@@ -2,6 +2,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+import torch
 
 import nanoquant.resident_quantization as resident
 from nanoquant.resident_quantization import ResidentQuantizationRequest
@@ -35,3 +36,19 @@ def test_legacy_tuning_seed_mode_invalidates_commit_identity() -> None:
     assert resident._resident_config_hash(request) != resident._resident_config_hash(
         replace(request, legacy_tuning_seed_reset=True)
     )
+
+
+def test_legacy_cuda_numerics_enables_and_restores_tf32() -> None:
+    original_matmul = torch.backends.cuda.matmul.allow_tf32
+    original_cudnn = torch.backends.cudnn.allow_tf32
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+    try:
+        with resident._legacy_cuda_numerics():
+            assert torch.backends.cuda.matmul.allow_tf32 is True
+            assert torch.backends.cudnn.allow_tf32 is True
+        assert torch.backends.cuda.matmul.allow_tf32 is False
+        assert torch.backends.cudnn.allow_tf32 is False
+    finally:
+        torch.backends.cuda.matmul.allow_tf32 = original_matmul
+        torch.backends.cudnn.allow_tf32 = original_cudnn

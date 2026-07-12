@@ -106,7 +106,9 @@ def _solve(
     system = 0.5 * (system + system.mT)
     stabilizer = (rho * system.diagonal().mean().abs() + regularization).clamp_min(epsilon)
     system.diagonal().add_(stabilizer)
-    rhs = design32.mT @ target.float() + rho * (projected.float() - dual.float())
+    rhs = design32.mT @ target.float()
+    rhs.add_(projected.float(), alpha=rho)
+    rhs.add_(dual.float(), alpha=-rho)
     factor, info = torch.linalg.cholesky_ex(system)
     solution = torch.cholesky_solve(rhs, factor) if int(info.max()) == 0 else torch.linalg.solve(system, rhs)
     return solution.to(design.dtype)
@@ -171,8 +173,8 @@ def factorize_admm(
         previous_right = right_projected
         left_projected = _rank_one_sign_projection(left + left_dual, inner_iterations, generator, epsilon)
         right_projected = _rank_one_sign_projection(right + right_dual, inner_iterations, generator, epsilon)
-        left_dual = left_dual + left - left_projected
-        right_dual = right_dual + right - right_projected
+        left_dual.add_(left - left_projected)
+        right_dual.add_(right - right_projected)
         completed = iteration + 1
         if iteration == 0 or completed % convergence_check_interval == 0 or completed == outer_iterations:
             primal = float((left - left_projected).norm() + (right - right_projected).norm())

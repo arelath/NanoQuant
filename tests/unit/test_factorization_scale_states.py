@@ -101,6 +101,42 @@ def test_admm_preserves_legacy_factor_dtype_and_signed_svid_scales() -> None:
     assert torch.equal(result.reconstruction, exported)
 
 
+def test_admm_bfloat16_recurrence_matches_legacy_operation_order() -> None:
+    result = factorize_admm(
+        torch.tensor(
+            [[1.0, -2.0, 0.5], [-1.0, 0.25, 2.0], [0.5, 1.0, -1.0]],
+            dtype=torch.bfloat16,
+        ),
+        torch.tensor([0.5, 2.0, 1.0]),
+        torch.tensor([1.0, 0.75, 1.5]),
+        2,
+        torch.Generator().manual_seed(7),
+        outer_iterations=20,
+        inner_iterations=2,
+    )
+
+    assert torch.equal(
+        result.left_binary,
+        torch.tensor([[-1.0, -1.0], [-1.0, -1.0], [1.0, 1.0]], dtype=torch.bfloat16),
+    )
+    assert torch.equal(
+        result.right_binary,
+        torch.tensor([[-1.0, 1.0, -1.0], [-1.0, 1.0, -1.0]], dtype=torch.bfloat16),
+    )
+    assert torch.equal(
+        result.scale_pre,
+        torch.tensor([0.11328125, 0.78515625, 0.60546875], dtype=torch.bfloat16),
+    )
+    assert torch.equal(
+        result.scale_mid,
+        torch.tensor([1.6640625, 0.9296875], dtype=torch.bfloat16),
+    )
+    assert torch.equal(
+        result.scale_post,
+        torch.tensor([0.7734375, 0.296875, 0.55859375], dtype=torch.bfloat16),
+    )
+
+
 def test_scale_fit_never_worsens_weighted_objective_and_protects_columns() -> None:
     generator = torch.Generator().manual_seed(2)
     target = torch.randn(5, 4, generator=generator)

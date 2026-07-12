@@ -6,6 +6,8 @@ import hashlib
 import json
 import statistics
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, cast
@@ -89,7 +91,20 @@ from nanoquant.infrastructure.resource_usage import peak_process_memory_bytes
 from nanoquant.infrastructure.safetensors_source import SafetensorsModelSource
 from nanoquant.infrastructure.tensor_store import LocalTensorStore
 
-RESIDENT_ALGORITHM_VERSION = 11
+RESIDENT_ALGORITHM_VERSION = 12
+
+
+@contextmanager
+def _legacy_cuda_numerics() -> Iterator[None]:
+    matmul_tf32 = torch.backends.cuda.matmul.allow_tf32
+    cudnn_tf32 = torch.backends.cudnn.allow_tf32
+    try:
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        yield
+    finally:
+        torch.backends.cuda.matmul.allow_tf32 = matmul_tf32
+        torch.backends.cudnn.allow_tf32 = cudnn_tf32
 
 
 @dataclass(frozen=True, slots=True)
@@ -1584,7 +1599,7 @@ def _run_resident_factorization_slice(request: ResidentQuantizationRequest) -> R
 
 def run_resident_factorization_slice(request: ResidentQuantizationRequest) -> ResidentFactorizationSliceResult:
     if request.device.startswith("cuda"):
-        with acquire_device_lease(request.device):
+        with acquire_device_lease(request.device), _legacy_cuda_numerics():
             return _run_resident_factorization_slice(request)
     return _run_resident_factorization_slice(request)
 
@@ -1592,6 +1607,6 @@ def run_resident_factorization_slice(request: ResidentQuantizationRequest) -> Re
 def run_resident_quantization(request: ResidentQuantizationRequest) -> ResidentQuantizationResult:
     """Run with an exclusive cross-process lease for CUDA resident state."""
     if request.device.startswith("cuda"):
-        with acquire_device_lease(request.device):
+        with acquire_device_lease(request.device), _legacy_cuda_numerics():
             return _run_resident_quantization(request)
     return _run_resident_quantization(request)
