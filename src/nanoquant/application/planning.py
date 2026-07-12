@@ -228,11 +228,15 @@ def build_quantization_plan(request: PlanningRequest) -> QuantizationPlan:
                     objective_map[layer.layer],
                     outlier_plans[layer.layer],
                     RetryPolicy(
-                        request.allocation.retry.maximum_attempts,
+                        request.allocation.retry.maximum_attempts if request.allocation.retry.enabled else 1,
                         request.allocation.retry.rank_increase_fraction,
                         request.allocation.retry.thresholds.weighted_normalized_error,
                         request.allocation.retry.thresholds.raw_normalized_error,
-                        min(layer.in_features, layer.out_features),
+                        (
+                            min(layer.in_features, layer.out_features)
+                            if request.allocation.retry.allow_above_allocator_cap
+                            else caps[layer.layer]
+                        ),
                         extra_budget,
                     ),
                     cost,

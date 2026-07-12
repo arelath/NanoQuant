@@ -2,7 +2,13 @@ from dataclasses import replace
 from pathlib import Path
 
 from nanoquant.application.planning import PlanningRequest, build_quantization_plan, persist_plan
-from nanoquant.config.schema import AllocationStrategy, OutlierConfig, RankAllocationConfig, RankBoundsConfig
+from nanoquant.config.schema import (
+    AllocationStrategy,
+    OutlierConfig,
+    RankAllocationConfig,
+    RankBoundsConfig,
+    RankRetryConfig,
+)
 from nanoquant.domain.models import (
     ArtifactRef,
     BlockId,
@@ -110,3 +116,23 @@ def test_utility_profile_must_cover_every_layer() -> None:
         assert "missing layer" in str(error)
     else:
         raise AssertionError("incomplete utility profile was accepted")
+
+
+def test_retry_plan_honors_enabled_and_above_allocator_cap_policy() -> None:
+    request = _request()
+    bounded = build_quantization_plan(request).blocks[0].layers[0]
+    assert bounded.retry.maximum_attempts == 2
+    assert bounded.retry.hard_rank_cap == bounded.allocator_cap
+
+    disabled = replace(request.allocation, retry=RankRetryConfig(enabled=False, maximum_attempts=3))
+    disabled_layer = build_quantization_plan(replace(request, allocation=disabled)).blocks[0].layers[0]
+    assert disabled_layer.retry.maximum_attempts == 1
+
+    above_cap = replace(
+        request.allocation,
+        retry=RankRetryConfig(enabled=True, maximum_attempts=3, allow_above_allocator_cap=True),
+    )
+    above_cap_layer = build_quantization_plan(replace(request, allocation=above_cap)).blocks[0].layers[0]
+    assert above_cap_layer.retry.maximum_attempts == 3
+    assert above_cap_layer.retry.hard_rank_cap == 64
+    assert above_cap_layer.retry.hard_rank_cap >= above_cap_layer.allocator_cap
