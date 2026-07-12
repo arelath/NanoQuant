@@ -88,7 +88,7 @@ from nanoquant.infrastructure.resource_usage import peak_process_memory_bytes
 from nanoquant.infrastructure.safetensors_source import SafetensorsModelSource
 from nanoquant.infrastructure.tensor_store import LocalTensorStore
 
-RESIDENT_ALGORITHM_VERSION = 4
+RESIDENT_ALGORITHM_VERSION = 5
 
 
 @dataclass(frozen=True, slots=True)
@@ -204,11 +204,23 @@ def _mse(prediction: torch.Tensor, target: torch.Tensor) -> float:
     return float(total / prediction.numel())
 
 
+def _weighted_mse(prediction: torch.Tensor, target: torch.Tensor, importance: torch.Tensor) -> float:
+    if importance.ndim != 1 or importance.shape[0] != prediction.shape[-1]:
+        raise ValueError("block output importance does not match hidden width")
+    weights = importance.to(device=prediction.device, dtype=torch.float32)
+    total = torch.zeros((), device=prediction.device)
+    for index in range(prediction.shape[0]):
+        error = prediction[index].detach().float() - target[index].detach().float()
+        total += (error.square() * weights).sum()
+    return float(total / prediction.numel())
+
+
 def _block_loss(
     adapter: Any,
     block: nn.Module,
     inputs: torch.Tensor,
     targets: torch.Tensor,
+    output_importance: torch.Tensor,
     metadata: dict[str, object],
     batch_size: int,
 ) -> float:
@@ -222,7 +234,10 @@ def _block_loss(
             input_batch = inputs[start:end].to(device, non_blocking=True)
             prediction = adapter.run_block(block, input_batch, **metadata)
             target = targets[start:end].to(device, non_blocking=True)
-            squared_error += (prediction.float() - target.float()).square().sum()
+            squared_error += (
+                (prediction.float() - target.float()).square()
+                * output_importance.to(device=device, dtype=torch.float32)
+            ).sum()
             elements += target.numel()
         return float(squared_error / elements)
 
@@ -853,24 +868,6 @@ def _run_resident_quantization(request: ResidentQuantizationRequest) -> Resident
                 request.block_forward_batch_size,
                 "cpu",
             ).detach()
-        recorder = BlockLossRecorder()
-        recorder.record_source_reference(_mse(teacher_outputs, teacher_outputs))
-        recorder.record_block_entry(
-            0.0
-            if deferred_slice
-            else _block_loss(
-                adapter,
-                working_block,
-                compressed_inputs,
-                teacher_outputs,
-                metadata,
-                request.block_forward_batch_size,
-            )
-        )
-        if request.device.startswith("cuda"):
-            # The no-grad source/output probes use the larger forward batch and
-            # otherwise leave attention workspaces reserved during backprop.
-            torch.cuda.empty_cache()
         block_output_stats = next(
             (
                 item
@@ -881,6 +878,25 @@ def _run_resident_quantization(request: ResidentQuantizationRequest) -> Resident
         )
         with tensors.read(block_output_stats.output_importance, request.device) as value:
             block_output_importance = value.clone()
+        recorder = BlockLossRecorder()
+        recorder.record_source_reference(_weighted_mse(teacher_outputs, teacher_outputs, block_output_importance))
+        recorder.record_block_entry(
+            0.0
+            if deferred_slice
+            else _block_loss(
+                adapter,
+                working_block,
+                compressed_inputs,
+                teacher_outputs,
+                block_output_importance,
+                metadata,
+                request.block_forward_batch_size,
+            )
+        )
+        if request.device.startswith("cuda"):
+            # The no-grad source/output probes use the larger forward batch and
+            # otherwise leave attention workspaces reserved during backprop.
+            torch.cuda.empty_cache()
         layer_results: list[LayerResult] = []
         frozen_states = []
         quantization_targets: dict[str, TensorRef] = {}
@@ -937,6 +953,7 @@ def _run_resident_quantization(request: ResidentQuantizationRequest) -> Resident
                             working_block,
                             compressed_inputs,
                             teacher_outputs,
+                            block_output_importance,
                             metadata,
                             request.block_forward_batch_size,
                         ),
@@ -1127,6 +1144,7 @@ def _run_resident_quantization(request: ResidentQuantizationRequest) -> Resident
                     working_block,
                     compressed_inputs,
                     teacher_outputs,
+                    block_output_importance,
                     metadata,
                     request.block_forward_batch_size,
                 ),
@@ -1191,6 +1209,7 @@ def _run_resident_quantization(request: ResidentQuantizationRequest) -> Resident
                     working_block,
                     compressed_inputs,
                     teacher_outputs,
+                    block_output_importance,
                     metadata,
                     request.block_forward_batch_size,
                 )
@@ -1204,7 +1223,9 @@ def _run_resident_quantization(request: ResidentQuantizationRequest) -> Resident
                 request.block_forward_batch_size,
                 "cpu",
             ).detach()
-        recorder.record_final_frozen_pre_kd(_mse(compressed_outputs, teacher_outputs))
+        recorder.record_final_frozen_pre_kd(
+            _weighted_mse(compressed_outputs, teacher_outputs, block_output_importance)
+        )
         frozen_block = FrozenBlockState(block_plan.block, tuple(frozen_states), ())
         block_peak = int(torch.cuda.max_memory_allocated(request.device)) if request.device.startswith("cuda") else 0
         peak_device_bytes = max(peak_device_bytes, block_peak)
