@@ -89,7 +89,7 @@ from nanoquant.infrastructure.resource_usage import peak_process_memory_bytes
 from nanoquant.infrastructure.safetensors_source import SafetensorsModelSource
 from nanoquant.infrastructure.tensor_store import LocalTensorStore
 
-RESIDENT_ALGORITHM_VERSION = 8
+RESIDENT_ALGORITHM_VERSION = 9
 
 
 @dataclass(frozen=True, slots=True)
@@ -405,6 +405,8 @@ def _resident_config_hash(request: ResidentQuantizationRequest) -> str:
                     "post_block_refit_epochs": request.post_block_refit_epochs,
                     "post_block_refit_batch_size": request.post_block_refit_batch_size,
                     "post_block_refit_learning_rate": request.post_block_refit_learning_rate,
+                    "tuning_microbatch_size": request.tuning_microbatch_size,
+                    "block_forward_batch_size": request.block_forward_batch_size,
                     "legacy_tuning_seed_reset": request.legacy_tuning_seed_reset,
                     "activation_retention": request.activation_retention,
                     "calibration_method": request.calibration_method,

@@ -185,7 +185,7 @@ def test_resident_tuning_recipe_refits_blocks_and_resumes_exactly(tmp_path: Path
     )
 
 
-def test_tuning_microbatch_is_execution_only_for_resume_identity(tmp_path: Path) -> None:
+def test_numerical_batch_shapes_invalidate_resume_identity(tmp_path: Path) -> None:
     request = ResidentQuantizationRequest(
         tmp_path / "snapshot",
         tmp_path / "output",
@@ -195,7 +195,8 @@ def test_tuning_microbatch_is_execution_only_for_resume_identity(tmp_path: Path)
         device="cpu",
     )
 
-    assert _resident_config_hash(replace(request, tuning_microbatch_size=2)) == _resident_config_hash(request)
+    assert _resident_config_hash(replace(request, tuning_microbatch_size=2)) != _resident_config_hash(request)
+    assert _resident_config_hash(replace(request, block_forward_batch_size=2)) != _resident_config_hash(request)
 
 
 def test_rolling_retention_keeps_only_latest_resume_generation(tmp_path: Path) -> None:
