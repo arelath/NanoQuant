@@ -11,7 +11,7 @@ import torch
 from torch import nn
 from transformers import AutoModelForCausalLM
 
-from nanoquant.application.layers import BlockEditor, LayerFreezer
+from nanoquant.application.layers import BlockEditor, LayerFreezer, restore_block_auxiliary_parameters
 from nanoquant.config.codec import from_dict
 from nanoquant.domain.models import ArtifactRef, BlockResult
 from nanoquant.infrastructure.artifacts import LocalArtifactStore
@@ -119,6 +119,12 @@ def load_frozen_run(
         for state in block_state.quantized_layers:
             frozen = freezer.load(state, tensors, device=device, dtype=block_dtype, backend=backend)
             editor.install_frozen_layer(block, state.layer.path, frozen.module)
+        restore_block_auxiliary_parameters(
+            block,
+            block_state.auxiliary_parameters,
+            tensors,
+            device=device,
+        )
     if global_tuning is not None:
         parameters = dict(model.named_parameters())
         with torch.no_grad():

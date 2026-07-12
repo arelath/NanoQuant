@@ -25,7 +25,13 @@ from nanoquant.application.calibration_artifacts import (
     build_objectives,
     persist_calibration,
 )
-from nanoquant.application.layers import BlockEditor, LayerFreezer, TrainableFactorizedLinear
+from nanoquant.application.layers import (
+    BlockEditor,
+    LayerFreezer,
+    TrainableFactorizedLinear,
+    freeze_block_auxiliary_parameters,
+    restore_block_auxiliary_parameters,
+)
 from nanoquant.application.loss_snapshots import BlockLossRecorder
 from nanoquant.application.planning import PersistedPlan, PlanningRequest, build_quantization_plan, persist_plan
 from nanoquant.application.prefix_capture import capture_prefix_invocations
@@ -92,7 +98,7 @@ from nanoquant.infrastructure.resource_usage import peak_process_memory_bytes
 from nanoquant.infrastructure.safetensors_source import SafetensorsModelSource
 from nanoquant.infrastructure.tensor_store import LocalTensorStore
 
-RESIDENT_ALGORITHM_VERSION = 15
+RESIDENT_ALGORITHM_VERSION = 16
 
 
 @contextmanager
@@ -853,6 +859,7 @@ def _run_resident_quantization(request: ResidentQuantizationRequest) -> Resident
         raise TypeError("model does not expose a mutable decoder layer stack")
     if request.restore_completed_blocks:
         for _, completed_block in committed_blocks:
+            restored_block = layer_container[completed_block.block.index]
             for state in completed_block.frozen_state.quantized_layers:
                 frozen = LayerFreezer().load(
                     state,
@@ -862,10 +869,16 @@ def _run_resident_quantization(request: ResidentQuantizationRequest) -> Resident
                     backend="factorized",
                 )
                 BlockEditor().install_frozen_layer(
-                    layer_container[completed_block.block.index],
+                    restored_block,
                     state.layer.path,
                     frozen.module,
                 )
+            restore_block_auxiliary_parameters(
+                restored_block,
+                completed_block.frozen_state.auxiliary_parameters,
+                tensors,
+                device=request.device,
+            )
     del decoder_layers
     if request.device.startswith("cuda") and completed_block_indexes:
         # Restoring a deep resume prefix replaces many full-precision CUDA weights.
@@ -1271,7 +1284,13 @@ def _run_resident_quantization(request: ResidentQuantizationRequest) -> Resident
         recorder.record_final_frozen_pre_kd(
             _weighted_mse(compressed_outputs, teacher_outputs, block_output_importance)
         )
-        frozen_block = FrozenBlockState(block_plan.block, tuple(frozen_states), ())
+        auxiliary_parameters = freeze_block_auxiliary_parameters(working_block, tensors)
+        frozen_block = FrozenBlockState(
+            block_plan.block,
+            tuple(frozen_states),
+            (),
+            auxiliary_parameters,
+        )
         block_peak = int(torch.cuda.max_memory_allocated(request.device)) if request.device.startswith("cuda") else 0
         peak_device_bytes = max(peak_device_bytes, block_peak)
         committed = commit_block(

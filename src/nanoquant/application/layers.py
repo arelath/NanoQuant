@@ -8,7 +8,7 @@ from typing import Any, cast
 import torch
 from torch import nn
 
-from nanoquant.domain.models import FrozenNanoQuantState, FrozenOutlierState, LayerId, ScaleState
+from nanoquant.domain.models import FrozenNanoQuantState, FrozenOutlierState, LayerId, ScaleState, TensorRef
 from nanoquant.ports.tensor_store import TensorStore
 
 
@@ -321,3 +321,36 @@ class BlockEditor:
 
     def install_frozen_layer(self, block: nn.Module, path: str, frozen: FrozenReferenceLinear) -> None:
         self._replace(block, path, frozen)
+
+
+def freeze_block_auxiliary_parameters(
+    block: nn.Module, tensors: TensorStore
+) -> tuple[tuple[str, TensorRef], ...]:
+    """Persist the named parameters left after every quantized linear is frozen."""
+    values = {name: parameter.detach() for name, parameter in block.named_parameters()}
+    if not values:
+        return ()
+    references = tensors.put("frozen-block-auxiliary", values)
+    return tuple((name, references[name]) for name in sorted(references))
+
+
+def restore_block_auxiliary_parameters(
+    block: nn.Module,
+    parameters: tuple[tuple[str, TensorRef], ...],
+    tensors: TensorStore,
+    *,
+    device: str,
+) -> None:
+    """Restore durable block-local parameters by their stable module names."""
+    available = dict(block.named_parameters())
+    expected = {name for name, _reference in parameters}
+    missing = sorted(expected - set(available))
+    if missing:
+        raise ValueError(f"frozen block auxiliary parameters are absent from the model: {missing}")
+    with torch.no_grad():
+        for name, reference in parameters:
+            target = available[name]
+            with tensors.read(reference, device) as value:
+                if value.shape != target.shape:
+                    raise ValueError(f"frozen block auxiliary parameter shape differs: {name}")
+                target.copy_(value.to(dtype=target.dtype))

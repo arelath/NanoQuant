@@ -11,6 +11,8 @@ from nanoquant.application.layers import (
     FrozenReferenceLinear,
     LayerFreezer,
     TrainableFactorizedLinear,
+    freeze_block_auxiliary_parameters,
+    restore_block_auxiliary_parameters,
 )
 from nanoquant.domain.models import BlockId, FrozenOutlierState, LayerId
 from nanoquant.infrastructure.artifacts import LocalArtifactStore
@@ -85,6 +87,27 @@ def test_editor_rejects_missing_or_non_linear_targets() -> None:
         BlockEditor().install_frozen_layer(block, "missing.value", frozen)
     with pytest.raises(TypeError, match="not a replaceable"):
         BlockEditor().install_frozen_layer(block, "mlp", frozen)
+
+
+def test_block_auxiliary_parameters_round_trip_by_name(tmp_path: Path) -> None:
+    block = Block()
+    block.register_parameter("gain", nn.Parameter(torch.tensor([1.25, -0.5])))
+    frozen = FrozenReferenceLinear(
+        torch.ones(2, 1),
+        torch.ones(1, 3),
+        torch.ones(3),
+        torch.ones(1),
+        torch.ones(2),
+    )
+    BlockEditor().install_frozen_layer(block, "mlp.up_proj", frozen)
+    tensors = LocalTensorStore(LocalArtifactStore(tmp_path / "artifacts"))
+
+    parameters = freeze_block_auxiliary_parameters(block, tensors)
+    assert tuple(name for name, _reference in parameters) == ("gain",)
+    block.gain.data.zero_()
+    restore_block_auxiliary_parameters(block, parameters, tensors, device="cpu")
+
+    assert torch.equal(block.gain, torch.tensor([1.25, -0.5]))
 
 
 def test_trainable_factorized_linear_keeps_fp32_parameters_with_bfloat16_activations() -> None:

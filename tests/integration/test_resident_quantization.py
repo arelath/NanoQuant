@@ -170,6 +170,22 @@ def test_resident_tuning_recipe_refits_blocks_and_resumes_exactly(tmp_path: Path
     control = run_resident_quantization(base)
     assert control.blocks[0].losses.after_post_block_refit is not None
     assert all(layer.tuning is not None for layer in control.blocks[0].layers)
+    assert control.blocks[0].frozen_state.auxiliary_parameters
+    loaded = load_frozen_run(
+        base.output,
+        snapshot,
+        source_name="fixture/gemma3",
+        revision="pinned-test-revision",
+        device="cpu",
+    )
+    evaluation_tokens = torch.tensor(base.token_ids)
+    with torch.no_grad():
+        loaded_logits = cast(Any, loaded.model)(input_ids=evaluation_tokens, use_cache=False).logits
+    loaded_nll = torch.nn.functional.cross_entropy(
+        loaded_logits[:, :-1].float().reshape(-1, loaded_logits.shape[-1]),
+        evaluation_tokens[:, 1:].reshape(-1),
+    )
+    assert float(loaded_nll) == pytest.approx(control.compressed_nll, rel=1e-6, abs=1e-7)
 
     resumed_request = replace(base, output=tmp_path / "resumed", interrupt_after_layer_commits=3)
     with pytest.raises(InterruptedError, match="after 3"):

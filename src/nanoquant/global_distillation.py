@@ -205,7 +205,12 @@ def _freeze_tuned_blocks(
             _restore_storage_dtype(module, state)
             states.append(freezer.freeze(state.layer, module, tensors, outliers=state.outliers).state)
         result.append(
-            FrozenBlockState(block_result.block, tuple(states), block_result.frozen_state.passthrough_tensors)
+            FrozenBlockState(
+                block_result.block,
+                tuple(states),
+                block_result.frozen_state.passthrough_tensors,
+                block_result.frozen_state.auxiliary_parameters,
+            )
         )
     return tuple(result)
 

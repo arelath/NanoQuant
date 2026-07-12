@@ -528,6 +528,7 @@ class FrozenBlockState:
     block: BlockId
     quantized_layers: tuple[FrozenNanoQuantState, ...]
     passthrough_tensors: tuple[TensorRef, ...]
+    auxiliary_parameters: tuple[tuple[str, TensorRef], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
