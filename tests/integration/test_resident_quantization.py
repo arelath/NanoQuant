@@ -1,3 +1,4 @@
+import json
 import math
 from dataclasses import replace
 from pathlib import Path
@@ -53,6 +54,12 @@ def test_resident_quantization_commits_complete_transformers_model(tmp_path: Pat
     assert len(result.blocks[0].layers) == 7
     retried_layers = [layer for layer in result.blocks[0].layers if len(layer.attempts) > 1]
     assert retried_layers
+    events = [json.loads(line) for line in (output / "events.jsonl").read_text().splitlines()]
+    outlier_attempts = sum(
+        event["name"] == "stage.completed" and event["stage"] == "select-outliers"
+        for event in events
+    )
+    assert outlier_attempts == sum(len(layer.attempts) for layer in result.blocks[0].layers)
     for layer in retried_layers:
         accepted = layer.attempts[layer.accepted_attempt]
         assert accepted.accepted is True

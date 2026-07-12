@@ -42,7 +42,7 @@ from nanoquant.application.quantization_stages import (
     ScaleFitStage,
 )
 from nanoquant.application.reconstruction_report import render_reconstruction_tables
-from nanoquant.application.retry_loop import run_factorization_attempts
+from nanoquant.application.retry_loop import AcceptedFactorization, run_factorization_attempts
 from nanoquant.application.stages import StageContext, execute_stage
 from nanoquant.application.tuning import TuningRequest, post_block_refit, tune_factorized, tune_non_factorized
 from nanoquant.config.codec import canonical_json, from_dict, to_dict
@@ -64,20 +64,27 @@ from nanoquant.domain.models import (
     CalibrationStats,
     CheckpointInventory,
     DatasetIdentity,
+    FactorizationRequest,
+    FactorizationResult,
     FrozenBlockState,
     FrozenModelResult,
     FrozenNanoQuantState,
     FrozenOutlierState,
     LayerId,
+    LayerPlan,
     LayerResult,
     ModelInventory,
     ObjectiveSpec,
     OutlierSelectionRequest,
+    OutlierSelectionResult,
     QuantizationPlan,
     ScaleFitRequest,
+    ScaleFitResult,
     TensorRef,
 )
+from nanoquant.domain.outliers import reconstruct_with_outliers
 from nanoquant.domain.runs import BudgetState
+from nanoquant.domain.scale_fit import reconstruct
 from nanoquant.domain.seeds import logical_seed
 from nanoquant.infrastructure.artifacts import LocalArtifactStore
 from nanoquant.infrastructure.commits import (
@@ -98,7 +105,7 @@ from nanoquant.infrastructure.resource_usage import peak_process_memory_bytes
 from nanoquant.infrastructure.safetensors_source import SafetensorsModelSource
 from nanoquant.infrastructure.tensor_store import LocalTensorStore
 
-RESIDENT_ALGORITHM_VERSION = 16
+RESIDENT_ALGORITHM_VERSION = 17
 
 
 @contextmanager
@@ -394,6 +401,164 @@ def _rehydrate_trainable_layer(
         outlier_values=frozen.outlier_values,
         outlier_scales=frozen.outlier_scales,
     ).to(device=device, dtype=dtype)
+
+
+def _run_resident_factorization_attempts(
+    layer_plan: LayerPlan,
+    source_weight: TensorRef,
+    request: ResidentQuantizationRequest,
+    budget: BudgetState,
+    context: StageContext,
+    config_hash: str,
+    factor_stage: FactorizationAttemptStage,
+    outlier_stage: OutlierSelectionStage,
+    scale_stage: ScaleFitStage,
+) -> tuple[AcceptedFactorization, OutlierSelectionResult, ScaleFitResult | None]:
+    """Execute the complete legacy rank attempt: outliers, ADMM, scale fit, and full metric."""
+    companions: list[tuple[OutlierSelectionResult, ScaleFitResult | None]] = []
+
+    def execute_attempt(rank: int, attempt: int) -> FactorizationResult:
+        started = time.perf_counter()
+        if request.device.startswith("cuda"):
+            torch.cuda.reset_peak_memory_stats(request.device)
+        outlier_seed = (
+            request.seed
+            if request.legacy_tuning_seed_reset
+            else logical_seed(
+                request.seed,
+                "outliers",
+                layer_plan.layer.block.index,
+                layer_plan.layer.path,
+                attempt,
+            )
+        )
+        factor_seed = (
+            request.seed
+            if request.legacy_tuning_seed_reset
+            else logical_seed(
+                request.seed,
+                "factorize-attempt",
+                layer_plan.layer.block.index,
+                layer_plan.layer.path,
+                attempt,
+            )
+        )
+        outliers = execute_stage(
+            outlier_stage,
+            OutlierSelectionRequest(
+                layer_plan.layer,
+                source_weight,
+                layer_plan.objective,
+                layer_plan.outliers,
+                rank,
+                outlier_seed,
+            ),
+            context,
+        )
+        probe_peak = (
+            int(torch.cuda.max_memory_allocated(request.device))
+            if request.device.startswith("cuda")
+            else 0
+        )
+        objective = replace(
+            layer_plan.objective,
+            input_importance=outliers.factor_input_importance,
+        )
+        factorized = execute_stage(
+            factor_stage,
+            FactorizationRequest(
+                1,
+                layer_plan.layer,
+                source_weight,
+                outliers.residual_weight,
+                objective,
+                rank,
+                factor_seed,
+                config_hash,
+                outliers.factor_generator_state,
+            ),
+            context,
+        )
+        fitted = None
+        scales = factorized.factors.scales
+        if request.scale_fit.enabled:
+            fitted = execute_stage(
+                scale_stage,
+                MaterializedScaleFitStageRequest(
+                    ScaleFitRequest(
+                        layer_plan.layer,
+                        outliers.residual_weight,
+                        factorized.factors,
+                        objective,
+                        outliers.indices,
+                    ),
+                    objective.input_importance,
+                    layer_plan.objective.output_importance,
+                ),
+                context,
+            )
+            scales = fitted.scales
+        if scales.mid is None:
+            raise AssertionError("factorizer omitted required mid scale")
+        with (
+            context.tensor_store.read(source_weight, request.device) as source,
+            context.tensor_store.read(factorized.factors.left_binary, request.device) as left,
+            context.tensor_store.read(factorized.factors.right_binary, request.device) as right,
+            context.tensor_store.read(scales.pre, request.device) as scale_pre,
+            context.tensor_store.read(scales.mid, request.device) as scale_mid,
+            context.tensor_store.read(scales.post, request.device) as scale_post,
+            context.tensor_store.read(outliers.indices, request.device) as indices,
+            context.tensor_store.read(outliers.values, request.device) as values,
+            context.tensor_store.read(layer_plan.objective.input_importance, request.device) as input_importance,
+            context.tensor_store.read(layer_plan.objective.output_importance, request.device) as output_importance,
+        ):
+            prediction = reconstruct(left, right, scale_pre, scale_mid, scale_post)
+            outlier_scales = None
+            if outliers.scales is not None:
+                with context.tensor_store.read(outliers.scales, request.device) as stored_scales:
+                    outlier_scales = stored_scales.clone()
+            prediction = reconstruct_with_outliers(
+                prediction,
+                indices.long(),
+                values,
+                outlier_scales,
+            )
+            metrics = reconstruction_metrics(
+                source,
+                prediction,
+                input_importance,
+                output_importance,
+            )
+        companions.append((outliers, fitted))
+        peak = (
+            max(probe_peak, int(torch.cuda.max_memory_allocated(request.device)))
+            if request.device.startswith("cuda")
+            else factorized.peak_workspace_bytes
+        )
+        return replace(
+            factorized,
+            factors=replace(factorized.factors, scales=scales),
+            metrics=metrics,
+            wall_seconds=time.perf_counter() - started,
+            peak_workspace_bytes=peak,
+        )
+
+    accepted = run_factorization_attempts(
+        layer_plan,
+        source_weight,
+        source_weight,
+        request.seed,
+        config_hash,
+        budget,
+        context,
+        lambda _result, _attempts: None,
+        factor_stage,
+        legacy_seed_reset=request.legacy_tuning_seed_reset,
+        attempt_executor=execute_attempt,
+    )
+    accepted_index = next(index for index, item in enumerate(accepted.attempts) if item.accepted)
+    outliers, fitted = companions[accepted_index]
+    return accepted, outliers, fitted
 
 
 def _resident_config_hash(request: ResidentQuantizationRequest) -> str:
@@ -1014,64 +1179,21 @@ def _run_resident_quantization(request: ResidentQuantizationRequest) -> Resident
                         ),
                     )
                 continue
-            outliers = execute_stage(
-                outlier_stage,
-                OutlierSelectionRequest(
-                    layer_plan.layer,
-                    source_ref,
-                    layer_plan.objective,
-                    layer_plan.outliers,
-                    layer_plan.rank,
-                    (
-                        request.seed
-                        if request.legacy_tuning_seed_reset
-                        else logical_seed(request.seed, "outliers", block_index, layer_plan.layer.path, 0)
-                    ),
-                ),
-                context,
-            )
-            factor_plan = replace(
+            accepted, outliers, fitted = _run_resident_factorization_attempts(
                 layer_plan,
-                objective=replace(
-                    layer_plan.objective,
-                    input_importance=outliers.factor_input_importance,
-                ),
-            )
-            accepted = run_factorization_attempts(
-                factor_plan,
                 source_ref,
-                outliers.residual_weight,
-                request.seed,
-                config_hash,
+                request,
                 budget,
                 context,
-                lambda _result, _attempts: None,
+                config_hash,
                 factor_stage,
-                legacy_seed_reset=request.legacy_tuning_seed_reset,
-                initial_generator_state=outliers.factor_generator_state,
+                outlier_stage,
+                scale_stage,
             )
             factorized = accepted.result
             peak_device_bytes = max(peak_device_bytes, accepted.peak_workspace_bytes)
             factorization_wall_seconds += accepted.wall_seconds
-            fitted = None
             scales = factorized.factors.scales
-            if request.scale_fit.enabled:
-                fitted = execute_stage(
-                    scale_stage,
-                    MaterializedScaleFitStageRequest(
-                        ScaleFitRequest(
-                            layer_plan.layer,
-                            outliers.residual_weight,
-                            factorized.factors,
-                            factor_plan.objective,
-                            outliers.indices,
-                        ),
-                        factor_plan.objective.input_importance,
-                        layer_plan.objective.output_importance,
-                    ),
-                    context,
-                )
-                scales = fitted.scales
             mid_ref = scales.mid
             if mid_ref is None:
                 raise AssertionError("factorizer omitted required mid scale")
@@ -1497,62 +1619,19 @@ def _run_resident_factorization_slice(request: ResidentQuantizationRequest) -> R
         scale_stage = ScaleFitStage(request.scale_fit, device=request.device)
         with source.read_tensor(layer_plan.source_weight, device="cpu") as source_weight:
             source_ref = tensors.put("source-layer", {"weight": source_weight})["weight"]
-        outliers = execute_stage(
-            outlier_stage,
-            OutlierSelectionRequest(
-                layer_plan.layer,
-                source_ref,
-                layer_plan.objective,
-                layer_plan.outliers,
-                layer_plan.rank,
-                (
-                    request.seed
-                    if request.legacy_tuning_seed_reset
-                    else logical_seed(request.seed, "outliers", block_index, layer_plan.layer.path, 0)
-                ),
-            ),
-            context,
-        )
-        factor_plan = replace(
+        accepted, outliers, fitted = _run_resident_factorization_attempts(
             layer_plan,
-            objective=replace(
-                layer_plan.objective,
-                input_importance=outliers.factor_input_importance,
-            ),
-        )
-        accepted = run_factorization_attempts(
-            factor_plan,
             source_ref,
-            outliers.residual_weight,
-            request.seed,
-            config_hash,
+            request,
             budget,
             context,
-            lambda _result, _attempts: None,
+            config_hash,
             factor_stage,
-            legacy_seed_reset=request.legacy_tuning_seed_reset,
-            initial_generator_state=outliers.factor_generator_state,
+            outlier_stage,
+            scale_stage,
         )
         factorized = accepted.result
-        fitted = None
         scales = factorized.factors.scales
-        if request.scale_fit.enabled:
-            fitted = execute_stage(
-                scale_stage,
-                MaterializedScaleFitStageRequest(
-                    ScaleFitRequest(
-                        layer_plan.layer,
-                        outliers.residual_weight,
-                        factorized.factors,
-                        factor_plan.objective,
-                        outliers.indices,
-                    ),
-                    factor_plan.objective.input_importance,
-                    layer_plan.objective.output_importance,
-                ),
-                context,
-            )
-            scales = fitted.scales
         if scales.mid is None:
             raise AssertionError("factorizer omitted required mid scale")
         outlier_indices = outlier_values = outlier_scales = None

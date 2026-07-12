@@ -32,6 +32,7 @@ class AcceptedFactorization:
 
 
 AcceptCommit = Callable[[FactorizationResult, tuple[AttemptSummary, ...]], None]
+AttemptExecutor = Callable[[int, int], FactorizationResult]
 
 
 def _replace_planned_factor_cost(
@@ -59,6 +60,7 @@ def run_factorization_attempts(
     factorization_stage: FactorizationAttemptStage | None = None,
     legacy_seed_reset: bool = False,
     initial_generator_state: TensorRef | None = None,
+    attempt_executor: AttemptExecutor | None = None,
 ) -> AcceptedFactorization:
     rank = layer_plan.rank
     base_factor_cost = factor_bit_cost(
@@ -75,18 +77,23 @@ def run_factorization_attempts(
                 run_seed, "factorize-attempt", layer_plan.layer.block.index, layer_plan.layer.path, attempt
             )
         )
-        request = FactorizationRequest(
-            1,
-            layer_plan.layer,
-            source_weight,
-            residual_weight,
-            layer_plan.objective,
-            rank,
-            attempt_seed,
-            factorizer_config_hash,
-            initial_generator_state if attempt == 0 else None,
-        )
-        result = execute_stage(factorization_stage or FactorizationAttemptStage(), request, context)
+        if attempt_executor is None:
+            request = FactorizationRequest(
+                1,
+                layer_plan.layer,
+                source_weight,
+                residual_weight,
+                layer_plan.objective,
+                rank,
+                attempt_seed,
+                factorizer_config_hash,
+                initial_generator_state if attempt == 0 else None,
+            )
+            result = execute_stage(factorization_stage or FactorizationAttemptStage(), request, context)
+        else:
+            result = attempt_executor(rank, attempt)
+            if result.rank != rank or result.layer != layer_plan.layer:
+                raise ValueError("factorization attempt executor returned the wrong layer or rank")
         results.append(result)
         weighted = result.metrics.export_weighted_normalized_error
         raw = result.metrics.raw_normalized_error
