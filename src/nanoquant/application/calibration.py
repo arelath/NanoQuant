@@ -15,6 +15,7 @@ from nanoquant.domain.calibration_math import (
     robust_tau,
     shrink_importance,
 )
+from nanoquant.ports.activation_store import ActivationStore
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,3 +162,31 @@ def calibrate_block(
         )
         for path, module in linears.items()
     )
+
+
+def calibrate_block_streamed(
+    block: nn.Module,
+    activations: ActivationStore,
+    key: str,
+    layer_paths: tuple[str, ...],
+    runner: BatchRunner,
+    *,
+    batch_size: int,
+    device: str = "cpu",
+    shrinkage: float = 0.0,
+) -> tuple[MaterializedLayerCalibration, ...]:
+    """Accumulate forward-only statistics from batch views over an activation generation."""
+    if batch_size <= 0:
+        raise ValueError("streamed calibration batch size must be positive")
+    with activations.read(key, device) as values:
+        if values.ndim == 0 or values.shape[0] == 0:
+            raise ValueError("streamed calibration activation generation is empty")
+        batches = tuple(values[start : start + batch_size] for start in range(0, values.shape[0], batch_size))
+        return calibrate_block(
+            block,
+            batches,
+            layer_paths,
+            runner,
+            method="forward_only",
+            shrinkage=shrinkage,
+        )

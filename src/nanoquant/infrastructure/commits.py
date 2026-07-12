@@ -72,8 +72,7 @@ def load_committed_block(
         raise ValueError("committed block identity does not match the active run")
     block = from_dict(BlockId, payload["block"], path="block")
     layers = tuple(
-        from_dict(LayerResult, item, path=f"layers[{index}]")
-        for index, item in enumerate(payload["layers"])
+        from_dict(LayerResult, item, path=f"layers[{index}]") for index, item in enumerate(payload["layers"])
     )
     frozen_state = from_dict(FrozenBlockState, payload["frozen_state"], path="frozen_state")
     losses = from_dict(BlockLossMetrics, payload["losses"], path="losses")

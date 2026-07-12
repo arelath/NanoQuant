@@ -173,23 +173,23 @@ Outcome: a complete 1B-class run uses the new pipeline and survives interruption
 Dependencies: Milestone 4 resident correctness  
 Outcome: the same pipeline operates from GPU-resident 1B models through disk-streamed 70B models.
 
-- [ ] **M5.1** Implement host inventory and resource planning for source, output, block weights, factors, Hessians, activations, tuning state, and temporary disk.
-- [ ] **M5.2** Add safety margins and refuse execution before expensive work when declared memory/disk minima cannot be met.
-- [ ] **M5.3** Implement block-aligned source streaming directly from sharded safetensors without constructing a full `state_dict`.
-- [ ] **M5.4** Implement a memory-mapped activation store with preallocated files, batched reads/writes, hashes, and atomic generation commit.
-- [ ] **M5.5** Implement automatic activation-tier selection across CUDA, pinned RAM, pageable RAM, and mmap from the resource plan.
-- [ ] **M5.6** Implement double-buffered activation propagation and bounded batch staging.
-- [ ] **M5.7** Generate teacher block outputs by loading one original block, then release it before/while processing the working block as allowed by the plan.
-- [ ] **M5.8** Write frozen/packed block shards incrementally so no complete quantized model state must reside in RAM.
+- [x] **M5.1** Implement host inventory and resource planning for source, output, block weights, factors, Hessians, activations, tuning state, and temporary disk.
+- [x] **M5.2** Add safety margins and refuse execution before expensive work when declared memory/disk minima cannot be met.
+- [x] **M5.3** Implement block-aligned source streaming directly from sharded safetensors without constructing a full `state_dict`.
+- [x] **M5.4** Implement a memory-mapped activation store with preallocated files, batched reads/writes, hashes, and atomic generation commit.
+- [x] **M5.5** Implement automatic activation-tier selection across CUDA, pinned RAM, pageable RAM, and mmap from the resource plan.
+- [x] **M5.6** Implement double-buffered activation propagation and bounded batch staging.
+- [x] **M5.7** Generate teacher block outputs by loading one original block, then release it before/while processing the working block as allowed by the plan.
+- [x] **M5.8** Write frozen/packed block shards incrementally so no complete quantized model state must reside in RAM.
 - [ ] **M5.9** Implement source-block/layer prefetch with explicit tensor/buffer leases and measured benefit.
-- [ ] **M5.10** Implement forward-only streamed calibration.
+- [x] **M5.10** Implement forward-only streamed calibration.
 - [ ] **M5.11** Implement streamed forward/backward calibration with boundary activation commits and block recomputation when Fisher statistics are required.
-- [ ] **M5.12** Implement block-diagonal covariance objective storage/execution.
-- [ ] **M5.13** Implement low-rank-plus-diagonal covariance objective storage/execution.
-- [ ] **M5.14** Enforce dense-Hessian per-layer workspace reservations and reject/explicitly fall back when dimensions exceed policy.
-- [ ] **M5.15** Implement finite OOM fallback actions for batch size and activation tier; distinguish algorithm-preserving from algorithm-changing fallbacks.
-- [ ] **M5.16** Implement disk-full, corrupt-shard, changed-source, and interrupted-activation-generation recovery behavior.
-- [ ] **M5.17** Add a constrained-resource integration test that forces mmap activation storage on a tiny model.
+- [x] **M5.12** Implement block-diagonal covariance objective storage/execution.
+- [x] **M5.13** Implement low-rank-plus-diagonal covariance objective storage/execution.
+- [x] **M5.14** Enforce dense-Hessian per-layer workspace reservations and reject/explicitly fall back when dimensions exceed policy.
+- [x] **M5.15** Implement finite OOM fallback actions for batch size and activation tier; distinguish algorithm-preserving from algorithm-changing fallbacks.
+- [x] **M5.16** Implement disk-full, corrupt-shard, changed-source, and interrupted-activation-generation recovery behavior.
+- [x] **M5.17** Add a constrained-resource integration test that forces mmap activation storage on a tiny model.
 - [ ] **M5.18** Verify resident and streaming executors produce equivalent tiny/1B results within approved tolerances.
 - [ ] **M5.19** Compare planned versus actual peak GPU, host, temporary disk, and I/O use and set estimator error thresholds.
 - [ ] **M5.20** Implement the distributed-executor port and decide which distributed calibration/tuning operations are required for the first release.

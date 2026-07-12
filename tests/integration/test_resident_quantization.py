@@ -10,6 +10,7 @@ from nanoquant.config.schema import ADMMConfig
 from nanoquant.infrastructure.artifacts import LocalArtifactStore
 from nanoquant.infrastructure.progress import ProgressJournal
 from nanoquant.resident_quantization import ResidentQuantizationRequest, run_resident_quantization
+from nanoquant.resident_replay import capture_and_replay_resident_layer
 
 
 def test_resident_quantization_commits_complete_transformers_model(tmp_path: Path) -> None:
@@ -81,3 +82,16 @@ def test_resident_quantization_commits_complete_transformers_model(tmp_path: Pat
         layer.factorization for layer in result.blocks[0].layers
     ]
     assert resumed.compressed_nll == pytest.approx(result.compressed_nll)
+    replay = capture_and_replay_resident_layer(
+        resumed_output,
+        snapshot,
+        source_name="fixture/gemma3",
+        revision="pinned-test-revision",
+        block=0,
+        path="self_attn.k_proj",
+        outer_iterations=2,
+        inner_iterations=1,
+        device="cpu",
+    )
+    assert replay.replay.expected_close is True
+    assert replay.elapsed_seconds < 60

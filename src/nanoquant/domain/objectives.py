@@ -54,6 +54,24 @@ class BlockDiagonalObjective:
     blocks: tuple[torch.Tensor, ...]
     block_size: int
     output_importance: torch.Tensor
+    epsilon: float = 1e-12
+
+    def weighted_error(self, target: torch.Tensor, prediction: torch.Tensor) -> torch.Tensor:
+        delta = prediction.float() - target.float()
+        if sum(block.shape[0] for block in self.blocks) != delta.shape[1]:
+            raise ValueError("block-diagonal covariance width does not match weight")
+        row_error = torch.zeros(delta.shape[0], dtype=torch.float32, device=delta.device)
+        start = 0
+        for block in self.blocks:
+            stop = start + block.shape[0]
+            chunk = delta[:, start:stop]
+            row_error += ((chunk @ block.float()) * chunk).sum(dim=1)
+            start = stop
+        return (row_error * self.output_importance.float().reshape(-1)).sum()
+
+    def normalized_error(self, target: torch.Tensor, prediction: torch.Tensor) -> torch.Tensor:
+        norm = self.weighted_error(target, torch.zeros_like(target))
+        return self.weighted_error(target, prediction) / norm.clamp_min(self.epsilon)
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,6 +79,19 @@ class LowRankDiagonalObjective:
     diagonal: torch.Tensor
     factors: torch.Tensor
     output_importance: torch.Tensor
+    epsilon: float = 1e-12
+
+    def weighted_error(self, target: torch.Tensor, prediction: torch.Tensor) -> torch.Tensor:
+        delta = prediction.float() - target.float()
+        if self.diagonal.numel() != delta.shape[1] or self.factors.shape[0] != delta.shape[1]:
+            raise ValueError("low-rank-plus-diagonal covariance width does not match weight")
+        diagonal_error = (delta.square() * self.diagonal.float().reshape(1, -1)).sum(dim=1)
+        low_rank_error = (delta @ self.factors.float()).square().sum(dim=1)
+        return ((diagonal_error + low_rank_error) * self.output_importance.float().reshape(-1)).sum()
+
+    def normalized_error(self, target: torch.Tensor, prediction: torch.Tensor) -> torch.Tensor:
+        norm = self.weighted_error(target, torch.zeros_like(target))
+        return self.weighted_error(target, prediction) / norm.clamp_min(self.epsilon)
 
 
 def regularize_covariance(

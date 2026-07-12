@@ -45,6 +45,7 @@ def capture_layer(
     accepted_reconstruction: torch.Tensor | None = None,
     outer_iterations: int = 400,
     inner_iterations: int = 5,
+    device: str = "cpu",
 ) -> ArtifactRef:
     tensors = {
         "weight": weight.detach().cpu().clone().contiguous(),
@@ -61,6 +62,7 @@ def capture_layer(
         "logical_seed": logical_seed,
         "outer_iterations": outer_iterations,
         "inner_iterations": inner_iterations,
+        "device": device,
     }
     with artifacts.begin_write("layer-fixture") as writer:
         save_file(tensors, writer.path / "tensors.safetensors")
@@ -75,23 +77,26 @@ def replay_layer(
     artifacts.validate(reference.artifact_id)
     root = artifacts.path_for(reference.artifact_id)
     metadata = json.loads((root / "fixture.json").read_text(encoding="utf-8"))
+    device = str(metadata.get("device", "cpu"))
+    if device.startswith("cuda") and not torch.cuda.is_available():
+        raise RuntimeError("captured layer replay requires CUDA")
     with safe_open(root / "tensors.safetensors", framework="pt", device="cpu") as tensors:
-        weight = tensors.get_tensor("weight")
-        residual = tensors.get_tensor("residual_weight")
-        input_importance = tensors.get_tensor("input_importance")
-        output_importance = tensors.get_tensor("output_importance")
+        weight = tensors.get_tensor("weight").to(device)
+        residual = tensors.get_tensor("residual_weight").to(device)
+        input_importance = tensors.get_tensor("input_importance").to(device)
+        output_importance = tensors.get_tensor("output_importance").to(device)
         result = factorize_admm(
             residual,
             input_importance,
             output_importance,
             int(metadata["rank"]),
-            torch.Generator().manual_seed(int(metadata["logical_seed"])),
+            torch.Generator(device=device).manual_seed(int(metadata["logical_seed"])),
             outer_iterations=int(metadata["outer_iterations"]),
             inner_iterations=int(metadata["inner_iterations"]),
         )
         metrics = reconstruction_metrics(weight, result.reconstruction, input_importance, output_importance)
         if "accepted_reconstruction" in tensors.keys():
-            expected = tensors.get_tensor("accepted_reconstruction")
+            expected = tensors.get_tensor("accepted_reconstruction").to(device)
             difference = float((result.reconstruction - expected).abs().max())
             close = difference <= tolerance
         else:
