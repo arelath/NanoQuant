@@ -24,6 +24,7 @@ from nanoquant.config.schema import (
     RankBoundsConfig,
     RankRetryConfig,
     ResidualProbeConfig,
+    RetryThresholdConfig,
 )
 from nanoquant.domain.models import ArtifactRef, BlockId, DatasetIdentity, LayerId
 from nanoquant.infrastructure.artifacts import LocalArtifactStore
@@ -140,7 +141,17 @@ def main() -> None:
             ceiling_fraction_of_uniform=1.1,
             edge_block_boost=0.15,
         ),
-        retry=RankRetryConfig(enabled=False, maximum_attempts=1),
+        retry=RankRetryConfig(
+            enabled=True,
+            thresholds=RetryThresholdConfig(
+                weighted_normalized_error=0.5,
+                raw_normalized_error=0.5,
+            ),
+            rank_increase_fraction=0.25,
+            maximum_attempts=3,
+            extra_bit_budget_fraction=0.02,
+            allow_above_allocator_cap=True,
+        ),
     )
     plan = persist_plan(
         build_quantization_plan(

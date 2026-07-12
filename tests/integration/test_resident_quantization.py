@@ -51,6 +51,13 @@ def test_resident_quantization_commits_complete_transformers_model(tmp_path: Pat
 
     assert len(result.blocks) == 1
     assert len(result.blocks[0].layers) == 7
+    retried_layers = [layer for layer in result.blocks[0].layers if len(layer.attempts) > 1]
+    assert retried_layers
+    for layer in retried_layers:
+        accepted = layer.attempts[layer.accepted_attempt]
+        assert accepted.accepted is True
+        assert layer.frozen_state.rank == accepted.rank
+        assert layer.actual_bit_cost.total == layer.plan.estimated_cost.total + layer.extra_retry_bits
     assert result.frozen_model.effective_bpw <= 8.0
     assert result.frozen_model.actual_total_bits > 0
     assert math.isfinite(result.reference_nll)

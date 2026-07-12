@@ -36,6 +36,7 @@ def capture_and_replay_resident_layer(
     outer_iterations: int,
     inner_iterations: int,
     seed: int = 0,
+    legacy_seed_reset: bool = False,
     device: str = "cuda",
 ) -> ResidentLayerReplay:
     started = time.perf_counter()
@@ -54,6 +55,7 @@ def capture_and_replay_resident_layer(
     identity = from_dict(CommitIdentity, record["identity"], path="identity")
     reference = ArtifactRef("layer-result", str(record["artifact_id"]), 1)
     layer = load_committed_layer(reference, artifacts, identity).result
+    accepted_attempt = layer.attempts[layer.accepted_attempt]
     if layer.frozen_state.outliers is not None:
         raise NotImplementedError("resident replay capture does not yet reconstruct outlier residuals")
     mid_ref = layer.frozen_state.scales.mid
@@ -77,8 +79,12 @@ def capture_and_replay_resident_layer(
             weight,
             input_importance,
             output_importance,
-            layer.plan.rank,
-            logical_seed(seed, "factorize", block, path, 0),
+            accepted_attempt.rank,
+            (
+                seed
+                if legacy_seed_reset
+                else logical_seed(seed, "factorize-attempt", block, path, accepted_attempt.attempt)
+            ),
             artifacts,
             accepted_reconstruction=accepted,
             outer_iterations=outer_iterations,

@@ -9,6 +9,7 @@ from nanoquant.application.quantization_stages import FactorizationAttemptStage
 from nanoquant.application.stages import StageContext, execute_stage
 from nanoquant.domain.models import (
     AttemptSummary,
+    BitCost,
     FactorizationRequest,
     FactorizationResult,
     LayerPlan,
@@ -24,9 +25,26 @@ class AcceptedFactorization:
     result: FactorizationResult
     attempts: tuple[AttemptSummary, ...]
     budget: BudgetState
+    actual_bit_cost: BitCost
+    extra_retry_bits: int
+    wall_seconds: float
+    peak_workspace_bytes: int
 
 
 AcceptCommit = Callable[[FactorizationResult, tuple[AttemptSummary, ...]], None]
+
+
+def _replace_planned_factor_cost(
+    planned: BitCost, base_factor: BitCost, accepted_factor: BitCost
+) -> BitCost:
+    return BitCost(
+        *(
+            planned_value - base_value + accepted_value
+            for planned_value, base_value, accepted_value in zip(
+                planned.as_tuple(), base_factor.as_tuple(), accepted_factor.as_tuple(), strict=True
+            )
+        )
+    )
 
 
 def run_factorization_attempts(
@@ -39,6 +57,7 @@ def run_factorization_attempts(
     context: StageContext,
     accept_commit: AcceptCommit,
     factorization_stage: FactorizationAttemptStage | None = None,
+    legacy_seed_reset: bool = False,
 ) -> AcceptedFactorization:
     rank = layer_plan.rank
     base_factor_cost = factor_bit_cost(
@@ -48,6 +67,13 @@ def run_factorization_attempts(
     summaries: list[AttemptSummary] = []
     while True:
         attempt = len(results)
+        attempt_seed = (
+            run_seed
+            if legacy_seed_reset
+            else logical_seed(
+                run_seed, "factorize-attempt", layer_plan.layer.block.index, layer_plan.layer.path, attempt
+            )
+        )
         request = FactorizationRequest(
             1,
             layer_plan.layer,
@@ -55,7 +81,7 @@ def run_factorization_attempts(
             residual_weight,
             layer_plan.objective,
             rank,
-            logical_seed(run_seed, "factorize-attempt", layer_plan.layer.block.index, layer_plan.layer.path, attempt),
+            attempt_seed,
             factorizer_config_hash,
         )
         result = execute_stage(factorization_stage or FactorizationAttemptStage(), request, context)
@@ -113,10 +139,22 @@ def run_factorization_attempts(
         accepted_result = results[accepted_index]
         accepted_summaries = tuple(summaries)
         accept_commit(accepted_result, accepted_summaries)
-        extra_bits = max(0, summaries[accepted_index].bit_cost.total - base_factor_cost.total)
+        accepted_factor_cost = summaries[accepted_index].bit_cost
+        actual_bit_cost = _replace_planned_factor_cost(
+            layer_plan.estimated_cost, base_factor_cost, accepted_factor_cost
+        )
+        extra_bits = max(0, actual_bit_cost.total - layer_plan.estimated_cost.total)
         updated_budget = replace(
             budget,
-            accepted_bits=budget.accepted_bits + layer_plan.estimated_cost.total + extra_bits,
+            accepted_bits=budget.accepted_bits + actual_bit_cost.total,
             retry_bits_spent=budget.retry_bits_spent + extra_bits,
         )
-        return AcceptedFactorization(accepted_result, accepted_summaries, updated_budget)
+        return AcceptedFactorization(
+            accepted_result,
+            accepted_summaries,
+            updated_budget,
+            actual_bit_cost,
+            extra_bits,
+            sum(item.wall_seconds for item in results),
+            max(item.peak_workspace_bytes for item in results),
+        )

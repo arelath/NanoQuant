@@ -33,6 +33,7 @@ from nanoquant.application.quantization_stages import (
     ScaleFitStage,
 )
 from nanoquant.application.reconstruction_report import render_reconstruction_tables
+from nanoquant.application.retry_loop import run_factorization_attempts
 from nanoquant.application.stages import StageContext, execute_stage
 from nanoquant.application.tuning import TuningRequest, post_block_refit, tune_factorized, tune_non_factorized
 from nanoquant.config.codec import canonical_json, from_dict, to_dict
@@ -44,17 +45,16 @@ from nanoquant.config.schema import (
     RankAllocationConfig,
     RankBoundsConfig,
     RankRetryConfig,
+    RetryThresholdConfig,
     ScaleFitConfig,
 )
 from nanoquant.domain.metrics import reconstruction_metrics
 from nanoquant.domain.models import (
     ArtifactRef,
-    AttemptSummary,
     BlockResult,
     CalibrationStats,
     CheckpointInventory,
     DatasetIdentity,
-    FactorizationRequest,
     FrozenBlockState,
     FrozenModelResult,
     FrozenNanoQuantState,
@@ -89,7 +89,7 @@ from nanoquant.infrastructure.resource_usage import peak_process_memory_bytes
 from nanoquant.infrastructure.safetensors_source import SafetensorsModelSource
 from nanoquant.infrastructure.tensor_store import LocalTensorStore
 
-RESIDENT_ALGORITHM_VERSION = 6
+RESIDENT_ALGORITHM_VERSION = 7
 
 
 @dataclass(frozen=True, slots=True)
@@ -774,7 +774,17 @@ def _run_resident_quantization(request: ResidentQuantizationRequest) -> Resident
                 ceiling_fraction_of_uniform=request.rank_ceiling_fraction,
                 edge_block_boost=request.rank_edge_boost,
             ),
-            retry=RankRetryConfig(enabled=False, maximum_attempts=1),
+            retry=RankRetryConfig(
+                enabled=True,
+                thresholds=RetryThresholdConfig(
+                    weighted_normalized_error=0.5,
+                    raw_normalized_error=0.5,
+                ),
+                rank_increase_fraction=0.25,
+                maximum_attempts=3,
+                extra_bit_budget_fraction=0.02,
+                allow_above_allocator_cap=True,
+            ),
         )
         plan = build_quantization_plan(
             PlanningRequest(
@@ -810,7 +820,10 @@ def _run_resident_quantization(request: ResidentQuantizationRequest) -> Resident
         for _reference, old_block in committed_blocks[:-1]:
             retire_block_activations(old_block, artifacts)
     accepted_bits = sum(layer.actual_bit_cost.total for _, block in committed_blocks for layer in block.layers)
-    budget = BudgetState(plan.planned_cost.total, accepted_bits, 0)
+    retry_bits_spent = sum(
+        layer.extra_retry_bits for _, block in committed_blocks for layer in block.layers
+    )
+    budget = BudgetState(plan.planned_cost.total, accepted_bits, retry_bits_spent)
     if committed_blocks:
         teacher_inputs, compressed_inputs = load_block_activations(committed_blocks[-1][0], artifacts, "cpu")
     else:
@@ -952,7 +965,11 @@ def _run_resident_quantization(request: ResidentQuantizationRequest) -> Resident
                 BlockEditor().install_frozen_layer(working_block, layer_plan.layer.path, frozen.module)
                 frozen_states.append(prior.frozen_state)
                 layer_results.append(prior)
-                budget = replace(budget, accepted_bits=budget.accepted_bits + prior.actual_bit_cost.total)
+                budget = replace(
+                    budget,
+                    accepted_bits=budget.accepted_bits + prior.actual_bit_cost.total,
+                    retry_bits_spent=budget.retry_bits_spent + prior.extra_retry_bits,
+                )
                 if not deferred_slice:
                     recorder.record_after_layer(
                         layer_plan.layer,
@@ -979,22 +996,21 @@ def _run_resident_quantization(request: ResidentQuantizationRequest) -> Resident
                 ),
                 context,
             )
-            factorized = execute_stage(
-                factor_stage,
-                FactorizationRequest(
-                    1,
-                    layer_plan.layer,
-                    source_ref,
-                    outliers.residual_weight,
-                    layer_plan.objective,
-                    layer_plan.rank,
-                    logical_seed(request.seed, "factorize", block_index, layer_plan.layer.path, 0),
-                    config_hash,
-                ),
+            accepted = run_factorization_attempts(
+                layer_plan,
+                source_ref,
+                outliers.residual_weight,
+                request.seed,
+                config_hash,
+                budget,
                 context,
+                lambda _result, _attempts: None,
+                factor_stage,
+                legacy_seed_reset=request.legacy_tuning_seed_reset,
             )
-            peak_device_bytes = max(peak_device_bytes, factorized.peak_workspace_bytes)
-            factorization_wall_seconds += factorized.wall_seconds
+            factorized = accepted.result
+            peak_device_bytes = max(peak_device_bytes, accepted.peak_workspace_bytes)
+            factorization_wall_seconds += accepted.wall_seconds
             fitted = None
             scales = factorized.factors.scales
             if request.scale_fit.enabled:
@@ -1101,30 +1117,22 @@ def _run_resident_quantization(request: ResidentQuantizationRequest) -> Resident
             frozen_module = frozen.module.to(device=request.device, dtype=compressed_inputs.dtype)
             BlockEditor().install_frozen_layer(working_block, layer_plan.layer.path, frozen_module)
             frozen_states.append(frozen.state)
-            attempt = AttemptSummary(
-                0,
-                layer_plan.rank,
-                factorized.factors.left_binary.artifact,
-                factorized.metrics.export_weighted_normalized_error,
-                factorized.metrics.raw_normalized_error,
-                layer_plan.estimated_cost,
-                factorized.metrics.export_weighted_normalized_error,
-                True,
-                "accepted",
+            accepted_attempt = next(
+                index for index, attempt in enumerate(accepted.attempts) if attempt.accepted
             )
             layer_result = LayerResult(
                 1,
                 layer_plan.layer,
                 layer_plan,
-                (attempt,),
-                0,
+                accepted.attempts,
+                accepted_attempt,
                 factorized.factors.left_binary.artifact,
                 fitted,
                 tuning,
                 frozen.state,
                 final_metrics,
-                layer_plan.estimated_cost,
-                0,
+                accepted.actual_bit_cost,
+                accepted.extra_retry_bits,
                 ()
                 if request.factorized_tuning_epochs > 0 and request.scale_fit.enabled
                 else (("tuning_disabled",) if request.scale_fit.enabled else ("scale_fit_disabled", "tuning_disabled")),
@@ -1144,7 +1152,7 @@ def _run_resident_quantization(request: ResidentQuantizationRequest) -> Resident
             ):
                 raise InterruptedError(f"injected interruption after {new_layer_commits} new layer commits")
             layer_results.append(layer_result)
-            budget = replace(budget, accepted_bits=budget.accepted_bits + layer_plan.estimated_cost.total)
+            budget = accepted.budget
             recorder.record_after_layer(
                 layer_plan.layer,
                 _block_loss(
@@ -1392,6 +1400,25 @@ def _run_resident_factorization_slice(request: ResidentQuantizationRequest) -> R
     discovery = journal.discover(plan, identity)
     records = (*discovery.valid_records, *discovery.orphan_records)
     complete_blocks = {record.block for record in records if record.kind == "block"}
+    completed_results = [
+        load_committed_block(ArtifactRef("block-result", record.artifact_id, 1), artifacts, identity).result
+        for record in records
+        if record.kind == "block"
+    ]
+    partial_results = [
+        load_committed_layer(ArtifactRef("layer-result", record.artifact_id, 1), artifacts, identity).result
+        for record in records
+        if record.kind == "layer" and record.block not in complete_blocks
+    ]
+    prior_layers = [
+        *(layer for block in completed_results for layer in block.layers),
+        *partial_results,
+    ]
+    budget = BudgetState(
+        plan.planned_cost.total,
+        sum(layer.actual_bit_cost.total for layer in prior_layers),
+        sum(layer.extra_retry_bits for layer in prior_layers),
+    )
     complete_layers = {
         (record.block, record.layer)
         for record in records
@@ -1434,20 +1461,19 @@ def _run_resident_factorization_slice(request: ResidentQuantizationRequest) -> R
             ),
             context,
         )
-        factorized = execute_stage(
-            factor_stage,
-            FactorizationRequest(
-                1,
-                layer_plan.layer,
-                source_ref,
-                outliers.residual_weight,
-                layer_plan.objective,
-                layer_plan.rank,
-                logical_seed(request.seed, "factorize", block_index, layer_plan.layer.path, 0),
-                config_hash,
-            ),
+        accepted = run_factorization_attempts(
+            layer_plan,
+            source_ref,
+            outliers.residual_weight,
+            request.seed,
+            config_hash,
+            budget,
             context,
+            lambda _result, _attempts: None,
+            factor_stage,
+            legacy_seed_reset=request.legacy_tuning_seed_reset,
         )
+        factorized = accepted.result
         fitted = None
         scales = factorized.factors.scales
         if request.scale_fit.enabled:
@@ -1514,30 +1540,22 @@ def _run_resident_factorization_slice(request: ResidentQuantizationRequest) -> R
                 input_importance,
                 output_importance,
             )
-        attempt = AttemptSummary(
-            0,
-            layer_plan.rank,
-            factorized.factors.left_binary.artifact,
-            factorized.metrics.export_weighted_normalized_error,
-            factorized.metrics.raw_normalized_error,
-            layer_plan.estimated_cost,
-            factorized.metrics.export_weighted_normalized_error,
-            True,
-            "accepted",
+        accepted_attempt = next(
+            index for index, attempt in enumerate(accepted.attempts) if attempt.accepted
         )
         layer_result = LayerResult(
             1,
             layer_plan.layer,
             layer_plan,
-            (attempt,),
-            0,
+            accepted.attempts,
+            accepted_attempt,
             factorized.factors.left_binary.artifact,
             fitted,
             None,
             frozen.state,
             final_metrics,
-            layer_plan.estimated_cost,
-            0,
+            accepted.actual_bit_cost,
+            accepted.extra_retry_bits,
             ("tuning_disabled",) if request.scale_fit.enabled else ("scale_fit_disabled", "tuning_disabled"),
         )
         committed = commit_layer(layer_result, artifacts, identity)

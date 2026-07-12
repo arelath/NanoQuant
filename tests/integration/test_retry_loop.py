@@ -1,3 +1,4 @@
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,7 @@ from nanoquant.application.stages import StageContext
 from nanoquant.config.schema import ADMMConfig
 from nanoquant.domain.models import (
     ArtifactRef,
+    BitCost,
     BlockId,
     LayerId,
     LayerPlan,
@@ -75,6 +77,7 @@ def _fixture(tmp_path: Path) -> tuple[LayerPlan, object, object, StageContext]:
 
 def test_retry_loop_commits_once_and_updates_budget_after_acceptance(tmp_path: Path) -> None:
     plan, source, residual, context = _fixture(tmp_path)
+    plan = replace(plan, estimated_cost=plan.estimated_cost + BitCost(outlier_value_bits=13))
     commits = []
     initial = BudgetState(1000, 0, 0)
     accepted = run_factorization_attempts(
@@ -93,7 +96,10 @@ def test_retry_loop_commits_once_and_updates_budget_after_acceptance(tmp_path: P
     assert len(commits) == 1
     assert accepted.budget.accepted_bits > 0
     selected = next(attempt for attempt in accepted.attempts if attempt.accepted)
-    assert accepted.budget.retry_bits_spent == max(0, selected.bit_cost.total - plan.estimated_cost.total)
+    base_factor_cost = factor_bit_cost(2, 2, plan.rank)
+    assert accepted.extra_retry_bits == max(0, selected.bit_cost.total - base_factor_cost.total)
+    assert accepted.actual_bit_cost.outlier_value_bits == 13
+    assert accepted.budget.accepted_bits == accepted.actual_bit_cost.total
     assert initial == BudgetState(1000, 0, 0)
     assert accepted.result.convergence.iterations_completed <= 2
 
