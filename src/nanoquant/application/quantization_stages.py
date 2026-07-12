@@ -107,8 +107,21 @@ class OutlierSelectionStage:
                 else:
                     raise ValueError(f"unsupported outlier selector: {request.plan.selector}")
                 residual, raw_values = remove_columns(weight, indices)
+                factor_input_importance = input_importance.clone()
+                if request.plan.removed_column_importance == "zero":
+                    factor_input_importance[indices.long()] = 0
+                elif request.plan.removed_column_importance != "keep":
+                    raise ValueError(
+                        "unsupported removed-column importance mode: "
+                        f"{request.plan.removed_column_importance}"
+                    )
                 stored_values, scales = store_outlier_values(raw_values, request.plan.storage_dtype)
-                tensors = {"indices": indices.to(torch.int64), "values": stored_values, "residual_weight": residual}
+                tensors = {
+                    "indices": indices.to(torch.int64),
+                    "values": stored_values,
+                    "residual_weight": residual,
+                    "factor_input_importance": factor_input_importance,
+                }
                 if scales is not None:
                     tensors["scales"] = scales
                 refs = context.tensor_store.put("outlier-selection", tensors)
@@ -124,13 +137,14 @@ class OutlierSelectionStage:
             bits=cost.total,
         )
         return OutlierSelectionResult(
-            1,
+            2,
             ComponentRef(self.name, self.version),
             request.layer,
             refs["indices"],
             refs["values"],
             refs.get("scales"),
             refs["residual_weight"],
+            refs["factor_input_importance"],
             _summary(indices.float()),
             cost,
         )

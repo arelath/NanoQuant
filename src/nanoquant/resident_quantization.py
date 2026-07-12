@@ -89,7 +89,7 @@ from nanoquant.infrastructure.resource_usage import peak_process_memory_bytes
 from nanoquant.infrastructure.safetensors_source import SafetensorsModelSource
 from nanoquant.infrastructure.tensor_store import LocalTensorStore
 
-RESIDENT_ALGORITHM_VERSION = 10
+RESIDENT_ALGORITHM_VERSION = 11
 
 
 @dataclass(frozen=True, slots=True)
@@ -992,8 +992,15 @@ def _run_resident_quantization(request: ResidentQuantizationRequest) -> Resident
                 ),
                 context,
             )
-            accepted = run_factorization_attempts(
+            factor_plan = replace(
                 layer_plan,
+                objective=replace(
+                    layer_plan.objective,
+                    input_importance=outliers.factor_input_importance,
+                ),
+            )
+            accepted = run_factorization_attempts(
+                factor_plan,
                 source_ref,
                 outliers.residual_weight,
                 request.seed,
@@ -1017,10 +1024,10 @@ def _run_resident_quantization(request: ResidentQuantizationRequest) -> Resident
                             layer_plan.layer,
                             outliers.residual_weight,
                             factorized.factors,
-                            layer_plan.objective,
+                            factor_plan.objective,
                             outliers.indices,
                         ),
-                        layer_plan.objective.input_importance,
+                        factor_plan.objective.input_importance,
                         layer_plan.objective.output_importance,
                     ),
                     context,
@@ -1457,8 +1464,15 @@ def _run_resident_factorization_slice(request: ResidentQuantizationRequest) -> R
             ),
             context,
         )
-        accepted = run_factorization_attempts(
+        factor_plan = replace(
             layer_plan,
+            objective=replace(
+                layer_plan.objective,
+                input_importance=outliers.factor_input_importance,
+            ),
+        )
+        accepted = run_factorization_attempts(
+            factor_plan,
             source_ref,
             outliers.residual_weight,
             request.seed,
@@ -1480,10 +1494,10 @@ def _run_resident_factorization_slice(request: ResidentQuantizationRequest) -> R
                         layer_plan.layer,
                         outliers.residual_weight,
                         factorized.factors,
-                        layer_plan.objective,
+                        factor_plan.objective,
                         outliers.indices,
                     ),
-                    layer_plan.objective.input_importance,
+                    factor_plan.objective.input_importance,
                     layer_plan.objective.output_importance,
                 ),
                 context,

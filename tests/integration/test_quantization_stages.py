@@ -1,3 +1,4 @@
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -65,17 +66,22 @@ def test_outlier_factorization_and_scale_fit_stages_commit_typed_results(tmp_pat
         layer, refs["weight"], objective, OutlierPlan("fisher", 1, "float16", True), 1, 7
     )
     outliers = execute_stage(OutlierSelectionStage(), outlier_request, context)
-    with tensors.read(outliers.indices) as indices:
+    with (
+        tensors.read(outliers.indices) as indices,
+        tensors.read(outliers.factor_input_importance) as factor_input_importance,
+    ):
         assert indices.numel() == 1
+        assert factor_input_importance[indices.long()].count_nonzero() == 0
+    factor_objective = replace(objective, input_importance=outliers.factor_input_importance)
     factor_request = FactorizationRequest(
-        1, layer, refs["weight"], outliers.residual_weight, objective, 1, 19, "factor-config"
+        1, layer, refs["weight"], outliers.residual_weight, factor_objective, 1, 19, "factor-config"
     )
     factorized = execute_stage(FactorizationAttemptStage(), factor_request, context)
     assert factorized.rank == 1
     assert factorized.metrics.export_weighted_normalized_error >= 0
     scale_request = MaterializedScaleFitStageRequest(
-        ScaleFitRequest(layer, outliers.residual_weight, factorized.factors, objective, outliers.indices),
-        refs["input_importance"],
+        ScaleFitRequest(layer, outliers.residual_weight, factorized.factors, factor_objective, outliers.indices),
+        outliers.factor_input_importance,
         refs["output_importance"],
     )
     fitted = execute_stage(ScaleFitStage(), scale_request, context)

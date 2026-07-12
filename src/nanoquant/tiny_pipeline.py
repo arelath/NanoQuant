@@ -213,6 +213,10 @@ def run_tiny_pipeline(root: str | Path, *, seed: int = 0) -> TinyPipelineResult:
                 logical_seed(seed, "outliers", block_index, path, 0),
             )
             outliers = execute_stage(OutlierSelectionStage(), outlier_request, context)
+            factor_objective = replace(
+                layer_plan.objective,
+                input_importance=outliers.factor_input_importance,
+            )
             factorized = execute_stage(
                 FactorizationAttemptStage(),
                 FactorizationRequest(
@@ -220,7 +224,7 @@ def run_tiny_pipeline(root: str | Path, *, seed: int = 0) -> TinyPipelineResult:
                     layer_plan.layer,
                     source_ref,
                     outliers.residual_weight,
-                    layer_plan.objective,
+                    factor_objective,
                     layer_plan.rank,
                     logical_seed(seed, "factorize", block_index, path, 0),
                     "tiny-factor-v1",
@@ -234,10 +238,10 @@ def run_tiny_pipeline(root: str | Path, *, seed: int = 0) -> TinyPipelineResult:
                         layer_plan.layer,
                         outliers.residual_weight,
                         factorized.factors,
-                        layer_plan.objective,
+                        factor_objective,
                         outliers.indices,
                     ),
-                    layer_plan.objective.input_importance,
+                    factor_objective.input_importance,
                     layer_plan.objective.output_importance,
                 ),
                 context,

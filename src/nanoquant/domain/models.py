@@ -255,6 +255,7 @@ class OutlierPlan:
     count: int
     storage_dtype: str
     charge_to_budget: bool
+    removed_column_importance: str = "zero"
 
 
 @dataclass(frozen=True, slots=True)
@@ -319,6 +320,7 @@ class OutlierSelectionResult:
     values: TensorRef
     scales: TensorRef | None
     residual_weight: TensorRef
+    factor_input_importance: TensorRef
     selected_score_summary: StatisticSummary
     bit_cost: BitCost
 

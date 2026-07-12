@@ -74,6 +74,7 @@ def build_quantization_plan(request: PlanningRequest) -> QuantizationPlan:
             count,
             request.outliers.storage_dtype.value,
             request.outliers.charge_to_bit_budget,
+            request.outliers.removed_column_importance,
         )
         bits = {"bfloat16": 16, "float16": 16, "int8": 8}[request.outliers.storage_dtype.value]
         cost = outlier_bit_cost(layer.out_features, count, value_bits=bits) if count else BitCost()
