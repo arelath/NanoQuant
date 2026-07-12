@@ -69,7 +69,7 @@ def test_freezer_persists_immutable_state_and_editor_installs_explicitly(tmp_pat
     loaded_with_outliers = LayerFreezer().load(state_with_outliers, tensors)
     factorized_with_outliers = LayerFreezer().load(state_with_outliers, tensors, backend="factorized")
     expected_weight = frozen.module.dense_weight().clone()
-    expected_weight[:, 1] += torch.tensor([3.0, -1.0])
+    expected_weight[:, 1] = torch.tensor([3.0, -1.0])
     assert torch.equal(loaded_with_outliers.module.dense_weight(), expected_weight)
     assert torch.allclose(
         factorized_with_outliers.module(inputs),
@@ -125,7 +125,9 @@ def test_trainable_forward_uses_two_stage_factorized_execution(monkeypatch: pyte
     monkeypatch.setattr(trainable, "dense_weight", fail_dense_materialization)
     right = torch.where(trainable.right_latent >= 0, 1.0, -1.0).to(torch.bfloat16)
     left = torch.where(trainable.left_latent >= 0, 1.0, -1.0).to(torch.bfloat16)
-    expected = torch.nn.functional.linear(inputs * trainable.scale_pre.to(torch.bfloat16), right)
+    masked_scale_pre = trainable.scale_pre.detach().clone()
+    masked_scale_pre[trainable.outlier_indices.long()] = 0
+    expected = torch.nn.functional.linear(inputs * masked_scale_pre.to(torch.bfloat16), right)
     expected = torch.nn.functional.linear(expected * trainable.scale_mid.to(torch.bfloat16), left)
     expected = expected * trainable.scale_post.to(torch.bfloat16)
     expected = expected + torch.nn.functional.linear(
@@ -139,6 +141,31 @@ def test_trainable_forward_uses_two_stage_factorized_execution(monkeypatch: pyte
     actual.float().sum().backward()
     assert trainable.left_latent.grad is not None
     assert trainable.right_latent.grad is not None
+    assert trainable.scale_pre.grad is not None
+    assert trainable.scale_pre.grad[trainable.outlier_indices.long()].count_nonzero() == 0
+
+
+def test_freezer_zeroes_main_path_scale_for_outlier_columns(tmp_path: Path) -> None:
+    trainable = TrainableFactorizedLinear(
+        torch.tensor([[0.2], [-0.3]]),
+        torch.tensor([[0.4, -0.5, 0.6]]),
+        torch.tensor([1.0, 7.0, 2.0]),
+        torch.tensor([0.5]),
+        torch.tensor([2.0, 3.0]),
+        outlier_indices=torch.tensor([1]),
+        outlier_values=torch.tensor([[4.0], [-2.0]]),
+    )
+    tensors = LocalTensorStore(LocalArtifactStore(tmp_path / "artifacts"))
+
+    frozen = LayerFreezer().freeze(
+        LayerId(BlockId(0), "mlp.up_proj"), trainable, tensors, backend="factorized"
+    )
+
+    assert frozen.module.scale_pre[1] == 0
+    with tensors.read(frozen.state.scales.pre) as persisted:
+        assert persisted[1] == 0
+    expected = trainable.dense_weight().detach()
+    assert torch.equal(frozen.module.dense_weight(), expected)
 
 
 def test_freezer_can_return_factorized_execution_backend(tmp_path: Path) -> None:
