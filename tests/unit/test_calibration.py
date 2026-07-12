@@ -9,6 +9,7 @@ from nanoquant.application.calibration import (
     calibrate_block,
     calibrate_causal_model,
     causal_language_model_loss,
+    materialize_causal_online_state,
 )
 from nanoquant.domain.calibration_math import activation_square_mean, robust_tau, shrink_importance
 
@@ -180,3 +181,34 @@ def test_chunked_hidden_gradient_matches_direct_causal_loss() -> None:
     chunked_stats = calibrate_causal_model(chunked, batches, (("hidden", chunked.model.hidden),))
     assert torch.allclose(direct_stats[0].input_importance, chunked_stats[0].input_importance)
     assert torch.allclose(direct_stats[0].output_importance, chunked_stats[0].output_importance, atol=1e-10)
+
+
+def test_resumed_online_causal_accumulators_match_uninterrupted_result() -> None:
+    batches = tuple(torch.tensor([[index % 7, (index + 1) % 7, (index + 2) % 7]]) for index in range(4))
+    uninterrupted_model = TinyCausalModel()
+    resumed_model = TinyCausalModel()
+    resumed_model.load_state_dict(uninterrupted_model.state_dict())
+    uninterrupted = calibrate_causal_model(
+        uninterrupted_model,
+        batches,
+        (("hidden", uninterrupted_model.hidden),),
+        shrinkage=0.2,
+    )
+    states = []
+    calibrate_causal_model(
+        resumed_model,
+        batches[:2],
+        (("hidden", resumed_model.hidden),),
+        state_sink=states.append,
+    )
+    calibrate_causal_model(
+        resumed_model,
+        batches[2:],
+        (("hidden", resumed_model.hidden),),
+        initial_state=states[-1],
+        state_sink=states.append,
+    )
+    resumed = materialize_causal_online_state(states[-1], shrinkage=0.2)
+    assert states[-1].sample_count == 4
+    assert torch.equal(uninterrupted[0].input_importance, resumed[0].input_importance)
+    assert torch.equal(uninterrupted[0].output_importance, resumed[0].output_importance)

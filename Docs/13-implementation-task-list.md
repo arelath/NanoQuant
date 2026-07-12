@@ -220,7 +220,7 @@ Outcome: packed artifacts load and generate correctly without research dependenc
 - [ ] **M6.15** Implement bounded/static or paged KV-cache management and verify positions/padding across batches.
 - [ ] **M6.16** Keep packing, capability discovery, device transfers, and allocator cleanup outside the token hot loop.
 - [ ] **M6.17** Implement device-side greedy and configured sampling paths with explicit synchronization boundaries.
-- [ ] **M6.18** Add logical-reference versus factorized-reference tests over real model shapes.
+- [x] **M6.18** Add logical-reference versus factorized-reference tests over real model shapes.
 - [ ] **M6.19** Add packed-backend parity tests over the full declared shape/rank/dtype/outlier matrix.
 - [ ] **M6.20** Add long-enough generation tests for output parity, cache correctness, and memory growth.
 - [ ] **M6.21** Implement kernel, layer, block, prefill, decode, and end-to-end benchmark commands with JSON output.

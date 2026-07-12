@@ -5,7 +5,13 @@ import pytest
 import torch
 from torch import nn
 
-from nanoquant.application.layers import BlockEditor, FrozenReferenceLinear, LayerFreezer, TrainableFactorizedLinear
+from nanoquant.application.layers import (
+    BlockEditor,
+    FactorizedReferenceLinear,
+    FrozenReferenceLinear,
+    LayerFreezer,
+    TrainableFactorizedLinear,
+)
 from nanoquant.domain.models import BlockId, FrozenOutlierState, LayerId
 from nanoquant.infrastructure.artifacts import LocalArtifactStore
 from nanoquant.infrastructure.tensor_store import LocalTensorStore
@@ -79,3 +85,42 @@ def test_editor_rejects_missing_or_non_linear_targets() -> None:
         BlockEditor().install_frozen_layer(block, "missing.value", frozen)
     with pytest.raises(TypeError, match="not a replaceable"):
         BlockEditor().install_frozen_layer(block, "mlp", frozen)
+
+
+def test_trainable_factorized_linear_keeps_fp32_parameters_with_bfloat16_activations() -> None:
+    trainable = TrainableFactorizedLinear(
+        torch.tensor([[1.0], [-1.0]], dtype=torch.float32),
+        torch.tensor([[1.0, -1.0, 1.0]], dtype=torch.float32),
+        torch.ones(3, dtype=torch.float32),
+        torch.ones(1, dtype=torch.float32),
+        torch.ones(2, dtype=torch.float32),
+    )
+    inputs = torch.randn(4, 3, generator=torch.Generator().manual_seed(9), dtype=torch.bfloat16)
+
+    output = trainable(inputs)
+    output.float().square().mean().backward()
+
+    assert output.dtype is torch.bfloat16
+    assert trainable.left_latent.dtype is torch.float32
+    assert trainable.left_latent.grad is not None
+    assert trainable.left_latent.grad.dtype is torch.float32
+
+
+@pytest.mark.parametrize(
+    ("out_features", "in_features", "rank"),
+    ((256, 1152, 128), (1152, 1152, 448), (6912, 1152, 1056)),
+)
+def test_dense_and_factorized_references_match_real_gemma_shapes(
+    out_features: int, in_features: int, rank: int
+) -> None:
+    generator = torch.Generator().manual_seed(out_features + rank)
+    left = torch.where(torch.rand(out_features, rank, generator=generator) >= 0.5, 1.0, -1.0)
+    right = torch.where(torch.rand(rank, in_features, generator=generator) >= 0.5, 1.0, -1.0)
+    scale_pre = torch.rand(in_features, generator=generator) * 0.02
+    scale_mid = torch.rand(rank, generator=generator) * 0.02
+    scale_post = torch.rand(out_features, generator=generator) * 0.02
+    dense = FrozenReferenceLinear(left, right, scale_pre, scale_mid, scale_post)
+    factorized = FactorizedReferenceLinear(left, right, scale_pre, scale_mid, scale_post)
+    inputs = torch.randn(2, in_features, generator=generator)
+
+    assert torch.allclose(factorized(inputs), dense(inputs), rtol=2e-5, atol=2e-6)

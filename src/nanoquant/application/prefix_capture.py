@@ -1,4 +1,4 @@
-"""Scoped model-prefix input capture without replacement or control-flow exceptions."""
+"""Scoped model-prefix input capture with immediate first-block short-circuiting."""
 
 from __future__ import annotations
 
@@ -13,6 +13,10 @@ from torch import nn
 class CapturedBlockInvocation:
     positional: tuple[object, ...]
     keyword: dict[str, object]
+
+
+class _PrefixCaptured(RuntimeError):
+    pass
 
 
 def _detach(value: object) -> object:
@@ -40,11 +44,15 @@ def capture_prefix_invocations(
                 {key: _detach(value) for key, value in kwargs.items()},
             )
         )
+        raise _PrefixCaptured
 
     handle = first_block.register_forward_pre_hook(hook, with_kwargs=True)
     try:
         for call in model_calls:
-            call()
+            try:
+                call()
+            except _PrefixCaptured:
+                pass
     finally:
         handle.remove()
     if len(captured) != len(model_calls):

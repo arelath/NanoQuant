@@ -40,12 +40,15 @@ def _loss_sum(prediction: torch.Tensor, target: torch.Tensor, importance: torch.
 
 
 def _evaluate_loss(model: nn.Module, request: TuningRequest, forward: ForwardFunction) -> float:
-    total = torch.zeros((), device=request.inputs.device)
+    parameter = next(iter(model.parameters()), None)
+    device = request.inputs.device if parameter is None else parameter.device
+    total = torch.zeros((), device=device)
     with torch.no_grad():
         for start in range(0, request.inputs.shape[0], request.batch_size):
             end = min(start + request.batch_size, request.inputs.shape[0])
-            prediction = forward(model, request.inputs[start:end])
-            total += _loss_sum(prediction, request.targets[start:end], request.output_importance)
+            prediction = forward(model, request.inputs[start:end].to(device, non_blocking=True))
+            target = request.targets[start:end].to(device, non_blocking=True)
+            total += _loss_sum(prediction, target, request.output_importance)
     return float(total / request.targets.numel())
 
 
@@ -90,10 +93,14 @@ def tune(
         for epoch in range(request.epochs):
             order = torch.randperm(request.inputs.shape[0], generator=generator)
             for start in range(0, request.inputs.shape[0], request.batch_size):
-                indexes = order[start : start + request.batch_size].to(request.inputs.device)
+                indexes = order[start : start + request.batch_size]
                 optimizer.zero_grad(set_to_none=True)
-                prediction = forward(model, request.inputs[indexes])
-                loss = _loss_sum(prediction, request.targets[indexes], request.output_importance) / max(
+                model_parameter = next(iter(model.parameters()), None)
+                device = request.inputs.device if model_parameter is None else model_parameter.device
+                input_batch = request.inputs[indexes].to(device, non_blocking=True)
+                target_batch = request.targets[indexes].to(device, non_blocking=True)
+                prediction = forward(model, input_batch)
+                loss = _loss_sum(prediction, target_batch, request.output_importance) / max(
                     1, indexes.numel()
                 )
                 torch.autograd.backward(loss)

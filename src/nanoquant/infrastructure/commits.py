@@ -113,10 +113,17 @@ def load_block_activations(
     reference: ArtifactRef, artifacts: LocalArtifactStore, device: str = "cpu"
 ) -> tuple[torch.Tensor, torch.Tensor]:
     artifacts.validate(reference.artifact_id)
-    path = artifacts.path_for(reference.artifact_id) / "activations.safetensors"
-    with safe_open(path, framework="pt", device="cpu") as handle:
-        teacher = handle.get_tensor("teacher_outputs")
-        compressed = handle.get_tensor("compressed_outputs")
+    root = artifacts.path_for(reference.artifact_id)
+    legacy = root / "activations.safetensors"
+    if legacy.exists():
+        with safe_open(legacy, framework="pt", device="cpu") as handle:
+            teacher = handle.get_tensor("teacher_outputs")
+            compressed = handle.get_tensor("compressed_outputs")
+    else:
+        with safe_open(root / "teacher-activations.safetensors", framework="pt", device="cpu") as handle:
+            teacher = handle.get_tensor("teacher_outputs")
+        with safe_open(root / "compressed-activations.safetensors", framework="pt", device="cpu") as handle:
+            compressed = handle.get_tensor("compressed_outputs")
     if device != "cpu":
         teacher = teacher.to(device)
         compressed = compressed.to(device)
@@ -182,11 +189,12 @@ def commit_block(
     }
     with artifacts.begin_write("block-result") as writer:
         save_file(
-            {
-                "teacher_outputs": teacher_outputs.detach().cpu().contiguous(),
-                "compressed_outputs": compressed_outputs.detach().cpu().contiguous(),
-            },
-            writer.path / "activations.safetensors",
+            {"teacher_outputs": teacher_outputs.detach().cpu().contiguous()},
+            writer.path / "teacher-activations.safetensors",
+        )
+        save_file(
+            {"compressed_outputs": compressed_outputs.detach().cpu().contiguous()},
+            writer.path / "compressed-activations.safetensors",
         )
         (writer.path / "block-result.json").write_text(json.dumps(core, sort_keys=True, indent=2), encoding="utf-8")
         descriptor = writer.commit()

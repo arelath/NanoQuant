@@ -16,10 +16,15 @@ from transformers import AutoModelForCausalLM
 
 from nanoquant.application.assembly import assemble_frozen_model
 from nanoquant.application.calibration import MaterializedLayerCalibration, calibrate_block, calibrate_causal_model
-from nanoquant.application.calibration_artifacts import build_objectives, persist_calibration
+from nanoquant.application.calibration_artifacts import (
+    PersistedCalibration,
+    PersistedObjectives,
+    build_objectives,
+    persist_calibration,
+)
 from nanoquant.application.layers import BlockEditor, LayerFreezer, TrainableFactorizedLinear
 from nanoquant.application.loss_snapshots import BlockLossRecorder
-from nanoquant.application.planning import PlanningRequest, build_quantization_plan, persist_plan
+from nanoquant.application.planning import PersistedPlan, PlanningRequest, build_quantization_plan, persist_plan
 from nanoquant.application.prefix_capture import capture_prefix_invocations
 from nanoquant.application.quantization_stages import (
     FactorizationAttemptStage,
@@ -29,8 +34,8 @@ from nanoquant.application.quantization_stages import (
 )
 from nanoquant.application.reconstruction_report import render_reconstruction_tables
 from nanoquant.application.stages import StageContext, execute_stage
-from nanoquant.application.tuning import TuningRequest, tune_factorized
-from nanoquant.config.codec import canonical_json, to_dict
+from nanoquant.application.tuning import TuningRequest, post_block_refit, tune_factorized, tune_non_factorized
+from nanoquant.config.codec import canonical_json, from_dict, to_dict
 from nanoquant.config.schema import (
     ADMMConfig,
     AllocationStrategy,
@@ -46,17 +51,22 @@ from nanoquant.domain.models import (
     ArtifactRef,
     AttemptSummary,
     BlockResult,
+    CalibrationStats,
+    CheckpointInventory,
     DatasetIdentity,
     FactorizationRequest,
     FrozenBlockState,
     FrozenModelResult,
+    FrozenNanoQuantState,
     FrozenOutlierState,
     LayerId,
     LayerResult,
     ModelInventory,
+    ObjectiveSpec,
     OutlierSelectionRequest,
     QuantizationPlan,
     ScaleFitRequest,
+    TensorRef,
 )
 from nanoquant.domain.runs import BudgetState
 from nanoquant.domain.seeds import logical_seed
@@ -69,6 +79,7 @@ from nanoquant.infrastructure.commits import (
     load_committed_block,
     load_committed_layer,
 )
+from nanoquant.infrastructure.device_lease import acquire_device_lease
 from nanoquant.infrastructure.events import JsonlEventSink
 from nanoquant.infrastructure.model_adapters import adapter_for_config
 from nanoquant.infrastructure.progress import ProgressJournal
@@ -100,14 +111,29 @@ class ResidentQuantizationRequest:
     factorized_tuning_epochs: int = 0
     factorized_tuning_batch_size: int = 8
     factorized_tuning_learning_rate: float = 1e-5
+    nonfactorized_tuning_epochs: int = 0
+    nonfactorized_tuning_epochs_by_layer: tuple[int, ...] = ()
+    nonfactorized_tuning_batch_size: int = 8
+    nonfactorized_tuning_learning_rate: float = 1e-4
+    nonfactorized_tuning_early_stop_relative_tolerance: float | None = None
+    post_block_refit_epochs: int = 0
+    post_block_refit_batch_size: int = 8
+    post_block_refit_learning_rate: float = 1e-5
     seed: int = 0
     verify_hashes: bool = True
     interrupt_after_layer_commits: int | None = None
+    interrupt_after_block_commits: int | None = None
     block_forward_batch_size: int = 8
     quality_token_ids: torch.Tensor | tuple[tuple[int, ...], ...] | None = None
     calibration_method: str = "forward_only"
     calibration_shrinkage: float = 0.0
     calibration_batch_size: int = 1
+    precomputed_calibration: ArtifactRef | None = None
+    precomputed_objectives: ArtifactRef | None = None
+    precomputed_plan: ArtifactRef | None = None
+    restore_completed_blocks: bool = True
+    evaluate_inline_quality: bool = True
+    defer_layer_loss_snapshots: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,6 +153,21 @@ class ResidentQuantizationResult:
     artifact_bytes: int
     elapsed_seconds: float
     reused_commit_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class ResidentFactorizationSliceResult:
+    layer: LayerResult | None
+    identity: CommitIdentity
+    elapsed_seconds: float
+    peak_device_bytes: int
+    remaining_layers: int
+
+
+_FACTOR_SLICE_SOURCE_CACHE: dict[
+    tuple[str, str, str, bool, tuple[str, ...]],
+    tuple[SafetensorsModelSource, CheckpointInventory, ModelInventory],
+] = {}
 
 
 def _checkpoint_dtype(config: dict[str, object]) -> torch.dtype:
@@ -167,13 +208,16 @@ def _block_loss(
     metadata: dict[str, object],
     batch_size: int,
 ) -> float:
+    block_device = next(iter(block.parameters()), None)
+    device = inputs.device if block_device is None else block_device.device
     with torch.no_grad():
-        squared_error = torch.zeros((), device=inputs.device)
+        squared_error = torch.zeros((), device=device)
         elements = 0
         for start in range(0, inputs.shape[0], batch_size):
             end = min(start + batch_size, inputs.shape[0])
-            prediction = adapter.run_block(block, inputs[start:end], **metadata)
-            target = targets[start:end]
+            input_batch = inputs[start:end].to(device, non_blocking=True)
+            prediction = adapter.run_block(block, input_batch, **metadata)
+            target = targets[start:end].to(device, non_blocking=True)
             squared_error += (prediction.float() - target.float()).square().sum()
             elements += target.numel()
         return float(squared_error / elements)
@@ -185,22 +229,54 @@ def _run_block_batched(
     inputs: torch.Tensor,
     metadata: dict[str, object],
     batch_size: int,
+    storage_device: str | torch.device | None = None,
 ) -> torch.Tensor:
     if batch_size <= 0:
         raise ValueError("block forward batch size must be positive")
+    block_parameter = next(iter(block.parameters()), None)
+    compute_device = inputs.device if block_parameter is None else block_parameter.device
+    destination = inputs.device if storage_device is None else torch.device(storage_device)
     result: torch.Tensor | None = None
     for start in range(0, inputs.shape[0], batch_size):
         end = min(start + batch_size, inputs.shape[0])
-        output = adapter.run_block(block, inputs[start:end], **metadata)
+        input_batch = inputs[start:end].to(compute_device, non_blocking=True)
+        output = adapter.run_block(block, input_batch, **metadata)
         if result is None:
             result = torch.empty(
                 (inputs.shape[0], *output.shape[1:]),
-                device=output.device,
+                device=destination,
                 dtype=output.dtype,
             )
-        result[start:end].copy_(output)
+        result[start:end].copy_(output.to(destination))
     if result is None:
         raise ValueError("cannot run a block over empty inputs")
+    return result
+
+
+def _run_prefix_batched(
+    adapter: Any,
+    model: nn.Module,
+    tokens: torch.Tensor,
+    batch_size: int,
+    storage_device: str | torch.device,
+) -> torch.Tensor:
+    if batch_size <= 0:
+        raise ValueError("prefix batch size must be positive")
+    destination = torch.device(storage_device)
+    result: torch.Tensor | None = None
+    with torch.no_grad():
+        for start in range(0, tokens.shape[0], batch_size):
+            end = min(start + batch_size, tokens.shape[0])
+            output = adapter.run_prefix(model, tokens[start:end])
+            if result is None:
+                result = torch.empty(
+                    (tokens.shape[0], *output.shape[1:]),
+                    device=destination,
+                    dtype=output.dtype,
+                )
+            result[start:end].copy_(output.to(destination))
+    if result is None:
+        raise ValueError("cannot run a prefix over empty tokens")
     return result
 
 
@@ -231,6 +307,125 @@ def _layer_type_multiplier(path: str) -> float:
     return 1.0
 
 
+def _module_at_path(module: nn.Module, path: str) -> nn.Module:
+    current = module
+    for part in path.split("."):
+        child = current[part] if isinstance(current, nn.ModuleDict) else getattr(current, part, None)
+        if not isinstance(child, nn.Module):
+            raise KeyError(f"module path not found: {path}")
+        current = child
+    return current
+
+
+def _nonfactorized_epochs(request: ResidentQuantizationRequest, layer_position: int) -> int:
+    schedule = request.nonfactorized_tuning_epochs_by_layer
+    if not schedule:
+        return request.nonfactorized_tuning_epochs
+    return schedule[min(layer_position, len(schedule) - 1)]
+
+
+def _rehydrate_trainable_layer(
+    state: FrozenNanoQuantState,
+    tensors: LocalTensorStore,
+    *,
+    device: str,
+    dtype: torch.dtype,
+) -> TrainableFactorizedLinear:
+    frozen = LayerFreezer().load(state, tensors, device=device, dtype=dtype).module
+    return TrainableFactorizedLinear(
+        frozen.left_binary,
+        frozen.right_binary,
+        frozen.scale_pre,
+        frozen.scale_mid,
+        frozen.scale_post,
+        bias=frozen.bias,
+        outlier_indices=frozen.outlier_indices,
+        outlier_values=frozen.outlier_values,
+        outlier_scales=frozen.outlier_scales,
+    ).to(device=device, dtype=dtype)
+
+
+def _resident_config_hash(request: ResidentQuantizationRequest) -> str:
+    return (
+        "sha256:"
+        + hashlib.sha256(
+            canonical_json(
+                {
+                    "target_bpw": request.target_bpw,
+                    "rank_multiple": request.rank_multiple,
+                    "allocation_strategy": request.allocation_strategy,
+                    "rank_floor_fraction": request.rank_floor_fraction,
+                    "rank_ceiling_fraction": request.rank_ceiling_fraction,
+                    "rank_sensitivity_alpha": request.rank_sensitivity_alpha,
+                    "rank_edge_boost": request.rank_edge_boost,
+                    "layer_order": request.layer_order,
+                    "admm": request.admm,
+                    "outliers": request.outliers,
+                    "scale_fit": request.scale_fit,
+                    "factorized_tuning_epochs": request.factorized_tuning_epochs,
+                    "factorized_tuning_batch_size": request.factorized_tuning_batch_size,
+                    "factorized_tuning_learning_rate": request.factorized_tuning_learning_rate,
+                    "nonfactorized_tuning_epochs": request.nonfactorized_tuning_epochs,
+                    "nonfactorized_tuning_epochs_by_layer": request.nonfactorized_tuning_epochs_by_layer,
+                    "nonfactorized_tuning_batch_size": request.nonfactorized_tuning_batch_size,
+                    "nonfactorized_tuning_learning_rate": request.nonfactorized_tuning_learning_rate,
+                    "nonfactorized_tuning_early_stop_relative_tolerance": (
+                        request.nonfactorized_tuning_early_stop_relative_tolerance
+                    ),
+                    "post_block_refit_epochs": request.post_block_refit_epochs,
+                    "post_block_refit_batch_size": request.post_block_refit_batch_size,
+                    "post_block_refit_learning_rate": request.post_block_refit_learning_rate,
+                    "calibration_method": request.calibration_method,
+                    "calibration_shrinkage": request.calibration_shrinkage,
+                    "calibration_batch_size": request.calibration_batch_size,
+                    "seed": request.seed,
+                }
+            ).encode()
+        ).hexdigest()
+    )
+
+
+def _factor_slice_source_inventory(
+    request: ResidentQuantizationRequest,
+) -> tuple[SafetensorsModelSource, CheckpointInventory, ModelInventory]:
+    key = (
+        str(request.snapshot.resolve()),
+        request.source,
+        request.revision,
+        request.verify_hashes,
+        request.layer_order,
+    )
+    cached = _FACTOR_SLICE_SOURCE_CACHE.get(key)
+    if cached is not None:
+        return cached
+    source = SafetensorsModelSource(
+        request.snapshot,
+        source=request.source,
+        revision=request.revision,
+        verify_hashes=request.verify_hashes,
+    )
+    checkpoint = source.inventory()
+    adapter = adapter_for_config(checkpoint.config)
+    inventory = adapter.model_inventory(source)
+    if request.layer_order:
+        inventory = replace(
+            inventory,
+            blocks=tuple(
+                replace(
+                    block,
+                    quantizable_layers=tuple(
+                        {layer.layer.path: layer for layer in block.quantizable_layers}[path]
+                        for path in request.layer_order
+                    ),
+                )
+                for block in inventory.blocks
+            ),
+        )
+    result = (source, checkpoint, inventory)
+    _FACTOR_SLICE_SOURCE_CACHE[key] = result
+    return result
+
+
 def _legacy_sensitivity_profile(
     inventory: ModelInventory,
     calibration: Any,
@@ -239,6 +434,7 @@ def _legacy_sensitivity_profile(
     *,
     alpha: float,
     edge_boost: float,
+    device: str = "cpu",
 ) -> tuple[tuple[str, float], ...]:
     stats = {item.layer: item for item in calibration.stats.layers}
     entries: list[dict[str, Any]] = []
@@ -246,9 +442,9 @@ def _legacy_sensitivity_profile(
         for layer in block.quantizable_layers:
             layer_stats = stats[layer.layer]
             with (
-                source.read_tensor(layer.weight, device="cpu") as weight,
-                tensors.read(layer_stats.input_importance, "cpu") as input_importance,
-                tensors.read(layer_stats.output_importance, "cpu") as output_importance,
+                source.read_tensor(layer.weight, device=device) as weight,
+                tensors.read(layer_stats.input_importance, device) as input_importance,
+                tensors.read(layer_stats.output_importance, device) as output_importance,
             ):
                 energy = float(
                     (
@@ -284,15 +480,87 @@ def _legacy_sensitivity_profile(
     return tuple(result)
 
 
-def run_resident_quantization(request: ResidentQuantizationRequest) -> ResidentQuantizationResult:
+def _load_precomputed_preprocessing(
+    request: ResidentQuantizationRequest,
+    artifacts: LocalArtifactStore,
+    inventory: ModelInventory,
+    dataset: DatasetIdentity,
+    total_tokens: int,
+) -> tuple[PersistedCalibration, PersistedObjectives, PersistedPlan] | None:
+    references = (
+        request.precomputed_calibration,
+        request.precomputed_objectives,
+        request.precomputed_plan,
+    )
+    if all(reference is None for reference in references):
+        return None
+    if any(reference is None for reference in references):
+        raise ValueError("precomputed calibration, objectives, and plan must be supplied together")
+    calibration_ref, objectives_ref, plan_ref = cast(tuple[ArtifactRef, ArtifactRef, ArtifactRef], references)
+    for reference in references:
+        artifacts.validate(cast(ArtifactRef, reference).artifact_id)
+    calibration_payload = json.loads(
+        (artifacts.path_for(calibration_ref.artifact_id) / "stats.json").read_text(encoding="utf-8")
+    )
+    calibration = PersistedCalibration(
+        calibration_ref,
+        from_dict(CalibrationStats, calibration_payload, path="calibration"),
+    )
+    objective_payload = json.loads(
+        (artifacts.path_for(objectives_ref.artifact_id) / "objectives.json").read_text(encoding="utf-8")
+    )
+    objectives = PersistedObjectives(
+        objectives_ref,
+        tuple(
+            from_dict(ObjectiveSpec, item, path=f"objectives[{index}]")
+            for index, item in enumerate(objective_payload)
+        ),
+    )
+    plan_payload = json.loads((artifacts.path_for(plan_ref.artifact_id) / "plan.json").read_text(encoding="utf-8"))
+    persisted_plan = PersistedPlan(plan_ref, from_dict(QuantizationPlan, plan_payload, path="plan"))
+    if calibration.stats.model != inventory.model or calibration.stats.dataset != dataset:
+        raise ValueError("precomputed calibration identity does not match the requested model/dataset")
+    if calibration.stats.method != request.calibration_method or calibration.stats.total_tokens != total_tokens:
+        raise ValueError("precomputed calibration protocol does not match the request")
+    if any(objective.source_calibration != calibration_ref for objective in objectives.objectives):
+        raise ValueError("precomputed objectives do not reference the selected calibration")
+    if persisted_plan.plan.model != inventory.model or persisted_plan.plan.calibration != calibration_ref:
+        raise ValueError("precomputed plan identity does not match the selected model/calibration")
+    if persisted_plan.plan.target_bpw != request.target_bpw:
+        raise ValueError("precomputed plan target BPW does not match the request")
+    return calibration, objectives, persisted_plan
+
+
+def _run_resident_quantization(request: ResidentQuantizationRequest) -> ResidentQuantizationResult:
     """Quantize all decoder linears while the source model remains resident on one device."""
     started = time.perf_counter()
     if request.block_forward_batch_size <= 0:
         raise ValueError("resident quantization block forward batch size must be positive")
     if request.calibration_batch_size <= 0:
         raise ValueError("resident quantization calibration batch size must be positive")
+    if request.factorized_tuning_epochs < 0 or request.nonfactorized_tuning_epochs < 0:
+        raise ValueError("resident quantization tuning epochs cannot be negative")
+    if any(epoch < 0 for epoch in request.nonfactorized_tuning_epochs_by_layer):
+        raise ValueError("resident quantization non-factorized tuning schedule cannot contain negative epochs")
+    if request.post_block_refit_epochs < 0:
+        raise ValueError("resident quantization post-block refit epochs cannot be negative")
+    if request.factorized_tuning_epochs > 0 and request.factorized_tuning_batch_size <= 0:
+        raise ValueError("resident quantization factorized tuning batch size must be positive")
+    if (
+        request.nonfactorized_tuning_epochs > 0 or any(request.nonfactorized_tuning_epochs_by_layer)
+    ) and request.nonfactorized_tuning_batch_size <= 0:
+        raise ValueError("resident quantization non-factorized tuning batch size must be positive")
+    if request.post_block_refit_epochs > 0 and request.post_block_refit_batch_size <= 0:
+        raise ValueError("resident quantization post-block refit batch size must be positive")
     if request.device.startswith("cuda") and not torch.cuda.is_available():
         raise RuntimeError("CUDA resident quantization requested without CUDA")
+    if request.defer_layer_loss_snapshots and (
+        request.factorized_tuning_epochs > 0
+        or request.nonfactorized_tuning_epochs > 0
+        or any(request.nonfactorized_tuning_epochs_by_layer)
+        or request.post_block_refit_epochs > 0
+    ):
+        raise ValueError("deferred layer losses are incompatible with activation-based tuning")
     artifacts = LocalArtifactStore(request.output / "artifacts")
     tensors = LocalTensorStore(artifacts)
     executor = ResidentExecutor()
@@ -337,11 +605,13 @@ def run_resident_quantization(request: ResidentQuantizationRequest) -> ResidentQ
     ).to(request.device)
     model.eval()
     decoder_layers = _decoder_layers(model)
-    with torch.no_grad():
-        reference_logits = cast(
-            torch.Tensor,
-            cast(Any, model)(input_ids=quality_tokens, use_cache=False).logits,
-        ).detach()
+    reference_logits = None
+    if request.evaluate_inline_quality:
+        with torch.no_grad():
+            reference_logits = cast(
+                torch.Tensor,
+                cast(Any, model)(input_ids=quality_tokens, use_cache=False).logits,
+            ).detach()
     text_model = getattr(model, "model", model)
     capture = capture_prefix_invocations(
         decoder_layers[0],
@@ -350,13 +620,30 @@ def run_resident_quantization(request: ResidentQuantizationRequest) -> ResidentQ
     captured_input = capture.positional[0]
     if not isinstance(captured_input, torch.Tensor):
         raise TypeError("captured first-block hidden state is not a tensor")
-    initial_inputs = adapter.run_prefix(model, tokens).detach()
-    if not torch.equal(initial_inputs[:1], captured_input):
+    initial_inputs = _run_prefix_batched(
+        adapter,
+        model,
+        tokens,
+        request.block_forward_batch_size,
+        "cpu",
+    ).detach()
+    if not torch.equal(initial_inputs[:1], captured_input.detach().cpu()):
         raise ValueError("adapter prefix does not match the model's first-block input")
     metadata = capture.keyword
+    token_bytes = tokens.detach().cpu().contiguous().view(torch.uint8).numpy().tobytes()
+    dataset = DatasetIdentity(
+        "sha256:" + hashlib.sha256(token_bytes).hexdigest(),
+        ("deterministic-token-fixture",),
+        ("1",),
+        checkpoint.tokenizer_hash,
+        "raw-token-ids-v1",
+    )
+    preprocessed = _load_precomputed_preprocessing(request, artifacts, inventory, dataset, tokens.numel())
 
     calibration_values: list[tuple[LayerId, MaterializedLayerCalibration]] = []
-    if request.calibration_method in {"online_fisher", "two_phase_fisher"}:
+    if preprocessed is not None:
+        pass
+    elif request.calibration_method in {"online_fisher", "two_phase_fisher"}:
         causal_layers: list[tuple[str, nn.Linear]] = []
         causal_ids: dict[str, LayerId] = {}
         for block_inventory, block in zip(inventory.blocks, decoder_layers, strict=True):
@@ -385,7 +672,9 @@ def run_resident_quantization(request: ResidentQuantizationRequest) -> ResidentQ
             paths = tuple(layer.path for layer in adapter.quantizable_layers(block, block_inventory.block))
 
             def calibration_runner(module: nn.Module, value: torch.Tensor) -> torch.Tensor:
-                return adapter.run_block(module, value, **metadata)
+                parameter = next(iter(module.parameters()), None)
+                device = value.device if parameter is None else parameter.device
+                return adapter.run_block(module, value.to(device, non_blocking=True), **metadata)
 
             stats = calibrate_block(
                 block,
@@ -409,88 +698,59 @@ def run_resident_quantization(request: ResidentQuantizationRequest) -> ResidentQ
                 ).detach()
     else:
         raise ValueError(f"unsupported resident calibration method: {request.calibration_method}")
-    token_bytes = tokens.detach().cpu().contiguous().view(torch.uint8).numpy().tobytes()
-    dataset = DatasetIdentity(
-        "sha256:" + hashlib.sha256(token_bytes).hexdigest(),
-        ("deterministic-token-fixture",),
-        ("1",),
-        checkpoint.tokenizer_hash,
-        "raw-token-ids-v1",
-    )
-    calibration = persist_calibration(
-        tuple(calibration_values),
-        inventory.model,
-        dataset,
-        request.calibration_method,
-        "float32",
-        artifacts,
-        tensors,
-        total_tokens=tokens.numel(),
-    )
-    objectives = build_objectives(calibration, ObjectiveConfig(), artifacts)
-    sensitivity_profile = (
-        _legacy_sensitivity_profile(
-            inventory,
-            calibration,
-            source,
+    if preprocessed is None:
+        calibration = persist_calibration(
+            tuple(calibration_values),
+            inventory.model,
+            dataset,
+            request.calibration_method,
+            "float32",
+            artifacts,
             tensors,
-            alpha=request.rank_sensitivity_alpha,
-            edge_boost=request.rank_edge_boost,
+            total_tokens=tokens.numel(),
         )
-        if request.allocation_strategy is AllocationStrategy.SENSITIVITY
-        else ()
-    )
-    allocation = RankAllocationConfig(
-        target_bpw=request.target_bpw,
-        strategy=request.allocation_strategy,
-        sensitivity_alpha=request.rank_sensitivity_alpha,
-        bounds=RankBoundsConfig(
-            multiple=request.rank_multiple,
-            floor_fraction_of_uniform=request.rank_floor_fraction,
-            ceiling_fraction_of_uniform=request.rank_ceiling_fraction,
-            edge_block_boost=request.rank_edge_boost,
-        ),
-        retry=RankRetryConfig(enabled=False, maximum_attempts=1),
-    )
-    plan = build_quantization_plan(
-        PlanningRequest(
-            inventory,
-            calibration.stats,
-            calibration.reference,
-            objectives.objectives,
-            allocation,
-            request.outliers,
-            sensitivity_profile,
+        objectives = build_objectives(calibration, ObjectiveConfig(), artifacts)
+        sensitivity_profile = (
+            _legacy_sensitivity_profile(
+                inventory,
+                calibration,
+                source,
+                tensors,
+                alpha=request.rank_sensitivity_alpha,
+                edge_boost=request.rank_edge_boost,
+                device=request.device,
+            )
+            if request.allocation_strategy is AllocationStrategy.SENSITIVITY
+            else ()
         )
-    )
-    persisted_plan = persist_plan(plan, artifacts)
-    config_hash = (
-        "sha256:"
-        + hashlib.sha256(
-            canonical_json(
-                {
-                    "target_bpw": request.target_bpw,
-                    "rank_multiple": request.rank_multiple,
-                    "allocation_strategy": request.allocation_strategy,
-                    "rank_floor_fraction": request.rank_floor_fraction,
-                    "rank_ceiling_fraction": request.rank_ceiling_fraction,
-                    "rank_sensitivity_alpha": request.rank_sensitivity_alpha,
-                    "rank_edge_boost": request.rank_edge_boost,
-                    "layer_order": request.layer_order,
-                    "admm": request.admm,
-                    "outliers": request.outliers,
-                    "scale_fit": request.scale_fit,
-                    "factorized_tuning_epochs": request.factorized_tuning_epochs,
-                    "factorized_tuning_batch_size": request.factorized_tuning_batch_size,
-                    "factorized_tuning_learning_rate": request.factorized_tuning_learning_rate,
-                    "calibration_method": request.calibration_method,
-                    "calibration_shrinkage": request.calibration_shrinkage,
-                    "calibration_batch_size": request.calibration_batch_size,
-                    "seed": request.seed,
-                }
-            ).encode()
-        ).hexdigest()
-    )
+        allocation = RankAllocationConfig(
+            target_bpw=request.target_bpw,
+            strategy=request.allocation_strategy,
+            sensitivity_alpha=request.rank_sensitivity_alpha,
+            bounds=RankBoundsConfig(
+                multiple=request.rank_multiple,
+                floor_fraction_of_uniform=request.rank_floor_fraction,
+                ceiling_fraction_of_uniform=request.rank_ceiling_fraction,
+                edge_block_boost=request.rank_edge_boost,
+            ),
+            retry=RankRetryConfig(enabled=False, maximum_attempts=1),
+        )
+        plan = build_quantization_plan(
+            PlanningRequest(
+                inventory,
+                calibration.stats,
+                calibration.reference,
+                objectives.objectives,
+                allocation,
+                request.outliers,
+                sensitivity_profile,
+            )
+        )
+        persisted_plan = persist_plan(plan, artifacts)
+    else:
+        calibration, objectives, persisted_plan = preprocessed
+        plan = persisted_plan.plan
+    config_hash = _resident_config_hash(request)
     identity = CommitIdentity(config_hash, inventory.model.config_hash, persisted_plan.reference.artifact_id)
     journal = ProgressJournal(request.output / "state", "resident-quantization", artifacts)
     discovery = journal.discover(plan, identity)
@@ -508,28 +768,30 @@ def run_resident_quantization(request: ResidentQuantizationRequest) -> ResidentQ
     accepted_bits = sum(layer.actual_bit_cost.total for _, block in committed_blocks for layer in block.layers)
     budget = BudgetState(plan.planned_cost.total, accepted_bits, 0)
     if committed_blocks:
-        teacher_inputs, compressed_inputs = load_block_activations(committed_blocks[-1][0], artifacts, request.device)
+        teacher_inputs, compressed_inputs = load_block_activations(committed_blocks[-1][0], artifacts, "cpu")
     else:
         teacher_inputs = initial_inputs
         compressed_inputs = initial_inputs
+    del initial_inputs
     completed_block_indexes = {block.block.index for _, block in committed_blocks}
     layer_container = getattr(getattr(model, "model", None), "layers", None)
     if not isinstance(layer_container, nn.ModuleList):
         raise TypeError("model does not expose a mutable decoder layer stack")
-    for _, completed_block in committed_blocks:
-        for state in completed_block.frozen_state.quantized_layers:
-            frozen = LayerFreezer().load(
-                state,
-                tensors,
-                device=request.device,
-                dtype=compressed_inputs.dtype,
-                backend="factorized",
-            )
-            BlockEditor().install_frozen_layer(
-                layer_container[completed_block.block.index],
-                state.layer.path,
-                frozen.module,
-            )
+    if request.restore_completed_blocks:
+        for _, completed_block in committed_blocks:
+            for state in completed_block.frozen_state.quantized_layers:
+                frozen = LayerFreezer().load(
+                    state,
+                    tensors,
+                    device=request.device,
+                    dtype=compressed_inputs.dtype,
+                    backend="factorized",
+                )
+                BlockEditor().install_frozen_layer(
+                    layer_container[completed_block.block.index],
+                    state.layer.path,
+                    frozen.module,
+                )
     del decoder_layers
     partial_layer_records = {
         (record.block, record.layer): record
@@ -539,6 +801,7 @@ def run_resident_quantization(request: ResidentQuantizationRequest) -> ResidentQ
     peak_device_bytes = 0
     factorization_wall_seconds = 0.0
     new_layer_commits = 0
+    new_block_commits = 0
     factor_stage = FactorizationAttemptStage(request.admm, device=request.device)
     outlier_stage = OutlierSelectionStage(
         device=request.device,
@@ -550,6 +813,7 @@ def run_resident_quantization(request: ResidentQuantizationRequest) -> ResidentQ
         if block_plan.block.index in completed_block_indexes:
             continue
         block_started = time.perf_counter()
+        deferred_slice = request.defer_layer_loss_snapshots
         block_index = block_plan.block.index
         source_block = layer_container[block_index]
         working_block = adapter.load_block(source, block_plan.block, request.device)
@@ -561,11 +825,14 @@ def run_resident_quantization(request: ResidentQuantizationRequest) -> ResidentQ
                 teacher_inputs,
                 metadata,
                 request.block_forward_batch_size,
+                "cpu",
             ).detach()
         recorder = BlockLossRecorder()
         recorder.record_source_reference(_mse(teacher_outputs, teacher_outputs))
         recorder.record_block_entry(
-            _block_loss(
+            0.0
+            if deferred_slice
+            else _block_loss(
                 adapter,
                 working_block,
                 compressed_inputs,
@@ -586,8 +853,39 @@ def run_resident_quantization(request: ResidentQuantizationRequest) -> ResidentQ
             block_output_importance = value.clone()
         layer_results: list[LayerResult] = []
         frozen_states = []
+        quantization_targets: dict[str, TensorRef] = {}
 
-        for layer_plan in block_plan.layers:
+        for layer_position, layer_plan in enumerate(block_plan.layers):
+            nonfactorized_epochs = _nonfactorized_epochs(request, layer_position)
+            if nonfactorized_epochs > 0:
+                tune_non_factorized(
+                    working_block,
+                    TuningRequest(
+                        compressed_inputs,
+                        teacher_outputs,
+                        nonfactorized_epochs,
+                        request.nonfactorized_tuning_batch_size,
+                        request.nonfactorized_tuning_learning_rate,
+                        early_stop_relative_tolerance=(
+                            request.nonfactorized_tuning_early_stop_relative_tolerance
+                        ),
+                        output_importance=block_output_importance,
+                        seed=logical_seed(
+                            request.seed,
+                            "nonfactorized-tuning",
+                            block_index,
+                            layer_plan.layer.path,
+                            0,
+                        ),
+                    ),
+                    lambda module, value: adapter.run_block(module, value, **metadata),
+                )
+            source_linear = _module_at_path(working_block, layer_plan.layer.path)
+            source_weight = getattr(source_linear, "weight", None)
+            if not isinstance(source_weight, torch.Tensor):
+                raise TypeError(f"quantization target has no materialized weight: {layer_plan.layer.path}")
+            source_ref = tensors.put("source-layer", {"weight": source_weight.detach().cpu()})["weight"]
+            quantization_targets[layer_plan.layer.path] = source_ref
             prior_record = partial_layer_records.get((block_index, layer_plan.layer.path))
             if prior_record is not None:
                 prior = load_committed_layer(
@@ -603,20 +901,19 @@ def run_resident_quantization(request: ResidentQuantizationRequest) -> ResidentQ
                 frozen_states.append(prior.frozen_state)
                 layer_results.append(prior)
                 budget = replace(budget, accepted_bits=budget.accepted_bits + prior.actual_bit_cost.total)
-                recorder.record_after_layer(
-                    layer_plan.layer,
-                    _block_loss(
-                        adapter,
-                        working_block,
-                        compressed_inputs,
-                        teacher_outputs,
-                        metadata,
-                        request.block_forward_batch_size,
-                    ),
-                )
+                if not deferred_slice:
+                    recorder.record_after_layer(
+                        layer_plan.layer,
+                        _block_loss(
+                            adapter,
+                            working_block,
+                            compressed_inputs,
+                            teacher_outputs,
+                            metadata,
+                            request.block_forward_batch_size,
+                        ),
+                    )
                 continue
-            with source.read_tensor(layer_plan.source_weight, device="cpu") as source_weight:
-                source_ref = tensors.put("source-layer", {"weight": source_weight})["weight"]
             outliers = execute_stage(
                 outlier_stage,
                 OutlierSelectionRequest(
@@ -794,6 +1091,68 @@ def run_resident_quantization(request: ResidentQuantizationRequest) -> ResidentQ
                     request.block_forward_batch_size,
                 ),
             )
+        if request.post_block_refit_epochs > 0:
+            trainable_by_path: dict[str, TrainableFactorizedLinear] = {}
+            for state in frozen_states:
+                trainable = _rehydrate_trainable_layer(
+                    state,
+                    tensors,
+                    device=request.device,
+                    dtype=compressed_inputs.dtype,
+                )
+                BlockEditor().install_trainable_layer(working_block, state.layer.path, trainable)
+                trainable_by_path[state.layer.path] = trainable
+            post_block_refit(
+                working_block,
+                TuningRequest(
+                    compressed_inputs,
+                    teacher_outputs,
+                    request.post_block_refit_epochs,
+                    request.post_block_refit_batch_size,
+                    request.post_block_refit_learning_rate,
+                    output_importance=block_output_importance,
+                    seed=logical_seed(request.seed, "post-block-refit", block_index, None, 0),
+                ),
+                lambda module, value: adapter.run_block(module, value, **metadata),
+            )
+            refitted_states = []
+            refitted_results = []
+            for layer_result in layer_results:
+                refitted = LayerFreezer().freeze(
+                    layer_result.layer,
+                    trainable_by_path[layer_result.layer.path],
+                    tensors,
+                    outliers=layer_result.frozen_state.outliers,
+                )
+                with (
+                    tensors.read(quantization_targets[layer_result.layer.path], request.device) as source_value,
+                    tensors.read(layer_result.plan.objective.input_importance, request.device) as input_importance,
+                    tensors.read(layer_result.plan.objective.output_importance, request.device) as output_importance,
+                ):
+                    metrics = reconstruction_metrics(
+                        source_value,
+                        refitted.module.dense_weight(),
+                        input_importance,
+                        output_importance,
+                    )
+                frozen_module = refitted.module.to(device=request.device, dtype=compressed_inputs.dtype)
+                BlockEditor().install_frozen_layer(working_block, layer_result.layer.path, frozen_module)
+                refitted_states.append(refitted.state)
+                refitted_results.append(
+                    replace(layer_result, frozen_state=refitted.state, final_reconstruction=metrics)
+                )
+            frozen_states = refitted_states
+            layer_results = refitted_results
+            recorder.record_post_block_refit(
+                _block_loss(
+                    adapter,
+                    working_block,
+                    compressed_inputs,
+                    teacher_outputs,
+                    metadata,
+                    request.block_forward_batch_size,
+                )
+            )
         with torch.no_grad():
             compressed_outputs = _run_block_batched(
                 adapter,
@@ -801,6 +1160,7 @@ def run_resident_quantization(request: ResidentQuantizationRequest) -> ResidentQ
                 compressed_inputs,
                 metadata,
                 request.block_forward_batch_size,
+                "cpu",
             ).detach()
         recorder.record_final_frozen_pre_kd(_mse(compressed_outputs, teacher_outputs))
         frozen_block = FrozenBlockState(block_plan.block, tuple(frozen_states), ())
@@ -824,16 +1184,26 @@ def run_resident_quantization(request: ResidentQuantizationRequest) -> ResidentQ
         )
         journal.append("block", block_index, None, committed.reference.artifact_id, identity)
         committed_blocks.append((committed.reference, committed.result))
+        new_block_commits += 1
+        if (
+            request.interrupt_after_block_commits is not None
+            and new_block_commits >= request.interrupt_after_block_commits
+        ):
+            raise InterruptedError(f"injected interruption after {new_block_commits} new block commits")
         teacher_inputs = teacher_outputs
         compressed_inputs = compressed_outputs
         layer_container[block_index] = working_block
         del working_block
 
-    with torch.no_grad():
-        compressed_logits = cast(
-            torch.Tensor,
-            cast(Any, model)(input_ids=quality_tokens, use_cache=False).logits,
-        ).detach()
+    compressed_logits = None
+    if request.evaluate_inline_quality:
+        if not request.restore_completed_blocks and completed_block_indexes:
+            raise ValueError("inline quality evaluation requires completed-block restoration")
+        with torch.no_grad():
+            compressed_logits = cast(
+                torch.Tensor,
+                cast(Any, model)(input_ids=quality_tokens, use_cache=False).logits,
+            ).detach()
     original_elements = sum(
         layer.in_features * layer.out_features for block in inventory.blocks for layer in block.quantizable_layers
     )
@@ -844,10 +1214,13 @@ def run_resident_quantization(request: ResidentQuantizationRequest) -> ResidentQ
         (),
         original_elements,
     )
-    reference_nll = _nll(reference_logits, quality_tokens)
-    compressed_nll = _nll(compressed_logits, quality_tokens)
-    logit_mse = _mse(compressed_logits, reference_logits)
-    argmax_agreement = float((compressed_logits.argmax(-1) == reference_logits.argmax(-1)).float().mean())
+    if reference_logits is None or compressed_logits is None:
+        reference_nll = compressed_nll = logit_mse = argmax_agreement = float("nan")
+    else:
+        reference_nll = _nll(reference_logits, quality_tokens)
+        compressed_nll = _nll(compressed_logits, quality_tokens)
+        logit_mse = _mse(compressed_logits, reference_logits)
+        argmax_agreement = float((compressed_logits.argmax(-1) == reference_logits.argmax(-1)).float().mean())
     elapsed = time.perf_counter() - started
     peak_host_bytes = peak_process_memory_bytes()
     ranks = [layer.rank for block in plan.blocks for layer in block.layers]
@@ -911,3 +1284,213 @@ def run_resident_quantization(request: ResidentQuantizationRequest) -> ResidentQ
         elapsed,
         len(discovered_records),
     )
+
+
+def _run_resident_factorization_slice(request: ResidentQuantizationRequest) -> ResidentFactorizationSliceResult:
+    """Commit the next planned weight-only layer without loading the Transformers model."""
+    started = time.perf_counter()
+    if (
+        request.factorized_tuning_epochs > 0
+        or request.nonfactorized_tuning_epochs > 0
+        or any(request.nonfactorized_tuning_epochs_by_layer)
+        or request.post_block_refit_epochs > 0
+    ):
+        raise ValueError("factor-only slices do not support activation-based tuning")
+    artifacts = LocalArtifactStore(request.output / "artifacts")
+    tensors = LocalTensorStore(artifacts)
+    source, checkpoint, inventory = _factor_slice_source_inventory(request)
+    tokens = _token_tensor(request.token_ids, "cpu")
+    token_bytes = tokens.contiguous().view(torch.uint8).numpy().tobytes()
+    dataset = DatasetIdentity(
+        "sha256:" + hashlib.sha256(token_bytes).hexdigest(),
+        ("deterministic-token-fixture",),
+        ("1",),
+        checkpoint.tokenizer_hash,
+        "raw-token-ids-v1",
+    )
+    preprocessed = _load_precomputed_preprocessing(request, artifacts, inventory, dataset, tokens.numel())
+    if preprocessed is None:
+        raise ValueError("factor-only slices require precomputed calibration, objectives, and plan")
+    _calibration, _objectives, persisted_plan = preprocessed
+    plan = persisted_plan.plan
+    config_hash = _resident_config_hash(request)
+    identity = CommitIdentity(config_hash, inventory.model.config_hash, persisted_plan.reference.artifact_id)
+    journal = ProgressJournal(request.output / "state", "resident-quantization", artifacts)
+    discovery = journal.discover(plan, identity)
+    records = (*discovery.valid_records, *discovery.orphan_records)
+    complete_blocks = {record.block for record in records if record.kind == "block"}
+    complete_layers = {
+        (record.block, record.layer)
+        for record in records
+        if record.kind == "layer" and record.block not in complete_blocks
+    }
+    pending = [
+        layer
+        for block in plan.blocks
+        if block.block.index not in complete_blocks
+        for layer in block.layers
+        if (block.block.index, layer.layer.path) not in complete_layers
+    ]
+    if not pending:
+        return ResidentFactorizationSliceResult(None, identity, time.perf_counter() - started, 0, 0)
+    layer_plan = pending[0]
+    block_index = layer_plan.layer.block.index
+    executor = ResidentExecutor()
+    events = JsonlEventSink(request.output / "events.jsonl", "resident-factorization-slice")
+    context = StageContext("resident-factorization-slice", executor, artifacts, tensors, events, Cancellation())
+    if request.device.startswith("cuda"):
+        torch.cuda.reset_peak_memory_stats(request.device)
+    try:
+        factor_stage = FactorizationAttemptStage(request.admm, device=request.device)
+        outlier_stage = OutlierSelectionStage(
+            device=request.device,
+            residual_probe_iterations=request.outliers.residual_probe.iterations,
+        )
+        scale_stage = ScaleFitStage(request.scale_fit, device=request.device)
+        with source.read_tensor(layer_plan.source_weight, device="cpu") as source_weight:
+            source_ref = tensors.put("source-layer", {"weight": source_weight})["weight"]
+        outliers = execute_stage(
+            outlier_stage,
+            OutlierSelectionRequest(
+                layer_plan.layer,
+                source_ref,
+                layer_plan.objective,
+                layer_plan.outliers,
+                layer_plan.rank,
+                logical_seed(request.seed, "outliers", block_index, layer_plan.layer.path, 0),
+            ),
+            context,
+        )
+        factorized = execute_stage(
+            factor_stage,
+            FactorizationRequest(
+                1,
+                layer_plan.layer,
+                source_ref,
+                outliers.residual_weight,
+                layer_plan.objective,
+                layer_plan.rank,
+                logical_seed(request.seed, "factorize", block_index, layer_plan.layer.path, 0),
+                config_hash,
+            ),
+            context,
+        )
+        fitted = None
+        scales = factorized.factors.scales
+        if request.scale_fit.enabled:
+            fitted = execute_stage(
+                scale_stage,
+                MaterializedScaleFitStageRequest(
+                    ScaleFitRequest(
+                        layer_plan.layer,
+                        outliers.residual_weight,
+                        factorized.factors,
+                        layer_plan.objective,
+                        outliers.indices,
+                    ),
+                    layer_plan.objective.input_importance,
+                    layer_plan.objective.output_importance,
+                ),
+                context,
+            )
+            scales = fitted.scales
+        if scales.mid is None:
+            raise AssertionError("factorizer omitted required mid scale")
+        outlier_indices = outlier_values = outlier_scales = None
+        if layer_plan.outliers.count:
+            with (
+                tensors.read(outliers.indices, request.device) as indices,
+                tensors.read(outliers.values, request.device) as values,
+            ):
+                outlier_indices = indices.clone()
+                outlier_values = values.clone()
+            if outliers.scales is not None:
+                with tensors.read(outliers.scales, request.device) as values:
+                    outlier_scales = values.clone()
+        with (
+            tensors.read(factorized.factors.left_latent, request.device) as left,
+            tensors.read(factorized.factors.right_latent, request.device) as right,
+            tensors.read(scales.pre, request.device) as scale_pre,
+            tensors.read(scales.mid, request.device) as scale_mid,
+            tensors.read(scales.post, request.device) as scale_post,
+        ):
+            trainable = TrainableFactorizedLinear(
+                left,
+                right,
+                scale_pre,
+                scale_mid,
+                scale_post,
+                outlier_indices=outlier_indices,
+                outlier_values=outlier_values,
+                outlier_scales=outlier_scales,
+            )
+        frozen_outliers = (
+            None
+            if layer_plan.outliers.count == 0
+            else FrozenOutlierState(outliers.indices, outliers.values, outliers.scales)
+        )
+        frozen = LayerFreezer().freeze(layer_plan.layer, trainable, tensors, outliers=frozen_outliers)
+        with (
+            tensors.read(source_ref, request.device) as source_value,
+            tensors.read(layer_plan.objective.input_importance, request.device) as input_importance,
+            tensors.read(layer_plan.objective.output_importance, request.device) as output_importance,
+        ):
+            final_metrics = reconstruction_metrics(
+                source_value,
+                frozen.module.dense_weight(),
+                input_importance,
+                output_importance,
+            )
+        attempt = AttemptSummary(
+            0,
+            layer_plan.rank,
+            factorized.factors.left_binary.artifact,
+            factorized.metrics.export_weighted_normalized_error,
+            factorized.metrics.raw_normalized_error,
+            layer_plan.estimated_cost,
+            factorized.metrics.export_weighted_normalized_error,
+            True,
+            "accepted",
+        )
+        layer_result = LayerResult(
+            1,
+            layer_plan.layer,
+            layer_plan,
+            (attempt,),
+            0,
+            factorized.factors.left_binary.artifact,
+            fitted,
+            None,
+            frozen.state,
+            final_metrics,
+            layer_plan.estimated_cost,
+            0,
+            ("tuning_disabled",) if request.scale_fit.enabled else ("scale_fit_disabled", "tuning_disabled"),
+        )
+        committed = commit_layer(layer_result, artifacts, identity)
+        journal.append("layer", block_index, layer_plan.layer.path, committed.reference.artifact_id, identity)
+        peak = int(torch.cuda.max_memory_allocated(request.device)) if request.device.startswith("cuda") else 0
+        return ResidentFactorizationSliceResult(
+            layer_result,
+            identity,
+            time.perf_counter() - started,
+            peak,
+            len(pending) - 1,
+        )
+    finally:
+        executor.release()
+
+
+def run_resident_factorization_slice(request: ResidentQuantizationRequest) -> ResidentFactorizationSliceResult:
+    if request.device.startswith("cuda"):
+        with acquire_device_lease(request.device):
+            return _run_resident_factorization_slice(request)
+    return _run_resident_factorization_slice(request)
+
+
+def run_resident_quantization(request: ResidentQuantizationRequest) -> ResidentQuantizationResult:
+    """Run with an exclusive cross-process lease for CUDA resident state."""
+    if request.device.startswith("cuda"):
+        with acquire_device_lease(request.device):
+            return _run_resident_quantization(request)
+    return _run_resident_quantization(request)

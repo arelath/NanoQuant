@@ -96,9 +96,19 @@ def test_resident_quantization_commits_complete_transformers_model(tmp_path: Pat
     assert resumed.reused_commit_count == 3
     assert resumed.plan == result.plan
     assert resumed.frozen_model.actual_total_bits == result.frozen_model.actual_total_bits
-    assert [layer.factorization for layer in resumed.blocks[0].layers] == [
-        layer.factorization for layer in result.blocks[0].layers
-    ]
+    for resumed_layer, control_layer in zip(resumed.blocks[0].layers, result.blocks[0].layers, strict=True):
+        assert resumed_layer.frozen_state.rank == control_layer.frozen_state.rank
+        assert resumed_layer.actual_bit_cost == control_layer.actual_bit_cost
+        assert resumed_layer.final_reconstruction.export_weighted_normalized_error == pytest.approx(
+            control_layer.final_reconstruction.export_weighted_normalized_error,
+            rel=1e-6,
+            abs=1e-7,
+        )
+        assert resumed_layer.final_reconstruction.raw_normalized_error == pytest.approx(
+            control_layer.final_reconstruction.raw_normalized_error,
+            rel=1e-6,
+            abs=1e-7,
+        )
     assert resumed.compressed_nll == pytest.approx(result.compressed_nll)
     replay = capture_and_replay_resident_layer(
         resumed_output,
@@ -113,3 +123,51 @@ def test_resident_quantization_commits_complete_transformers_model(tmp_path: Pat
     )
     assert replay.replay.expected_close is True
     assert replay.elapsed_seconds < 60
+
+
+def test_resident_tuning_recipe_refits_blocks_and_resumes_exactly(tmp_path: Path) -> None:
+    snapshot = tmp_path / "snapshot"
+    config = Gemma3TextConfig(
+        vocab_size=24,
+        hidden_size=8,
+        intermediate_size=16,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=4,
+    )
+    Gemma3ForCausalLM(config).save_pretrained(snapshot, safe_serialization=True)
+    base = ResidentQuantizationRequest(
+        snapshot,
+        tmp_path / "control",
+        "fixture/gemma3",
+        "pinned-test-revision",
+        ((1, 2, 3, 4), (4, 3, 2, 1)),
+        device="cpu",
+        target_bpw=8.0,
+        rank_multiple=1,
+        admm=ADMMConfig(outer_iterations=1, inner_iterations=1),
+        nonfactorized_tuning_epochs_by_layer=(1, 0),
+        nonfactorized_tuning_batch_size=1,
+        factorized_tuning_epochs=1,
+        factorized_tuning_batch_size=1,
+        post_block_refit_epochs=1,
+        post_block_refit_batch_size=1,
+    )
+
+    control = run_resident_quantization(base)
+    assert control.blocks[0].losses.after_post_block_refit is not None
+    assert all(layer.tuning is not None for layer in control.blocks[0].layers)
+
+    resumed_request = replace(base, output=tmp_path / "resumed", interrupt_after_layer_commits=3)
+    with pytest.raises(InterruptedError, match="after 3"):
+        run_resident_quantization(resumed_request)
+    resumed = run_resident_quantization(replace(resumed_request, interrupt_after_layer_commits=None))
+
+    assert resumed.reused_commit_count == 3
+    assert resumed.compressed_nll == pytest.approx(control.compressed_nll, rel=1e-6, abs=1e-7)
+    assert resumed.blocks[0].losses.after_post_block_refit == pytest.approx(
+        control.blocks[0].losses.after_post_block_refit,
+        rel=1e-6,
+        abs=1e-7,
+    )

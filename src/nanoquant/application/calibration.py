@@ -27,6 +27,35 @@ class MaterializedLayerCalibration:
     method: str
 
 
+@dataclass(frozen=True, slots=True)
+class OnlineAccumulatorSnapshot:
+    total: torch.Tensor
+    global_max: torch.Tensor | None
+    batch_count: int
+    pre_scale: float
+    post_scale: float
+    percentile: float
+
+
+@dataclass(frozen=True, slots=True)
+class CausalOnlineLayerSnapshot:
+    path: str
+    inputs: OnlineAccumulatorSnapshot
+    outputs: OnlineAccumulatorSnapshot
+
+
+@dataclass(frozen=True, slots=True)
+class CausalOnlineCalibrationState:
+    layers: tuple[CausalOnlineLayerSnapshot, ...]
+    processed_samples: int
+
+    @property
+    def sample_count(self) -> int:
+        if self.processed_samples < 0:
+            raise ValueError("causal calibration processed-sample count is negative")
+        return self.processed_samples
+
+
 BatchRunner = Callable[[nn.Module, torch.Tensor], torch.Tensor]
 LossBuilder = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
 
@@ -61,6 +90,8 @@ def calibrate_causal_model(
     *,
     method: str = "online_fisher",
     shrinkage: float = 0.0,
+    initial_state: CausalOnlineCalibrationState | None = None,
+    state_sink: Callable[[CausalOnlineCalibrationState], None] | None = None,
 ) -> tuple[MaterializedLayerCalibration, ...]:
     """Collect legacy-compatible full-model input and output Fisher diagonals.
 
@@ -75,6 +106,11 @@ def calibrate_causal_model(
         raise UnsupportedCalibrationMode(f"CAL004 unsupported causal calibration method: {method}")
     if len({path for path, _module in layers}) != len(layers):
         raise ValueError("causal calibration layer paths must be unique")
+    if method != "online_fisher" and (initial_state is not None or state_sink is not None):
+        raise ValueError("durable causal calibration state is supported only for online Fisher")
+    state_by_path = {} if initial_state is None else {layer.path: layer for layer in initial_state.layers}
+    if initial_state is not None and set(state_by_path) != {path for path, _module in layers}:
+        raise ValueError("causal calibration state does not exactly match requested layers")
 
     original_training = model.training
     original_requires_grad = tuple(parameter.requires_grad for parameter in model.parameters())
@@ -156,8 +192,6 @@ def calibrate_causal_model(
             for batch in batches:
                 model.zero_grad(set_to_none=True)
                 backward_batch(batch)
-                if batch.is_cuda:
-                    torch.cuda.empty_cache()
         finally:
             for handle in handles:
                 handle.remove()
@@ -191,8 +225,6 @@ def calibrate_causal_model(
                 for batch in batches:
                     model.zero_grad(set_to_none=True)
                     backward_batch(batch)
-                    if batch.is_cuda:
-                        torch.cuda.empty_cache()
             finally:
                 for handle in handles:
                     handle.remove()
@@ -204,17 +236,46 @@ def calibrate_causal_model(
                 for path, module in layers
             }
         else:
-            inputs = {path: OnlineClippedAccumulator(module.in_features) for path, module in layers}
+            inputs = {
+                path: _restore_online_accumulator(
+                    module.in_features,
+                    None if initial_state is None else state_by_path[path].inputs,
+                )
+                for path, module in layers
+            }
             outputs = {
-                path: OnlineClippedAccumulator(module.out_features, 1e6, 1e-6) for path, module in layers
+                path: _restore_online_accumulator(
+                    module.out_features,
+                    None if initial_state is None else state_by_path[path].outputs,
+                    pre_scale=1e6,
+                    post_scale=1e-6,
+                )
+                for path, module in layers
             }
         execute(inputs, outputs)
+        logical_sample_count = (0 if initial_state is None else initial_state.sample_count) + sum(
+            batch.shape[0] for batch in batches
+        )
+        if state_sink is not None:
+            state_sink(
+                CausalOnlineCalibrationState(
+                    tuple(
+                        CausalOnlineLayerSnapshot(
+                            path,
+                            _snapshot_online_accumulator(cast(OnlineClippedAccumulator, inputs[path])),
+                            _snapshot_online_accumulator(cast(OnlineClippedAccumulator, outputs[path])),
+                        )
+                        for path, _module in layers
+                    ),
+                    logical_sample_count,
+                )
+            )
         return tuple(
             MaterializedLayerCalibration(
                 path,
-                shrink_importance(inputs[path].finalize(), shrinkage),
-                shrink_importance(outputs[path].finalize(), shrinkage),
-                sum(batch.shape[0] for batch in batches),
+                shrink_importance(cast(Any, inputs[path]).total / logical_sample_count, shrinkage),
+                shrink_importance(cast(Any, outputs[path]).total / logical_sample_count, shrinkage),
+                logical_sample_count,
                 method,
             )
             for path, _module in layers
@@ -231,6 +292,59 @@ def calibrate_causal_model(
         for parameter, requires_grad in zip(model.parameters(), original_requires_grad, strict=True):
             parameter.requires_grad_(requires_grad)
         model.train(original_training)
+        if any(batch.is_cuda for batch in batches):
+            torch.cuda.empty_cache()
+
+
+def _restore_online_accumulator(
+    width: int,
+    snapshot: OnlineAccumulatorSnapshot | None,
+    *,
+    pre_scale: float = 1.0,
+    post_scale: float = 1.0,
+) -> OnlineClippedAccumulator:
+    if snapshot is None:
+        return OnlineClippedAccumulator(width, pre_scale, post_scale)
+    if snapshot.total.shape != (width,):
+        raise ValueError("online calibration accumulator width changed")
+    if snapshot.pre_scale != pre_scale or snapshot.post_scale != post_scale:
+        raise ValueError("online calibration accumulator scaling changed")
+    accumulator = OnlineClippedAccumulator(width, snapshot.pre_scale, snapshot.post_scale, snapshot.percentile)
+    accumulator.total.copy_(snapshot.total)
+    accumulator.global_max = None if snapshot.global_max is None else snapshot.global_max.detach().clone()
+    accumulator.batch_count = snapshot.batch_count
+    return accumulator
+
+
+def _snapshot_online_accumulator(accumulator: OnlineClippedAccumulator) -> OnlineAccumulatorSnapshot:
+    return OnlineAccumulatorSnapshot(
+        accumulator.total.detach().clone(),
+        None if accumulator.global_max is None else accumulator.global_max.detach().clone(),
+        accumulator.batch_count,
+        accumulator.pre_scale,
+        accumulator.post_scale,
+        accumulator.percentile,
+    )
+
+
+def materialize_causal_online_state(
+    state: CausalOnlineCalibrationState,
+    *,
+    shrinkage: float = 0.0,
+) -> tuple[MaterializedLayerCalibration, ...]:
+    sample_count = state.sample_count
+    if sample_count <= 0:
+        raise ValueError("cannot materialize an empty causal calibration state")
+    return tuple(
+        MaterializedLayerCalibration(
+            layer.path,
+            shrink_importance(layer.inputs.total / sample_count, shrinkage),
+            shrink_importance(layer.outputs.total / sample_count, shrinkage),
+            sample_count,
+            "online_fisher",
+        )
+        for layer in state.layers
+    )
 
 
 def _linears(block: nn.Module, paths: tuple[str, ...]) -> dict[str, nn.Linear]:

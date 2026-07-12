@@ -77,7 +77,9 @@ class TrainableFactorizedLinear(nn.Module):
         return result
 
     def forward(self, value: torch.Tensor) -> torch.Tensor:
-        return torch.nn.functional.linear(value, self.dense_weight(), self.bias)
+        weight = self.dense_weight().to(device=value.device, dtype=value.dtype)
+        bias = None if self.bias is None else self.bias.to(device=value.device, dtype=value.dtype)
+        return torch.nn.functional.linear(value, weight, bias)
 
 
 class FrozenReferenceLinear(nn.Module):

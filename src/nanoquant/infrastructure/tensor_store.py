@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Iterator
 from contextlib import contextmanager
+from typing import Any, cast
 
 import torch
 from safetensors import safe_open
@@ -20,7 +21,8 @@ def _tensor_hash(value: torch.Tensor) -> str:
     digest = hashlib.sha256()
     digest.update(str(contiguous.dtype).encode() + b"\0")
     digest.update(str(tuple(contiguous.shape)).encode() + b"\0")
-    digest.update(contiguous.view(torch.uint8).numpy().tobytes())
+    if contiguous.numel():
+        digest.update(memoryview(cast(Any, contiguous.view(torch.uint8).numpy())).cast("B"))
     return "sha256:" + digest.hexdigest()
 
 

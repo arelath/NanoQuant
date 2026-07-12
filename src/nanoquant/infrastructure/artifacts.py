@@ -68,6 +68,7 @@ class LocalArtifactWriter:
             shutil.rmtree(self.path)
         else:
             os.replace(self.path, destination)
+        self.store._remember_validation(descriptor, destination)
         self._committed = True
         return descriptor
 
@@ -85,6 +86,32 @@ class LocalArtifactStore:
         self.temporary_root = Path(temporary_root) if temporary_root else self.root / ".tmp"
         self.root.mkdir(parents=True, exist_ok=True)
         self.temporary_root.mkdir(parents=True, exist_ok=True)
+        self._validated: dict[str, tuple[ArtifactDescriptor, tuple[tuple[str, int, int], ...]]] = {}
+        self._validation_cache_path = self.root / ".validation-cache.json"
+        try:
+            cached = json.loads(self._validation_cache_path.read_text(encoding="utf-8"))
+            self._persistent_validation = cached if isinstance(cached, dict) else {}
+        except (OSError, json.JSONDecodeError):
+            self._persistent_validation = {}
+
+    def _persist_validation(self) -> None:
+        temporary = self._validation_cache_path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(self._persistent_validation, sort_keys=True), encoding="utf-8")
+        os.replace(temporary, self._validation_cache_path)
+
+    def _remember_validation(self, descriptor: ArtifactDescriptor, root: Path) -> None:
+        signatures = tuple(
+            (item.path, (root / item.path).stat().st_size, (root / item.path).stat().st_mtime_ns)
+            for item in descriptor.files
+        )
+        descriptor_stat = (root / "descriptor.json").stat()
+        persistent_signature = {
+            "descriptor": [descriptor_stat.st_size, descriptor_stat.st_mtime_ns],
+            "members": [list(signature) for signature in signatures],
+        }
+        self._validated[descriptor.artifact_id] = (descriptor, signatures)
+        self._persistent_validation[descriptor.artifact_id] = persistent_signature
+        self._persist_validation()
 
     def begin_write(self, artifact_type: str, schema_version: int = 1) -> LocalArtifactWriter:
         if not artifact_type or any(
@@ -100,6 +127,20 @@ class LocalArtifactStore:
 
     def validate(self, artifact_id: str) -> ArtifactDescriptor:
         root = self.path_for(artifact_id)
+        cached = self._validated.get(artifact_id)
+        if cached is not None:
+            descriptor, signatures = cached
+            current = tuple(
+                (
+                    item.path,
+                    (root / item.path).stat().st_size,
+                    (root / item.path).stat().st_mtime_ns,
+                )
+                for item in descriptor.files
+                if (root / item.path).is_file()
+            )
+            if current == signatures:
+                return descriptor
         try:
             raw = json.loads((root / "descriptor.json").read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
@@ -127,12 +168,26 @@ class LocalArtifactStore:
         expected_hash = hashlib.sha256(identity_payload.encode("utf-8")).hexdigest()
         if descriptor.content_hash != f"sha256:{expected_hash}" or artifact_id != f"sha256-{expected_hash}":
             raise ArtifactCorruptionError("ART001 descriptor content identity mismatch")
+        signatures = tuple(
+            (item.path, (root / item.path).stat().st_size, (root / item.path).stat().st_mtime_ns)
+            for item in files
+            if (root / item.path).is_file()
+        )
+        descriptor_stat = (root / "descriptor.json").stat()
+        persistent_signature = {
+            "descriptor": [descriptor_stat.st_size, descriptor_stat.st_mtime_ns],
+            "members": [list(signature) for signature in signatures],
+        }
+        if self._persistent_validation.get(artifact_id) == persistent_signature and len(signatures) == len(files):
+            self._validated[artifact_id] = (descriptor, signatures)
+            return descriptor
         for item in files:
             path = (root / item.path).resolve()
             if root.resolve() not in path.parents:
                 raise ArtifactCorruptionError("ART001 descriptor path traversal")
             if not path.is_file() or path.stat().st_size != item.bytes or _hash_file(path) != item.sha256:
                 raise ArtifactCorruptionError(f"ART001 corrupt artifact member: {item.path}")
+        self._remember_validation(descriptor, root)
         return descriptor
 
     def cleanup_abandoned(self, older_than_seconds: float = 3600) -> int:
