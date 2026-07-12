@@ -151,7 +151,7 @@ DEFINITIONS = (
 
 
 class TransformersModelAdapter:
-    version = "1"
+    version = "2"
 
     def __init__(self, definition: AdapterDefinition) -> None:
         self.definition = definition
@@ -166,6 +166,11 @@ class TransformersModelAdapter:
                 f"expected one of {self.definition.model_types}"
             )
         return inventory
+
+    @property
+    def attention_implementation(self) -> str:
+        """Return the attention backend used by the legacy model loader."""
+        return "eager" if self.family == "gemma" else "sdpa"
 
     def decoder_block_count(self, source: ModelSource) -> int:
         value = self._checkpoint(source).config.get(self.definition.block_count_field)
@@ -256,6 +261,7 @@ class TransformersModelAdapter:
     def construct_block(self, source: ModelSource, block_id: BlockId, device: str) -> nn.Module:
         checkpoint = self._checkpoint(source)
         config = self.definition.config_factory(checkpoint.config)
+        config._attn_implementation = self.attention_implementation
         block = self.definition.block_factory(config, block_id.index)
         dtype = getattr(config, "torch_dtype", None)
         return block.to(device=device, dtype=dtype) if isinstance(dtype, torch.dtype) else block.to(device)

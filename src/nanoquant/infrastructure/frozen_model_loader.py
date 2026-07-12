@@ -102,6 +102,7 @@ def load_frozen_run(
             snapshot,
             local_files_only=True,
             torch_dtype=_dtype(checkpoint.config),
+            attn_implementation=adapter.attention_implementation,
         ),
     ).to(device)
     model.eval()

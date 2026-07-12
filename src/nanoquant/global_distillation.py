@@ -243,6 +243,7 @@ def _run_global_topk_distillation(request: GlobalDistillationRequest) -> GlobalD
                 request.snapshot,
                 local_files_only=True,
                 torch_dtype=_checkpoint_dtype(request.snapshot),
+                attn_implementation=cast(Any, loaded.model).config._attn_implementation,
             ),
         ).to(request.device)
         cast(Any, teacher).config.use_cache = False

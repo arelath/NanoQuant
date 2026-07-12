@@ -607,6 +607,7 @@ def _run_resident_quantization(request: ResidentQuantizationRequest) -> Resident
             request.snapshot,
             local_files_only=True,
             torch_dtype=_checkpoint_dtype(checkpoint.config),
+            attn_implementation=adapter.attention_implementation,
         ),
     ).to(request.device)
     model.eval()

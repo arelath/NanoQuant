@@ -70,6 +70,7 @@ def _source(tmp_path: Path, config: object) -> tuple[SafetensorsModelSource, dic
 def test_adapter_contract_inventory_mapping_loading_and_order(tmp_path: Path, config: object) -> None:
     source, expected_state = _source(tmp_path, config)
     adapter = adapter_for_config(source.inventory().config)
+    assert adapter.attention_implementation == ("eager" if config.model_type.startswith("gemma") else "sdpa")
     assert adapter.decoder_block_count(source) == 1
     inventory = adapter.model_inventory(source)
     assert len(inventory.blocks) == 1
