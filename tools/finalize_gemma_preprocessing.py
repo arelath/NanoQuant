@@ -128,7 +128,6 @@ def main() -> None:
             source,
             tensors,
             alpha=0.5,
-            edge_boost=0.15,
             device=args.device,
         )
     allocation = RankAllocationConfig(

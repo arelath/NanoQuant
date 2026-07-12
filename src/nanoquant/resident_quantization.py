@@ -467,7 +467,6 @@ def _legacy_sensitivity_profile(
     tensors: LocalTensorStore,
     *,
     alpha: float,
-    edge_boost: float,
     device: str = "cpu",
 ) -> tuple[tuple[str, float], ...]:
     stats = {item.layer: item for item in calibration.stats.layers}
@@ -502,14 +501,10 @@ def _legacy_sensitivity_profile(
         path: max(statistics.median(item["relative"] for item in entries if item["path"] == path), 1e-12)
         for path in {item["path"] for item in entries}
     }
-    last_block = len(inventory.blocks) - 1
     result = []
     for item in entries:
         residual = max(item["relative"] / type_medians[item["path"]], 1e-12)
-        edge_distance = min(item["block"], last_block - item["block"])
-        edge_score = 1.0 - edge_distance / max(1.0, last_block / 2.0)
-        edge = 1.0 + edge_boost * max(0.0, edge_score)
-        score = residual**alpha * _layer_type_multiplier(item["path"]) * edge
+        score = residual**alpha * _layer_type_multiplier(item["path"])
         result.append((f"{item['block']}:{item['path']}", score))
     return tuple(result)
 
@@ -760,7 +755,6 @@ def _run_resident_quantization(request: ResidentQuantizationRequest) -> Resident
                 source,
                 tensors,
                 alpha=request.rank_sensitivity_alpha,
-                edge_boost=request.rank_edge_boost,
                 device=request.device,
             )
             if request.allocation_strategy is AllocationStrategy.SENSITIVITY

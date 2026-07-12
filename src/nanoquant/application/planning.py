@@ -111,17 +111,6 @@ def build_quantization_plan(request: PlanningRequest) -> QuantizationPlan:
                     math.floor(base_rank * request.allocation.bounds.ceiling_fraction_of_uniform / multiple) * multiple,
                 ),
             )
-        if request.allocation.strategy.value != "uniform" and layer.layer.block.index in {
-            0,
-            len(request.inventory.blocks) - 1,
-        }:
-            cap = min(
-                maximum,
-                max(
-                    cap,
-                    math.floor(base_rank * (1 + request.allocation.bounds.edge_block_boost) / multiple) * multiple,
-                ),
-            )
         ranks[layer.layer] = min(floor, cap)
         caps[layer.layer] = cap
         stats = calibration_map.get(layer.layer)
@@ -129,7 +118,13 @@ def build_quantization_plan(request: PlanningRequest) -> QuantizationPlan:
         profile_key = f"{layer.layer.block.index}:{layer.layer.path}"
         if request.allocation.strategy.value == "utility_profile" and profile_key not in utility_profile:
             raise ValueError(f"utility profile is missing layer {profile_key}")
-        utilities[layer.layer] = utility_profile.get(profile_key, sensitivity)
+        utility = utility_profile.get(profile_key, sensitivity)
+        if request.allocation.strategy.value != "uniform" and request.allocation.bounds.edge_block_boost > 0:
+            last_block = len(request.inventory.blocks) - 1
+            edge_distance = min(layer.layer.block.index, last_block - layer.layer.block.index)
+            edge_score = 1.0 - edge_distance / max(1.0, last_block / 2.0)
+            utility *= 1.0 + request.allocation.bounds.edge_block_boost * max(0.0, edge_score)
+        utilities[layer.layer] = utility
 
     def current_cost(layer: object, rank: int) -> BitCost:
         inventory = next(item for item in layers if item.layer == layer)

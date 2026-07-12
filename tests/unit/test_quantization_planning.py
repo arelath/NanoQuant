@@ -87,6 +87,20 @@ def test_sensitivity_plan_allocates_no_less_rank_to_more_sensitive_layer() -> No
     assert ranks[1] >= ranks[0]
 
 
+def test_edge_boost_changes_utility_without_relaxing_rank_ceiling() -> None:
+    request = _request(AllocationStrategy.SENSITIVITY)
+    unboosted = build_quantization_plan(request)
+    boosted_allocation = replace(
+        request.allocation,
+        bounds=replace(request.allocation.bounds, edge_block_boost=0.75),
+    )
+    boosted = build_quantization_plan(replace(request, allocation=boosted_allocation))
+
+    assert [layer.allocator_cap for block in boosted.blocks for layer in block.layers] == [
+        layer.allocator_cap for block in unboosted.blocks for layer in block.layers
+    ]
+
+
 def test_uniform_bpw_uses_shape_specific_ranks_for_heterogeneous_layers() -> None:
     request = _request()
     dimensions = ((1152, 6912), (1152, 256))
