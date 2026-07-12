@@ -8,6 +8,7 @@ from dataclasses import dataclass
 import torch
 from torch import nn
 
+from nanoquant.application.parity_adamw import ParityAdamW
 from nanoquant.domain.models import LossMetrics, TuningMetrics
 
 ForwardFunction = Callable[[nn.Module, torch.Tensor], torch.Tensor]
@@ -87,7 +88,7 @@ def tune(
     best_value = before_value
     best_epoch = -1
     best_state = {name: parameter.detach().clone() for name, parameter in selected}
-    optimizer = torch.optim.AdamW(
+    optimizer = ParityAdamW(
         [parameter for _, parameter in selected], lr=request.learning_rate, weight_decay=request.weight_decay
     )
     total_steps = max(1, request.epochs * ((request.inputs.shape[0] + request.batch_size - 1) // request.batch_size))

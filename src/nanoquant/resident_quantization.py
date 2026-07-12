@@ -88,7 +88,7 @@ from nanoquant.infrastructure.resource_usage import peak_process_memory_bytes
 from nanoquant.infrastructure.safetensors_source import SafetensorsModelSource
 from nanoquant.infrastructure.tensor_store import LocalTensorStore
 
-RESIDENT_ALGORITHM_VERSION = 2
+RESIDENT_ALGORITHM_VERSION = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -1014,7 +1014,7 @@ def _run_resident_quantization(request: ResidentQuantizationRequest) -> Resident
                     outlier_indices=outlier_indices,
                     outlier_values=outlier_values,
                     outlier_scales=outlier_scales,
-                )
+                ).to(device=request.device, dtype=compressed_inputs.dtype)
             tuning = None
             if request.factorized_tuning_epochs > 0:
                 BlockEditor().install_trainable_layer(working_block, layer_plan.layer.path, trainable)
