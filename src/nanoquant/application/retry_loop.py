@@ -38,6 +38,7 @@ def run_factorization_attempts(
     budget: BudgetState,
     context: StageContext,
     accept_commit: AcceptCommit,
+    factorization_stage: FactorizationAttemptStage | None = None,
 ) -> AcceptedFactorization:
     rank = layer_plan.rank
     base_factor_cost = factor_bit_cost(
@@ -57,7 +58,7 @@ def run_factorization_attempts(
             logical_seed(run_seed, "factorize-attempt", layer_plan.layer.block.index, layer_plan.layer.path, attempt),
             factorizer_config_hash,
         )
-        result = execute_stage(FactorizationAttemptStage(), request, context)
+        result = execute_stage(factorization_stage or FactorizationAttemptStage(), request, context)
         results.append(result)
         weighted = result.metrics.export_weighted_normalized_error
         raw = result.metrics.raw_normalized_error
@@ -115,7 +116,7 @@ def run_factorization_attempts(
         extra_bits = max(0, summaries[accepted_index].bit_cost.total - base_factor_cost.total)
         updated_budget = replace(
             budget,
-            accepted_bits=budget.accepted_bits + summaries[accepted_index].bit_cost.total,
+            accepted_bits=budget.accepted_bits + layer_plan.estimated_cost.total + extra_bits,
             retry_bits_spent=budget.retry_bits_spent + extra_bits,
         )
         return AcceptedFactorization(accepted_result, accepted_summaries, updated_budget)

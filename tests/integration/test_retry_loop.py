@@ -3,8 +3,10 @@ from pathlib import Path
 import pytest
 import torch
 
+from nanoquant.application.quantization_stages import FactorizationAttemptStage
 from nanoquant.application.retry_loop import run_factorization_attempts
 from nanoquant.application.stages import StageContext
+from nanoquant.config.schema import ADMMConfig
 from nanoquant.domain.models import (
     ArtifactRef,
     BlockId,
@@ -84,6 +86,7 @@ def test_retry_loop_commits_once_and_updates_budget_after_acceptance(tmp_path: P
         initial,
         context,
         lambda result, attempts: commits.append((result, attempts)),
+        FactorizationAttemptStage(ADMMConfig(outer_iterations=2, inner_iterations=1)),
     )
     assert len(accepted.attempts) == 2
     assert sum(attempt.accepted for attempt in accepted.attempts) == 1
@@ -92,6 +95,7 @@ def test_retry_loop_commits_once_and_updates_budget_after_acceptance(tmp_path: P
     selected = next(attempt for attempt in accepted.attempts if attempt.accepted)
     assert accepted.budget.retry_bits_spent == max(0, selected.bit_cost.total - plan.estimated_cost.total)
     assert initial == BudgetState(1000, 0, 0)
+    assert accepted.result.convergence.iterations_completed <= 2
 
 
 def test_failed_accepted_layer_commit_does_not_mutate_budget(tmp_path: Path) -> None:
@@ -102,5 +106,15 @@ def test_failed_accepted_layer_commit_does_not_mutate_budget(tmp_path: Path) -> 
         raise OSError("commit failed")
 
     with pytest.raises(IOError, match="commit failed"):
-        run_factorization_attempts(plan, source, residual, 3, "config", initial, context, fail_commit)
+        run_factorization_attempts(
+            plan,
+            source,
+            residual,
+            3,
+            "config",
+            initial,
+            context,
+            fail_commit,
+            FactorizationAttemptStage(ADMMConfig(outer_iterations=2, inner_iterations=1)),
+        )
     assert initial.retry_bits_spent == 0 and initial.accepted_bits == 0
