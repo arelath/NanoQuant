@@ -142,7 +142,7 @@ class OutlierSelectionStage:
 
 class FactorizationAttemptStage:
     name = "factorize-attempt"
-    version = "1"
+    version = "2"
 
     def __init__(self, admm: ADMMConfig | None = None, *, device: str = "cpu") -> None:
         self.admm = admm or ADMMConfig(outer_iterations=400)

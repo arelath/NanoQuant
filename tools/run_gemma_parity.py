@@ -128,6 +128,7 @@ def main() -> None:
             post_block_refit_batch_size=args.post_block_refit_batch_size,
             post_block_refit_learning_rate=1e-5,
             tuning_microbatch_size=args.tuning_microbatch_size,
+            legacy_tuning_seed_reset=True,
             calibration_method="online_fisher",
             calibration_shrinkage=0.6,
             calibration_batch_size=1,

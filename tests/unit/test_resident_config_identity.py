@@ -1,3 +1,4 @@
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -24,3 +25,13 @@ def test_resident_algorithm_version_invalidates_commit_identity(monkeypatch: pyt
     )
 
     assert resident._resident_config_hash(request) != original
+
+
+def test_legacy_tuning_seed_mode_invalidates_commit_identity() -> None:
+    request = ResidentQuantizationRequest(
+        Path("snapshot"), Path("output"), "fixture/model", "revision", ((1, 2, 3),), device="cpu"
+    )
+
+    assert resident._resident_config_hash(request) != resident._resident_config_hash(
+        replace(request, legacy_tuning_seed_reset=True)
+    )

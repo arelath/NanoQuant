@@ -88,7 +88,7 @@ from nanoquant.infrastructure.resource_usage import peak_process_memory_bytes
 from nanoquant.infrastructure.safetensors_source import SafetensorsModelSource
 from nanoquant.infrastructure.tensor_store import LocalTensorStore
 
-RESIDENT_ALGORITHM_VERSION = 3
+RESIDENT_ALGORITHM_VERSION = 4
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,6 +122,7 @@ class ResidentQuantizationRequest:
     post_block_refit_batch_size: int = 8
     post_block_refit_learning_rate: float = 1e-5
     tuning_microbatch_size: int | None = None
+    legacy_tuning_seed_reset: bool = False
     seed: int = 0
     verify_hashes: bool = True
     interrupt_after_layer_commits: int | None = None
@@ -327,6 +328,14 @@ def _nonfactorized_epochs(request: ResidentQuantizationRequest, layer_position: 
     return schedule[min(layer_position, len(schedule) - 1)]
 
 
+def _tuning_seed(
+    request: ResidentQuantizationRequest, stage: str, block: int, layer: str | None
+) -> int:
+    if request.legacy_tuning_seed_reset:
+        return request.seed
+    return logical_seed(request.seed, stage, block, layer, 0)
+
+
 def _rehydrate_trainable_layer(
     state: FrozenNanoQuantState,
     tensors: LocalTensorStore,
@@ -379,6 +388,7 @@ def _resident_config_hash(request: ResidentQuantizationRequest) -> str:
                     "post_block_refit_epochs": request.post_block_refit_epochs,
                     "post_block_refit_batch_size": request.post_block_refit_batch_size,
                     "post_block_refit_learning_rate": request.post_block_refit_learning_rate,
+                    "legacy_tuning_seed_reset": request.legacy_tuning_seed_reset,
                     "calibration_method": request.calibration_method,
                     "calibration_shrinkage": request.calibration_shrinkage,
                     "calibration_batch_size": request.calibration_batch_size,
@@ -890,12 +900,8 @@ def _run_resident_quantization(request: ResidentQuantizationRequest) -> Resident
                             request.nonfactorized_tuning_early_stop_relative_tolerance
                         ),
                         output_importance=block_output_importance,
-                        seed=logical_seed(
-                            request.seed,
-                            "nonfactorized-tuning",
-                            block_index,
-                            layer_plan.layer.path,
-                            0,
+                        seed=_tuning_seed(
+                            request, "nonfactorized-tuning", block_index, layer_plan.layer.path
                         ),
                         microbatch_size=request.tuning_microbatch_size,
                     ),
@@ -999,9 +1005,19 @@ def _run_resident_quantization(request: ResidentQuantizationRequest) -> Resident
                 if outliers.scales is not None:
                     with tensors.read(outliers.scales, request.device) as values:
                         outlier_scales = values.clone()
+            left_initial = (
+                factorized.factors.left_latent
+                if request.factorized_tuning_epochs > 0
+                else factorized.factors.left_binary
+            )
+            right_initial = (
+                factorized.factors.right_latent
+                if request.factorized_tuning_epochs > 0
+                else factorized.factors.right_binary
+            )
             with (
-                tensors.read(factorized.factors.left_latent, request.device) as left,
-                tensors.read(factorized.factors.right_latent, request.device) as right,
+                tensors.read(left_initial, request.device) as left,
+                tensors.read(right_initial, request.device) as right,
                 tensors.read(scales.pre, request.device) as scale_pre,
                 tensors.read(mid_ref, request.device) as scale_mid,
                 tensors.read(scales.post, request.device) as scale_post,
@@ -1029,7 +1045,7 @@ def _run_resident_quantization(request: ResidentQuantizationRequest) -> Resident
                         request.factorized_tuning_batch_size,
                         request.factorized_tuning_learning_rate,
                         output_importance=block_output_importance,
-                        seed=logical_seed(request.seed, "factorized-tuning", block_index, layer_plan.layer.path, 0),
+                        seed=_tuning_seed(request, "factorized-tuning", block_index, layer_plan.layer.path),
                         microbatch_size=request.tuning_microbatch_size,
                     ),
                     lambda module, value: adapter.run_block(module, value, **metadata),
@@ -1135,7 +1151,7 @@ def _run_resident_quantization(request: ResidentQuantizationRequest) -> Resident
                     request.post_block_refit_batch_size,
                     request.post_block_refit_learning_rate,
                     output_importance=block_output_importance,
-                    seed=logical_seed(request.seed, "post-block-refit", block_index, None, 0),
+                    seed=_tuning_seed(request, "post-block-refit", block_index, None),
                     microbatch_size=request.tuning_microbatch_size,
                 ),
                 lambda module, value: adapter.run_block(module, value, **metadata),
@@ -1434,8 +1450,8 @@ def _run_resident_factorization_slice(request: ResidentQuantizationRequest) -> R
                 with tensors.read(outliers.scales, request.device) as values:
                     outlier_scales = values.clone()
         with (
-            tensors.read(factorized.factors.left_latent, request.device) as left,
-            tensors.read(factorized.factors.right_latent, request.device) as right,
+            tensors.read(factorized.factors.left_binary, request.device) as left,
+            tensors.read(factorized.factors.right_binary, request.device) as right,
             tensors.read(scales.pre, request.device) as scale_pre,
             tensors.read(scales.mid, request.device) as scale_mid,
             tensors.read(scales.post, request.device) as scale_post,

@@ -177,12 +177,17 @@ def factorize_admm(
     left_unbalanced = left_projected / output_scale
     right_unbalanced = right_projected / input_scale
     balance = (right_unbalanced.norm().clamp_min(epsilon) / left_unbalanced.norm().clamp_min(epsilon)).sqrt()
-    left_latent = left_unbalanced * balance
-    right_latent = right_unbalanced / balance
-    left_binary = _sign(left_latent)
-    right_binary = _sign(right_latent)
-    scale_post = left_latent.abs().mean(dim=1)
-    scale_pre = right_latent.abs().mean(dim=0)
+    left_export = left_unbalanced * balance
+    right_export = right_unbalanced / balance
+    # Legacy NanoQuant tunes the primal-plus-dual variables, while export is
+    # derived from the SVID-projected variables. Their signs agree initially,
+    # but their margins to zero carry essential STE optimization state.
+    left_latent = ((left + left_dual) / output_scale) * balance
+    right_latent = ((right + right_dual) / input_scale) / balance
+    left_binary = _sign(left_export)
+    right_binary = _sign(right_export)
+    scale_post = left_export.abs().mean(dim=1)
+    scale_pre = right_export.abs().mean(dim=0)
     base_left = left_binary * scale_post.reshape(-1, 1)
     base_right = right_binary * scale_pre.reshape(1, -1)
     system = base_left.mT @ base_left

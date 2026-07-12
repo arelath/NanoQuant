@@ -39,6 +39,8 @@ def test_admm_is_deterministic_uses_generator_and_does_not_mutate_inputs() -> No
     )
     assert torch.equal(weight, original)
     assert torch.equal(first.left_binary, second.left_binary)
+    assert torch.equal(first.left_latent, second.left_latent)
+    assert torch.equal(first.right_latent, second.right_latent)
     assert torch.allclose(first.reconstruction, second.reconstruction)
     assert set(torch.unique(first.left_binary).tolist()) <= {-1.0, 1.0}
     assert first.iterations_completed == 4
