@@ -127,3 +127,12 @@ After that run completes, the next required actions are:
 4. Diagnose and implement any remaining algorithmic gap; model-level top-k KD is known to be represented in config
    but not yet implemented as a complete rewrite stage.
 5. Update evidence and milestone gates only when the corresponding real comparison proves them.
+
+## Performance work after parity
+
+- Establish an accurate, protocol-matched Gemma parity result before starting broad performance optimization.
+- Once correctness parity is demonstrated, run a dedicated profiling and performance pass. The current resident
+  implementation is approximately 30% slower than the legacy reference on the comparable workload; treat that as
+  the initial performance baseline, not an accepted final state.
+- Compare identical model, calibration, ADMM, tuning, batch, device, and retention settings. Record wall time and
+  stage-level timing so optimizations target measured bottlenecks and preserve numerical/quality parity.
