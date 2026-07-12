@@ -24,13 +24,36 @@ class TuningRequest:
     weight_decay: float = 0.0
     early_stop_relative_tolerance: float | None = None
     objective: str = "mean_squared_error"
+    output_importance: torch.Tensor | None = None
+    seed: int = 0
+
+
+def _loss_sum(prediction: torch.Tensor, target: torch.Tensor, importance: torch.Tensor | None) -> torch.Tensor:
+    if prediction.shape != target.shape:
+        raise ValueError("tuning prediction and target shapes differ")
+    error = (prediction.float() - target.float()).square()
+    if importance is not None:
+        if importance.ndim != 1 or importance.shape[0] != prediction.shape[-1]:
+            raise ValueError("tuning output importance must match the output feature dimension")
+        error = error * importance.to(device=error.device, dtype=error.dtype)
+    return error.sum()
+
+
+def _evaluate_loss(model: nn.Module, request: TuningRequest, forward: ForwardFunction) -> float:
+    total = torch.zeros((), device=request.inputs.device)
+    with torch.no_grad():
+        for start in range(0, request.inputs.shape[0], request.batch_size):
+            end = min(start + request.batch_size, request.inputs.shape[0])
+            prediction = forward(model, request.inputs[start:end])
+            total += _loss_sum(prediction, request.targets[start:end], request.output_importance)
+    return float(total / request.targets.numel())
 
 
 def _loss(model: nn.Module, request: TuningRequest, forward: ForwardFunction) -> torch.Tensor:
     prediction = forward(model, request.inputs)
     if prediction.shape != request.targets.shape:
         raise ValueError("tuning prediction and target shapes differ")
-    return (prediction.float() - request.targets.float()).square().mean()
+    return _loss_sum(prediction, request.targets, request.output_importance) / request.targets.numel()
 
 
 def tune(
@@ -49,26 +72,35 @@ def tune(
         parameter.requires_grad_(False)
     for _, parameter in selected:
         parameter.requires_grad_(True)
-    before_value = float(_loss(model, request, forward).detach())
+    before_value = _evaluate_loss(model, request, forward)
     best_value = before_value
     best_epoch = -1
     best_state = {name: parameter.detach().clone() for name, parameter in selected}
     optimizer = torch.optim.AdamW(
         [parameter for _, parameter in selected], lr=request.learning_rate, weight_decay=request.weight_decay
     )
+    total_steps = max(1, request.epochs * ((request.inputs.shape[0] + request.batch_size - 1) // request.batch_size))
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=total_steps, eta_min=request.learning_rate * 1e-4
+    )
+    generator = torch.Generator(device="cpu").manual_seed(request.seed)
     epochs_completed = 0
     stopped_early = False
     try:
         for epoch in range(request.epochs):
+            order = torch.randperm(request.inputs.shape[0], generator=generator)
             for start in range(0, request.inputs.shape[0], request.batch_size):
-                end = min(start + request.batch_size, request.inputs.shape[0])
+                indexes = order[start : start + request.batch_size].to(request.inputs.device)
                 optimizer.zero_grad(set_to_none=True)
-                prediction = forward(model, request.inputs[start:end])
-                loss = (prediction.float() - request.targets[start:end].float()).square().mean()
+                prediction = forward(model, request.inputs[indexes])
+                loss = _loss_sum(prediction, request.targets[indexes], request.output_importance) / max(
+                    1, indexes.numel()
+                )
                 torch.autograd.backward(loss)
                 optimizer.step()
+                scheduler.step()
             epochs_completed = epoch + 1
-            current = float(_loss(model, request, forward).detach())
+            current = _evaluate_loss(model, request, forward)
             if current < best_value:
                 improvement = (best_value - current) / max(abs(best_value), 1e-12)
                 best_value = current
@@ -84,7 +116,7 @@ def tune(
         with torch.no_grad():
             for name, value in best_state.items():
                 parameter_map[name].copy_(value)
-        final_value = float(_loss(model, request, forward).detach())
+        final_value = _evaluate_loss(model, request, forward)
     finally:
         for parameter in model.parameters():
             parameter.requires_grad_(original_requires_grad[id(parameter)])

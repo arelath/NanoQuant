@@ -1,3 +1,4 @@
+from dataclasses import replace
 from pathlib import Path
 
 from nanoquant.application.planning import PlanningRequest, build_quantization_plan, persist_plan
@@ -78,6 +79,27 @@ def test_sensitivity_plan_allocates_no_less_rank_to_more_sensitive_layer() -> No
     plan = build_quantization_plan(_request(AllocationStrategy.SENSITIVITY))
     ranks = [layer.rank for block in plan.blocks for layer in block.layers]
     assert ranks[1] >= ranks[0]
+
+
+def test_uniform_bpw_uses_shape_specific_ranks_for_heterogeneous_layers() -> None:
+    request = _request()
+    dimensions = ((1152, 6912), (1152, 256))
+    blocks = []
+    for block, (inputs, outputs) in zip(request.inventory.blocks, dimensions, strict=True):
+        layer = block.quantizable_layers[0]
+        source = replace(layer.weight, spec=TensorSpec((outputs, inputs), "float32"))
+        updated = replace(layer, weight=source, in_features=inputs, out_features=outputs)
+        blocks.append(replace(block, source_tensors=(source,), quantizable_layers=(updated,)))
+    inventory = replace(request.inventory, blocks=tuple(blocks))
+    allocation = replace(request.allocation, bounds=replace(request.allocation.bounds, multiple=32))
+
+    plan = build_quantization_plan(replace(request, inventory=inventory, allocation=allocation))
+    ranks = [layer.rank for block in plan.blocks for layer in block.layers]
+    elements = sum(inputs * outputs for inputs, outputs in dimensions)
+
+    assert ranks[0] > ranks[1]
+    assert ranks == [960, 160]
+    assert 0.98 <= plan.planned_cost.total / elements <= 1.0
 
 
 def test_utility_profile_must_cover_every_layer() -> None:

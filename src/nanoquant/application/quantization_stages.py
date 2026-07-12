@@ -8,7 +8,7 @@ from dataclasses import dataclass
 import torch
 
 from nanoquant.application.stages import StageContext
-from nanoquant.config.schema import ADMMConfig
+from nanoquant.config.schema import ADMMConfig, ScaleFitConfig
 from nanoquant.domain.factorization import factorize_admm
 from nanoquant.domain.metrics import reconstruction_metrics
 from nanoquant.domain.models import (
@@ -51,6 +51,12 @@ class OutlierSelectionStage:
     name = "select-outliers"
     version = "1"
 
+    def __init__(self, *, device: str = "cpu", residual_probe_iterations: int = 20) -> None:
+        if residual_probe_iterations <= 0:
+            raise ValueError("residual probe iterations must be positive")
+        self.device = device
+        self.residual_probe_iterations = residual_probe_iterations
+
     def estimate(self, request: OutlierSelectionRequest, host: HostInventory) -> ResourceEstimate:
         elements = 1
         for dimension in request.source_weight.spec.shape:
@@ -59,52 +65,53 @@ class OutlierSelectionStage:
 
     def execute(self, request: OutlierSelectionRequest, context: StageContext) -> OutlierSelectionResult:
         context.cancellation.raise_if_cancelled()
-        with (
-            context.tensor_store.read(request.source_weight) as weight_value,
-            context.tensor_store.read(request.objective.input_importance) as input_value,
-            context.tensor_store.read(request.objective.output_importance) as output_value,
-        ):
-            weight, input_importance, output_importance = (
-                weight_value.float(),
-                input_value.float(),
-                output_value.float(),
-            )
-            if request.plan.selector == "none" or request.plan.count == 0:
-                indices = torch.empty(0, dtype=torch.int64)
-            elif request.plan.selector == "fisher":
-                indices = select_top_columns(
-                    fisher_scores(weight, input_importance, output_importance), request.plan.count
+        with context.executor.device_scope(self.device):
+            with (
+                context.tensor_store.read(request.source_weight, self.device) as weight_value,
+                context.tensor_store.read(request.objective.input_importance, self.device) as input_value,
+                context.tensor_store.read(request.objective.output_importance, self.device) as output_value,
+            ):
+                weight, input_importance, output_importance = (
+                    weight_value.float(),
+                    input_value.float(),
+                    output_value.float(),
                 )
-            elif request.plan.selector == "residual":
+                if request.plan.selector == "none" or request.plan.count == 0:
+                    indices = torch.empty(0, dtype=torch.int64, device=self.device)
+                elif request.plan.selector == "fisher":
+                    indices = select_top_columns(
+                        fisher_scores(weight, input_importance, output_importance), request.plan.count
+                    )
+                elif request.plan.selector == "residual":
 
-                def probe(value: torch.Tensor, rank: int, generator: torch.Generator) -> torch.Tensor:
-                    return factorize_admm(
-                        value,
+                    def probe(value: torch.Tensor, rank: int, generator: torch.Generator) -> torch.Tensor:
+                        return factorize_admm(
+                            value,
+                            input_importance,
+                            output_importance,
+                            rank,
+                            generator,
+                            outer_iterations=self.residual_probe_iterations,
+                            inner_iterations=3,
+                        ).reconstruction
+
+                    scores = residual_probe_scores(
+                        weight,
+                        request.probe_rank,
                         input_importance,
                         output_importance,
-                        rank,
-                        generator,
-                        outer_iterations=20,
-                        inner_iterations=3,
-                    ).reconstruction
-
-                scores = residual_probe_scores(
-                    weight,
-                    request.probe_rank,
-                    input_importance,
-                    output_importance,
-                    probe,
-                    torch.Generator().manual_seed(request.logical_seed),
-                )
-                indices = select_top_columns(scores, request.plan.count)
-            else:
-                raise ValueError(f"unsupported outlier selector: {request.plan.selector}")
-            residual, raw_values = remove_columns(weight, indices)
-            stored_values, scales = store_outlier_values(raw_values, request.plan.storage_dtype)
-            tensors = {"indices": indices.to(torch.int64), "values": stored_values, "residual_weight": residual}
-            if scales is not None:
-                tensors["scales"] = scales
-            refs = context.tensor_store.put("outlier-selection", tensors)
+                        probe,
+                        torch.Generator(device=self.device).manual_seed(request.logical_seed),
+                    )
+                    indices = select_top_columns(scores, request.plan.count)
+                else:
+                    raise ValueError(f"unsupported outlier selector: {request.plan.selector}")
+                residual, raw_values = remove_columns(weight, indices)
+                stored_values, scales = store_outlier_values(raw_values, request.plan.storage_dtype)
+                tensors = {"indices": indices.to(torch.int64), "values": stored_values, "residual_weight": residual}
+                if scales is not None:
+                    tensors["scales"] = scales
+                refs = context.tensor_store.put("outlier-selection", tensors)
         bits = {"bfloat16": 16, "float16": 16, "int8": 8}.get(request.plan.storage_dtype, 16)
         cost = outlier_bit_cost(weight.shape[0], indices.numel(), value_bits=bits)
         context.events.emit(
@@ -250,6 +257,10 @@ class ScaleFitStage:
     name = "fit-scales"
     version = "1"
 
+    def __init__(self, config: ScaleFitConfig | None = None, *, device: str = "cpu") -> None:
+        self.config = config or ScaleFitConfig()
+        self.device = device
+
     def estimate(self, request: MaterializedScaleFitStageRequest, host: HostInventory) -> ResourceEstimate:
         output, inputs = request.request.target_weight.spec.shape
         return ResourceEstimate(peak_cpu_bytes=output * inputs * 12)
@@ -258,34 +269,46 @@ class ScaleFitStage:
         item = request.request
         if item.factors.scales.mid is None:
             raise ValueError("scale-fit stage requires an explicit mid scale")
-        with (
-            context.tensor_store.read(item.target_weight) as target,
-            context.tensor_store.read(item.factors.left_binary) as left,
-            context.tensor_store.read(item.factors.right_binary) as right,
-            context.tensor_store.read(item.factors.scales.pre) as pre,
-            context.tensor_store.read(item.factors.scales.mid) as mid,
-            context.tensor_store.read(item.factors.scales.post) as post,
-            context.tensor_store.read(request.input_importance) as input_importance,
-            context.tensor_store.read(request.output_importance) as output_importance,
-        ):
-            protected = None
-            if item.protected_columns is not None:
-                with context.tensor_store.read(item.protected_columns) as value:
-                    protected = value.clone()
-            original_prediction = reconstruct(left, right, pre, mid, post)
-            fitted = fit_scales(
-                target, left, right, pre, mid, post, input_importance, output_importance, protected_columns=protected
-            )
-            refs = context.tensor_store.put(
-                "scale-fit",
-                {
-                    "scale_pre": fitted.scale_pre,
-                    "scale_mid": fitted.scale_mid,
-                    "scale_post": fitted.scale_post,
-                },
-            )
-            before = reconstruction_metrics(target, original_prediction, input_importance, output_importance)
-            after = reconstruction_metrics(target, fitted.reconstruction, input_importance, output_importance)
+        with context.executor.device_scope(self.device):
+            with (
+                context.tensor_store.read(item.target_weight, self.device) as target,
+                context.tensor_store.read(item.factors.left_binary, self.device) as left,
+                context.tensor_store.read(item.factors.right_binary, self.device) as right,
+                context.tensor_store.read(item.factors.scales.pre, self.device) as pre,
+                context.tensor_store.read(item.factors.scales.mid, self.device) as mid,
+                context.tensor_store.read(item.factors.scales.post, self.device) as post,
+                context.tensor_store.read(request.input_importance, self.device) as input_importance,
+                context.tensor_store.read(request.output_importance, self.device) as output_importance,
+            ):
+                protected = None
+                if item.protected_columns is not None:
+                    with context.tensor_store.read(item.protected_columns, self.device) as value:
+                        protected = value.clone()
+                original_prediction = reconstruct(left, right, pre, mid, post)
+                fitted = fit_scales(
+                    target,
+                    left,
+                    right,
+                    pre,
+                    mid,
+                    post,
+                    input_importance,
+                    output_importance,
+                    alternating_passes=self.config.alternating_passes,
+                    epsilon=self.config.epsilon,
+                    protected_columns=protected,
+                    rollback_on_regression=self.config.rollback_on_regression,
+                )
+                refs = context.tensor_store.put(
+                    "scale-fit",
+                    {
+                        "scale_pre": fitted.scale_pre,
+                        "scale_mid": fitted.scale_mid,
+                        "scale_post": fitted.scale_post,
+                    },
+                )
+                before = reconstruction_metrics(target, original_prediction, input_importance, output_importance)
+                after = reconstruction_metrics(target, fitted.reconstruction, input_importance, output_importance)
         return ScaleFitResult(
             ScaleState(refs["scale_pre"], refs["scale_mid"], refs["scale_post"]),
             before,

@@ -1,3 +1,4 @@
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -5,7 +6,7 @@ import torch
 from torch import nn
 
 from nanoquant.application.layers import BlockEditor, FrozenReferenceLinear, LayerFreezer, TrainableFactorizedLinear
-from nanoquant.domain.models import BlockId, LayerId
+from nanoquant.domain.models import BlockId, FrozenOutlierState, LayerId
 from nanoquant.infrastructure.artifacts import LocalArtifactStore
 from nanoquant.infrastructure.tensor_store import LocalTensorStore
 
@@ -42,8 +43,33 @@ def test_freezer_persists_immutable_state_and_editor_installs_explicitly(tmp_pat
     with tensors.read(frozen.state.left_binary) as persisted:
         assert torch.equal(persisted, frozen.module.left_binary)
     loaded = LayerFreezer().load(frozen.state, tensors)
+    factorized = LayerFreezer().load(frozen.state, tensors, backend="factorized")
     assert torch.equal(loaded.module(inputs), expected)
+    assert torch.allclose(factorized.module(inputs), expected, atol=1e-6)
     assert loaded.state == frozen.state
+
+    outliers = tensors.put(
+        "outlier-fixture",
+        {
+            "indices": torch.tensor([1], dtype=torch.int64),
+            "values": torch.tensor([[6], [-4]], dtype=torch.int8),
+            "scales": torch.tensor([[0.5], [0.25]]),
+        },
+    )
+    state_with_outliers = replace(
+        frozen.state,
+        outliers=FrozenOutlierState(outliers["indices"], outliers["values"], outliers["scales"]),
+    )
+    loaded_with_outliers = LayerFreezer().load(state_with_outliers, tensors)
+    factorized_with_outliers = LayerFreezer().load(state_with_outliers, tensors, backend="factorized")
+    expected_weight = frozen.module.dense_weight().clone()
+    expected_weight[:, 1] += torch.tensor([3.0, -1.0])
+    assert torch.equal(loaded_with_outliers.module.dense_weight(), expected_weight)
+    assert torch.allclose(
+        factorized_with_outliers.module(inputs),
+        torch.nn.functional.linear(inputs, expected_weight),
+        atol=1e-6,
+    )
 
 
 def test_editor_rejects_missing_or_non_linear_targets() -> None:

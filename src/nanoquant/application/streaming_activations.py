@@ -4,16 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Protocol
 
 import torch
 
-from nanoquant.ports.activation_store import ActivationStore
+from nanoquant.ports.activation_store import ActivationStore, BatchGenerationWriter
 from nanoquant.ports.executor import Executor
-
-
-class BatchGenerationWriter(Protocol):
-    def write(self, selection: slice, values: torch.Tensor) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)

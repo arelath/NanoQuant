@@ -1,13 +1,16 @@
 import math
 from dataclasses import replace
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
+import torch
 from transformers.models.gemma3.configuration_gemma3 import Gemma3TextConfig
 from transformers.models.gemma3.modeling_gemma3 import Gemma3ForCausalLM
 
 from nanoquant.config.schema import ADMMConfig
 from nanoquant.infrastructure.artifacts import LocalArtifactStore
+from nanoquant.infrastructure.frozen_model_loader import load_frozen_run
 from nanoquant.infrastructure.progress import ProgressJournal
 from nanoquant.resident_quantization import ResidentQuantizationRequest, run_resident_quantization
 from nanoquant.resident_replay import capture_and_replay_resident_layer
@@ -53,6 +56,21 @@ def test_resident_quantization_commits_complete_transformers_model(tmp_path: Pat
     assert result.artifact_bytes > 0
     artifacts = LocalArtifactStore(output / "artifacts")
     artifacts.validate(result.report.artifact_id)
+    loaded = load_frozen_run(
+        output,
+        snapshot,
+        source_name="fixture/gemma3",
+        revision="pinned-test-revision",
+        device="cpu",
+    )
+    evaluation_tokens = torch.tensor([[1, 2, 3, 4]])
+    with torch.no_grad():
+        logits = cast(Any, loaded.model)(input_ids=evaluation_tokens, use_cache=False).logits
+    loaded_nll = torch.nn.functional.cross_entropy(
+        logits[:, :-1].float().reshape(-1, logits.shape[-1]),
+        evaluation_tokens[:, 1:].reshape(-1),
+    )
+    assert float(loaded_nll) == pytest.approx(result.compressed_nll)
     discovery = ProgressJournal(output / "state", "resident-quantization", artifacts).discover(
         result.plan, result.identity
     )

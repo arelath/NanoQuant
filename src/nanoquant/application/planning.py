@@ -79,37 +79,36 @@ def build_quantization_plan(request: PlanningRequest) -> QuantizationPlan:
         cost = outlier_bit_cost(layer.out_features, count, value_bits=bits) if count else BitCost()
         outlier_plans[layer.layer] = plan
         outlier_costs[layer.layer] = cost
-    charged_outlier_bits = sum(
-        cost.total for layer, cost in outlier_costs.items() if outlier_plans[layer].charge_to_budget
-    )
-    uniform = 0
-    maximum_uniform = min(min(layer.in_features, layer.out_features) for layer in layers)
-    for candidate in range(multiple, maximum_uniform + 1, multiple):
-        candidate_bits = charged_outlier_bits + sum(
-            factor_bit_cost(layer.out_features, layer.in_features, candidate).total for layer in layers
-        )
-        if candidate_bits > target_bits:
-            break
-        uniform = candidate
-    if uniform == 0:
-        raise ValueError("target bit budget cannot fund the minimum aligned factor ranks and scales")
+    base_ranks: dict[object, int] = {}
+    for layer in layers:
+        layer_target_bits = math.floor(layer.in_features * layer.out_features * request.allocation.target_bpw)
+        charged = outlier_costs[layer.layer].total if outlier_plans[layer.layer].charge_to_budget else 0
+        base_rank = 0
+        for candidate in range(multiple, min(layer.in_features, layer.out_features) + 1, multiple):
+            if factor_bit_cost(layer.out_features, layer.in_features, candidate).total + charged > layer_target_bits:
+                break
+            base_rank = candidate
+        if base_rank == 0:
+            raise ValueError(f"target bit budget cannot fund minimum aligned factors for {layer.layer}")
+        base_ranks[layer.layer] = base_rank
     ranks: dict[object, int] = {}
     caps: dict[object, int] = {}
     utilities: dict[object, float] = {}
     for layer in layers:
         maximum = min(layer.in_features, layer.out_features)
+        base_rank = base_ranks[layer.layer]
         if request.allocation.strategy.value == "uniform":
-            floor = cap = min(maximum, uniform)
+            floor = cap = base_rank
         else:
             floor = max(
                 multiple,
-                math.floor(uniform * request.allocation.bounds.floor_fraction_of_uniform / multiple) * multiple,
+                math.floor(base_rank * request.allocation.bounds.floor_fraction_of_uniform / multiple) * multiple,
             )
             cap = min(
                 maximum,
                 max(
                     multiple,
-                    math.floor(uniform * request.allocation.bounds.ceiling_fraction_of_uniform / multiple) * multiple,
+                    math.floor(base_rank * request.allocation.bounds.ceiling_fraction_of_uniform / multiple) * multiple,
                 ),
             )
         if request.allocation.strategy.value != "uniform" and layer.layer.block.index in {
@@ -118,7 +117,10 @@ def build_quantization_plan(request: PlanningRequest) -> QuantizationPlan:
         }:
             cap = min(
                 maximum,
-                max(cap, math.floor(uniform * (1 + request.allocation.bounds.edge_block_boost) / multiple) * multiple),
+                max(
+                    cap,
+                    math.floor(base_rank * (1 + request.allocation.bounds.edge_block_boost) / multiple) * multiple,
+                ),
             )
         ranks[layer.layer] = min(floor, cap)
         caps[layer.layer] = cap
@@ -142,28 +144,71 @@ def build_quantization_plan(request: PlanningRequest) -> QuantizationPlan:
     spent = sum(budget_cost(layer.layer, ranks[layer.layer]) for layer in layers)
     if spent > target_bits:
         raise ValueError(f"minimum rank/outlier plan costs {spent} bits, exceeding target {target_bits}")
-    while True:
-        candidates = []
+    if request.allocation.strategy.value == "sensitivity" and utility_profile:
+        costs_per_rank = {
+            layer.layer: layer.in_features + layer.out_features + 16
+            for layer in layers
+        }
+        budget_units = sum(base_ranks[layer.layer] * costs_per_rank[layer.layer] for layer in layers)
+        score_units = sum(
+            base_ranks[layer.layer] * costs_per_rank[layer.layer] * utilities[layer.layer] for layer in layers
+        )
+        mean_score = score_units / budget_units
+        targets = {
+            layer.layer: base_ranks[layer.layer] * utilities[layer.layer] / mean_score for layer in layers
+        }
         for layer in layers:
-            rank = ranks[layer.layer]
-            if rank + multiple > caps[layer.layer]:
-                continue
-            marginal = budget_cost(layer.layer, rank + multiple) - budget_cost(layer.layer, rank)
-            if spent + marginal <= target_bits:
-                candidates.append(
-                    (
-                        utilities[layer.layer] / marginal,
-                        -layer.layer.block.index,
-                        layer.layer.path,
-                        layer.layer,
-                        marginal,
+            proposed = math.floor(targets[layer.layer] / multiple) * multiple
+            ranks[layer.layer] = min(caps[layer.layer], max(ranks[layer.layer], proposed))
+
+        def used_units() -> int:
+            return sum(ranks[layer.layer] * costs_per_rank[layer.layer] for layer in layers)
+
+        while used_units() > budget_units:
+            candidates = [layer for layer in layers if ranks[layer.layer] - multiple >= max(multiple, math.floor(
+                base_ranks[layer.layer] * request.allocation.bounds.floor_fraction_of_uniform / multiple
+            ) * multiple)]
+            if not candidates:
+                break
+            victim = max(candidates, key=lambda layer: ranks[layer.layer] - targets[layer.layer])
+            ranks[victim.layer] -= multiple
+        while True:
+            remaining = budget_units - used_units()
+            candidates = [
+                layer
+                for layer in layers
+                if ranks[layer.layer] + multiple <= caps[layer.layer]
+                and ranks[layer.layer] < targets[layer.layer]
+                and costs_per_rank[layer.layer] * multiple <= remaining
+            ]
+            if not candidates:
+                break
+            winner = max(candidates, key=lambda layer: targets[layer.layer] - ranks[layer.layer])
+            ranks[winner.layer] += multiple
+        spent = sum(budget_cost(layer.layer, ranks[layer.layer]) for layer in layers)
+    else:
+        while True:
+            rank_candidates: list[tuple[float, int, str, object, int]] = []
+            for layer in layers:
+                rank = ranks[layer.layer]
+                if rank + multiple > caps[layer.layer]:
+                    continue
+                marginal = budget_cost(layer.layer, rank + multiple) - budget_cost(layer.layer, rank)
+                if spent + marginal <= target_bits:
+                    rank_candidates.append(
+                        (
+                            utilities[layer.layer] / marginal,
+                            -layer.layer.block.index,
+                            layer.layer.path,
+                            layer.layer,
+                            marginal,
+                        )
                     )
-                )
-        if not candidates:
-            break
-        *_, selected, marginal = max(candidates)
-        ranks[selected] += multiple
-        spent += marginal
+            if not rank_candidates:
+                break
+            *_, selected, marginal = max(rank_candidates, key=lambda candidate: candidate[:3])
+            ranks[selected] += multiple
+            spent += marginal
     extra_budget = math.floor(target_bits * request.allocation.retry.extra_bit_budget_fraction)
     block_plans = []
     all_costs = []

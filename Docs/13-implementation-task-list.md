@@ -131,7 +131,7 @@ Outcome: architecture-specific behavior is isolated and calibration emits portab
 - [x] **M3.19** Implement objective builders producing per-layer `ObjectiveSpec` artifacts from calibration statistics.
 - [x] **M3.20** Implement calibration OOM policies as explicit finite fallbacks with events and plan revisions.
 - [ ] **M3.21** Add common adapter contract tests for complete tensor mapping, block ordering, prefix/block/suffix parity, tied weights, and streamed loading.
-- [ ] **M3.22** Add calibration parity/stability tests, batch-partition invariance tests, and cached-versus-uncached equivalence tests.
+- [x] **M3.22** Add calibration parity/stability tests, batch-partition invariance tests, and cached-versus-uncached equivalence tests.
 - [x] **M3.GATE** Calibrate the tiny model and one supported 1B model through the new adapters and produce validated, replayable statistics/objective artifacts without using legacy traversal helpers.
 
 ## Milestone 4 — Build the resident pipeline, replay workflow, and resume semantics
@@ -208,8 +208,8 @@ Outcome: packed artifacts load and generate correctly without research dependenc
 - [ ] **M6.3** Finalize and version the first CUDA packed layout, including padding, alignment, scale, outlier, bias, and tensor-name metadata.
 - [ ] **M6.4** Implement offline frozen-to-packed conversion and block-aligned artifact sharding.
 - [ ] **M6.5** Implement packed artifact inspection and validation without loading all tensors.
-- [ ] **M6.6** Implement the logical dense-reconstruction reference backend.
-- [ ] **M6.7** Implement the factorized PyTorch reference backend.
+- [x] **M6.6** Implement the logical dense-reconstruction reference backend.
+- [x] **M6.7** Implement the factorized PyTorch reference backend.
 - [ ] **M6.8** Implement the `RuntimeBackend` capability/support/prepare/linear contract.
 - [ ] **M6.9** Implement backend planning for every layer before inference and strict-mode failure on unexpected fallback.
 - [ ] **M6.10** Map the modified llama.cpp GGUF/NanoQuant logical and packed representation to the rewrite's format documentation.
@@ -258,19 +258,19 @@ Outcome: runtime performance is measured, explained, and competitive with the mo
 Dependencies: Milestones 1, 4, and 6; can progress in parallel with Milestone 7  
 Outcome: runs produce cheap-to-expensive decision evidence and actionable reports.
 
-- [ ] **M8.1** Implement the versioned evaluator registry and immutable evaluator specifications.
-- [ ] **M8.2** Implement calibration, quick-decision, and final-evaluation partitions with content hashes and overlap detection.
+- [x] **M8.1** Implement the versioned evaluator registry and immutable evaluator specifications.
+- [x] **M8.2** Implement calibration, quick-decision, and final-evaluation partitions with content hashes and overlap detection.
 - [ ] **M8.3** Implement artifact-structure and packed-reference parity smoke evaluators.
-- [ ] **M8.4** Implement token-accurate negative-log-likelihood/perplexity evaluation with BOS/EOS, causal shift, padding, stride, and partial-window tests.
+- [x] **M8.4** Implement token-accurate negative-log-likelihood/perplexity evaluation with BOS/EOS, causal shift, padding, stride, and partial-window tests.
 - [ ] **M8.5** Implement the selected zero/few-shot task evaluators with pinned dataset/task/prompt revisions.
 - [ ] **M8.6** Implement deterministic generation sanity/regression cases.
 - [ ] **M8.7** Implement long-context evaluation where supported by the model/runtime plan.
-- [ ] **M8.8** Implement smoke, quick, standard, and full evaluation tiers from the registry.
-- [ ] **M8.9** Implement predefined promotion, rejection, and inconclusive decisions with immutable gate policy.
+- [x] **M8.8** Implement smoke, quick, standard, and full evaluation tiers from the registry.
+- [x] **M8.9** Implement predefined promotion, rejection, and inconclusive decisions with immutable gate policy.
 - [ ] **M8.10** Implement paired comparisons, bootstrap/appropriate confidence intervals, repeated-run variability, and minimum meaningful deltas.
 - [ ] **M8.11** Implement exact effective core/artifact BPW, bytes, memory, quantization cost, and runtime metrics as separate dimensions.
-- [ ] **M8.12** Preserve per-layer objective-weighted reconstruction tables for every run.
-- [ ] **M8.13** Preserve the Experiment 019-style final-block-versus-block-entry table with positive, negative, and `n/a` semantics.
+- [x] **M8.12** Preserve per-layer objective-weighted reconstruction tables for every run.
+- [x] **M8.13** Preserve the Experiment 019-style final-block-versus-block-entry table with positive, negative, and `n/a` semantics.
 - [ ] **M8.14** Preserve source/base-model, block-entry, final-pre-KD, and final-post-KD snapshots and named comparisons.
 - [ ] **M8.15** Implement diagnostic rules for calibration instability, Hessian conditioning, ADMM plateau, export gaps, ineffective retry/outliers, poor tuning recovery, and runtime fallback.
 - [ ] **M8.16** Implement complete summary reports for completed, failed, interrupted, resumed, and forked runs.

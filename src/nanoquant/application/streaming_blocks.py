@@ -13,8 +13,7 @@ from nanoquant.application.streaming_activations import (
     PropagationMetrics,
 )
 from nanoquant.domain.models import BlockId
-from nanoquant.infrastructure.activation_store import MmapActivationStore
-from nanoquant.ports.activation_store import ActivationStore
+from nanoquant.ports.activation_store import ActivationStore, GenerationActivationStore
 from nanoquant.ports.executor import Executor
 from nanoquant.ports.model_adapter import ModelAdapter
 from nanoquant.ports.model_source import ModelSource
@@ -62,7 +61,7 @@ class StreamingBlockExecutor:
         adapter: ModelAdapter,
         source: ModelSource,
         inputs: ActivationStore,
-        outputs: MmapActivationStore,
+        outputs: GenerationActivationStore,
         prepare_working: Callable[[nn.Module], nn.Module],
     ) -> StreamingBlockResult:
         with inputs.read(request.teacher_input_key, self.device) as teacher_inputs:

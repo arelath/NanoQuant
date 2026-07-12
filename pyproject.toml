@@ -25,6 +25,9 @@ dev = [
   "ruff>=0.5",
   "types-PyYAML>=6.0",
 ]
+evaluation = [
+  "datasets==5.0.0",
+]
 
 [project.scripts]
 nanoquant = "nanoquant.cli.main:main"

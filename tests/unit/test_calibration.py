@@ -1,8 +1,15 @@
+from types import SimpleNamespace
+
 import pytest
 import torch
 from torch import nn
 
-from nanoquant.application.calibration import UnsupportedCalibrationMode, calibrate_block
+from nanoquant.application.calibration import (
+    UnsupportedCalibrationMode,
+    calibrate_block,
+    calibrate_causal_model,
+    causal_language_model_loss,
+)
 from nanoquant.domain.calibration_math import activation_square_mean, robust_tau, shrink_importance
 
 
@@ -14,6 +21,62 @@ class CalibrationBlock(nn.Module):
 
     def forward(self, value: torch.Tensor) -> torch.Tensor:
         return self.second(torch.tanh(self.first(value)))
+
+
+class TinyCausalModel(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.embedding = nn.Embedding(7, 4)
+        self.hidden = nn.Linear(4, 4, bias=False)
+        self.lm_head = nn.Linear(4, 7, bias=False)
+        self._input_hook: torch.utils.hooks.RemovableHandle | None = None
+
+    def enable_input_require_grads(self) -> None:
+        self._input_hook = self.embedding.register_forward_hook(
+            lambda _module, _inputs, output: output.requires_grad_(True)
+        )
+
+    def disable_input_require_grads(self) -> None:
+        if self._input_hook is not None:
+            self._input_hook.remove()
+            self._input_hook = None
+
+    def forward(self, input_ids: torch.Tensor, use_cache: bool = False) -> SimpleNamespace:
+        del use_cache
+        hidden = torch.tanh(self.hidden(self.embedding(input_ids)))
+        return SimpleNamespace(logits=self.lm_head(hidden))
+
+
+class TinyTextStack(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.embedding = nn.Embedding(7, 4)
+        self.hidden = nn.Linear(4, 4, bias=False)
+
+    def forward(self, input_ids: torch.Tensor, use_cache: bool = False) -> SimpleNamespace:
+        del use_cache
+        return SimpleNamespace(last_hidden_state=torch.tanh(self.hidden(self.embedding(input_ids))))
+
+
+class TinySplitCausalModel(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.model = TinyTextStack()
+        self.lm_head = nn.Linear(4, 7, bias=False)
+        self._input_hook: torch.utils.hooks.RemovableHandle | None = None
+
+    def enable_input_require_grads(self) -> None:
+        self._input_hook = self.model.embedding.register_forward_hook(
+            lambda _module, _inputs, output: output.requires_grad_(True)
+        )
+
+    def disable_input_require_grads(self) -> None:
+        if self._input_hook is not None:
+            self._input_hook.remove()
+            self._input_hook = None
+
+    def forward(self, input_ids: torch.Tensor, use_cache: bool = False) -> SimpleNamespace:
+        return SimpleNamespace(logits=self.lm_head(self.model(input_ids, use_cache).last_hidden_state))
 
 
 def _runner(block: nn.Module, value: torch.Tensor) -> torch.Tensor:
@@ -73,3 +136,47 @@ def test_two_phase_is_deterministic() -> None:
 def test_dbf_is_explicitly_rejected_as_research_only() -> None:
     with pytest.raises(UnsupportedCalibrationMode, match="CAL004"):
         calibrate_block(CalibrationBlock(), (torch.ones(1, 3),), ("first",), _runner, method="dbf")
+
+
+def test_causal_loss_applies_exact_next_token_shift() -> None:
+    logits = torch.zeros(1, 3, 3)
+    logits[0, 0, 1] = 4
+    logits[0, 1, 2] = 4
+    tokens = torch.tensor([[0, 1, 2]])
+    expected = torch.nn.functional.cross_entropy(logits[:, :-1].reshape(-1, 3), tokens[:, 1:].reshape(-1))
+    assert torch.equal(causal_language_model_loss(logits, tokens), expected)
+
+
+@pytest.mark.parametrize("method", ["online_fisher", "two_phase_fisher"])
+def test_full_causal_calibration_collects_output_fisher_and_restores_model(method: str) -> None:
+    model = TinyCausalModel().eval()
+    original_requires_grad = tuple(parameter.requires_grad for parameter in model.parameters())
+    results = calibrate_causal_model(
+        model,
+        (torch.tensor([[0, 1, 2, 3]]), torch.tensor([[3, 2, 1, 0]])),
+        (("hidden", model.hidden),),
+        method=method,
+        shrinkage=0.2,
+    )
+    assert len(results) == 1
+    assert results[0].sample_count == 2
+    assert results[0].method == method
+    assert torch.isfinite(results[0].input_importance).all()
+    assert torch.isfinite(results[0].output_importance).all()
+    assert torch.count_nonzero(results[0].output_importance) > 0
+    assert model.training is False
+    assert tuple(parameter.requires_grad for parameter in model.parameters()) == original_requires_grad
+    assert all(not module._forward_hooks and not module._backward_hooks for module in model.modules())
+
+
+def test_chunked_hidden_gradient_matches_direct_causal_loss() -> None:
+    direct = TinyCausalModel()
+    chunked = TinySplitCausalModel()
+    chunked.model.embedding.load_state_dict(direct.embedding.state_dict())
+    chunked.model.hidden.load_state_dict(direct.hidden.state_dict())
+    chunked.lm_head.load_state_dict(direct.lm_head.state_dict())
+    batches = (torch.tensor([[0, 1, 2, 3, 4, 5]]),)
+    direct_stats = calibrate_causal_model(direct, batches, (("hidden", direct.hidden),))
+    chunked_stats = calibrate_causal_model(chunked, batches, (("hidden", chunked.model.hidden),))
+    assert torch.allclose(direct_stats[0].input_importance, chunked_stats[0].input_importance)
+    assert torch.allclose(direct_stats[0].output_importance, chunked_stats[0].output_importance, atol=1e-10)
