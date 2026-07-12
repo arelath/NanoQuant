@@ -54,6 +54,9 @@ def main() -> None:
             args.snapshot,
             local_files_only=True,
             torch_dtype=torch.bfloat16,
+            # Experiment 018 forces eager Gemma attention. SDPA changes both
+            # forward rounding and the Fisher gradients accumulated here.
+            attn_implementation="eager",
         ).to(args.device)
         model.eval()
         layers = tuple(
