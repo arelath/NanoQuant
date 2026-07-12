@@ -41,6 +41,9 @@ def test_freezer_persists_immutable_state_and_editor_installs_explicitly(tmp_pat
     assert torch.equal(block(inputs), expected)
     with tensors.read(frozen.state.left_binary) as persisted:
         assert torch.equal(persisted, frozen.module.left_binary)
+    loaded = LayerFreezer().load(frozen.state, tensors)
+    assert torch.equal(loaded.module(inputs), expected)
+    assert loaded.state == frozen.state
 
 
 def test_editor_rejects_missing_or_non_linear_targets() -> None:

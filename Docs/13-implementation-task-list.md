@@ -132,7 +132,7 @@ Outcome: architecture-specific behavior is isolated and calibration emits portab
 - [x] **M3.20** Implement calibration OOM policies as explicit finite fallbacks with events and plan revisions.
 - [ ] **M3.21** Add common adapter contract tests for complete tensor mapping, block ordering, prefix/block/suffix parity, tied weights, and streamed loading.
 - [ ] **M3.22** Add calibration parity/stability tests, batch-partition invariance tests, and cached-versus-uncached equivalence tests.
-- [ ] **M3.GATE** Calibrate the tiny model and one supported 1B model through the new adapters and produce validated, replayable statistics/objective artifacts without using legacy traversal helpers.
+- [x] **M3.GATE** Calibrate the tiny model and one supported 1B model through the new adapters and produce validated, replayable statistics/objective artifacts without using legacy traversal helpers.
 
 ## Milestone 4 — Build the resident pipeline, replay workflow, and resume semantics
 

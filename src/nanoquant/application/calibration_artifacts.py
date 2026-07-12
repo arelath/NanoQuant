@@ -60,6 +60,8 @@ def persist_calibration(
     accumulation_dtype: str,
     artifacts: ArtifactStore,
     tensors: TensorStore,
+    *,
+    total_tokens: int = 0,
 ) -> PersistedCalibration:
     values = {}
     for layer, layer_stats in materialized:
@@ -85,7 +87,15 @@ def persist_calibration(
     )
     sample_count = materialized[0][1].sample_count if materialized else 0
     calibration_stats = CalibrationStats(
-        1, ComponentRef("calibration", "1"), model, dataset, method, accumulation_dtype, layers, sample_count, 0
+        1,
+        ComponentRef("calibration", "1"),
+        model,
+        dataset,
+        method,
+        accumulation_dtype,
+        layers,
+        sample_count,
+        total_tokens,
     )
     with artifacts.begin_write("calibration-stats") as writer:
         (writer.path / "stats.json").write_text(

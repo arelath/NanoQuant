@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import pytest
 import torch
 
 from nanoquant.application.quantization_stages import (
@@ -9,6 +10,7 @@ from nanoquant.application.quantization_stages import (
     ScaleFitStage,
 )
 from nanoquant.application.stages import StageContext, execute_stage
+from nanoquant.config.schema import ADMMConfig
 from nanoquant.domain.models import (
     ArtifactRef,
     BlockId,
@@ -79,3 +81,38 @@ def test_outlier_factorization_and_scale_fit_stages_commit_typed_results(tmp_pat
     fitted = execute_stage(ScaleFitStage(), scale_request, context)
     assert fitted.after.export_weighted_error <= fitted.before.export_weighted_error + 1e-5
     assert (tmp_path / "events.jsonl").read_text(encoding="utf-8").count("stage.completed") == 3
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA resident stage requires a GPU")
+def test_factorization_stage_honors_cuda_device_and_admm_settings(tmp_path: Path) -> None:
+    context, tensors = _context(tmp_path)
+    refs = tensors.put(
+        "gpu-factor-fixture",
+        {
+            "weight": torch.randn(8, 8, generator=torch.Generator().manual_seed(2)),
+            "input_importance": torch.ones(8),
+            "output_importance": torch.ones(8),
+        },
+    )
+    layer = LayerId(BlockId(0), "linear")
+    objective = ObjectiveSpec(
+        1,
+        layer,
+        "diagonal",
+        refs["input_importance"],
+        refs["output_importance"],
+        None,
+        0.01,
+        "target_weighted_norm_squared",
+        None,
+        ArtifactRef("calibration", "sha256-" + "0" * 64, 1),
+    )
+    result = execute_stage(
+        FactorizationAttemptStage(ADMMConfig(outer_iterations=2, inner_iterations=1), device="cuda"),
+        FactorizationRequest(1, layer, refs["weight"], refs["weight"], objective, 2, 3, "gpu-test"),
+        context,
+    )
+
+    assert result.convergence.iterations_completed == 2
+    assert result.wall_seconds > 0
+    assert result.peak_workspace_bytes > 0

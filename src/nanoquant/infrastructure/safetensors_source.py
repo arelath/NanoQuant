@@ -44,6 +44,7 @@ class SafetensorsModelSource:
             raise FileNotFoundError(self.snapshot)
         self._key_to_shard = self._discover_shards()
         self._shard_hashes: dict[str, str] = {}
+        self._verified_signatures: dict[str, tuple[int, int, int]] = {}
         self._inventory: CheckpointInventory | None = None
 
     def _discover_shards(self) -> dict[str, str]:
@@ -75,8 +76,25 @@ class SafetensorsModelSource:
 
     def _hash(self, shard: str) -> str:
         if shard not in self._shard_hashes:
-            self._shard_hashes[shard] = _sha256(self.snapshot / shard)
+            path = self.snapshot / shard
+            self._shard_hashes[shard] = _sha256(path)
+            self._verified_signatures[shard] = self._signature(path)
         return self._shard_hashes[shard]
+
+    @staticmethod
+    def _signature(path: Path) -> tuple[int, int, int]:
+        stat = path.stat()
+        return stat.st_size, stat.st_mtime_ns, stat.st_ino
+
+    def _verify_unchanged(self, shard: str) -> None:
+        path = self.snapshot / shard
+        expected = self._hash(shard)
+        signature = self._signature(path)
+        if self._verified_signatures.get(shard) == signature:
+            return
+        if _sha256(path) != expected:
+            raise SourceIntegrityError(f"source shard changed after inventory: {shard}")
+        self._verified_signatures[shard] = signature
 
     def tensor_metadata(self) -> tuple[CheckpointTensorMetadata, ...]:
         grouped: dict[str, list[str]] = {}
@@ -139,10 +157,7 @@ class SafetensorsModelSource:
         except KeyError as exc:
             raise KeyError(f"tensor is not in source inventory: {source_key}") from exc
         if self.verify_hashes:
-            current = _sha256(self.snapshot / shard)
-            expected = self._hash(shard)
-            if current != expected:
-                raise SourceIntegrityError(f"source shard changed after inventory: {shard}")
+            self._verify_unchanged(shard)
         with safe_open(self.snapshot / shard, framework="pt", device="cpu") as handle:
             tensor = handle.get_tensor(source_key)
             yield tensor if device == "cpu" else tensor.to(device)

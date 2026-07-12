@@ -46,7 +46,11 @@ def _decode(value: Any, annotation: Any, path: str) -> Any:
         if len(args) > 1 and args[1] is not Ellipsis and len(args) != len(value):
             raise ConfigDecodeError(path, f"expected {len(args)} elements")
         return tuple(
-            _decode(item, element_type if len(args) == 2 else args[index], f"{path}[{index}]")
+            _decode(
+                item,
+                element_type if not args or (len(args) == 2 and args[1] is Ellipsis) else args[index],
+                f"{path}[{index}]",
+            )
             for index, item in enumerate(value)
         )
     if isinstance(annotation, type) and issubclass(annotation, Enum):

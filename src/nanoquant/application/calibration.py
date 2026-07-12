@@ -156,7 +156,7 @@ def calibrate_block(
             shrink_importance(outputs[path].finalize(), shrinkage)
             if requires_backward
             else torch.ones(module.out_features),
-            len(batches),
+            sum(batch.shape[0] for batch in batches),
             method,
         )
         for path, module in linears.items()

@@ -132,6 +132,34 @@ class LayerFreezer:
         )
         return FrozenLayer(state, module)
 
+    def load(
+        self,
+        state: FrozenNanoQuantState,
+        tensors: TensorStore,
+        *,
+        device: str = "cpu",
+        dtype: torch.dtype | None = None,
+    ) -> FrozenLayer:
+        if state.outliers is not None:
+            raise NotImplementedError("frozen reference loading does not yet support outliers")
+        if state.scales.mid is None:
+            raise ValueError("frozen NanoQuant state is missing its mid scale")
+        with (
+            tensors.read(state.left_binary, device) as left,
+            tensors.read(state.right_binary, device) as right,
+            tensors.read(state.scales.pre, device) as scale_pre,
+            tensors.read(state.scales.mid, device) as scale_mid,
+            tensors.read(state.scales.post, device) as scale_post,
+        ):
+            bias = None
+            if state.bias is not None:
+                with tensors.read(state.bias, device) as value:
+                    bias = value.clone()
+            module = FrozenReferenceLinear(left, right, scale_pre, scale_mid, scale_post, bias)
+        if dtype is not None:
+            module = module.to(dtype=dtype)
+        return FrozenLayer(state, module)
+
 
 class BlockEditor:
     def install_frozen_layer(self, block: nn.Module, path: str, frozen: FrozenReferenceLinear) -> None:

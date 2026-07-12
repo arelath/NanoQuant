@@ -30,7 +30,14 @@ from nanoquant.domain.models import (
 )
 from nanoquant.domain.runs import BudgetState
 from nanoquant.infrastructure.artifacts import LocalArtifactStore
-from nanoquant.infrastructure.commits import CommitIdentity, commit_block, commit_layer
+from nanoquant.infrastructure.commits import (
+    CommitIdentity,
+    commit_block,
+    commit_layer,
+    load_block_activations,
+    load_committed_block,
+    load_committed_layer,
+)
 from nanoquant.infrastructure.progress import ProgressJournal
 
 
@@ -192,3 +199,33 @@ def test_post_commit_failure_artifacts_equal_uninterrupted_controls(tmp_path: Pa
         if '"artifact_type": "block-result"' in path.read_text(encoding="utf-8")
     )
     assert failure_block_id == control_block.reference.artifact_id
+
+
+def test_committed_layer_block_and_activations_round_trip_as_typed_results(tmp_path: Path) -> None:
+    layer_result, _plan, frozen_block, losses = _objects()
+    identity = CommitIdentity("config", "model", "plan")
+    artifacts = LocalArtifactStore(tmp_path / "artifacts")
+    layer = commit_layer(layer_result, artifacts, identity)
+    teacher = torch.arange(12, dtype=torch.float32).reshape(2, 3, 2)
+    compressed = teacher + 1
+    block = commit_block(
+        BlockId(0),
+        (layer_result,),
+        frozen_block,
+        losses,
+        teacher,
+        compressed,
+        0,
+        artifacts,
+        identity,
+        wall_seconds=1.25,
+        peak_gpu_bytes=10,
+        peak_host_bytes=20,
+    )
+
+    assert load_committed_layer(layer.reference, artifacts, identity) == layer
+    loaded_block = load_committed_block(block.reference, artifacts, identity)
+    assert loaded_block == block
+    loaded_teacher, loaded_compressed = load_block_activations(block.reference, artifacts)
+    assert torch.equal(loaded_teacher, teacher)
+    assert torch.equal(loaded_compressed, compressed)

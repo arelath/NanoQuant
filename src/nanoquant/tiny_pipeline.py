@@ -159,7 +159,14 @@ def run_tiny_pipeline(root: str | Path, *, seed: int = 0) -> TinyPipelineResult:
         "sha256:tiny-dataset", ("offline/tiny",), ("v1",), "sha256:tiny-tokenizer", "tokens-v1"
     )
     calibration = persist_calibration(
-        tuple(calibration_materialized), model_identity, dataset_identity, "forward_only", "float32", artifacts, tensors
+        tuple(calibration_materialized),
+        model_identity,
+        dataset_identity,
+        "forward_only",
+        "float32",
+        artifacts,
+        tensors,
+        total_tokens=tokens.numel(),
     )
     objectives = build_objectives(calibration, ObjectiveConfig(), artifacts)
     allocation = RankAllocationConfig(

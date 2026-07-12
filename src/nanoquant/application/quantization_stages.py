@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 
 import torch
 
 from nanoquant.application.stages import StageContext
+from nanoquant.config.schema import ADMMConfig
 from nanoquant.domain.factorization import factorize_admm
 from nanoquant.domain.metrics import reconstruction_metrics
 from nanoquant.domain.models import (
@@ -135,6 +137,10 @@ class FactorizationAttemptStage:
     name = "factorize-attempt"
     version = "1"
 
+    def __init__(self, admm: ADMMConfig | None = None, *, device: str = "cpu") -> None:
+        self.admm = admm or ADMMConfig(outer_iterations=400)
+        self.device = device
+
     def estimate(self, request: FactorizationRequest, host: HostInventory) -> ResourceEstimate:
         output, inputs = request.source_weight.spec.shape
         return ResourceEstimate(
@@ -143,41 +149,51 @@ class FactorizationAttemptStage:
         )
 
     def execute(self, request: FactorizationRequest, context: StageContext) -> FactorizationResult:
-        with (
-            context.tensor_store.read(request.residual_weight) as residual_value,
-            context.tensor_store.read(request.objective.input_importance) as input_value,
-            context.tensor_store.read(request.objective.output_importance) as output_value,
-        ):
-            residual = residual_value.float()
-            input_importance = input_value.float()
-            output_importance = output_value.float()
-            result = factorize_admm(
-                residual,
-                input_importance,
-                output_importance,
-                request.rank,
-                torch.Generator().manual_seed(request.logical_seed),
-            )
-            metrics = reconstruction_metrics(
-                residual,
-                result.reconstruction,
-                input_importance,
-                output_importance,
-                objective_mode=request.objective.kind,
-                latent_prediction=result.left_latent @ result.right_latent,
-            )
-            refs = context.tensor_store.put(
-                "factorization-attempt",
-                {
-                    "left_latent": result.left_latent,
-                    "right_latent": result.right_latent,
-                    "left_binary": result.left_binary,
-                    "right_binary": result.right_binary,
-                    "scale_pre": result.scale_pre,
-                    "scale_mid": result.scale_mid,
-                    "scale_post": result.scale_post,
-                },
-            )
+        started = time.perf_counter()
+        if self.device.startswith("cuda"):
+            torch.cuda.reset_peak_memory_stats(self.device)
+        with context.executor.device_scope(self.device):
+            with (
+                context.tensor_store.read(request.residual_weight, self.device) as residual_value,
+                context.tensor_store.read(request.objective.input_importance, self.device) as input_value,
+                context.tensor_store.read(request.objective.output_importance, self.device) as output_value,
+            ):
+                residual = residual_value.float()
+                input_importance = input_value.float()
+                output_importance = output_value.float()
+                result = factorize_admm(
+                    residual,
+                    input_importance,
+                    output_importance,
+                    request.rank,
+                    torch.Generator(device=self.device).manual_seed(request.logical_seed),
+                    outer_iterations=self.admm.outer_iterations,
+                    inner_iterations=self.admm.inner_iterations,
+                    regularization=self.admm.regularization,
+                    penalty_schedule=self.admm.penalty_schedule,
+                    convergence_check_interval=self.admm.convergence_check_interval,
+                    early_stop_tolerance=self.admm.early_stop_tolerance,
+                )
+                metrics = reconstruction_metrics(
+                    residual,
+                    result.reconstruction,
+                    input_importance,
+                    output_importance,
+                    objective_mode=request.objective.kind,
+                    latent_prediction=result.left_latent @ result.right_latent,
+                )
+                refs = context.tensor_store.put(
+                    "factorization-attempt",
+                    {
+                        "left_latent": result.left_latent,
+                        "right_latent": result.right_latent,
+                        "left_binary": result.left_binary,
+                        "right_binary": result.right_binary,
+                        "scale_pre": result.scale_pre,
+                        "scale_mid": result.scale_mid,
+                        "scale_post": result.scale_post,
+                    },
+                )
         factors = TrainableFactors(
             refs["left_latent"],
             refs["right_latent"],
@@ -208,8 +224,10 @@ class FactorizationAttemptStage:
             factors,
             metrics,
             convergence,
-            0.0,
-            self.estimate(request, HostInventory(0, 0, 0)).peak_cpu_bytes,
+            time.perf_counter() - started,
+            int(torch.cuda.max_memory_allocated(self.device))
+            if self.device.startswith("cuda")
+            else self.estimate(request, HostInventory(0, 0, 0)).peak_cpu_bytes,
         )
 
     def validate(self, result: FactorizationResult, context: StageContext) -> ValidationReport:
