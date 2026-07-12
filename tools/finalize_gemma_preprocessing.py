@@ -56,7 +56,10 @@ def main() -> None:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--calibration", type=Path, default=Path("evidence/m3/experiment018-calibration"))
     parser.add_argument("--device", default="cuda")
+    parser.add_argument("--shrinkage", type=float, default=0.6)
     args = parser.parse_args()
+    if not 0.0 <= args.shrinkage <= 1.0:
+        raise ValueError("shrinkage must be in [0, 1]")
 
     state = load_causal_calibration_state(args.state)
     dataset_values = load_pinned_calibration(
@@ -94,7 +97,7 @@ def main() -> None:
         checkpoint.tokenizer_hash,
         "raw-token-ids-v1",
     )
-    materialized = materialize_causal_online_state(state, shrinkage=0.6)
+    materialized = materialize_causal_online_state(state, shrinkage=args.shrinkage)
     calibration_values = tuple(
         (LayerId(BlockId(int(item.path.split(".", 2)[1])), item.path.split(".", 2)[2]), item)
         for item in materialized
