@@ -16,6 +16,7 @@ from nanoquant.config.codec import from_dict
 from nanoquant.domain.models import ArtifactRef, BlockResult
 from nanoquant.infrastructure.artifacts import LocalArtifactStore
 from nanoquant.infrastructure.commits import CommitIdentity, load_committed_block
+from nanoquant.infrastructure.global_tuning import active_global_tuning, load_global_tuning
 from nanoquant.infrastructure.model_adapters import adapter_for_config
 from nanoquant.infrastructure.safetensors_source import SafetensorsModelSource
 from nanoquant.infrastructure.tensor_store import LocalTensorStore
@@ -26,6 +27,7 @@ class LoadedFrozenModel:
     model: nn.Module
     blocks: tuple[BlockResult, ...]
     identity: CommitIdentity
+    global_tuning: ArtifactRef | None
 
 
 def _dtype(config: dict[str, object]) -> torch.dtype:
@@ -86,6 +88,14 @@ def load_frozen_run(
         ).result
         for index in range(expected_blocks)
     )
+    global_tuning_ref = active_global_tuning(run_output)
+    global_tuning = None if global_tuning_ref is None else load_global_tuning(global_tuning_ref, artifacts).result
+    source_blocks = tuple(block.teacher_outputs.artifact for block in committed)
+    if global_tuning is not None:
+        if global_tuning.source_blocks != source_blocks:
+            raise ValueError("global tuning result does not match the run's committed blocks")
+        if tuple(state.block.index for state in global_tuning.tuned_blocks) != tuple(range(expected_blocks)):
+            raise ValueError("global tuning result does not contain complete contiguous block states")
     model = cast(
         nn.Module,
         AutoModelForCausalLM.from_pretrained(
@@ -98,10 +108,26 @@ def load_frozen_run(
     decoder_layers = _decoder_layers(model)
     freezer = LayerFreezer()
     editor = BlockEditor()
-    for block_result, block in zip(committed, decoder_layers, strict=True):
+    block_states = (
+        tuple(block.frozen_state for block in committed)
+        if global_tuning is None
+        else global_tuning.tuned_blocks
+    )
+    for block_state, block in zip(block_states, decoder_layers, strict=True):
         block_dtype = next(block.parameters()).dtype
-        for state in block_result.frozen_state.quantized_layers:
+        for state in block_state.quantized_layers:
             frozen = freezer.load(state, tensors, device=device, dtype=block_dtype, backend=backend)
             editor.install_frozen_layer(block, state.layer.path, frozen.module)
+    if global_tuning is not None:
+        parameters = dict(model.named_parameters())
+        with torch.no_grad():
+            for name, reference in global_tuning.auxiliary_parameters:
+                if name not in parameters:
+                    raise ValueError(f"global tuning parameter is absent from the model: {name}")
+                parameter = parameters[name]
+                with tensors.read(reference, device) as value:
+                    if value.shape != parameter.shape:
+                        raise ValueError(f"global tuning parameter shape differs: {name}")
+                    parameter.copy_(value.to(dtype=parameter.dtype))
     cast(Any, model).config.use_cache = False
-    return LoadedFrozenModel(model, committed, identity)
+    return LoadedFrozenModel(model, committed, identity, global_tuning_ref)

@@ -543,6 +543,23 @@ class BlockResult:
 
 
 @dataclass(frozen=True, slots=True)
+class GlobalTuningResult:
+    schema_version: int
+    source_blocks: tuple[ArtifactRef, ...]
+    tuned_blocks: tuple[FrozenBlockState, ...]
+    auxiliary_parameters: tuple[tuple[str, TensorRef], ...]
+    protocol_hash: str
+    token_hash: str
+    epoch_losses: tuple[float, ...]
+    steps_completed: int
+    selected_parameter_count: int
+    teacher_cache_bytes: int
+    wall_seconds: float
+    peak_gpu_bytes: int
+    peak_host_bytes: int
+
+
+@dataclass(frozen=True, slots=True)
 class FrozenModelResult:
     schema_version: int
     model: ModelIdentity

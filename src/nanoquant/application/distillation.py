@@ -22,6 +22,7 @@ class TopKDistillationConfig:
     vocabulary_chunk_size: int = 8192
     token_chunk_size: int = 128
     maximum_tokens_per_batch: int | None = 512
+    gradient_checkpointing: bool = True
     weight_decay: float = 0.01
     seed: int = 0
 
@@ -296,7 +297,7 @@ def distill_topk(
                     token_chunk_size=config.token_chunk_size,
                 )
                 optimizer.zero_grad(set_to_none=True)
-                loss.backward()
+                torch.autograd.backward(loss)
                 optimizer.step()
                 scheduler.step()
                 total_loss += float(loss.detach())
