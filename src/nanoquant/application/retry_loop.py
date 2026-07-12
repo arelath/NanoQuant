@@ -58,6 +58,7 @@ def run_factorization_attempts(
     accept_commit: AcceptCommit,
     factorization_stage: FactorizationAttemptStage | None = None,
     legacy_seed_reset: bool = False,
+    initial_generator_state: TensorRef | None = None,
 ) -> AcceptedFactorization:
     rank = layer_plan.rank
     base_factor_cost = factor_bit_cost(
@@ -83,6 +84,7 @@ def run_factorization_attempts(
             rank,
             attempt_seed,
             factorizer_config_hash,
+            initial_generator_state if attempt == 0 else None,
         )
         result = execute_stage(factorization_stage or FactorizationAttemptStage(), request, context)
         results.append(result)

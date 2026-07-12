@@ -228,6 +228,7 @@ def run_tiny_pipeline(root: str | Path, *, seed: int = 0) -> TinyPipelineResult:
                     layer_plan.rank,
                     logical_seed(seed, "factorize", block_index, path, 0),
                     "tiny-factor-v1",
+                    outliers.factor_generator_state,
                 ),
                 context,
             )

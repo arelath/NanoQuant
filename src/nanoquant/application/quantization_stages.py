@@ -49,7 +49,7 @@ def _summary(value: torch.Tensor) -> StatisticSummary:
 
 class OutlierSelectionStage:
     name = "select-outliers"
-    version = "2"
+    version = "3"
 
     def __init__(self, *, device: str = "cpu", residual_probe_iterations: int = 20) -> None:
         if residual_probe_iterations <= 0:
@@ -76,6 +76,7 @@ class OutlierSelectionStage:
                     input_value.float(),
                     output_value.float(),
                 )
+                generator = torch.Generator(device=self.device).manual_seed(request.logical_seed)
                 if request.plan.selector == "none" or request.plan.count == 0:
                     indices = torch.empty(0, dtype=torch.int64, device=self.device)
                 elif request.plan.selector == "fisher":
@@ -101,7 +102,7 @@ class OutlierSelectionStage:
                         input_importance,
                         output_importance,
                         probe,
-                        torch.Generator(device=self.device).manual_seed(request.logical_seed),
+                        generator,
                     )
                     indices = select_top_columns(scores, request.plan.count)
                 else:
@@ -122,6 +123,8 @@ class OutlierSelectionStage:
                     "residual_weight": residual,
                     "factor_input_importance": factor_input_importance,
                 }
+                if request.plan.selector == "residual" and indices.numel() > 0:
+                    tensors["factor_generator_state"] = generator.get_state()
                 if scales is not None:
                     tensors["scales"] = scales
                 refs = context.tensor_store.put("outlier-selection", tensors)
@@ -145,6 +148,7 @@ class OutlierSelectionStage:
             refs.get("scales"),
             refs["residual_weight"],
             refs["factor_input_importance"],
+            refs.get("factor_generator_state"),
             _summary(indices.float()),
             cost,
         )
@@ -156,7 +160,7 @@ class OutlierSelectionStage:
 
 class FactorizationAttemptStage:
     name = "factorize-attempt"
-    version = "3"
+    version = "4"
 
     def __init__(self, admm: ADMMConfig | None = None, *, device: str = "cpu") -> None:
         self.admm = admm or ADMMConfig(outer_iterations=400)
@@ -182,12 +186,16 @@ class FactorizationAttemptStage:
                 residual = residual_value
                 input_importance = input_value.float()
                 output_importance = output_value.float()
+                generator = torch.Generator(device=self.device).manual_seed(request.logical_seed)
+                if request.generator_state is not None:
+                    with context.tensor_store.read(request.generator_state, "cpu") as state:
+                        generator.set_state(state)
                 result = factorize_admm(
                     residual,
                     input_importance,
                     output_importance,
                     request.rank,
-                    torch.Generator(device=self.device).manual_seed(request.logical_seed),
+                    generator,
                     outer_iterations=self.admm.outer_iterations,
                     inner_iterations=self.admm.inner_iterations,
                     regularization=self.admm.regularization,

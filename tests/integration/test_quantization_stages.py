@@ -74,7 +74,15 @@ def test_outlier_factorization_and_scale_fit_stages_commit_typed_results(tmp_pat
         assert factor_input_importance[indices.long()].count_nonzero() == 0
     factor_objective = replace(objective, input_importance=outliers.factor_input_importance)
     factor_request = FactorizationRequest(
-        1, layer, refs["weight"], outliers.residual_weight, factor_objective, 1, 19, "factor-config"
+        1,
+        layer,
+        refs["weight"],
+        outliers.residual_weight,
+        factor_objective,
+        1,
+        19,
+        "factor-config",
+        outliers.factor_generator_state,
     )
     factorized = execute_stage(FactorizationAttemptStage(), factor_request, context)
     assert factorized.rank == 1

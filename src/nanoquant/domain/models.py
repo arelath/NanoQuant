@@ -321,6 +321,7 @@ class OutlierSelectionResult:
     scales: TensorRef | None
     residual_weight: TensorRef
     factor_input_importance: TensorRef
+    factor_generator_state: TensorRef | None
     selected_score_summary: StatisticSummary
     bit_cost: BitCost
 
@@ -374,6 +375,7 @@ class FactorizationRequest:
     rank: int
     logical_seed: int
     factorizer_config_hash: str
+    generator_state: TensorRef | None = None
 
 
 @dataclass(frozen=True, slots=True)

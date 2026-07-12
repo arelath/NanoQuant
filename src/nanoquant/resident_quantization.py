@@ -91,7 +91,7 @@ from nanoquant.infrastructure.resource_usage import peak_process_memory_bytes
 from nanoquant.infrastructure.safetensors_source import SafetensorsModelSource
 from nanoquant.infrastructure.tensor_store import LocalTensorStore
 
-RESIDENT_ALGORITHM_VERSION = 13
+RESIDENT_ALGORITHM_VERSION = 14
 
 
 @contextmanager
@@ -1003,7 +1003,11 @@ def _run_resident_quantization(request: ResidentQuantizationRequest) -> Resident
                     layer_plan.objective,
                     layer_plan.outliers,
                     layer_plan.rank,
-                    logical_seed(request.seed, "outliers", block_index, layer_plan.layer.path, 0),
+                    (
+                        request.seed
+                        if request.legacy_tuning_seed_reset
+                        else logical_seed(request.seed, "outliers", block_index, layer_plan.layer.path, 0)
+                    ),
                 ),
                 context,
             )
@@ -1025,6 +1029,7 @@ def _run_resident_quantization(request: ResidentQuantizationRequest) -> Resident
                 lambda _result, _attempts: None,
                 factor_stage,
                 legacy_seed_reset=request.legacy_tuning_seed_reset,
+                initial_generator_state=outliers.factor_generator_state,
             )
             factorized = accepted.result
             peak_device_bytes = max(peak_device_bytes, accepted.peak_workspace_bytes)
@@ -1475,7 +1480,11 @@ def _run_resident_factorization_slice(request: ResidentQuantizationRequest) -> R
                 layer_plan.objective,
                 layer_plan.outliers,
                 layer_plan.rank,
-                logical_seed(request.seed, "outliers", block_index, layer_plan.layer.path, 0),
+                (
+                    request.seed
+                    if request.legacy_tuning_seed_reset
+                    else logical_seed(request.seed, "outliers", block_index, layer_plan.layer.path, 0)
+                ),
             ),
             context,
         )
@@ -1497,6 +1506,7 @@ def _run_resident_factorization_slice(request: ResidentQuantizationRequest) -> R
             lambda _result, _attempts: None,
             factor_stage,
             legacy_seed_reset=request.legacy_tuning_seed_reset,
+            initial_generator_state=outliers.factor_generator_state,
         )
         factorized = accepted.result
         fitted = None
