@@ -70,7 +70,8 @@ Read these in order for a full rewrite plan:
 12. [Delivery and migration plan](11-delivery-roadmap.md)
 13. [Lessons carried forward and local reference implementations](12-lessons-carried-forward.md)
 14. [Implementation task list and milestones](13-implementation-task-list.md)
-15. [Glossary](glossary.md)
+15. [Artifact retention and disk usage](14-artifact-retention-and-disk-usage.md)
+16. [Glossary](glossary.md)
 
 The [architecture decision record directory](adr/README.md) records decisions that future contributors may otherwise be tempted to reverse without understanding their context.
 

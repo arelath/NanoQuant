@@ -23,6 +23,8 @@ a reduced-iteration diagnostic, or an unfinished real-model run.
 - `Docs/13-implementation-task-list.md`: authoritative milestone checklist; unchecked items are real remaining work unless
   later evidence explicitly supersedes them.
 - `Docs/requirements-traceability.md`: requirements-to-milestone mapping.
+- `Docs/14-artifact-retention-and-disk-usage.md`: measured design for bounded activation retention, shared stores,
+  and store-aware garbage collection.
 - `evidence/m4/README.md`: current Gemma resident-run evidence and comparison notes.
 
 Read the relevant architecture/config/contract documents under `Docs/` before changing a boundary or persisted

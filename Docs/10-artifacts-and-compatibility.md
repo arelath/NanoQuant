@@ -282,3 +282,6 @@ Objects are collectible only when unreachable from:
 - child-artifact lineage required by policy.
 
 Garbage collection first produces a dry-run inventory with sizes and references. Temporary activation streams have short retention unless a diagnostic fixture explicitly pins them.
+
+The measured retention classes, split block/activation format, store-aware root rules, migration protocol, and disk
+acceptance bounds are specified in [Artifact Retention and Disk Usage](14-artifact-retention-and-disk-usage.md).
