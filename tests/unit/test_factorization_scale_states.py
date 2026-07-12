@@ -63,6 +63,44 @@ def test_admm_rejects_invalid_schedule_and_dimensions() -> None:
     assert all(0 <= function(0.3) <= 1 for function in SCHEDULES.values())
 
 
+def test_admm_preserves_legacy_factor_dtype_and_signed_svid_scales() -> None:
+    weight = torch.tensor(
+        [[1.0, -2.0, 0.5], [-1.0, 0.25, 2.0], [0.5, 1.0, -1.0]],
+        dtype=torch.bfloat16,
+    )
+    result = factorize_admm(
+        weight,
+        torch.ones(3),
+        torch.ones(3),
+        2,
+        torch.Generator().manual_seed(7),
+        outer_iterations=4,
+        inner_iterations=2,
+    )
+
+    exported = (
+        result.left_binary * result.scale_post.reshape(-1, 1)
+    ) @ (
+        result.right_binary
+        * result.scale_mid.reshape(-1, 1)
+        * result.scale_pre.reshape(1, -1)
+    )
+    assert result.left_latent.dtype is torch.float32
+    assert result.right_latent.dtype is torch.float32
+    assert all(
+        value.dtype is torch.bfloat16
+        for value in (
+            result.left_binary,
+            result.right_binary,
+            result.scale_pre,
+            result.scale_mid,
+            result.scale_post,
+        )
+    )
+    assert (result.scale_pre < 0).any() and (result.scale_post < 0).any()
+    assert torch.equal(result.reconstruction, exported)
+
+
 def test_scale_fit_never_worsens_weighted_objective_and_protects_columns() -> None:
     generator = torch.Generator().manual_seed(2)
     target = torch.randn(5, 4, generator=generator)

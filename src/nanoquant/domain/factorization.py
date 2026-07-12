@@ -80,9 +80,16 @@ def _power_iteration(
 def _rank_one_sign_projection(
     value: torch.Tensor, iterations: int, generator: torch.Generator, epsilon: float
 ) -> torch.Tensor:
+    left, right, signs = _svid_components(value, iterations, generator, epsilon)
+    return torch.outer(left, right) * signs
+
+
+def _svid_components(
+    value: torch.Tensor, iterations: int, generator: torch.Generator, epsilon: float
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     signs = _sign(value)
     left, singular, right = _power_iteration(value.abs(), iterations, generator, epsilon)
-    return torch.outer(left * singular, right) * signs
+    return left * singular, right, signs
 
 
 def _solve(
@@ -130,10 +137,10 @@ def factorize_admm(
         schedule = SCHEDULES[penalty_schedule]
     except KeyError as exc:
         raise ValueError(f"unknown penalty schedule: {penalty_schedule}") from exc
-    dtype = weight.dtype if weight.dtype in (torch.float32, torch.float64) else torch.float32
+    dtype = weight.dtype if weight.is_floating_point() else torch.float32
     target = weight.detach().to(dtype=dtype)
-    input_scale = input_importance.detach().to(dtype=dtype).sqrt().clamp_min(epsilon)
-    output_scale = output_importance.detach().to(dtype=dtype).sqrt().clamp_min(epsilon).reshape(-1, 1)
+    input_scale = input_importance.detach().float().sqrt().clamp_min(epsilon)
+    output_scale = output_importance.detach().float().sqrt().clamp_min(epsilon).reshape(-1, 1)
     normalized = target * input_scale.reshape(1, -1) * output_scale
     left = torch.randn((weight.shape[0], rank), dtype=dtype, device=weight.device, generator=generator)
     right = torch.randn((rank, weight.shape[1]), dtype=dtype, device=weight.device, generator=generator)
@@ -184,27 +191,31 @@ def factorize_admm(
     # but their margins to zero carry essential STE optimization state.
     left_latent = ((left + left_dual) / output_scale) * balance
     right_latent = ((right + right_dual) / input_scale) / balance
-    left_binary = _sign(left_export)
-    right_binary = _sign(right_export)
-    scale_post = left_export.abs().mean(dim=1)
-    scale_pre = right_export.abs().mean(dim=0)
-    base_left = left_binary * scale_post.reshape(-1, 1)
-    base_right = right_binary * scale_pre.reshape(1, -1)
-    system = base_left.mT @ base_left
-    rhs = (base_left.mT @ target @ base_right.mT).diagonal()
-    gram = system * (base_right @ base_right.mT)
-    gram.diagonal().add_(epsilon)
-    scale_mid = torch.linalg.lstsq(gram, rhs.reshape(-1, 1)).solution.reshape(-1)
-    reconstruction = (base_left * scale_mid.reshape(1, -1)) @ base_right
+    scale_factor = left_projected.norm(dim=0).clamp_min(epsilon).reciprocal()
+    left_export = left_export * scale_factor
+    right_u, scale_pre, right_binary = _svid_components(
+        right_export.float(), inner_iterations, generator, epsilon
+    )
+    left_u, scale_post, left_sign = _svid_components(
+        left_export.mT.float(), inner_iterations, generator, epsilon
+    )
+    left_binary = left_sign.mT.to(dtype).clone(memory_format=torch.contiguous_format)
+    right_binary = right_binary.to(dtype).contiguous()
+    scale_pre = scale_pre.to(dtype)
+    scale_mid = (right_u * left_u).to(dtype)
+    scale_post = scale_post.to(dtype)
+    reconstruction = (left_binary * scale_post.reshape(-1, 1)) @ (
+        right_binary * scale_mid.reshape(-1, 1) * scale_pre.reshape(1, -1)
+    )
     return ADMMResult(
-        left_latent.clone(),
-        right_latent.clone(),
-        left_binary,
-        right_binary,
-        scale_pre,
-        scale_mid,
-        scale_post,
-        reconstruction,
+        left_latent.clone().contiguous(),
+        right_latent.clone().contiguous(),
+        left_binary.contiguous(),
+        right_binary.contiguous(),
+        scale_pre.contiguous(),
+        scale_mid.contiguous(),
+        scale_post.contiguous(),
+        reconstruction.contiguous(),
         completed,
         stopped,
         tuple(trace),

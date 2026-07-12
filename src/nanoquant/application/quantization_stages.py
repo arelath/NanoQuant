@@ -49,7 +49,7 @@ def _summary(value: torch.Tensor) -> StatisticSummary:
 
 class OutlierSelectionStage:
     name = "select-outliers"
-    version = "1"
+    version = "2"
 
     def __init__(self, *, device: str = "cpu", residual_probe_iterations: int = 20) -> None:
         if residual_probe_iterations <= 0:
@@ -72,7 +72,7 @@ class OutlierSelectionStage:
                 context.tensor_store.read(request.objective.output_importance, self.device) as output_value,
             ):
                 weight, input_importance, output_importance = (
-                    weight_value.float(),
+                    weight_value,
                     input_value.float(),
                     output_value.float(),
                 )
@@ -142,7 +142,7 @@ class OutlierSelectionStage:
 
 class FactorizationAttemptStage:
     name = "factorize-attempt"
-    version = "2"
+    version = "3"
 
     def __init__(self, admm: ADMMConfig | None = None, *, device: str = "cpu") -> None:
         self.admm = admm or ADMMConfig(outer_iterations=400)
@@ -165,7 +165,7 @@ class FactorizationAttemptStage:
                 context.tensor_store.read(request.objective.input_importance, self.device) as input_value,
                 context.tensor_store.read(request.objective.output_importance, self.device) as output_value,
             ):
-                residual = residual_value.float()
+                residual = residual_value
                 input_importance = input_value.float()
                 output_importance = output_value.float()
                 result = factorize_admm(
