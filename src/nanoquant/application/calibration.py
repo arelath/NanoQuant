@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol, cast
 
 import torch
+from cut_cross_entropy import linear_cross_entropy  # type: ignore[import-untyped]
 from torch import nn
 
 from nanoquant.domain.calibration_math import (
@@ -147,6 +148,20 @@ def calibrate_causal_model(
                 hidden = text_output[0]
             if not isinstance(hidden, torch.Tensor):
                 raise TypeError("causal calibration text model did not return hidden states")
+            lm_head_weight = getattr(lm_head, "weight", None)
+            if (
+                hidden.is_cuda
+                and isinstance(lm_head_weight, torch.Tensor)
+                and lm_head_weight.is_cuda
+            ):
+                loss = linear_cross_entropy(
+                    hidden,
+                    lm_head_weight,
+                    batch.to(hidden.device),
+                    shift=1,
+                )
+                loss.backward()
+                return
             hidden_gradient = torch.zeros_like(hidden)
             target_count = batch.shape[0] * (batch.shape[1] - 1)
             token_chunk = 128
