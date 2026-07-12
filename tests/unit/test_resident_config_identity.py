@@ -28,6 +28,22 @@ def test_resident_algorithm_version_invalidates_commit_identity(monkeypatch: pyt
     assert resident._resident_config_hash(request) != original
 
 
+def test_torch_runtime_version_invalidates_commit_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    request = ResidentQuantizationRequest(
+        Path("snapshot"),
+        Path("output"),
+        "fixture/model",
+        "revision",
+        ((1, 2, 3),),
+        device="cpu",
+    )
+    original = resident._resident_config_hash(request)
+
+    monkeypatch.setattr(torch, "__version__", "different-runtime")
+
+    assert resident._resident_config_hash(request) != original
+
+
 def test_legacy_tuning_seed_mode_invalidates_commit_identity() -> None:
     request = ResidentQuantizationRequest(
         Path("snapshot"), Path("output"), "fixture/model", "revision", ((1, 2, 3),), device="cpu"

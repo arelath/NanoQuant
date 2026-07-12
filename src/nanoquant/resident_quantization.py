@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import torch
+import transformers
 from torch import nn
 from transformers import AutoModelForCausalLM
 
@@ -91,7 +92,7 @@ from nanoquant.infrastructure.resource_usage import peak_process_memory_bytes
 from nanoquant.infrastructure.safetensors_source import SafetensorsModelSource
 from nanoquant.infrastructure.tensor_store import LocalTensorStore
 
-RESIDENT_ALGORITHM_VERSION = 14
+RESIDENT_ALGORITHM_VERSION = 15
 
 
 @contextmanager
@@ -396,6 +397,11 @@ def _resident_config_hash(request: ResidentQuantizationRequest) -> str:
             canonical_json(
                 {
                     "resident_algorithm_version": RESIDENT_ALGORITHM_VERSION,
+                    "runtime": {
+                        "torch": str(torch.__version__),
+                        "transformers": transformers.__version__,
+                        "cuda": torch.version.cuda,
+                    },
                     "target_bpw": request.target_bpw,
                     "rank_multiple": request.rank_multiple,
                     "allocation_strategy": request.allocation_strategy,
