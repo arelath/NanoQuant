@@ -312,6 +312,7 @@ class ScaleFitStage:
                     epsilon=self.config.epsilon,
                     protected_columns=protected,
                     rollback_on_regression=self.config.rollback_on_regression,
+                    chunk_rows=self.config.chunk_rows,
                 )
                 refs = context.tensor_store.put(
                     "scale-fit",
