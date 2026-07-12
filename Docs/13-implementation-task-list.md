@@ -18,11 +18,11 @@ This checklist converts the [delivery roadmap](11-delivery-roadmap.md) into exec
 Dependencies: none  
 Outcome: the rewrite has trustworthy parity, quality, and performance baselines.
 
-- [ ] **M0.1** Record the NanoQuant repository revision, dirty-worktree patch, environment, package versions, and supported hardware baseline.
-- [ ] **M0.2** Record the modified llama.cpp revision, dirty patch, build configuration, conversion script revision, and `nanoquant.cu` content hash.
+- [x] **M0.1** Record the NanoQuant repository revision, dirty-worktree patch, environment, package versions, and supported hardware baseline.
+- [x] **M0.2** Record the modified llama.cpp revision, dirty patch, build configuration, conversion script revision, and `nanoquant.cu` content hash.
 - [ ] **M0.3** Select and document the reference development GPU, large-model host, stable performance host, and expected power/clock configuration.
-- [ ] **M0.4** Freeze the exact current configuration for Experiment 019, including every effective default that is currently spread across config representations.
-- [ ] **M0.5** Preserve `outputs/019-phase1-weight-errors.md` and its CSV as golden reporting inputs.
+- [x] **M0.4** Freeze the exact current configuration for Experiment 019, including every effective default that is currently spread across config representations.
+- [x] **M0.5** Preserve `outputs/019-phase1-weight-errors.md` and its CSV as golden reporting inputs.
 - [ ] **M0.6** Capture at least three layer fixtures: attention, MLP, and one historically difficult reconstruction layer.
 - [ ] **M0.7** Capture at least two block fixtures from different model depths, including inputs, teacher targets, statistics, weights, and accepted results.
 - [ ] **M0.8** Capture one deterministic tiny-model end-to-end legacy run.
@@ -32,12 +32,12 @@ Outcome: the rewrite has trustworthy parity, quality, and performance baselines.
 - [ ] **M0.12** Reconcile the two inference protocols: model artifact, BPW, prompt length, decode length, batch, sampling, KV cache, hardware, warm-up, and timed boundaries.
 - [ ] **M0.13** Capture llama.cpp kernel, layer/block, prefill, decode, and end-to-end benchmark JSON for the agreed comparison workloads.
 - [ ] **M0.14** Capture representative Nsight or equivalent traces for both current runtimes and account for at least 90% of wall time.
-- [ ] **M0.15** Inventory every current configuration field and confirm that each has a destination or explicit removal in the migration map.
-- [ ] **M0.16** Inventory supported model families, checkpoint variants, datasets, evaluation tasks, packing formats, and CUDA architectures.
-- [ ] **M0.17** Decide whether DBF remains supported, becomes research-only, or is deprecated; record the decision in an ADR.
-- [ ] **M0.18** Decide which calibration modes and Hessian representations are productized versus experimental; record the decision.
-- [ ] **M0.19** Decide the compatibility policy for existing `.pt`, packed extension, and GGUF artifacts.
-- [ ] **M0.20** Create a requirements-to-milestone traceability table covering every requirement ID in `01-requirements.md`.
+- [x] **M0.15** Inventory every current configuration field and confirm that each has a destination or explicit removal in the migration map.
+- [x] **M0.16** Inventory supported model families, checkpoint variants, datasets, evaluation tasks, packing formats, and CUDA architectures.
+- [x] **M0.17** Decide whether DBF remains supported, becomes research-only, or is deprecated; record the decision in an ADR.
+- [x] **M0.18** Decide which calibration modes and Hessian representations are productized versus experimental; record the decision.
+- [x] **M0.19** Decide the compatibility policy for existing `.pt`, packed extension, and GGUF artifacts.
+- [x] **M0.20** Create a requirements-to-milestone traceability table covering every requirement ID in `01-requirements.md`.
 - [ ] **M0.GATE** Verify that legacy fixtures, evaluation baselines, Experiment 019 reports, and both inference profiles can be reproduced by another maintainer from recorded instructions.
 
 ## Milestone 1 — Establish configuration, run, event, and artifact foundations
@@ -45,34 +45,34 @@ Outcome: the rewrite has trustworthy parity, quality, and performance baselines.
 Dependencies: Milestone 0 baseline formats identified  
 Outcome: even legacy-backed work can run through the new auditable shell.
 
-- [ ] **M1.1** Create the proposed package boundaries: `domain`, `application`, `ports`, `infrastructure`, `runtime`, `config`, and `cli`.
-- [ ] **M1.2** Add automated forbidden-import/dependency-direction checks from `02-architecture.md`.
-- [ ] **M1.3** Implement every frozen nested dataclass in `03-configuration-reference.md` as the sole canonical configuration schema.
-- [ ] **M1.4** Implement enum, tuple, optional, and nested-dataclass decoding from YAML and JSON.
-- [ ] **M1.5** Reject unknown configuration paths with full-path errors and nearest-name suggestions.
-- [ ] **M1.6** Implement canonical configuration serialization with deterministic field/value encoding.
-- [ ] **M1.7** Implement sparse schema-aware CLI overrides without declaring duplicate defaults.
-- [ ] **M1.8** Implement pre-resolution, resolved, and planned validation phases with stable diagnostic codes.
-- [ ] **M1.9** Implement immutable resolution of source revisions, tokenizer revisions, and `auto` executor/storage choices using the same `RunConfig` type.
-- [ ] **M1.10** Implement legacy flat-config migration and require every legacy field to be mapped, removed explicitly, or rejected.
-- [ ] **M1.11** Generate CLI help and configuration reference data from the canonical schema.
-- [ ] **M1.12** Implement `IntentConfig.experiment_number` and validation against a numbered launcher filename.
-- [ ] **M1.13** Implement the thin numbered zero-argument runfile adapter calling the shared application service.
-- [ ] **M1.14** Add a `000_experiment_template.py` showing the approved no-argument runfile pattern without consuming a research experiment number.
-- [ ] **M1.15** Add static tests prohibiting `argparse`, copied orchestration, and direct infrastructure imports in numbered runfiles.
-- [ ] **M1.16** Implement run IDs, run lifecycle states, parent/fork relationships, and active-process leases.
-- [ ] **M1.17** Implement `LauncherProvenance`, including kind, experiment number, repository-relative path, content hash, revision, and arguments.
-- [ ] **M1.18** Implement the versioned `RunManifest` and run-directory layout.
-- [ ] **M1.19** Implement allowlisted environment capture with credential/secret redaction.
-- [ ] **M1.20** Implement the structured event envelope, monotonic run sequence numbers, spans, and local JSONL sink.
-- [ ] **M1.21** Implement concise console rendering from structured events without parsing or duplicating messages.
-- [ ] **M1.22** Implement stable warning/diagnostic code registration with documentation links.
-- [ ] **M1.23** Implement the local content-addressed artifact store and common artifact descriptor.
-- [ ] **M1.24** Implement temporary leases, hashing, validation, atomic commit descriptors, and cleanup of abandoned writes.
-- [ ] **M1.25** Implement stage-specific semantic cache keys and visible reuse/invalidation explanations.
-- [ ] **M1.26** Add a compatibility adapter that invokes the legacy pipeline while producing new manifests, events, and artifact references.
-- [ ] **M1.27** Render a minimal completed/failed/interrupted run report from structured data only.
-- [ ] **M1.28** Add config parity, schema migration, event ordering, secret redaction, artifact corruption, and atomic-write tests.
+- [x] **M1.1** Create the proposed package boundaries: `domain`, `application`, `ports`, `infrastructure`, `runtime`, `config`, and `cli`.
+- [x] **M1.2** Add automated forbidden-import/dependency-direction checks from `02-architecture.md`.
+- [x] **M1.3** Implement every frozen nested dataclass in `03-configuration-reference.md` as the sole canonical configuration schema.
+- [x] **M1.4** Implement enum, tuple, optional, and nested-dataclass decoding from YAML and JSON.
+- [x] **M1.5** Reject unknown configuration paths with full-path errors and nearest-name suggestions.
+- [x] **M1.6** Implement canonical configuration serialization with deterministic field/value encoding.
+- [x] **M1.7** Implement sparse schema-aware CLI overrides without declaring duplicate defaults.
+- [x] **M1.8** Implement pre-resolution, resolved, and planned validation phases with stable diagnostic codes.
+- [x] **M1.9** Implement immutable resolution of source revisions, tokenizer revisions, and `auto` executor/storage choices using the same `RunConfig` type.
+- [x] **M1.10** Implement legacy flat-config migration and require every legacy field to be mapped, removed explicitly, or rejected.
+- [x] **M1.11** Generate CLI help and configuration reference data from the canonical schema.
+- [x] **M1.12** Implement `IntentConfig.experiment_number` and validation against a numbered launcher filename.
+- [x] **M1.13** Implement the thin numbered zero-argument runfile adapter calling the shared application service.
+- [x] **M1.14** Add a `000_experiment_template.py` showing the approved no-argument runfile pattern without consuming a research experiment number.
+- [x] **M1.15** Add static tests prohibiting `argparse`, copied orchestration, and direct infrastructure imports in numbered runfiles.
+- [x] **M1.16** Implement run IDs, run lifecycle states, parent/fork relationships, and active-process leases.
+- [x] **M1.17** Implement `LauncherProvenance`, including kind, experiment number, repository-relative path, content hash, revision, and arguments.
+- [x] **M1.18** Implement the versioned `RunManifest` and run-directory layout.
+- [x] **M1.19** Implement allowlisted environment capture with credential/secret redaction.
+- [x] **M1.20** Implement the structured event envelope, monotonic run sequence numbers, spans, and local JSONL sink.
+- [x] **M1.21** Implement concise console rendering from structured events without parsing or duplicating messages.
+- [x] **M1.22** Implement stable warning/diagnostic code registration with documentation links.
+- [x] **M1.23** Implement the local content-addressed artifact store and common artifact descriptor.
+- [x] **M1.24** Implement temporary leases, hashing, validation, atomic commit descriptors, and cleanup of abandoned writes.
+- [x] **M1.25** Implement stage-specific semantic cache keys and visible reuse/invalidation explanations.
+- [x] **M1.26** Add a compatibility adapter that invokes the legacy pipeline while producing new manifests, events, and artifact references.
+- [x] **M1.27** Render a minimal completed/failed/interrupted run report from structured data only.
+- [x] **M1.28** Add config parity, schema migration, event ordering, secret redaction, artifact corruption, and atomic-write tests.
 - [ ] **M1.GATE** Run a legacy-backed numbered experiment with no arguments and verify canonical resolved config, launcher provenance, structured events, artifact commits, and a self-contained report.
 
 ## Milestone 2 — Extract and verify the mathematical domain
@@ -80,28 +80,28 @@ Outcome: even legacy-backed work can run through the new auditable shell.
 Dependencies: Milestone 0 fixtures; Milestone 1 artifact/test foundations  
 Outcome: core NanoQuant mathematics is pure, typed, replayable, and parity-tested.
 
-- [ ] **M2.1** Implement canonical `BlockId`, `LayerId`, `TensorId`, `ComponentRef`, `ArtifactRef`, `TensorSpec`, and `TensorRef` types.
-- [ ] **M2.2** Implement canonical model/dataset identities and model inventory domain objects.
-- [ ] **M2.3** Implement `BitCost`, exact logical/storage accounting helpers, and reconciliation tests.
-- [ ] **M2.4** Extract raw, per-element, objective-weighted, normalized, and staged export reconstruction metrics into pure functions.
+- [x] **M2.1** Implement canonical `BlockId`, `LayerId`, `TensorId`, `ComponentRef`, `ArtifactRef`, `TensorSpec`, and `TensorRef` types.
+- [x] **M2.2** Implement canonical model/dataset identities and model inventory domain objects.
+- [x] **M2.3** Implement `BitCost`, exact logical/storage accounting helpers, and reconciliation tests.
+- [x] **M2.4** Extract raw, per-element, objective-weighted, normalized, and staged export reconstruction metrics into pure functions.
 - [ ] **M2.5** Extract diagonal reconstruction objective and verify legacy parity on captured layers.
-- [ ] **M2.6** Extract dense-Hessian objective, whitening/unwhitening, regularization, and triangular-solve behavior.
-- [ ] **M2.7** Define the block-diagonal and low-rank-plus-diagonal objective contracts, even if optimized implementations arrive in Milestone 5.
-- [ ] **M2.8** Extract uniform rank allocation and exact BPW budgeting.
-- [ ] **M2.9** Extract sensitivity/utility allocation, rounding, floor/ceiling, and edge-boost policies.
-- [ ] **M2.10** Extract rank retry scoring, caps, attempt limits, and global extra-bit budget as a pure policy.
-- [ ] **M2.11** Extract Fisher outlier selection and its bit accounting.
-- [ ] **M2.12** Extract residual-probe outlier selection and isolate its factorizer dependency.
-- [ ] **M2.13** Extract outlier removal/reconstruction and BF16/FP16/INT8 storage behavior.
-- [ ] **M2.14** Extract NanoQuant ADMM solve steps, schedules, convergence metrics, and deterministic generator use.
+- [x] **M2.6** Extract dense-Hessian objective, whitening/unwhitening, regularization, and triangular-solve behavior.
+- [x] **M2.7** Define the block-diagonal and low-rank-plus-diagonal objective contracts, even if optimized implementations arrive in Milestone 5.
+- [x] **M2.8** Extract uniform rank allocation and exact BPW budgeting.
+- [x] **M2.9** Extract sensitivity/utility allocation, rounding, floor/ceiling, and edge-boost policies.
+- [x] **M2.10** Extract rank retry scoring, caps, attempt limits, and global extra-bit budget as a pure policy.
+- [x] **M2.11** Extract Fisher outlier selection and its bit accounting.
+- [x] **M2.12** Extract residual-probe outlier selection and isolate its factorizer dependency.
+- [x] **M2.13** Extract outlier removal/reconstruction and BF16/FP16/INT8 storage behavior.
+- [x] **M2.14** Extract NanoQuant ADMM solve steps, schedules, convergence metrics, and deterministic generator use.
 - [ ] **M2.15** Extract DBF only if retained by M0.17, with an explicit component/version and parity expectations.
-- [ ] **M2.16** Extract scale-pre/mid/post fitting, objective comparison, protected outlier columns, and rollback.
-- [ ] **M2.17** Implement `MaterializedFactorizationInput/Output` for pure in-stage tensor computation.
-- [ ] **M2.18** Implement persisted `FactorizationRequest`, `FactorizationResult`, convergence, scale, outlier, retry, tuning, and layer-result DTOs.
-- [ ] **M2.19** Implement separate `TrainableNanoQuantState` and `FrozenNanoQuantState` with validated conversion.
-- [ ] **M2.20** Ensure domain functions do not print, access files, traverse models, consult global configuration, or mutate caller tensors.
-- [ ] **M2.21** Add small deterministic CPU unit tests for every mathematical component and boundary case.
-- [ ] **M2.22** Add property tests for pack-independent reconstruction, retry monotonicity, budgets, scaling invariants, and deterministic logical seeds.
+- [x] **M2.16** Extract scale-pre/mid/post fitting, objective comparison, protected outlier columns, and rollback.
+- [x] **M2.17** Implement `MaterializedFactorizationInput/Output` for pure in-stage tensor computation.
+- [x] **M2.18** Implement persisted `FactorizationRequest`, `FactorizationResult`, convergence, scale, outlier, retry, tuning, and layer-result DTOs.
+- [x] **M2.19** Implement separate `TrainableNanoQuantState` and `FrozenNanoQuantState` with validated conversion.
+- [x] **M2.20** Ensure domain functions do not print, access files, traverse models, consult global configuration, or mutate caller tensors.
+- [x] **M2.21** Add small deterministic CPU unit tests for every mathematical component and boundary case.
+- [x] **M2.22** Add property tests for pack-independent reconstruction, retry monotonicity, budgets, scaling invariants, and deterministic logical seeds.
 - [ ] **M2.23** Run old/new layer-fixture comparisons and document all numerical tolerances or intentional differences.
 - [ ] **M2.GATE** Verify captured layer fixtures reproduce accepted legacy factors/metrics within approved tolerances using only typed requests, tensor artifacts, and domain components.
 
@@ -110,26 +110,26 @@ Outcome: core NanoQuant mathematics is pure, typed, replayable, and parity-teste
 Dependencies: Milestones 1–2  
 Outcome: architecture-specific behavior is isolated and calibration emits portable artifacts.
 
-- [ ] **M3.1** Implement the `ModelSource` port for config/tokenizer metadata and tensor inventory without weight materialization.
-- [ ] **M3.2** Implement safe sharded-safetensors lookup, tensor shape/dtype inspection, direct reads, memory mapping, and hash verification.
-- [ ] **M3.3** Implement the `ModelAdapter` contract for block inventory, source-key mapping, block construction/loading, quantizable layers, prefix, block, suffix, and LM head.
-- [ ] **M3.4** Implement the Llama-compatible adapter.
-- [ ] **M3.5** Implement the Gemma/Gemma 3 adapter, including text-stack and position/attention metadata behavior.
-- [ ] **M3.6** Implement the Qwen adapter.
-- [ ] **M3.7** Implement the OPT adapter if retained in the supported-family decision.
-- [ ] **M3.8** Add explicit unsupported-variant diagnostics instead of best-effort architecture guessing.
-- [ ] **M3.9** Create an offline deterministic tiny causal-transformer adapter/fixture for integration tests.
-- [ ] **M3.10** Implement versioned dataset-source, mixture, formatting, selection, tokenization, and fingerprint services.
-- [ ] **M3.11** Pin tokenizer revision, chat template, BOS/EOS/padding behavior, and selected sample identities.
-- [ ] **M3.12** Implement CUDA, pinned-RAM, and pageable-RAM activation stores behind one contract.
-- [ ] **M3.13** Implement model-prefix input capture without permanent module replacement or exception-based hidden control flow.
-- [ ] **M3.14** Implement typed calibration accumulators and portable `CalibrationStats` artifacts.
-- [ ] **M3.15** Implement online Fisher calibration with current behavior documented and tested.
-- [ ] **M3.16** Implement two-phase Fisher calibration and deterministic partition/order behavior.
-- [ ] **M3.17** Implement forward-only calibration for low-resource execution.
-- [ ] **M3.18** Implement the retained DBF/other calibration modes or emit explicit unsupported diagnostics.
-- [ ] **M3.19** Implement objective builders producing per-layer `ObjectiveSpec` artifacts from calibration statistics.
-- [ ] **M3.20** Implement calibration OOM policies as explicit finite fallbacks with events and plan revisions.
+- [x] **M3.1** Implement the `ModelSource` port for config/tokenizer metadata and tensor inventory without weight materialization.
+- [x] **M3.2** Implement safe sharded-safetensors lookup, tensor shape/dtype inspection, direct reads, memory mapping, and hash verification.
+- [x] **M3.3** Implement the `ModelAdapter` contract for block inventory, source-key mapping, block construction/loading, quantizable layers, prefix, block, suffix, and LM head.
+- [x] **M3.4** Implement the Llama-compatible adapter.
+- [x] **M3.5** Implement the Gemma/Gemma 3 adapter, including text-stack and position/attention metadata behavior.
+- [x] **M3.6** Implement the Qwen adapter.
+- [x] **M3.7** Implement the OPT adapter if retained in the supported-family decision.
+- [x] **M3.8** Add explicit unsupported-variant diagnostics instead of best-effort architecture guessing.
+- [x] **M3.9** Create an offline deterministic tiny causal-transformer adapter/fixture for integration tests.
+- [x] **M3.10** Implement versioned dataset-source, mixture, formatting, selection, tokenization, and fingerprint services.
+- [x] **M3.11** Pin tokenizer revision, chat template, BOS/EOS/padding behavior, and selected sample identities.
+- [x] **M3.12** Implement CUDA, pinned-RAM, and pageable-RAM activation stores behind one contract.
+- [x] **M3.13** Implement model-prefix input capture without permanent module replacement or exception-based hidden control flow.
+- [x] **M3.14** Implement typed calibration accumulators and portable `CalibrationStats` artifacts.
+- [x] **M3.15** Implement online Fisher calibration with current behavior documented and tested.
+- [x] **M3.16** Implement two-phase Fisher calibration and deterministic partition/order behavior.
+- [x] **M3.17** Implement forward-only calibration for low-resource execution.
+- [x] **M3.18** Implement the retained DBF/other calibration modes or emit explicit unsupported diagnostics.
+- [x] **M3.19** Implement objective builders producing per-layer `ObjectiveSpec` artifacts from calibration statistics.
+- [x] **M3.20** Implement calibration OOM policies as explicit finite fallbacks with events and plan revisions.
 - [ ] **M3.21** Add common adapter contract tests for complete tensor mapping, block ordering, prefix/block/suffix parity, tied weights, and streamed loading.
 - [ ] **M3.22** Add calibration parity/stability tests, batch-partition invariance tests, and cached-versus-uncached equivalence tests.
 - [ ] **M3.GATE** Calibrate the tiny model and one supported 1B model through the new adapters and produce validated, replayable statistics/objective artifacts without using legacy traversal helpers.
@@ -139,33 +139,33 @@ Outcome: architecture-specific behavior is isolated and calibration emits portab
 Dependencies: Milestones 1–3  
 Outcome: a complete 1B-class run uses the new pipeline and survives interruption.
 
-- [ ] **M4.1** Implement the generic typed `Stage[Request, Result]` interface, stage registry, semantic key, resource estimate, execute, and validate lifecycle.
-- [ ] **M4.2** Implement `StageContext` with executor, artifact/tensor stores, event sink, cancellation, and no global full config.
-- [ ] **M4.3** Implement the resident executor, device scopes, tensor leases, buffer reuse, and deterministic release without hot-loop allocator clearing.
-- [ ] **M4.4** Implement planning from model inventory, calibration artifacts, allocation config, outliers, objectives, and exact bit cost.
-- [ ] **M4.5** Emit and validate complete `QuantizationPlan`, `BlockPlan`, and `LayerPlan` artifacts before model mutation.
-- [ ] **M4.6** Implement source/working block construction through the adapter.
-- [ ] **M4.7** Implement non-factorized tuning as an independent typed service.
-- [ ] **M4.8** Implement outlier-selection stage and artifact commit.
-- [ ] **M4.9** Implement factorization-attempt stage, scale-fit stage, reconstruction evaluation, and attempt events.
-- [ ] **M4.10** Implement the pure retry-decision loop and update retry budget only after accepted layer commit.
-- [ ] **M4.11** Implement factorized tuning and best-state restoration as an independent service.
-- [ ] **M4.12** Implement post-block refit as an optional independent service.
-- [ ] **M4.13** Implement `LayerFreezer`, `BlockEditor`, and explicit installation of frozen layer state into the stage-owned working block.
-- [ ] **M4.14** Record source-reference, block-entry, after-each-layer, post-refit, and final-frozen-pre-KD loss snapshots.
-- [ ] **M4.15** Commit immutable `LayerResult` after each accepted layer.
-- [ ] **M4.16** Commit immutable `BlockResult`, frozen block state, and teacher/compressed next-block activation generations atomically.
-- [ ] **M4.17** Implement `RunState`, `ProgressCursor`, `BudgetState`, and journaled committed-artifact references.
-- [ ] **M4.18** Implement logical seed derivation from run seed, stage, block, layer, and attempt.
-- [ ] **M4.19** Implement resume validation, latest-valid-commit discovery, and restart of the first incomplete unit.
-- [ ] **M4.20** Implement fork semantics and a visible upstream-reuse/downstream-invalidation plan.
-- [ ] **M4.21** Inject failure before/after every layer/block commit operation and verify equivalence with uninterrupted controls.
-- [ ] **M4.22** Implement `capture-layer`, `replay-layer`, `capture-block`, and `replay-block` using canonical fixture artifacts.
-- [ ] **M4.23** Implement `FrozenModelResult` assembly from block artifacts without requiring a mutable full model object.
-- [ ] **M4.24** Render the Experiment 019-style per-layer reconstruction and final-block-pre-KD tables from structured results.
-- [ ] **M4.25** Run the deterministic tiny end-to-end pipeline entirely on new components.
+- [x] **M4.1** Implement the generic typed `Stage[Request, Result]` interface, stage registry, semantic key, resource estimate, execute, and validate lifecycle.
+- [x] **M4.2** Implement `StageContext` with executor, artifact/tensor stores, event sink, cancellation, and no global full config.
+- [x] **M4.3** Implement the resident executor, device scopes, tensor leases, buffer reuse, and deterministic release without hot-loop allocator clearing.
+- [x] **M4.4** Implement planning from model inventory, calibration artifacts, allocation config, outliers, objectives, and exact bit cost.
+- [x] **M4.5** Emit and validate complete `QuantizationPlan`, `BlockPlan`, and `LayerPlan` artifacts before model mutation.
+- [x] **M4.6** Implement source/working block construction through the adapter.
+- [x] **M4.7** Implement non-factorized tuning as an independent typed service.
+- [x] **M4.8** Implement outlier-selection stage and artifact commit.
+- [x] **M4.9** Implement factorization-attempt stage, scale-fit stage, reconstruction evaluation, and attempt events.
+- [x] **M4.10** Implement the pure retry-decision loop and update retry budget only after accepted layer commit.
+- [x] **M4.11** Implement factorized tuning and best-state restoration as an independent service.
+- [x] **M4.12** Implement post-block refit as an optional independent service.
+- [x] **M4.13** Implement `LayerFreezer`, `BlockEditor`, and explicit installation of frozen layer state into the stage-owned working block.
+- [x] **M4.14** Record source-reference, block-entry, after-each-layer, post-refit, and final-frozen-pre-KD loss snapshots.
+- [x] **M4.15** Commit immutable `LayerResult` after each accepted layer.
+- [x] **M4.16** Commit immutable `BlockResult`, frozen block state, and teacher/compressed next-block activation generations atomically.
+- [x] **M4.17** Implement `RunState`, `ProgressCursor`, `BudgetState`, and journaled committed-artifact references.
+- [x] **M4.18** Implement logical seed derivation from run seed, stage, block, layer, and attempt.
+- [x] **M4.19** Implement resume validation, latest-valid-commit discovery, and restart of the first incomplete unit.
+- [x] **M4.20** Implement fork semantics and a visible upstream-reuse/downstream-invalidation plan.
+- [x] **M4.21** Inject failure before/after every layer/block commit operation and verify equivalence with uninterrupted controls.
+- [x] **M4.22** Implement `capture-layer`, `replay-layer`, `capture-block`, and `replay-block` using canonical fixture artifacts.
+- [x] **M4.23** Implement `FrozenModelResult` assembly from block artifacts without requiring a mutable full model object.
+- [x] **M4.24** Render the Experiment 019-style per-layer reconstruction and final-block-pre-KD tables from structured results.
+- [x] **M4.25** Run the deterministic tiny end-to-end pipeline entirely on new components.
 - [ ] **M4.26** Run a representative 1B resident quantization and compare factors, BPW, block losses, quality, memory, and time with the legacy baseline.
-- [ ] **M4.27** Meet the captured-layer under-60-second and tiny-model under-10-minute feedback targets where the reference hardware/factorizer settings permit them.
+- [x] **M4.27** Meet the captured-layer under-60-second and tiny-model under-10-minute feedback targets where the reference hardware/factorizer settings permit them.
 - [ ] **M4.GATE** Complete, interrupt, resume, replay, and compare a 1B resident run with no legacy quantization/orchestration dependency and approved parity differences only.
 
 ## Milestone 5 — Add bounded-memory streaming and 70B scaling
@@ -344,4 +344,3 @@ These tasks should not block the first rewrite release unless promoted by an ADR
 - [ ] **P5** Add automated representative-case selection from accumulated layer/block diagnostics.
 - [ ] **P6** Add cost-aware experiment scheduling across available machines.
 - [ ] **P7** Add safe artifact garbage-collection tooling with dry-run/reachability reports.
-

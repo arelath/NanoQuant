@@ -1,0 +1,2733 @@
+diff --git a/ggml/include/ggml.h b/ggml/include/ggml.h
+index 721a07282..22e9470fa 100644
+--- a/ggml/include/ggml.h
++++ b/ggml/include/ggml.h
+@@ -513,6 +513,9 @@ extern "C" {
+         GGML_OP_MUL_MAT,
+         GGML_OP_MUL_MAT_ID,
+         GGML_OP_NANOQUANT_LINEAR,
++        GGML_OP_NANOQUANT_STAGE1_FUSED,
++        GGML_OP_NANOQUANT_STAGE2,
++        GGML_OP_NANOQUANT_STAGE2_FUSED2,
+         GGML_OP_OUT_PROD,
+ 
+         GGML_OP_SCALE,
+@@ -1445,6 +1448,47 @@ extern "C" {
+             struct ggml_tensor  * salient_weight,
+             struct ggml_tensor  * salient_scale);
+ 
++    // Internal building blocks used to fuse NanoQuant stage 1 across projections.
++    // stage1_fused accepts up to three groups of (v_bits, scale_pre, scale_mid)
++    // and returns a concatenated F32 rank buffer [sum(rank), ...].
++    GGML_API struct ggml_tensor * ggml_nanoquant_stage1_fused(
++            struct ggml_context * ctx,
++            struct ggml_tensor  * x,
++            struct ggml_tensor  * v0,
++            struct ggml_tensor  * scale_pre0,
++            struct ggml_tensor  * scale_mid0,
++            struct ggml_tensor  * v1,
++            struct ggml_tensor  * scale_pre1,
++            struct ggml_tensor  * scale_mid1,
++            struct ggml_tensor  * v2,
++            struct ggml_tensor  * scale_pre2,
++            struct ggml_tensor  * scale_mid2);
++
++    GGML_API struct ggml_tensor * ggml_nanoquant_stage2(
++            struct ggml_context * ctx,
++            struct ggml_tensor  * x,
++            struct ggml_tensor  * tmp,
++            struct ggml_tensor  * u_bits,
++            struct ggml_tensor  * scale_post,
++            struct ggml_tensor  * salient_idx,
++            struct ggml_tensor  * salient_weight,
++            struct ggml_tensor  * salient_scale);
++
++    GGML_API struct ggml_tensor * ggml_nanoquant_stage2_fused2(
++            struct ggml_context * ctx,
++            struct ggml_tensor  * x,
++            struct ggml_tensor  * tmp,
++            struct ggml_tensor  * u0,
++            struct ggml_tensor  * scale_post0,
++            struct ggml_tensor  * salient_idx0,
++            struct ggml_tensor  * salient_weight0,
++            struct ggml_tensor  * u1,
++            struct ggml_tensor  * scale_post1,
++            struct ggml_tensor  * salient_idx1,
++            struct ggml_tensor  * salient_weight1,
++            int64_t               n_rank0,
++            int64_t               n_rank1);
++
+     // change the precision of a matrix multiplication
+     // set to GGML_PREC_F32 for higher precision (useful for phi-2)
+     GGML_API void ggml_mul_mat_set_prec(
+diff --git a/ggml/src/ggml-cpu/ggml-cpu.c b/ggml/src/ggml-cpu/ggml-cpu.c
+index 432807060..ad109c27e 100644
+--- a/ggml/src/ggml-cpu/ggml-cpu.c
++++ b/ggml/src/ggml-cpu/ggml-cpu.c
+@@ -1845,6 +1845,18 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
+             {
+                 ggml_compute_forward_nanoquant_linear(params, tensor);
+             } break;
++        case GGML_OP_NANOQUANT_STAGE1_FUSED:
++            {
++                ggml_compute_forward_nanoquant_stage1_fused(params, tensor);
++            } break;
++        case GGML_OP_NANOQUANT_STAGE2:
++            {
++                ggml_compute_forward_nanoquant_stage2(params, tensor);
++            } break;
++        case GGML_OP_NANOQUANT_STAGE2_FUSED2:
++            {
++                ggml_compute_forward_nanoquant_stage2_fused2(params, tensor);
++            } break;
+         case GGML_OP_OUT_PROD:
+             {
+                 ggml_compute_forward_out_prod(params, tensor);
+@@ -2315,6 +2327,9 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
+         case GGML_OP_MUL_MAT:
+         case GGML_OP_MUL_MAT_ID:
+         case GGML_OP_NANOQUANT_LINEAR:
++        case GGML_OP_NANOQUANT_STAGE1_FUSED:
++        case GGML_OP_NANOQUANT_STAGE2:
++        case GGML_OP_NANOQUANT_STAGE2_FUSED2:
+         case GGML_OP_OUT_PROD:
+             {
+                 n_tasks = n_threads;
+diff --git a/ggml/src/ggml-cpu/ops.cpp b/ggml/src/ggml-cpu/ops.cpp
+index ecd3c87ea..55ca43d26 100644
+--- a/ggml/src/ggml-cpu/ops.cpp
++++ b/ggml/src/ggml-cpu/ops.cpp
+@@ -11528,6 +11528,210 @@ static inline float ggml_nanoquant_get_sign(const ggml_tensor * bits, int64_t ro
+     return (word & (uint32_t(1) << bit_idx)) ? -1.0f : 1.0f;
+ }
+ 
++void ggml_compute_forward_nanoquant_stage1_fused(const ggml_compute_params * params, ggml_tensor * dst) {
++    const ggml_tensor * x = dst->src[0];
++
++    GGML_ASSERT(dst->type == GGML_TYPE_F32);
++    GGML_ASSERT(dst->nb[0] == sizeof(float));
++
++    const int ith = params->ith;
++    const int nth = params->nth;
++
++    const int64_t n_in = x->ne[0];
++    const int64_t n_col = dst->ne[1]*dst->ne[2]*dst->ne[3];
++
++    // CPU split-stage ops are primarily a reference/fallback path; each group
++    // writes into its concatenated rank slice of dst.
++    int64_t rank_base = 0;
++    for (int g = 0; g < 3; ++g) {
++        const ggml_tensor * v_bits    = dst->src[1 + 3*g];
++        const ggml_tensor * scale_pre = dst->src[2 + 3*g];
++        const ggml_tensor * scale_mid = dst->src[3 + 3*g];
++        if (v_bits == nullptr) {
++            continue;
++        }
++
++        GGML_ASSERT(v_bits->type == GGML_TYPE_I32);
++        const int64_t n_rank = scale_mid->ne[0];
++        const int64_t r0 = (n_rank*ith)/nth;
++        const int64_t r1 = (n_rank*(ith + 1))/nth;
++
++        for (int64_t c = 0; c < n_col; ++c) {
++            const int64_t i3 = c/(dst->ne[1]*dst->ne[2]);
++            const int64_t rem = c - i3*dst->ne[1]*dst->ne[2];
++            const int64_t i2 = rem/dst->ne[1];
++            const int64_t i1 = rem - i2*dst->ne[1];
++
++            for (int64_t r = r0; r < r1; ++r) {
++                float acc = 0.0f;
++                for (int64_t i = 0; i < n_in; ++i) {
++                    const float xv = ggml_nanoquant_get_f32_4d(x, i, i1, i2, i3) *
++                        ggml_nanoquant_get_f32_1d(scale_pre, i);
++                    acc += xv * ggml_nanoquant_get_sign(v_bits, r, i);
++                }
++                const int64_t rr = rank_base + r;
++                float * out = (float *) ((char *) dst->data + rr*dst->nb[0] + i1*dst->nb[1] + i2*dst->nb[2] + i3*dst->nb[3]);
++                *out = acc * ggml_nanoquant_get_f32_1d(scale_mid, r);
++            }
++        }
++
++        rank_base += n_rank;
++    }
++}
++
++void ggml_compute_forward_nanoquant_stage2(const ggml_compute_params * params, ggml_tensor * dst) {
++    const ggml_tensor * x          = dst->src[0];
++    const ggml_tensor * tmp        = dst->src[1];
++    const ggml_tensor * u_bits     = dst->src[2];
++    const ggml_tensor * scale_post = dst->src[3];
++    const ggml_tensor * salient_idx    = dst->src[4];
++    const ggml_tensor * salient_weight = dst->src[5];
++    const ggml_tensor * salient_scale  = dst->src[6];
++
++    GGML_ASSERT(dst->type == GGML_TYPE_F32);
++    GGML_ASSERT(tmp->type == GGML_TYPE_F32);
++    GGML_ASSERT(u_bits->type == GGML_TYPE_I32);
++    GGML_ASSERT(dst->nb[0] == sizeof(float));
++
++    const int ith = params->ith;
++    const int nth = params->nth;
++
++    const int64_t n_rank = tmp->ne[0];
++    const int64_t n_out  = dst->ne[0];
++    const int64_t n_salient = salient_idx == nullptr ? 0 : salient_idx->ne[0];
++
++    const int64_t o0 = (n_out*ith)/nth;
++    const int64_t o1 = (n_out*(ith + 1))/nth;
++    if (o0 >= o1) {
++        return;
++    }
++
++    std::vector<float> post(n_out);
++    for (int64_t o = o0; o < o1; ++o) {
++        post[o] = ggml_nanoquant_get_f32_1d(scale_post, o);
++    }
++
++    const int64_t n_col = dst->ne[1]*dst->ne[2]*dst->ne[3];
++    for (int64_t c = 0; c < n_col; ++c) {
++        const int64_t i3 = c/(dst->ne[1]*dst->ne[2]);
++        const int64_t rem = c - i3*dst->ne[1]*dst->ne[2];
++        const int64_t i2 = rem/dst->ne[1];
++        const int64_t i1 = rem - i2*dst->ne[1];
++
++        for (int64_t o = o0; o < o1; ++o) {
++            float acc = 0.0f;
++            for (int64_t r = 0; r < n_rank; ++r) {
++                const float tv = *(const float *) ((const char *) tmp->data + r*tmp->nb[0] + i1*tmp->nb[1] + i2*tmp->nb[2] + i3*tmp->nb[3]);
++                acc += tv * ggml_nanoquant_get_sign(u_bits, o, r);
++            }
++
++            float value = acc * post[o];
++            for (int64_t s = 0; s < n_salient; ++s) {
++                const int64_t idx = ggml_nanoquant_get_i32_1d(salient_idx, s);
++                GGML_ASSERT(idx >= 0 && idx < x->ne[0]);
++
++                float weight = ggml_nanoquant_get_f32_2d(salient_weight, s, o);
++                if (salient_scale != nullptr) {
++                    weight *= ggml_nanoquant_get_f32_1d(salient_scale, s);
++                }
++                value += ggml_nanoquant_get_f32_4d(x, idx, i1, i2, i3)*weight;
++            }
++
++            float * out = (float *) ((char *) dst->data + o*dst->nb[0] + i1*dst->nb[1] + i2*dst->nb[2] + i3*dst->nb[3]);
++            *out = value;
++        }
++    }
++}
++
++static void ggml_compute_forward_nanoquant_stage2_fused2_group(
++        const ggml_compute_params * params,
++        ggml_tensor * dst,
++        const ggml_tensor * x,
++        const ggml_tensor * tmp,
++        const ggml_tensor * u_bits,
++        const ggml_tensor * scale_post,
++        const ggml_tensor * salient_idx,
++        const ggml_tensor * salient_weight,
++        int64_t n_rank,
++        int64_t rank_offset,
++        int64_t out_offset) {
++    // The fused output is concatenated by output rows, while tmp is
++    // concatenated by rank rows from fused stage 1.
++    const int ith = params->ith;
++    const int nth = params->nth;
++
++    const int64_t n_out = scale_post->ne[0];
++    const int64_t n_salient = salient_idx == nullptr ? 0 : salient_idx->ne[0];
++
++    const int64_t o0 = (n_out*ith)/nth;
++    const int64_t o1 = (n_out*(ith + 1))/nth;
++    if (o0 >= o1) {
++        return;
++    }
++
++    std::vector<float> post(n_out);
++    for (int64_t o = o0; o < o1; ++o) {
++        post[o] = ggml_nanoquant_get_f32_1d(scale_post, o);
++    }
++
++    const int64_t n_col = dst->ne[1]*dst->ne[2]*dst->ne[3];
++    for (int64_t c = 0; c < n_col; ++c) {
++        const int64_t i3 = c/(dst->ne[1]*dst->ne[2]);
++        const int64_t rem = c - i3*dst->ne[1]*dst->ne[2];
++        const int64_t i2 = rem/dst->ne[1];
++        const int64_t i1 = rem - i2*dst->ne[1];
++
++        for (int64_t o = o0; o < o1; ++o) {
++            float acc = 0.0f;
++            for (int64_t r = 0; r < n_rank; ++r) {
++                const int64_t rr = rank_offset + r;
++                const float tv = *(const float *) ((const char *) tmp->data + rr*tmp->nb[0] + i1*tmp->nb[1] + i2*tmp->nb[2] + i3*tmp->nb[3]);
++                acc += tv * ggml_nanoquant_get_sign(u_bits, o, r);
++            }
++
++            float value = acc * post[o];
++            for (int64_t s = 0; s < n_salient; ++s) {
++                const int64_t idx = ggml_nanoquant_get_i32_1d(salient_idx, s);
++                GGML_ASSERT(idx >= 0 && idx < x->ne[0]);
++                value += ggml_nanoquant_get_f32_4d(x, idx, i1, i2, i3) *
++                    ggml_nanoquant_get_f32_2d(salient_weight, s, o);
++            }
++
++            const int64_t oo = out_offset + o;
++            float * out = (float *) ((char *) dst->data + oo*dst->nb[0] + i1*dst->nb[1] + i2*dst->nb[2] + i3*dst->nb[3]);
++            *out = value;
++        }
++    }
++}
++
++void ggml_compute_forward_nanoquant_stage2_fused2(const ggml_compute_params * params, ggml_tensor * dst) {
++    const ggml_tensor * x          = dst->src[0];
++    const ggml_tensor * tmp        = dst->src[1];
++    const ggml_tensor * u0         = dst->src[2];
++    const ggml_tensor * post0      = dst->src[3];
++    const ggml_tensor * idx0       = dst->src[4];
++    const ggml_tensor * weight0    = dst->src[5];
++    const ggml_tensor * u1         = dst->src[6];
++    const ggml_tensor * post1      = dst->src[7];
++    const ggml_tensor * idx1       = dst->src[8];
++    const ggml_tensor * weight1    = dst->src[9];
++
++    GGML_ASSERT(dst->type == GGML_TYPE_F32);
++    GGML_ASSERT(tmp->type == GGML_TYPE_F32);
++    GGML_ASSERT(u0->type == GGML_TYPE_I32);
++    GGML_ASSERT(u1->type == GGML_TYPE_I32);
++    GGML_ASSERT(dst->nb[0] == sizeof(float));
++
++    const int64_t n_rank0 = ggml_get_op_params_i32(dst, 0);
++    const int64_t n_rank1 = ggml_get_op_params_i32(dst, 1);
++    const int64_t n_out0  = post0->ne[0];
++
++    ggml_compute_forward_nanoquant_stage2_fused2_group(
++        params, dst, x, tmp, u0, post0, idx0, weight0, n_rank0, 0, 0);
++    ggml_compute_forward_nanoquant_stage2_fused2_group(
++        params, dst, x, tmp, u1, post1, idx1, weight1, n_rank1, n_rank0, n_out0);
++}
++
+ void ggml_compute_forward_nanoquant_linear(const ggml_compute_params * params, ggml_tensor * dst) {
+     const ggml_tensor * x          = dst->src[0];
+     const ggml_tensor * v_bits     = dst->src[1];
+diff --git a/ggml/src/ggml-cpu/ops.h b/ggml/src/ggml-cpu/ops.h
+index 64afe555a..f5bb68791 100644
+--- a/ggml/src/ggml-cpu/ops.h
++++ b/ggml/src/ggml-cpu/ops.h
+@@ -114,6 +114,9 @@ void ggml_compute_forward_cross_entropy_loss_back(const struct ggml_compute_para
+ void ggml_compute_forward_opt_step_adamw(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+ void ggml_compute_forward_mul_mat(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+ void ggml_compute_forward_nanoquant_linear(const struct ggml_compute_params * params, struct ggml_tensor * dst);
++void ggml_compute_forward_nanoquant_stage1_fused(const struct ggml_compute_params * params, struct ggml_tensor * dst);
++void ggml_compute_forward_nanoquant_stage2(const struct ggml_compute_params * params, struct ggml_tensor * dst);
++void ggml_compute_forward_nanoquant_stage2_fused2(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+ void ggml_compute_forward_fwht(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+ void ggml_compute_forward_opt_step_sgd(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+ #ifdef __cplusplus
+diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
+index e73b7d1dd..b8bf1cc37 100644
+--- a/ggml/src/ggml-cuda/ggml-cuda.cu
++++ b/ggml/src/ggml-cuda/ggml-cuda.cu
+@@ -2126,6 +2126,15 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
+         case GGML_OP_NANOQUANT_LINEAR:
+             ggml_cuda_op_nanoquant_linear(ctx, dst);
+             break;
++        case GGML_OP_NANOQUANT_STAGE1_FUSED:
++            ggml_cuda_op_nanoquant_stage1_fused(ctx, dst);
++            break;
++        case GGML_OP_NANOQUANT_STAGE2:
++            ggml_cuda_op_nanoquant_stage2(ctx, dst);
++            break;
++        case GGML_OP_NANOQUANT_STAGE2_FUSED2:
++            ggml_cuda_op_nanoquant_stage2_fused2(ctx, dst);
++            break;
+         case GGML_OP_OUT_PROD:
+             ggml_cuda_out_prod(ctx, dst);
+             break;
+@@ -4750,6 +4759,147 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
+                     }
+                 }
+ 
++                return true;
++            } break;
++        case GGML_OP_NANOQUANT_STAGE1_FUSED:
++            {
++                auto is_fp_type = [](ggml_type type) {
++                    return type == GGML_TYPE_F32 || type == GGML_TYPE_F16 || type == GGML_TYPE_BF16;
++                };
++
++                if (op->type != GGML_TYPE_F32 || !is_fp_type(op->src[0]->type) ||
++                    op->nb[0] != ggml_element_size(op) ||
++                    op->src[0]->nb[0] != ggml_element_size(op->src[0])) {
++                    return false;
++                }
++
++                for (int i = 0; i < 3; ++i) {
++                    const ggml_tensor * v   = op->src[1 + 3*i];
++                    const ggml_tensor * pre = op->src[2 + 3*i];
++                    const ggml_tensor * mid = op->src[3 + 3*i];
++                    if (v == nullptr) {
++                        continue;
++                    }
++                    if (v->type != GGML_TYPE_I32 || !is_fp_type(pre->type) || !is_fp_type(mid->type) ||
++                        v->nb[0] != ggml_element_size(v) ||
++                        pre->nb[0] != ggml_element_size(pre) ||
++                        mid->nb[0] != ggml_element_size(mid)) {
++                        return false;
++                    }
++                }
++
++                return true;
++            } break;
++        case GGML_OP_NANOQUANT_STAGE2:
++            {
++                const ggml_tensor * x          = op->src[0];
++                const ggml_tensor * tmp        = op->src[1];
++                const ggml_tensor * u_bits     = op->src[2];
++                const ggml_tensor * scale_post = op->src[3];
++                const ggml_tensor * salient_idx    = op->src[4];
++                const ggml_tensor * salient_weight = op->src[5];
++                const ggml_tensor * salient_scale  = op->src[6];
++
++                auto is_fp_type = [](ggml_type type) {
++                    return type == GGML_TYPE_F32 || type == GGML_TYPE_F16 || type == GGML_TYPE_BF16;
++                };
++
++                if (op->type != GGML_TYPE_F32 ||
++                    !is_fp_type(x->type) ||
++                    tmp->type != GGML_TYPE_F32 ||
++                    u_bits->type != GGML_TYPE_I32 ||
++                    !is_fp_type(scale_post->type) ||
++                    x->nb[0] != ggml_element_size(x) ||
++                    tmp->nb[0] != ggml_element_size(tmp) ||
++                    op->nb[0] != ggml_element_size(op) ||
++                    u_bits->nb[0] != ggml_element_size(u_bits) ||
++                    scale_post->nb[0] != ggml_element_size(scale_post)) {
++                    return false;
++                }
++
++                if ((salient_idx == nullptr) != (salient_weight == nullptr)) {
++                    return false;
++                }
++                if (salient_scale != nullptr && salient_weight == nullptr) {
++                    return false;
++                }
++                if (salient_idx != nullptr) {
++                    if (salient_idx->type != GGML_TYPE_I32 ||
++                        salient_idx->nb[0] != ggml_element_size(salient_idx) ||
++                        salient_weight->nb[0] != ggml_element_size(salient_weight)) {
++                        return false;
++                    }
++                    if (salient_weight->type == GGML_TYPE_I8) {
++                        if (salient_scale == nullptr ||
++                            !is_fp_type(salient_scale->type) ||
++                            salient_scale->nb[0] != ggml_element_size(salient_scale)) {
++                            return false;
++                        }
++                    } else if (!is_fp_type(salient_weight->type)) {
++                        return false;
++                    } else if (salient_scale != nullptr) {
++                        return false;
++                    }
++                }
++
++                return true;
++            } break;
++        case GGML_OP_NANOQUANT_STAGE2_FUSED2:
++            {
++                const ggml_tensor * x       = op->src[0];
++                const ggml_tensor * tmp     = op->src[1];
++                const ggml_tensor * u0      = op->src[2];
++                const ggml_tensor * post0   = op->src[3];
++                const ggml_tensor * idx0    = op->src[4];
++                const ggml_tensor * weight0 = op->src[5];
++                const ggml_tensor * u1      = op->src[6];
++                const ggml_tensor * post1   = op->src[7];
++                const ggml_tensor * idx1    = op->src[8];
++                const ggml_tensor * weight1 = op->src[9];
++
++                auto is_fp_type = [](ggml_type type) {
++                    return type == GGML_TYPE_F32 || type == GGML_TYPE_F16 || type == GGML_TYPE_BF16;
++                };
++
++                if (op->type != GGML_TYPE_F32 ||
++                    !is_fp_type(x->type) ||
++                    tmp->type != GGML_TYPE_F32 ||
++                    u0->type != GGML_TYPE_I32 ||
++                    u1->type != GGML_TYPE_I32 ||
++                    !is_fp_type(post0->type) ||
++                    !is_fp_type(post1->type) ||
++                    x->nb[0] != ggml_element_size(x) ||
++                    tmp->nb[0] != ggml_element_size(tmp) ||
++                    op->nb[0] != ggml_element_size(op) ||
++                    u0->nb[0] != ggml_element_size(u0) ||
++                    u1->nb[0] != ggml_element_size(u1) ||
++                    post0->nb[0] != ggml_element_size(post0) ||
++                    post1->nb[0] != ggml_element_size(post1)) {
++                    return false;
++                }
++
++                const int64_t n_rank0 = ggml_get_op_params_i32(op, 0);
++                const int64_t n_rank1 = ggml_get_op_params_i32(op, 1);
++                if (n_rank0%WARP_SIZE != 0 || n_rank1%WARP_SIZE != 0) {
++                    return false;
++                }
++
++                if (idx0 == nullptr || idx1 == nullptr || weight0 == nullptr || weight1 == nullptr) {
++                    return false;
++                }
++                if (idx0->type != GGML_TYPE_I32 || idx1->type != GGML_TYPE_I32 ||
++                        idx0->ne[0] != 2 || idx1->ne[0] != 2 ||
++                        idx0->nb[0] != ggml_element_size(idx0) ||
++                        idx1->nb[0] != ggml_element_size(idx1) ||
++                        weight0->type != GGML_TYPE_F16 ||
++                        weight1->type != GGML_TYPE_F16 ||
++                        weight0->nb[0] != ggml_element_size(weight0) ||
++                        weight1->nb[0] != ggml_element_size(weight1) ||
++                        weight0->nb[1] != 2*ggml_element_size(weight0) ||
++                        weight1->nb[1] != 2*ggml_element_size(weight1)) {
++                    return false;
++                }
++
+                 return true;
+             } break;
+         case GGML_OP_OUT_PROD:
+diff --git a/ggml/src/ggml-cuda/nanoquant.cu b/ggml/src/ggml-cuda/nanoquant.cu
+index 6ae939bb1..f69a18dfb 100644
+--- a/ggml/src/ggml-cuda/nanoquant.cu
++++ b/ggml/src/ggml-cuda/nanoquant.cu
+@@ -46,6 +46,7 @@ static __device__ __forceinline__ uint4 nanoquant_load_sign_word4(
+         const int64_t   nb1,
+         const int64_t   row,
+         const int64_t   word_idx) {
++    // Only used when the row stride and base pointer are 16-byte aligned.
+     return *(const uint4 *) ((const char *) bits + word_idx*nb0 + row*nb1);
+ }
+ 
+@@ -249,6 +250,513 @@ static __global__ void nanoquant_stage1_warp_kernel(
+     }
+ }
+ 
++template <int block_size, bool full_warps, bool fast_f32>
++static __global__ void nanoquant_stage1_fused_warp_kernel(
++        const void * x,
++        const ggml_type x_type,
++        const int64_t nbx0,
++        const int64_t nbx1,
++        const int64_t nbx2,
++        const int64_t nbx3,
++        const int32_t * v0,
++        const int64_t nbv00,
++        const int64_t nbv01,
++        const bool vector_v0,
++        const void * scale_pre0,
++        const ggml_type scale_pre0_type,
++        const int64_t nb_pre00,
++        const void * scale_mid0,
++        const ggml_type scale_mid0_type,
++        const int64_t nb_mid00,
++        const int32_t * v1,
++        const int64_t nbv10,
++        const int64_t nbv11,
++        const bool vector_v1,
++        const void * scale_pre1,
++        const ggml_type scale_pre1_type,
++        const int64_t nb_pre10,
++        const void * scale_mid1,
++        const ggml_type scale_mid1_type,
++        const int64_t nb_mid10,
++        const int32_t * v2,
++        const int64_t nbv20,
++        const int64_t nbv21,
++        const bool vector_v2,
++        const void * scale_pre2,
++        const ggml_type scale_pre2_type,
++        const int64_t nb_pre20,
++        const void * scale_mid2,
++        const ggml_type scale_mid2_type,
++        const int64_t nb_mid20,
++        float * tmp,
++        const int64_t n_in,
++        const int64_t n_rank0,
++        const int64_t n_rank1,
++        const int64_t n_rank2,
++        const int64_t ne1,
++        const int64_t ne2) {
++    static_assert(block_size % WARP_SIZE == 0, "block size must be a whole number of warps");
++    constexpr int rows_per_block = block_size / WARP_SIZE;
++
++    const int lane = threadIdx.x % WARP_SIZE;
++    const int row  = threadIdx.x / WARP_SIZE;
++    const int64_t r_global = (int64_t) blockIdx.x*rows_per_block + row;
++    const int64_t n_rank_total = n_rank0 + n_rank1 + n_rank2;
++    if (r_global >= n_rank_total) {
++        return;
++    }
++
++    const int64_t c = 0;
++    const int64_t i1 = 0;
++    const int64_t i2 = 0;
++    const int64_t i3 = 0;
++    (void) ne1;
++    (void) ne2;
++    (void) i1;
++    (void) i2;
++    (void) i3;
++
++    const int32_t * v_bits;
++    int64_t nbv0;
++    int64_t nbv1;
++    [[maybe_unused]] bool vector_sign_loads;
++    const void * scale_pre;
++    [[maybe_unused]] ggml_type scale_pre_type;
++    [[maybe_unused]] int64_t nb_pre0;
++    const void * scale_mid;
++    [[maybe_unused]] ggml_type scale_mid_type;
++    [[maybe_unused]] int64_t nb_mid0;
++    int64_t r;
++
++    if (r_global < n_rank0) {
++        v_bits = v0; nbv0 = nbv00; nbv1 = nbv01; vector_sign_loads = vector_v0;
++        scale_pre = scale_pre0; scale_pre_type = scale_pre0_type; nb_pre0 = nb_pre00;
++        scale_mid = scale_mid0; scale_mid_type = scale_mid0_type; nb_mid0 = nb_mid00;
++        r = r_global;
++    } else if (r_global < n_rank0 + n_rank1) {
++        v_bits = v1; nbv0 = nbv10; nbv1 = nbv11; vector_sign_loads = vector_v1;
++        scale_pre = scale_pre1; scale_pre_type = scale_pre1_type; nb_pre0 = nb_pre10;
++        scale_mid = scale_mid1; scale_mid_type = scale_mid1_type; nb_mid0 = nb_mid10;
++        r = r_global - n_rank0;
++    } else {
++        v_bits = v2; nbv0 = nbv20; nbv1 = nbv21; vector_sign_loads = vector_v2;
++        scale_pre = scale_pre2; scale_pre_type = scale_pre2_type; nb_pre0 = nb_pre20;
++        scale_mid = scale_mid2; scale_mid_type = scale_mid2_type; nb_mid0 = nb_mid20;
++        r = r_global - n_rank0 - n_rank1;
++    }
++
++    float acc = 0.0f;
++    if constexpr (fast_f32) {
++        const float * x_f = (const float *) x;
++        const float * scale_pre_f = (const float *) scale_pre;
++        if constexpr (full_warps) {
++            float acc0 = 0.0f;
++            float acc1 = 0.0f;
++            float acc2 = 0.0f;
++            float acc3 = 0.0f;
++            const int64_t n_words = n_in/WARP_SIZE;
++            int64_t word_idx = 0;
++            for (; word_idx + 3 < n_words; word_idx += 4) {
++                uint32_t word0;
++                uint32_t word1;
++                uint32_t word2;
++                uint32_t word3;
++                if (vector_sign_loads) {
++                    uint4 words = make_uint4(0, 0, 0, 0);
++                    if (lane == 0) {
++                        words = nanoquant_load_sign_word4(v_bits, nbv0, nbv1, r, word_idx);
++                    }
++                    word0 = words.x;
++                    word1 = words.y;
++                    word2 = words.z;
++                    word3 = words.w;
++                } else {
++                    word0 = lane == 0 ? nanoquant_load_sign_word(v_bits, nbv0, nbv1, r, word_idx + 0) : 0;
++                    word1 = lane == 0 ? nanoquant_load_sign_word(v_bits, nbv0, nbv1, r, word_idx + 1) : 0;
++                    word2 = lane == 0 ? nanoquant_load_sign_word(v_bits, nbv0, nbv1, r, word_idx + 2) : 0;
++                    word3 = lane == 0 ? nanoquant_load_sign_word(v_bits, nbv0, nbv1, r, word_idx + 3) : 0;
++                }
++                word0 = __shfl_sync(0xffffffff, word0, 0);
++                word1 = __shfl_sync(0xffffffff, word1, 0);
++                word2 = __shfl_sync(0xffffffff, word2, 0);
++                word3 = __shfl_sync(0xffffffff, word3, 0);
++
++                const int64_t ii0 = (word_idx + 0)*WARP_SIZE + lane;
++                const int64_t ii1 = (word_idx + 1)*WARP_SIZE + lane;
++                const int64_t ii2 = (word_idx + 2)*WARP_SIZE + lane;
++                const int64_t ii3 = (word_idx + 3)*WARP_SIZE + lane;
++                acc0 = nanoquant_fmaf_sign_word(word0, lane, x_f[ii0], scale_pre_f[ii0], acc0);
++                acc1 = nanoquant_fmaf_sign_word(word1, lane, x_f[ii1], scale_pre_f[ii1], acc1);
++                acc2 = nanoquant_fmaf_sign_word(word2, lane, x_f[ii2], scale_pre_f[ii2], acc2);
++                acc3 = nanoquant_fmaf_sign_word(word3, lane, x_f[ii3], scale_pre_f[ii3], acc3);
++            }
++            acc = (acc0 + acc1) + (acc2 + acc3);
++            for (; word_idx < n_words; ++word_idx) {
++                uint32_t word = lane == 0 ? nanoquant_load_sign_word(v_bits, nbv0, nbv1, r, word_idx) : 0;
++                word = __shfl_sync(0xffffffff, word, 0);
++                const int64_t i = word_idx*WARP_SIZE + lane;
++                acc = nanoquant_fmaf_sign_word(word, lane, x_f[i], scale_pre_f[i], acc);
++            }
++        } else {
++            for (int64_t base = 0; base < n_in; base += WARP_SIZE) {
++                const int64_t i = base + lane;
++                uint32_t word = lane == 0 ? nanoquant_load_sign_word(v_bits, nbv0, nbv1, r, base/WARP_SIZE) : 0;
++                word = __shfl_sync(0xffffffff, word, 0);
++                if (i >= n_in) {
++                    continue;
++                }
++                acc = nanoquant_fmaf_sign_word(word, lane, x_f[i], scale_pre_f[i], acc);
++            }
++        }
++    } else {
++        for (int64_t base = 0; base < n_in; base += WARP_SIZE) {
++            const int64_t i = base + lane;
++            uint32_t word = lane == 0 ? nanoquant_load_sign_word(v_bits, nbv0, nbv1, r, base/WARP_SIZE) : 0;
++            word = __shfl_sync(0xffffffff, word, 0);
++            if constexpr (!full_warps) {
++                if (i >= n_in) {
++                    continue;
++                }
++            }
++            const float xv = nanoquant_load_f32(x, x_type, i*nbx0 + i1*nbx1 + i2*nbx2 + i3*nbx3);
++            const float pre = nanoquant_load_f32(scale_pre, scale_pre_type, i*nb_pre0);
++            acc = nanoquant_fmaf_sign_word(word, lane, xv, pre, acc);
++        }
++    }
++
++    acc = warp_reduce_sum(acc);
++    if (lane == 0) {
++        float mid;
++        if constexpr (fast_f32) {
++            mid = ((const float *) scale_mid)[r];
++        } else {
++            mid = nanoquant_load_f32(scale_mid, scale_mid_type, r*nb_mid0);
++        }
++        tmp[c*n_rank_total + r_global] = acc*mid;
++    }
++}
++
++template <int block_size, int cols_per_block>
++static __global__ void nanoquant_stage1_coltile_kernel(
++        const void * x,
++        const int64_t nbx0,
++        const int64_t nbx1,
++        const int64_t nbx2,
++        const int64_t nbx3,
++        const int32_t * v_bits,
++        const int64_t nbv0,
++        const int64_t nbv1,
++        const bool vector_sign_loads,
++        const float * scale_pre,
++        const float * scale_mid,
++        float * tmp,
++        const int64_t n_in,
++        const int64_t n_rank,
++        const int64_t n_col,
++        const int64_t ne1,
++        const int64_t ne2) {
++    static_assert(block_size == cols_per_block*WARP_SIZE, "one warp per token column");
++
++    // Prefill shapes are too small to fill the GPU with one full block per dot.
++    // This packs several token columns into a block while keeping one warp per dot product.
++    const int lane = threadIdx.x % WARP_SIZE;
++    const int col  = threadIdx.x / WARP_SIZE;
++    const int64_t r = blockIdx.x;
++    const int64_t c = (int64_t) blockIdx.y*cols_per_block + col;
++    if (c >= n_col) {
++        return;
++    }
++
++    const int64_t i3 = c/(ne1*ne2);
++    const int64_t rem = c - i3*ne1*ne2;
++    const int64_t i2 = rem/ne1;
++    const int64_t i1 = rem - i2*ne1;
++
++    float acc0 = 0.0f;
++    float acc1 = 0.0f;
++    float acc2 = 0.0f;
++    float acc3 = 0.0f;
++    const int64_t n_words = n_in/WARP_SIZE;
++    int64_t word_idx = 0;
++    for (; word_idx + 3 < n_words; word_idx += 4) {
++        uint32_t word0;
++        uint32_t word1;
++        uint32_t word2;
++        uint32_t word3;
++        if (vector_sign_loads) {
++            uint4 words = make_uint4(0, 0, 0, 0);
++            if (lane == 0) {
++                words = nanoquant_load_sign_word4(v_bits, nbv0, nbv1, r, word_idx);
++            }
++            word0 = words.x;
++            word1 = words.y;
++            word2 = words.z;
++            word3 = words.w;
++        } else {
++            word0 = lane == 0 ? nanoquant_load_sign_word(v_bits, nbv0, nbv1, r, word_idx + 0) : 0;
++            word1 = lane == 0 ? nanoquant_load_sign_word(v_bits, nbv0, nbv1, r, word_idx + 1) : 0;
++            word2 = lane == 0 ? nanoquant_load_sign_word(v_bits, nbv0, nbv1, r, word_idx + 2) : 0;
++            word3 = lane == 0 ? nanoquant_load_sign_word(v_bits, nbv0, nbv1, r, word_idx + 3) : 0;
++        }
++        word0 = __shfl_sync(0xffffffff, word0, 0);
++        word1 = __shfl_sync(0xffffffff, word1, 0);
++        word2 = __shfl_sync(0xffffffff, word2, 0);
++        word3 = __shfl_sync(0xffffffff, word3, 0);
++
++        const int64_t i0 = (word_idx + 0)*WARP_SIZE + lane;
++        const int64_t i1_in = (word_idx + 1)*WARP_SIZE + lane;
++        const int64_t i2_in = (word_idx + 2)*WARP_SIZE + lane;
++        const int64_t i3_in = (word_idx + 3)*WARP_SIZE + lane;
++        const float x0 = *(const float *) ((const char *) x + i0*nbx0 + i1*nbx1 + i2*nbx2 + i3*nbx3);
++        const float x1 = *(const float *) ((const char *) x + i1_in*nbx0 + i1*nbx1 + i2*nbx2 + i3*nbx3);
++        const float x2 = *(const float *) ((const char *) x + i2_in*nbx0 + i1*nbx1 + i2*nbx2 + i3*nbx3);
++        const float x3 = *(const float *) ((const char *) x + i3_in*nbx0 + i1*nbx1 + i2*nbx2 + i3*nbx3);
++        acc0 = nanoquant_fmaf_sign_word(word0, lane, x0, scale_pre[i0], acc0);
++        acc1 = nanoquant_fmaf_sign_word(word1, lane, x1, scale_pre[i1_in], acc1);
++        acc2 = nanoquant_fmaf_sign_word(word2, lane, x2, scale_pre[i2_in], acc2);
++        acc3 = nanoquant_fmaf_sign_word(word3, lane, x3, scale_pre[i3_in], acc3);
++    }
++
++    float acc = (acc0 + acc1) + (acc2 + acc3);
++    for (; word_idx < n_words; ++word_idx) {
++        uint32_t word = lane == 0 ? nanoquant_load_sign_word(v_bits, nbv0, nbv1, r, word_idx) : 0;
++        word = __shfl_sync(0xffffffff, word, 0);
++        const int64_t i = word_idx*WARP_SIZE + lane;
++        const float xv = *(const float *) ((const char *) x + i*nbx0 + i1*nbx1 + i2*nbx2 + i3*nbx3);
++        acc = nanoquant_fmaf_sign_word(word, lane, xv, scale_pre[i], acc);
++    }
++
++    acc = warp_reduce_sum(acc);
++    if (lane == 0) {
++        tmp[c*n_rank + r] = acc*scale_mid[r];
++    }
++}
++
++template <int block_size, int cols_per_block>
++static __global__ void nanoquant_stage1_fused_coltile_kernel(
++        const void * x,
++        const int64_t nbx0,
++        const int64_t nbx1,
++        const int64_t nbx2,
++        const int64_t nbx3,
++        const int32_t * v0,
++        const int64_t nbv00,
++        const int64_t nbv01,
++        const bool vector_v0,
++        const float * scale_pre0,
++        const float * scale_mid0,
++        const int32_t * v1,
++        const int64_t nbv10,
++        const int64_t nbv11,
++        const bool vector_v1,
++        const float * scale_pre1,
++        const float * scale_mid1,
++        const int32_t * v2,
++        const int64_t nbv20,
++        const int64_t nbv21,
++        const bool vector_v2,
++        const float * scale_pre2,
++        const float * scale_mid2,
++        float * tmp,
++        const int64_t n_in,
++        const int64_t n_rank0,
++        const int64_t n_rank1,
++        const int64_t n_rank2,
++        const int64_t n_col,
++        const int64_t ne1,
++        const int64_t ne2) {
++    static_assert(block_size == cols_per_block*WARP_SIZE, "one warp per token column");
++
++    // Same column-tiled prefill strategy as the single-projection kernel, but
++    // with Q/K/V or gate/up ranks concatenated in tmp.
++    const int lane = threadIdx.x % WARP_SIZE;
++    const int col  = threadIdx.x / WARP_SIZE;
++    const int64_t r_global = blockIdx.x;
++    const int64_t c = (int64_t) blockIdx.y*cols_per_block + col;
++    const int64_t n_rank_total = n_rank0 + n_rank1 + n_rank2;
++    if (r_global >= n_rank_total || c >= n_col) {
++        return;
++    }
++
++    const int64_t i3 = c/(ne1*ne2);
++    const int64_t rem = c - i3*ne1*ne2;
++    const int64_t i2 = rem/ne1;
++    const int64_t i1 = rem - i2*ne1;
++
++    const int32_t * v_bits;
++    int64_t nbv0;
++    int64_t nbv1;
++    bool vector_sign_loads;
++    const float * scale_pre;
++    const float * scale_mid;
++    int64_t r;
++
++    if (r_global < n_rank0) {
++        v_bits = v0; nbv0 = nbv00; nbv1 = nbv01; vector_sign_loads = vector_v0;
++        scale_pre = scale_pre0; scale_mid = scale_mid0; r = r_global;
++    } else if (r_global < n_rank0 + n_rank1) {
++        v_bits = v1; nbv0 = nbv10; nbv1 = nbv11; vector_sign_loads = vector_v1;
++        scale_pre = scale_pre1; scale_mid = scale_mid1; r = r_global - n_rank0;
++    } else {
++        v_bits = v2; nbv0 = nbv20; nbv1 = nbv21; vector_sign_loads = vector_v2;
++        scale_pre = scale_pre2; scale_mid = scale_mid2; r = r_global - n_rank0 - n_rank1;
++    }
++
++    float acc0 = 0.0f;
++    float acc1 = 0.0f;
++    float acc2 = 0.0f;
++    float acc3 = 0.0f;
++    const int64_t n_words = n_in/WARP_SIZE;
++    int64_t word_idx = 0;
++    for (; word_idx + 3 < n_words; word_idx += 4) {
++        uint32_t word0;
++        uint32_t word1;
++        uint32_t word2;
++        uint32_t word3;
++        if (vector_sign_loads) {
++            uint4 words = make_uint4(0, 0, 0, 0);
++            if (lane == 0) {
++                words = nanoquant_load_sign_word4(v_bits, nbv0, nbv1, r, word_idx);
++            }
++            word0 = words.x;
++            word1 = words.y;
++            word2 = words.z;
++            word3 = words.w;
++        } else {
++            word0 = lane == 0 ? nanoquant_load_sign_word(v_bits, nbv0, nbv1, r, word_idx + 0) : 0;
++            word1 = lane == 0 ? nanoquant_load_sign_word(v_bits, nbv0, nbv1, r, word_idx + 1) : 0;
++            word2 = lane == 0 ? nanoquant_load_sign_word(v_bits, nbv0, nbv1, r, word_idx + 2) : 0;
++            word3 = lane == 0 ? nanoquant_load_sign_word(v_bits, nbv0, nbv1, r, word_idx + 3) : 0;
++        }
++        word0 = __shfl_sync(0xffffffff, word0, 0);
++        word1 = __shfl_sync(0xffffffff, word1, 0);
++        word2 = __shfl_sync(0xffffffff, word2, 0);
++        word3 = __shfl_sync(0xffffffff, word3, 0);
++
++        const int64_t i0 = (word_idx + 0)*WARP_SIZE + lane;
++        const int64_t i1_in = (word_idx + 1)*WARP_SIZE + lane;
++        const int64_t i2_in = (word_idx + 2)*WARP_SIZE + lane;
++        const int64_t i3_in = (word_idx + 3)*WARP_SIZE + lane;
++        const float x0 = *(const float *) ((const char *) x + i0*nbx0 + i1*nbx1 + i2*nbx2 + i3*nbx3);
++        const float x1 = *(const float *) ((const char *) x + i1_in*nbx0 + i1*nbx1 + i2*nbx2 + i3*nbx3);
++        const float x2 = *(const float *) ((const char *) x + i2_in*nbx0 + i1*nbx1 + i2*nbx2 + i3*nbx3);
++        const float x3 = *(const float *) ((const char *) x + i3_in*nbx0 + i1*nbx1 + i2*nbx2 + i3*nbx3);
++        acc0 = nanoquant_fmaf_sign_word(word0, lane, x0, scale_pre[i0], acc0);
++        acc1 = nanoquant_fmaf_sign_word(word1, lane, x1, scale_pre[i1_in], acc1);
++        acc2 = nanoquant_fmaf_sign_word(word2, lane, x2, scale_pre[i2_in], acc2);
++        acc3 = nanoquant_fmaf_sign_word(word3, lane, x3, scale_pre[i3_in], acc3);
++    }
++
++    float acc = (acc0 + acc1) + (acc2 + acc3);
++    for (; word_idx < n_words; ++word_idx) {
++        uint32_t word = lane == 0 ? nanoquant_load_sign_word(v_bits, nbv0, nbv1, r, word_idx) : 0;
++        word = __shfl_sync(0xffffffff, word, 0);
++        const int64_t i = word_idx*WARP_SIZE + lane;
++        const float xv = *(const float *) ((const char *) x + i*nbx0 + i1*nbx1 + i2*nbx2 + i3*nbx3);
++        acc = nanoquant_fmaf_sign_word(word, lane, xv, scale_pre[i], acc);
++    }
++
++    acc = warp_reduce_sum(acc);
++    if (lane == 0) {
++        tmp[c*n_rank_total + r_global] = acc*scale_mid[r];
++    }
++}
++
++template <int block_size>
++static __global__ void nanoquant_stage1_fused_block_kernel(
++        const void * x,
++        const ggml_type x_type,
++        const int64_t nbx0,
++        const int64_t nbx1,
++        const int64_t nbx2,
++        const int64_t nbx3,
++        const int32_t * v0,
++        const int64_t nbv00,
++        const int64_t nbv01,
++        const void * scale_pre0,
++        const ggml_type scale_pre0_type,
++        const int64_t nb_pre00,
++        const void * scale_mid0,
++        const ggml_type scale_mid0_type,
++        const int64_t nb_mid00,
++        const int32_t * v1,
++        const int64_t nbv10,
++        const int64_t nbv11,
++        const void * scale_pre1,
++        const ggml_type scale_pre1_type,
++        const int64_t nb_pre10,
++        const void * scale_mid1,
++        const ggml_type scale_mid1_type,
++        const int64_t nb_mid10,
++        const int32_t * v2,
++        const int64_t nbv20,
++        const int64_t nbv21,
++        const void * scale_pre2,
++        const ggml_type scale_pre2_type,
++        const int64_t nb_pre20,
++        const void * scale_mid2,
++        const ggml_type scale_mid2_type,
++        const int64_t nb_mid20,
++        float * tmp,
++        const int64_t n_in,
++        const int64_t n_rank0,
++        const int64_t n_rank1,
++        const int64_t n_rank2,
++        const int64_t ne1,
++        const int64_t ne2) {
++    const int64_t r_global = blockIdx.x;
++    const int64_t c = blockIdx.y;
++    const int tid = threadIdx.x;
++    const int64_t n_rank_total = n_rank0 + n_rank1 + n_rank2;
++
++    const int32_t * v_bits;
++    int64_t nbv0;
++    int64_t nbv1;
++    const void * scale_pre;
++    ggml_type scale_pre_type;
++    int64_t nb_pre0;
++    const void * scale_mid;
++    ggml_type scale_mid_type;
++    int64_t nb_mid0;
++    int64_t r;
++
++    if (r_global < n_rank0) {
++        v_bits = v0; nbv0 = nbv00; nbv1 = nbv01;
++        scale_pre = scale_pre0; scale_pre_type = scale_pre0_type; nb_pre0 = nb_pre00;
++        scale_mid = scale_mid0; scale_mid_type = scale_mid0_type; nb_mid0 = nb_mid00;
++        r = r_global;
++    } else if (r_global < n_rank0 + n_rank1) {
++        v_bits = v1; nbv0 = nbv10; nbv1 = nbv11;
++        scale_pre = scale_pre1; scale_pre_type = scale_pre1_type; nb_pre0 = nb_pre10;
++        scale_mid = scale_mid1; scale_mid_type = scale_mid1_type; nb_mid0 = nb_mid10;
++        r = r_global - n_rank0;
++    } else {
++        v_bits = v2; nbv0 = nbv20; nbv1 = nbv21;
++        scale_pre = scale_pre2; scale_pre_type = scale_pre2_type; nb_pre0 = nb_pre20;
++        scale_mid = scale_mid2; scale_mid_type = scale_mid2_type; nb_mid0 = nb_mid20;
++        r = r_global - n_rank0 - n_rank1;
++    }
++
++    const int64_t i3 = c/(ne1*ne2);
++    const int64_t rem = c - i3*ne1*ne2;
++    const int64_t i2 = rem/ne1;
++    const int64_t i1 = rem - i2*ne1;
++
++    float acc = 0.0f;
++    for (int64_t i = tid; i < n_in; i += block_size) {
++        const float xv = nanoquant_load_f32(x, x_type, i*nbx0 + i1*nbx1 + i2*nbx2 + i3*nbx3);
++        const float pre = nanoquant_load_f32(scale_pre, scale_pre_type, i*nb_pre0);
++        acc += nanoquant_apply_sign(v_bits, nbv0, nbv1, r, i, xv*pre);
++    }
++
++    extern __shared__ float shared[];
++    acc = block_reduce<block_reduce_method::SUM, block_size>(acc, shared);
++    if (tid == 0) {
++        const float mid = nanoquant_load_f32(scale_mid, scale_mid_type, r*nb_mid0);
++        tmp[c*n_rank_total + r_global] = acc*mid;
++    }
++}
++
+ template <int block_size, bool full_warps, int fast_salient, bool no_salient>
+ static __global__ void nanoquant_stage2_warp_kernel(
+         const void * x,
+@@ -373,14 +881,16 @@ static __global__ void nanoquant_stage2_warp_kernel(
+     float salient_acc = 0.0f;
+     if constexpr (no_salient) {
+     } else if constexpr (fast_salient >= 0) {
+-        // The current GGUF path emits exactly 8 F16 salient weights in contiguous [out, salient] order.
++        // Fast salient paths require contiguous F16 weights in [out, salient] order.
+         const int32_t * salient_idx_i = (const int32_t *) salient_idx;
+         const half * salient_weight_h = (const half *) salient_weight;
+         const float * x_f = (const float *) x;
+-        for (int s = lane; s < fast_salient; s += WARP_SIZE) {
+-            const int64_t idx = salient_idx_i[s];
+-            const float weight = __half2float(salient_weight_h[o*fast_salient + s]);
+-            salient_acc += x_f[idx]*weight;
++        if (lane == 0) {
++            for (int s = 0; s < fast_salient; ++s) {
++                const int64_t idx = salient_idx_i[s];
++                const float weight = __half2float(salient_weight_h[o*fast_salient + s]);
++                salient_acc += x_f[idx]*weight;
++            }
+         }
+     } else {
+         for (int64_t s = lane; s < n_salient; s += WARP_SIZE) {
+@@ -395,7 +905,7 @@ static __global__ void nanoquant_stage2_warp_kernel(
+     }
+ 
+     acc = warp_reduce_sum(acc);
+-    if constexpr (!no_salient) {
++    if constexpr (!no_salient && fast_salient < 0) {
+         salient_acc = warp_reduce_sum(salient_acc);
+     }
+     if (lane == 0) {
+@@ -415,6 +925,169 @@ static __global__ void nanoquant_stage2_warp_kernel(
+     }
+ }
+ 
++template <int block_size, bool full_warps, int fast_salient0, int fast_salient1>
++static __global__ void nanoquant_stage2_fused2_warp_kernel(
++        const void * x,
++        const ggml_type x_type,
++        const int64_t nbx0,
++        const int64_t nbx1,
++        const int64_t nbx2,
++        const int64_t nbx3,
++        const float * tmp,
++        const int32_t * u0,
++        const int64_t nbu00,
++        const int64_t nbu01,
++        const bool vector_u0,
++        const void * scale_post0,
++        const ggml_type scale_post0_type,
++        const int64_t nb_post00,
++        const int32_t * salient_idx0,
++        const int64_t nb_salient_idx00,
++        const void * salient_weight0,
++        const ggml_type salient_weight0_type,
++        const int64_t nb_salient_weight00,
++        const int64_t nb_salient_weight01,
++        const int32_t * u1,
++        const int64_t nbu10,
++        const int64_t nbu11,
++        const bool vector_u1,
++        const void * scale_post1,
++        const ggml_type scale_post1_type,
++        const int64_t nb_post10,
++        const int32_t * salient_idx1,
++        const int64_t nb_salient_idx10,
++        const void * salient_weight1,
++        const ggml_type salient_weight1_type,
++        const int64_t nb_salient_weight10,
++        const int64_t nb_salient_weight11,
++        float * dst,
++        const int64_t n_rank0,
++        const int64_t n_rank1,
++        const int64_t n_out0,
++        const int64_t n_out_total,
++        const int64_t ne1,
++        const int64_t ne2,
++        const int64_t nbd0,
++        const int64_t nbd1,
++        const int64_t nbd2,
++        const int64_t nbd3) {
++    static_assert(block_size % WARP_SIZE == 0, "block size must be a whole number of warps");
++    constexpr int rows_per_block = block_size / WARP_SIZE;
++
++    const int lane = threadIdx.x % WARP_SIZE;
++    const int row  = threadIdx.x / WARP_SIZE;
++    const int64_t o_global = (int64_t) blockIdx.x*rows_per_block + row;
++    if (o_global >= n_out_total) {
++        return;
++    }
++
++    const bool group1 = o_global >= n_out0;
++    const int64_t o = group1 ? o_global - n_out0 : o_global;
++    const int64_t n_rank = group1 ? n_rank1 : n_rank0;
++    const int64_t rank_offset = group1 ? n_rank0 : 0;
++    const int32_t * u_bits = group1 ? u1 : u0;
++    const int64_t nbu0 = group1 ? nbu10 : nbu00;
++    const int64_t nbu1 = group1 ? nbu11 : nbu01;
++    const bool vector_sign_loads = group1 ? vector_u1 : vector_u0;
++
++    const int64_t c = 0;
++    const int64_t i1 = 0;
++    const int64_t i2 = 0;
++    const int64_t i3 = 0;
++    (void) ne1;
++    (void) ne2;
++    (void) c;
++    (void) i1;
++    (void) i2;
++    (void) i3;
++
++    float acc = 0.0f;
++    if constexpr (full_warps) {
++        float acc0 = 0.0f;
++        float acc1 = 0.0f;
++        float acc2 = 0.0f;
++        float acc3 = 0.0f;
++        const int64_t n_words = n_rank/WARP_SIZE;
++        int64_t word_idx = 0;
++        for (; word_idx + 3 < n_words; word_idx += 4) {
++            uint32_t word0;
++            uint32_t word1;
++            uint32_t word2;
++            uint32_t word3;
++            if (vector_sign_loads) {
++                uint4 words = make_uint4(0, 0, 0, 0);
++                if (lane == 0) {
++                    words = nanoquant_load_sign_word4(u_bits, nbu0, nbu1, o, word_idx);
++                }
++                word0 = words.x;
++                word1 = words.y;
++                word2 = words.z;
++                word3 = words.w;
++            } else {
++                word0 = lane == 0 ? nanoquant_load_sign_word(u_bits, nbu0, nbu1, o, word_idx + 0) : 0;
++                word1 = lane == 0 ? nanoquant_load_sign_word(u_bits, nbu0, nbu1, o, word_idx + 1) : 0;
++                word2 = lane == 0 ? nanoquant_load_sign_word(u_bits, nbu0, nbu1, o, word_idx + 2) : 0;
++                word3 = lane == 0 ? nanoquant_load_sign_word(u_bits, nbu0, nbu1, o, word_idx + 3) : 0;
++            }
++            word0 = __shfl_sync(0xffffffff, word0, 0);
++            word1 = __shfl_sync(0xffffffff, word1, 0);
++            word2 = __shfl_sync(0xffffffff, word2, 0);
++            word3 = __shfl_sync(0xffffffff, word3, 0);
++
++            const int64_t r0 = rank_offset + (word_idx + 0)*WARP_SIZE + lane;
++            const int64_t r1 = rank_offset + (word_idx + 1)*WARP_SIZE + lane;
++            const int64_t r2 = rank_offset + (word_idx + 2)*WARP_SIZE + lane;
++            const int64_t r3 = rank_offset + (word_idx + 3)*WARP_SIZE + lane;
++            acc0 += nanoquant_apply_sign_word(word0, lane, tmp[r0]);
++            acc1 += nanoquant_apply_sign_word(word1, lane, tmp[r1]);
++            acc2 += nanoquant_apply_sign_word(word2, lane, tmp[r2]);
++            acc3 += nanoquant_apply_sign_word(word3, lane, tmp[r3]);
++        }
++        acc = (acc0 + acc1) + (acc2 + acc3);
++        for (; word_idx < n_words; ++word_idx) {
++            uint32_t word = lane == 0 ? nanoquant_load_sign_word(u_bits, nbu0, nbu1, o, word_idx) : 0;
++            word = __shfl_sync(0xffffffff, word, 0);
++            const int64_t r = rank_offset + word_idx*WARP_SIZE + lane;
++            acc += nanoquant_apply_sign_word(word, lane, tmp[r]);
++        }
++    } else {
++        for (int64_t base = 0; base < n_rank; base += WARP_SIZE) {
++            const int64_t r = base + lane;
++            uint32_t word = lane == 0 ? nanoquant_load_sign_word(u_bits, nbu0, nbu1, o, base/WARP_SIZE) : 0;
++            word = __shfl_sync(0xffffffff, word, 0);
++            if (r >= n_rank) {
++                continue;
++            }
++            acc += nanoquant_apply_sign_word(word, lane, tmp[rank_offset + r]);
++        }
++    }
++
++    float salient_acc = 0.0f;
++    if (lane == 0) {
++        const int fast_salient = group1 ? fast_salient1 : fast_salient0;
++        const int32_t * salient_idx = group1 ? salient_idx1 : salient_idx0;
++        const void * salient_weight = group1 ? salient_weight1 : salient_weight0;
++        if (fast_salient > 0) {
++            const half * salient_weight_h = (const half *) salient_weight;
++            const float * x_f = (const float *) x;
++            for (int s = 0; s < fast_salient; ++s) {
++                const int64_t idx = salient_idx[s];
++                const float weight = __half2float(salient_weight_h[o*fast_salient + s]);
++                salient_acc += x_f[idx]*weight;
++            }
++        }
++    }
++
++    acc = warp_reduce_sum(acc);
++    if (lane == 0) {
++        const void * scale_post = group1 ? scale_post1 : scale_post0;
++        const ggml_type scale_post_type = group1 ? scale_post1_type : scale_post0_type;
++        const int64_t nb_post0 = group1 ? nb_post10 : nb_post00;
++        const float post = nanoquant_load_f32(scale_post, scale_post_type, o*nb_post0);
++        *(float *) ((char *) dst + o_global*nbd0) = acc*post + salient_acc;
++    }
++}
++
+ template <int block_size>
+ static __global__ void nanoquant_stage1_block_kernel(
+         const void * x,
+@@ -441,97 +1114,605 @@ static __global__ void nanoquant_stage1_block_kernel(
+     const int64_t c = blockIdx.y;
+     const int tid = threadIdx.x;
+ 
+-    const int64_t i3 = c/(ne1*ne2);
+-    const int64_t rem = c - i3*ne1*ne2;
+-    const int64_t i2 = rem/ne1;
+-    const int64_t i1 = rem - i2*ne1;
++    const int64_t i3 = c/(ne1*ne2);
++    const int64_t rem = c - i3*ne1*ne2;
++    const int64_t i2 = rem/ne1;
++    const int64_t i1 = rem - i2*ne1;
++
++    float acc = 0.0f;
++    if (x_type == GGML_TYPE_F32 && scale_pre_type == GGML_TYPE_F32) {
++        for (int64_t i = tid; i < n_in; i += block_size) {
++            const float xv = *(const float *) ((const char *) x + i*nbx0 + i1*nbx1 + i2*nbx2 + i3*nbx3);
++            const float pre = *(const float *) ((const char *) scale_pre + i*nb_pre0);
++            acc += nanoquant_apply_sign(v_bits, nbv0, nbv1, r, i, xv*pre);
++        }
++    } else {
++        for (int64_t i = tid; i < n_in; i += block_size) {
++            const float xv = nanoquant_load_f32(x, x_type, i*nbx0 + i1*nbx1 + i2*nbx2 + i3*nbx3);
++            const float pre = nanoquant_load_f32(scale_pre, scale_pre_type, i*nb_pre0);
++            acc += nanoquant_apply_sign(v_bits, nbv0, nbv1, r, i, xv*pre);
++        }
++    }
++
++    extern __shared__ float shared[];
++    acc = block_reduce<block_reduce_method::SUM, block_size>(acc, shared);
++    if (tid == 0) {
++        const float mid = nanoquant_load_f32(scale_mid, scale_mid_type, r*nb_mid0);
++        tmp[c*n_rank + r] = acc*mid;
++    }
++}
++
++template <int block_size>
++static __global__ void nanoquant_stage2_block_kernel(
++        const void * x,
++        const ggml_type x_type,
++        const int64_t nbx0,
++        const int64_t nbx1,
++        const int64_t nbx2,
++        const int64_t nbx3,
++        const int32_t * u_bits,
++        const int64_t nbu0,
++        const int64_t nbu1,
++        const void * scale_post,
++        const ggml_type scale_post_type,
++        const int64_t nb_post0,
++        const int32_t * salient_idx,
++        const int64_t nb_salient_idx0,
++        const void * salient_weight,
++        const ggml_type salient_weight_type,
++        const int64_t nb_salient_weight0,
++        const int64_t nb_salient_weight1,
++        const void * salient_scale,
++        const ggml_type salient_scale_type,
++        const int64_t nb_salient_scale0,
++        const int64_t n_salient,
++        const float * tmp,
++        const int64_t nbtmp0,
++        const int64_t nbtmp1,
++        const int64_t nbtmp2,
++        const int64_t nbtmp3,
++        float * dst,
++        const int64_t n_rank,
++        const int64_t ne1,
++        const int64_t ne2,
++        const int64_t nbd0,
++        const int64_t nbd1,
++        const int64_t nbd2,
++        const int64_t nbd3) {
++    // Generic fallback for uncommon shapes and scalar types.  It is slower than
++    // the specialized paths but handles arbitrary strides and salient formats.
++    const int64_t o = blockIdx.x;
++    const int64_t c = blockIdx.y;
++    const int tid = threadIdx.x;
++
++    const int64_t i3 = c/(ne1*ne2);
++    const int64_t rem = c - i3*ne1*ne2;
++    const int64_t i2 = rem/ne1;
++    const int64_t i1 = rem - i2*ne1;
++
++    float acc = 0.0f;
++    for (int64_t r = tid; r < n_rank; r += block_size) {
++        const float tmp_v = *(const float *) ((const char *) tmp + r*nbtmp0 + i1*nbtmp1 + i2*nbtmp2 + i3*nbtmp3);
++        acc += nanoquant_apply_sign(u_bits, nbu0, nbu1, o, r, tmp_v);
++    }
++
++    extern __shared__ float shared[];
++    acc = block_reduce<block_reduce_method::SUM, block_size>(acc, shared);
++    if (tid == 0) {
++        float value = acc*nanoquant_load_f32(scale_post, scale_post_type, o*nb_post0);
++
++        for (int64_t s = 0; s < n_salient; ++s) {
++            const int64_t idx = *(const int32_t *) ((const char *) salient_idx + s*nb_salient_idx0);
++            float weight = nanoquant_load_f32(
++                salient_weight, salient_weight_type, s*nb_salient_weight0 + o*nb_salient_weight1);
++            if (salient_scale != nullptr) {
++                weight *= nanoquant_load_f32(salient_scale, salient_scale_type, s*nb_salient_scale0);
++            }
++            value += nanoquant_load_f32(x, x_type, idx*nbx0 + i1*nbx1 + i2*nbx2 + i3*nbx3)*weight;
++        }
++
++        *(float *) ((char *) dst + o*nbd0 + i1*nbd1 + i2*nbd2 + i3*nbd3) = value;
++    }
++}
++
++template <int block_size, int cols_per_block, int fast_salient>
++static __global__ void nanoquant_stage2_coltile_kernel(
++        const void * x,
++        const int64_t nbx0,
++        const int64_t nbx1,
++        const int64_t nbx2,
++        const int64_t nbx3,
++        const int32_t * u_bits,
++        const int64_t nbu0,
++        const int64_t nbu1,
++        const bool vector_sign_loads,
++        const float * scale_post,
++        const int32_t * salient_idx,
++        const half * salient_weight,
++        const float * tmp,
++        const int64_t nbtmp0,
++        const int64_t nbtmp1,
++        const int64_t nbtmp2,
++        const int64_t nbtmp3,
++        float * dst,
++        const int64_t n_rank,
++        const int64_t n_col,
++        const int64_t ne1,
++        const int64_t ne2,
++        const int64_t nbd0,
++        const int64_t nbd1,
++        const int64_t nbd2,
++        const int64_t nbd3) {
++    static_assert(block_size == cols_per_block*WARP_SIZE, "one warp per token column");
++
++    // Fast prefill path for the current GGUF layout: F32 activation/tmp/post
++    // tensors and contiguous F16 salient weights in [out, salient] order.
++    const int lane = threadIdx.x % WARP_SIZE;
++    const int col  = threadIdx.x / WARP_SIZE;
++    const int64_t o = blockIdx.x;
++    const int64_t c = (int64_t) blockIdx.y*cols_per_block + col;
++    if (c >= n_col) {
++        return;
++    }
++
++    const int64_t i3 = c/(ne1*ne2);
++    const int64_t rem = c - i3*ne1*ne2;
++    const int64_t i2 = rem/ne1;
++    const int64_t i1 = rem - i2*ne1;
++
++    float acc0 = 0.0f;
++    float acc1 = 0.0f;
++    float acc2 = 0.0f;
++    float acc3 = 0.0f;
++    const int64_t n_words = n_rank/WARP_SIZE;
++    int64_t word_idx = 0;
++    for (; word_idx + 3 < n_words; word_idx += 4) {
++        uint32_t word0;
++        uint32_t word1;
++        uint32_t word2;
++        uint32_t word3;
++        if (vector_sign_loads) {
++            uint4 words = make_uint4(0, 0, 0, 0);
++            if (lane == 0) {
++                words = nanoquant_load_sign_word4(u_bits, nbu0, nbu1, o, word_idx);
++            }
++            word0 = words.x;
++            word1 = words.y;
++            word2 = words.z;
++            word3 = words.w;
++        } else {
++            word0 = lane == 0 ? nanoquant_load_sign_word(u_bits, nbu0, nbu1, o, word_idx + 0) : 0;
++            word1 = lane == 0 ? nanoquant_load_sign_word(u_bits, nbu0, nbu1, o, word_idx + 1) : 0;
++            word2 = lane == 0 ? nanoquant_load_sign_word(u_bits, nbu0, nbu1, o, word_idx + 2) : 0;
++            word3 = lane == 0 ? nanoquant_load_sign_word(u_bits, nbu0, nbu1, o, word_idx + 3) : 0;
++        }
++        word0 = __shfl_sync(0xffffffff, word0, 0);
++        word1 = __shfl_sync(0xffffffff, word1, 0);
++        word2 = __shfl_sync(0xffffffff, word2, 0);
++        word3 = __shfl_sync(0xffffffff, word3, 0);
++
++        const int64_t r0 = (word_idx + 0)*WARP_SIZE + lane;
++        const int64_t r1 = (word_idx + 1)*WARP_SIZE + lane;
++        const int64_t r2 = (word_idx + 2)*WARP_SIZE + lane;
++        const int64_t r3 = (word_idx + 3)*WARP_SIZE + lane;
++        const float tmp0 = *(const float *) ((const char *) tmp + r0*nbtmp0 + i1*nbtmp1 + i2*nbtmp2 + i3*nbtmp3);
++        const float tmp1 = *(const float *) ((const char *) tmp + r1*nbtmp0 + i1*nbtmp1 + i2*nbtmp2 + i3*nbtmp3);
++        const float tmp2 = *(const float *) ((const char *) tmp + r2*nbtmp0 + i1*nbtmp1 + i2*nbtmp2 + i3*nbtmp3);
++        const float tmp3 = *(const float *) ((const char *) tmp + r3*nbtmp0 + i1*nbtmp1 + i2*nbtmp2 + i3*nbtmp3);
++        acc0 += nanoquant_apply_sign_word(word0, lane, tmp0);
++        acc1 += nanoquant_apply_sign_word(word1, lane, tmp1);
++        acc2 += nanoquant_apply_sign_word(word2, lane, tmp2);
++        acc3 += nanoquant_apply_sign_word(word3, lane, tmp3);
++    }
++
++    float acc = (acc0 + acc1) + (acc2 + acc3);
++    for (; word_idx < n_words; ++word_idx) {
++        uint32_t word = lane == 0 ? nanoquant_load_sign_word(u_bits, nbu0, nbu1, o, word_idx) : 0;
++        word = __shfl_sync(0xffffffff, word, 0);
++        const int64_t r = word_idx*WARP_SIZE + lane;
++        const float tmp_v = *(const float *) ((const char *) tmp + r*nbtmp0 + i1*nbtmp1 + i2*nbtmp2 + i3*nbtmp3);
++        acc += nanoquant_apply_sign_word(word, lane, tmp_v);
++    }
++
++    acc = warp_reduce_sum(acc);
++    if (lane == 0) {
++        float value = acc*scale_post[o];
++        for (int s = 0; s < fast_salient; ++s) {
++            const int64_t idx = salient_idx[s];
++            const float weight = __half2float(salient_weight[o*fast_salient + s]);
++            const float xv = *(const float *) ((const char *) x + idx*nbx0 + i1*nbx1 + i2*nbx2 + i3*nbx3);
++            value += xv*weight;
++        }
++        *(float *) ((char *) dst + o*nbd0 + i1*nbd1 + i2*nbd2 + i3*nbd3) = value;
++    }
++}
++
++static bool nanoquant_vector_sign_loads(const ggml_tensor * bits) {
++    // Four packed sign words can be loaded as uint4 only when each row starts
++    // on a 16-byte boundary.
++    return bits != nullptr &&
++        bits->nb[0] == sizeof(int32_t) &&
++        ((((uintptr_t) bits->data) | (uintptr_t) bits->nb[1]) & 0xF) == 0;
++}
++
++static int nanoquant_fast_salient_count(
++        const ggml_tensor * x,
++        const ggml_tensor * scale_post,
++        const ggml_tensor * salient_idx,
++        const ggml_tensor * salient_weight,
++        const ggml_tensor * salient_scale,
++        const ggml_tensor * dst,
++        const int64_t       n_salient) {
++    // Return the template salient count for layouts with direct pointer math;
++    // -1 means the generic typed/strided path must be used.
++    if (n_salient == 0) {
++        return 0;
++    }
++    if (n_salient != 2 && n_salient != 7 && n_salient != 8) {
++        return -1;
++    }
++    if (x->type != GGML_TYPE_F32 ||
++            scale_post->type != GGML_TYPE_F32 ||
++            salient_idx == nullptr ||
++            salient_weight == nullptr ||
++            salient_weight->type != GGML_TYPE_F16 ||
++            salient_scale != nullptr ||
++            x->nb[0] != sizeof(float) ||
++            scale_post->nb[0] != sizeof(float) ||
++            salient_idx->nb[0] != sizeof(int32_t) ||
++            salient_weight->nb[0] != sizeof(half) ||
++            salient_weight->nb[1] != n_salient*sizeof(half) ||
++            dst->nb[0] != sizeof(float)) {
++        return -1;
++    }
++    return (int) n_salient;
++}
++
++void ggml_cuda_op_nanoquant_stage1_fused(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
++    const ggml_tensor * x = dst->src[0];
++    const ggml_tensor * v0 = dst->src[1];
++    const ggml_tensor * pre0 = dst->src[2];
++    const ggml_tensor * mid0 = dst->src[3];
++    const ggml_tensor * v1 = dst->src[4];
++    const ggml_tensor * pre1 = dst->src[5];
++    const ggml_tensor * mid1 = dst->src[6];
++    const ggml_tensor * v2 = dst->src[7];
++    const ggml_tensor * pre2 = dst->src[8];
++    const ggml_tensor * mid2 = dst->src[9];
++
++    const int64_t n_in = x->ne[0];
++    const int64_t n_rank0 = mid0 == nullptr ? 0 : mid0->ne[0];
++    const int64_t n_rank1 = mid1 == nullptr ? 0 : mid1->ne[0];
++    const int64_t n_rank2 = mid2 == nullptr ? 0 : mid2->ne[0];
++    const int64_t n_rank_total = n_rank0 + n_rank1 + n_rank2;
++    const int64_t n_col = dst->ne[1]*dst->ne[2]*dst->ne[3];
++
++    constexpr int block_size = 256;
++    constexpr int rows_per_block = block_size / WARP_SIZE;
++    cudaStream_t stream = ctx.stream();
++
++    const auto ptr = [](const ggml_tensor * t) { return t == nullptr ? nullptr : t->data; };
++    const auto type = [](const ggml_tensor * t) { return t == nullptr ? GGML_TYPE_COUNT : t->type; };
++    const auto nb0 = [](const ggml_tensor * t) { return t == nullptr ? 0 : t->nb[0]; };
++    const auto nb1 = [](const ggml_tensor * t) { return t == nullptr ? 0 : t->nb[1]; };
++
++    if (n_col == 1) {
++        const bool full_warps = n_in % WARP_SIZE == 0;
++        const bool fast_f32 =
++            x->type == GGML_TYPE_F32 &&
++            x->nb[0] == sizeof(float) &&
++            (pre0 == nullptr || (pre0->type == GGML_TYPE_F32 && pre0->nb[0] == sizeof(float) && mid0->type == GGML_TYPE_F32 && mid0->nb[0] == sizeof(float))) &&
++            (pre1 == nullptr || (pre1->type == GGML_TYPE_F32 && pre1->nb[0] == sizeof(float) && mid1->type == GGML_TYPE_F32 && mid1->nb[0] == sizeof(float))) &&
++            (pre2 == nullptr || (pre2->type == GGML_TYPE_F32 && pre2->nb[0] == sizeof(float) && mid2->type == GGML_TYPE_F32 && mid2->nb[0] == sizeof(float)));
++
++        const dim3 blocks((n_rank_total + rows_per_block - 1)/rows_per_block, n_col, 1);
++        const ggml_cuda_kernel_launch_params params(blocks, block_size, 0, stream);
++        if (full_warps && fast_f32) {
++            ggml_cuda_kernel_launch(nanoquant_stage1_fused_warp_kernel<block_size, true, true>, params,
++                x->data, x->type, x->nb[0], x->nb[1], x->nb[2], x->nb[3],
++                (const int32_t *) ptr(v0), nb0(v0), nb1(v0), nanoquant_vector_sign_loads(v0), ptr(pre0), type(pre0), nb0(pre0), ptr(mid0), type(mid0), nb0(mid0),
++                (const int32_t *) ptr(v1), nb0(v1), nb1(v1), nanoquant_vector_sign_loads(v1), ptr(pre1), type(pre1), nb0(pre1), ptr(mid1), type(mid1), nb0(mid1),
++                (const int32_t *) ptr(v2), nb0(v2), nb1(v2), nanoquant_vector_sign_loads(v2), ptr(pre2), type(pre2), nb0(pre2), ptr(mid2), type(mid2), nb0(mid2),
++                (float *) dst->data, n_in, n_rank0, n_rank1, n_rank2, dst->ne[1], dst->ne[2]);
++        } else if (full_warps) {
++            ggml_cuda_kernel_launch(nanoquant_stage1_fused_warp_kernel<block_size, true, false>, params,
++                x->data, x->type, x->nb[0], x->nb[1], x->nb[2], x->nb[3],
++                (const int32_t *) ptr(v0), nb0(v0), nb1(v0), nanoquant_vector_sign_loads(v0), ptr(pre0), type(pre0), nb0(pre0), ptr(mid0), type(mid0), nb0(mid0),
++                (const int32_t *) ptr(v1), nb0(v1), nb1(v1), nanoquant_vector_sign_loads(v1), ptr(pre1), type(pre1), nb0(pre1), ptr(mid1), type(mid1), nb0(mid1),
++                (const int32_t *) ptr(v2), nb0(v2), nb1(v2), nanoquant_vector_sign_loads(v2), ptr(pre2), type(pre2), nb0(pre2), ptr(mid2), type(mid2), nb0(mid2),
++                (float *) dst->data, n_in, n_rank0, n_rank1, n_rank2, dst->ne[1], dst->ne[2]);
++        } else {
++            ggml_cuda_kernel_launch(nanoquant_stage1_fused_warp_kernel<block_size, false, false>, params,
++                x->data, x->type, x->nb[0], x->nb[1], x->nb[2], x->nb[3],
++                (const int32_t *) ptr(v0), nb0(v0), nb1(v0), false, ptr(pre0), type(pre0), nb0(pre0), ptr(mid0), type(mid0), nb0(mid0),
++                (const int32_t *) ptr(v1), nb0(v1), nb1(v1), false, ptr(pre1), type(pre1), nb0(pre1), ptr(mid1), type(mid1), nb0(mid1),
++                (const int32_t *) ptr(v2), nb0(v2), nb1(v2), false, ptr(pre2), type(pre2), nb0(pre2), ptr(mid2), type(mid2), nb0(mid2),
++                (float *) dst->data, n_in, n_rank0, n_rank1, n_rank2, dst->ne[1], dst->ne[2]);
++        }
++    } else {
++        const bool fast_f32 =
++            n_in % WARP_SIZE == 0 &&
++            x->type == GGML_TYPE_F32 &&
++            x->nb[0] == sizeof(float) &&
++            (pre0 == nullptr || (pre0->type == GGML_TYPE_F32 && pre0->nb[0] == sizeof(float) && mid0->type == GGML_TYPE_F32 && mid0->nb[0] == sizeof(float))) &&
++            (pre1 == nullptr || (pre1->type == GGML_TYPE_F32 && pre1->nb[0] == sizeof(float) && mid1->type == GGML_TYPE_F32 && mid1->nb[0] == sizeof(float))) &&
++            (pre2 == nullptr || (pre2->type == GGML_TYPE_F32 && pre2->nb[0] == sizeof(float) && mid2->type == GGML_TYPE_F32 && mid2->nb[0] == sizeof(float)));
++        if (fast_f32 && n_col >= 8) {
++            // Below eight columns, the old block kernel has enough occupancy and
++            // avoids the column-tile kernel's extra grid bookkeeping.
++            constexpr int cols_per_block = 8;
++            const dim3 blocks(n_rank_total, (n_col + cols_per_block - 1)/cols_per_block, 1);
++            const ggml_cuda_kernel_launch_params params(blocks, block_size, 0, stream);
++            ggml_cuda_kernel_launch(nanoquant_stage1_fused_coltile_kernel<block_size, cols_per_block>, params,
++                x->data, x->nb[0], x->nb[1], x->nb[2], x->nb[3],
++                (const int32_t *) ptr(v0), nb0(v0), nb1(v0), nanoquant_vector_sign_loads(v0), (const float *) ptr(pre0), (const float *) ptr(mid0),
++                (const int32_t *) ptr(v1), nb0(v1), nb1(v1), nanoquant_vector_sign_loads(v1), (const float *) ptr(pre1), (const float *) ptr(mid1),
++                (const int32_t *) ptr(v2), nb0(v2), nb1(v2), nanoquant_vector_sign_loads(v2), (const float *) ptr(pre2), (const float *) ptr(mid2),
++                (float *) dst->data, n_in, n_rank0, n_rank1, n_rank2, n_col, dst->ne[1], dst->ne[2]);
++            return;
++        }
++
++        const size_t shmem = rows_per_block*sizeof(float);
++        const dim3 blocks(n_rank_total, n_col, 1);
++        const ggml_cuda_kernel_launch_params params(blocks, block_size, shmem, stream);
++        ggml_cuda_kernel_launch(nanoquant_stage1_fused_block_kernel<block_size>, params,
++            x->data, x->type, x->nb[0], x->nb[1], x->nb[2], x->nb[3],
++            (const int32_t *) ptr(v0), nb0(v0), nb1(v0), ptr(pre0), type(pre0), nb0(pre0), ptr(mid0), type(mid0), nb0(mid0),
++            (const int32_t *) ptr(v1), nb0(v1), nb1(v1), ptr(pre1), type(pre1), nb0(pre1), ptr(mid1), type(mid1), nb0(mid1),
++            (const int32_t *) ptr(v2), nb0(v2), nb1(v2), ptr(pre2), type(pre2), nb0(pre2), ptr(mid2), type(mid2), nb0(mid2),
++            (float *) dst->data, n_in, n_rank0, n_rank1, n_rank2, dst->ne[1], dst->ne[2]);
++    }
++}
++
++void ggml_cuda_op_nanoquant_stage2(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
++    const ggml_tensor * x          = dst->src[0];
++    const ggml_tensor * tmp        = dst->src[1];
++    const ggml_tensor * u_bits     = dst->src[2];
++    const ggml_tensor * scale_post = dst->src[3];
++    const ggml_tensor * salient_idx    = dst->src[4];
++    const ggml_tensor * salient_weight = dst->src[5];
++    const ggml_tensor * salient_scale  = dst->src[6];
++
++    const int64_t n_rank = tmp->ne[0];
++    const int64_t n_out  = dst->ne[0];
++    const int64_t n_col  = dst->ne[1]*dst->ne[2]*dst->ne[3];
++    const int64_t n_salient = salient_idx == nullptr ? 0 : salient_idx->ne[0];
++
++    constexpr int block_size = 256;
++    constexpr int rows_per_block = block_size / WARP_SIZE;
++    cudaStream_t stream = ctx.stream();
+ 
+-    float acc = 0.0f;
+-    if (x_type == GGML_TYPE_F32 && scale_pre_type == GGML_TYPE_F32) {
+-        for (int64_t i = tid; i < n_in; i += block_size) {
+-            const float xv = *(const float *) ((const char *) x + i*nbx0 + i1*nbx1 + i2*nbx2 + i3*nbx3);
+-            const float pre = *(const float *) ((const char *) scale_pre + i*nb_pre0);
+-            acc += nanoquant_apply_sign(v_bits, nbv0, nbv1, r, i, xv*pre);
++    if (n_col == 1) {
++        const bool full_warps = n_rank % WARP_SIZE == 0;
++        const dim3 blocks((n_out + rows_per_block - 1)/rows_per_block, n_col, 1);
++        const ggml_cuda_kernel_launch_params params(blocks, block_size, 0, stream);
++        const bool no_salient = n_salient == 0;
++        const int fast_salient = nanoquant_fast_salient_count(
++                x, scale_post, salient_idx, salient_weight, salient_scale, dst, n_salient);
++
++        if (full_warps && no_salient) {
++            ggml_cuda_kernel_launch(nanoquant_stage2_warp_kernel<block_size, true, -1, true>, params,
++                x->data, x->type, x->nb[0], x->nb[1], x->nb[2], x->nb[3],
++                (const int32_t *) u_bits->data, u_bits->nb[0], u_bits->nb[1], nanoquant_vector_sign_loads(u_bits),
++                scale_post->data, scale_post->type, scale_post->nb[0],
++                nullptr, 0, nullptr, GGML_TYPE_COUNT, 0, 0, nullptr, GGML_TYPE_COUNT, 0,
++                n_salient, (const float *) tmp->data, (float *) dst->data, n_rank, n_out,
++                dst->ne[1], dst->ne[2], dst->nb[0], dst->nb[1], dst->nb[2], dst->nb[3]);
++        } else if (full_warps && fast_salient == 2) {
++            ggml_cuda_kernel_launch(nanoquant_stage2_warp_kernel<block_size, true, 2, false>, params,
++                x->data, x->type, x->nb[0], x->nb[1], x->nb[2], x->nb[3],
++                (const int32_t *) u_bits->data, u_bits->nb[0], u_bits->nb[1], nanoquant_vector_sign_loads(u_bits),
++                scale_post->data, scale_post->type, scale_post->nb[0],
++                (const int32_t *) salient_idx->data, salient_idx->nb[0],
++                salient_weight->data, salient_weight->type, salient_weight->nb[0], salient_weight->nb[1],
++                nullptr, GGML_TYPE_COUNT, 0,
++                n_salient, (const float *) tmp->data, (float *) dst->data, n_rank, n_out,
++                dst->ne[1], dst->ne[2], dst->nb[0], dst->nb[1], dst->nb[2], dst->nb[3]);
++        } else if (full_warps && fast_salient == 7) {
++            ggml_cuda_kernel_launch(nanoquant_stage2_warp_kernel<block_size, true, 7, false>, params,
++                x->data, x->type, x->nb[0], x->nb[1], x->nb[2], x->nb[3],
++                (const int32_t *) u_bits->data, u_bits->nb[0], u_bits->nb[1], nanoquant_vector_sign_loads(u_bits),
++                scale_post->data, scale_post->type, scale_post->nb[0],
++                (const int32_t *) salient_idx->data, salient_idx->nb[0],
++                salient_weight->data, salient_weight->type, salient_weight->nb[0], salient_weight->nb[1],
++                nullptr, GGML_TYPE_COUNT, 0,
++                n_salient, (const float *) tmp->data, (float *) dst->data, n_rank, n_out,
++                dst->ne[1], dst->ne[2], dst->nb[0], dst->nb[1], dst->nb[2], dst->nb[3]);
++        } else if (full_warps && fast_salient == 8) {
++            ggml_cuda_kernel_launch(nanoquant_stage2_warp_kernel<block_size, true, 8, false>, params,
++                x->data, x->type, x->nb[0], x->nb[1], x->nb[2], x->nb[3],
++                (const int32_t *) u_bits->data, u_bits->nb[0], u_bits->nb[1], nanoquant_vector_sign_loads(u_bits),
++                scale_post->data, scale_post->type, scale_post->nb[0],
++                (const int32_t *) salient_idx->data, salient_idx->nb[0],
++                salient_weight->data, salient_weight->type, salient_weight->nb[0], salient_weight->nb[1],
++                nullptr, GGML_TYPE_COUNT, 0,
++                n_salient, (const float *) tmp->data, (float *) dst->data, n_rank, n_out,
++                dst->ne[1], dst->ne[2], dst->nb[0], dst->nb[1], dst->nb[2], dst->nb[3]);
++        } else if (full_warps) {
++            ggml_cuda_kernel_launch(nanoquant_stage2_warp_kernel<block_size, true, -1, false>, params,
++                x->data, x->type, x->nb[0], x->nb[1], x->nb[2], x->nb[3],
++                (const int32_t *) u_bits->data, u_bits->nb[0], u_bits->nb[1], nanoquant_vector_sign_loads(u_bits),
++                scale_post->data, scale_post->type, scale_post->nb[0],
++                salient_idx == nullptr ? nullptr : (const int32_t *) salient_idx->data,
++                salient_idx == nullptr ? 0 : salient_idx->nb[0],
++                salient_weight == nullptr ? nullptr : salient_weight->data,
++                salient_weight == nullptr ? GGML_TYPE_COUNT : salient_weight->type,
++                salient_weight == nullptr ? 0 : salient_weight->nb[0],
++                salient_weight == nullptr ? 0 : salient_weight->nb[1],
++                salient_scale == nullptr ? nullptr : salient_scale->data,
++                salient_scale == nullptr ? GGML_TYPE_COUNT : salient_scale->type,
++                salient_scale == nullptr ? 0 : salient_scale->nb[0],
++                n_salient, (const float *) tmp->data, (float *) dst->data, n_rank, n_out,
++                dst->ne[1], dst->ne[2], dst->nb[0], dst->nb[1], dst->nb[2], dst->nb[3]);
++        } else {
++            ggml_cuda_kernel_launch(nanoquant_stage2_warp_kernel<block_size, false, -1, false>, params,
++                x->data, x->type, x->nb[0], x->nb[1], x->nb[2], x->nb[3],
++                (const int32_t *) u_bits->data, u_bits->nb[0], u_bits->nb[1], false,
++                scale_post->data, scale_post->type, scale_post->nb[0],
++                salient_idx == nullptr ? nullptr : (const int32_t *) salient_idx->data,
++                salient_idx == nullptr ? 0 : salient_idx->nb[0],
++                salient_weight == nullptr ? nullptr : salient_weight->data,
++                salient_weight == nullptr ? GGML_TYPE_COUNT : salient_weight->type,
++                salient_weight == nullptr ? 0 : salient_weight->nb[0],
++                salient_weight == nullptr ? 0 : salient_weight->nb[1],
++                salient_scale == nullptr ? nullptr : salient_scale->data,
++                salient_scale == nullptr ? GGML_TYPE_COUNT : salient_scale->type,
++                salient_scale == nullptr ? 0 : salient_scale->nb[0],
++                n_salient, (const float *) tmp->data, (float *) dst->data, n_rank, n_out,
++                dst->ne[1], dst->ne[2], dst->nb[0], dst->nb[1], dst->nb[2], dst->nb[3]);
+         }
+     } else {
+-        for (int64_t i = tid; i < n_in; i += block_size) {
+-            const float xv = nanoquant_load_f32(x, x_type, i*nbx0 + i1*nbx1 + i2*nbx2 + i3*nbx3);
+-            const float pre = nanoquant_load_f32(scale_pre, scale_pre_type, i*nb_pre0);
+-            acc += nanoquant_apply_sign(v_bits, nbv0, nbv1, r, i, xv*pre);
++        const int fast_salient = nanoquant_fast_salient_count(
++                x, scale_post, salient_idx, salient_weight, salient_scale, dst, n_salient);
++        const bool use_coltile =
++            n_rank % WARP_SIZE == 0 &&
++            n_col >= 8 &&
++            (fast_salient == 2 || fast_salient == 7 || fast_salient == 8) &&
++            tmp->nb[0] == sizeof(float);
++        if (use_coltile) {
++            // The col-tile path trades per-dot block-level reductions for warp
++            // reductions and much denser launches during prompt processing.
++            constexpr int cols_per_block = 8;
++            const dim3 blocks(n_out, (n_col + cols_per_block - 1)/cols_per_block, 1);
++            const ggml_cuda_kernel_launch_params params(blocks, block_size, 0, stream);
++            if (fast_salient == 2) {
++                ggml_cuda_kernel_launch(nanoquant_stage2_coltile_kernel<block_size, cols_per_block, 2>, params,
++                    x->data, x->nb[0], x->nb[1], x->nb[2], x->nb[3],
++                    (const int32_t *) u_bits->data, u_bits->nb[0], u_bits->nb[1], nanoquant_vector_sign_loads(u_bits),
++                    (const float *) scale_post->data,
++                    (const int32_t *) salient_idx->data,
++                    (const half *) salient_weight->data,
++                    (const float *) tmp->data,
++                    tmp->nb[0], tmp->nb[1], tmp->nb[2], tmp->nb[3],
++                    (float *) dst->data, n_rank, n_col,
++                    dst->ne[1], dst->ne[2], dst->nb[0], dst->nb[1], dst->nb[2], dst->nb[3]);
++            } else if (fast_salient == 7) {
++                ggml_cuda_kernel_launch(nanoquant_stage2_coltile_kernel<block_size, cols_per_block, 7>, params,
++                    x->data, x->nb[0], x->nb[1], x->nb[2], x->nb[3],
++                    (const int32_t *) u_bits->data, u_bits->nb[0], u_bits->nb[1], nanoquant_vector_sign_loads(u_bits),
++                    (const float *) scale_post->data,
++                    (const int32_t *) salient_idx->data,
++                    (const half *) salient_weight->data,
++                    (const float *) tmp->data,
++                    tmp->nb[0], tmp->nb[1], tmp->nb[2], tmp->nb[3],
++                    (float *) dst->data, n_rank, n_col,
++                    dst->ne[1], dst->ne[2], dst->nb[0], dst->nb[1], dst->nb[2], dst->nb[3]);
++            } else {
++                ggml_cuda_kernel_launch(nanoquant_stage2_coltile_kernel<block_size, cols_per_block, 8>, params,
++                    x->data, x->nb[0], x->nb[1], x->nb[2], x->nb[3],
++                    (const int32_t *) u_bits->data, u_bits->nb[0], u_bits->nb[1], nanoquant_vector_sign_loads(u_bits),
++                    (const float *) scale_post->data,
++                    (const int32_t *) salient_idx->data,
++                    (const half *) salient_weight->data,
++                    (const float *) tmp->data,
++                    tmp->nb[0], tmp->nb[1], tmp->nb[2], tmp->nb[3],
++                    (float *) dst->data, n_rank, n_col,
++                    dst->ne[1], dst->ne[2], dst->nb[0], dst->nb[1], dst->nb[2], dst->nb[3]);
++            }
++            return;
+         }
+-    }
+ 
+-    extern __shared__ float shared[];
+-    acc = block_reduce<block_reduce_method::SUM, block_size>(acc, shared);
+-    if (tid == 0) {
+-        const float mid = nanoquant_load_f32(scale_mid, scale_mid_type, r*nb_mid0);
+-        tmp[c*n_rank + r] = acc*mid;
++        const size_t shmem = rows_per_block*sizeof(float);
++        const dim3 blocks(n_out, n_col, 1);
++        const ggml_cuda_kernel_launch_params params(blocks, block_size, shmem, stream);
++        ggml_cuda_kernel_launch(nanoquant_stage2_block_kernel<block_size>, params,
++            x->data, x->type, x->nb[0], x->nb[1], x->nb[2], x->nb[3],
++            (const int32_t *) u_bits->data, u_bits->nb[0], u_bits->nb[1],
++            scale_post->data, scale_post->type, scale_post->nb[0],
++            salient_idx == nullptr ? nullptr : (const int32_t *) salient_idx->data,
++            salient_idx == nullptr ? 0 : salient_idx->nb[0],
++            salient_weight == nullptr ? nullptr : salient_weight->data,
++            salient_weight == nullptr ? GGML_TYPE_COUNT : salient_weight->type,
++            salient_weight == nullptr ? 0 : salient_weight->nb[0],
++            salient_weight == nullptr ? 0 : salient_weight->nb[1],
++            salient_scale == nullptr ? nullptr : salient_scale->data,
++            salient_scale == nullptr ? GGML_TYPE_COUNT : salient_scale->type,
++            salient_scale == nullptr ? 0 : salient_scale->nb[0],
++            n_salient, (const float *) tmp->data,
++            tmp->nb[0], tmp->nb[1], tmp->nb[2], tmp->nb[3],
++            (float *) dst->data, n_rank,
++            dst->ne[1], dst->ne[2], dst->nb[0], dst->nb[1], dst->nb[2], dst->nb[3]);
+     }
+ }
+ 
+-template <int block_size>
+-static __global__ void nanoquant_stage2_block_kernel(
+-        const void * x,
+-        const ggml_type x_type,
+-        const int64_t nbx0,
+-        const int64_t nbx1,
+-        const int64_t nbx2,
+-        const int64_t nbx3,
+-        const int32_t * u_bits,
+-        const int64_t nbu0,
+-        const int64_t nbu1,
+-        const void * scale_post,
+-        const ggml_type scale_post_type,
+-        const int64_t nb_post0,
+-        const int32_t * salient_idx,
+-        const int64_t nb_salient_idx0,
+-        const void * salient_weight,
+-        const ggml_type salient_weight_type,
+-        const int64_t nb_salient_weight0,
+-        const int64_t nb_salient_weight1,
+-        const void * salient_scale,
+-        const ggml_type salient_scale_type,
+-        const int64_t nb_salient_scale0,
+-        const int64_t n_salient,
+-        const float * tmp,
+-        float * dst,
+-        const int64_t n_rank,
+-        const int64_t ne1,
+-        const int64_t ne2,
+-        const int64_t nbd0,
+-        const int64_t nbd1,
+-        const int64_t nbd2,
+-        const int64_t nbd3) {
+-    const int64_t o = blockIdx.x;
+-    const int64_t c = blockIdx.y;
+-    const int tid = threadIdx.x;
++void ggml_cuda_op_nanoquant_stage2_fused2(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
++    const ggml_tensor * x       = dst->src[0];
++    const ggml_tensor * tmp     = dst->src[1];
++    const ggml_tensor * u0      = dst->src[2];
++    const ggml_tensor * post0   = dst->src[3];
++    const ggml_tensor * idx0    = dst->src[4];
++    const ggml_tensor * weight0 = dst->src[5];
++    const ggml_tensor * u1      = dst->src[6];
++    const ggml_tensor * post1   = dst->src[7];
++    const ggml_tensor * idx1    = dst->src[8];
++    const ggml_tensor * weight1 = dst->src[9];
+ 
+-    const int64_t i3 = c/(ne1*ne2);
+-    const int64_t rem = c - i3*ne1*ne2;
+-    const int64_t i2 = rem/ne1;
+-    const int64_t i1 = rem - i2*ne1;
++    const int64_t n_rank0 = ggml_get_op_params_i32(dst, 0);
++    const int64_t n_rank1 = ggml_get_op_params_i32(dst, 1);
++    const int64_t n_out0  = post0->ne[0];
++    const int64_t n_out1  = post1->ne[0];
++    const int64_t n_col   = dst->ne[1]*dst->ne[2]*dst->ne[3];
++    const int64_t n_salient0 = idx0 == nullptr ? 0 : idx0->ne[0];
++    const int64_t n_salient1 = idx1 == nullptr ? 0 : idx1->ne[0];
+ 
+-    float acc = 0.0f;
+-    for (int64_t r = tid; r < n_rank; r += block_size) {
+-        acc += nanoquant_apply_sign(u_bits, nbu0, nbu1, o, r, tmp[c*n_rank + r]);
+-    }
++    constexpr int block_size = 256;
++    constexpr int rows_per_block = block_size / WARP_SIZE;
++    cudaStream_t stream = ctx.stream();
+ 
+-    extern __shared__ float shared[];
+-    acc = block_reduce<block_reduce_method::SUM, block_size>(acc, shared);
+-    if (tid == 0) {
+-        float value = acc*nanoquant_load_f32(scale_post, scale_post_type, o*nb_post0);
++    if (n_col == 1) {
++        // This op is intentionally narrow: it exists to trim decode launch
++        // count for two projections with the common 2-outlier F16 layout.
++        const int fast0 = nanoquant_fast_salient_count(x, post0, idx0, weight0, nullptr, dst, n_salient0);
++        const int fast1 = nanoquant_fast_salient_count(x, post1, idx1, weight1, nullptr, dst, n_salient1);
++        GGML_ASSERT(fast0 == 2 && fast1 == 2);
+ 
+-        for (int64_t s = 0; s < n_salient; ++s) {
+-            const int64_t idx = *(const int32_t *) ((const char *) salient_idx + s*nb_salient_idx0);
+-            float weight = nanoquant_load_f32(
+-                salient_weight, salient_weight_type, s*nb_salient_weight0 + o*nb_salient_weight1);
+-            if (salient_scale != nullptr) {
+-                weight *= nanoquant_load_f32(salient_scale, salient_scale_type, s*nb_salient_scale0);
+-            }
+-            value += nanoquant_load_f32(x, x_type, idx*nbx0 + i1*nbx1 + i2*nbx2 + i3*nbx3)*weight;
+-        }
++        const bool full_warps = n_rank0 % WARP_SIZE == 0 && n_rank1 % WARP_SIZE == 0;
++        GGML_ASSERT(full_warps);
+ 
+-        *(float *) ((char *) dst + o*nbd0 + i1*nbd1 + i2*nbd2 + i3*nbd3) = value;
++        const dim3 blocks((n_out0 + n_out1 + rows_per_block - 1)/rows_per_block, 1, 1);
++        const ggml_cuda_kernel_launch_params params(blocks, block_size, 0, stream);
++        ggml_cuda_kernel_launch(nanoquant_stage2_fused2_warp_kernel<block_size, true, 2, 2>, params,
++            x->data, x->type, x->nb[0], x->nb[1], x->nb[2], x->nb[3],
++            (const float *) tmp->data,
++            (const int32_t *) u0->data, u0->nb[0], u0->nb[1], nanoquant_vector_sign_loads(u0),
++            post0->data, post0->type, post0->nb[0],
++            (const int32_t *) idx0->data, idx0->nb[0],
++            weight0->data, weight0->type, weight0->nb[0], weight0->nb[1],
++            (const int32_t *) u1->data, u1->nb[0], u1->nb[1], nanoquant_vector_sign_loads(u1),
++            post1->data, post1->type, post1->nb[0],
++            (const int32_t *) idx1->data, idx1->nb[0],
++            weight1->data, weight1->type, weight1->nb[0], weight1->nb[1],
++            (float *) dst->data, n_rank0, n_rank1, n_out0, n_out0 + n_out1,
++            dst->ne[1], dst->ne[2], dst->nb[0], dst->nb[1], dst->nb[2], dst->nb[3]);
++    } else {
++        // Graph construction currently avoids this branch for prompt batches;
++        // keep the fallback correct for backend validation and future callers.
++        const size_t shmem = rows_per_block*sizeof(float);
++        const ggml_cuda_kernel_launch_params params0(dim3(n_out0, n_col, 1), block_size, shmem, stream);
++        ggml_cuda_kernel_launch(nanoquant_stage2_block_kernel<block_size>, params0,
++            x->data, x->type, x->nb[0], x->nb[1], x->nb[2], x->nb[3],
++            (const int32_t *) u0->data, u0->nb[0], u0->nb[1],
++            post0->data, post0->type, post0->nb[0],
++            (const int32_t *) idx0->data, idx0->nb[0],
++            weight0->data, weight0->type, weight0->nb[0], weight0->nb[1],
++            nullptr, GGML_TYPE_COUNT, 0,
++            n_salient0, (const float *) tmp->data,
++            tmp->nb[0], tmp->nb[1], tmp->nb[2], tmp->nb[3],
++            (float *) dst->data, n_rank0,
++            dst->ne[1], dst->ne[2], dst->nb[0], dst->nb[1], dst->nb[2], dst->nb[3]);
++
++        const ggml_cuda_kernel_launch_params params1(dim3(n_out1, n_col, 1), block_size, shmem, stream);
++        ggml_cuda_kernel_launch(nanoquant_stage2_block_kernel<block_size>, params1,
++            x->data, x->type, x->nb[0], x->nb[1], x->nb[2], x->nb[3],
++            (const int32_t *) u1->data, u1->nb[0], u1->nb[1],
++            post1->data, post1->type, post1->nb[0],
++            (const int32_t *) idx1->data, idx1->nb[0],
++            weight1->data, weight1->type, weight1->nb[0], weight1->nb[1],
++            nullptr, GGML_TYPE_COUNT, 0,
++            n_salient1, (const float *) ((const char *) tmp->data + n_rank0*tmp->nb[0]),
++            tmp->nb[0], tmp->nb[1], tmp->nb[2], tmp->nb[3],
++            (float *) ((char *) dst->data + n_out0*dst->nb[0]), n_rank1,
++            dst->ne[1], dst->ne[2], dst->nb[0], dst->nb[1], dst->nb[2], dst->nb[3]);
+     }
+ }
+ 
+@@ -615,21 +1796,8 @@ void ggml_cuda_op_nanoquant_linear(ggml_backend_cuda_context & ctx, ggml_tensor
+ 
+         const ggml_cuda_kernel_launch_params stage2_params(stage2_blocks, block_size, 0, stream);
+         const bool no_salient = n_salient == 0;
+-        // This guarded path matches the current converter output for salient outliers.
+-        const bool fast_salient =
+-            x->type == GGML_TYPE_F32 &&
+-            scale_post->type == GGML_TYPE_F32 &&
+-            salient_idx != nullptr &&
+-            salient_weight != nullptr &&
+-            salient_weight->type == GGML_TYPE_F16 &&
+-            salient_scale == nullptr &&
+-            x->nb[0] == sizeof(float) &&
+-            scale_post->nb[0] == sizeof(float) &&
+-            salient_idx->nb[0] == sizeof(int32_t) &&
+-            salient_weight->nb[0] == sizeof(half) &&
+-            salient_weight->nb[1] == 8*sizeof(half) &&
+-            dst->nb[0] == sizeof(float) &&
+-            n_salient == 8;
++        const int fast_salient = nanoquant_fast_salient_count(
++                x, scale_post, salient_idx, salient_weight, salient_scale, dst, n_salient);
+         if (full_warps && no_salient) {
+             ggml_cuda_kernel_launch(nanoquant_stage2_warp_kernel<block_size, true, -1, true>, stage2_params,
+                 x->data, x->type, x->nb[0], x->nb[1], x->nb[2], x->nb[3],
+@@ -646,7 +1814,39 @@ void ggml_cuda_op_nanoquant_linear(ggml_backend_cuda_context & ctx, ggml_tensor
+                 salient_scale == nullptr ? 0 : salient_scale->nb[0],
+                 n_salient, tmp.get(), (float *) dst->data, n_rank, n_out,
+                 dst->ne[1], dst->ne[2], dst->nb[0], dst->nb[1], dst->nb[2], dst->nb[3]);
+-        } else if (full_warps && fast_salient) {
++        } else if (full_warps && fast_salient == 2) {
++            ggml_cuda_kernel_launch(nanoquant_stage2_warp_kernel<block_size, true, 2, false>, stage2_params,
++                x->data, x->type, x->nb[0], x->nb[1], x->nb[2], x->nb[3],
++                (const int32_t *) u_bits->data, u_bits->nb[0], u_bits->nb[1], vector_u_loads,
++                scale_post->data, scale_post->type, scale_post->nb[0],
++                salient_idx == nullptr ? nullptr : (const int32_t *) salient_idx->data,
++                salient_idx == nullptr ? 0 : salient_idx->nb[0],
++                salient_weight == nullptr ? nullptr : salient_weight->data,
++                salient_weight == nullptr ? GGML_TYPE_COUNT : salient_weight->type,
++                salient_weight == nullptr ? 0 : salient_weight->nb[0],
++                salient_weight == nullptr ? 0 : salient_weight->nb[1],
++                salient_scale == nullptr ? nullptr : salient_scale->data,
++                salient_scale == nullptr ? GGML_TYPE_COUNT : salient_scale->type,
++                salient_scale == nullptr ? 0 : salient_scale->nb[0],
++                n_salient, tmp.get(), (float *) dst->data, n_rank, n_out,
++                dst->ne[1], dst->ne[2], dst->nb[0], dst->nb[1], dst->nb[2], dst->nb[3]);
++        } else if (full_warps && fast_salient == 7) {
++            ggml_cuda_kernel_launch(nanoquant_stage2_warp_kernel<block_size, true, 7, false>, stage2_params,
++                x->data, x->type, x->nb[0], x->nb[1], x->nb[2], x->nb[3],
++                (const int32_t *) u_bits->data, u_bits->nb[0], u_bits->nb[1], vector_u_loads,
++                scale_post->data, scale_post->type, scale_post->nb[0],
++                salient_idx == nullptr ? nullptr : (const int32_t *) salient_idx->data,
++                salient_idx == nullptr ? 0 : salient_idx->nb[0],
++                salient_weight == nullptr ? nullptr : salient_weight->data,
++                salient_weight == nullptr ? GGML_TYPE_COUNT : salient_weight->type,
++                salient_weight == nullptr ? 0 : salient_weight->nb[0],
++                salient_weight == nullptr ? 0 : salient_weight->nb[1],
++                salient_scale == nullptr ? nullptr : salient_scale->data,
++                salient_scale == nullptr ? GGML_TYPE_COUNT : salient_scale->type,
++                salient_scale == nullptr ? 0 : salient_scale->nb[0],
++                n_salient, tmp.get(), (float *) dst->data, n_rank, n_out,
++                dst->ne[1], dst->ne[2], dst->nb[0], dst->nb[1], dst->nb[2], dst->nb[3]);
++        } else if (full_warps && fast_salient == 8) {
+             ggml_cuda_kernel_launch(nanoquant_stage2_warp_kernel<block_size, true, 8, false>, stage2_params,
+                 x->data, x->type, x->nb[0], x->nb[1], x->nb[2], x->nb[3],
+                 (const int32_t *) u_bits->data, u_bits->nb[0], u_bits->nb[1], vector_u_loads,
+@@ -694,7 +1894,39 @@ void ggml_cuda_op_nanoquant_linear(ggml_backend_cuda_context & ctx, ggml_tensor
+                 salient_scale == nullptr ? 0 : salient_scale->nb[0],
+                 n_salient, tmp.get(), (float *) dst->data, n_rank, n_out,
+                 dst->ne[1], dst->ne[2], dst->nb[0], dst->nb[1], dst->nb[2], dst->nb[3]);
+-        } else if (fast_salient) {
++        } else if (fast_salient == 2) {
++            ggml_cuda_kernel_launch(nanoquant_stage2_warp_kernel<block_size, false, 2, false>, stage2_params,
++                x->data, x->type, x->nb[0], x->nb[1], x->nb[2], x->nb[3],
++                (const int32_t *) u_bits->data, u_bits->nb[0], u_bits->nb[1], false,
++                scale_post->data, scale_post->type, scale_post->nb[0],
++                salient_idx == nullptr ? nullptr : (const int32_t *) salient_idx->data,
++                salient_idx == nullptr ? 0 : salient_idx->nb[0],
++                salient_weight == nullptr ? nullptr : salient_weight->data,
++                salient_weight == nullptr ? GGML_TYPE_COUNT : salient_weight->type,
++                salient_weight == nullptr ? 0 : salient_weight->nb[0],
++                salient_weight == nullptr ? 0 : salient_weight->nb[1],
++                salient_scale == nullptr ? nullptr : salient_scale->data,
++                salient_scale == nullptr ? GGML_TYPE_COUNT : salient_scale->type,
++                salient_scale == nullptr ? 0 : salient_scale->nb[0],
++                n_salient, tmp.get(), (float *) dst->data, n_rank, n_out,
++                dst->ne[1], dst->ne[2], dst->nb[0], dst->nb[1], dst->nb[2], dst->nb[3]);
++        } else if (fast_salient == 7) {
++            ggml_cuda_kernel_launch(nanoquant_stage2_warp_kernel<block_size, false, 7, false>, stage2_params,
++                x->data, x->type, x->nb[0], x->nb[1], x->nb[2], x->nb[3],
++                (const int32_t *) u_bits->data, u_bits->nb[0], u_bits->nb[1], false,
++                scale_post->data, scale_post->type, scale_post->nb[0],
++                salient_idx == nullptr ? nullptr : (const int32_t *) salient_idx->data,
++                salient_idx == nullptr ? 0 : salient_idx->nb[0],
++                salient_weight == nullptr ? nullptr : salient_weight->data,
++                salient_weight == nullptr ? GGML_TYPE_COUNT : salient_weight->type,
++                salient_weight == nullptr ? 0 : salient_weight->nb[0],
++                salient_weight == nullptr ? 0 : salient_weight->nb[1],
++                salient_scale == nullptr ? nullptr : salient_scale->data,
++                salient_scale == nullptr ? GGML_TYPE_COUNT : salient_scale->type,
++                salient_scale == nullptr ? 0 : salient_scale->nb[0],
++                n_salient, tmp.get(), (float *) dst->data, n_rank, n_out,
++                dst->ne[1], dst->ne[2], dst->nb[0], dst->nb[1], dst->nb[2], dst->nb[3]);
++        } else if (fast_salient == 8) {
+             ggml_cuda_kernel_launch(nanoquant_stage2_warp_kernel<block_size, false, 8, false>, stage2_params,
+                 x->data, x->type, x->nb[0], x->nb[1], x->nb[2], x->nb[3],
+                 (const int32_t *) u_bits->data, u_bits->nb[0], u_bits->nb[1], false,
+@@ -729,32 +1961,117 @@ void ggml_cuda_op_nanoquant_linear(ggml_backend_cuda_context & ctx, ggml_tensor
+         }
+     } else {
+         const size_t shmem = rows_per_block*sizeof(float);
+-        const dim3 stage1_blocks(n_rank, n_col, 1);
+         const dim3 stage2_blocks(n_out,  n_col, 1);
+ 
+-        const ggml_cuda_kernel_launch_params stage1_params(stage1_blocks, block_size, shmem, stream);
+-        ggml_cuda_kernel_launch(nanoquant_stage1_block_kernel<block_size>, stage1_params,
+-            x->data, x->type, x->nb[0], x->nb[1], x->nb[2], x->nb[3],
+-            (const int32_t *) v_bits->data, v_bits->nb[0], v_bits->nb[1],
+-            scale_pre->data, scale_pre->type, scale_pre->nb[0],
+-            scale_mid->data, scale_mid->type, scale_mid->nb[0],
+-            tmp.get(), n_in, n_rank, dst->ne[1], dst->ne[2]);
++        const bool fast_stage1 =
++            n_in % WARP_SIZE == 0 &&
++            n_col >= 8 &&
++            x->type == GGML_TYPE_F32 &&
++            scale_pre->type == GGML_TYPE_F32 &&
++            scale_mid->type == GGML_TYPE_F32 &&
++            x->nb[0] == sizeof(float) &&
++            scale_pre->nb[0] == sizeof(float) &&
++            scale_mid->nb[0] == sizeof(float);
+ 
+-        const ggml_cuda_kernel_launch_params stage2_params(stage2_blocks, block_size, shmem, stream);
+-        ggml_cuda_kernel_launch(nanoquant_stage2_block_kernel<block_size>, stage2_params,
+-            x->data, x->type, x->nb[0], x->nb[1], x->nb[2], x->nb[3],
+-            (const int32_t *) u_bits->data, u_bits->nb[0], u_bits->nb[1],
+-            scale_post->data, scale_post->type, scale_post->nb[0],
+-            salient_idx == nullptr ? nullptr : (const int32_t *) salient_idx->data,
+-            salient_idx == nullptr ? 0 : salient_idx->nb[0],
+-            salient_weight == nullptr ? nullptr : salient_weight->data,
+-            salient_weight == nullptr ? GGML_TYPE_COUNT : salient_weight->type,
+-            salient_weight == nullptr ? 0 : salient_weight->nb[0],
+-            salient_weight == nullptr ? 0 : salient_weight->nb[1],
+-            salient_scale == nullptr ? nullptr : salient_scale->data,
+-            salient_scale == nullptr ? GGML_TYPE_COUNT : salient_scale->type,
+-            salient_scale == nullptr ? 0 : salient_scale->nb[0],
+-            n_salient, tmp.get(), (float *) dst->data, n_rank,
+-            dst->ne[1], dst->ne[2], dst->nb[0], dst->nb[1], dst->nb[2], dst->nb[3]);
++        if (fast_stage1) {
++            // This mirrors the split stage-1 prefill op, but uses the temporary
++            // buffer allocated inside the monolithic NanoQuant op.
++            constexpr int cols_per_block = 8;
++            const dim3 stage1_blocks(n_rank, (n_col + cols_per_block - 1)/cols_per_block, 1);
++            const ggml_cuda_kernel_launch_params stage1_params(stage1_blocks, block_size, 0, stream);
++            ggml_cuda_kernel_launch(nanoquant_stage1_coltile_kernel<block_size, cols_per_block>, stage1_params,
++                x->data, x->nb[0], x->nb[1], x->nb[2], x->nb[3],
++                (const int32_t *) v_bits->data, v_bits->nb[0], v_bits->nb[1], nanoquant_vector_sign_loads(v_bits),
++                (const float *) scale_pre->data, (const float *) scale_mid->data,
++                tmp.get(), n_in, n_rank, n_col, dst->ne[1], dst->ne[2]);
++        } else {
++            const dim3 stage1_blocks(n_rank, n_col, 1);
++            const ggml_cuda_kernel_launch_params stage1_params(stage1_blocks, block_size, shmem, stream);
++            ggml_cuda_kernel_launch(nanoquant_stage1_block_kernel<block_size>, stage1_params,
++                x->data, x->type, x->nb[0], x->nb[1], x->nb[2], x->nb[3],
++                (const int32_t *) v_bits->data, v_bits->nb[0], v_bits->nb[1],
++                scale_pre->data, scale_pre->type, scale_pre->nb[0],
++                scale_mid->data, scale_mid->type, scale_mid->nb[0],
++                tmp.get(), n_in, n_rank, dst->ne[1], dst->ne[2]);
++        }
++
++        const int fast_salient = nanoquant_fast_salient_count(
++                x, scale_post, salient_idx, salient_weight, salient_scale, dst, n_salient);
++        const bool fast_stage2 =
++            n_rank % WARP_SIZE == 0 &&
++            n_col >= 8 &&
++            (fast_salient == 2 || fast_salient == 7 || fast_salient == 8);
++        if (fast_stage2) {
++            // tmp is internally allocated in [column, rank] order, so pass
++            // explicit byte strides instead of relying on tensor metadata.
++            constexpr int cols_per_block = 8;
++            const dim3 stage2_coltile_blocks(n_out, (n_col + cols_per_block - 1)/cols_per_block, 1);
++            const ggml_cuda_kernel_launch_params stage2_params(stage2_coltile_blocks, block_size, 0, stream);
++            if (fast_salient == 2) {
++                ggml_cuda_kernel_launch(nanoquant_stage2_coltile_kernel<block_size, cols_per_block, 2>, stage2_params,
++                    x->data, x->nb[0], x->nb[1], x->nb[2], x->nb[3],
++                    (const int32_t *) u_bits->data, u_bits->nb[0], u_bits->nb[1], nanoquant_vector_sign_loads(u_bits),
++                    (const float *) scale_post->data,
++                    (const int32_t *) salient_idx->data,
++                    (const half *) salient_weight->data,
++                    tmp.get(),
++                    (int64_t) sizeof(float),
++                    (int64_t) n_rank*sizeof(float),
++                    (int64_t) n_rank*dst->ne[1]*sizeof(float),
++                    (int64_t) n_rank*dst->ne[1]*dst->ne[2]*sizeof(float),
++                    (float *) dst->data, n_rank, n_col,
++                    dst->ne[1], dst->ne[2], dst->nb[0], dst->nb[1], dst->nb[2], dst->nb[3]);
++            } else if (fast_salient == 7) {
++                ggml_cuda_kernel_launch(nanoquant_stage2_coltile_kernel<block_size, cols_per_block, 7>, stage2_params,
++                    x->data, x->nb[0], x->nb[1], x->nb[2], x->nb[3],
++                    (const int32_t *) u_bits->data, u_bits->nb[0], u_bits->nb[1], nanoquant_vector_sign_loads(u_bits),
++                    (const float *) scale_post->data,
++                    (const int32_t *) salient_idx->data,
++                    (const half *) salient_weight->data,
++                    tmp.get(),
++                    (int64_t) sizeof(float),
++                    (int64_t) n_rank*sizeof(float),
++                    (int64_t) n_rank*dst->ne[1]*sizeof(float),
++                    (int64_t) n_rank*dst->ne[1]*dst->ne[2]*sizeof(float),
++                    (float *) dst->data, n_rank, n_col,
++                    dst->ne[1], dst->ne[2], dst->nb[0], dst->nb[1], dst->nb[2], dst->nb[3]);
++            } else {
++                ggml_cuda_kernel_launch(nanoquant_stage2_coltile_kernel<block_size, cols_per_block, 8>, stage2_params,
++                    x->data, x->nb[0], x->nb[1], x->nb[2], x->nb[3],
++                    (const int32_t *) u_bits->data, u_bits->nb[0], u_bits->nb[1], nanoquant_vector_sign_loads(u_bits),
++                    (const float *) scale_post->data,
++                    (const int32_t *) salient_idx->data,
++                    (const half *) salient_weight->data,
++                    tmp.get(),
++                    (int64_t) sizeof(float),
++                    (int64_t) n_rank*sizeof(float),
++                    (int64_t) n_rank*dst->ne[1]*sizeof(float),
++                    (int64_t) n_rank*dst->ne[1]*dst->ne[2]*sizeof(float),
++                    (float *) dst->data, n_rank, n_col,
++                    dst->ne[1], dst->ne[2], dst->nb[0], dst->nb[1], dst->nb[2], dst->nb[3]);
++            }
++        } else {
++            const ggml_cuda_kernel_launch_params stage2_params(stage2_blocks, block_size, shmem, stream);
++            ggml_cuda_kernel_launch(nanoquant_stage2_block_kernel<block_size>, stage2_params,
++                x->data, x->type, x->nb[0], x->nb[1], x->nb[2], x->nb[3],
++                (const int32_t *) u_bits->data, u_bits->nb[0], u_bits->nb[1],
++                scale_post->data, scale_post->type, scale_post->nb[0],
++                salient_idx == nullptr ? nullptr : (const int32_t *) salient_idx->data,
++                salient_idx == nullptr ? 0 : salient_idx->nb[0],
++                salient_weight == nullptr ? nullptr : salient_weight->data,
++                salient_weight == nullptr ? GGML_TYPE_COUNT : salient_weight->type,
++                salient_weight == nullptr ? 0 : salient_weight->nb[0],
++                salient_weight == nullptr ? 0 : salient_weight->nb[1],
++                salient_scale == nullptr ? nullptr : salient_scale->data,
++                salient_scale == nullptr ? GGML_TYPE_COUNT : salient_scale->type,
++                salient_scale == nullptr ? 0 : salient_scale->nb[0],
++                n_salient, tmp.get(),
++                (int64_t) sizeof(float),
++                (int64_t) n_rank*sizeof(float),
++                (int64_t) n_rank*dst->ne[1]*sizeof(float),
++                (int64_t) n_rank*dst->ne[1]*dst->ne[2]*sizeof(float),
++                (float *) dst->data, n_rank,
++                dst->ne[1], dst->ne[2], dst->nb[0], dst->nb[1], dst->nb[2], dst->nb[3]);
++        }
+     }
+ }
+diff --git a/ggml/src/ggml-cuda/nanoquant.cuh b/ggml/src/ggml-cuda/nanoquant.cuh
+index 1793de68c..e4b439b4f 100644
+--- a/ggml/src/ggml-cuda/nanoquant.cuh
++++ b/ggml/src/ggml-cuda/nanoquant.cuh
+@@ -3,3 +3,6 @@
+ #include "common.cuh"
+ 
+ void ggml_cuda_op_nanoquant_linear(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
++void ggml_cuda_op_nanoquant_stage1_fused(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
++void ggml_cuda_op_nanoquant_stage2(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
++void ggml_cuda_op_nanoquant_stage2_fused2(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
+diff --git a/ggml/src/ggml.c b/ggml/src/ggml.c
+index e246f92d1..be396ac65 100644
+--- a/ggml/src/ggml.c
++++ b/ggml/src/ggml.c
+@@ -1022,6 +1022,9 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
+     "MUL_MAT",
+     "MUL_MAT_ID",
+     "NANOQUANT_LINEAR",
++    "NANOQUANT_STAGE1_FUSED",
++    "NANOQUANT_STAGE2",
++    "NANOQUANT_STAGE2_FUSED2",
+     "OUT_PROD",
+ 
+     "SCALE",
+@@ -1097,7 +1100,7 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
+     "GLU",
+ };
+ 
+-static_assert(GGML_OP_COUNT == 98, "GGML_OP_COUNT != 98");
++static_assert(GGML_OP_COUNT == 101, "GGML_OP_COUNT != 101");
+ 
+ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
+     "none",
+@@ -1134,6 +1137,9 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
+     "X*Y",
+     "X[i]*Y",
+     "nq_linear(x)",
++    "nq_stage1(x)",
++    "nq_stage2(x)",
++    "nq_stage2_fused2(x)",
+     "X*Y",
+ 
+     "x*v",
+@@ -1209,7 +1215,7 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
+     "glu(x)",
+ };
+ 
+-static_assert(GGML_OP_COUNT == 98, "GGML_OP_COUNT != 98");
++static_assert(GGML_OP_COUNT == 101, "GGML_OP_COUNT != 101");
+ 
+ static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
+ 
+@@ -3343,6 +3349,193 @@ struct ggml_tensor * ggml_nanoquant_linear(
+     return result;
+ }
+ 
++struct ggml_tensor * ggml_nanoquant_stage1_fused(
++        struct ggml_context * ctx,
++        struct ggml_tensor  * x,
++        struct ggml_tensor  * v0,
++        struct ggml_tensor  * scale_pre0,
++        struct ggml_tensor  * scale_mid0,
++        struct ggml_tensor  * v1,
++        struct ggml_tensor  * scale_pre1,
++        struct ggml_tensor  * scale_mid1,
++        struct ggml_tensor  * v2,
++        struct ggml_tensor  * scale_pre2,
++        struct ggml_tensor  * scale_mid2) {
++    GGML_ASSERT(x->type == GGML_TYPE_F32 || x->type == GGML_TYPE_F16 || x->type == GGML_TYPE_BF16);
++
++    // Up to three projections fit in GGML_MAX_SRC as triplets
++    // (sign bits, pre scale, mid scale); callers pass NULL triplets for fewer.
++    struct ggml_tensor * const v[3]   = { v0, v1, v2 };
++    struct ggml_tensor * const pre[3] = { scale_pre0, scale_pre1, scale_pre2 };
++    struct ggml_tensor * const mid[3] = { scale_mid0, scale_mid1, scale_mid2 };
++
++    const int64_t n_in = x->ne[0];
++    int64_t n_rank_total = 0;
++    for (int i = 0; i < 3; ++i) {
++        if (v[i] == NULL) {
++            GGML_ASSERT(pre[i] == NULL);
++            GGML_ASSERT(mid[i] == NULL);
++            continue;
++        }
++
++        GGML_ASSERT(v[i]->type == GGML_TYPE_I32);
++        GGML_ASSERT(pre[i]->type == GGML_TYPE_F32 || pre[i]->type == GGML_TYPE_F16 || pre[i]->type == GGML_TYPE_BF16);
++        GGML_ASSERT(mid[i]->type == GGML_TYPE_F32 || mid[i]->type == GGML_TYPE_F16 || mid[i]->type == GGML_TYPE_BF16);
++        GGML_ASSERT(pre[i]->ne[0] == n_in);
++        GGML_ASSERT(v[i]->ne[0] == (n_in + 31)/32);
++        GGML_ASSERT(v[i]->ne[1] == mid[i]->ne[0]);
++        n_rank_total += mid[i]->ne[0];
++    }
++    GGML_ASSERT(n_rank_total > 0);
++
++    const int64_t ne[4] = { n_rank_total, x->ne[1], x->ne[2], x->ne[3] };
++    struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, 4, ne);
++
++    result->op     = GGML_OP_NANOQUANT_STAGE1_FUSED;
++    result->src[0] = x;
++    result->src[1] = v0;
++    result->src[2] = scale_pre0;
++    result->src[3] = scale_mid0;
++    result->src[4] = v1;
++    result->src[5] = scale_pre1;
++    result->src[6] = scale_mid1;
++    result->src[7] = v2;
++    result->src[8] = scale_pre2;
++    result->src[9] = scale_mid2;
++
++    return result;
++}
++
++struct ggml_tensor * ggml_nanoquant_stage2(
++        struct ggml_context * ctx,
++        struct ggml_tensor  * x,
++        struct ggml_tensor  * tmp,
++        struct ggml_tensor  * u_bits,
++        struct ggml_tensor  * scale_post,
++        struct ggml_tensor  * salient_idx,
++        struct ggml_tensor  * salient_weight,
++        struct ggml_tensor  * salient_scale) {
++    GGML_ASSERT(x->type == GGML_TYPE_F32 || x->type == GGML_TYPE_F16 || x->type == GGML_TYPE_BF16);
++    GGML_ASSERT(tmp->type == GGML_TYPE_F32);
++    GGML_ASSERT(u_bits->type == GGML_TYPE_I32);
++    GGML_ASSERT(scale_post->type == GGML_TYPE_F32 || scale_post->type == GGML_TYPE_F16 || scale_post->type == GGML_TYPE_BF16);
++
++    const int64_t n_rank = tmp->ne[0];
++    const int64_t n_out  = scale_post->ne[0];
++
++    GGML_ASSERT(u_bits->ne[0] == (n_rank + 31)/32);
++    GGML_ASSERT(u_bits->ne[1] == n_out);
++    GGML_ASSERT((salient_idx == NULL) == (salient_weight == NULL));
++    GGML_ASSERT(salient_scale == NULL || salient_weight != NULL);
++
++    if (salient_idx != NULL) {
++        const int64_t n_salient = salient_idx->ne[0];
++        GGML_ASSERT(salient_idx->type == GGML_TYPE_I32);
++        GGML_ASSERT(salient_weight->ne[0] == n_salient);
++        GGML_ASSERT(salient_weight->ne[1] == n_out);
++        if (salient_scale != NULL) {
++            GGML_ASSERT(salient_weight->type == GGML_TYPE_I8);
++            GGML_ASSERT(salient_scale->type == GGML_TYPE_F32 ||
++                        salient_scale->type == GGML_TYPE_F16 ||
++                        salient_scale->type == GGML_TYPE_BF16);
++            GGML_ASSERT(salient_scale->ne[0] == n_salient);
++        } else {
++            GGML_ASSERT(salient_weight->type == GGML_TYPE_F32 ||
++                        salient_weight->type == GGML_TYPE_F16 ||
++                        salient_weight->type == GGML_TYPE_BF16);
++        }
++    }
++
++    const int64_t ne[4] = { n_out, x->ne[1], x->ne[2], x->ne[3] };
++    struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, 4, ne);
++
++    result->op     = GGML_OP_NANOQUANT_STAGE2;
++    result->src[0] = x;
++    result->src[1] = tmp;
++    result->src[2] = u_bits;
++    result->src[3] = scale_post;
++    result->src[4] = salient_idx;
++    result->src[5] = salient_weight;
++    result->src[6] = salient_scale;
++
++    return result;
++}
++
++struct ggml_tensor * ggml_nanoquant_stage2_fused2(
++        struct ggml_context * ctx,
++        struct ggml_tensor  * x,
++        struct ggml_tensor  * tmp,
++        struct ggml_tensor  * u0,
++        struct ggml_tensor  * scale_post0,
++        struct ggml_tensor  * salient_idx0,
++        struct ggml_tensor  * salient_weight0,
++        struct ggml_tensor  * u1,
++        struct ggml_tensor  * scale_post1,
++        struct ggml_tensor  * salient_idx1,
++        struct ggml_tensor  * salient_weight1,
++        int64_t               n_rank0,
++        int64_t               n_rank1) {
++    GGML_ASSERT(x->type == GGML_TYPE_F32 || x->type == GGML_TYPE_F16 || x->type == GGML_TYPE_BF16);
++    GGML_ASSERT(tmp->type == GGML_TYPE_F32);
++    GGML_ASSERT(u0->type == GGML_TYPE_I32);
++    GGML_ASSERT(u1->type == GGML_TYPE_I32);
++    GGML_ASSERT(scale_post0->type == GGML_TYPE_F32 || scale_post0->type == GGML_TYPE_F16 || scale_post0->type == GGML_TYPE_BF16);
++    GGML_ASSERT(scale_post1->type == GGML_TYPE_F32 || scale_post1->type == GGML_TYPE_F16 || scale_post1->type == GGML_TYPE_BF16);
++    GGML_ASSERT(n_rank0 > 0);
++    GGML_ASSERT(n_rank1 > 0);
++    GGML_ASSERT(tmp->ne[0] >= n_rank0 + n_rank1);
++
++    const int64_t n_out0 = scale_post0->ne[0];
++    const int64_t n_out1 = scale_post1->ne[0];
++
++    GGML_ASSERT(u0->ne[0] == (n_rank0 + 31)/32);
++    GGML_ASSERT(u0->ne[1] == n_out0);
++    GGML_ASSERT(u1->ne[0] == (n_rank1 + 31)/32);
++    GGML_ASSERT(u1->ne[1] == n_out1);
++    GGML_ASSERT((salient_idx0 == NULL) == (salient_weight0 == NULL));
++    GGML_ASSERT((salient_idx1 == NULL) == (salient_weight1 == NULL));
++
++    if (salient_idx0 != NULL) {
++        const int64_t n_salient = salient_idx0->ne[0];
++        GGML_ASSERT(salient_idx0->type == GGML_TYPE_I32);
++        GGML_ASSERT(salient_weight0->type == GGML_TYPE_F32 ||
++                    salient_weight0->type == GGML_TYPE_F16 ||
++                    salient_weight0->type == GGML_TYPE_BF16);
++        GGML_ASSERT(salient_weight0->ne[0] == n_salient);
++        GGML_ASSERT(salient_weight0->ne[1] == n_out0);
++    }
++    if (salient_idx1 != NULL) {
++        const int64_t n_salient = salient_idx1->ne[0];
++        GGML_ASSERT(salient_idx1->type == GGML_TYPE_I32);
++        GGML_ASSERT(salient_weight1->type == GGML_TYPE_F32 ||
++                    salient_weight1->type == GGML_TYPE_F16 ||
++                    salient_weight1->type == GGML_TYPE_BF16);
++        GGML_ASSERT(salient_weight1->ne[0] == n_salient);
++        GGML_ASSERT(salient_weight1->ne[1] == n_out1);
++    }
++
++    const int64_t ne[4] = { n_out0 + n_out1, x->ne[1], x->ne[2], x->ne[3] };
++    struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, 4, ne);
++
++    // Rank offsets cannot be inferred from output shape, so keep them as op params.
++    ggml_set_op_params_i32(result, 0, (int32_t) n_rank0);
++    ggml_set_op_params_i32(result, 1, (int32_t) n_rank1);
++
++    result->op     = GGML_OP_NANOQUANT_STAGE2_FUSED2;
++    result->src[0] = x;
++    result->src[1] = tmp;
++    result->src[2] = u0;
++    result->src[3] = scale_post0;
++    result->src[4] = salient_idx0;
++    result->src[5] = salient_weight0;
++    result->src[6] = u1;
++    result->src[7] = scale_post1;
++    result->src[8] = salient_idx1;
++    result->src[9] = salient_weight1;
++
++    return result;
++}
++
+ void ggml_mul_mat_set_prec(
+         struct ggml_tensor * a,
+         enum ggml_prec       prec) {
+@@ -6699,7 +6892,10 @@ static void ggml_compute_backward(
+                                 grad)));        // [m,p,qq,rr]
+             }
+         } break;
+-        case GGML_OP_NANOQUANT_LINEAR: {
++        case GGML_OP_NANOQUANT_LINEAR:
++        case GGML_OP_NANOQUANT_STAGE1_FUSED:
++        case GGML_OP_NANOQUANT_STAGE2:
++        case GGML_OP_NANOQUANT_STAGE2_FUSED2: {
+             GGML_ASSERT(!src0_needs_grads && !src1_needs_grads && !src2_needs_grads);
+         } break;
+         case GGML_OP_SCALE: {
+diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
+index 07a0e5c4e..498761215 100644
+--- a/src/llama-graph.cpp
++++ b/src/llama-graph.cpp
+@@ -1407,6 +1407,49 @@ ggml_tensor * llm_graph_context::build_lora_mm(
+     return res;
+ }
+ 
++ggml_tensor * llm_graph_context::build_nanoquant_tmp_view(
++        ggml_tensor * tmp,
++        int64_t rank,
++        int64_t rank_offset) const {
++    // Fused stage 1 concatenates projection ranks; stage 2 still wants a
++    // per-projection rank view without copying tmp.
++    return ggml_view_4d(ctx0, tmp, rank, tmp->ne[1], tmp->ne[2], tmp->ne[3],
++            tmp->nb[1], tmp->nb[2], tmp->nb[3], rank_offset*tmp->nb[0]);
++}
++
++ggml_tensor * llm_graph_context::build_nanoquant_stage2(
++        const llama_nanoquant_weight * nq,
++        ggml_tensor * cur,
++        ggml_tensor * tmp,
++        ggml_tensor * w_s) const {
++    ggml_tensor * res = ggml_nanoquant_stage2(ctx0, cur, tmp, nq->u, nq->scale_post,
++            nq->salient_idx, nq->salient_weight, nq->salient_scale);
++    if (w_s) {
++        res = ggml_mul(ctx0, res, w_s);
++    }
++    return res;
++}
++
++static bool llama_nanoquant_can_fuse_stage2_2way(
++        const llama_nanoquant_weight * a,
++        const llama_nanoquant_weight * b) {
++    // The CUDA fused2 kernel is deliberately specialized to the common decode
++    // shape; broader salient layouts use normal stage-2 kernels.
++    if (a == nullptr || b == nullptr || !a->enabled() || !b->enabled()) {
++        return false;
++    }
++    if (a->salient_scale != nullptr || b->salient_scale != nullptr ||
++            a->salient_idx == nullptr || b->salient_idx == nullptr ||
++            a->salient_weight == nullptr || b->salient_weight == nullptr) {
++        return false;
++    }
++    if (a->salient_idx->ne[0] != 2 || b->salient_idx->ne[0] != 2 ||
++            a->salient_weight->type != GGML_TYPE_F16 || b->salient_weight->type != GGML_TYPE_F16) {
++        return false;
++    }
++    return a->scale_mid->ne[0]%32 == 0 && b->scale_mid->ne[0]%32 == 0;
++}
++
+ ggml_tensor * llm_graph_context::build_lora_mm_id(
+           ggml_tensor * w,   // ggml_tensor * as
+           ggml_tensor * cur, // ggml_tensor * b
+@@ -1515,7 +1558,52 @@ llm_graph_qkv llm_graph_context::build_qkv(
+             ggml_row_size(qkv->type, n_embd_q + n_embd_kv));
+     } else {
+         // separate Q/K/V path
+-        Qcur = build_lora_mm(layer.wq, cur, layer.wq_s);
++        bool qk_stage2_fused = false;
++        const llama_nanoquant_weight * nq_q = model == nullptr ? nullptr : model->get_nanoquant_weight(layer.wq);
++        const llama_nanoquant_weight * nq_k = model == nullptr ? nullptr : model->get_nanoquant_weight(layer.wk);
++        const llama_nanoquant_weight * nq_v = model == nullptr ? nullptr : model->get_nanoquant_weight(layer.wv);
++        const bool fuse_nanoquant_qkv = nq_q != nullptr && nq_q->enabled() &&
++            nq_k != nullptr && nq_k->enabled() &&
++            nq_v != nullptr && nq_v->enabled();
++
++        if (fuse_nanoquant_qkv) {
++            ggml_tensor * tmp_qkv = ggml_nanoquant_stage1_fused(ctx0, cur,
++                    nq_q->v, nq_q->scale_pre, nq_q->scale_mid,
++                    nq_k->v, nq_k->scale_pre, nq_k->scale_mid,
++                    nq_v->v, nq_v->scale_pre, nq_v->scale_mid);
++            cb(tmp_qkv, "nq_qkv_stage1", il);
++
++            const int64_t rank_q = nq_q->scale_mid->ne[0];
++            const int64_t rank_k = nq_k->scale_mid->ne[0];
++            const int64_t rank_v = nq_v->scale_mid->ne[0];
++            if (n_tokens == 1 &&
++                    llama_nanoquant_can_fuse_stage2_2way(nq_q, nq_k) &&
++                    layer.wq_s == nullptr && layer.wk_s == nullptr &&
++                    layer.wq_b == nullptr && layer.wk_b == nullptr &&
++                    hparams.f_clamp_kqv <= 0.0f) {
++                // Decode-only: prompt batches use column-tiled stage 2, which
++                // benchmarks faster than the fused2 block fallback.
++                ggml_tensor * qk = ggml_nanoquant_stage2_fused2(ctx0, cur, tmp_qkv,
++                        nq_q->u, nq_q->scale_post, nq_q->salient_idx, nq_q->salient_weight,
++                        nq_k->u, nq_k->scale_post, nq_k->salient_idx, nq_k->salient_weight,
++                        rank_q, rank_k);
++                cb(qk, "nq_qk_stage2", il);
++                Qcur = ggml_view_3d(ctx0, qk, n_embd_head, n_head, n_tokens,
++                        ggml_row_size(qk->type, n_embd_head), qk->nb[1], 0);
++                Kcur = ggml_view_3d(ctx0, qk, n_embd_head, n_head_kv, n_tokens,
++                        ggml_row_size(qk->type, n_embd_head), qk->nb[1], n_embd_q*qk->nb[0]);
++                qk_stage2_fused = true;
++            } else {
++                Qcur = build_nanoquant_stage2(nq_q, cur, build_nanoquant_tmp_view(tmp_qkv, rank_q, 0), layer.wq_s);
++                Kcur = build_nanoquant_stage2(nq_k, cur, build_nanoquant_tmp_view(tmp_qkv, rank_k, rank_q), layer.wk_s);
++            }
++            Vcur = build_nanoquant_stage2(nq_v, cur, build_nanoquant_tmp_view(tmp_qkv, rank_v, rank_q + rank_k), layer.wv_s);
++        } else {
++            Qcur = build_lora_mm(layer.wq, cur, layer.wq_s);
++            Kcur = build_lora_mm(layer.wk, cur, layer.wk_s);
++            Vcur = build_lora_mm(layer.wv, cur, layer.wv_s);
++        }
++
+         cb(Qcur, "Qcur", il);
+         if (layer.wq_b) {
+             Qcur = ggml_add(ctx0, Qcur, layer.wq_b);
+@@ -1525,7 +1613,6 @@ llm_graph_qkv llm_graph_context::build_qkv(
+             Qcur = ggml_clamp(ctx0, Qcur, -hparams.f_clamp_kqv, hparams.f_clamp_kqv);
+             cb(Qcur, "Qcur_clamped", il);
+         }
+-        Kcur = build_lora_mm(layer.wk, cur, layer.wk_s);
+         cb(Kcur, "Kcur", il);
+         if (layer.wk_b) {
+             Kcur = ggml_add(ctx0, Kcur, layer.wk_b);
+@@ -1535,7 +1622,6 @@ llm_graph_qkv llm_graph_context::build_qkv(
+             Kcur = ggml_clamp(ctx0, Kcur, -hparams.f_clamp_kqv, hparams.f_clamp_kqv);
+             cb(Kcur, "Kcur_clamped", il);
+         }
+-        Vcur = build_lora_mm(layer.wv, cur, layer.wv_s);
+         cb(Vcur, "Vcur", il);
+         if (layer.wv_b) {
+             Vcur = ggml_add(ctx0, Vcur, layer.wv_b);
+@@ -1545,8 +1631,10 @@ llm_graph_qkv llm_graph_context::build_qkv(
+             Vcur = ggml_clamp(ctx0, Vcur, -hparams.f_clamp_kqv, hparams.f_clamp_kqv);
+             cb(Vcur, "Vcur_clamped", il);
+         }
+-        Qcur = ggml_reshape_3d(ctx0, Qcur, n_embd_head, n_head,    n_tokens);
+-        Kcur = ggml_reshape_3d(ctx0, Kcur, n_embd_head, n_head_kv, n_tokens);
++        if (!qk_stage2_fused) {
++            Qcur = ggml_reshape_3d(ctx0, Qcur, n_embd_head, n_head,    n_tokens);
++            Kcur = ggml_reshape_3d(ctx0, Kcur, n_embd_head, n_head_kv, n_tokens);
++        }
+         Vcur = ggml_reshape_3d(ctx0, Vcur, n_embd_head, n_head_kv, n_tokens);
+     }
+ 
+@@ -1597,8 +1685,41 @@ ggml_tensor * llm_graph_context::build_ffn(
+     GGML_ASSERT(!down_s || !down || down->type != GGML_TYPE_NVFP4 || !has_lora(down));
+ 
+     const bool has_gate = gate != nullptr;
+-
+-    ggml_tensor * tmp = up ? build_lora_mm(up, cur) : cur;
++    const llama_nanoquant_weight * nq_up   = model == nullptr ? nullptr : model->get_nanoquant_weight(up);
++    const llama_nanoquant_weight * nq_gate = model == nullptr ? nullptr : model->get_nanoquant_weight(gate);
++    const bool fuse_nanoquant_gate_up = has_gate && type_gate == LLM_FFN_PAR &&
++        nq_up != nullptr && nq_up->enabled() &&
++        nq_gate != nullptr && nq_gate->enabled();
++
++    ggml_tensor * tmp = nullptr;
++    if (fuse_nanoquant_gate_up) {
++        ggml_tensor * tmp_gate_up = ggml_nanoquant_stage1_fused(ctx0, cur,
++                nq_up->v,   nq_up->scale_pre,   nq_up->scale_mid,
++                nq_gate->v, nq_gate->scale_pre, nq_gate->scale_mid,
++                nullptr, nullptr, nullptr);
++        cb(tmp_gate_up, "nq_gate_up_stage1", il);
++
++        const int64_t rank_up = nq_up->scale_mid->ne[0];
++        const int64_t rank_gate = nq_gate->scale_mid->ne[0];
++        if (n_tokens == 1 && llama_nanoquant_can_fuse_stage2_2way(nq_up, nq_gate)) {
++            // Decode-only for the same reason as Q/K: prefill is handled by
++            // the regular stage-2 op's column-tiled CUDA path.
++            ggml_tensor * up_gate = ggml_nanoquant_stage2_fused2(ctx0, cur, tmp_gate_up,
++                    nq_up->u,   nq_up->scale_post,   nq_up->salient_idx,   nq_up->salient_weight,
++                    nq_gate->u, nq_gate->scale_post, nq_gate->salient_idx, nq_gate->salient_weight,
++                    rank_up, rank_gate);
++            cb(up_gate, "nq_up_gate_stage2", il);
++            tmp = ggml_view_4d(ctx0, up_gate, nq_up->scale_post->ne[0], up_gate->ne[1], up_gate->ne[2], up_gate->ne[3],
++                    up_gate->nb[1], up_gate->nb[2], up_gate->nb[3], 0);
++            cur = ggml_view_4d(ctx0, up_gate, nq_gate->scale_post->ne[0], up_gate->ne[1], up_gate->ne[2], up_gate->ne[3],
++                    up_gate->nb[1], up_gate->nb[2], up_gate->nb[3], nq_up->scale_post->ne[0]*up_gate->nb[0]);
++        } else {
++            tmp = build_nanoquant_stage2(nq_up, cur, build_nanoquant_tmp_view(tmp_gate_up, rank_up, 0));
++            cur = build_nanoquant_stage2(nq_gate, cur, build_nanoquant_tmp_view(tmp_gate_up, rank_gate, rank_up));
++        }
++    } else {
++        tmp = up ? build_lora_mm(up, cur) : cur;
++    }
+     cb(tmp, "ffn_up", il);
+ 
+     if (up_b) {
+@@ -1612,17 +1733,21 @@ ggml_tensor * llm_graph_context::build_ffn(
+     }
+ 
+     if (has_gate) {
+-        switch (type_gate) {
+-            case LLM_FFN_SEQ:
+-                {
+-                    cur = build_lora_mm(gate, tmp);
+-                    cb(cur, "ffn_gate", il);
+-                } break;
+-            case LLM_FFN_PAR:
+-                {
+-                    cur = build_lora_mm(gate, cur);
+-                    cb(cur, "ffn_gate", il);
+-                } break;
++        if (fuse_nanoquant_gate_up) {
++            cb(cur, "ffn_gate", il);
++        } else {
++            switch (type_gate) {
++                case LLM_FFN_SEQ:
++                    {
++                        cur = build_lora_mm(gate, tmp);
++                        cb(cur, "ffn_gate", il);
++                    } break;
++                case LLM_FFN_PAR:
++                    {
++                        cur = build_lora_mm(gate, cur);
++                        cb(cur, "ffn_gate", il);
++                    } break;
++            }
+         }
+ 
+         if (gate_b) {
+diff --git a/src/llama-graph.h b/src/llama-graph.h
+index 85d83569a..54059cb1d 100644
+--- a/src/llama-graph.h
++++ b/src/llama-graph.h
+@@ -19,6 +19,7 @@ struct ggml_tensor;
+ struct llama_cparams;
+ struct llama_layer;
+ struct llama_model;
++struct llama_nanoquant_weight;
+ 
+ struct llama_memory_context_i;
+ 
+@@ -938,9 +939,20 @@ struct llm_graph_context {
+ 
+     // do mat_mul, while optionally apply lora and per-tensor scale
+     ggml_tensor * build_lora_mm(
+-              ggml_tensor * w,
+-              ggml_tensor * cur,
+-              ggml_tensor * w_s = nullptr) const;
++            ggml_tensor * w,
++            ggml_tensor * cur,
++            ggml_tensor * w_s = nullptr) const;
++
++    ggml_tensor * build_nanoquant_stage2(
++            const llama_nanoquant_weight * nq,
++            ggml_tensor * cur,
++            ggml_tensor * tmp,
++            ggml_tensor * w_s = nullptr) const;
++
++    ggml_tensor * build_nanoquant_tmp_view(
++            ggml_tensor * tmp,
++            int64_t rank,
++            int64_t rank_offset) const;
+ 
+     // do mat_mul_id, while optionally apply lora and per-expert scale
+     ggml_tensor * build_lora_mm_id(
+diff --git a/tests/test-backend-ops.cpp b/tests/test-backend-ops.cpp
+index c24f14502..c08965000 100644
+--- a/tests/test-backend-ops.cpp
++++ b/tests/test-backend-ops.cpp
+@@ -4245,6 +4245,7 @@ struct test_nanoquant_linear : public test_case {
+     const int64_t n_col;
+     const int64_t n_salient;
+     const bool    int8_outliers;
++    const bool    f16_outliers;
+ 
+     test_nanoquant_linear(
+             int64_t n_in,
+@@ -4252,18 +4253,21 @@ struct test_nanoquant_linear : public test_case {
+             int64_t n_out,
+             int64_t n_col,
+             int64_t n_salient = 0,
+-            bool    int8_outliers = false)
++            bool    int8_outliers = false,
++            bool    f16_outliers = false)
+         : n_in(n_in),
+           n_rank(n_rank),
+           n_out(n_out),
+           n_col(n_col),
+           n_salient(n_salient),
+-          int8_outliers(int8_outliers) {
++          int8_outliers(int8_outliers),
++          f16_outliers(f16_outliers) {
+         GGML_ASSERT(n_salient > 0 || !int8_outliers);
++        GGML_ASSERT(!int8_outliers || !f16_outliers);
+     }
+ 
+     std::string vars() override {
+-        return VARS_TO_STR6(n_in, n_rank, n_out, n_col, n_salient, int8_outliers);
++        return VARS_TO_STR7(n_in, n_rank, n_out, n_col, n_salient, int8_outliers, f16_outliers);
+     }
+ 
+     double max_nmse_err() override {
+@@ -4297,7 +4301,8 @@ struct test_nanoquant_linear : public test_case {
+         ggml_tensor * salient_scale  = nullptr;
+         if (n_salient > 0) {
+             salient_idx    = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, n_salient);
+-            salient_weight = ggml_new_tensor_2d(ctx, int8_outliers ? GGML_TYPE_I8 : GGML_TYPE_F32, n_salient, n_out);
++            const ggml_type salient_weight_type = int8_outliers ? GGML_TYPE_I8 : (f16_outliers ? GGML_TYPE_F16 : GGML_TYPE_F32);
++            salient_weight = ggml_new_tensor_2d(ctx, salient_weight_type, n_salient, n_out);
+ 
+             ggml_set_name(salient_idx,    "salient_idx");
+             ggml_set_name(salient_weight, "salient_weight");
+@@ -4367,6 +4372,16 @@ struct test_nanoquant_linear : public test_case {
+                     }
+                 }
+                 ggml_backend_tensor_set(t, data.data(), 0, data.size()*sizeof(float));
++            } else if (strcmp(t->name, "salient_weight") == 0 && t->type == GGML_TYPE_F16) {
++                std::vector<float> data_f32(ggml_nelements(t));
++                std::vector<ggml_fp16_t> data_f16(ggml_nelements(t));
++                for (int64_t o = 0; o < t->ne[1]; ++o) {
++                    for (int64_t s = 0; s < t->ne[0]; ++s) {
++                        data_f32[o*t->ne[0] + s] = ((o*5 + s*3)%19 - 9)*0.0078125f;
++                    }
++                }
++                ggml_fp32_to_fp16_row(data_f32.data(), data_f16.data(), data_f16.size());
++                ggml_backend_tensor_set(t, data_f16.data(), 0, data_f16.size()*sizeof(ggml_fp16_t));
+             } else if (strcmp(t->name, "salient_weight") == 0 && t->type == GGML_TYPE_I8) {
+                 std::vector<int8_t> data(ggml_nelements(t));
+                 for (int64_t o = 0; o < t->ne[1]; ++o) {
+@@ -8689,6 +8704,8 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
+     test_cases.emplace_back(new test_nanoquant_linear(32, 16, 24, 1));
+     test_cases.emplace_back(new test_nanoquant_linear(33, 17, 25, 1, 3));
+     test_cases.emplace_back(new test_nanoquant_linear(64, 32, 48, 4, 4, true));
++    test_cases.emplace_back(new test_nanoquant_linear(64, 32, 48, 8, 2, false, true));
++    test_cases.emplace_back(new test_nanoquant_linear(96, 64, 64, 8, 7, false, true));
+ 
+     // FWHT tests
+     test_cases.emplace_back(new test_mul_mat_hadamard(GGML_TYPE_F32, GGML_TYPE_F32, 128, 1, 128));

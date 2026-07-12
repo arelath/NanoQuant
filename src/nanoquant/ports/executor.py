@@ -1,0 +1,13 @@
+from __future__ import annotations
+
+from contextlib import AbstractContextManager
+from typing import Protocol
+
+import torch
+
+
+class Executor(Protocol):
+    def device_scope(self, device: str) -> AbstractContextManager[None]: ...
+    def tensor_lease(self, value: torch.Tensor, device: str) -> AbstractContextManager[torch.Tensor]: ...
+    def buffer(self, key: str, shape: tuple[int, ...], dtype: torch.dtype, device: str) -> torch.Tensor: ...
+    def release(self) -> None: ...

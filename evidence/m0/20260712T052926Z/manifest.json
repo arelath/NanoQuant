@@ -1,0 +1,167 @@
+{
+  "capture_id": "20260712T052926Z",
+  "capture_tool": "tools/capture_m0_baseline.py",
+  "captured_at": "2026-07-12T05:29:26.969623+00:00",
+  "experiment_019_launcher": {
+    "bytes": 9953,
+    "path": "evidence/m0/20260712T052926Z/legacy/019-compress-gemma-3-1b-it-phase1.py",
+    "sha256": "334146426e95f733d70c9fc0cd68a38d17841a4833a5ac19690911234870d407",
+    "source_name": "019-compress-gemma-3-1b-it-phase1.py"
+  },
+  "golden": [
+    {
+      "bytes": 6300,
+      "path": "evidence/m0/20260712T052926Z/golden/019-phase1-weight-errors.md",
+      "sha256": "5ae66b5070fba8c6a22918e27b67386c642b977414280b1179e8c8476397c5e8",
+      "source_name": "019-phase1-weight-errors.md"
+    },
+    {
+      "bytes": 120019,
+      "path": "evidence/m0/20260712T052926Z/golden/019-phase1-weight-errors.csv",
+      "sha256": "82d531ed0b7beb65dafd57eecb862ed62623442c19f28caa1f79189d8965d7ce",
+      "source_name": "019-phase1-weight-errors.csv"
+    },
+    {
+      "bytes": 51129,
+      "path": "evidence/m0/20260712T052926Z/golden/019-phase1-rank-utility.csv",
+      "sha256": "700b6f163703e6d5338f9899d183a7b3bbe89812356a111e77f04cd6e7828c5f",
+      "source_name": "019-phase1-rank-utility.csv"
+    }
+  ],
+  "host": {
+    "nvidia_smi": {
+      "command": [
+        "nvidia-smi",
+        "--query-gpu=name,uuid,driver_version,memory.total,clocks.max.sm,compute_cap",
+        "--format=csv,noheader"
+      ],
+      "returncode": 0,
+      "stderr": "",
+      "stdout": "NVIDIA RTX 4000 Ada Generation Laptop GPU, GPU-6a21b49c-ed5a-aa1e-e88c-c72c4f24f67f, 596.36, 12282 MiB, 3105 MHz, 8.9\n"
+    },
+    "platform": "Windows-11-10.0.26200-SP0",
+    "python": "3.12.1 (tags/v3.12.1:2305ca5, Dec  7 2023, 22:03:25) [MSC v.1937 64 bit (AMD64)]"
+  },
+  "legacy": {
+    "dirty_patch": "dirty.patch",
+    "dirty_patch_sha256": "21d556c11fde0c49624adaf293693568eeda011406d268ca44be0249d80d4550",
+    "packages": {
+      "command": [
+        "D:\\dev\\research\\NanoQuant-OfficalCode\\.venv\\Scripts\\python.exe",
+        "-m",
+        "pip",
+        "freeze"
+      ],
+      "returncode": 0,
+      "stderr": "",
+      "stdout": "absl-py==2.5.0\naccelerate==1.14.0\naiohappyeyeballs==2.7.1\naiohttp==3.14.1\naiosignal==1.4.0\namdsmi==7.0.2\nannotated-types==0.7.0\nanyio==4.14.1\nattrs==26.1.0\ncertifi==2026.6.17\nchardet==6.0.0.post1\ncharset-normalizer==3.4.9\nclick==8.4.2\ncolorama==0.4.6\ncut-cross-entropy==25.1.1\nDataProperty==1.1.1\ndatasets==5.0.0\ndill==0.4.1\ndocstring_parser==0.18.0\nevaluate==0.4.6\nfilelock==3.29.0\nfrozenlist==1.8.0\nfsspec==2026.4.0\ngemlite==0.5.1.post1\nh11==0.16.0\nhttpcore==1.0.9\nhttpx==0.28.1\nhuggingface_hub==0.36.2\nidna==3.18\nJinja2==3.1.6\njoblib==1.5.3\nlm_eval==0.4.12\nloguru==0.7.3\nlxml==6.1.1\nmarkdown-it-py==4.2.0\nMarkupSafe==3.0.3\nmbstrdecoder==1.1.5\nmdurl==0.1.2\nmore-itertools==11.1.0\nmpmath==1.3.0\nmultidict==6.7.1\nmultiprocess==0.70.19\nnanoquant @ file:///D:/dev/research/NanoQuant-OfficalCode\nnarwhals==2.23.0\nnetworkx==3.6.1\nnltk==3.9.4\nnumpy==2.4.4\nnvidia-ml-py==13.610.43\noptimum==2.2.0\npackaging==26.2\npandas==3.0.3\npathvalidate==3.3.1\npillow==12.2.0\nportalocker==3.2.0\npropcache==0.5.2\npsutil==7.2.2\npyarrow==24.0.0\npydantic==2.13.4\npydantic_core==2.46.4\nPygments==2.20.0\npytablewriter==1.2.1\npython-dateutil==2.9.0.post0\npytz==2026.2\npywin32==312\nPyYAML==6.0.3\nregex==2026.6.28\nrequests==2.34.2\nrich==15.0.0\nrouge_score==0.1.2\nsacrebleu==2.6.0\nsafetensors==0.8.0\nscikit-learn==1.9.0\nscipy==1.18.0\nsentencepiece==0.2.1\nsetuptools==70.2.0\nsix==1.17.0\nsqlitedict==2.1.0\nsympy==1.14.0\ntabledata==1.3.5\ntabulate==0.10.0\ntcolorpy==0.1.7\nthreadpoolctl==3.6.0\ntokenizers==0.21.4\ntorch==2.12.1+cu130\ntorchvision==0.27.1+cu130\ntqdm==4.68.4\ntransformers==4.51.3\ntriton-windows==3.7.1.post27\ntypeguard==4.5.2\ntypepy==1.3.5\ntyping-inspection==0.4.2\ntyping_extensions==4.15.0\ntyro==1.0.15\ntzdata==2026.2\nurllib3==2.7.0\nwin32_setctime==1.2.0\nword2number==1.1\nxxhash==3.8.1\nyarl==1.24.2\nzeus-ml==0.11.0.post1\n"
+    },
+    "path_at_capture": "D:\\dev\\research\\NanoQuant-OfficalCode",
+    "revision": "c89b72085725a689b1fd99ec8e64c5671b18d4b4",
+    "status": [
+      " M 007-evaluate-all-gemma-quality.py",
+      " M docs/rewrite-design/00-current-state.md",
+      " M docs/rewrite-design/01-requirements.md",
+      " M docs/rewrite-design/02-architecture.md",
+      " M docs/rewrite-design/02-domain-and-stage-contracts.md",
+      " M docs/rewrite-design/03-configuration-and-runs.md",
+      " M docs/rewrite-design/03-configuration-reference.md",
+      " M docs/rewrite-design/05-fast-prototyping.md",
+      " M docs/rewrite-design/06-inference-runtime.md",
+      " M docs/rewrite-design/07-observability-and-reporting.md",
+      " M docs/rewrite-design/08-evaluation.md",
+      " M docs/rewrite-design/09-testing-and-quality.md",
+      " M docs/rewrite-design/10-artifacts-and-compatibility.md",
+      " M docs/rewrite-design/11-delivery-roadmap.md",
+      " M docs/rewrite-design/README.md",
+      " M docs/rewrite-design/adr/README.md",
+      " M outputs/019-phase1-rank-utility.csv",
+      " M outputs/019-phase1-weight-errors.csv",
+      " M outputs/019-phase1-weight-errors.md",
+      "?? docs/rewrite-design/12-lessons-carried-forward.md",
+      "?? docs/rewrite-design/13-implementation-task-list.md",
+      "?? docs/rewrite-design/adr/0005-numbered-zero-argument-runfiles.md",
+      "?? outputs/quality/007-gemma-3-4b-it-quality-all-raw.json",
+      "?? outputs/quality/007-gemma-3-4b-it-quality-all-summary.csv",
+      "?? outputs/quality/007-gemma-3-4b-it-quality-all.md",
+      "?? tests/test_quality_model_families.py"
+    ]
+  },
+  "llama_cpp": {
+    "benchmark_json": [
+      {
+        "bytes": 2798,
+        "path": "evidence/m0/20260712T052926Z/llama.cpp/benchmarks/bench-nanoquant-current-pg512-tg128-r5.json",
+        "sha256": "356359722bfb9ac34205cb6c9038e4d48506307aff02967bd8e23adaebff54c1",
+        "source_name": "bench-nanoquant-current-pg512-tg128-r5.json"
+      },
+      {
+        "bytes": 1405,
+        "path": "evidence/m0/20260712T052926Z/llama.cpp/benchmarks/bench-nanoquant-current-pp512-r5.json",
+        "sha256": "4a290fb4b01ad9a8943815f3f7e32a98ccd8eac1b869dfcb9bc04ad820ff08a4",
+        "source_name": "bench-nanoquant-current-pp512-r5.json"
+      },
+      {
+        "bytes": 1497,
+        "path": "evidence/m0/20260712T052926Z/llama.cpp/benchmarks/bench-nanoquant-current-tg128-r10.json",
+        "sha256": "6dd2dcb2e3cff9ca895d36dfef925dc0a9e1b19c25921779dc4e2222e35ce832",
+        "source_name": "bench-nanoquant-current-tg128-r10.json"
+      }
+    ],
+    "build_configurations": [
+      {
+        "bytes": 54817,
+        "path": "evidence/m0/20260712T052926Z/llama.cpp/build/build-CMakeCache.txt",
+        "sha256": "821f9097488f7c8b75bd0d16fc1c41e32d35751c11a2fa0dc87c92e1fff1876a",
+        "source_name": "CMakeCache.txt"
+      },
+      {
+        "bytes": 57587,
+        "path": "evidence/m0/20260712T052926Z/llama.cpp/build/build-local-cuda-ninja-CMakeCache.txt",
+        "sha256": "e543e68899f875969e5ff01c018064eb7801e406a072e6da8f4321d0b2b279d5",
+        "source_name": "CMakeCache.txt"
+      },
+      {
+        "bytes": 33488,
+        "path": "evidence/m0/20260712T052926Z/llama.cpp/build/build-nanoquant-cpu-CMakeCache.txt",
+        "sha256": "305bd1a6172d234bc693c1603405b3ed3672af16436521a8e8464cbf259a3076",
+        "source_name": "CMakeCache.txt"
+      }
+    ],
+    "converter": {
+      "bytes": 25317,
+      "path": "evidence/m0/20260712T052926Z/llama.cpp/convert_nanoquant_to_gguf.py",
+      "sha256": "92b0d31c1ce83d0fe3668bbb20cee6a4da24ec3e9476f6699890d01540241e4d",
+      "source_name": "convert_nanoquant_to_gguf.py"
+    },
+    "dirty_patch": "dirty.patch",
+    "dirty_patch_sha256": "511da84ca41185e5335cb41dc63112809512925665c5f539a94302d493becbad",
+    "nanoquant_cuda": {
+      "bytes": 103046,
+      "path": "evidence/m0/20260712T052926Z/llama.cpp/nanoquant.cu",
+      "sha256": "5c87336c2b6b8fb33805c6ee6a8752d4bd364beed63fd4cca03c2b36be966619",
+      "source_name": "nanoquant.cu"
+    },
+    "path_at_capture": "D:\\dev\\research\\llama.cpp",
+    "revision": "5c6ae79816ee0f2b3d4bb8ec9061c294185d320b",
+    "status": [
+      " M ggml/include/ggml.h",
+      " M ggml/src/ggml-cpu/ggml-cpu.c",
+      " M ggml/src/ggml-cpu/ops.cpp",
+      " M ggml/src/ggml-cpu/ops.h",
+      " M ggml/src/ggml-cuda/ggml-cuda.cu",
+      " M ggml/src/ggml-cuda/nanoquant.cu",
+      " M ggml/src/ggml-cuda/nanoquant.cuh",
+      " M ggml/src/ggml.c",
+      " M src/llama-graph.cpp",
+      " M src/llama-graph.h",
+      " M tests/test-backend-ops.cpp",
+      "?? nanoquant-free-residual-q8-lm-head-inference-transcript.txt",
+      "?? nanoquant-free-residual-q8-lm-head-stage12-coltile-inference-transcript.txt",
+      "?? nanoquant-free-residual-q8-lm-head-stage2-fused2-inference-transcript.txt",
+      "?? nanoquant-fused-inference-transcript-paris.txt",
+      "?? nanoquant-fused-inference-transcript.txt"
+    ]
+  },
+  "schema_version": 1
+}

@@ -17,6 +17,9 @@ Architecture decision records (ADRs) preserve the context and tradeoffs behind d
 - [ADR-0003: Separate trainable and packed runtime representations](0003-separate-training-and-runtime-state.md)
 - [ADR-0004: Support large models through block streaming](0004-block-streaming-for-large-models.md)
 - [ADR-0005: Retain numbered zero-argument experiment runfiles](0005-numbered-zero-argument-runfiles.md)
+- [ADR-0006: DBF remains research-only](0006-dbf-research-only.md)
+- [ADR-0007: Calibration and Hessian support tiers](0007-calibration-and-objective-support.md)
+- [ADR-0008: Legacy artifact compatibility is conversion-based](0008-legacy-artifact-compatibility.md)
 
 ## Template
 

@@ -1,0 +1,1354 @@
+diff --git a/007-evaluate-all-gemma-quality.py b/007-evaluate-all-gemma-quality.py
+index 971168c..566ed1a 100644
+--- a/007-evaluate-all-gemma-quality.py
++++ b/007-evaluate-all-gemma-quality.py
+@@ -1,14 +1,18 @@
+ # Copyright (c) 2026 Samsung Electronics Co., Ltd.
+ # SPDX-License-Identifier: Apache-2.0
+ 
+-"""Longer cached quality comparison for Gemma checkpoints.
++"""Longer cached quality comparisons for Gemma 3 1B and 4B checkpoints.
+ 
+-This parameterless script evaluates the base model plus every ``.pt`` checkpoint
+-under ``outputs``. Results are cached per model/task/limit so reruns only compute
++This parameterless script groups ``.pt`` checkpoints under ``outputs`` by model
++family, evaluates each against the matching base model, and writes an independent
++report per family. Results are cached per model/task/limit so reruns only compute
+ missing or changed work.
+ 
+ Run:
+     python 007-evaluate-all-gemma-quality.py
++
++Optional family filter:
++    NANOQUANT_QUALITY_MODELS=4b python 007-evaluate-all-gemma-quality.py
+ """
+ 
+ from __future__ import annotations
+@@ -25,22 +29,38 @@ from typing import Any, Callable
+ import torch
+ from datasets import load_dataset
+ from lm_eval.evaluator import simple_evaluate
++from lm_eval.models.huggingface import HFLM
+ from transformers import AutoConfig, AutoModelForCausalLM
+ 
+ 
+ ROOT = Path(__file__).resolve().parent
+ SRC = ROOT / "src"
+-MODEL_ID = "google/gemma-3-1b-it"
+ OUTPUTS_DIR = ROOT / "outputs"
+ OUT_DIR = OUTPUTS_DIR / "quality"
+ CACHE_DIR = OUT_DIR / "cache"
+ LOG_DIR = ROOT / "logs"
+ 
+-RAW_JSON = OUT_DIR / "007-gemma-3-1b-it-quality-all-raw.json"
+-SUMMARY_CSV = OUT_DIR / "007-gemma-3-1b-it-quality-all-summary.csv"
+-MARKDOWN_PATH = OUT_DIR / "007-gemma-3-1b-it-quality-all.md"
+ LOG_PATH = LOG_DIR / "007-evaluate-all-gemma-quality.log"
+ 
++MODEL_SPECS = (
++    {
++        "size": "1b",
++        "slug": "gemma-3-1b-it",
++        "display_name": "Gemma 3 1B",
++        "model_id": "google/gemma-3-1b-it",
++        "text_only": False,
++    },
++    {
++        "size": "4b",
++        "slug": "gemma-3-4b-it",
++        "display_name": "Gemma 3 4B",
++        "model_id": "google/gemma-3-4b-it",
++        # The 4B checkpoint is a multimodal wrapper. These quality tasks are
++        # text-only, so retaining its 0.78 GiB vision tower on CUDA is wasteful.
++        "text_only": True,
++    },
++)
++
+ DEVICE = "cuda:0"
+ DTYPE = torch.bfloat16
+ PPL_SEQLEN = 128
+@@ -117,16 +137,17 @@ def jsonable(value: Any) -> Any:
+     return str(value)
+ 
+ 
+-def safe_label(path: Path) -> str:
+-    return path.stem.replace("gemma-3-1b-it-", "")
++def safe_label(path: Path, model_slug: str) -> str:
++    prefix = f"{model_slug}-"
++    return path.stem[len(prefix):] if path.stem.startswith(prefix) else path.stem
+ 
+ 
+-def model_identity(label: str, checkpoint_path: Path | None) -> dict[str, Any]:
++def model_identity(label: str, checkpoint_path: Path | None, model_id: str) -> dict[str, Any]:
+     if checkpoint_path is None:
+         return {
+             "label": label,
+             "kind": "base",
+-            "model_id": MODEL_ID,
++            "model_id": model_id,
+         }
+     stat = checkpoint_path.stat()
+     return {
+@@ -179,6 +200,18 @@ def cache_read(identity: dict[str, Any], eval_name: str, extra: dict[str, Any])
+     return json.loads(path.read_text(encoding="utf-8"))["result"]
+ 
+ 
++def lm_eval_extra(task: str, limit: int) -> dict[str, Any]:
++    return {
++        "task": task,
++        "limit": limit,
++        "num_fewshot": TASK_FEWSHOT.get(task, 0),
++        "batch_size": LM_EVAL_BATCH_SIZE,
++        "max_length": LM_EVAL_MAX_LENGTH,
++        "truncation": True,
++        "dtype": str(DTYPE),
++    }
++
++
+ def evaluation_specs() -> list[tuple[str, dict[str, Any]]]:
+     specs = [(
+         "wikitext2_ppl",
+@@ -191,15 +224,7 @@ def evaluation_specs() -> list[tuple[str, dict[str, Any]]]:
+     for task, limit in TASK_LIMITS.items():
+         specs.append((
+             f"lm_eval_{task}",
+-            {
+-                "task": task,
+-                "limit": limit,
+-                "num_fewshot": TASK_FEWSHOT.get(task, 0),
+-                "batch_size": LM_EVAL_BATCH_SIZE,
+-                "max_length": LM_EVAL_MAX_LENGTH,
+-                "truncation": True,
+-                "dtype": str(DTYPE),
+-            },
++            lm_eval_extra(task, limit),
+         ))
+     return specs
+ 
+@@ -218,19 +243,36 @@ def cached_case_result(case: dict[str, Any]) -> dict[str, Any] | None:
+     }
+ 
+ 
+-def load_original_model():
++def text_model_for_evaluation(model):
++    """Drop a multimodal wrapper while retaining its text CausalLM exactly."""
++    language_model = getattr(model, "language_model", None)
++    if language_model is None:
++        return model
++
++    # The nested model already owns the text weights and generation config. Keep
++    # the benchmark sequence-length convention when detaching it from the wrapper.
++    language_model.seqlen = getattr(model, "seqlen", LM_EVAL_MAX_LENGTH)
++    if not hasattr(language_model, "generation_config") and hasattr(model, "generation_config"):
++        language_model.generation_config = model.generation_config
++    return language_model
++
++
++def load_original_model(model_id: str, text_only: bool = False):
+     from nanoquant.utils.load_utils import set_attention_implementation
+ 
+-    config = AutoConfig.from_pretrained(MODEL_ID, trust_remote_code=True)
++    config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
+     attn_implementation = set_attention_implementation(config)
+     model = AutoModelForCausalLM.from_pretrained(
+-        MODEL_ID,
++        model_id,
+         config=config,
+         torch_dtype=DTYPE,
+         attn_implementation=attn_implementation,
+         low_cpu_mem_usage=True,
+         trust_remote_code=True,
+     )
++    if text_only:
++        model = text_model_for_evaluation(model)
++        gc.collect()
+     model.seqlen = LM_EVAL_MAX_LENGTH
+     model.config.use_cache = False
+     model.to(DEVICE)
+@@ -238,16 +280,19 @@ def load_original_model():
+     return model
+ 
+ 
+-def load_checkpoint_model(checkpoint_path: Path):
++def load_checkpoint_model(model_id: str, checkpoint_path: Path, text_only: bool = False):
+     from nanoquant.utils.load_utils import load_compressed_model
+ 
+     model = load_compressed_model(
+-        model_name_or_path=MODEL_ID,
++        model_name_or_path=model_id,
+         checkpoint_path=str(checkpoint_path),
+         seqlen=LM_EVAL_MAX_LENGTH,
+         device=DEVICE,
+         dtype=DTYPE,
+     )
++    if text_only:
++        model = text_model_for_evaluation(model)
++        gc.collect()
+     model.config.use_cache = False
+     model.to(DEVICE)
+     model.eval()
+@@ -282,42 +327,62 @@ def limited_wikitext_ppl(model, tokenizer) -> float:
+     return float(torch.exp(torch.stack(nlls).sum() / denom).item())
+ 
+ 
+-def run_one_task(model, tokenizer, task: str, limit: int) -> dict[str, Any]:
+-    return simple_evaluate(
+-        model="hf",
+-        model_args={
+-            "pretrained": model,
+-            "tokenizer": tokenizer,
+-            "max_length": LM_EVAL_MAX_LENGTH,
+-            "truncation": True,
+-        },
++def run_one_task(
++    model,
++    tokenizer,
++    task: str,
++    limit: int,
++) -> dict[str, Any]:
++    # Construct HFLM explicitly. Passing the torch model through ``model_args``
++    # makes lm-eval merge it into every task's metadata; task serialization then
++    # deep-copies all CUDA parameters and OOMs on Gemma 3 4B.
++    lm_model = HFLM(
++        pretrained=model,
++        tokenizer=tokenizer,
++        max_length=LM_EVAL_MAX_LENGTH,
++        truncation=True,
++        batch_size=LM_EVAL_BATCH_SIZE,
++    )
++    result = simple_evaluate(
++        model=lm_model,
+         tasks=[task],
+         num_fewshot=TASK_FEWSHOT.get(task, 0),
+         batch_size=LM_EVAL_BATCH_SIZE,
+         device=DEVICE,
+         limit=limit,
+     )
++    if result is None:
++        raise RuntimeError(f"lm-eval returned no result for {task}")
++    return result
+ 
+ 
+-def discover_model_cases() -> list[dict[str, Any]]:
+-    checkpoints = sorted(OUTPUTS_DIR.glob("*.pt"))
++def discover_model_cases(spec: dict[str, Any], outputs_dir: Path = OUTPUTS_DIR) -> list[dict[str, Any]]:
++    model_id = spec["model_id"]
++    model_slug = spec["slug"]
++    checkpoints = sorted(outputs_dir.glob(f"{model_slug}-*.pt"))
+     cases = [{
+         "label": BASE_LABEL,
++        "model_id": model_id,
++        "text_only": spec["text_only"],
+         "checkpoint_path": None,
+-        "identity": model_identity(BASE_LABEL, None),
++        "identity": model_identity(BASE_LABEL, None, model_id),
+     }]
+     for checkpoint in checkpoints:
+-        label = safe_label(checkpoint)
++        label = safe_label(checkpoint, model_slug)
+         cases.append({
+             "label": label,
++            "model_id": model_id,
++            "text_only": spec["text_only"],
+             "checkpoint_path": checkpoint,
+-            "identity": model_identity(label, checkpoint),
++            "identity": model_identity(label, checkpoint, model_id),
+         })
+     return cases
+ 
+ 
+ def evaluate_case(case: dict[str, Any], tokenizer) -> dict[str, Any]:
+     label = case["label"]
++    model_id = case["model_id"]
++    text_only = case["text_only"]
+     checkpoint_path = case["checkpoint_path"]
+     identity = case["identity"]
+ 
+@@ -326,7 +391,11 @@ def evaluate_case(case: dict[str, Any], tokenizer) -> dict[str, Any]:
+         print(f"[CACHE] {label} / all evaluations")
+         return cached
+ 
+-    model = load_original_model() if checkpoint_path is None else load_checkpoint_model(checkpoint_path)
++    model = (
++        load_original_model(model_id, text_only=text_only)
++        if checkpoint_path is None
++        else load_checkpoint_model(model_id, checkpoint_path, text_only=text_only)
++    )
+ 
+     try:
+         ppl = cache_get_or_run(
+@@ -342,20 +411,19 @@ def evaluate_case(case: dict[str, Any], tokenizer) -> dict[str, Any]:
+ 
+         task_results = {}
+         for task, limit in TASK_LIMITS.items():
++            extra = lm_eval_extra(task, limit)
+             task_results[task] = cache_get_or_run(
+                 identity,
+                 f"lm_eval_{task}",
+-                {
+-                    "task": task,
+-                    "limit": limit,
+-                    "num_fewshot": TASK_FEWSHOT.get(task, 0),
+-                    "batch_size": LM_EVAL_BATCH_SIZE,
+-                    "max_length": LM_EVAL_MAX_LENGTH,
+-                    "truncation": True,
+-                    "dtype": str(DTYPE),
+-                },
+-                lambda task=task, limit=limit: run_one_task(model, tokenizer, task, limit),
++                extra,
++                lambda task=task, limit=limit: run_one_task(
++                    model,
++                    tokenizer,
++                    task,
++                    limit,
++                ),
+             )
++            cleanup()
+ 
+         return {
+             "label": label,
+@@ -422,16 +490,16 @@ def flatten_summary(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+     return rows
+ 
+ 
+-def markdown_table(results: list[dict[str, Any]]) -> str:
++def markdown_table(results: list[dict[str, Any]], spec: dict[str, Any]) -> str:
+     metric_columns = [("wikitext2_limited", "ppl")]
+     for task in TASK_LIMITS:
+         metric_columns.append((task, "best"))
+ 
+     header = ["Model"] + [f"{task} {metric}" if metric != "best" else task for task, metric in metric_columns]
+     lines = [
+-        "# Gemma 3 1B Quality Comparison",
++        f"# {spec['display_name']} Quality Comparison",
+         "",
+-        f"- Base model: `{MODEL_ID}`",
++        f"- Base model: `{spec['model_id']}`",
+         f"- PPL sequence length: `{PPL_SEQLEN}`",
+         f"- lm-eval max length: `{LM_EVAL_MAX_LENGTH}`",
+         f"- Wikitext PPL samples: `{PPL_SAMPLES}`",
+@@ -460,6 +528,47 @@ def markdown_table(results: list[dict[str, Any]]) -> str:
+     return "\n".join(lines)
+ 
+ 
++def artifact_paths(spec: dict[str, Any]) -> dict[str, Path]:
++    prefix = f"007-{spec['slug']}-quality-all"
++    return {
++        "raw_json": OUT_DIR / f"{prefix}-raw.json",
++        "summary_csv": OUT_DIR / f"{prefix}-summary.csv",
++        "markdown": OUT_DIR / f"{prefix}.md",
++    }
++
++
++def selected_model_specs() -> list[dict[str, Any]]:
++    raw = os.environ.get("NANOQUANT_QUALITY_MODELS", "").strip().lower()
++    if not raw:
++        return list(MODEL_SPECS)
++    requested = {item.strip() for item in raw.split(",") if item.strip()}
++    selected = [
++        spec for spec in MODEL_SPECS
++        if requested.intersection({spec["size"], spec["slug"], spec["model_id"].lower()})
++    ]
++    if not selected:
++        choices = ", ".join(spec["size"] for spec in MODEL_SPECS)
++        raise ValueError(f"NANOQUANT_QUALITY_MODELS did not match a configured family; expected {choices}")
++    return selected
++
++
++def write_family_results(spec: dict[str, Any], results: list[dict[str, Any]]) -> None:
++    paths = artifact_paths(spec)
++    paths["raw_json"].write_text(json.dumps(jsonable(results), indent=2), encoding="utf-8")
++
++    rows = flatten_summary(results)
++    with paths["summary_csv"].open("w", newline="", encoding="utf-8") as f:
++        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
++        writer.writeheader()
++        writer.writerows(rows)
++
++    paths["markdown"].write_text(markdown_table(results, spec), encoding="utf-8")
++
++    print(f"\nWrote {spec['size'].upper()} raw JSON: {paths['raw_json']}")
++    print(f"Wrote {spec['size'].upper()} summary CSV: {paths['summary_csv']}")
++    print(f"Wrote {spec['size'].upper()} Markdown: {paths['markdown']}")
++
++
+ def main() -> None:
+     sys.path.insert(0, str(SRC))
+     load_dotenv(ROOT / ".env")
+@@ -472,27 +581,24 @@ def main() -> None:
+ 
+     from nanoquant.utils.load_utils import load_tokenizer
+ 
+-    tokenizer = load_tokenizer(MODEL_ID)
+-    cases = discover_model_cases()
+-    print("Model cases:")
+-    for case in cases:
+-        print(f"  - {case['label']}: {case['checkpoint_path'] or MODEL_ID}")
+-
+-    results = [evaluate_case(case, tokenizer) for case in cases]
+-
+-    RAW_JSON.write_text(json.dumps(jsonable(results), indent=2), encoding="utf-8")
++    evaluated_families = 0
++    for spec in selected_model_specs():
++        cases = discover_model_cases(spec)
++        if len(cases) == 1:
++            print(f"[SKIP] {spec['display_name']}: no {spec['slug']}-*.pt checkpoints under {OUTPUTS_DIR}")
++            continue
+ 
+-    rows = flatten_summary(results)
+-    with SUMMARY_CSV.open("w", newline="", encoding="utf-8") as f:
+-        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+-        writer.writeheader()
+-        writer.writerows(rows)
++        print(f"\n{spec['display_name']} model cases:")
++        for case in cases:
++            print(f"  - {case['label']}: {case['checkpoint_path'] or spec['model_id']}")
+ 
+-    MARKDOWN_PATH.write_text(markdown_table(results), encoding="utf-8")
++        tokenizer = load_tokenizer(spec["model_id"])
++        results = [evaluate_case(case, tokenizer) for case in cases]
++        write_family_results(spec, results)
++        evaluated_families += 1
+ 
+-    print(f"\nWrote raw JSON: {RAW_JSON}")
+-    print(f"Wrote summary CSV: {SUMMARY_CSV}")
+-    print(f"Wrote Markdown: {MARKDOWN_PATH}")
++    if evaluated_families == 0:
++        raise FileNotFoundError(f"No configured Gemma checkpoints found under {OUTPUTS_DIR}")
+ 
+ 
+ if __name__ == "__main__":
+diff --git a/docs/rewrite-design/00-current-state.md b/docs/rewrite-design/00-current-state.md
+index 0b5055c..d2ae1d1 100644
+--- a/docs/rewrite-design/00-current-state.md
++++ b/docs/rewrite-design/00-current-state.md
+@@ -2,6 +2,8 @@
+ 
+ This document records why a rewrite is justified and what must be preserved. It is not a complete code review; detailed algorithm and optimization findings remain in the existing project documentation.
+ 
++The current NanoQuant codebase is located at `D:\dev\research\NanoQuant-OfficalCode\`. The modified NanoQuant-capable llama.cpp reference is located at `D:\dev\research\llama.cpp\`; its CUDA implementation is `D:\dev\research\llama.cpp\ggml\src\ggml-cuda\nanoquant.cu`. These are current local anchors, not portable artifact identities.
++
+ ## 1. Current workflow
+ 
+ The primary flow is approximately:
+@@ -60,11 +62,11 @@ The Hub model wrapper performs calibration, teacher loading, compression, tuning
+ 
+ Rewrite response: application services own use cases; Hugging Face and Hub behavior are infrastructure adapters.
+ 
+-### Experiment programs are specifications
++### Experiment chronology and zero-argument runfiles are useful, but mechanics are duplicated
+ 
+-Numbered Python files capture recipes, environment loading, logging, paths, explanations, and invocation. Their filenames, printed labels, and active model/settings can drift, and comparing two runs requires manual investigation.
++Numbered Python files make experiment order obvious, and running a file without parameters is an effective executable record. Those are strengths to preserve. The current files also capture repeated environment loading, logging, paths, and invocation mechanics; filenames, printed labels, and active model/settings can then drift, and comparing two runs requires manual investigation.
+ 
+-Rewrite response: declarative recipes with purpose/hypothesis/baseline, immutable run manifests, semantic config diffs, and generated reports.
++Rewrite response: retain thin numbered zero-argument runfiles that construct the canonical typed configuration and invoke one shared application service. Add purpose/hypothesis/baseline, immutable run manifests, launcher hashes, semantic config diffs, and generated reports. See [ADR-0005](adr/0005-numbered-zero-argument-runfiles.md).
+ 
+ ### Persistence is final-output-oriented
+ 
+@@ -88,7 +90,9 @@ Rewrite response: deployment-only runtime, explicit backend planner, separate ge
+ 
+ Important decisions are printed and selected metrics are appended to CSV/Markdown within compression code. A failed run can require reading long logs and source code to infer why a rank, retry, or fallback occurred.
+ 
+-Rewrite response: structured decision events, stable diagnostics, result artifacts, and reports generated entirely from structured data.
++The block-final-versus-pre-quantization table in `D:\dev\research\NanoQuant-OfficalCode\outputs\019-phase1-weight-errors.md` is nevertheless a high-value diagnostic and must be carried forward.
++
++Rewrite response: structured decision events, stable diagnostics, result artifacts, and reports generated entirely from structured data, including an equivalent block-final table before and after model-level KD.
+ 
+ ### Evaluation is not yet a decision ladder
+ 
+@@ -147,4 +151,3 @@ Capture at least:
+ - interruption behavior and amount of work currently lost.
+ 
+ Without these, the rewrite can become cleaner while silently changing the algorithm or failing to improve the actual bottleneck.
+-
+diff --git a/docs/rewrite-design/01-requirements.md b/docs/rewrite-design/01-requirements.md
+index 94e3a34..3f67bfc 100644
+--- a/docs/rewrite-design/01-requirements.md
++++ b/docs/rewrite-design/01-requirements.md
+@@ -22,6 +22,15 @@ The rewrite must support four primary workflows:
+ - **CFG-005:** The planner estimates source size, output size, peak GPU/CPU memory, activation storage, temporary disk, and major stage costs.
+ - **CFG-006:** A run has a stable identity derived from normalized semantic inputs; presentation-only fields do not invalidate computational caches.
+ 
++### Experiment provenance
++
++- **EXP-001:** Promoted research experiments may be launched by monotonically numbered, descriptive Python files.
++- **EXP-002:** A numbered runfile executes without experiment-defining command-line parameters.
++- **EXP-003:** A runfile constructs the canonical `RunConfig` or loads one canonical colocated recipe and contains no copied quantization, logging, checkpoint, or evaluation orchestration.
++- **EXP-004:** The run manifest records experiment number, launcher path, repository-relative path when available, launcher content hash, and code revision.
++- **EXP-005:** A completed experiment number is not reused for a semantically different configuration; a change receives the next number or an explicit fork/run relationship.
++- **EXP-006:** Generic YAML/CLI launch remains supported for automation and sweeps; it does not eliminate numbered zero-argument runfiles.
++
+ ### Calibration and quantization
+ 
+ - **QNT-001:** Calibration emits a versioned `CalibrationStats` artifact independent of the execution strategy that produced it.
+@@ -62,6 +71,7 @@ The rewrite must support four primary workflows:
+ - **INF-005:** Prefill, single-token decode, sampling, cache updates, model loading, and end-to-end generation are benchmarked separately.
+ - **INF-006:** Kernel and end-to-end outputs match the reference within backend-specific tolerances.
+ - **INF-007:** Packed artifacts load without calibration, optimizer, dataset, or experiment-framework dependencies.
++- **INF-008:** Performance and packing comparisons record the modified NanoQuant llama.cpp implementation revision and `ggml/src/ggml-cuda/nanoquant.cu` source hash when it is the reference.
+ 
+ ### Logging and reporting
+ 
+@@ -71,6 +81,8 @@ The rewrite must support four primary workflows:
+ - **OBS-004:** Expected warnings have stable codes and remediation text.
+ - **OBS-005:** A run report contains purpose, hypothesis, baseline, recipe, environment, progress, resource use, results, comparisons, warnings, and conclusion.
+ - **OBS-006:** Secrets, access tokens, private dataset examples, and prompts marked sensitive are redacted.
++- **OBS-007:** Every block records source-reference, block-entry, after-layer, final-frozen-pre-KD, andâ€”when applicableâ€”final-post-KD losses with named absolute and relative comparisons.
++- **OBS-008:** Reports render the per-layer weight-reconstruction table and final block error versus its explicitly named pre-quantization/base-model baseline; pre-KD results remain available after KD.
+ 
+ ### Evaluation
+ 
+@@ -174,4 +186,3 @@ A rewrite release cannot be called production-ready until:
+ - packed inference parity passes for every supported backend;
+ - quick and full evaluation reports are reproducible from their manifests;
+ - the performance baseline and comparison methodology are published with the release artifacts.
+-
+diff --git a/docs/rewrite-design/02-architecture.md b/docs/rewrite-design/02-architecture.md
+index fa579f3..eb1a829 100644
+--- a/docs/rewrite-design/02-architecture.md
++++ b/docs/rewrite-design/02-architecture.md
+@@ -15,7 +15,7 @@ Dependencies point toward the domain. A CUDA backend may depend on a domain pack
+ 
+ ```mermaid
+ flowchart TB
+-    CLI["CLI / Python API"] --> APP["Application services"]
++    CLI["Numbered runfiles / CLI / YAML / Python API"] --> APP["Application services"]
+     APP --> PIPE["Stage pipeline"]
+     PIPE --> DOMAIN["Domain math and policies"]
+     PIPE --> PORTS["Ports"]
+@@ -62,6 +62,8 @@ Application services express user-visible operations:
+ 
+ The application layer owns stage ordering and transactions, but delegates resource placement and persistence through ports.
+ 
++Numbered experiment runfiles are intentionally retained as thin input adapters. They construct the same canonical configuration and call the same application service as YAML/CLI/Python callers; they do not own a separate pipeline.
++
+ ### Model adapters
+ 
+ A model adapter contains all architecture-specific knowledge:
+diff --git a/docs/rewrite-design/02-domain-and-stage-contracts.md b/docs/rewrite-design/02-domain-and-stage-contracts.md
+index 32ecb83..47ac582 100644
+--- a/docs/rewrite-design/02-domain-and-stage-contracts.md
++++ b/docs/rewrite-design/02-domain-and-stage-contracts.md
+@@ -548,12 +548,34 @@ class BlockQuantizationRequest:
+     budget_state: ArtifactRef
+ 
+ 
++@dataclass(frozen=True, slots=True)
++class LossComparison:
++    baseline_name: str
++    candidate_name: str
++    baseline_loss: float
++    candidate_loss: float
++    absolute_delta: float
++    relative_delta: Optional[float]
++    denominator_floor: float
++
++
+ @dataclass(frozen=True, slots=True)
+ class BlockLossMetrics:
+-    before_quantization: float
++    source_reference: float
++    block_entry_pre_quantization: float
+     after_each_layer: tuple[tuple[LayerId, float], ...]
+     after_post_block_refit: Optional[float]
+-    final_frozen: float
++    final_frozen_pre_kd: float
++    final_vs_block_entry: LossComparison
++    final_vs_source_reference: LossComparison
++
++
++@dataclass(frozen=True, slots=True)
++class GlobalTuningBlockMetrics:
++    block: BlockId
++    final_frozen_pre_kd: float
++    final_post_kd: float
++    post_kd_vs_pre_kd: LossComparison
+ 
+ 
+ @dataclass(frozen=True, slots=True)
+diff --git a/docs/rewrite-design/03-configuration-and-runs.md b/docs/rewrite-design/03-configuration-and-runs.md
+index 30c5d2c..3a5abf8 100644
+--- a/docs/rewrite-design/03-configuration-and-runs.md
++++ b/docs/rewrite-design/03-configuration-and-runs.md
+@@ -40,6 +40,7 @@ A recipe contains both executable settings and the reason for the run:
+ schema_version: 1
+ 
+ intent:
++  experiment_number: 20
+   name: gemma-3-4b-residual-outlier-ablation
+   purpose: Determine whether residual-selected outliers reduce block loss enough to justify their bit cost.
+   hypothesis: Residual selection will improve v_proj and o_proj more than Fisher selection at equal effective BPW.
+@@ -172,6 +173,7 @@ runs/<run-id>/
+   plan.json
+   environment.json
+   source.json
++  launcher.json
+   events.jsonl
+   status.json
+ 
+@@ -200,6 +202,7 @@ Large immutable tensors are held in the artifact store and referenced by hash; t
+ The manifest is the authoritative self-description of a run. It contains:
+ 
+ - run ID and parent/fork run ID;
++- experiment number plus launcher kind, repository-relative path, and content hash;
+ - purpose, hypothesis, owner, and tags;
+ - input and resolved recipe hashes;
+ - source model identity and file hashes;
+@@ -212,6 +215,21 @@ The manifest is the authoritative self-description of a run. It contains:
+ - evaluation and benchmark references;
+ - terminal status and conclusion.
+ 
++Launcher provenance is a separate typed value, not part of `RunConfig` defaults:
++
++```python
++@dataclass(frozen=True, slots=True)
++class LauncherProvenance:
++    kind: str  # numbered_runfile, yaml, cli, python_api
++    repository_root: Optional[str]
++    repository_relative_path: Optional[str]
++    content_hash: Optional[str]
++    experiment_number: Optional[int]
++    command_arguments: tuple[str, ...]
++```
++
++For a numbered zero-argument runfile, `command_arguments` is empty and the parsed filename number must agree with `config.intent.experiment_number`. The exact local absolute path may be included as diagnostic environment data, but repository-relative path plus revision/hash provides portable provenance.
++
+ Environment capture uses an allowlist. It must never dump all environment variables because tokens and secrets are commonly present there.
+ 
+ ## 8. Forking a run
+@@ -247,6 +265,17 @@ Schema migration rules are explicit:
+ - defaults are applied according to the source schema version before migration;
+ - resolved recipes are never silently rewritten in place.
+ 
+-## 10. Experiment naming
++## 10. Experiment numbering and naming
++
++Sequential numbers are retained as a useful chronological research record. A promoted experiment should normally have a descriptive zero-argument launcher such as `experiments/020_low_rank_hessian_replay.py`.
++
++The number is a human chronology label, not the immutable run identity:
++
++- a run ID identifies one attempt/resume lineage;
++- content hashes identify reusable artifacts;
++- the experiment number shows research order;
++- the filename slug summarizes intent;
++- `IntentConfig` records purpose, hypothesis, and baseline;
++- the manifest records launcher path/hash and resolved configuration.
+ 
+-Sequential numbers may remain useful as human labels, but they are not identities and should not encode behavior. A run's purpose belongs in `intent`; its implementation is the resolved recipe; its evidence is the report. This eliminates the situation where a filename says one experiment number or model while the embedded settings describe another.
++Completed experiment files are not edited into a different experiment. A changed hypothesis or semantic setting receives the next number. The file remains thin and uses the canonical configuration/application API; it does not duplicate orchestration. Full conventions are in [Lessons Carried Forward](12-lessons-carried-forward.md#2-preserve-numbered-experiment-files) and [ADR-0005](adr/0005-numbered-zero-argument-runfiles.md).
+diff --git a/docs/rewrite-design/03-configuration-reference.md b/docs/rewrite-design/03-configuration-reference.md
+index 3b415c2..f762c32 100644
+--- a/docs/rewrite-design/03-configuration-reference.md
++++ b/docs/rewrite-design/03-configuration-reference.md
+@@ -110,6 +110,7 @@ Enums remove stringly typed comparisons scattered through the pipeline. Serializ
+ ```python
+ @dataclass(frozen=True, slots=True)
+ class IntentConfig:
++    experiment_number: Optional[int] = None
+     name: str = "unnamed-run"
+     purpose: str = ""
+     hypothesis: str = ""
+@@ -518,6 +519,9 @@ class ObservabilityConfig:
+     event_level: str = "info"
+     record_resource_interval_seconds: float = 5.0
+     record_admm_steps: bool = False
++    record_weight_reconstruction_table: bool = True
++    record_block_loss_snapshots: bool = True
++    loss_denominator_floor: float = 1e-8
+     capture_cuda_trace: bool = False
+     diagnostic_fixture_policy: str = "on_failure"
+ 
+@@ -605,6 +609,7 @@ The same object can be represented as:
+ schema_version: 1
+ 
+ intent:
++  experiment_number: 19
+   name: gemma-3-4b-phase1
+   purpose: Establish the phase-1 diagonal-objective baseline.
+   hypothesis: Residual outliers improve difficult attention projections at equal BPW.
+@@ -749,6 +754,9 @@ observability:
+   console_level: info
+   event_level: info
+   record_admm_steps: false
++  record_weight_reconstruction_table: true
++  record_block_loss_snapshots: true
++  loss_denominator_floor: 1.0e-8
+   diagnostic_fixture_policy: on_failure
+ 
+ output:
+@@ -943,6 +951,8 @@ The migration tool maps old flat names to canonical paths. Representative curren
+ | `block_activation_device` | `runtime.activations.kind` |
+ | `pin_cpu_activations` | resolved from `runtime.activations.kind`; not an independent boolean |
+ | `pin_cpu_activation_max_gib` | `runtime.resources.pinned_memory_gib` |
++| `loss_pct_floor` | `observability.loss_denominator_floor` |
++| `eval_block_ppl` | an explicit block-level evaluator suite/promotion policy; not a quantization boolean |
+ | `quant_layer_order` | `block_tuning.layer_order` |
+ | `cleanup_per_layer` | removed; resource scopes/executor policy own cleanup |
+ | `rank_allocation_strategy` | `allocation.strategy` |
+@@ -995,6 +1005,7 @@ The migration tool maps old flat names to canonical paths. Representative curren
+ | `fact_epochs` | `block_tuning.factorized.loop.epochs` |
+ | `fact_early_stop_rel_tol` | `block_tuning.factorized.loop.early_stop_relative_tolerance` |
+ | `fact_skip_jump_frac` | `block_tuning.factorized.skip_if_relative_loss_jump_below` |
++| `tune_eval_summaries` | removed as an opt-in; canonical layer/block snapshots are always recorded when `observability.record_block_loss_snapshots=true` (the default) |
+ | `post_block_scale_epochs` | `block_tuning.post_block_refit.enabled/epochs` |
+ | `post_block_scale_lr` | `block_tuning.post_block_refit.scale_learning_rate` |
+ | `post_block_outlier_lr` | `block_tuning.post_block_refit.outlier_learning_rate` |
+@@ -1050,4 +1061,3 @@ There is no alternate `NanoQuantConfig`, `NanoQuantConfigDataclass`, `QuantArgum
+ - migration covers every legacy field and fails on unmapped input;
+ - generated CLI help and config documentation match field defaults;
+ - no module outside `config` constructs its own defaults for canonical fields.
+-
+diff --git a/docs/rewrite-design/05-fast-prototyping.md b/docs/rewrite-design/05-fast-prototyping.md
+index d43351c..ca42541 100644
+--- a/docs/rewrite-design/05-fast-prototyping.md
++++ b/docs/rewrite-design/05-fast-prototyping.md
+@@ -17,7 +17,19 @@ A full quantization run taking hours must be the final confirmation step, not th
+ 
+ Every level produces a normal run manifest and comparable metrics. A replay is not an untracked debugging script.
+ 
+-## 3. Captured replay fixtures
++## 3. Numbered zero-argument experiment workflow
++
++Numbered runfiles remain the normal human-facing chronology for promoted experiments:
++
++```text
++python experiments/020_low_rank_hessian_replay.py
++```
++
++The file declares experiment number, purpose, hypothesis, baseline, and canonical `RunConfig`, then calls the shared application entry point. It takes no experiment-defining parameters. This preserves the useful workflow of the current codebase while preventing logging, checkpoint, model-loading, or evaluation mechanics from being copied between runs.
++
++After an experiment produces a committed run, changing its hypothesis or semantic settings means copying it to the next number. Resume does not create a new experiment number; a changed recipe does. See [Lessons Carried Forward](12-lessons-carried-forward.md#2-preserve-numbered-experiment-files) and [ADR-0005](adr/0005-numbered-zero-argument-runfiles.md).
++
++## 4. Captured replay fixtures
+ 
+ An expensive run can opt into capturing a bounded diagnostic fixture:
+ 
+@@ -54,7 +66,7 @@ nanoquant replay-layer fixtures/<id> --recipe recipes/change.yaml
+ nanoquant replay-block fixtures/<id> --compare runs/<baseline>
+ ```
+ 
+-## 4. Stage caching
++## 5. Stage caching
+ 
+ Calibration is often more expensive than the policy being changed. Stage-specific semantic hashes allow common experiments to reuse:
+ 
+@@ -70,7 +82,7 @@ Calibration is often more expensive than the policy being changed. Stage-specifi
+ 
+ Cache reuse is visible in the plan and run report. Each hit states the producing run, content hash, validation result, and time saved.
+ 
+-## 5. Experiment specification
++## 6. Experiment specification
+ 
+ Every experiment should declare:
+ 
+@@ -89,6 +101,7 @@ Example:
+ 
+ ```yaml
+ intent:
++  experiment_number: 20
+   purpose: Test low-rank-plus-diagonal Hessian approximation on difficult v_proj layers.
+   hypothesis: Rank-256 covariance correction reduces block residual loss by at least 5% relative without more than 20% factorization-time overhead.
+   baseline_run: run_01J...
+@@ -104,7 +117,7 @@ intent:
+ 
+ The run report fills in whether promotion criteria were met.
+ 
+-## 6. Representative case selection
++## 7. Representative case selection
+ 
+ Fast subsets must be representative rather than merely convenient. The evaluation registry maintains cases such as:
+ 
+@@ -118,7 +131,7 @@ Fast subsets must be representative rather than merely convenient. The evaluatio
+ 
+ Case selection is versioned and uses baseline evidence. Changing the representative set changes the benchmark identity.
+ 
+-## 7. Debug and reduced recipes
++## 8. Debug and reduced recipes
+ 
+ Named profiles make speed-versus-fidelity tradeoffs explicit:
+ 
+@@ -134,7 +147,7 @@ A report carries a prominent evidence tier. Results from `debug` or `smoke` cann
+ 
+ Reduced ADMM iterations can test code paths and gross trends but may change method rankings. Where possible, a representative replay should use production factorizer settings on fewer layers rather than weakened settings on the whole model.
+ 
+-## 8. Comparison-first workflow
++## 9. Comparison-first workflow
+ 
+ Researchers should not inspect unrelated logs side by side manually. `nanoquant compare` aligns candidate and baseline by semantic layer identity and produces:
+ 
+@@ -151,7 +164,7 @@ Researchers should not inspect unrelated logs side by side manually. `nanoquant
+ 
+ Large per-layer tables sort by the most actionable regression and link back to the exact attempt events.
+ 
+-## 9. Profiling workflow
++## 10. Profiling workflow
+ 
+ Performance changes follow the same ladder:
+ 
+@@ -162,7 +175,7 @@ Performance changes follow the same ladder:
+ 
+ Each profile records warm-up, repetitions, synchronization points, tensor shapes, dtypes, allocator state, and hardware. CUDA traces are optional artifacts linked from the run rather than embedded in console logs.
+ 
+-## 10. Reproducibility modes
++## 11. Reproducibility modes
+ 
+ Two modes are useful:
+ 
+@@ -171,7 +184,7 @@ Two modes are useful:
+ 
+ The mode is part of the recipe. A candidate cannot claim bit-for-bit reproducibility if performance mode was used.
+ 
+-## 11. Preventing prototype code from becoming architecture
++## 12. Preventing prototype code from becoming architecture
+ 
+ Exploration may begin in notebooks or scratch programs, but promotion requires:
+ 
+@@ -181,7 +194,6 @@ Exploration may begin in notebooks or scratch programs, but promotion requires:
+ - registered metrics and events;
+ - no model-family branching outside adapters;
+ - a comparison report against the baseline;
+-- removal or archival of the scratch entry point.
+-
+-This keeps fast experimentation while preventing another accumulation of numbered scripts that each partially reimplement orchestration.
++- promotion into a thin numbered zero-argument runfile, with the scratch entry point removed or archived.
+ 
++This keeps fast experimentation and chronological numbered files while preventing those files from reimplementing orchestration.
+diff --git a/docs/rewrite-design/06-inference-runtime.md b/docs/rewrite-design/06-inference-runtime.md
+index 518065d..7908c88 100644
+--- a/docs/rewrite-design/06-inference-runtime.md
++++ b/docs/rewrite-design/06-inference-runtime.md
+@@ -6,7 +6,22 @@ The deployment runtime must make NanoQuant's storage reduction visible as real e
+ 
+ The numbers are not assumed to be directly comparable until the protocol in [requirements](01-requirements.md#4-performance-acceptance-protocol) is applied. Differences in model, quantization, context length, batch, sampling, cache, compilation, and measurement boundaries can dominate the result.
+ 
+-## 2. Separate runtime package surface
++## 2. Current code and optimized runtime references
++
++The rewrite uses two current local codebases as explicit references:
++
++- research/quantization application: `D:\dev\research\NanoQuant-OfficalCode\`;
++- modified NanoQuant-capable llama.cpp: `D:\dev\research\llama.cpp\`.
++
++The modified llama.cpp CUDA implementation is [ggml/src/ggml-cuda/nanoquant.cu](../../../llama.cpp/ggml/src/ggml-cuda/nanoquant.cu), currently located at `D:\dev\research\llama.cpp\ggml\src\ggml-cuda\nanoquant.cu`.
++
++It is a concrete packing, kernel, integration, profiling, and performance reference. The implementation includes decode-specialized warp kernels, packed sign-word/vector loads, warp broadcasts, branchless sign-bit application, sign-aware FMA, multiple accumulators, dtype-specialized paths, and fused first-stage projections. Benchmark JSON and Nsight artifacts in the modified repository show the history of decode and prefill optimization attempts.
++
++Before changing formats or kernels, the rewrite records the llama.cpp source revision/patch hash, CUDA source hash, conversion format, exact model artifact, commands, JSON samples, hardware, and profiles. The observed approximately 400 tokens/second target must be tied to one such captured workload; intermediate repository benchmarks remain valid evidence for their own recorded workloads.
++
++See [Lessons Carried Forward](12-lessons-carried-forward.md#5-preserve-the-modified-llamacpp-implementation-as-a-runtime-reference).
++
++## 3. Separate runtime package surface
+ 
+ Deployment code must be importable without the research stack:
+ 
+@@ -28,7 +43,7 @@ not required:
+ 
+ The runtime consumes only a validated `PackedModelArtifact`. It does not mutate training state or pack weights during the first request.
+ 
+-## 3. Runtime architecture
++## 4. Runtime architecture
+ 
+ ```mermaid
+ flowchart LR
+@@ -46,7 +61,7 @@ flowchart LR
+ 
+ The backend planner resolves every quantized layer before inference and emits a dispatch report. Unsupported layers either fail under strict mode or use a named fallback that is included in the report and benchmark result.
+ 
+-## 4. Runtime representations
++## 5. Runtime representations
+ 
+ ### Frozen logical state
+ 
+@@ -74,7 +89,7 @@ This is immutable and backend-specific:
+ 
+ Packing happens during artifact creation, not during normal model loading. A model artifact may contain multiple packed layouts only when the storage/performance tradeoff is justified and reported.
+ 
+-## 5. Backend contract
++## 6. Backend contract
+ 
+ ```python
+ class RuntimeBackend(Protocol):
+@@ -101,7 +116,7 @@ class RuntimeBackend(Protocol):
+ 
+ Backend selection is performed once per workload class where possible, not through repeated Python conditionals inside every token step.
+ 
+-## 6. Reference implementations
++## 7. Reference implementations
+ 
+ Three paths provide progressively stronger validation:
+ 
+@@ -111,7 +126,7 @@ Three paths provide progressively stronger validation:
+ 
+ Tests compare (2) with (1), then (3) with (2). This localizes errors to quantized math versus packing/kernel behavior.
+ 
+-## 7. Prefill and decode are different workloads
++## 8. Prefill and decode are different workloads
+ 
+ The runtime maintains separate plans and kernels:
+ 
+@@ -132,7 +147,7 @@ For decode, the performance model must account for:
+ 
+ The goal is not merely a fast isolated GEMV. The generation loop must keep the GPU busy and avoid losing kernel gains to Python or synchronization gaps.
+ 
+-## 8. Generation engine
++## 9. Generation engine
+ 
+ The generation engine owns:
+ 
+@@ -156,7 +171,7 @@ Hot-loop rules:
+ - host-visible stopping checks are batched or explicitly measured;
+ - cache tensors are preallocated or use a bounded allocator.
+ 
+-## 9. Fusion opportunities
++## 10. Fusion opportunities
+ 
+ After profiles establish the cost, optimized backends may fuse:
+ 
+@@ -170,7 +185,7 @@ After profiles establish the cost, optimized backends may fuse:
+ 
+ Fusion is accepted only with reference parity, shape coverage, and an end-to-end benefit. A faster microkernel that forces expensive layout conversion elsewhere is not an improvement.
+ 
+-## 10. Performance investigation plan
++## 11. Performance investigation plan
+ 
+ Before rewriting kernels, capture an end-to-end trace and answer:
+ 
+@@ -189,7 +204,7 @@ Before rewriting kernels, capture an end-to-end trace and answer:
+ 
+ The trace should account for at least 90% of wall time before major optimization work is chosen.
+ 
+-## 11. Benchmark suites
++## 12. Benchmark suites
+ 
+ ### Kernel suite
+ 
+@@ -233,7 +248,7 @@ Metrics:
+ - fallback layer count;
+ - generated-output parity/hash under deterministic settings.
+ 
+-## 12. Apples-to-apples reference comparison
++## 13. Apples-to-apples reference comparison
+ 
+ The llama.cpp comparison uses the same:
+ 
+@@ -249,7 +264,7 @@ The llama.cpp comparison uses the same:
+ 
+ If quantization formats differ materially, report both model quality and effective BPW beside throughput. A 400 tokens/second result at a different quality or memory point is informative but not a direct regression threshold.
+ 
+-## 13. Performance gates
++## 14. Performance gates
+ 
+ - Microbenchmarks reject statistically significant regressions above their configured threshold.
+ - End-to-end decode must not regress more than 10% from the accepted NanoQuant baseline.
+@@ -258,7 +273,7 @@ If quantization formats differ materially, report both model quality and effecti
+ - Performance results are accepted only from designated stable hosts.
+ - Compiler or driver changes establish a new baseline rather than being mixed silently with the old one.
+ 
+-## 14. Optimization order
++## 15. Optimization order
+ 
+ 1. Establish correct reference paths and a trustworthy benchmark.
+ 2. Remove packing, discovery, transfers, and synchronization from hot loops.
+@@ -268,4 +283,3 @@ If quantization formats differ materially, report both model quality and effecti
+ 6. Improve kernel bandwidth/occupancy for dominant real shapes.
+ 7. Optimize cache, attention, logits, and sampling once quantized linears no longer dominate.
+ 8. Re-run quality, memory, and full generation gates after every layout change.
+-
+diff --git a/docs/rewrite-design/07-observability-and-reporting.md b/docs/rewrite-design/07-observability-and-reporting.md
+index 2183034..40b172c 100644
+--- a/docs/rewrite-design/07-observability-and-reporting.md
++++ b/docs/rewrite-design/07-observability-and-reporting.md
+@@ -80,9 +80,14 @@ factorization.primal_residual
+ factorization.dual_residual
+ factorization.wall_seconds
+ 
+-block.loss.before
+-block.loss.after_factorization
+-block.loss.after_tuning
++block.loss.source_reference
++block.loss.entry_pre_quantization
++block.loss.after_layer
++block.loss.final_frozen_pre_kd
++block.loss.final_post_kd
++block.loss.final_vs_entry_absolute
++block.loss.final_vs_entry_relative
++block.loss.final_vs_source_absolute
+ 
+ model.effective_bpw
+ model.packed_bytes
+@@ -177,29 +182,47 @@ The reporting layer derives diagnoses from structured metrics. Initial rules inc
+ 
+ Diagnostic thresholds are recipe/versioned policy, not hard-coded report logic.
+ 
+-## 8. Console output
++## 8. Required block-final error view
++
++The report at `D:\dev\research\NanoQuant-OfficalCode\outputs\019-phase1-weight-errors.md` established a useful diagnostic that is mandatory in the rewrite.
++
++For every block, structured results retain:
++
++- original source/base-model reference loss;
++- block-entry pre-quantization loss;
++- loss after each accepted/tuned/frozen layer;
++- post-block-refit loss when present;
++- final frozen loss before model-level KD;
++- final loss after KD when present;
++- named absolute and relative deltas.
++
++The default table renders per-layer residual error and a `Block final vs block-entry pre-quantization baseline` column. If the baseline denominator is near zero, the relative value is `n/a` while absolute values remain visible. The pre-KD table is never overwritten by post-KD results.
++
++The report also retains the per-layer objective-weighted weight-reconstruction table from the same reference file. Together, these distinguish a matrix approximation problem from a block-behavior/tuning problem.
++
++## 9. Console output
+ 
+ The console is concise and optimized for active monitoring:
+ 
+ ```text
+ [12/80] self_attn.v_proj attempt 1 rank=1536 err=0.284 threshold=0.350 18.4s ACCEPT
+-[12/80] block loss 1.91e-4 â†’ 2.35e-4 â†’ 2.02e-4 recovery=75.0%
++[12/80] block entry=1.91e-4 final-pre-KD=2.02e-4 delta=+1.10e-5 (+5.76%)
+ [resources] gpu=31.2/44.0 GiB host=42.8/64.0 GiB temp=38.1/500 GiB
+ ```
+ 
+ Detailed tensors and histories remain in structured artifacts. Progress rendering must not synchronize CUDA or become a material part of stage time.
+ 
+-## 9. Run summary report
++## 10. Run summary report
+ 
+ Every completed, failed, or interrupted run renders `reports/summary.md` with:
+ 
+-1. **Intent:** purpose, hypothesis, owner, baseline, evidence tier.
++1. **Intent:** experiment number/runfile, purpose, hypothesis, owner, baseline, evidence tier.
+ 2. **Outcome:** completed/failed/stopped, promotion decision, concise conclusion.
+ 3. **Recipe delta:** changes from baseline and fully resolved recipe link.
+ 4. **Inputs:** model, revision, datasets, tokenizer, calibration sample identity.
+ 5. **Environment:** code revision, packages, CUDA, driver, hardware, executor.
+ 6. **Resource plan versus actual:** peak memory, disk, I/O, stage timings.
+-7. **Quantization:** effective BPW, ranks, retries, outliers, reconstruction and block loss.
++7. **Quantization:** effective BPW, ranks, retries, outliers, per-layer reconstruction, and final block error versus named source/block-entry baselines before and after KD.
+ 8. **Quality:** evaluation tier, metrics, deltas, uncertainty, failed gates.
+ 9. **Performance:** packing, load, prefill, decode, memory, fallback coverage.
+ 10. **Warnings and diagnostics:** grouped by severity and model location.
+@@ -208,7 +231,7 @@ Every completed, failed, or interrupted run renders `reports/summary.md` with:
+ 
+ The report generator reads only the manifest, events, and result artifacts. It never scrapes console logs.
+ 
+-## 10. Comparison report
++## 11. Comparison report
+ 
+ Candidate-versus-baseline reports include:
+ 
+@@ -223,7 +246,7 @@ Candidate-versus-baseline reports include:
+ 
+ When two runs are not directly comparable, the report says why rather than producing a misleading delta.
+ 
+-## 11. Event sinks and retention
++## 12. Event sinks and retention
+ 
+ Initial sinks:
+ 
+@@ -242,7 +265,7 @@ Retention classes:
+ - temporary activations and traces: short-lived unless pinned by a run;
+ - incomplete temporary writes: removable after lease expiry.
+ 
+-## 12. Logging tests
++## 13. Logging tests
+ 
+ Tests verify:
+ 
+@@ -254,4 +277,4 @@ Tests verify:
+ - console rendering never changes computation;
+ - performance mode does not add per-token synchronization;
+ - event schema migrations preserve old run readability.
+-
++- the Experiment 019-style weight-error and final-block tables render from structured fixtures with correct positive/negative/n-a semantics.
+diff --git a/docs/rewrite-design/08-evaluation.md b/docs/rewrite-design/08-evaluation.md
+index 13cf9af..4401278 100644
+--- a/docs/rewrite-design/08-evaluation.md
++++ b/docs/rewrite-design/08-evaluation.md
+@@ -29,6 +29,8 @@ No single score represents NanoQuant quality. Reports preserve separate dimensio
+ 
+ - block-output reconstruction loss;
+ - quantization jump and tuning recovery;
++- final frozen block error versus both the source/base-model reference and the block-entry pre-quantization baseline;
++- pre-KD versus post-KD block recovery;
+ - held-out block replay loss;
+ - rank/outlier utility per added bit;
+ - sensitivity of results across calibration partitions.
+@@ -80,6 +82,7 @@ Useful early signals include:
+ - reference parity failure;
+ - large held-out NLL regression on a fixed token slice;
+ - severe block loss in historically sensitive blocks;
++- a material Experiment 019-style `Block final` regression after all local tuning/refitting;
+ - effective BPW above the intended budget;
+ - unexpected inference fallback or drastic throughput regression;
+ - deterministic generation degeneration such as empty/repeated output.
+@@ -249,4 +252,3 @@ Recommended next action: run standard tier on the same artifact.
+ ```
+ 
+ This is preferable to turning noise into a new full quantization direction.
+-
+diff --git a/docs/rewrite-design/09-testing-and-quality.md b/docs/rewrite-design/09-testing-and-quality.md
+index b722764..80afb45 100644
+--- a/docs/rewrite-design/09-testing-and-quality.md
++++ b/docs/rewrite-design/09-testing-and-quality.md
+@@ -134,6 +134,8 @@ Additional integration scenarios:
+ - optional global KD;
+ - loading a prior supported artifact version through migration;
+ - strict inference mode refusing an unsupported backend layout.
++- a numbered zero-argument experiment runfile producing the same resolved config as direct Python/YAML construction;
++- Experiment 019-style per-layer reconstruction and final-block/pre-KD report generation.
+ 
+ ## 7. Resume and failure injection
+ 
+@@ -216,6 +218,7 @@ Golden fixtures are used sparingly for stable, high-value outputs:
+ - known tiny factorization result/metrics under deterministic mode;
+ - packed artifact inventory;
+ - run summary and comparison reports;
++- numbered-runfile provenance and final-block error tables;
+ - migration of every supported prior schema.
+ 
+ Goldens store tolerances and producer versions. Updating a golden requires a review that explains the semantic change; `--update-goldens` is not an acceptable unexplained fix.
+@@ -303,7 +306,8 @@ A release requires:
+ - successful clean-install runtime inference;
+ - successful interruption/resume equivalence;
+ - readable manifests from every supported schema version;
+-- published quality and performance comparison against the previous release.
++- published quality and performance comparison against the previous release;
++- captured comparison against the modified llama.cpp NanoQuant runtime for the agreed workload.
+ 
+ ## 14. Bug workflow
+ 
+@@ -316,4 +320,3 @@ Every correctness or performance bug should leave behind the smallest useful reg
+ - or a benchmark workload.
+ 
+ The test should fail before the fix and pass afterward. Large full-run logs alone are not a regression test.
+-
+diff --git a/docs/rewrite-design/10-artifacts-and-compatibility.md b/docs/rewrite-design/10-artifacts-and-compatibility.md
+index 2cde88f..8c95f73 100644
+--- a/docs/rewrite-design/10-artifacts-and-compatibility.md
++++ b/docs/rewrite-design/10-artifacts-and-compatibility.md
+@@ -150,6 +150,7 @@ packed-model/
+ - file hashes and total sizes;
+ - tokenizer/config identities;
+ - recipe/run references;
++- experiment number and numbered-launcher path/content hash when present;
+ - validation results;
+ - optional quality/performance summary.
+ 
+@@ -281,4 +282,3 @@ Objects are collectible only when unreachable from:
+ - child-artifact lineage required by policy.
+ 
+ Garbage collection first produces a dry-run inventory with sizes and references. Temporary activation streams have short retention unless a diagnostic fixture explicitly pins them.
+-
+diff --git a/docs/rewrite-design/11-delivery-roadmap.md b/docs/rewrite-design/11-delivery-roadmap.md
+index ae1504b..5bac266 100644
+--- a/docs/rewrite-design/11-delivery-roadmap.md
++++ b/docs/rewrite-design/11-delivery-roadmap.md
+@@ -1,5 +1,7 @@
+ # Delivery and Migration Roadmap
+ 
++> The executable checkbox checklist for these phases is [Rewrite Implementation Task List](13-implementation-task-list.md).
++
+ ## 1. Strategy
+ 
+ The rewrite should be clean architecturally but incremental operationally. A single big-bang replacement would make it difficult to distinguish architectural bugs from algorithm changes and could invalidate established results.
+@@ -33,7 +35,7 @@ Algorithm changes are generally kept out of parity milestones. Improvements beco
+ | `utils/eval_utils.py` | evaluator implementations and registry |
+ | `kernel/utils.py` | runtime packers/backend dispatch |
+ | `kernel/test_decode.py` | runtime generation engine plus benchmark application |
+-| numbered experiment programs | declarative recipes and run manifests |
++| numbered experiment programs | thin numbered zero-argument runfiles using canonical `RunConfig`, plus manifests and optional YAML views |
+ | CSV/Markdown writes inside compression | event sink, result artifacts, and report renderer |
+ 
+ ## 3. Phase 0: Freeze evidence
+@@ -45,6 +47,8 @@ Deliverables:
+ - save source revisions and calibration selections;
+ - capture current layer factors, reconstruction metrics, block losses, effective BPW, checkpoints, and evaluation output;
+ - establish the current inference protocol and reproduce the observed throughput;
++- capture the modified `D:\dev\research\llama.cpp\ggml\src\ggml-cuda\nanoquant.cu` revision/hash, conversion path, benchmark JSON, and representative profiles;
++- preserve the per-layer weight error and `Final Error Before Model-Level KD` block table from `outputs/019-phase1-weight-errors.md` as a golden reporting fixture;
+ - capture end-to-end and CUDA profiles;
+ - document known correctness quirks intentionally preserved for parity versus defects explicitly fixed first.
+ 
+@@ -59,6 +63,7 @@ Exit criteria:
+ Implement:
+ 
+ - canonical configuration schema and recipe resolver;
++- numbered zero-argument runfile adapter and launcher provenance capture;
+ - run manifest, run directory, and environment capture;
+ - structured event envelope and local JSONL/console sinks;
+ - artifact descriptor, content hashing, atomic local store;
+@@ -195,7 +200,8 @@ Implement:
+ - promotion gates;
+ - fixture capture/replay commands;
+ - Pareto and cost reporting;
+-- baseline registry.
++- baseline registry;
++- required pre-KD/post-KD final-block error views matching the established Experiment 019 semantics.
+ 
+ Exit criteria:
+ 
+@@ -209,11 +215,11 @@ Exit criteria:
+ 
+ Tasks:
+ 
+-- migrate supported old recipes to YAML;
++- migrate supported old numbered experiments to thin zero-argument runfiles using canonical `RunConfig`, with YAML views where useful;
+ - provide old checkpoint import or a precise re-quantization requirement;
+ - publish operator and contributor guides from tested commands;
+ - switch default CLI and Python API;
+-- archive legacy experiment scripts and document their replacement run IDs;
++- preserve experiment numbers/chronology, archive only copied legacy orchestration, and document replacement run IDs;
+ - remove duplicate configs, orchestration paths, mutable packed/training module behavior, and log-parsing tools;
+ - establish support/deprecation windows.
+ 
+diff --git a/docs/rewrite-design/README.md b/docs/rewrite-design/README.md
+index d545c55..bb617ff 100644
+--- a/docs/rewrite-design/README.md
++++ b/docs/rewrite-design/README.md
+@@ -11,7 +11,7 @@ The current implementation proved the algorithm and accumulated useful optimizat
+ - orchestration lives partly in model/Hub wrappers;
+ - block compression combines policy, math, model mutation, memory management, logging, and file output;
+ - training and packed inference states share one mutable linear-module implementation;
+-- numbered Python programs serve as experiment specifications;
++- numbered Python programs preserve useful experiment chronology and zero-argument reproducibility, but currently also repeat orchestration that can drift;
+ - the inference benchmark script also contains substantial runtime behavior;
+ - a normal run is too expensive to use as the first feedback loop;
+ - loading a calibration model and a separate full-precision teacher does not scale cleanly to 70B models.
+@@ -48,6 +48,7 @@ The 20 tokens/second currently observed in the test framework and the approximat
+ 8. **Reference paths come first.** A slow, clear PyTorch implementation defines correctness for every optimized kernel and packed format.
+ 9. **Failure is expected.** Long-running work commits progress atomically and can survive process death, OOM, machine restart, and evaluation interruption.
+ 10. **Performance claims require protocols.** Throughput without model, hardware, prompt/decode lengths, batch size, cache policy, sampling, and synchronization details is not a result.
++11. **Preserve useful research ergonomics.** Numbered experiment files and zero-argument launch remain first-class; the rewrite centralizes their mechanics rather than removing the convention.
+ 
+ ## Documentation map
+ 
+@@ -67,7 +68,9 @@ Read these in order for a full rewrite plan:
+ 10. [Testing and quality gates](09-testing-and-quality.md)
+ 11. [Artifact formats and compatibility](10-artifacts-and-compatibility.md)
+ 12. [Delivery and migration plan](11-delivery-roadmap.md)
+-13. [Glossary](glossary.md)
++13. [Lessons carried forward and local reference implementations](12-lessons-carried-forward.md)
++14. [Implementation task list and milestones](13-implementation-task-list.md)
++15. [Glossary](glossary.md)
+ 
+ The [architecture decision record directory](adr/README.md) records decisions that future contributors may otherwise be tempted to reverse without understanding their context.
+ 
+@@ -90,6 +93,14 @@ nanoquant report runs/<run-id>
+ 
+ Commands do not contain unique business logic. They validate input, invoke an application service, stream structured progress, and select an exit code.
+ 
++Promoted research experiments also retain a numbered, zero-argument runfile:
++
++```text
++python experiments/020_low_rank_hessian_replay.py
++```
++
++The runfile constructs the same canonical `RunConfig` and calls the same application service. It contains no copied orchestration and its path/hash are recorded in the manifest. See [Lessons Carried Forward](12-lessons-carried-forward.md#2-preserve-numbered-experiment-files).
++
+ ## Definition of done for the rewrite
+ 
+ The rewrite is complete when:
+diff --git a/docs/rewrite-design/adr/README.md b/docs/rewrite-design/adr/README.md
+index 7a73a47..4fb8f74 100644
+--- a/docs/rewrite-design/adr/README.md
++++ b/docs/rewrite-design/adr/README.md
+@@ -16,6 +16,7 @@ Architecture decision records (ADRs) preserve the context and tradeoffs behind d
+ - [ADR-0002: Execute work as typed resumable stages](0002-resumable-stage-pipeline.md)
+ - [ADR-0003: Separate trainable and packed runtime representations](0003-separate-training-and-runtime-state.md)
+ - [ADR-0004: Support large models through block streaming](0004-block-streaming-for-large-models.md)
++- [ADR-0005: Retain numbered zero-argument experiment runfiles](0005-numbered-zero-argument-runfiles.md)
+ 
+ ## Template
+ 
+@@ -45,4 +46,3 @@ What credible alternatives were rejected and why?
+ 
+ How will we know the decision works?
+ ```
+-
+diff --git a/outputs/019-phase1-rank-utility.csv b/outputs/019-phase1-rank-utility.csv
+index 374e547..9c7a2be 100644
+--- a/outputs/019-phase1-rank-utility.csv
++++ b/outputs/019-phase1-rank-utility.csv
+@@ -230,3 +230,10 @@ timestamp,model_id,block,total_blocks,layer,rank,cost_per_rank,binary_bits,pre_q
+ 2026-07-11 19:30:59,google/gemma-3-4b-it,33,34,self_attn.o_proj,960,4624,4439040,58983.23828125,61024.70703125,2041.46875,0.034610998132480565,60176.7578125,1193.51953125,0.02023489326847292,4.5583939925012885e-09
+ 2026-07-11 19:32:53,google/gemma-3-4b-it,33,34,self_attn.q_proj,960,4624,4439040,60027.94921875,60689.53125,661.58203125,0.011021233273172556,60185.73046875,157.78125,0.0026284631084934067,5.921242224655345e-10
+ 2026-07-11 19:34:46,google/gemma-3-4b-it,33,34,self_attn.k_proj,608,3600,2188800,60090.89453125,60630.08203125,539.1875,0.008972865260303255,60342.90625,252.01171875,0.004193842024084737,1.9160462463837432e-09
++2026-07-11 19:39:03,google/gemma-3-4b-it,34,34,mlp.gate_proj,2208,12816,28297728,928.8536987304688,981.3515625,52.49786376953125,0.05651898015939847,908.2392578125,-20.61444091796875,-0.022193420714310543,0.0
++2026-07-11 19:41:39,google/gemma-3-4b-it,34,34,mlp.up_proj,2208,12816,28297728,858.5155639648438,904.3182983398438,45.802734375,0.05335108214401064,847.4464111328125,-11.06915283203125,-0.012893363028750557,0.0
++2026-07-11 19:43:44,google/gemma-3-4b-it,34,34,mlp.down_proj,1792,12816,22966272,816.94970703125,884.67333984375,67.7236328125,0.08289816647172069,795.7039184570312,-21.24578857421875,-0.026006238072383635,0.0
++2026-07-11 19:45:25,google/gemma-3-4b-it,34,34,self_attn.v_proj,704,3600,2534400,800.7138061523438,869.36474609375,68.65093994140625,0.08573717527276498,795.2611694335938,-5.45263671875,-0.006809719873510688,0.0
++2026-07-11 19:47:05,google/gemma-3-4b-it,34,34,self_attn.o_proj,960,4624,4439040,781.2224731445312,798.9005737304688,17.6781005859375,0.02262876606042916,775.4065551757812,-5.81591796875,-0.007444637307142619,0.0
++2026-07-11 19:48:56,google/gemma-3-4b-it,34,34,self_attn.q_proj,960,4624,4439040,761.9560546875,818.9602661132812,57.00421142578125,0.07481299095281854,760.8268432617188,-1.12921142578125,-0.001481990226121862,0.0
++2026-07-11 19:50:44,google/gemma-3-4b-it,34,34,self_attn.k_proj,768,3600,2764800,750.3493041992188,810.5279541015625,60.17864990234375,0.08020084721284187,775.2125854492188,24.86328125,0.033135609123452675,1.1984812327637687e-08
+diff --git a/outputs/019-phase1-weight-errors.csv b/outputs/019-phase1-weight-errors.csv
+index 231b460..3277495 100644
+--- a/outputs/019-phase1-weight-errors.csv
++++ b/outputs/019-phase1-weight-errors.csv
+@@ -240,3 +240,10 @@ timestamp,model_id,block,total_blocks,layer,rank,attempt,base_rank,cap_rank,retr
+ 2026-07-11 19:29:52,google/gemma-3-4b-it,33,34,self_attn.o_proj,960,1,1088,1184,2048,3,bf16,residual,2560,2048,5242880,255.34710693359375,0.3602877543447215,diagonal,0.274250864982605,0.30914829592937404,0.2742515504360199,0.30914906860425756,0.27424582839012146,0.30914261844870805,0.2737067937850952,0.308534993639206,0.2737067937850952,0.30853497982025146,1.0,0.30853497982025146,0.9007193858618037,0.35,0.4,0.8871175050735474,4.870359553024173e-05,708.7310180664062,8.149311780929565
+ 2026-07-11 19:31:35,google/gemma-3-4b-it,33,34,self_attn.q_proj,960,1,1088,1184,2048,3,bf16,residual,2048,2560,5242880,615.5785522460938,0.3100245218931686,diagonal,0.3833125829696655,0.2576563081446875,0.3833155632019043,0.25765831140696,0.3833179771900177,0.25765993404940074,0.3822815418243408,0.2569632595288776,0.3822815418243408,0.25696325302124023,1.0,0.25696325302124023,0.7750613047329215,0.35,0.4,1.48768949508667,0.0001174122910015285,1985.5802001953125,8.2688889503479
+ 2026-07-11 19:33:29,google/gemma-3-4b-it,33,34,self_attn.k_proj,608,1,704,768,1024,3,bf16,residual,1024,2560,2621440,375.9526672363281,0.3328387535822967,diagonal,0.6309401392936707,0.22713066089766895,0.6309423446655273,0.22713145480431102,0.6308860182762146,0.2271111779995338,0.629357099533081,0.22656078612721525,0.629357099533081,0.2265607863664627,1.0,0.2265607863664627,0.8320968839557417,0.35,0.4,2.7778730392456055,0.00014341456117108464,1129.533935546875,7.096896648406982
++2026-07-11 19:37:58,google/gemma-3-4b-it,34,34,mlp.gate_proj,2208,1,2016,2208,2560,3,bf16,residual,10240,2560,26214400,3130.137451171875,0.2937020871585567,diagonal,0.3863954246044159,0.20946477690906112,0.3863997459411621,0.2094671195036672,0.3863987922668457,0.2094666025172714,0.3854644298553467,0.20896008509596076,0.3854644298553467,0.20896008610725403,1.0,0.20896008610725403,0.7342552178963918,0.35,0.4,1.8446797132492065,0.00011940526776015758,10657.525390625,36.490893602371216
++2026-07-11 19:40:34,google/gemma-3-4b-it,34,34,mlp.up_proj,2208,1,2016,2208,2560,3,bf16,residual,10240,2560,26214400,3258.194580078125,0.302989715540914,diagonal,0.5067875981330872,0.22364764547867705,0.5067939162254333,0.22365043368123438,0.5067814588546753,0.22364493618751283,0.5056613087654114,0.22315060891713473,0.5056613087654114,0.2231506109237671,1.0,0.2231506109237671,0.7574742888522848,0.35,0.4,2.2660090923309326,0.00012429025955498218,10753.482421875,36.22457838058472
++2026-07-11 19:42:48,google/gemma-3-4b-it,34,34,mlp.down_proj,1792,1,2016,2208,2560,11,bf16,residual,2560,10240,26214400,661.3700561523438,0.36385230665829804,diagonal,1.7778873443603516,0.27964616903123996,1.7778944969177246,0.27964729406611605,1.777967095375061,0.27965871317010826,1.7742021083831787,0.2790665135619204,1.7742021083831787,0.2790665030479431,1.0,0.2790665030479431,0.909630766645745,0.35,0.4,6.357631683349609,2.5229265447705983e-05,1817.688232421875,25.77768635749817
++2026-07-11 19:44:20,google/gemma-3-4b-it,34,34,self_attn.v_proj,704,1,704,768,1024,3,bf16,residual,1024,2560,2621440,430.7271423339844,0.34662953617386466,diagonal,0.39380598068237305,0.28677943442498427,0.39380815625190735,0.286781018729518,0.393840491771698,0.2868045662695054,0.3927954435348511,0.2860435358204744,0.3927954435348511,0.28604352474212646,1.0,0.28604352474212646,0.8665738404346616,0.35,0.4,1.373201608657837,0.00016430936520919203,1242.615234375,8.38156533241272
++2026-07-11 19:46:02,google/gemma-3-4b-it,34,34,self_attn.o_proj,960,1,1088,1184,2048,3,bf16,residual,2560,2048,5242880,431.5708923339844,0.33217005702109187,diagonal,0.09765076637268066,0.2672694488024811,0.09765122830867767,0.2672707131179995,0.09764797985553741,0.26726182212499955,0.09744393825531006,0.2667033617252376,0.09744393825531006,0.26670336723327637,1.0,0.26670336723327637,0.8304251425527296,0.35,0.4,0.3653644919395447,8.231561514548957e-05,1299.246826171875,8.545137882232666
++2026-07-11 19:47:41,google/gemma-3-4b-it,34,34,self_attn.q_proj,960,1,1088,1184,2048,3,bf16,residual,2048,2560,5242880,570.038330078125,0.3233785209950888,diagonal,0.2918442487716675,0.2587417679650503,0.2918440103530884,0.2587415565891368,0.29188084602355957,0.2587742141677665,0.29118168354034424,0.2581543543015421,0.29118168354034424,0.25815436244010925,1.0,0.25815436244010925,0.808446302487722,0.35,0.4,1.1279363632202148,0.00010872618295252324,1762.7587890625,8.875821590423584
++2026-07-11 19:49:30,google/gemma-3-4b-it,34,34,self_attn.k_proj,768,1,704,768,1024,3,bf16,residual,1024,2560,2621440,344.1573486328125,0.27445031806732195,diagonal,4.837958812713623,0.17892636369356607,4.83799934387207,0.17892786269202346,4.83730411529541,0.17890215045965993,4.823172569274902,0.17837951142102795,4.823172569274902,0.17837950587272644,1.0,0.17837950587272644,0.6861257951683049,0.35,0.4,27.03882598876953,0.00013128560967743397,1253.98779296875,7.66261887550354
+diff --git a/outputs/019-phase1-weight-errors.md b/outputs/019-phase1-weight-errors.md
+index 940d176..5cb3e09 100644
+--- a/outputs/019-phase1-weight-errors.md
++++ b/outputs/019-phase1-weight-errors.md
+@@ -39,4 +39,48 @@ CSV: `D:\dev\research\NanoQuant-OfficalCode\outputs\019-phase1-weight-errors.csv
+ | 31 | 0.2269 | 0.2451 | 0.2328 | 0.1825 | 0.331 | 0.1964 | 0.1544 |
+ | 32 | 0.279 | 0.3182 | 0.2351 | 0.283 | 0.2913 | 0.2185 | 0.2299 |
+ | 33 | 0.2136 | 0.243 | 0.2292 | 0.2389 | 0.3085 | 0.257 | 0.2266 |
+-| 34 |  |  |  |  |  |  |  |
++| 34 | 0.209 | 0.2232 | 0.2791 | 0.286 | 0.2667 | 0.2582 | 0.1784 |
++
++## Final Error Before Model-Level KD
++
++This snapshot is measured after every block has been quantized, tuned, refit, and finalized, immediately before model-level knowledge-distillation tuning begins.
++
++Final block-loss increase vs pre-quant baseline (%)
++Layer cells use the loss immediately before that layer was quantized; Block final uses the loss at block entry and includes the post-block refit.
++Positive is residual error; negative is an improvement; n/a means the pre-quant loss was near zero.
++| Block | mlp.gate_proj | mlp.up_proj | mlp.down_proj | self_attn.v_proj | self_attn.o_proj | self_attn.q_proj | self_attn.k_proj | Block final |
++| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
++| 1 | n/a | +49.19% | +46.10% | +3.27% | +3.38% | -0.13% | +18.54% | n/a |
++| 2 | +20.84% | +18.05% | +17.17% | +8.78% | +4.48% | +5.99% | +10.40% | -52.47% |
++| 3 | +31.96% | +23.71% | +16.54% | +13.09% | +10.65% | +9.33% | +11.71% | -72.89% |
++| 4 | +45.28% | +26.24% | +14.91% | +24.65% | +23.89% | +13.05% | +13.86% | -83.39% |
++| 5 | +53.59% | +32.73% | +5.08% | +1.88% | +8.73% | +6.71% | +7.99% | -95.85% |
++| 6 | +36.62% | +28.16% | +2.67% | +10.63% | +7.83% | +12.94% | +13.88% | -96.09% |
++| 7 | +18.17% | +14.39% | +3.79% | +11.69% | +15.98% | +9.56% | +10.50% | -95.88% |
++| 8 | +10.76% | +12.98% | +3.67% | +6.91% | +10.05% | +6.78% | +8.82% | -90.94% |
++| 9 | +7.67% | +10.01% | +4.45% | +10.10% | +9.00% | +6.61% | +8.02% | -85.23% |
++| 10 | +10.08% | +13.96% | +2.76% | +5.49% | +6.13% | +10.40% | +7.23% | -87.71% |
++| 11 | +5.20% | +9.20% | +4.88% | +6.19% | +5.64% | +3.79% | +4.06% | -78.60% |
++| 12 | +2.68% | +4.66% | +2.56% | +4.96% | +3.63% | +8.48% | +7.98% | -82.88% |
++| 13 | +1.00% | +4.47% | +1.77% | +1.64% | +2.60% | +6.04% | +3.60% | -80.86% |
++| 14 | -0.46% | +4.88% | +1.84% | +5.71% | +4.38% | +9.35% | +6.89% | -81.98% |
++| 15 | +0.55% | +5.12% | +4.60% | +2.40% | +2.87% | +3.31% | +3.46% | -79.99% |
++| 16 | +1.57% | +5.35% | +6.75% | +3.53% | +2.55% | +2.37% | +1.30% | -56.14% |
++| 17 | +1.06% | +3.65% | +6.39% | +2.47% | +2.26% | +1.01% | +0.88% | -28.17% |
++| 18 | +1.73% | +4.46% | +7.62% | +3.28% | +2.59% | +1.28% | +1.10% | -31.75% |
++| 19 | +2.25% | +4.91% | +9.17% | +3.41% | +2.74% | +1.20% | +1.33% | -12.86% |
++| 20 | +3.00% | +5.82% | +11.18% | +2.65% | +3.91% | +1.11% | +0.93% | -7.68% |
++| 21 | +4.07% | +7.85% | +13.98% | +3.27% | +3.55% | +0.73% | +0.72% | -1.60% |
++| 22 | +4.86% | +8.67% | +15.40% | +3.48% | +3.39% | +1.00% | +0.88% | -0.34% |
++| 23 | +5.43% | +8.98% | +18.93% | +3.21% | +3.62% | +0.84% | +0.60% | +5.84% |
++| 24 | +7.38% | +10.46% | +14.70% | +5.84% | +5.17% | +1.34% | +0.88% | +4.69% |
++| 25 | +5.12% | +6.76% | +14.51% | +3.72% | +3.63% | +0.62% | +0.47% | -0.20% |
++| 26 | +6.04% | +7.08% | +13.84% | +2.41% | +1.95% | +0.65% | +0.52% | -0.36% |
++| 27 | +6.50% | +7.76% | +11.26% | +3.63% | +2.32% | +0.53% | +0.37% | +1.22% |
++| 28 | +6.76% | +7.14% | +9.86% | +2.92% | +1.92% | +0.38% | +0.35% | +2.12% |
++| 29 | +6.25% | +7.12% | +8.43% | +2.65% | +1.35% | +1.03% | +1.51% | -1.75% |
++| 30 | +5.53% | +5.88% | +6.53% | +6.40% | +7.04% | +0.55% | +0.68% | +1.37% |
++| 31 | +3.30% | +4.08% | +7.39% | +1.45% | +3.06% | +0.24% | +0.23% | -2.87% |
++| 32 | +3.54% | +3.91% | +5.77% | +3.66% | +3.67% | +0.15% | +0.19% | +0.49% |
++| 33 | +2.45% | +3.05% | +6.34% | +1.96% | +2.02% | +0.26% | +0.42% | -6.17% |
++| 34 | -2.22% | -1.29% | -2.60% | -0.68% | -0.74% | -0.15% | +3.31% | -45.93% |
