@@ -90,6 +90,8 @@ Do not delete or rewrite valid evidence to make a rerun look clean.
   command line rather than assuming the shell/tool result killed them.
 - The cross-process lease is implemented in `src/nanoquant/infrastructure/device_lease.py`. Keep its true
   cross-process test when modifying it.
+- Use `tools/cleanup_artifacts.py` for artifact reclamation. It is dry-run by default and preserves non-artifact
+  evidence files; never manually delete content-addressed directories while a run is active.
 - Preserve unrelated worktree changes. Much of the current dirty tree belongs to the ongoing parity effort.
 
 ## Git workflow
