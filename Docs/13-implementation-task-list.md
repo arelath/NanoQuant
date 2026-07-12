@@ -166,7 +166,7 @@ Outcome: a complete 1B-class run uses the new pipeline and survives interruption
 - [x] **M4.25** Run the deterministic tiny end-to-end pipeline entirely on new components.
 - [ ] **M4.26** Run a representative 1B resident quantization and compare factors, BPW, block losses, quality, memory, and time with the legacy baseline.
 - [x] **M4.27** Meet the captured-layer under-60-second and tiny-model under-10-minute feedback targets where the reference hardware/factorizer settings permit them.
-- [x] **M4.28** Implement memory-bounded top-k model-level distillation, immutable tuned-state persistence, atomic activation, and frozen-loader integration with a complete tiny-model test.
+- [x] **M4.28** Implement memory-bounded top-k model-level distillation, durable per-epoch teacher-cache resume, immutable tuned-state persistence, atomic activation, and frozen-loader integration with a complete tiny-model test.
 - [ ] **M4.29** Run the pinned 1B eight-epoch model-level KD protocol, evaluate the tuned artifact, and compare its quality/memory/time with the retained legacy result.
 - [ ] **M4.GATE** Complete, interrupt, resume, replay, and compare a 1B resident run with no legacy quantization/orchestration dependency and approved parity differences only.
 

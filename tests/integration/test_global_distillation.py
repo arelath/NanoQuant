@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from typing import Any, cast
 
@@ -82,6 +83,9 @@ def test_complete_frozen_run_can_be_distilled_committed_and_reloaded(tmp_path: P
 
     active = active_global_tuning(output)
     assert active == distilled.reference
+    cache_journal = json.loads((output / "global-distillation-cache.json").read_text(encoding="utf-8"))
+    assert len(cache_journal["epochs"]) == 3
+    assert all(reference is not None for reference in cache_journal["epochs"])
     persisted = load_global_tuning(distilled.reference, LocalArtifactStore(output / "artifacts"))
     assert persisted.result == distilled.result
     assert distilled.metrics.steps_completed == 6

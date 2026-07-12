@@ -17,7 +17,7 @@ from transformers import AutoModelForCausalLM
 from nanoquant.application.distillation import (
     DistillationMetrics,
     TopKDistillationConfig,
-    cache_topk_teacher_targets,
+    cache_topk_teacher_epoch,
     distill_topk,
 )
 from nanoquant.application.layers import BlockEditor, LayerFreezer, TrainableFactorizedLinear
@@ -25,6 +25,13 @@ from nanoquant.config.codec import canonical_json
 from nanoquant.domain.models import ArtifactRef, FrozenBlockState, FrozenNanoQuantState, GlobalTuningResult
 from nanoquant.infrastructure.artifacts import LocalArtifactStore
 from nanoquant.infrastructure.device_lease import acquire_device_lease
+from nanoquant.infrastructure.distillation_cache import (
+    TeacherCacheIdentity,
+    commit_teacher_epoch,
+    load_teacher_cache_journal,
+    materialize_teacher_cache,
+    record_teacher_epoch,
+)
 from nanoquant.infrastructure.frozen_model_loader import LoadedFrozenModel, load_frozen_run
 from nanoquant.infrastructure.global_tuning import activate_global_tuning, commit_global_tuning
 from nanoquant.infrastructure.resource_usage import peak_process_memory_bytes
@@ -199,6 +206,10 @@ def _freeze_tuned_blocks(
 def _run_global_topk_distillation(request: GlobalDistillationRequest) -> GlobalDistillationRunResult:
     started = time.perf_counter()
     tokens = _tokens(request.token_ids)
+    token_bytes = tokens.contiguous().view(torch.uint8).numpy().tobytes()
+    protocol_hash = "sha256:" + hashlib.sha256(canonical_json(request.config).encode()).hexdigest()
+    token_hash = "sha256:" + hashlib.sha256(token_bytes).hexdigest()
+    cache_identity = TeacherCacheIdentity(protocol_hash, token_hash)
     artifacts = LocalArtifactStore(request.run_output / "artifacts")
     tensors = LocalTensorStore(artifacts)
     loaded = load_frozen_run(
@@ -217,29 +228,44 @@ def _run_global_topk_distillation(request: GlobalDistillationRequest) -> GlobalD
 
     if request.device.startswith("cuda"):
         torch.cuda.reset_peak_memory_stats(request.device)
-    teacher = cast(
-        nn.Module,
-        AutoModelForCausalLM.from_pretrained(
-            request.snapshot,
-            local_files_only=True,
-            torch_dtype=_checkpoint_dtype(request.snapshot),
-        ),
-    ).to(request.device)
-    cast(Any, teacher).config.use_cache = False
-    teacher_cache = cache_topk_teacher_targets(
-        teacher,
-        tokens,
-        _lm_head(teacher),
-        _hidden_states,
-        request.config,
-        device=request.device,
-        pad_token_id=request.pad_token_id,
-    )
-    teacher.cpu()
-    del teacher
-    gc.collect()
-    if request.device.startswith("cuda"):
-        torch.cuda.empty_cache()
+    cache_journal = load_teacher_cache_journal(request.run_output, cache_identity, request.config.epochs)
+    if any(reference is None for reference in cache_journal.epochs):
+        teacher = cast(
+            nn.Module,
+            AutoModelForCausalLM.from_pretrained(
+                request.snapshot,
+                local_files_only=True,
+                torch_dtype=_checkpoint_dtype(request.snapshot),
+            ),
+        ).to(request.device)
+        cast(Any, teacher).config.use_cache = False
+        teacher_head = _lm_head(teacher)
+        for epoch_index, reference in enumerate(cache_journal.epochs):
+            if reference is not None:
+                continue
+            batches, _cache_bytes = cache_topk_teacher_epoch(
+                teacher,
+                tokens,
+                teacher_head,
+                _hidden_states,
+                request.config,
+                epoch_index=epoch_index,
+                device=request.device,
+                pad_token_id=request.pad_token_id,
+            )
+            committed_epoch = commit_teacher_epoch(epoch_index, batches, cache_identity, artifacts)
+            cache_journal = record_teacher_epoch(
+                request.run_output,
+                cache_journal,
+                epoch_index,
+                committed_epoch.reference,
+            )
+        teacher.cpu()
+        del teacher_head, teacher
+        gc.collect()
+        if request.device.startswith("cuda"):
+            torch.cuda.empty_cache()
+    teacher_cache = materialize_teacher_cache(cache_journal, artifacts)
 
     student = loaded.model
     cast(Any, student).config.use_cache = False
@@ -273,14 +299,13 @@ def _run_global_topk_distillation(request: GlobalDistillationRequest) -> GlobalD
         "global-tuning-parameters",
         {name: parameter_map[name].detach().cpu() for name in auxiliary_names},
     )
-    token_bytes = tokens.contiguous().view(torch.uint8).numpy().tobytes()
     result = GlobalTuningResult(
         1,
         tuple(block.teacher_outputs.artifact for block in loaded.blocks),
         tuned_blocks,
         tuple((name, auxiliary_refs[name]) for name in auxiliary_names),
-        "sha256:" + hashlib.sha256(canonical_json(request.config).encode()).hexdigest(),
-        "sha256:" + hashlib.sha256(token_bytes).hexdigest(),
+        protocol_hash,
+        token_hash,
         metrics.epoch_losses,
         metrics.steps_completed,
         metrics.selected_parameter_count,

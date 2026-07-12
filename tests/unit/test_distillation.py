@@ -6,6 +6,7 @@ from torch import nn
 
 from nanoquant.application.distillation import (
     TopKDistillationConfig,
+    cache_topk_teacher_epoch,
     cache_topk_teacher_targets,
     distill_topk,
     teacher_topk_logits,
@@ -112,6 +113,16 @@ def test_cached_topk_distillation_is_bounded_deterministic_and_improves_student(
         device="cpu",
         pad_token_id=0,
     )
+    resumed_epoch, resumed_bytes = cache_topk_teacher_epoch(
+        teacher,
+        tokens,
+        teacher.lm_head,
+        _hidden,
+        config,
+        epoch_index=5,
+        device="cpu",
+        pad_token_id=0,
+    )
     untouched_embedding = student.embedding.weight.detach().clone()
     metrics = distill_topk(
         student,
@@ -125,6 +136,17 @@ def test_cached_topk_distillation_is_bounded_deterministic_and_improves_student(
     )
 
     assert cache.bytes > 0
+    assert resumed_bytes == sum(
+        value.numel() * value.element_size()
+        for batch in cache.epochs[5]
+        for value in (batch.token_indices, batch.top_values, batch.top_indices)
+    )
+    assert all(
+        torch.equal(left.token_indices, right.token_indices)
+        and torch.equal(left.top_values, right.top_values)
+        and torch.equal(left.top_indices, right.top_indices)
+        for left, right in zip(cache.epochs[5], resumed_epoch, strict=True)
+    )
     assert all(target.token_indices.numel() <= 6 for epoch in cache.epochs for target in epoch)
     assert all(
         torch.equal(left.token_indices, right.token_indices)

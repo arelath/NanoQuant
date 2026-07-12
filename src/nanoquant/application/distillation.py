@@ -193,54 +193,86 @@ def cache_topk_teacher_targets(
     device: str | torch.device,
     pad_token_id: int | None,
 ) -> TopKTeacherCache:
+    epochs = []
+    cache_bytes = 0
+    for epoch_index in range(config.epochs):
+        batches, epoch_bytes = cache_topk_teacher_epoch(
+            teacher,
+            token_ids,
+            lm_head,
+            hidden_states,
+            config,
+            epoch_index=epoch_index,
+            device=device,
+            pad_token_id=pad_token_id,
+        )
+        epochs.append(batches)
+        cache_bytes += epoch_bytes
+    return TopKTeacherCache(tuple(epochs), cache_bytes)
+
+
+def cache_topk_teacher_epoch(
+    teacher: nn.Module,
+    token_ids: torch.Tensor,
+    lm_head: nn.Module,
+    hidden_states: HiddenStatesFunction,
+    config: TopKDistillationConfig,
+    *,
+    epoch_index: int,
+    device: str | torch.device,
+    pad_token_id: int | None,
+) -> tuple[tuple[TopKTeacherBatch, ...], int]:
     if token_ids.ndim != 2 or token_ids.shape[0] == 0:
         raise ValueError("distillation token IDs must be a non-empty rank-two tensor")
+    if epoch_index < 0 or epoch_index >= config.epochs:
+        raise ValueError("distillation teacher-cache epoch index is out of range")
     cpu_tokens = token_ids.detach().cpu()
     order_generator = torch.Generator(device="cpu").manual_seed(config.seed)
     token_generator = torch.Generator(device="cpu").manual_seed(config.seed)
     order = torch.arange(cpu_tokens.shape[0])
-    epoch_targets = []
+    epoch_plan: list[tuple[torch.Tensor, torch.Tensor]] = []
+    for current_epoch in range(epoch_index + 1):
+        permutation = torch.randperm(order.numel(), generator=order_generator)
+        order = order.index_select(0, permutation)
+        for start in range(0, order.numel(), config.batch_size):
+            indices = order[start : start + config.batch_size]
+            batch = cpu_tokens.index_select(0, indices)
+            mask = torch.ones_like(batch, dtype=torch.bool) if pad_token_id is None else batch != pad_token_id
+            selected = select_kd_token_indices(mask, config.maximum_tokens_per_batch, token_generator)
+            if current_epoch == epoch_index and selected.numel() > 0:
+                epoch_plan.append((indices.clone(), selected))
+    batches = []
     cache_bytes = 0
     teacher.eval()
     with torch.no_grad():
-        for _epoch in range(config.epochs):
-            permutation = torch.randperm(order.numel(), generator=order_generator)
-            order = order.index_select(0, permutation)
-            batches = []
-            for start in range(0, order.numel(), config.batch_size):
-                indices = order[start : start + config.batch_size]
-                batch = cpu_tokens.index_select(0, indices).to(device)
-                mask = torch.ones_like(batch, dtype=torch.bool) if pad_token_id is None else batch != pad_token_id
-                selected = select_kd_token_indices(mask.cpu(), config.maximum_tokens_per_batch, token_generator)
-                if selected.numel() == 0:
-                    continue
-                teacher_hidden = hidden_states(teacher, batch)
-                teacher_hidden = teacher_hidden.reshape(-1, teacher_hidden.shape[-1])
-                teacher_hidden = teacher_hidden.index_select(0, selected.to(teacher_hidden.device))
-                values, vocabulary_indices = teacher_topk_logits(
-                    teacher_hidden,
-                    lm_head,
-                    top_k=config.top_k,
-                    vocabulary_chunk_size=config.vocabulary_chunk_size,
-                    temperature=config.temperature,
+        for indices, selected in epoch_plan:
+            batch = cpu_tokens.index_select(0, indices).to(device)
+            teacher_hidden = hidden_states(teacher, batch)
+            teacher_hidden = teacher_hidden.reshape(-1, teacher_hidden.shape[-1])
+            teacher_hidden = teacher_hidden.index_select(0, selected.to(teacher_hidden.device))
+            values, vocabulary_indices = teacher_topk_logits(
+                teacher_hidden,
+                lm_head,
+                top_k=config.top_k,
+                vocabulary_chunk_size=config.vocabulary_chunk_size,
+                temperature=config.temperature,
+            )
+            selected_cpu = selected.cpu()
+            values_cpu = values.cpu()
+            vocabulary_indices_cpu = vocabulary_indices.to(device="cpu", dtype=torch.int32)
+            cache_bytes += sum(
+                value.numel() * value.element_size()
+                for value in (selected_cpu, values_cpu, vocabulary_indices_cpu)
+            )
+            batches.append(
+                TopKTeacherBatch(
+                    tuple(int(index) for index in indices),
+                    selected_cpu,
+                    values_cpu,
+                    vocabulary_indices_cpu,
                 )
-                selected_cpu = selected.cpu()
-                values_cpu = values.cpu()
-                vocabulary_indices_cpu = vocabulary_indices.to(device="cpu", dtype=torch.int32)
-                cache_bytes += sum(
-                    value.numel() * value.element_size()
-                    for value in (selected_cpu, values_cpu, vocabulary_indices_cpu)
-                )
-                batches.append(
-                    TopKTeacherBatch(
-                        tuple(int(index) for index in indices),
-                        selected_cpu,
-                        values_cpu,
-                        vocabulary_indices_cpu,
-                    )
-                )
-            epoch_targets.append(tuple(batches))
-    return TopKTeacherCache(tuple(epoch_targets), cache_bytes)
+            )
+    return tuple(batches), cache_bytes
 
 
 def distill_topk(
