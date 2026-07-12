@@ -50,6 +50,12 @@ def main() -> None:
     parser.add_argument("--nonfactorized-tuning-batch-size", type=int, default=8)
     parser.add_argument("--post-block-refit-epochs", type=int, default=0)
     parser.add_argument("--post-block-refit-batch-size", type=int, default=8)
+    parser.add_argument(
+        "--tuning-microbatch-size",
+        type=int,
+        default=1,
+        help="activation microbatch used to accumulate each tuning optimizer batch (default: 1)",
+    )
     parser.add_argument("--interrupt-after-layer-commits", type=int)
     parser.add_argument("--interrupt-after-block-commits", type=int)
     parser.add_argument("--samples", type=int, default=256)
@@ -121,6 +127,7 @@ def main() -> None:
             post_block_refit_epochs=args.post_block_refit_epochs,
             post_block_refit_batch_size=args.post_block_refit_batch_size,
             post_block_refit_learning_rate=1e-5,
+            tuning_microbatch_size=args.tuning_microbatch_size,
             calibration_method="online_fisher",
             calibration_shrinkage=0.6,
             calibration_batch_size=1,

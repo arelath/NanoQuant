@@ -26,6 +26,7 @@ class TuningRequest:
     objective: str = "mean_squared_error"
     output_importance: torch.Tensor | None = None
     seed: int = 0
+    microbatch_size: int | None = None
 
 
 def _loss_sum(prediction: torch.Tensor, target: torch.Tensor, importance: torch.Tensor | None) -> torch.Tensor:
@@ -44,11 +45,13 @@ def _evaluate_loss(model: nn.Module, request: TuningRequest, forward: ForwardFun
     device = request.inputs.device if parameter is None else parameter.device
     total = torch.zeros((), device=device)
     with torch.no_grad():
-        for start in range(0, request.inputs.shape[0], request.batch_size):
-            end = min(start + request.batch_size, request.inputs.shape[0])
+        evaluation_batch_size = request.microbatch_size or request.batch_size
+        for start in range(0, request.inputs.shape[0], evaluation_batch_size):
+            end = min(start + evaluation_batch_size, request.inputs.shape[0])
             prediction = forward(model, request.inputs[start:end].to(device, non_blocking=True))
             target = request.targets[start:end].to(device, non_blocking=True)
             total += _loss_sum(prediction, target, request.output_importance)
+            del prediction, target
     return float(total / request.targets.numel())
 
 
@@ -65,7 +68,12 @@ def tune(
     forward: ForwardFunction,
     selector: ParameterSelector,
 ) -> TuningMetrics:
-    if request.epochs < 0 or request.batch_size <= 0 or request.learning_rate <= 0:
+    if (
+        request.epochs < 0
+        or request.batch_size <= 0
+        or request.learning_rate <= 0
+        or (request.microbatch_size is not None and request.microbatch_size <= 0)
+    ):
         raise ValueError("invalid tuning loop settings")
     selected = [(name, parameter) for name, parameter in model.named_parameters() if selector(name, parameter)]
     if not selected:
@@ -97,13 +105,17 @@ def tune(
                 optimizer.zero_grad(set_to_none=True)
                 model_parameter = next(iter(model.parameters()), None)
                 device = request.inputs.device if model_parameter is None else model_parameter.device
-                input_batch = request.inputs[indexes].to(device, non_blocking=True)
-                target_batch = request.targets[indexes].to(device, non_blocking=True)
-                prediction = forward(model, input_batch)
-                loss = _loss_sum(prediction, target_batch, request.output_importance) / max(
-                    1, indexes.numel()
-                )
-                torch.autograd.backward(loss)
+                microbatch_size = request.microbatch_size or indexes.numel()
+                for microbatch_start in range(0, indexes.numel(), microbatch_size):
+                    microbatch_indexes = indexes[microbatch_start : microbatch_start + microbatch_size]
+                    input_batch = request.inputs[microbatch_indexes].to(device, non_blocking=True)
+                    target_batch = request.targets[microbatch_indexes].to(device, non_blocking=True)
+                    prediction = forward(model, input_batch)
+                    loss = _loss_sum(prediction, target_batch, request.output_importance) / max(1, indexes.numel())
+                    torch.autograd.backward(loss)
+                    # Do not retain the final microbatch's autograd graph through
+                    # optimizer/evaluation/factorization phase boundaries.
+                    del input_batch, target_batch, prediction, loss
                 optimizer.step()
                 scheduler.step()
             epochs_completed = epoch + 1
@@ -128,6 +140,10 @@ def tune(
         for parameter in model.parameters():
             parameter.requires_grad_(original_requires_grad[id(parameter)])
     elements = request.targets.numel()
+    del optimizer, scheduler, best_state
+    cleanup_parameter = next(iter(model.parameters()), None)
+    if cleanup_parameter is not None and cleanup_parameter.device.type == "cuda":
+        torch.cuda.empty_cache()
     return TuningMetrics(
         LossMetrics(before_value, elements, request.objective),
         LossMetrics(best_value, elements, request.objective),

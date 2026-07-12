@@ -106,6 +106,63 @@ def test_trainable_factorized_linear_keeps_fp32_parameters_with_bfloat16_activat
     assert trainable.left_latent.grad.dtype is torch.float32
 
 
+def test_trainable_forward_uses_two_stage_factorized_execution(monkeypatch: pytest.MonkeyPatch) -> None:
+    trainable = TrainableFactorizedLinear(
+        torch.tensor([[0.2, -0.7], [-0.4, 0.9]], dtype=torch.float32),
+        torch.tensor([[0.8, -0.1, 0.5], [-0.6, 0.3, -0.2]], dtype=torch.float32),
+        torch.tensor([0.75, 1.25, 0.5], dtype=torch.float32),
+        torch.tensor([1.5, 0.25], dtype=torch.float32),
+        torch.tensor([0.5, 2.0], dtype=torch.float32),
+        bias=torch.tensor([0.25, -0.5], dtype=torch.float32),
+        outlier_indices=torch.tensor([1]),
+        outlier_values=torch.tensor([[0.75], [-0.25]], dtype=torch.float32),
+    )
+    inputs = torch.tensor([[1.5, -0.75, 0.25], [-0.5, 0.125, 2.0]], dtype=torch.bfloat16)
+
+    def fail_dense_materialization() -> torch.Tensor:
+        raise AssertionError("trainable forward materialized a dense factor product")
+
+    monkeypatch.setattr(trainable, "dense_weight", fail_dense_materialization)
+    right = torch.where(trainable.right_latent >= 0, 1.0, -1.0).to(torch.bfloat16)
+    left = torch.where(trainable.left_latent >= 0, 1.0, -1.0).to(torch.bfloat16)
+    expected = torch.nn.functional.linear(inputs * trainable.scale_pre.to(torch.bfloat16), right)
+    expected = torch.nn.functional.linear(expected * trainable.scale_mid.to(torch.bfloat16), left)
+    expected = expected * trainable.scale_post.to(torch.bfloat16)
+    expected = expected + torch.nn.functional.linear(
+        inputs.index_select(-1, trainable.outlier_indices.long()),
+        trainable.outlier_values.to(torch.bfloat16),
+    )
+    expected = expected + trainable.bias.to(torch.bfloat16)
+
+    actual = trainable(inputs)
+    assert torch.equal(actual, expected)
+    actual.float().sum().backward()
+    assert trainable.left_latent.grad is not None
+    assert trainable.right_latent.grad is not None
+
+
+def test_freezer_can_return_factorized_execution_backend(tmp_path: Path) -> None:
+    trainable = TrainableFactorizedLinear(
+        torch.tensor([[1.0, -1.0], [-1.0, 1.0]]),
+        torch.tensor([[1.0, -1.0, 1.0], [-1.0, 1.0, 1.0]]),
+        torch.tensor([1.0, 2.0, 3.0]),
+        torch.tensor([0.5, 1.5]),
+        torch.tensor([2.0, 1.0]),
+    )
+    tensors = LocalTensorStore(LocalArtifactStore(tmp_path / "artifacts"))
+
+    frozen = LayerFreezer().freeze(
+        LayerId(BlockId(0), "mlp.up_proj"),
+        trainable,
+        tensors,
+        backend="factorized",
+    )
+
+    assert isinstance(frozen.module, FactorizedReferenceLinear)
+    inputs = torch.randn(4, 3, generator=torch.Generator().manual_seed(7))
+    assert torch.allclose(frozen.module(inputs), trainable(inputs), atol=1e-6)
+
+
 @pytest.mark.parametrize(
     ("out_features", "in_features", "rank"),
     ((256, 1152, 128), (1152, 1152, 448), (6912, 1152, 1056)),

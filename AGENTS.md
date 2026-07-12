@@ -80,6 +80,9 @@ nvidia-smi
 
 The journal, artifact descriptors, and completed block/layer commits are authoritative; console output is not.
 Do not delete or rewrite valid evidence to make a rerun look clean.
+When a semantic resident algorithm or numerical execution path changes, increment `RESIDENT_ALGORITHM_VERSION` in
+`src/nanoquant/resident_quantization.py`; otherwise orphan discovery can adopt incompatible commits from a shared
+artifact store.
 
 ## Long-running jobs and GPU safety
 

@@ -12,7 +12,11 @@ from nanoquant.config.schema import ADMMConfig
 from nanoquant.infrastructure.artifacts import LocalArtifactStore
 from nanoquant.infrastructure.frozen_model_loader import load_frozen_run
 from nanoquant.infrastructure.progress import ProgressJournal
-from nanoquant.resident_quantization import ResidentQuantizationRequest, run_resident_quantization
+from nanoquant.resident_quantization import (
+    ResidentQuantizationRequest,
+    _resident_config_hash,
+    run_resident_quantization,
+)
 from nanoquant.resident_replay import capture_and_replay_resident_layer
 
 
@@ -171,3 +175,16 @@ def test_resident_tuning_recipe_refits_blocks_and_resumes_exactly(tmp_path: Path
         rel=1e-6,
         abs=1e-7,
     )
+
+
+def test_tuning_microbatch_is_execution_only_for_resume_identity(tmp_path: Path) -> None:
+    request = ResidentQuantizationRequest(
+        tmp_path / "snapshot",
+        tmp_path / "output",
+        "fixture/model",
+        "revision",
+        ((1, 2),),
+        device="cpu",
+    )
+
+    assert _resident_config_hash(replace(request, tuning_microbatch_size=2)) == _resident_config_hash(request)

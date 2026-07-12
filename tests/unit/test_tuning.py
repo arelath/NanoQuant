@@ -1,3 +1,6 @@
+from copy import deepcopy
+
+import pytest
 import torch
 from torch import nn
 
@@ -55,3 +58,21 @@ def test_post_block_refit_updates_scales_without_latent_changes() -> None:
     assert metrics.final.loss <= metrics.before.loss
     assert torch.equal(model.quant.left_latent, latent_before[0])
     assert torch.equal(model.quant.right_latent, latent_before[1])
+
+
+def test_microbatch_accumulation_preserves_optimizer_batch_update() -> None:
+    full_batch_model = Hybrid()
+    microbatch_model = deepcopy(full_batch_model)
+    inputs = torch.randn(8, 3, generator=torch.Generator().manual_seed(5))
+    targets = torch.randn(8, 2, generator=torch.Generator().manual_seed(6))
+    full = TuningRequest(inputs, targets, 2, 4, 0.01, seed=7)
+    micro = TuningRequest(inputs, targets, 2, 4, 0.01, seed=7, microbatch_size=2)
+
+    full_metrics = tune_factorized(full_batch_model, "quant", full, _forward)
+    micro_metrics = tune_factorized(microbatch_model, "quant", micro, _forward)
+
+    assert micro_metrics.final.loss == pytest.approx(full_metrics.final.loss, rel=1e-6, abs=1e-7)
+    for full_parameter, micro_parameter in zip(
+        full_batch_model.quant.parameters(), microbatch_model.quant.parameters(), strict=True
+    ):
+        assert torch.allclose(full_parameter, micro_parameter, rtol=1e-6, atol=1e-7)

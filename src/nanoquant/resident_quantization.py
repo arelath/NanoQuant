@@ -88,6 +88,8 @@ from nanoquant.infrastructure.resource_usage import peak_process_memory_bytes
 from nanoquant.infrastructure.safetensors_source import SafetensorsModelSource
 from nanoquant.infrastructure.tensor_store import LocalTensorStore
 
+RESIDENT_ALGORITHM_VERSION = 2
+
 
 @dataclass(frozen=True, slots=True)
 class ResidentQuantizationRequest:
@@ -119,6 +121,7 @@ class ResidentQuantizationRequest:
     post_block_refit_epochs: int = 0
     post_block_refit_batch_size: int = 8
     post_block_refit_learning_rate: float = 1e-5
+    tuning_microbatch_size: int | None = None
     seed: int = 0
     verify_hashes: bool = True
     interrupt_after_layer_commits: int | None = None
@@ -351,6 +354,7 @@ def _resident_config_hash(request: ResidentQuantizationRequest) -> str:
         + hashlib.sha256(
             canonical_json(
                 {
+                    "resident_algorithm_version": RESIDENT_ALGORITHM_VERSION,
                     "target_bpw": request.target_bpw,
                     "rank_multiple": request.rank_multiple,
                     "allocation_strategy": request.allocation_strategy,
@@ -552,6 +556,8 @@ def _run_resident_quantization(request: ResidentQuantizationRequest) -> Resident
         raise ValueError("resident quantization non-factorized tuning batch size must be positive")
     if request.post_block_refit_epochs > 0 and request.post_block_refit_batch_size <= 0:
         raise ValueError("resident quantization post-block refit batch size must be positive")
+    if request.tuning_microbatch_size is not None and request.tuning_microbatch_size <= 0:
+        raise ValueError("resident quantization tuning microbatch size must be positive")
     if request.device.startswith("cuda") and not torch.cuda.is_available():
         raise RuntimeError("CUDA resident quantization requested without CUDA")
     if request.defer_layer_loss_snapshots and (
@@ -630,6 +636,10 @@ def _run_resident_quantization(request: ResidentQuantizationRequest) -> Resident
     if not torch.equal(initial_inputs[:1], captured_input.detach().cpu()):
         raise ValueError("adapter prefix does not match the model's first-block input")
     metadata = capture.keyword
+    if request.device.startswith("cuda"):
+        # Prefix capture traverses the full embedding/prefix path in large
+        # no-grad batches. Its workspaces are dead once activations are on CPU.
+        torch.cuda.empty_cache()
     token_bytes = tokens.detach().cpu().contiguous().view(torch.uint8).numpy().tobytes()
     dataset = DatasetIdentity(
         "sha256:" + hashlib.sha256(token_bytes).hexdigest(),
@@ -793,6 +803,11 @@ def _run_resident_quantization(request: ResidentQuantizationRequest) -> Resident
                     frozen.module,
                 )
     del decoder_layers
+    if request.device.startswith("cuda") and completed_block_indexes:
+        # Restoring a deep resume prefix replaces many full-precision CUDA weights.
+        # Release those now-unreachable allocator reservations once at the resume
+        # boundary so activation-based tuning has the same workspace as a cold run.
+        torch.cuda.empty_cache()
     partial_layer_records = {
         (record.block, record.layer): record
         for record in discovered_records
@@ -841,6 +856,10 @@ def _run_resident_quantization(request: ResidentQuantizationRequest) -> Resident
                 request.block_forward_batch_size,
             )
         )
+        if request.device.startswith("cuda"):
+            # The no-grad source/output probes use the larger forward batch and
+            # otherwise leave attention workspaces reserved during backprop.
+            torch.cuda.empty_cache()
         block_output_stats = next(
             (
                 item
@@ -877,6 +896,7 @@ def _run_resident_quantization(request: ResidentQuantizationRequest) -> Resident
                             layer_plan.layer.path,
                             0,
                         ),
+                        microbatch_size=request.tuning_microbatch_size,
                     ),
                     lambda module, value: adapter.run_block(module, value, **metadata),
                 )
@@ -896,6 +916,7 @@ def _run_resident_quantization(request: ResidentQuantizationRequest) -> Resident
                     tensors,
                     device=request.device,
                     dtype=compressed_inputs.dtype,
+                    backend="factorized",
                 )
                 BlockEditor().install_frozen_layer(working_block, layer_plan.layer.path, frozen.module)
                 frozen_states.append(prior.frozen_state)
@@ -1008,6 +1029,7 @@ def _run_resident_quantization(request: ResidentQuantizationRequest) -> Resident
                         request.factorized_tuning_learning_rate,
                         output_importance=block_output_importance,
                         seed=logical_seed(request.seed, "factorized-tuning", block_index, layer_plan.layer.path, 0),
+                        microbatch_size=request.tuning_microbatch_size,
                     ),
                     lambda module, value: adapter.run_block(module, value, **metadata),
                 )
@@ -1021,6 +1043,7 @@ def _run_resident_quantization(request: ResidentQuantizationRequest) -> Resident
                 trainable,
                 tensors,
                 outliers=frozen_outliers,
+                backend="factorized",
             )
             with (
                 tensors.read(source_ref, request.device) as source_value,
@@ -1112,6 +1135,7 @@ def _run_resident_quantization(request: ResidentQuantizationRequest) -> Resident
                     request.post_block_refit_learning_rate,
                     output_importance=block_output_importance,
                     seed=logical_seed(request.seed, "post-block-refit", block_index, None, 0),
+                    microbatch_size=request.tuning_microbatch_size,
                 ),
                 lambda module, value: adapter.run_block(module, value, **metadata),
             )
@@ -1123,6 +1147,7 @@ def _run_resident_quantization(request: ResidentQuantizationRequest) -> Resident
                     trainable_by_path[layer_result.layer.path],
                     tensors,
                     outliers=layer_result.frozen_state.outliers,
+                    backend="factorized",
                 )
                 with (
                     tensors.read(quantization_targets[layer_result.layer.path], request.device) as source_value,

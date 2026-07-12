@@ -77,9 +77,27 @@ class TrainableFactorizedLinear(nn.Module):
         return result
 
     def forward(self, value: torch.Tensor) -> torch.Tensor:
-        weight = self.dense_weight().to(device=value.device, dtype=value.dtype)
-        bias = None if self.bias is None else self.bias.to(device=value.device, dtype=value.dtype)
-        return torch.nn.functional.linear(value, weight, bias)
+        apply_sign = cast(Any, _SignSTE).apply
+        right = cast(torch.Tensor, apply_sign(self.right_latent)).to(device=value.device, dtype=value.dtype)
+        latent = torch.nn.functional.linear(
+            value * self.scale_pre.to(device=value.device, dtype=value.dtype),
+            right,
+        )
+        latent = latent * self.scale_mid.to(device=value.device, dtype=value.dtype)
+        left = cast(torch.Tensor, apply_sign(self.left_latent)).to(device=value.device, dtype=value.dtype)
+        output = torch.nn.functional.linear(latent, left)
+        output = output * self.scale_post.to(device=value.device, dtype=value.dtype)
+        if self.outlier_indices is not None and self.outlier_values is not None:
+            outlier_values: torch.Tensor = self.outlier_values
+            if self.outlier_scales is not None:
+                outlier_values = outlier_values.float() * self.outlier_scales.float()
+            output = output + torch.nn.functional.linear(
+                value.index_select(-1, self.outlier_indices.long()),
+                outlier_values.to(device=value.device, dtype=value.dtype),
+            )
+        if self.bias is not None:
+            output = output + self.bias.to(device=value.device, dtype=value.dtype)
+        return output
 
 
 class FrozenReferenceLinear(nn.Module):
@@ -166,6 +184,7 @@ class LayerFreezer:
         tensors: TensorStore,
         logical_format: str = "nanoquant-v1",
         outliers: FrozenOutlierState | None = None,
+        backend: str = "dense",
     ) -> FrozenLayer:
         left = torch.where(trainable.left_latent.detach() >= 0, 1.0, -1.0)
         right = torch.where(trainable.right_latent.detach() >= 0, 1.0, -1.0)
@@ -206,6 +225,7 @@ class LayerFreezer:
             tensors,
             device=str(trainable.left_latent.device),
             dtype=trainable.left_latent.dtype,
+            backend=backend,
         )
 
     def load(
