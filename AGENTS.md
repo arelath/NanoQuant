@@ -92,6 +92,17 @@ Do not delete or rewrite valid evidence to make a rerun look clean.
   cross-process test when modifying it.
 - Preserve unrelated worktree changes. Much of the current dirty tree belongs to the ongoing parity effort.
 
+## Git workflow
+
+- Work directly on the current branch; do not create or switch branches for agent work.
+- Use Git to commit each major feature after its implementation and proportionate validation are complete.
+- Keep commits intentional and reviewable: inspect `git status` and the staged diff, stage only the feature being
+  committed, and use a message that describes the completed behavior.
+- Do not fold unrelated user changes into a feature commit. Never use destructive cleanup commands to manufacture a
+  clean tree.
+- Long-running evidence files may continue changing while source commits are made; commit only stable source,
+  tests, tools, and documentation that belong to the completed feature.
+
 ## Current parity direction
 
 The full-Fisher factor/outlier/scale run is complete but remains well behind legacy quality without tuning. The
