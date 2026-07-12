@@ -16,6 +16,7 @@ from transformers import AutoModelForCausalLM
 
 from nanoquant.application.distillation import (
     DistillationMetrics,
+    DistillationResumeState,
     TopKDistillationConfig,
     cache_topk_teacher_epoch,
     distill_topk,
@@ -31,6 +32,12 @@ from nanoquant.infrastructure.distillation_cache import (
     load_teacher_cache_journal,
     materialize_teacher_cache,
     record_teacher_epoch,
+)
+from nanoquant.infrastructure.distillation_checkpoint import (
+    DistillationCheckpointIdentity,
+    activate_distillation_checkpoint,
+    active_distillation_checkpoint,
+    commit_distillation_checkpoint,
 )
 from nanoquant.infrastructure.frozen_model_loader import LoadedFrozenModel, load_frozen_run
 from nanoquant.infrastructure.global_tuning import activate_global_tuning, commit_global_tuning
@@ -277,6 +284,17 @@ def _run_global_topk_distillation(request: GlobalDistillationRequest) -> GlobalD
         if callable(enable_input_gradients):
             enable_input_gradients()
     student.to(request.device)
+    checkpoint_identity = DistillationCheckpointIdentity(
+        tuple(block.teacher_outputs.artifact for block in loaded.blocks),
+        protocol_hash,
+        token_hash,
+    )
+    active_checkpoint = active_distillation_checkpoint(request.run_output, checkpoint_identity, artifacts)
+
+    def checkpoint_sink(state: DistillationResumeState) -> None:
+        committed_checkpoint = commit_distillation_checkpoint(state, checkpoint_identity, artifacts)
+        activate_distillation_checkpoint(request.run_output, committed_checkpoint.reference)
+
     metrics = distill_topk(
         student,
         tokens,
@@ -286,6 +304,8 @@ def _run_global_topk_distillation(request: GlobalDistillationRequest) -> GlobalD
         request.config,
         lambda _name, parameter: id(parameter) in selected,
         device=request.device,
+        resume=None if active_checkpoint is None else active_checkpoint.state,
+        checkpoint_sink=checkpoint_sink,
     )
     peak_gpu = int(torch.cuda.max_memory_allocated(request.device)) if request.device.startswith("cuda") else 0
     student.cpu()

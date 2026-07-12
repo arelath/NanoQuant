@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import cast
 
 import torch
 from torch import nn
@@ -73,6 +75,26 @@ class DistillationMetrics:
     steps_completed: int
     selected_parameter_count: int
     teacher_cache_bytes: int
+
+
+@dataclass(frozen=True, slots=True)
+class DistillationOptimizerState:
+    parameter_name: str
+    step: torch.Tensor
+    exponential_average: torch.Tensor
+    exponential_average_squared: torch.Tensor
+
+
+@dataclass(frozen=True, slots=True)
+class DistillationResumeState:
+    completed_epochs: int
+    epoch_losses: tuple[float, ...]
+    steps_completed: int
+    parameter_values: tuple[tuple[str, torch.Tensor], ...]
+    optimizer_states: tuple[DistillationOptimizerState, ...]
+
+
+DistillationCheckpointSink = Callable[[DistillationResumeState], None]
 
 
 def select_kd_token_indices(
@@ -285,6 +307,8 @@ def distill_topk(
     selector: ParameterSelector,
     *,
     device: str | torch.device,
+    resume: DistillationResumeState | None = None,
+    checkpoint_sink: DistillationCheckpointSink | None = None,
 ) -> DistillationMetrics:
     if len(teacher_cache.epochs) != config.epochs:
         raise ValueError("teacher target cache epoch count does not match distillation config")
@@ -298,19 +322,65 @@ def distill_topk(
         parameter.requires_grad_(False)
     for _name, parameter in selected_parameters:
         parameter.requires_grad_(True)
+    selected_by_name = dict(selected_parameters)
+    if resume is not None:
+        if resume.completed_epochs < 0 or resume.completed_epochs > config.epochs:
+            raise ValueError("distillation resume epoch is out of range")
+        if len(resume.epoch_losses) != resume.completed_epochs:
+            raise ValueError("distillation resume losses do not match completed epochs")
+        if set(dict(resume.parameter_values)) != set(selected_by_name):
+            raise ValueError("distillation resume parameters do not match the selector")
+        with torch.no_grad():
+            for name, value in resume.parameter_values:
+                parameter = selected_by_name[name]
+                if parameter.shape != value.shape:
+                    raise ValueError(f"distillation resume parameter shape differs: {name}")
+                parameter.copy_(value.to(device=parameter.device, dtype=parameter.dtype))
     optimizer = torch.optim.AdamW(
         [parameter for _name, parameter in selected_parameters],
         lr=config.learning_rate,
         weight_decay=config.weight_decay,
     )
     total_steps = sum(len(epoch) for epoch in teacher_cache.epochs)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(1, total_steps))
+    starting_steps = 0 if resume is None else resume.steps_completed
+    if starting_steps < 0 or starting_steps > total_steps:
+        raise ValueError("distillation resume step is out of range")
+    if resume is not None:
+        optimizer_by_name = {state.parameter_name: state for state in resume.optimizer_states}
+        if set(optimizer_by_name) != set(selected_by_name):
+            raise ValueError("distillation resume optimizer states do not match the selector")
+        for name, parameter in selected_parameters:
+            state = optimizer_by_name[name]
+            if state.exponential_average.shape != parameter.shape:
+                raise ValueError(f"distillation resume optimizer shape differs: {name}")
+            optimizer.state[parameter] = {
+                "step": state.step.detach().cpu().clone(),
+                "exp_avg": state.exponential_average.to(device=parameter.device, dtype=parameter.dtype),
+                "exp_avg_sq": state.exponential_average_squared.to(
+                    device=parameter.device,
+                    dtype=parameter.dtype,
+                ),
+            }
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        T_max=max(1, total_steps),
+    )
+    if starting_steps:
+        current_lr = config.learning_rate * (1 + math.cos(math.pi * starting_steps / max(1, total_steps))) / 2
+        for group in optimizer.param_groups:
+            group["lr"] = current_lr
+        scheduler_state = scheduler.state_dict()
+        scheduler_state["last_epoch"] = starting_steps
+        scheduler_state["_step_count"] = starting_steps + 1
+        scheduler_state["_last_lr"] = [current_lr] * len(optimizer.param_groups)
+        scheduler.load_state_dict(scheduler_state)
     cpu_tokens = token_ids.detach().cpu()
-    epoch_losses = []
-    steps = 0
+    epoch_losses = [] if resume is None else list(resume.epoch_losses)
+    steps = starting_steps
+    starting_epoch = 0 if resume is None else resume.completed_epochs
     student.train()
     try:
-        for epoch in teacher_cache.epochs:
+        for epoch_index, epoch in enumerate(teacher_cache.epochs[starting_epoch:], start=starting_epoch):
             total_loss = 0.0
             for target in epoch:
                 sample_indices = torch.tensor(target.sample_indices, dtype=torch.long)
@@ -335,6 +405,27 @@ def distill_topk(
                 total_loss += float(loss.detach())
                 steps += 1
             epoch_losses.append(total_loss / max(1, len(epoch)))
+            if checkpoint_sink is not None:
+                optimizer_states = []
+                for name, parameter in selected_parameters:
+                    state = optimizer.state[parameter]
+                    optimizer_states.append(
+                        DistillationOptimizerState(
+                            name,
+                            cast(torch.Tensor, state["step"]).detach().cpu().clone(),
+                            cast(torch.Tensor, state["exp_avg"]).detach().cpu().clone(),
+                            cast(torch.Tensor, state["exp_avg_sq"]).detach().cpu().clone(),
+                        )
+                    )
+                checkpoint_sink(
+                    DistillationResumeState(
+                        epoch_index + 1,
+                        tuple(epoch_losses),
+                        steps,
+                        tuple((name, parameter.detach().cpu().clone()) for name, parameter in selected_parameters),
+                        tuple(optimizer_states),
+                    )
+                )
     finally:
         for parameter in student.parameters():
             parameter.requires_grad_(prior_requires_grad[id(parameter)])

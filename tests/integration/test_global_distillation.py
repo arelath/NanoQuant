@@ -10,6 +10,10 @@ from nanoquant.application.distillation import TopKDistillationConfig
 from nanoquant.config.schema import ADMMConfig
 from nanoquant.global_distillation import GlobalDistillationRequest, run_global_topk_distillation
 from nanoquant.infrastructure.artifacts import LocalArtifactStore
+from nanoquant.infrastructure.distillation_checkpoint import (
+    DistillationCheckpointIdentity,
+    active_distillation_checkpoint,
+)
 from nanoquant.infrastructure.frozen_model_loader import load_frozen_run
 from nanoquant.infrastructure.global_tuning import active_global_tuning, load_global_tuning
 from nanoquant.resident_quantization import ResidentQuantizationRequest, run_resident_quantization
@@ -93,6 +97,18 @@ def test_complete_frozen_run_can_be_distilled_committed_and_reloaded(tmp_path: P
     assert distilled.result.source_blocks == tuple(block.teacher_outputs.artifact for block in before.blocks)
     assert len(distilled.result.tuned_blocks) == 1
     assert distilled.result.auxiliary_parameters
+    training_checkpoint = active_distillation_checkpoint(
+        output,
+        DistillationCheckpointIdentity(
+            distilled.result.source_blocks,
+            distilled.result.protocol_hash,
+            distilled.result.token_hash,
+        ),
+        LocalArtifactStore(output / "artifacts"),
+    )
+    assert training_checkpoint is not None
+    assert training_checkpoint.state.completed_epochs == 3
+    assert training_checkpoint.state.steps_completed == 6
 
     loaded = load_frozen_run(
         output,

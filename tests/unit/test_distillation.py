@@ -5,6 +5,7 @@ import torch
 from torch import nn
 
 from nanoquant.application.distillation import (
+    DistillationResumeState,
     TopKDistillationConfig,
     cache_topk_teacher_epoch,
     cache_topk_teacher_targets,
@@ -159,3 +160,80 @@ def test_cached_topk_distillation_is_bounded_deterministic_and_improves_student(
     assert metrics.selected_parameter_count == 1
     assert metrics.epoch_losses[-1] < metrics.epoch_losses[0]
     assert torch.equal(student.embedding.weight, untouched_embedding)
+
+
+def test_topk_distillation_resume_restores_adam_and_scheduler_exactly() -> None:
+    torch.manual_seed(11)
+    teacher = ToyLanguageModel()
+    initial_student = deepcopy(teacher)
+    with torch.no_grad():
+        initial_student.projection.weight.add_(0.2)
+    tokens = torch.randint(1, 17, (6, 5), generator=torch.Generator().manual_seed(12))
+    config = TopKDistillationConfig(
+        epochs=4,
+        batch_size=2,
+        learning_rate=0.025,
+        top_k=6,
+        vocabulary_chunk_size=5,
+        token_chunk_size=3,
+        maximum_tokens_per_batch=7,
+        gradient_checkpointing=False,
+        weight_decay=0.0,
+        seed=13,
+    )
+    cache = cache_topk_teacher_targets(
+        teacher,
+        tokens,
+        teacher.lm_head,
+        _hidden,
+        config,
+        device="cpu",
+        pad_token_id=None,
+    )
+    control = deepcopy(initial_student)
+    control_metrics = distill_topk(
+        control,
+        tokens,
+        control.lm_head,
+        _hidden,
+        cache,
+        config,
+        lambda name, _parameter: name == "projection.weight",
+        device="cpu",
+    )
+    checkpoints: list[DistillationResumeState] = []
+
+    def interrupt(checkpoint: DistillationResumeState) -> None:
+        checkpoints.append(checkpoint)
+        if checkpoint.completed_epochs == 2:
+            raise InterruptedError("test interruption")
+
+    interrupted = deepcopy(initial_student)
+    with pytest.raises(InterruptedError, match="test interruption"):
+        distill_topk(
+            interrupted,
+            tokens,
+            interrupted.lm_head,
+            _hidden,
+            cache,
+            config,
+            lambda name, _parameter: name == "projection.weight",
+            device="cpu",
+            checkpoint_sink=interrupt,
+        )
+    resumed = deepcopy(initial_student)
+    resumed_metrics = distill_topk(
+        resumed,
+        tokens,
+        resumed.lm_head,
+        _hidden,
+        cache,
+        config,
+        lambda name, _parameter: name == "projection.weight",
+        device="cpu",
+        resume=checkpoints[-1],
+    )
+
+    assert resumed_metrics.epoch_losses == pytest.approx(control_metrics.epoch_losses, abs=1e-8)
+    assert resumed_metrics.steps_completed == control_metrics.steps_completed
+    assert torch.equal(resumed.projection.weight, control.projection.weight)
