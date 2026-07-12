@@ -56,6 +56,7 @@ def main() -> None:
         default=1,
         help="activation microbatch used to accumulate each tuning optimizer batch (default: 1)",
     )
+    parser.add_argument("--activation-retention", choices=("rolling", "all"), default="rolling")
     parser.add_argument("--interrupt-after-layer-commits", type=int)
     parser.add_argument("--interrupt-after-block-commits", type=int)
     parser.add_argument("--samples", type=int, default=256)
@@ -129,6 +130,7 @@ def main() -> None:
             post_block_refit_learning_rate=1e-5,
             tuning_microbatch_size=args.tuning_microbatch_size,
             legacy_tuning_seed_reset=True,
+            activation_retention=args.activation_retention,
             calibration_method="online_fisher",
             calibration_shrinkage=0.6,
             calibration_batch_size=1,

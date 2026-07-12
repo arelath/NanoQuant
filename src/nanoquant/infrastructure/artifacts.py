@@ -190,6 +190,33 @@ class LocalArtifactStore:
         self._remember_validation(descriptor, root)
         return descriptor
 
+    def remove_artifact(self, artifact_id: str, *, expected_type: str) -> int:
+        """Remove one fully validated immutable object and return its logical bytes."""
+        descriptor = self.validate(artifact_id)
+        if descriptor.artifact_type != expected_type:
+            raise ValueError(
+                f"artifact type mismatch for removal: expected {expected_type}, got {descriptor.artifact_type}"
+            )
+        root = self.path_for(artifact_id)
+        resolved_store = self.root.resolve()
+        resolved = root.resolve()
+        if resolved_store not in resolved.parents:
+            raise ValueError("artifact removal escaped the store root")
+        logical_bytes = sum(item.bytes for item in descriptor.files)
+        quarantine = self.temporary_root / f"retired-{artifact_id}"
+        if quarantine.exists():
+            raise FileExistsError(f"artifact retirement quarantine already exists: {artifact_id}")
+        os.replace(root, quarantine)
+        shutil.rmtree(quarantine)
+        self._validated.pop(artifact_id, None)
+        self._persistent_validation.pop(artifact_id, None)
+        self._persist_validation()
+        try:
+            root.parent.rmdir()
+        except OSError:
+            pass
+        return logical_bytes
+
     def cleanup_abandoned(self, older_than_seconds: float = 3600) -> int:
         removed = 0
         cutoff = time.time() - older_than_seconds

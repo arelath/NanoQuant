@@ -1,8 +1,14 @@
 # Artifact Retention and Disk Usage
 
-Status: proposed design, informed by the 2026-07-12 pinned Gemma audit
+Status: rolling block-result v2 implemented; shared-store and store-aware GC phases remain proposed
 
 Audience: artifact-store, orchestration, resume, replay, and scaling maintainers
+
+Implementation note (2026-07-12): resident runs now write small durable `block-result` v2 objects and separate
+`activation-generation` objects. The default `rolling` policy retires the predecessor generation only after the
+successor block and journal record commit. V1 readers remain supported, and frozen loading does not require retired
+generations. The workspace-level shared store, reader leases, selected pins, migration, and store-aware GC described
+below are later rollout phases.
 
 ## 1. Problem statement
 

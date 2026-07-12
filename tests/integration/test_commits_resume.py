@@ -29,7 +29,7 @@ from nanoquant.domain.models import (
     TensorSpec,
 )
 from nanoquant.domain.runs import BudgetState
-from nanoquant.infrastructure.artifacts import LocalArtifactStore
+from nanoquant.infrastructure.artifacts import ArtifactCorruptionError, LocalArtifactStore
 from nanoquant.infrastructure.commits import (
     CommitIdentity,
     commit_block,
@@ -37,6 +37,7 @@ from nanoquant.infrastructure.commits import (
     load_block_activations,
     load_committed_block,
     load_committed_layer,
+    retire_block_activations,
 )
 from nanoquant.infrastructure.progress import ProgressJournal
 
@@ -229,3 +230,57 @@ def test_committed_layer_block_and_activations_round_trip_as_typed_results(tmp_p
     loaded_teacher, loaded_compressed = load_block_activations(block.reference, artifacts)
     assert torch.equal(loaded_teacher, teacher)
     assert torch.equal(loaded_compressed, compressed)
+    block_descriptor = artifacts.validate(block.reference.artifact_id)
+    assert [item.path for item in block_descriptor.files] == ["block-result.json"]
+    assert block.result.teacher_outputs.artifact.artifact_type == "activation-generation"
+
+
+def test_external_activation_generation_can_retire_without_invalidating_block_evidence(tmp_path: Path) -> None:
+    layer_result, _plan, frozen_block, losses = _objects()
+    identity = CommitIdentity("config", "model", "plan")
+    artifacts = LocalArtifactStore(tmp_path / "artifacts")
+    committed = commit_block(
+        BlockId(0),
+        (layer_result,),
+        frozen_block,
+        losses,
+        torch.ones(2, 3, 2),
+        torch.zeros(2, 3, 2),
+        0,
+        artifacts,
+        identity,
+    )
+    generation = committed.result.teacher_outputs.artifact
+
+    assert retire_block_activations(committed.result, artifacts) > 0
+    assert not artifacts.path_for(generation.artifact_id).exists()
+    assert load_committed_block(committed.reference, artifacts, identity) == committed
+    with pytest.raises(ArtifactCorruptionError, match="descriptor unavailable"):
+        load_block_activations(committed.reference, artifacts)
+
+
+def test_failure_after_activation_generation_leaves_no_discoverable_block(tmp_path: Path) -> None:
+    layer_result, plan, frozen_block, losses = _objects()
+    identity = CommitIdentity("config", "model", "plan")
+    artifacts = LocalArtifactStore(tmp_path / "artifacts")
+
+    with pytest.raises(RuntimeError, match="after_activation"):
+        commit_block(
+            BlockId(0),
+            (layer_result,),
+            frozen_block,
+            losses,
+            torch.ones(2, 3, 2),
+            torch.zeros(2, 3, 2),
+            0,
+            artifacts,
+            identity,
+            inject=_fail_at("after_activation_commit"),
+        )
+
+    discovery = ProgressJournal(tmp_path / "state", "run", artifacts).discover(plan, identity)
+    assert discovery.orphan_records == ()
+    assert any(
+        '"artifact_type": "activation-generation"' in path.read_text(encoding="utf-8")
+        for path in artifacts.root.glob("??/sha256-*/descriptor.json")
+    )

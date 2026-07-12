@@ -78,6 +78,7 @@ from nanoquant.infrastructure.commits import (
     load_block_activations,
     load_committed_block,
     load_committed_layer,
+    retire_block_activations,
 )
 from nanoquant.infrastructure.device_lease import acquire_device_lease
 from nanoquant.infrastructure.events import JsonlEventSink
@@ -88,7 +89,7 @@ from nanoquant.infrastructure.resource_usage import peak_process_memory_bytes
 from nanoquant.infrastructure.safetensors_source import SafetensorsModelSource
 from nanoquant.infrastructure.tensor_store import LocalTensorStore
 
-RESIDENT_ALGORITHM_VERSION = 5
+RESIDENT_ALGORITHM_VERSION = 6
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,6 +124,7 @@ class ResidentQuantizationRequest:
     post_block_refit_learning_rate: float = 1e-5
     tuning_microbatch_size: int | None = None
     legacy_tuning_seed_reset: bool = False
+    activation_retention: str = "rolling"
     seed: int = 0
     verify_hashes: bool = True
     interrupt_after_layer_commits: int | None = None
@@ -404,6 +406,7 @@ def _resident_config_hash(request: ResidentQuantizationRequest) -> str:
                     "post_block_refit_batch_size": request.post_block_refit_batch_size,
                     "post_block_refit_learning_rate": request.post_block_refit_learning_rate,
                     "legacy_tuning_seed_reset": request.legacy_tuning_seed_reset,
+                    "activation_retention": request.activation_retention,
                     "calibration_method": request.calibration_method,
                     "calibration_shrinkage": request.calibration_shrinkage,
                     "calibration_batch_size": request.calibration_batch_size,
@@ -583,6 +586,8 @@ def _run_resident_quantization(request: ResidentQuantizationRequest) -> Resident
         raise ValueError("resident quantization post-block refit batch size must be positive")
     if request.tuning_microbatch_size is not None and request.tuning_microbatch_size <= 0:
         raise ValueError("resident quantization tuning microbatch size must be positive")
+    if request.activation_retention not in {"rolling", "all"}:
+        raise ValueError("resident quantization activation retention must be 'rolling' or 'all'")
     if request.device.startswith("cuda") and not torch.cuda.is_available():
         raise RuntimeError("CUDA resident quantization requested without CUDA")
     if request.defer_layer_loss_snapshots and (
@@ -801,6 +806,9 @@ def _run_resident_quantization(request: ResidentQuantizationRequest) -> Resident
         )
         for record in block_records
     ]
+    if request.activation_retention == "rolling":
+        for _reference, old_block in committed_blocks[:-1]:
+            retire_block_activations(old_block, artifacts)
     accepted_bits = sum(layer.actual_bit_cost.total for _, block in committed_blocks for layer in block.layers)
     budget = BudgetState(plan.planned_cost.total, accepted_bits, 0)
     if committed_blocks:
@@ -1246,6 +1254,8 @@ def _run_resident_quantization(request: ResidentQuantizationRequest) -> Resident
             else (("tuning_disabled",) if request.scale_fit.enabled else ("scale_fit_disabled", "tuning_disabled")),
         )
         journal.append("block", block_index, None, committed.reference.artifact_id, identity)
+        if request.activation_retention == "rolling" and committed_blocks:
+            retire_block_activations(committed_blocks[-1][1], artifacts)
         committed_blocks.append((committed.reference, committed.result))
         new_block_commits += 1
         if (

@@ -78,22 +78,28 @@ def load_committed_block(
     losses = from_dict(BlockLossMetrics, payload["losses"], path="losses")
     teacher_shape = tuple(int(value) for value in payload["teacher_shape"])
     compressed_shape = tuple(int(value) for value in payload["compressed_shape"])
+    schema_version = int(payload["schema_version"])
+    activation_reference = (
+        reference
+        if schema_version == 1
+        else from_dict(ArtifactRef, payload["activation_generation"], path="activation_generation")
+    )
     teacher = ActivationStreamRef(
-        reference,
+        activation_reference,
         teacher_shape,
         str(payload["teacher_dtype"]),
         teacher_shape[0],
         teacher_shape[-2],
     )
     compressed = ActivationStreamRef(
-        reference,
+        activation_reference,
         compressed_shape,
         str(payload["compressed_dtype"]),
         compressed_shape[0],
         compressed_shape[-2],
     )
     result = BlockResult(
-        int(payload["schema_version"]),
+        schema_version,
         block,
         layers,
         frozen_state,
@@ -119,10 +125,21 @@ def load_block_activations(
         with safe_open(legacy, framework="pt", device="cpu") as handle:
             teacher = handle.get_tensor("teacher_outputs")
             compressed = handle.get_tensor("compressed_outputs")
-    else:
+    elif (root / "teacher-activations.safetensors").exists():
         with safe_open(root / "teacher-activations.safetensors", framework="pt", device="cpu") as handle:
             teacher = handle.get_tensor("teacher_outputs")
         with safe_open(root / "compressed-activations.safetensors", framework="pt", device="cpu") as handle:
+            compressed = handle.get_tensor("compressed_outputs")
+    else:
+        payload = _payload(reference, artifacts, "block-result.json")
+        generation = from_dict(ArtifactRef, payload["activation_generation"], path="activation_generation")
+        artifacts.validate(generation.artifact_id)
+        generation_root = artifacts.path_for(generation.artifact_id)
+        with safe_open(generation_root / "teacher-activations.safetensors", framework="pt", device="cpu") as handle:
+            teacher = handle.get_tensor("teacher_outputs")
+        with safe_open(
+            generation_root / "compressed-activations.safetensors", framework="pt", device="cpu"
+        ) as handle:
             compressed = handle.get_tensor("compressed_outputs")
     if device != "cpu":
         teacher = teacher.to(device)
@@ -170,8 +187,32 @@ def commit_block(
     if teacher_outputs.shape != compressed_outputs.shape:
         raise ValueError("teacher/compressed activation shapes differ")
     inject("before_block_commit")
-    core = {
+    activation_core = {
         "schema_version": 1,
+        "identity": to_dict(identity),
+        "boundary_after_block": block.index,
+        "teacher_shape": list(teacher_outputs.shape),
+        "compressed_shape": list(compressed_outputs.shape),
+        "teacher_dtype": str(teacher_outputs.dtype).removeprefix("torch."),
+        "compressed_dtype": str(compressed_outputs.dtype).removeprefix("torch."),
+    }
+    with artifacts.begin_write("activation-generation") as writer:
+        save_file(
+            {"teacher_outputs": teacher_outputs.detach().cpu().contiguous()},
+            writer.path / "teacher-activations.safetensors",
+        )
+        save_file(
+            {"compressed_outputs": compressed_outputs.detach().cpu().contiguous()},
+            writer.path / "compressed-activations.safetensors",
+        )
+        (writer.path / "activation-generation.json").write_text(
+            json.dumps(activation_core, sort_keys=True, indent=2), encoding="utf-8"
+        )
+        activation_descriptor = writer.commit()
+    activation_reference = ArtifactRef("activation-generation", activation_descriptor.artifact_id, 1)
+    inject("after_activation_commit")
+    core = {
+        "schema_version": 2,
         "identity": to_dict(identity),
         "block": to_dict(block),
         "layers": to_dict(layers),
@@ -186,35 +227,28 @@ def commit_block(
         "compressed_shape": list(compressed_outputs.shape),
         "teacher_dtype": str(teacher_outputs.dtype).removeprefix("torch."),
         "compressed_dtype": str(compressed_outputs.dtype).removeprefix("torch."),
+        "activation_generation": to_dict(activation_reference),
     }
     with artifacts.begin_write("block-result") as writer:
-        save_file(
-            {"teacher_outputs": teacher_outputs.detach().cpu().contiguous()},
-            writer.path / "teacher-activations.safetensors",
-        )
-        save_file(
-            {"compressed_outputs": compressed_outputs.detach().cpu().contiguous()},
-            writer.path / "compressed-activations.safetensors",
-        )
         (writer.path / "block-result.json").write_text(json.dumps(core, sort_keys=True, indent=2), encoding="utf-8")
         descriptor = writer.commit()
     reference = ArtifactRef("block-result", descriptor.artifact_id, 1)
     teacher_ref = ActivationStreamRef(
-        reference,
+        activation_reference,
         tuple(teacher_outputs.shape),
         core["teacher_dtype"],
         teacher_outputs.shape[0],
         teacher_outputs.shape[-2],
     )
     compressed_ref = ActivationStreamRef(
-        reference,
+        activation_reference,
         tuple(compressed_outputs.shape),
         core["compressed_dtype"],
         compressed_outputs.shape[0],
         compressed_outputs.shape[-2],
     )
     result = BlockResult(
-        1,
+        2,
         block,
         layers,
         frozen_state,
@@ -229,3 +263,13 @@ def commit_block(
     )
     inject("after_block_commit")
     return CommittedBlock(reference, result)
+
+
+def retire_block_activations(result: BlockResult, artifacts: LocalArtifactStore) -> int:
+    """Retire external resume generations while leaving durable block evidence intact."""
+    references = {result.teacher_outputs.artifact, result.compressed_outputs.artifact}
+    retired = 0
+    for reference in references:
+        if reference.artifact_type == "activation-generation" and artifacts.path_for(reference.artifact_id).exists():
+            retired += artifacts.remove_artifact(reference.artifact_id, expected_type="activation-generation")
+    return retired

@@ -80,6 +80,8 @@ nvidia-smi
 
 The journal, artifact descriptors, and completed block/layer commits are authoritative; console output is not.
 Do not delete or rewrite valid evidence to make a rerun look clean.
+Resident parity runs default to rolling activation retention: only the latest external resume generation is kept;
+durable block results and frozen state remain valid after predecessor activation retirement.
 When a semantic resident algorithm or numerical execution path changes, increment `RESIDENT_ALGORITHM_VERSION` in
 `src/nanoquant/resident_quantization.py`; otherwise orphan discovery can adopt incompatible commits from a shared
 artifact store.

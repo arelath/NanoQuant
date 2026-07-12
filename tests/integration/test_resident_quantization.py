@@ -9,7 +9,8 @@ from transformers.models.gemma3.configuration_gemma3 import Gemma3TextConfig
 from transformers.models.gemma3.modeling_gemma3 import Gemma3ForCausalLM
 
 from nanoquant.config.schema import ADMMConfig
-from nanoquant.infrastructure.artifacts import LocalArtifactStore
+from nanoquant.infrastructure.artifacts import ArtifactCorruptionError, LocalArtifactStore
+from nanoquant.infrastructure.commits import load_block_activations
 from nanoquant.infrastructure.frozen_model_loader import load_frozen_run
 from nanoquant.infrastructure.progress import ProgressJournal
 from nanoquant.resident_quantization import (
@@ -188,3 +189,44 @@ def test_tuning_microbatch_is_execution_only_for_resume_identity(tmp_path: Path)
     )
 
     assert _resident_config_hash(replace(request, tuning_microbatch_size=2)) == _resident_config_hash(request)
+
+
+def test_rolling_retention_keeps_only_latest_resume_generation(tmp_path: Path) -> None:
+    snapshot = tmp_path / "snapshot"
+    config = Gemma3TextConfig(
+        vocab_size=32,
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=4,
+    )
+    Gemma3ForCausalLM(config).save_pretrained(snapshot, safe_serialization=True)
+    output = tmp_path / "rolling"
+    request = ResidentQuantizationRequest(
+        snapshot,
+        output,
+        "fixture/gemma3",
+        "pinned-test-revision",
+        ((1, 2, 3, 4),),
+        device="cpu",
+        target_bpw=8.0,
+        rank_multiple=1,
+        admm=ADMMConfig(outer_iterations=1, inner_iterations=1),
+        interrupt_after_block_commits=1,
+    )
+    with pytest.raises(InterruptedError, match="after 1"):
+        run_resident_quantization(request)
+
+    result = run_resident_quantization(replace(request, interrupt_after_block_commits=None))
+    artifacts = LocalArtifactStore(output / "artifacts")
+    generations = list(artifacts.root.glob("??/sha256-*/activation-generation.json"))
+
+    assert len(result.blocks) == 2
+    assert len(generations) == 1
+    assert not artifacts.path_for(result.blocks[0].teacher_outputs.artifact.artifact_id).exists()
+    with pytest.raises(ArtifactCorruptionError, match="descriptor unavailable"):
+        load_block_activations(result.frozen_model.blocks[0], artifacts)
+    teacher, compressed = load_block_activations(result.frozen_model.blocks[1], artifacts)
+    assert teacher.shape == compressed.shape == (1, 4, 16)
