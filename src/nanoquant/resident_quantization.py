@@ -277,6 +277,7 @@ def _block_loss(
         return float(squared_error / elements)
 
 
+@torch.no_grad()
 def _run_block_batched(
     adapter: Any,
     block: nn.Module,

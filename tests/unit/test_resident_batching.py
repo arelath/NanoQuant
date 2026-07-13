@@ -10,6 +10,16 @@ class _BlockAdapter:
         return block(value)
 
 
+def test_block_forward_does_not_retain_autograd_graphs() -> None:
+    inputs = torch.randn(5, 4, requires_grad=True)
+    block = nn.Linear(4, 3, bias=False)
+
+    actual = _run_block_batched(_BlockAdapter(), block, inputs, {}, 2)
+
+    assert not actual.requires_grad
+    assert actual.grad_fn is None
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="pinned CUDA transfer requires a GPU")
 def test_cuda_block_forward_produces_bitwise_equal_pinned_host_activations() -> None:
     inputs = torch.randn(5, 4, dtype=torch.bfloat16, generator=torch.Generator().manual_seed(41))
