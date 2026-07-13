@@ -462,8 +462,8 @@ Span-event mirroring measured roughly 2.9% recorder time on the same short workl
 The profile comparison CLI now checks stable phase paths, identical invocation counts, runtime fingerprints,
 aggregate deltas, and the matching reservoir median; aggregate-only movement without median confirmation is
 reported as noise, and environment-mismatched regressions are informational rather than actionable.
-Resident calibration, replay, global distillation, the stage executor, and the tiny-pipeline composition roots
-still need equivalent P0 wiring before the framework-wide rollout item is complete. The resident tuning path
+Resident calibration, replay, the stage executor, and the tiny-pipeline composition roots still need equivalent
+P0 wiring before the framework-wide rollout item is complete. The resident tuning path
 supports opt-in micro phases for staging, forward, loss, backward, optimizer steps, evaluation, synchronization,
 and best-state cloning, with token/step/clone/transfer counters and exact profiled/control parity coverage.
 The resident ADMM path now adds opt-in micro phases for setup, both linear solves, SVID projections, dual updates,
@@ -481,6 +481,12 @@ The resident artifact store and tensor store now attribute serialization, conten
 activation bytes across frozen tensors and layer/block commits. Profiled/control tests require identical tensor,
 layer, block, and external activation-generation artifact identities, so the observation boundary cannot alter
 persisted bytes or resume references.
+Global top-k distillation now emits per-process profiles across frozen-model load, thaw, teacher-cache epochs,
+student setup, training, durable epoch checkpoints, offload, refreeze, and activation of the final tuning result.
+At micro level its teacher and student loops separate transfers, forward, top-k/loss, backward, optimizer, and
+checkpoint snapshots with step/token/cache-byte counters. The pinned launcher exposes the same macro/micro and
+deferred-CUDA controls as resident quantization; interrupted/resumed integration coverage verifies separate
+profile files, and direct profiled/control tests preserve cache tensors, metrics, and trained parameters exactly.
 Micro spans suppress durable span events and use the documented 5% recorder-time warning ceiling; macro
 profiling retains its stricter 0.5% ceiling and optional span-event mirror.
 Deferred CUDA timing is now implemented for macro and micro profiles: event pairs are sampled and bounded per

@@ -12,6 +12,7 @@ import torch
 from torch import nn
 
 from nanoquant.application.parity_adamw import ParityAdamW
+from nanoquant.domain.profiling import NULL_RECORDER, PhaseRecorder
 
 HiddenStatesFunction = Callable[[nn.Module, torch.Tensor], torch.Tensor]
 ParameterSelector = Callable[[str, nn.Parameter], bool]
@@ -224,6 +225,7 @@ def cache_topk_teacher_targets(
     *,
     device: str | torch.device,
     pad_token_id: int | None,
+    recorder: PhaseRecorder = NULL_RECORDER,
 ) -> TopKTeacherCache:
     epochs = []
     cache_bytes = 0
@@ -237,6 +239,7 @@ def cache_topk_teacher_targets(
             epoch_index=epoch_index,
             device=device,
             pad_token_id=pad_token_id,
+            recorder=recorder,
         )
         epochs.append(batches)
         cache_bytes += epoch_bytes
@@ -253,61 +256,85 @@ def cache_topk_teacher_epoch(
     epoch_index: int,
     device: str | torch.device,
     pad_token_id: int | None,
+    recorder: PhaseRecorder = NULL_RECORDER,
 ) -> tuple[tuple[TopKTeacherBatch, ...], int]:
     if token_ids.ndim != 2 or token_ids.shape[0] == 0:
         raise ValueError("distillation token IDs must be a non-empty rank-two tensor")
     if epoch_index < 0 or epoch_index >= config.epochs:
         raise ValueError("distillation teacher-cache epoch index is out of range")
-    cpu_tokens = token_ids.detach().cpu()
-    # Match the legacy cache plan exactly. Hugging Face ``set_seed`` seeded
-    # Python's RNG and the default RNG on the training device once; the legacy
-    # loop then shuffled one persistent Python list and selected token positions
-    # with ``torch.randperm(..., device=batch.device)`` across all epochs.
-    # Replaying from the seed through ``epoch_index`` keeps independently
-    # resumable epoch commits bitwise-compatible with that stateful loop.
-    order_generator = random.Random(config.seed)
-    generator_device = torch.device(device)
-    token_generator = torch.Generator(device=generator_device).manual_seed(config.seed)
-    order = list(range(cpu_tokens.shape[0]))
-    epoch_plan: list[tuple[torch.Tensor, torch.Tensor]] = []
-    for current_epoch in range(epoch_index + 1):
-        order_generator.shuffle(order)
-        for start in range(0, len(order), config.batch_size):
-            indices = torch.tensor(order[start : start + config.batch_size], dtype=torch.long)
-            batch = cpu_tokens.index_select(0, indices)
-            mask = torch.ones_like(batch, dtype=torch.bool) if pad_token_id is None else batch != pad_token_id
-            valid = torch.nonzero(mask.reshape(-1), as_tuple=False).flatten()
-            maximum_tokens = config.maximum_tokens_per_batch
-            if maximum_tokens is not None and valid.numel() > maximum_tokens:
-                permutation = torch.randperm(
-                    valid.numel(),
-                    generator=token_generator,
-                    device=generator_device,
-                )[:maximum_tokens].cpu()
-                selected = valid.index_select(0, permutation)
-            else:
-                selected = valid
-            if current_epoch == epoch_index and selected.numel() > 0:
-                epoch_plan.append((indices.clone(), selected))
+    with recorder.phase("planning"):
+        cpu_tokens = token_ids.detach().cpu()
+        # Match the legacy cache plan exactly. Hugging Face ``set_seed`` seeded
+        # Python's RNG and the default RNG on the training device once; the legacy
+        # loop then shuffled one persistent Python list and selected token positions
+        # with ``torch.randperm(..., device=batch.device)`` across all epochs.
+        # Replaying from the seed through ``epoch_index`` keeps independently
+        # resumable epoch commits bitwise-compatible with that stateful loop.
+        order_generator = random.Random(config.seed)
+        generator_device = torch.device(device)
+        token_generator = torch.Generator(device=generator_device).manual_seed(config.seed)
+        order = list(range(cpu_tokens.shape[0]))
+        epoch_plan: list[tuple[torch.Tensor, torch.Tensor]] = []
+        for current_epoch in range(epoch_index + 1):
+            order_generator.shuffle(order)
+            for start in range(0, len(order), config.batch_size):
+                indices = torch.tensor(order[start : start + config.batch_size], dtype=torch.long)
+                batch = cpu_tokens.index_select(0, indices)
+                mask = torch.ones_like(batch, dtype=torch.bool) if pad_token_id is None else batch != pad_token_id
+                valid = torch.nonzero(mask.reshape(-1), as_tuple=False).flatten()
+                maximum_tokens = config.maximum_tokens_per_batch
+                if maximum_tokens is not None and valid.numel() > maximum_tokens:
+                    permutation = torch.randperm(
+                        valid.numel(),
+                        generator=token_generator,
+                        device=generator_device,
+                    )[:maximum_tokens].cpu()
+                    selected = valid.index_select(0, permutation)
+                else:
+                    selected = valid
+                if current_epoch == epoch_index and selected.numel() > 0:
+                    epoch_plan.append((indices.clone(), selected))
     batches = []
     cache_bytes = 0
     teacher.eval()
     with torch.no_grad():
         for indices, selected in epoch_plan:
-            batch = cpu_tokens.index_select(0, indices).to(device)
-            teacher_hidden = hidden_states(teacher, batch)
-            teacher_hidden = teacher_hidden.reshape(-1, teacher_hidden.shape[-1])
-            teacher_hidden = teacher_hidden.index_select(0, selected.to(teacher_hidden.device))
-            values, vocabulary_indices = teacher_topk_logits(
-                teacher_hidden,
-                lm_head,
-                top_k=config.top_k,
-                vocabulary_chunk_size=config.vocabulary_chunk_size,
-                temperature=config.temperature,
-            )
-            selected_cpu = selected.cpu()
-            values_cpu = values.cpu()
-            vocabulary_indices_cpu = vocabulary_indices.to(device="cpu", dtype=torch.int32)
+            if recorder is NULL_RECORDER:
+                batch = cpu_tokens.index_select(0, indices).to(device)
+                teacher_hidden = hidden_states(teacher, batch)
+                teacher_hidden = teacher_hidden.reshape(-1, teacher_hidden.shape[-1])
+                teacher_hidden = teacher_hidden.index_select(0, selected.to(teacher_hidden.device))
+                values, vocabulary_indices = teacher_topk_logits(
+                    teacher_hidden,
+                    lm_head,
+                    top_k=config.top_k,
+                    vocabulary_chunk_size=config.vocabulary_chunk_size,
+                    temperature=config.temperature,
+                )
+                selected_cpu = selected.cpu()
+                values_cpu = values.cpu()
+                vocabulary_indices_cpu = vocabulary_indices.to(device="cpu", dtype=torch.int32)
+            else:
+                with recorder.phase("h2d"):
+                    batch = cpu_tokens.index_select(0, indices).to(device)
+                with recorder.phase("forward"):
+                    teacher_hidden = hidden_states(teacher, batch)
+                    teacher_hidden = teacher_hidden.reshape(-1, teacher_hidden.shape[-1])
+                    teacher_hidden = teacher_hidden.index_select(0, selected.to(teacher_hidden.device))
+                with recorder.phase("topk"):
+                    values, vocabulary_indices = teacher_topk_logits(
+                        teacher_hidden,
+                        lm_head,
+                        top_k=config.top_k,
+                        vocabulary_chunk_size=config.vocabulary_chunk_size,
+                        temperature=config.temperature,
+                    )
+                with recorder.phase("d2h"):
+                    selected_cpu = selected.cpu()
+                    values_cpu = values.cpu()
+                    vocabulary_indices_cpu = vocabulary_indices.to(device="cpu", dtype=torch.int32)
+                recorder.add("distillation.teacher_batches", 1)
+                recorder.add("distillation.teacher_tokens", selected.numel())
             cache_bytes += sum(
                 value.numel() * value.element_size()
                 for value in (selected_cpu, values_cpu, vocabulary_indices_cpu)
@@ -320,6 +347,7 @@ def cache_topk_teacher_epoch(
                     vocabulary_indices_cpu,
                 )
             )
+    recorder.add("distillation.teacher_cache_bytes", cache_bytes)
     return tuple(batches), cache_bytes
 
 
@@ -335,6 +363,7 @@ def distill_topk(
     device: str | torch.device,
     resume: DistillationResumeState | None = None,
     checkpoint_sink: DistillationCheckpointSink | None = None,
+    recorder: PhaseRecorder = NULL_RECORDER,
 ) -> DistillationMetrics:
     if len(teacher_cache.epochs) != config.epochs:
         raise ValueError("teacher target cache epoch count does not match distillation config")
@@ -417,58 +446,92 @@ def distill_topk(
     student.train()
     try:
         for epoch_index, epoch in enumerate(teacher_cache.epochs[starting_epoch:], start=starting_epoch):
-            total_loss = 0.0
-            for target in epoch:
-                sample_indices = torch.tensor(target.sample_indices, dtype=torch.long)
-                batch = cpu_tokens.index_select(0, sample_indices).to(device)
-                selected_tokens = target.token_indices.to(device=device, dtype=torch.long)
-                student_hidden = hidden_states(student, batch)
-                student_hidden = student_hidden.reshape(-1, student_hidden.shape[-1]).index_select(
-                    0, selected_tokens
-                )
-                loss = topk_distillation_loss(
-                    student_hidden,
-                    target.top_values.to(device),
-                    target.top_indices.to(device=device, dtype=torch.long),
-                    lm_head,
-                    temperature=config.temperature,
-                    token_chunk_size=config.token_chunk_size,
-                )
-                optimizer.zero_grad(set_to_none=True)
-                torch.autograd.backward(loss)
-                optimizer.step()
-                scheduler.step()
-                total_loss += float(loss.detach())
-                steps += 1
-            epoch_losses.append(total_loss / max(1, len(epoch)))
-            if checkpoint_sink is not None:
-                optimizer_states = []
-                optimizer_step = torch.tensor(
-                    int(optimizer.param_groups[0].get("step", 0)),
-                    dtype=torch.int64,
-                )
-                for name, parameter in selected_parameters:
-                    state = optimizer.state[parameter]
-                    optimizer_states.append(
-                        DistillationOptimizerState(
-                            name,
-                            optimizer_step.clone(),
-                            cast(torch.Tensor, state["exp_avg"]).detach().cpu().clone(),
-                            cast(torch.Tensor, state["exp_avg_sq"]).detach().cpu().clone(),
-                            None
-                            if state.get("kahan_comp") is None
-                            else cast(torch.Tensor, state["kahan_comp"]).detach().cpu().clone(),
+            with recorder.phase("epoch", epoch=epoch_index):
+                total_loss = 0.0
+                for target in epoch:
+                    if recorder is NULL_RECORDER:
+                        sample_indices = torch.tensor(target.sample_indices, dtype=torch.long)
+                        batch = cpu_tokens.index_select(0, sample_indices).to(device)
+                        selected_tokens = target.token_indices.to(device=device, dtype=torch.long)
+                        student_hidden = hidden_states(student, batch)
+                        student_hidden = student_hidden.reshape(-1, student_hidden.shape[-1]).index_select(
+                            0, selected_tokens
                         )
-                    )
-                checkpoint_sink(
-                    DistillationResumeState(
-                        epoch_index + 1,
-                        tuple(epoch_losses),
-                        steps,
-                        tuple((name, parameter.detach().cpu().clone()) for name, parameter in selected_parameters),
-                        tuple(optimizer_states),
-                    )
-                )
+                        loss = topk_distillation_loss(
+                            student_hidden,
+                            target.top_values.to(device),
+                            target.top_indices.to(device=device, dtype=torch.long),
+                            lm_head,
+                            temperature=config.temperature,
+                            token_chunk_size=config.token_chunk_size,
+                        )
+                        optimizer.zero_grad(set_to_none=True)
+                        torch.autograd.backward(loss)
+                        optimizer.step()
+                        scheduler.step()
+                    else:
+                        with recorder.phase("h2d"):
+                            sample_indices = torch.tensor(target.sample_indices, dtype=torch.long)
+                            batch = cpu_tokens.index_select(0, sample_indices).to(device)
+                            selected_tokens = target.token_indices.to(device=device, dtype=torch.long)
+                        with recorder.phase("forward"):
+                            student_hidden = hidden_states(student, batch)
+                            student_hidden = student_hidden.reshape(-1, student_hidden.shape[-1]).index_select(
+                                0, selected_tokens
+                            )
+                        with recorder.phase("loss"):
+                            loss = topk_distillation_loss(
+                                student_hidden,
+                                target.top_values.to(device),
+                                target.top_indices.to(device=device, dtype=torch.long),
+                                lm_head,
+                                temperature=config.temperature,
+                                token_chunk_size=config.token_chunk_size,
+                            )
+                        with recorder.phase("zero_grad"):
+                            optimizer.zero_grad(set_to_none=True)
+                        with recorder.phase("backward"):
+                            torch.autograd.backward(loss)
+                        with recorder.phase("optimizer_step"):
+                            optimizer.step()
+                            scheduler.step()
+                        recorder.add("distillation.steps", 1)
+                        recorder.add("distillation.tokens", selected_tokens.numel())
+                    total_loss += float(loss.detach())
+                    steps += 1
+                epoch_losses.append(total_loss / max(1, len(epoch)))
+                if checkpoint_sink is not None:
+                    with recorder.phase("checkpoint_snapshot"):
+                        optimizer_states = []
+                        optimizer_step = torch.tensor(
+                            int(optimizer.param_groups[0].get("step", 0)),
+                            dtype=torch.int64,
+                        )
+                        for name, parameter in selected_parameters:
+                            state = optimizer.state[parameter]
+                            optimizer_states.append(
+                                DistillationOptimizerState(
+                                    name,
+                                    optimizer_step.clone(),
+                                    cast(torch.Tensor, state["exp_avg"]).detach().cpu().clone(),
+                                    cast(torch.Tensor, state["exp_avg_sq"]).detach().cpu().clone(),
+                                    None
+                                    if state.get("kahan_comp") is None
+                                    else cast(torch.Tensor, state["kahan_comp"]).detach().cpu().clone(),
+                                )
+                            )
+                        checkpoint_sink(
+                            DistillationResumeState(
+                                epoch_index + 1,
+                                tuple(epoch_losses),
+                                steps,
+                                tuple(
+                                    (name, parameter.detach().cpu().clone())
+                                    for name, parameter in selected_parameters
+                                ),
+                                tuple(optimizer_states),
+                            )
+                        )
     finally:
         for parameter in student.parameters():
             parameter.requires_grad_(prior_requires_grad[id(parameter)])

@@ -9,6 +9,7 @@ from pathlib import Path
 from transformers import AutoTokenizer
 
 from nanoquant.application.distillation import TopKDistillationConfig
+from nanoquant.config.schema import ProfilingConfig, ProfilingLevel
 from nanoquant.domain.models import ArtifactRef
 from nanoquant.global_distillation import GlobalDistillationRequest, run_global_topk_distillation
 from nanoquant.infrastructure.hf_calibration_dataset import load_pinned_calibration
@@ -32,6 +33,13 @@ def main() -> None:
     parser.add_argument("--token-chunk-size", type=int, default=128)
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--device", default="cuda")
+    parser.add_argument(
+        "--profile",
+        choices=(ProfilingLevel.OFF.value, ProfilingLevel.MACRO.value, ProfilingLevel.MICRO.value),
+        default=ProfilingLevel.MACRO.value,
+    )
+    parser.add_argument("--profile-cuda-timing", action="store_true")
+    parser.add_argument("--profile-cuda-sample-every", type=int, default=16)
     parser.add_argument(
         "--replace-global-tuning",
         action="store_true",
@@ -90,6 +98,12 @@ def main() -> None:
         interrupt_after_epoch_commits=args.interrupt_after_epoch_commits,
         initial_cooldown_seconds=args.initial_cooldown_seconds,
         epoch_cooldown_seconds=args.epoch_cooldown_seconds,
+        profiling=ProfilingConfig(
+            level=ProfilingLevel(args.profile),
+            cuda_timing=args.profile_cuda_timing,
+            cuda_sample_every=args.profile_cuda_sample_every,
+            emit_span_events=False,
+        ),
     )
     try:
         result = run_global_topk_distillation(request)

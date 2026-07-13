@@ -23,7 +23,9 @@ from nanoquant.application.distillation import (
 )
 from nanoquant.application.layers import BlockEditor, LayerFreezer, TrainableFactorizedLinear
 from nanoquant.config.codec import canonical_json, to_dict
+from nanoquant.config.schema import ProfilingConfig, ProfilingLevel
 from nanoquant.domain.models import ArtifactRef, FrozenBlockState, FrozenNanoQuantState, GlobalTuningResult
+from nanoquant.domain.profiling import NULL_RECORDER, PhaseRecorder
 from nanoquant.infrastructure.artifacts import LocalArtifactStore
 from nanoquant.infrastructure.device_lease import acquire_device_lease
 from nanoquant.infrastructure.distillation_cache import (
@@ -41,6 +43,7 @@ from nanoquant.infrastructure.distillation_checkpoint import (
 )
 from nanoquant.infrastructure.frozen_model_loader import LoadedFrozenModel, load_frozen_run
 from nanoquant.infrastructure.global_tuning import activate_global_tuning, commit_global_tuning
+from nanoquant.infrastructure.profiling import profiled_run
 from nanoquant.infrastructure.resource_usage import peak_process_memory_bytes
 from nanoquant.infrastructure.tensor_store import LocalTensorStore
 
@@ -60,6 +63,7 @@ class GlobalDistillationRequest:
     interrupt_after_epoch_commits: int | None = None
     initial_cooldown_seconds: float = 0.0
     epoch_cooldown_seconds: float = 0.0
+    profiling: ProfilingConfig = ProfilingConfig()
 
 
 @dataclass(frozen=True, slots=True)
@@ -240,7 +244,10 @@ def _offload_student(student: nn.Module, device: str) -> None:
         torch.cuda.empty_cache()
 
 
-def _run_global_topk_distillation(request: GlobalDistillationRequest) -> GlobalDistillationRunResult:
+def _run_global_topk_distillation(
+    request: GlobalDistillationRequest,
+    recorder: PhaseRecorder,
+) -> GlobalDistillationRunResult:
     started = time.perf_counter()
     if request.interrupt_after_epoch_commits is not None and request.interrupt_after_epoch_commits <= 0:
         raise ValueError("distillation epoch interrupt count must be positive")
@@ -264,22 +271,25 @@ def _run_global_topk_distillation(request: GlobalDistillationRequest) -> GlobalD
     teacher_protocol_hash = "sha256:" + hashlib.sha256(canonical_json(teacher_protocol).encode()).hexdigest()
     token_hash = "sha256:" + hashlib.sha256(token_bytes).hexdigest()
     cache_identity = TeacherCacheIdentity(teacher_protocol_hash, token_hash)
-    artifacts = LocalArtifactStore(request.run_output / "artifacts")
+    micro_recorder = recorder if request.profiling.level is ProfilingLevel.MICRO else NULL_RECORDER
+    artifacts = LocalArtifactStore(request.run_output / "artifacts", recorder=micro_recorder)
     tensors = LocalTensorStore(artifacts)
-    loaded = load_frozen_run(
-        request.run_output,
-        request.snapshot,
-        source_name=request.source,
-        revision=request.revision,
-        device="cpu",
-        verify_hashes=request.verify_hashes,
-        backend="factorized",
-        use_global_tuning=not request.replace_existing_global_tuning,
-    )
+    with recorder.phase("load_frozen"):
+        loaded = load_frozen_run(
+            request.run_output,
+            request.snapshot,
+            source_name=request.source,
+            revision=request.revision,
+            device="cpu",
+            verify_hashes=request.verify_hashes,
+            backend="factorized",
+            use_global_tuning=not request.replace_existing_global_tuning,
+        )
     if loaded.global_tuning is not None:
         raise ValueError("run already has an active global tuning result")
-    trainable = _thaw_frozen_layers(loaded, tensors)
-    selected, auxiliary_names = _selected_parameters(loaded.model, trainable)
+    with recorder.phase("thaw"):
+        trainable = _thaw_frozen_layers(loaded, tensors)
+        selected, auxiliary_names = _selected_parameters(loaded.model, trainable)
 
     if request.device.startswith("cuda"):
         torch.cuda.reset_peak_memory_stats(request.device)
@@ -290,54 +300,60 @@ def _run_global_topk_distillation(request: GlobalDistillationRequest) -> GlobalD
         replace_mismatched=request.replace_existing_global_tuning,
     )
     if any(reference is None for reference in cache_journal.epochs):
-        teacher = cast(
-            nn.Module,
-            AutoModelForCausalLM.from_pretrained(
-                request.snapshot,
-                local_files_only=True,
-                torch_dtype=_checkpoint_dtype(request.snapshot),
-                attn_implementation=cast(Any, loaded.model).config._attn_implementation,
-            ),
-        ).to(request.device)
+        with recorder.phase("teacher_load"):
+            teacher = cast(
+                nn.Module,
+                AutoModelForCausalLM.from_pretrained(
+                    request.snapshot,
+                    local_files_only=True,
+                    torch_dtype=_checkpoint_dtype(request.snapshot),
+                    attn_implementation=cast(Any, loaded.model).config._attn_implementation,
+                ),
+            ).to(request.device)
         cast(Any, teacher).config.use_cache = False
         teacher_head = _lm_head(teacher)
         for epoch_index, reference in enumerate(cache_journal.epochs):
             if reference is not None:
                 continue
-            batches, _cache_bytes = cache_topk_teacher_epoch(
-                teacher,
-                tokens,
-                teacher_head,
-                _hidden_states,
-                request.config,
-                epoch_index=epoch_index,
-                device=request.device,
-                pad_token_id=request.pad_token_id,
-            )
-            committed_epoch = commit_teacher_epoch(epoch_index, batches, cache_identity, artifacts)
-            cache_journal = record_teacher_epoch(
-                request.run_output,
-                cache_journal,
-                epoch_index,
-                committed_epoch.reference,
-            )
+            with recorder.phase("teacher_cache_epoch", epoch=epoch_index):
+                batches, _cache_bytes = cache_topk_teacher_epoch(
+                    teacher,
+                    tokens,
+                    teacher_head,
+                    _hidden_states,
+                    request.config,
+                    epoch_index=epoch_index,
+                    device=request.device,
+                    pad_token_id=request.pad_token_id,
+                    recorder=micro_recorder,
+                )
+                with recorder.phase("commit"):
+                    committed_epoch = commit_teacher_epoch(epoch_index, batches, cache_identity, artifacts)
+                    cache_journal = record_teacher_epoch(
+                        request.run_output,
+                        cache_journal,
+                        epoch_index,
+                        committed_epoch.reference,
+                    )
         teacher.cpu()
         del teacher_head, teacher
         gc.collect()
         if request.device.startswith("cuda"):
             torch.cuda.empty_cache()
-    teacher_cache = materialize_teacher_cache(cache_journal, artifacts)
+    with recorder.phase("teacher_cache_load"):
+        teacher_cache = materialize_teacher_cache(cache_journal, artifacts)
 
-    student = loaded.model
-    cast(Any, student).config.use_cache = False
-    if request.config.gradient_checkpointing:
-        enable_checkpointing = getattr(student, "gradient_checkpointing_enable", None)
-        if callable(enable_checkpointing):
-            enable_checkpointing()
-        enable_input_gradients = getattr(student, "enable_input_require_grads", None)
-        if callable(enable_input_gradients):
-            enable_input_gradients()
-    student.to(request.device)
+    with recorder.phase("student_setup"):
+        student = loaded.model
+        cast(Any, student).config.use_cache = False
+        if request.config.gradient_checkpointing:
+            enable_checkpointing = getattr(student, "gradient_checkpointing_enable", None)
+            if callable(enable_checkpointing):
+                enable_checkpointing()
+            enable_input_gradients = getattr(student, "enable_input_require_grads", None)
+            if callable(enable_input_gradients):
+                enable_input_gradients()
+        student.to(request.device)
     checkpoint_identity = DistillationCheckpointIdentity(
         tuple(block.teacher_outputs.artifact for block in loaded.blocks),
         protocol_hash,
@@ -349,8 +365,9 @@ def _run_global_topk_distillation(request: GlobalDistillationRequest) -> GlobalD
 
     def checkpoint_sink(state: DistillationResumeState) -> None:
         nonlocal epoch_commits
-        committed_checkpoint = commit_distillation_checkpoint(state, checkpoint_identity, artifacts)
-        activate_distillation_checkpoint(request.run_output, committed_checkpoint.reference)
+        with recorder.phase("checkpoint_commit", epoch=state.completed_epochs):
+            committed_checkpoint = commit_distillation_checkpoint(state, checkpoint_identity, artifacts)
+            activate_distillation_checkpoint(request.run_output, committed_checkpoint.reference)
         epoch_commits += 1
         if (
             request.interrupt_after_epoch_commits is not None
@@ -363,18 +380,20 @@ def _run_global_topk_distillation(request: GlobalDistillationRequest) -> GlobalD
             time.sleep(request.epoch_cooldown_seconds)
 
     try:
-        metrics = distill_topk(
-            student,
-            tokens,
-            _lm_head(student),
-            _hidden_states,
-            teacher_cache,
-            request.config,
-            lambda _name, parameter: id(parameter) in selected,
-            device=request.device,
-            resume=None if active_checkpoint is None else active_checkpoint.state,
-            checkpoint_sink=checkpoint_sink,
-        )
+        with recorder.phase("train"):
+            metrics = distill_topk(
+                student,
+                tokens,
+                _lm_head(student),
+                _hidden_states,
+                teacher_cache,
+                request.config,
+                lambda _name, parameter: id(parameter) in selected,
+                device=request.device,
+                resume=None if active_checkpoint is None else active_checkpoint.state,
+                checkpoint_sink=checkpoint_sink,
+                recorder=micro_recorder,
+            )
     except BaseException:
         try:
             _offload_student(student, request.device)
@@ -384,14 +403,16 @@ def _run_global_topk_distillation(request: GlobalDistillationRequest) -> GlobalD
             pass
         raise
     peak_gpu = int(torch.cuda.max_memory_allocated(request.device)) if request.device.startswith("cuda") else 0
-    _offload_student(student, request.device)
+    with recorder.phase("offload"):
+        _offload_student(student, request.device)
 
-    tuned_blocks = _freeze_tuned_blocks(loaded, trainable, tensors)
-    parameter_map = dict(student.named_parameters())
-    auxiliary_refs = tensors.put(
-        "global-tuning-parameters",
-        {name: parameter_map[name].detach().cpu() for name in auxiliary_names},
-    )
+    with recorder.phase("freeze"):
+        tuned_blocks = _freeze_tuned_blocks(loaded, trainable, tensors)
+        parameter_map = dict(student.named_parameters())
+        auxiliary_refs = tensors.put(
+            "global-tuning-parameters",
+            {name: parameter_map[name].detach().cpu() for name in auxiliary_names},
+        )
     result = GlobalTuningResult(
         1,
         tuple(block.teacher_outputs.artifact for block in loaded.blocks),
@@ -407,13 +428,24 @@ def _run_global_topk_distillation(request: GlobalDistillationRequest) -> GlobalD
         peak_gpu,
         peak_process_memory_bytes(),
     )
-    committed = commit_global_tuning(result, artifacts)
-    activate_global_tuning(request.run_output, committed.reference)
+    with recorder.phase("commit"):
+        committed = commit_global_tuning(result, artifacts)
+        activate_global_tuning(request.run_output, committed.reference)
     return GlobalDistillationRunResult(committed.reference, result, metrics)
 
 
 def run_global_topk_distillation(request: GlobalDistillationRequest) -> GlobalDistillationRunResult:
+    def execute() -> GlobalDistillationRunResult:
+        with profiled_run(
+            request.profiling,
+            request.run_output,
+            None,
+            run_id="global-distillation",
+        ) as recorder:
+            with recorder.phase("run"):
+                return _run_global_topk_distillation(request, recorder)
+
     if request.device.startswith("cuda"):
         with acquire_device_lease(request.device):
-            return _run_global_topk_distillation(request)
-    return _run_global_topk_distillation(request)
+            return execute()
+    return execute()

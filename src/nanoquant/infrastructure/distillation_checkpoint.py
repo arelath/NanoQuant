@@ -62,23 +62,23 @@ def commit_distillation_checkpoint(
                 "has_kahan_compensation": optimizer.kahan_compensation is not None,
             }
         )
-    with artifacts.begin_write("distillation-checkpoint") as writer:
-        save_file(tensors, writer.path / "state.safetensors")
-        (writer.path / "checkpoint.json").write_text(
-            json.dumps(
-                {
-                    "schema_version": 1,
-                    "identity": to_dict(identity),
-                    "completed_epochs": state.completed_epochs,
-                    "epoch_losses": list(state.epoch_losses),
-                    "steps_completed": state.steps_completed,
-                    "parameters": parameters,
-                },
-                sort_keys=True,
-                indent=2,
-            ),
-            encoding="utf-8",
+    with artifacts.recorder.phase("serialize"):
+        encoded = json.dumps(
+            {
+                "schema_version": 1,
+                "identity": to_dict(identity),
+                "completed_epochs": state.completed_epochs,
+                "epoch_losses": list(state.epoch_losses),
+                "steps_completed": state.steps_completed,
+                "parameters": parameters,
+            },
+            sort_keys=True,
+            indent=2,
         )
+    with artifacts.begin_write("distillation-checkpoint") as writer:
+        with artifacts.recorder.phase("write"):
+            save_file(tensors, writer.path / "state.safetensors")
+            (writer.path / "checkpoint.json").write_text(encoded, encoding="utf-8")
         descriptor = writer.commit()
     reference = ArtifactRef("distillation-checkpoint", descriptor.artifact_id, descriptor.schema_version)
     return CommittedDistillationCheckpoint(reference, identity, state)

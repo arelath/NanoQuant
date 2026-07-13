@@ -128,6 +128,28 @@ def test_complete_frozen_run_can_be_distilled_committed_and_reloaded(
     distilled = run_global_topk_distillation(request)
     assert cooldowns == [1.5, 1.5, 3.25]
     assert offloads == ["cpu", "cpu"]
+    profiles = [
+        json.loads(path.read_text(encoding="utf-8"))
+        for path in sorted(output.glob("profile*.json"))
+    ]
+    distillation_profiles = [profile for profile in profiles if profile["run_id"] == "global-distillation"]
+    assert len(distillation_profiles) == 2
+    phase_paths = {
+        str(phase["path"])
+        for profile in distillation_profiles
+        for phase in profile["phases"]
+    }
+    assert {
+        "run/load_frozen",
+        "run/thaw",
+        "run/teacher_cache_epoch",
+        "run/student_setup",
+        "run/train",
+        "run/train/checkpoint_commit",
+        "run/offload",
+        "run/freeze",
+        "run/commit",
+    } <= phase_paths
 
     active = active_global_tuning(output)
     assert active == distilled.reference

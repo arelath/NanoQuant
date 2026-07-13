@@ -21,11 +21,11 @@ class CommittedGlobalTuning:
 
 
 def commit_global_tuning(result: GlobalTuningResult, artifacts: LocalArtifactStore) -> CommittedGlobalTuning:
+    with artifacts.recorder.phase("serialize"):
+        encoded = json.dumps(to_dict(result), sort_keys=True, indent=2)
     with artifacts.begin_write("global-tuning-result") as writer:
-        (writer.path / "global-tuning-result.json").write_text(
-            json.dumps(to_dict(result), sort_keys=True, indent=2),
-            encoding="utf-8",
-        )
+        with artifacts.recorder.phase("write"):
+            (writer.path / "global-tuning-result.json").write_text(encoded, encoding="utf-8")
         descriptor = writer.commit()
     return CommittedGlobalTuning(
         ArtifactRef("global-tuning-result", descriptor.artifact_id, descriptor.schema_version),

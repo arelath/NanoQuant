@@ -61,22 +61,22 @@ def commit_teacher_epoch(
         )
     if not values:
         raise ValueError("cannot commit an empty teacher-target epoch")
-    with artifacts.begin_write("topk-teacher-epoch") as writer:
-        save_file(values, writer.path / "targets.safetensors")
-        (writer.path / "epoch.json").write_text(
-            json.dumps(
-                {
-                    "schema_version": 1,
-                    "identity": to_dict(identity),
-                    "epoch_index": epoch_index,
-                    "bytes": cache_bytes,
-                    "batches": manifest_batches,
-                },
-                sort_keys=True,
-                indent=2,
-            ),
-            encoding="utf-8",
+    with artifacts.recorder.phase("serialize"):
+        encoded = json.dumps(
+            {
+                "schema_version": 1,
+                "identity": to_dict(identity),
+                "epoch_index": epoch_index,
+                "bytes": cache_bytes,
+                "batches": manifest_batches,
+            },
+            sort_keys=True,
+            indent=2,
         )
+    with artifacts.begin_write("topk-teacher-epoch") as writer:
+        with artifacts.recorder.phase("write"):
+            save_file(values, writer.path / "targets.safetensors")
+            (writer.path / "epoch.json").write_text(encoded, encoding="utf-8")
         descriptor = writer.commit()
     reference = ArtifactRef("topk-teacher-epoch", descriptor.artifact_id, descriptor.schema_version)
     return CommittedTeacherEpoch(reference, epoch_index, batches, cache_bytes)

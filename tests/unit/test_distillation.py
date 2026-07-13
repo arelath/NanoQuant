@@ -13,6 +13,8 @@ from nanoquant.application.distillation import (
     teacher_topk_logits,
     topk_distillation_loss,
 )
+from nanoquant.config.schema import ProfilingConfig, ProfilingLevel
+from nanoquant.infrastructure.profiling import Profiler
 
 
 class ToyLanguageModel(nn.Module):
@@ -283,3 +285,97 @@ def test_topk_distillation_resume_restores_adam_and_scheduler_exactly() -> None:
     assert resumed_metrics.epoch_losses == pytest.approx(control_metrics.epoch_losses, abs=1e-8)
     assert resumed_metrics.steps_completed == control_metrics.steps_completed
     assert torch.equal(resumed.projection.weight, control.projection.weight)
+
+
+def test_distillation_micro_profile_preserves_cache_training_and_parameters() -> None:
+    torch.manual_seed(21)
+    teacher = ToyLanguageModel()
+    initial_student = deepcopy(teacher)
+    with torch.no_grad():
+        initial_student.projection.weight.add_(0.15)
+    tokens = torch.randint(1, 17, (4, 5), generator=torch.Generator().manual_seed(22))
+    config = TopKDistillationConfig(
+        epochs=2,
+        batch_size=2,
+        learning_rate=0.02,
+        top_k=5,
+        vocabulary_chunk_size=6,
+        token_chunk_size=3,
+        maximum_tokens_per_batch=6,
+        gradient_checkpointing=False,
+        seed=23,
+    )
+    control_cache = cache_topk_teacher_targets(
+        teacher,
+        tokens,
+        teacher.lm_head,
+        _hidden,
+        config,
+        device="cpu",
+        pad_token_id=None,
+    )
+    profiler = Profiler(
+        ProfilingConfig(level=ProfilingLevel.MICRO, emit_span_events=False),
+        run_id="distillation-micro",
+    )
+    profiled_cache = cache_topk_teacher_targets(
+        teacher,
+        tokens,
+        teacher.lm_head,
+        _hidden,
+        config,
+        device="cpu",
+        pad_token_id=None,
+        recorder=profiler,
+    )
+    assert profiled_cache.bytes == control_cache.bytes
+    for profiled_epoch, control_epoch in zip(profiled_cache.epochs, control_cache.epochs, strict=True):
+        for profiled_batch, control_batch in zip(profiled_epoch, control_epoch, strict=True):
+            assert profiled_batch.sample_indices == control_batch.sample_indices
+            assert torch.equal(profiled_batch.token_indices, control_batch.token_indices)
+            assert torch.equal(profiled_batch.top_values, control_batch.top_values)
+            assert torch.equal(profiled_batch.top_indices, control_batch.top_indices)
+
+    control_student = deepcopy(initial_student)
+    profiled_student = deepcopy(initial_student)
+    control_metrics = distill_topk(
+        control_student,
+        tokens,
+        control_student.lm_head,
+        _hidden,
+        control_cache,
+        config,
+        lambda name, _parameter: name == "projection.weight",
+        device="cpu",
+    )
+    profiled_metrics = distill_topk(
+        profiled_student,
+        tokens,
+        profiled_student.lm_head,
+        _hidden,
+        profiled_cache,
+        config,
+        lambda name, _parameter: name == "projection.weight",
+        device="cpu",
+        recorder=profiler,
+    )
+
+    assert profiled_metrics == control_metrics
+    assert torch.equal(profiled_student.projection.weight, control_student.projection.weight)
+    payload = profiler.snapshot()
+    phase_paths = {str(phase["path"]) for phase in payload["phases"]}  # type: ignore[index]
+    assert {
+        "planning",
+        "h2d",
+        "forward",
+        "topk",
+        "d2h",
+        "epoch/h2d",
+        "epoch/forward",
+        "epoch/loss",
+        "epoch/backward",
+        "epoch/optimizer_step",
+    } <= phase_paths
+    counters = {str(counter["name"]): counter for counter in payload["counters"]}  # type: ignore[index]
+    assert counters["distillation.steps"]["total"] == profiled_metrics.steps_completed
+    assert counters["distillation.teacher_cache_bytes"]["total"] == profiled_cache.bytes
