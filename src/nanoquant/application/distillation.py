@@ -10,6 +10,8 @@ from typing import cast
 import torch
 from torch import nn
 
+from nanoquant.application.parity_adamw import ParityAdamW
+
 HiddenStatesFunction = Callable[[nn.Module, torch.Tensor], torch.Tensor]
 ParameterSelector = Callable[[str, nn.Parameter], bool]
 
@@ -25,8 +27,9 @@ class TopKDistillationConfig:
     token_chunk_size: int = 128
     maximum_tokens_per_batch: int | None = 512
     gradient_checkpointing: bool = True
-    weight_decay: float = 0.01
+    weight_decay: float = 0.0
     seed: int = 0
+    optimizer_version: str = "legacy-optimi-adamw-v1"
 
     def __post_init__(self) -> None:
         if self.epochs <= 0 or self.batch_size <= 0:
@@ -39,6 +42,8 @@ class TopKDistillationConfig:
             raise ValueError("distillation maximum tokens per batch must be positive when provided")
         if self.weight_decay < 0:
             raise ValueError("distillation weight decay cannot be negative")
+        if self.optimizer_version != "legacy-optimi-adamw-v1":
+            raise ValueError("unsupported distillation optimizer version")
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,6 +88,7 @@ class DistillationOptimizerState:
     step: torch.Tensor
     exponential_average: torch.Tensor
     exponential_average_squared: torch.Tensor
+    kahan_compensation: torch.Tensor | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -336,7 +342,7 @@ def distill_topk(
                 if parameter.shape != value.shape:
                     raise ValueError(f"distillation resume parameter shape differs: {name}")
                 parameter.copy_(value.to(device=parameter.device, dtype=parameter.dtype))
-    optimizer = torch.optim.AdamW(
+    optimizer = ParityAdamW(
         [parameter for _name, parameter in selected_parameters],
         lr=config.learning_rate,
         weight_decay=config.weight_decay,
@@ -353,14 +359,24 @@ def distill_topk(
             state = optimizer_by_name[name]
             if state.exponential_average.shape != parameter.shape:
                 raise ValueError(f"distillation resume optimizer shape differs: {name}")
+            if parameter.dtype in {torch.float16, torch.bfloat16} and state.kahan_compensation is None:
+                raise ValueError(f"distillation resume Kahan state is missing: {name}")
             optimizer.state[parameter] = {
-                "step": state.step.detach().cpu().clone(),
                 "exp_avg": state.exponential_average.to(device=parameter.device, dtype=parameter.dtype),
                 "exp_avg_sq": state.exponential_average_squared.to(
                     device=parameter.device,
                     dtype=parameter.dtype,
                 ),
+                "kahan_comp": None
+                if state.kahan_compensation is None
+                else state.kahan_compensation.to(device=parameter.device, dtype=parameter.dtype),
+                "denominator": torch.empty_like(parameter),
             }
+        saved_steps = {int(state.step.item()) for state in resume.optimizer_states}
+        if saved_steps != {starting_steps}:
+            raise ValueError("distillation resume optimizer steps differ from completed steps")
+        for group in optimizer.param_groups:
+            group["step"] = starting_steps
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
         T_max=max(1, total_steps),
@@ -407,14 +423,21 @@ def distill_topk(
             epoch_losses.append(total_loss / max(1, len(epoch)))
             if checkpoint_sink is not None:
                 optimizer_states = []
+                optimizer_step = torch.tensor(
+                    int(optimizer.param_groups[0].get("step", 0)),
+                    dtype=torch.int64,
+                )
                 for name, parameter in selected_parameters:
                     state = optimizer.state[parameter]
                     optimizer_states.append(
                         DistillationOptimizerState(
                             name,
-                            cast(torch.Tensor, state["step"]).detach().cpu().clone(),
+                            optimizer_step.clone(),
                             cast(torch.Tensor, state["exp_avg"]).detach().cpu().clone(),
                             cast(torch.Tensor, state["exp_avg_sq"]).detach().cpu().clone(),
+                            None
+                            if state.get("kahan_comp") is None
+                            else cast(torch.Tensor, state["kahan_comp"]).detach().cpu().clone(),
                         )
                     )
                 checkpoint_sink(

@@ -483,6 +483,20 @@ iterations, and twice during export. Applying the measured deltas across the anc
 attempts projects to roughly **3–12 seconds** saved in factorization. Factorized tuning invokes the same
 STE twice per forward, so it should benefit as well; its run-level effect still needs the next full run.
 
+### Parity corrections discovered by performance profiling (not S0)
+
+The global-KD profile exposed two rewrite/legacy differences, so these are correctness fixes rather than
+behavior-preserving optimizations. Legacy `NanoQuantLinear` fixes factor, scale, and salient training
+parameters to BF16, and its Optimi `AdamW` call leaves weight decay at the zero default. The rewrite had
+thawed 1,989,504 selected quantized-layer values as FP32 and explicitly used 0.01 weight decay. It now
+thaws those values as BF16, obtains Optimi-compatible Kahan state for them, and uses zero weight decay.
+
+On one pinned Gemma KD batch, with identical cached targets and gradient checkpointing, restoring BF16
+reduced selected-state peak CUDA allocation from **4,075,673,088 to 2,696,238,080 bytes (33.8%)**. Five
+clean post-warmup steps improved median forward-plus-backward-plus-optimizer wall from **0.705 s to
+0.552 s (1.28x)**. This deliberately changes the rewrite's KD recurrence to match legacy, so exact quality
+must be remeasured rather than inferred from the speedup.
+
 ## 4. Smaller observations (bundle opportunistically)
 
 - [x] `next(iter(model.parameters()), None)` previously executed per batch step in `tune`; the foreach
@@ -511,6 +525,19 @@ STE twice per forward, so it should benefit as well; its run-level effect still 
 - **Resolved after a clean GPU measurement (2026-07-13):** the lower-allocation `_sign` candidate is now
   implemented as item 3.18. Its uncontaminated speedups were 1.21x on the representative attention shape
   and 1.92x on the largest MLP shape, with exact edge semantics and recurrence coverage.
+- **Replacement-KD slowdown was environmental, not reproduced (2026-07-13):** the completed replacement
+  run's seven epoch intervals were **608, 602, 605, 589, 589, 627, and 624 seconds**, versus a 174-second
+  median after the first checkpoint in the prior run. It finished all 2,048 steps in **4,923.63 seconds**
+  with 4,079,121,920 peak allocated CUDA bytes. On the now-idle GPU, however, the exact same model path and
+  first cached batch measured **0.70–0.85 seconds per complete step**, matching the prior checkpoint rate;
+  its parity optimizer occupied only about 5 ms. The earlier 29–34% GPU and 21–28% memory-controller
+  snapshots therefore reflect external/system contention, not an optimizer regression. No speculative
+  code change was made for the non-reproducible slowdown.
+- **Replacement-KD quality rejected (2026-07-13):** despite lowering cached-target training loss from
+  2.15325 to 2.13831, the exact serial WikiText-2 result regressed from **444.7151 to 459.7149 perplexity
+  (3.37%)**, and is **6.19% worse** than the 432.9306 pre-KD result. The artifact remains as evidence but
+  is not accepted as a parity improvement. Profiling then found the BF16 and zero-weight-decay mismatches
+  described above; the corrected recurrence requires a fresh quality run.
 - `JsonlEventSink._read_last_sequence` parses the whole event log at construction — only matters for
   resumed runs with large logs; fine today, worth a tail-scan if event volume grows.
 - `_artifact_bytes` walks the whole artifact tree once at report time — keep an eye on it as artifact

@@ -83,6 +83,7 @@ def load_frozen_run(
     device: str = "cuda",
     verify_hashes: bool = True,
     backend: str = "factorized",
+    use_global_tuning: bool = True,
 ) -> LoadedFrozenModel:
     run_output = Path(run_output)
     artifacts = LocalArtifactStore(run_output / "artifacts")
@@ -108,7 +109,7 @@ def load_frozen_run(
         ).result
         for index in range(expected_blocks)
     )
-    global_tuning_ref = active_global_tuning(run_output)
+    global_tuning_ref = active_global_tuning(run_output) if use_global_tuning else None
     global_tuning = None if global_tuning_ref is None else load_global_tuning(global_tuning_ref, artifacts).result
     source_blocks = tuple(block.teacher_outputs.artifact for block in committed)
     if global_tuning is not None:

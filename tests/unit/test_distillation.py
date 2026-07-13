@@ -32,6 +32,10 @@ def _hidden(model: nn.Module, token_ids: torch.Tensor) -> torch.Tensor:
     return model.hidden_states(token_ids)
 
 
+def test_distillation_config_uses_legacy_zero_weight_decay() -> None:
+    assert TopKDistillationConfig().weight_decay == 0.0
+
+
 def test_chunked_teacher_topk_matches_dense_logits() -> None:
     generator = torch.Generator().manual_seed(4)
     head = nn.Linear(5, 19, bias=True)

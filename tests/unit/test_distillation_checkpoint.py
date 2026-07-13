@@ -28,6 +28,7 @@ def _state() -> DistillationResumeState:
                 torch.tensor(6.0),
                 torch.tensor((0.1, 0.2)),
                 torch.tensor((0.01, 0.04)),
+                torch.tensor((0.001, 0.002)),
             ),
         ),
     )
@@ -50,6 +51,18 @@ def test_distillation_checkpoint_roundtrips_and_activates_atomically(tmp_path: P
     assert loaded.state.steps_completed == 6
     assert torch.equal(dict(loaded.state.parameter_values)["scale"], torch.tensor((1.0, 2.0)))
     assert torch.equal(loaded.state.optimizer_states[0].exponential_average, torch.tensor((0.1, 0.2)))
+    assert torch.equal(
+        loaded.state.optimizer_states[0].kahan_compensation,
+        torch.tensor((0.001, 0.002)),
+    )
+    assert (
+        active_distillation_checkpoint(
+            tmp_path,
+            DistillationCheckpointIdentity(identity.source_blocks, "different", identity.token_hash),
+            artifacts,
+        )
+        is None
+    )
     with pytest.raises(ValueError, match="does not match"):
         load_distillation_checkpoint(
             committed.reference,

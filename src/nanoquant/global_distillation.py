@@ -22,7 +22,7 @@ from nanoquant.application.distillation import (
     distill_topk,
 )
 from nanoquant.application.layers import BlockEditor, LayerFreezer, TrainableFactorizedLinear
-from nanoquant.config.codec import canonical_json
+from nanoquant.config.codec import canonical_json, to_dict
 from nanoquant.domain.models import ArtifactRef, FrozenBlockState, FrozenNanoQuantState, GlobalTuningResult
 from nanoquant.infrastructure.artifacts import LocalArtifactStore
 from nanoquant.infrastructure.device_lease import acquire_device_lease
@@ -56,6 +56,7 @@ class GlobalDistillationRequest:
     device: str = "cuda"
     pad_token_id: int | None = None
     verify_hashes: bool = True
+    replace_existing_global_tuning: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,7 +142,17 @@ def _thaw_frozen_layers(
     trainable: dict[tuple[int, str], TrainableFactorizedLinear] = {}
     for block_result, block in zip(loaded.blocks, _decoder_layers(loaded.model), strict=True):
         for state in block_result.frozen_state.quantized_layers:
-            frozen = freezer.load(state, tensors, device="cpu", dtype=torch.float32).module
+            frozen = freezer.load(
+                state,
+                tensors,
+                device="cpu",
+                # Legacy NanoQuantLinear fixes its trainable factor, scale, and
+                # salient paths to BF16.  Loading them as FP32 changes both the
+                # optimizer recurrence (no Kahan compensation) and the cost of
+                # every activation-dtype conversion in the factorized forward.
+                dtype=torch.bfloat16,
+                backend="factorized",
+            ).module
             module = TrainableFactorizedLinear(
                 frozen.left_binary,
                 frozen.right_binary,
@@ -221,8 +232,17 @@ def _run_global_topk_distillation(request: GlobalDistillationRequest) -> GlobalD
     tokens = _tokens(request.token_ids)
     token_bytes = tokens.contiguous().view(torch.uint8).numpy().tobytes()
     protocol_hash = "sha256:" + hashlib.sha256(canonical_json(request.config).encode()).hexdigest()
+    teacher_protocol = to_dict(request.config)
+    if not isinstance(teacher_protocol, dict):
+        raise TypeError("distillation config did not encode as an object")
+    teacher_protocol.pop("optimizer_version")
+    # Teacher-cache schema v1 included weight decay even though it cannot
+    # affect teacher targets. Normalize it to the original protocol value so
+    # the legacy-zero-decay correction can reuse the already committed cache.
+    teacher_protocol["weight_decay"] = 0.01
+    teacher_protocol_hash = "sha256:" + hashlib.sha256(canonical_json(teacher_protocol).encode()).hexdigest()
     token_hash = "sha256:" + hashlib.sha256(token_bytes).hexdigest()
-    cache_identity = TeacherCacheIdentity(protocol_hash, token_hash)
+    cache_identity = TeacherCacheIdentity(teacher_protocol_hash, token_hash)
     artifacts = LocalArtifactStore(request.run_output / "artifacts")
     tensors = LocalTensorStore(artifacts)
     loaded = load_frozen_run(
@@ -233,6 +253,7 @@ def _run_global_topk_distillation(request: GlobalDistillationRequest) -> GlobalD
         device="cpu",
         verify_hashes=request.verify_hashes,
         backend="factorized",
+        use_global_tuning=not request.replace_existing_global_tuning,
     )
     if loaded.global_tuning is not None:
         raise ValueError("run already has an active global tuning result")

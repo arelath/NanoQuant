@@ -32,6 +32,11 @@ def main() -> None:
     parser.add_argument("--token-chunk-size", type=int, default=128)
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--device", default="cuda")
+    parser.add_argument(
+        "--replace-global-tuning",
+        action="store_true",
+        help="Start from immutable pre-KD commits and atomically replace the active tuned result.",
+    )
     args = parser.parse_args()
 
     calibration = load_pinned_calibration(
@@ -58,11 +63,14 @@ def main() -> None:
                 token_chunk_size=args.token_chunk_size,
                 maximum_tokens_per_batch=args.maximum_tokens_per_batch,
                 gradient_checkpointing=True,
-                weight_decay=0.01,
+                # The legacy Optimi AdamW invocation leaves weight decay at its
+                # zero default. Keep this explicit in the pinned protocol.
+                weight_decay=0.0,
                 seed=0,
             ),
             device=args.device,
             pad_token_id=tokenizer.pad_token_id,
+            replace_existing_global_tuning=args.replace_global_tuning,
         )
     )
     print(

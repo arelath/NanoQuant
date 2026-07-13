@@ -53,7 +53,15 @@ def commit_distillation_checkpoint(
         tensors[f"{prefix}.step"] = optimizer.step.detach().cpu().contiguous()
         tensors[f"{prefix}.exp_avg"] = optimizer.exponential_average.detach().cpu().contiguous()
         tensors[f"{prefix}.exp_avg_sq"] = optimizer.exponential_average_squared.detach().cpu().contiguous()
-        parameters.append({"name": name, "prefix": prefix})
+        if optimizer.kahan_compensation is not None:
+            tensors[f"{prefix}.kahan_comp"] = optimizer.kahan_compensation.detach().cpu().contiguous()
+        parameters.append(
+            {
+                "name": name,
+                "prefix": prefix,
+                "has_kahan_compensation": optimizer.kahan_compensation is not None,
+            }
+        )
     with artifacts.begin_write("distillation-checkpoint") as writer:
         save_file(tensors, writer.path / "state.safetensors")
         (writer.path / "checkpoint.json").write_text(
@@ -106,6 +114,9 @@ def load_distillation_checkpoint(
                     handle.get_tensor(f"{prefix}.step"),
                     handle.get_tensor(f"{prefix}.exp_avg"),
                     handle.get_tensor(f"{prefix}.exp_avg_sq"),
+                    handle.get_tensor(f"{prefix}.kahan_comp")
+                    if item.get("has_kahan_compensation", False)
+                    else None,
                 )
             )
     state = DistillationResumeState(
@@ -146,4 +157,9 @@ def active_distillation_checkpoint(
         json.loads(path.read_text(encoding="utf-8")),
         path="distillation_checkpoint_reference",
     )
-    return load_distillation_checkpoint(reference, identity, artifacts)
+    try:
+        return load_distillation_checkpoint(reference, identity, artifacts)
+    except ValueError as exc:
+        if str(exc) == "distillation checkpoint does not match the requested run/protocol":
+            return None
+        raise

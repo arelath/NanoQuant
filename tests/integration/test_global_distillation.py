@@ -109,6 +109,14 @@ def test_complete_frozen_run_can_be_distilled_committed_and_reloaded(tmp_path: P
     assert training_checkpoint is not None
     assert training_checkpoint.state.completed_epochs == 3
     assert training_checkpoint.state.steps_completed == 6
+    parameter_values = dict(training_checkpoint.state.parameter_values)
+    optimizer_states = {
+        state.parameter_name: state for state in training_checkpoint.state.optimizer_states
+    }
+    scale_names = tuple(name for name in parameter_values if ".scale_" in name)
+    assert scale_names
+    assert all(parameter_values[name].dtype is torch.bfloat16 for name in scale_names)
+    assert all(optimizer_states[name].kahan_compensation is not None for name in scale_names)
 
     loaded = load_frozen_run(
         output,
@@ -121,3 +129,16 @@ def test_complete_frozen_run_can_be_distilled_committed_and_reloaded(tmp_path: P
     with torch.no_grad():
         after_logits = cast(Any, loaded.model)(input_ids=tokens, use_cache=False).logits.detach()
     assert not torch.equal(after_logits, before_logits)
+
+    pre_distillation = load_frozen_run(
+        output,
+        snapshot,
+        source_name="fixture/gemma3",
+        revision="pinned-test-revision",
+        device="cpu",
+        use_global_tuning=False,
+    )
+    assert pre_distillation.global_tuning is None
+    with torch.no_grad():
+        pre_distillation_logits = cast(Any, pre_distillation.model)(input_ids=tokens, use_cache=False).logits
+    assert torch.equal(pre_distillation_logits, before_logits)
