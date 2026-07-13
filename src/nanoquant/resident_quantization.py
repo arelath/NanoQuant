@@ -294,6 +294,7 @@ def _block_loss(
     output_importance: torch.Tensor,
     metadata: dict[str, object],
     batch_size: int,
+    recorder: PhaseRecorder = NULL_RECORDER,
 ) -> float:
     block_device = next(iter(block.parameters()), None)
     device = inputs.device if block_device is None else block_device.device
@@ -301,6 +302,27 @@ def _block_loss(
     with torch.no_grad():
         squared_error = torch.zeros((), device=device)
         elements = 0
+        if recorder is not NULL_RECORDER:
+            batches = iter(iter_device_batches((inputs, targets), batch_size, device))
+            batch_count = (inputs.shape[0] + batch_size - 1) // batch_size
+            for _batch_index in range(batch_count):
+                with recorder.phase("batch_stage"):
+                    input_batch, target = next(batches)
+                    if inputs.device.type == "cpu" and device.type == "cuda":
+                        recorder.add(
+                            "transfer.h2d_bytes",
+                            input_batch.numel() * input_batch.element_size()
+                            + target.numel() * target.element_size(),
+                        )
+                with recorder.phase("forward"):
+                    prediction = adapter.run_block(block, input_batch, **metadata)
+                with recorder.phase("loss"):
+                    squared_error += ((prediction.float() - target.float()).square() * weights).sum()
+                    elements += target.numel()
+                recorder.add("forward.batches", 1)
+                recorder.add("forward.elements", target.numel())
+            with recorder.phase("synchronize"):
+                return float(squared_error / elements)
         for input_batch, target in iter_device_batches((inputs, targets), batch_size, device):
             prediction = adapter.run_block(block, input_batch, **metadata)
             squared_error += ((prediction.float() - target.float()).square() * weights).sum()
@@ -316,6 +338,7 @@ def _run_block_batched(
     metadata: dict[str, object],
     batch_size: int,
     storage_device: str | torch.device | None = None,
+    recorder: PhaseRecorder = NULL_RECORDER,
 ) -> torch.Tensor:
     if batch_size <= 0:
         raise ValueError("block forward batch size must be positive")
@@ -323,6 +346,40 @@ def _run_block_batched(
     compute_device = inputs.device if block_parameter is None else block_parameter.device
     destination = inputs.device if storage_device is None else torch.device(storage_device)
     result: torch.Tensor | None = None
+    if recorder is not NULL_RECORDER:
+        batches = iter(iter_device_batches((inputs,), batch_size, compute_device))
+        batch_count = (inputs.shape[0] + batch_size - 1) // batch_size
+        for batch_index in range(batch_count):
+            with recorder.phase("batch_stage"):
+                (input_batch,) = next(batches)
+                if inputs.device.type == "cpu" and compute_device.type == "cuda":
+                    recorder.add(
+                        "transfer.h2d_bytes",
+                        input_batch.numel() * input_batch.element_size(),
+                    )
+            start = batch_index * batch_size
+            end = min(start + batch_size, inputs.shape[0])
+            with recorder.phase("forward"):
+                output = adapter.run_block(block, input_batch, **metadata)
+            if result is None:
+                shape = (inputs.shape[0], *output.shape[1:])
+                result = (
+                    torch.empty(shape, device=destination, dtype=output.dtype, pin_memory=True)
+                    if destination.type == "cpu" and compute_device.type == "cuda"
+                    else torch.empty(shape, device=destination, dtype=output.dtype)
+                )
+            with recorder.phase("d2h" if destination.type == "cpu" and output.device.type == "cuda" else "store"):
+                result[start:end].copy_(output)
+                if destination.type == "cpu" and output.device.type == "cuda":
+                    recorder.add(
+                        "transfer.d2h_bytes",
+                        output.numel() * output.element_size(),
+                    )
+            recorder.add("forward.batches", 1)
+            recorder.add("forward.elements", output.numel())
+        if result is None:
+            raise ValueError("cannot run a block over empty inputs")
+        return result
     for batch_index, (input_batch,) in enumerate(iter_device_batches((inputs,), batch_size, compute_device)):
         start = batch_index * batch_size
         end = min(start + batch_size, inputs.shape[0])
@@ -1017,6 +1074,7 @@ def _run_resident_quantization_impl(
                     calibration_inputs,
                     metadata,
                     request.block_forward_batch_size,
+                    recorder=micro_recorder,
                 ).detach()
     else:
         raise ValueError(f"unsupported resident calibration method: {request.calibration_method}")
@@ -1197,6 +1255,7 @@ def _run_resident_quantization_impl(
                     metadata,
                     request.block_forward_batch_size,
                     "cpu",
+                    recorder=micro_recorder,
                 ).detach()
         block_output_stats = next(
             (
@@ -1224,6 +1283,7 @@ def _run_resident_quantization_impl(
                     block_output_importance,
                     metadata,
                     request.block_forward_batch_size,
+                    micro_recorder,
                 )
             )
         if request.device.startswith("cuda"):
@@ -1294,6 +1354,7 @@ def _run_resident_quantization_impl(
                                 block_output_importance,
                                 metadata,
                                 request.block_forward_batch_size,
+                                micro_recorder,
                             ),
                         )
                 continue
@@ -1453,6 +1514,7 @@ def _run_resident_quantization_impl(
                         block_output_importance,
                         metadata,
                         request.block_forward_batch_size,
+                        micro_recorder,
                     ),
                 )
         if request.post_block_refit_epochs > 0:
@@ -1520,6 +1582,7 @@ def _run_resident_quantization_impl(
                     block_output_importance,
                     metadata,
                     request.block_forward_batch_size,
+                    micro_recorder,
                 )
             )
         with _profile_block_phase(recorder, block_index, "propagate"):
@@ -1531,6 +1594,7 @@ def _run_resident_quantization_impl(
                     metadata,
                     request.block_forward_batch_size,
                     "cpu",
+                    recorder=micro_recorder,
                 ).detach()
         with _profile_block_phase(recorder, block_index, "finalize"):
             loss_recorder.record_final_frozen_pre_kd(

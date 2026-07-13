@@ -2,6 +2,8 @@ import pytest
 import torch
 from torch import nn
 
+from nanoquant.config.schema import ProfilingConfig, ProfilingLevel
+from nanoquant.infrastructure.profiling import Profiler
 from nanoquant.resident_quantization import _block_loss, _peak_device_memory_bytes, _run_block_batched
 
 
@@ -18,6 +20,47 @@ def test_block_forward_does_not_retain_autograd_graphs() -> None:
 
     assert not actual.requires_grad
     assert actual.grad_fn is None
+
+
+def test_block_forward_micro_profile_preserves_output_and_attributes_batches() -> None:
+    inputs = torch.randn(5, 4, generator=torch.Generator().manual_seed(44))
+    block = nn.Linear(4, 3, bias=False)
+    expected = _run_block_batched(_BlockAdapter(), block, inputs, {}, 2)
+    profiler = Profiler(ProfilingConfig(level=ProfilingLevel.MICRO), run_id="block-forward")
+
+    actual = _run_block_batched(_BlockAdapter(), block, inputs, {}, 2, recorder=profiler)
+
+    assert torch.equal(actual, expected)
+    payload = profiler.snapshot()
+    phases = {phase["path"]: phase for phase in payload["phases"]}
+    assert {"batch_stage", "forward", "store"} <= phases.keys()
+    assert phases["batch_stage"]["count"] == phases["forward"]["count"] == phases["store"]["count"] == 3
+    assert all(phase["failed_count"] == 0 for phase in phases.values())
+    counters = {counter["name"]: counter for counter in payload["counters"]}
+    assert counters["forward.batches"]["total"] == 3
+    assert counters["forward.elements"]["total"] == actual.numel()
+
+
+def test_block_loss_micro_profile_preserves_accumulation_and_attributes_work() -> None:
+    inputs = torch.randn(5, 4, generator=torch.Generator().manual_seed(45))
+    targets = torch.randn(5, 3, generator=torch.Generator().manual_seed(46))
+    importance = torch.linspace(0.5, 1.5, 3)
+    block = nn.Linear(4, 3, bias=False)
+    expected = _block_loss(_BlockAdapter(), block, inputs, targets, importance, {}, 2)
+    profiler = Profiler(ProfilingConfig(level=ProfilingLevel.MICRO), run_id="block-loss")
+
+    actual = _block_loss(_BlockAdapter(), block, inputs, targets, importance, {}, 2, profiler)
+
+    assert actual == expected
+    payload = profiler.snapshot()
+    phases = {phase["path"]: phase for phase in payload["phases"]}
+    assert {"batch_stage", "forward", "loss", "synchronize"} <= phases.keys()
+    assert phases["batch_stage"]["count"] == phases["forward"]["count"] == phases["loss"]["count"] == 3
+    assert phases["synchronize"]["count"] == 1
+    assert all(phase["failed_count"] == 0 for phase in phases.values())
+    counters = {counter["name"]: counter for counter in payload["counters"]}
+    assert counters["forward.batches"]["total"] == 3
+    assert counters["forward.elements"]["total"] == targets.numel()
 
 
 def test_peak_device_memory_uses_reserved_allocator_high_water(monkeypatch: pytest.MonkeyPatch) -> None:

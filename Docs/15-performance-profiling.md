@@ -520,6 +520,10 @@ PyTorch's allocated tensor high-water.
 Resident block results now also persist the process working-set high-water and the larger of CUDA allocated or
 allocator-reserved high-water. Earlier results recorded allocated memory only (and host block peaks as zero), which
 underreported active-run device pressure when `nvidia-smi` showed almost all 12 GiB reserved.
+Resident teacher/propagation forwards and block-loss snapshots now expose opt-in micro phases for batch staging,
+forward execution, output storage/D2H, weighted loss construction, and the final scalar synchronization, with
+H2D/D2H byte and batch/element counters. The default path retains a separate instrumentation-free loop, while
+profiled/control CPU tests preserve outputs and accumulated losses exactly.
 
 P0 and P2 are pure instrumentation and can land before parity sign-off (they are parity-neutral by C1 and
 cheap to review); P1 blocks on parity per the agreed sequencing, because baselines captured before parity
