@@ -29,29 +29,40 @@ def _tensor_hash(value: torch.Tensor) -> str:
 class LocalTensorStore:
     def __init__(self, artifacts: LocalArtifactStore) -> None:
         self.artifacts = artifacts
+        self._verified: dict[tuple[str, str, str], tuple[int, int]] = {}
 
     def put(self, artifact_type: str, tensors: dict[str, torch.Tensor]) -> dict[str, TensorRef]:
         if not tensors:
             raise ValueError("tensor artifact must not be empty")
         copied = {key: value.detach().cpu().clone().contiguous() for key, value in tensors.items()}
+        content_hashes = {key: _tensor_hash(value) for key, value in copied.items()}
         with self.artifacts.begin_write(artifact_type) as writer:
             save_file(copied, writer.path / "tensors.safetensors")
             descriptor = writer.commit()
         artifact = ArtifactRef(artifact_type, descriptor.artifact_id, descriptor.schema_version)
-        return {
+        references = {
             key: TensorRef(
                 artifact,
                 key,
                 TensorSpec(tuple(value.shape), str(value.dtype).removeprefix("torch.")),
-                _tensor_hash(value),
+                content_hashes[key],
             )
             for key, value in copied.items()
         }
+        path = self.artifacts.path_for(artifact.artifact_id) / "tensors.safetensors"
+        stat = path.stat()
+        signature = (stat.st_size, stat.st_mtime_ns)
+        for reference in references.values():
+            self._verified[(artifact.artifact_id, reference.key, reference.content_hash)] = signature
+        return references
 
     @contextmanager
     def read(self, reference: TensorRef, device: str = "cpu") -> Iterator[torch.Tensor]:
         self.artifacts.validate(reference.artifact.artifact_id)
         path = self.artifacts.path_for(reference.artifact.artifact_id) / "tensors.safetensors"
+        stat = path.stat()
+        signature = (stat.st_size, stat.st_mtime_ns)
+        verification_key = (reference.artifact.artifact_id, reference.key, reference.content_hash)
         with safe_open(path, framework="pt", device="cpu") as handle:
             if reference.key not in handle.keys():
                 raise KeyError(f"tensor key not in artifact: {reference.key}")
@@ -61,6 +72,7 @@ class LocalTensorStore:
                 or str(value.dtype).removeprefix("torch.") != reference.spec.dtype
             ):
                 raise OSError("ART001 tensor spec mismatch")
-            if _tensor_hash(value) != reference.content_hash:
+            if self._verified.get(verification_key) != signature and _tensor_hash(value) != reference.content_hash:
                 raise OSError("ART001 tensor content hash mismatch")
+            self._verified[verification_key] = signature
             yield value if device == "cpu" else value.to(device)

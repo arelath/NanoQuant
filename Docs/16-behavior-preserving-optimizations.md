@@ -62,6 +62,7 @@ in section 6 so nobody drifts into it by accident.
 | [ ] | 11 | Device-side KD loss accumulation + pinned teacher cache | S0/S1 | global KD | 1–3% of KD phase | ≤1% of full protocol | Medium | S |
 | [x] | 12 | Keep the JSONL event file handle open | S0 | events | ~3k opens/run | ~0.1% | High | S |
 | [x] | 13 | Device-side calibration threshold accumulation | S0 | calibration | ~20k small syncs | ~0.1–0.2% | High | S |
+| [x] | 14 | Cache verified tensor hashes by immutable file signature | S0 | tensor loads | repeated memory hashes removed | ~10–20 s | High | S |
 
 Combined outlook, avoiding double counting: roughly **8–15% on the factor+scale anchor** (items 4–6, 8–10)
 and **15–35% on the full protocol** once tuning and KD phases exist to optimize (items 1–3, 7, 11 dominate).
@@ -389,6 +390,21 @@ and order-insensitive here, so results are bit-identical.
 threshold maxima on each layer's device and update them without `.cpu()`. CUDA validation showed the
 device maximum, the former host maximum, and the resulting clipped importance arithmetic are bitwise
 equal; a CUDA two-phase calibration completed with finite input and output importance.
+
+### [x] 3.14 Cache tensor verification by immutable file signature (S0)
+
+**Where.** `LocalTensorStore.read` validates the artifact file and then recomputes the referenced tensor's
+SHA-256 on every read. Factor outputs are commonly reread by scale fitting, trainable rehydration, and
+freezing within the same process.
+
+**Done (2026-07-12).** `LocalTensorStore` now remembers a successful tensor verification by artifact ID,
+tensor key, declared content hash, file size, and nanosecond mtime. A store that just wrote the immutable
+artifact seeds this entry from the exact tensor hashes computed for its returned refs; a reopened store
+still hashes once. Every read continues to call artifact validation, and a changed file signature forces
+full validation and tensor rehashing. Hashing all seven tensors in a real 51.1 MB factor artifact took a
+median 20.2 ms; eliminating two to three repeats across 321 attempts bounds the saving at roughly
+10–20 seconds. Tests prove reopened-store behavior and that cached tensor verification does not bypass
+artifact corruption detection.
 
 ## 4. Smaller observations (bundle opportunistically)
 
