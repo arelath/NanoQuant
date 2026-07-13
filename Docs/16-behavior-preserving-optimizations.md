@@ -66,6 +66,7 @@ in section 6 so nobody drifts into it by accident.
 | [x] | 15 | Bypass STE signs for immutable binary KD factors | S0 | global KD | measured 24% per layer-step | full-run rerun pending | High | S |
 | [x] | 16 | Fuse ADMM factor promotion into FP32 additions | S0 | factorization | measured 2.1% per solve | ~5–6 s of anchor | High | XS |
 | [x] | 17 | Reuse ADMM symmetrization storage | S0 | factorization | measured 3.6% per solve | ~9–10 s of anchor | High | XS |
+| [x] | 18 | Lower-allocation binary sign extraction | S0 | factorization, factorized tuning | measured 1.21–1.92x per sign | ~3–12 s factorization, tuning rerun pending | High | XS |
 
 Combined outlook, avoiding double counting: roughly **8–15% on the factor+scale anchor** (items 4–6, 8–10)
 and **15–35% on the full protocol** once tuning phases exist to optimize (items 1–3, 7, and 15 dominate).
@@ -467,6 +468,21 @@ alternating benchmark, median time for 512 solves improved from 381.324 ms to 36
 0.0256 ms saving per solve. Across 800 iterations × two solves × 238 attempts, that projects to roughly
 **9–10 seconds on the anchor**, with no extra memory or fallback change.
 
+### [x] 3.18 Lower-allocation binary sign extraction (S0)
+
+**Where.** ADMM SVID projection and the factorized-tuning STE formed signs with
+`torch.where(value >= 0, ones_like(value), -ones_like(value))`. That creates two full-size branch tensors
+in addition to the comparison and result. The comparison already contains the complete binary decision.
+
+**Done (2026-07-13).** Both hot paths now convert the comparison to the source dtype and transform its
+0/1 result to -1/+1 in place. Tests cover NaN, infinities, signed zero, both FP32 and BF16 factorization,
+and the STE identity gradient. On an otherwise idle RTX 4000 Ada, 512 attention-shaped 1152×448 BF16
+signs improved from a median **25.645 ms to 21.199 ms (1.21x)**; 64 largest-MLP 6912×1056 signs improved
+from **11.908 ms to 6.214 ms (1.92x)**. ADMM calls this twice before its loop, twice in each of 800
+iterations, and twice during export. Applying the measured deltas across the anchor's 238 mixed-shape
+attempts projects to roughly **3–12 seconds** saved in factorization. Factorized tuning invokes the same
+STE twice per forward, so it should benefit as well; its run-level effect still needs the next full run.
+
 ## 4. Smaller observations (bundle opportunistically)
 
 - [x] `next(iter(model.parameters()), None)` previously executed per batch step in `tune`; the foreach
@@ -492,19 +508,9 @@ alternating benchmark, median time for 512 solves improved from 381.324 ms to 36
   for the largest 6912×1056 MLP factor, 32-call median time regressed from 27.724 ms to 31.760 ms
   (**0.87x**). Both produced bitwise-identical projections, but the side-stream/event design was not
   implemented because it degraded both relevant shapes.
-- **Deferred pending a clean GPU measurement (2026-07-13):** replacing `_sign`'s full-size `+1`/`-1`
-  branch tensors with boolean-to-bf16 in-place arithmetic preserved `+0`, `-0`, infinity, and NaN behavior
-  and passed the exact CPU recurrence suite. Initial CUDA samples appeared faster, but they coincided with
-  a separately launched full Gemma replacement-KD run and are therefore contaminated. The prototype was
-  removed rather than accepting untrustworthy timing; repeat it only after that process releases the GPU.
-- **Active-run regression to profile (2026-07-13):** the uncommitted replacement-KD path using the new
-  parity optimizer committed 256, 512, and 768 steps at 23:59:38, 00:09:46, and 00:19:48. Its two complete
-  epoch intervals are therefore **608 s and 602 s**. The prior run's matching 256→512 interval was 292 s,
-  and its median interval after the first checkpoint was about 174 s. Read-only snapshots during the new
-  run showed only 29–34% GPU utilization, 21–28% memory-controller utilization, and about 5.2 GiB VRAM,
-  so it is neither compute-saturated nor VRAM-bound. Do not accept the replacement path as a performance
-  improvement on current evidence. Its optimizer step and factorized forward/backward need isolated
-  profiling after the correctness run finishes; the concurrent implementation was left untouched.
+- **Resolved after a clean GPU measurement (2026-07-13):** the lower-allocation `_sign` candidate is now
+  implemented as item 3.18. Its uncontaminated speedups were 1.21x on the representative attention shape
+  and 1.92x on the largest MLP shape, with exact edge semantics and recurrence coverage.
 - `JsonlEventSink._read_last_sequence` parses the whole event log at construction — only matters for
   resumed runs with large logs; fine today, worth a tail-scan if event volume grows.
 - `_artifact_bytes` walks the whole artifact tree once at report time — keep an eye on it as artifact

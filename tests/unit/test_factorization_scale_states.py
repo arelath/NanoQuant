@@ -3,7 +3,7 @@ import torch
 from hypothesis import given
 from hypothesis import strategies as st
 
-from nanoquant.domain.factorization import SCHEDULES, factorize_admm
+from nanoquant.domain.factorization import SCHEDULES, _sign, factorize_admm
 from nanoquant.domain.metrics import weighted_squared_error
 from nanoquant.domain.models import ArtifactRef, AttemptSummary, BitCost
 from nanoquant.domain.outliers import residual_probe_scores, store_outlier_values
@@ -11,6 +11,16 @@ from nanoquant.domain.packing import pack_sign_bits, unpack_sign_bits
 from nanoquant.domain.planning import allocate_rank_budget, decide_retry
 from nanoquant.domain.scale_fit import fit_scales, reconstruct
 from nanoquant.domain.states import TrainableNanoQuantState, freeze_state
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_factor_sign_preserves_legacy_edge_semantics(dtype: torch.dtype) -> None:
+    values = torch.tensor(
+        [float("nan"), float("-inf"), -1.0, -0.0, 0.0, 1.0, float("inf")],
+        dtype=dtype,
+    )
+
+    assert torch.equal(_sign(values), torch.tensor([-1, -1, -1, 1, 1, 1, 1], dtype=dtype))
 
 
 def test_admm_is_deterministic_uses_generator_and_does_not_mutate_inputs() -> None:

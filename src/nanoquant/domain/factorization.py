@@ -59,7 +59,10 @@ SCHEDULES: dict[str, Callable[[float], float]] = {
 
 
 def _sign(value: torch.Tensor) -> torch.Tensor:
-    return torch.where(value >= 0, torch.ones_like(value), -torch.ones_like(value))
+    # The comparison already allocates the branch predicate. Convert that
+    # result in place instead of allocating two full-size +/-1 branch tensors
+    # for torch.where; NaN and signed-zero behavior remains identical.
+    return (value >= 0).to(dtype=value.dtype).mul_(2).sub_(1)
 
 
 def _power_iteration(

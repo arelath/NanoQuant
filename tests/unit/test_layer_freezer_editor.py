@@ -11,6 +11,7 @@ from nanoquant.application.layers import (
     FrozenReferenceLinear,
     LayerFreezer,
     TrainableFactorizedLinear,
+    _SignSTE,
     freeze_block_auxiliary_parameters,
     restore_block_auxiliary_parameters,
 )
@@ -26,6 +27,19 @@ class Block(nn.Module):
 
     def forward(self, value: torch.Tensor) -> torch.Tensor:
         return self.mlp["up_proj"](value)
+
+
+def test_sign_ste_preserves_legacy_edges_and_identity_gradient() -> None:
+    values = torch.tensor(
+        [float("nan"), float("-inf"), -1.0, -0.0, 0.0, 1.0, float("inf")],
+        requires_grad=True,
+    )
+
+    signed = _SignSTE.apply(values)
+    signed.sum().backward()
+
+    assert torch.equal(signed, torch.tensor([-1.0, -1.0, -1.0, 1.0, 1.0, 1.0, 1.0]))
+    assert torch.equal(values.grad, torch.ones_like(values))
 
 
 def test_freezer_persists_immutable_state_and_editor_installs_explicitly(tmp_path: Path) -> None:

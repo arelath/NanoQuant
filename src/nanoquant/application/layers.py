@@ -23,7 +23,7 @@ def _mask_outlier_columns(scale_pre: torch.Tensor, indices: torch.Tensor | None)
 class _SignSTE(torch.autograd.Function):
     @staticmethod
     def forward(ctx: object, value: torch.Tensor) -> torch.Tensor:
-        return torch.where(value >= 0, torch.ones_like(value), -torch.ones_like(value))
+        return (value >= 0).to(dtype=value.dtype).mul_(2).sub_(1)
 
     @staticmethod
     def backward(ctx: object, gradient: torch.Tensor) -> tuple[torch.Tensor]:
