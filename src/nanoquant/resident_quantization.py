@@ -246,6 +246,14 @@ def _weighted_mse(prediction: torch.Tensor, target: torch.Tensor, importance: to
     return float(total / prediction.numel())
 
 
+def _self_reference_weighted_mse(value: torch.Tensor, importance: torch.Tensor) -> float:
+    # x - x == 0.0 for every finite IEEE-754 value, so the weighted MSE of a tensor
+    # against itself is always exactly 0.0 unless it contains non-finite entries.
+    if bool(torch.isfinite(value).all()):
+        return 0.0
+    return _weighted_mse(value, value, importance)
+
+
 def _block_loss(
     adapter: Any,
     block: nn.Module,
@@ -257,6 +265,7 @@ def _block_loss(
 ) -> float:
     block_device = next(iter(block.parameters()), None)
     device = inputs.device if block_device is None else block_device.device
+    weights = output_importance.to(device=device, dtype=torch.float32)
     with torch.no_grad():
         squared_error = torch.zeros((), device=device)
         elements = 0
@@ -265,10 +274,7 @@ def _block_loss(
             input_batch = inputs[start:end].to(device, non_blocking=True)
             prediction = adapter.run_block(block, input_batch, **metadata)
             target = targets[start:end].to(device, non_blocking=True)
-            squared_error += (
-                (prediction.float() - target.float()).square()
-                * output_importance.to(device=device, dtype=torch.float32)
-            ).sum()
+            squared_error += ((prediction.float() - target.float()).square() * weights).sum()
             elements += target.numel()
         return float(squared_error / elements)
 
@@ -297,7 +303,7 @@ def _run_block_batched(
                 device=destination,
                 dtype=output.dtype,
             )
-        result[start:end].copy_(output.to(destination))
+        result[start:end].copy_(output)
     if result is None:
         raise ValueError("cannot run a block over empty inputs")
     return result
@@ -324,7 +330,7 @@ def _run_prefix_batched(
                     device=destination,
                     dtype=output.dtype,
                 )
-            result[start:end].copy_(output.to(destination))
+            result[start:end].copy_(output)
     if result is None:
         raise ValueError("cannot run a prefix over empty tokens")
     return result
@@ -1095,7 +1101,7 @@ def _run_resident_quantization(request: ResidentQuantizationRequest) -> Resident
         with tensors.read(block_output_stats.output_importance, request.device) as value:
             block_output_importance = value.clone()
         recorder = BlockLossRecorder()
-        recorder.record_source_reference(_weighted_mse(teacher_outputs, teacher_outputs, block_output_importance))
+        recorder.record_source_reference(_self_reference_weighted_mse(teacher_outputs, block_output_importance))
         recorder.record_block_entry(
             0.0
             if deferred_slice
@@ -1518,6 +1524,7 @@ def _run_resident_quantization(request: ResidentQuantizationRequest) -> Resident
     report = ArtifactRef("resident-quantization-report", descriptor.artifact_id, descriptor.schema_version)
     artifact_bytes = _artifact_bytes(artifacts.root)
     executor.release()
+    events.close()
     return ResidentQuantizationResult(
         inventory,
         plan,
@@ -1709,6 +1716,7 @@ def _run_resident_factorization_slice(request: ResidentQuantizationRequest) -> R
         )
     finally:
         executor.release()
+        events.close()
 
 
 def run_resident_factorization_slice(request: ResidentQuantizationRequest) -> ResidentFactorizationSliceResult:
