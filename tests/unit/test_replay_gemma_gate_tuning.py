@@ -9,6 +9,7 @@ from tools.replay_gemma_gate_tuning import (
     _acquire_or_wait,
     _comparison,
     _legacy_initial,
+    _refit_state,
     _rewrite_initial,
     _rewrite_pre_scale_fit,
 )
@@ -83,3 +84,30 @@ def test_acquire_or_wait_retries_without_bypassing_lease(monkeypatch) -> None:  
 
     assert attempts == 2
     assert sleeps == [2.0]
+
+
+def test_refit_state_zeros_salient_columns_and_preserves_side_path() -> None:
+    state = {
+        "left": torch.tensor([[1.0], [-1.0]]),
+        "right": torch.tensor([[1.0, 1.0]]),
+        "scale_pre": torch.ones(2),
+        "scale_mid": torch.ones(1),
+        "scale_post": torch.ones(2),
+        "outlier_indices": torch.tensor([1]),
+        "outlier_values": torch.tensor([[3.0], [4.0]]),
+    }
+    target = torch.tensor([[2.0, 3.0], [-2.0, 4.0]])
+
+    refitted, result = _refit_state(
+        state,
+        target,
+        torch.ones(2),
+        torch.ones(2),
+        alternating_passes=2,
+    )
+
+    assert result.accepted is True
+    assert result.after_error <= result.before_error
+    assert refitted["scale_pre"][1] == 0
+    assert torch.equal(refitted["outlier_indices"], state["outlier_indices"])
+    assert torch.equal(refitted["outlier_values"], state["outlier_values"])

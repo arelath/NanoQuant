@@ -19,6 +19,7 @@ from nanoquant.application.layers import BlockEditor, TrainableFactorizedLinear
 from nanoquant.application.prefix_capture import capture_prefix_invocations
 from nanoquant.application.tuning import TuningRequest, tune_factorized
 from nanoquant.domain.models import ArtifactRef
+from nanoquant.domain.scale_fit import MaterializedScaleFitResult, fit_scales
 from nanoquant.infrastructure.device_lease import DeviceLeaseError, acquire_device_lease
 from nanoquant.infrastructure.hf_calibration_dataset import load_pinned_calibration
 from nanoquant.infrastructure.model_adapters import adapter_for_config
@@ -96,6 +97,41 @@ def _rewrite_pre_scale_fit(factor_path: Path, frozen_path: Path) -> dict[str, to
     }
 
 
+def _refit_state(
+    state: dict[str, torch.Tensor],
+    target_weight: torch.Tensor,
+    input_importance: torch.Tensor,
+    output_importance: torch.Tensor,
+    alternating_passes: int,
+) -> tuple[dict[str, torch.Tensor], MaterializedScaleFitResult]:
+    """Refit a retained factorization against its residual-weight objective."""
+    residual = target_weight.detach().float().clone()
+    device_state = {key: value.to(residual.device) for key, value in state.items()}
+    protected = device_state["outlier_indices"].long()
+    residual[:, protected] = 0
+    fitted = fit_scales(
+        residual,
+        device_state["left"],
+        device_state["right"],
+        device_state["scale_pre"],
+        device_state["scale_mid"],
+        device_state["scale_post"],
+        input_importance.to(residual.device),
+        output_importance.to(residual.device),
+        alternating_passes=alternating_passes,
+        protected_columns=protected,
+    )
+    refitted = dict(device_state)
+    refitted.update(
+        {
+            "scale_pre": fitted.scale_pre,
+            "scale_mid": fitted.scale_mid,
+            "scale_post": fitted.scale_post,
+        }
+    )
+    return refitted, fitted
+
+
 def _module(state: dict[str, torch.Tensor], device: str, dtype: torch.dtype) -> TrainableFactorizedLinear:
     return TrainableFactorizedLinear(
         state["left"],
@@ -134,8 +170,8 @@ def _weighted_weight_metrics(
 def _comparison(left: dict[str, torch.Tensor], right: dict[str, torch.Tensor]) -> dict[str, object]:
     result: dict[str, object] = {}
     for key in ("left", "right", "scale_pre", "scale_mid", "scale_post", "outlier_values"):
-        a = left[key].float().reshape(-1)
-        b = right[key].float().reshape(-1)
+        a = left[key].detach().float().cpu().reshape(-1)
+        b = right[key].detach().float().cpu().reshape(-1)
         if key in {"left", "right"}:
             a = torch.where(a >= 0, 1.0, -1.0)
             b = torch.where(b >= 0, 1.0, -1.0)
@@ -146,7 +182,9 @@ def _comparison(left: dict[str, torch.Tensor], right: dict[str, torch.Tensor]) -
             "maximum_absolute_difference": float((a - b).abs().max()),
             "relative_l2_difference": float((a - b).norm() / b.norm().clamp_min(1e-12)),
         }
-    result["outlier_indices_exact"] = bool(torch.equal(left["outlier_indices"].long(), right["outlier_indices"].long()))
+    result["outlier_indices_exact"] = bool(
+        torch.equal(left["outlier_indices"].long().cpu(), right["outlier_indices"].long().cpu())
+    )
     return result
 
 
@@ -179,6 +217,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--rewrite-frozen", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--epochs", default="8,32")
+    parser.add_argument(
+        "--ls-scale-fit-passes",
+        default="0,1,2,4,8",
+        help="comma-separated alternating-pass counts for the pre-tuning LS sweep",
+    )
     parser.add_argument("--samples", type=int, default=256)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--microbatch-size", type=int, default=8)
@@ -198,6 +241,11 @@ def main() -> None:
     epochs = tuple(int(value.strip()) for value in args.epochs.split(",") if value.strip())
     if not epochs or any(value <= 0 for value in epochs):
         raise ValueError("epochs must contain positive integers")
+    ls_scale_fit_passes = tuple(
+        int(value.strip()) for value in args.ls_scale_fit_passes.split(",") if value.strip()
+    )
+    if not ls_scale_fit_passes or any(value < 0 for value in ls_scale_fit_passes):
+        raise ValueError("ls-scale-fit-passes must contain non-negative integers")
     legacy = _legacy_initial(args.legacy_initial)
     rewrite = _rewrite_initial(args.rewrite_factor, args.rewrite_scales, args.rewrite_frozen)
     rewrite_pre_scale_fit = _rewrite_pre_scale_fit(args.rewrite_factor, args.rewrite_frozen)
@@ -227,6 +275,7 @@ def main() -> None:
         "model_revision": MODEL_REVISION,
         "samples": args.samples,
         "epochs": list(epochs),
+        "ls_scale_fit_passes": list(ls_scale_fit_passes),
         "initial_state_comparison": _comparison(legacy, rewrite),
         "runs": [],
     }
@@ -286,6 +335,47 @@ def main() -> None:
                 / pre_fit_metrics["weighted_error"],
             }
             del pre_fit_module, post_fit_module
+            ls_scale_fit_sweep: list[dict[str, object]] = []
+            for pass_count in ls_scale_fit_passes:
+                refitted_state, fitted = _refit_state(
+                    rewrite_pre_scale_fit,
+                    source_weight,
+                    input_importance.to(args.device),
+                    gate_output_importance.to(args.device),
+                    pass_count,
+                )
+                block = adapter.load_block(source, inventory.blocks[0].block, args.device)
+                block.eval()
+                refitted_module = _module(refitted_state, args.device, inputs.dtype)
+                BlockEditor().install_trainable_layer(block, GATE_PATH, refitted_module)
+                row: dict[str, object] = {
+                    "alternating_passes": pass_count,
+                    "accepted": fitted.accepted,
+                    "rollback_reason": fitted.rollback_reason,
+                    "residual_weighted_error_before": fitted.before_error,
+                    "residual_weighted_error_after": fitted.after_error,
+                    "full_weight": _weighted_weight_metrics(
+                        source_weight,
+                        refitted_module,
+                        input_importance.to(args.device),
+                        gate_output_importance.to(args.device),
+                    ),
+                    "block_loss": _block_loss(
+                        adapter,
+                        block,
+                        inputs,
+                        targets,
+                        block_output_importance,
+                        metadata,
+                        args.block_forward_batch_size,
+                    ),
+                    "persisted_rewrite_scale_comparison": _comparison(rewrite, refitted_state),
+                }
+                ls_scale_fit_sweep.append(row)
+                print(json.dumps({"ls_scale_fit": row}, indent=2, sort_keys=True))
+                del block, refitted_module, refitted_state
+            payload["ls_scale_fit_sweep"] = ls_scale_fit_sweep
+            args.output.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
             for name, state in (("legacy", legacy), ("rewrite", rewrite)):
                 for epoch_count in epochs:
                     if args.device.startswith("cuda"):
