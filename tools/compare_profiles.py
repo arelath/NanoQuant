@@ -34,7 +34,7 @@ class LoadedProfile:
 def load_profile(path: str | Path) -> LoadedProfile:
     source = Path(path)
     payload: Any = json.loads(source.read_text(encoding="utf-8"))
-    if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+    if not isinstance(payload, dict) or payload.get("schema_version") not in {1, 2}:
         raise ValueError(f"unsupported profile schema: {source}")
     environment = payload.get("environment")
     coverage = payload.get("coverage")

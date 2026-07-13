@@ -21,9 +21,10 @@ import torch
 
 from nanoquant.config.schema import ProfilingConfig, ProfilingLevel
 from nanoquant.domain.profiling import NULL_RECORDER, PhaseRecorder
+from nanoquant.infrastructure.resource_usage import process_memory_snapshot
 from nanoquant.ports.event_sink import EventSink
 
-_PROFILE_SCHEMA_VERSION = 1
+_PROFILE_SCHEMA_VERSION = 2
 _MAX_MARKS = 256
 _ATTRIBUTE_TYPES = (str, int, float, bool, type(None))
 
@@ -70,6 +71,39 @@ class _GroupAggregate:
 
 
 @dataclass(slots=True)
+class _MemoryMetricAggregate:
+    count: int = 0
+    first: int = 0
+    last: int = 0
+    minimum: int = 0
+    maximum: int = 0
+    positive_delta: int = 0
+
+    def record(self, started: int, ended: int) -> None:
+        if self.count == 0:
+            self.first = started
+            self.minimum = min(started, ended)
+            self.maximum = max(started, ended)
+        else:
+            self.minimum = min(self.minimum, started, ended)
+            self.maximum = max(self.maximum, started, ended)
+        self.count += 1
+        self.last = ended
+        self.positive_delta += max(0, ended - started)
+
+    def payload(self) -> dict[str, int]:
+        return {
+            "count": self.count,
+            "first": self.first,
+            "last": self.last,
+            "minimum": self.minimum,
+            "maximum": self.maximum,
+            "net_change": self.last - self.first,
+            "positive_delta": self.positive_delta,
+        }
+
+
+@dataclass(slots=True)
 class _PhaseAggregate:
     sample_limit: int
     count: int = 0
@@ -82,6 +116,7 @@ class _PhaseAggregate:
     self_samples: list[float] = field(default_factory=list)
     cuda_samples: list[float] = field(default_factory=list)
     groups: dict[str, _GroupAggregate] = field(default_factory=dict)
+    memory: dict[str, _MemoryMetricAggregate] = field(default_factory=dict)
 
     def record(self, elapsed: float, self_seconds: float, attributes: Mapping[str, object], failed: bool) -> None:
         self.count += 1
@@ -105,6 +140,10 @@ class _PhaseAggregate:
     def record_cuda(self, elapsed: float) -> None:
         self.cuda_samples.append(elapsed)
 
+    def record_memory(self, started: Mapping[str, int], ended: Mapping[str, int]) -> None:
+        for metric in started.keys() & ended.keys():
+            self.memory.setdefault(metric, _MemoryMetricAggregate()).record(started[metric], ended[metric])
+
     def payload(self, path: str) -> dict[str, object]:
         cuda_sample_count = len(self.cuda_samples)
         cuda_seconds = 0.0 if cuda_sample_count == 0 else sum(self.cuda_samples) * self.count / cuda_sample_count
@@ -126,6 +165,7 @@ class _PhaseAggregate:
             "cuda_p90": _percentile(self.cuda_samples, 0.90),
             "max": self.maximum,
             "groups": {name: group.payload() for name, group in sorted(self.groups.items())},
+            "memory": {name: metric.payload() for name, metric in sorted(self.memory.items())},
         }
 
 
@@ -159,6 +199,7 @@ class _Frame:
     span_id: str | None
     parent_span_id: str | None
     cuda_start: _CudaEvent | None = None
+    memory_start: dict[str, int] | None = None
     child_seconds: float = 0.0
 
 
@@ -170,6 +211,33 @@ class _CudaEvent(Protocol):
 
 def _torch_cuda_event() -> _CudaEvent:
     return cast(_CudaEvent, torch.cuda.Event(enable_timing=True))  # type: ignore[no-untyped-call]
+
+
+def _runtime_memory_sample() -> dict[str, int]:
+    process = process_memory_snapshot()
+    sample = {
+        "host.working_set_bytes": process.working_set_bytes,
+        "host.peak_working_set_bytes": process.peak_working_set_bytes,
+        "host.private_bytes": process.private_bytes,
+        "host.peak_private_bytes": process.peak_private_bytes,
+    }
+    if bool(getattr(torch.cuda, "_initialized", False)):
+        stats = torch.cuda.memory_stats()
+        free_bytes, total_bytes = torch.cuda.mem_get_info()
+        sample.update(
+            {
+                "cuda.allocated_bytes": int(stats.get("allocated_bytes.all.current", 0)),
+                "cuda.reserved_bytes": int(stats.get("reserved_bytes.all.current", 0)),
+                "cuda.peak_allocated_bytes": int(stats.get("allocated_bytes.all.peak", 0)),
+                "cuda.peak_reserved_bytes": int(stats.get("reserved_bytes.all.peak", 0)),
+                "cuda.device_free_bytes": int(free_bytes),
+                "cuda.device_used_bytes": int(total_bytes - free_bytes),
+                "cuda.device_total_bytes": int(total_bytes),
+                "cuda.allocation_count": int(stats.get("allocation.all.allocated", 0)),
+                "cuda.free_count": int(stats.get("allocation.all.freed", 0)),
+            }
+        )
+    return sample
 
 
 @dataclass(frozen=True, slots=True)
@@ -216,6 +284,7 @@ class Profiler:
         clock: Callable[[], float] = time.perf_counter,
         cuda_event_factory: Callable[[], _CudaEvent] | None = None,
         cuda_synchronize: Callable[[], None] | None = None,
+        memory_sampler: Callable[[], Mapping[str, int]] | None = None,
     ) -> None:
         if config.level is ProfilingLevel.OFF:
             raise ValueError("disabled profiling must use NULL_RECORDER")
@@ -253,6 +322,8 @@ class Profiler:
         self._pending_cuda_samples: list[_PendingCudaSample] = []
         self._cuda_resolution_error: str | None = None
         self._cuda_resolved = False
+        self._memory_sampler = memory_sampler or _runtime_memory_sample
+        self._memory_error: str | None = None
 
     def _now(self) -> float:
         return float(self._clock())
@@ -275,6 +346,15 @@ class Profiler:
         self._validate_name(name, "phase")
         _validate_attributes(attributes)
         return _MeasuredPhase(self, name, dict(attributes))
+
+    def _sample_memory(self) -> dict[str, int] | None:
+        if not self.config.memory_counters or self._memory_error is not None:
+            return None
+        try:
+            return {name: int(value) for name, value in self._memory_sampler().items()}
+        except Exception as error:  # Profiling must not replace a pipeline result or exception.
+            self._memory_error = f"{type(error).__name__}: {error}"
+            return None
 
     def _enter(self, name: str, attributes: dict[str, object]) -> _Frame:
         overhead_started = self._now()
@@ -308,7 +388,8 @@ class Profiler:
                 path=path,
                 **attributes,
             )
-        frame = _Frame(path, self._now(), attributes, span_id, parent_span_id, cuda_start)
+        memory_start = self._sample_memory()
+        frame = _Frame(path, self._now(), attributes, span_id, parent_span_id, cuda_start, memory_start)
         self._stack.append(frame)
         self._recorder_seconds += self._now() - overhead_started
         return frame
@@ -323,6 +404,7 @@ class Profiler:
                 self._cuda_resolution_error = f"{type(cuda_error).__name__}: {cuda_error}"
         ended = self._now()
         overhead_started = ended
+        memory_end = self._sample_memory()
         self._check_thread()
         if not self._stack or self._stack[-1] is not frame:
             raise RuntimeError("profiling phases must exit in stack order")
@@ -331,6 +413,8 @@ class Profiler:
         self_seconds = max(0.0, elapsed - frame.child_seconds)
         aggregate = self._phases.setdefault(frame.path, _PhaseAggregate(self.config.raw_samples_per_phase))
         aggregate.record(elapsed, self_seconds, frame.attributes, error is not None)
+        if frame.memory_start is not None and memory_end is not None:
+            aggregate.record_memory(frame.memory_start, memory_end)
         if self._stack:
             self._stack[-1].child_seconds += elapsed
         else:
@@ -434,6 +518,14 @@ class Profiler:
                     "fraction": coverage,
                 }
             )
+        if self._memory_error is not None:
+            warnings.append(
+                {
+                    "code": "PERF004",
+                    "message": "memory counters could not be sampled",
+                    "error": self._memory_error,
+                }
+            )
         recorder_budget = 0.005 if self.config.level is ProfilingLevel.MACRO else 0.05
         if recorder_fraction > recorder_budget:
             warnings.append(
@@ -470,6 +562,10 @@ class Profiler:
                 "enabled": self.config.cuda_timing,
                 "sample_every": self.config.cuda_sample_every,
                 "resolved": self.config.cuda_timing and self._cuda_resolution_error is None,
+            },
+            "memory_counters": {
+                "enabled": self.config.memory_counters,
+                "available": self.config.memory_counters and self._memory_error is None,
             },
             "warnings": warnings,
             "phases": [aggregate.payload(path) for path, aggregate in sorted(self._phases.items())],
@@ -573,6 +669,25 @@ class ProfileWriter:
                 f"{float(phase['cuda_seconds']):.6f} | {phase['cuda_sample_count']} | "
                 f"{float(phase['p50']):.6f} | {float(phase['p90']):.6f} | {float(phase['max']):.6f} |"
             )
+        run_phase = next((phase for phase in phases if phase.get("path") == "run"), None)
+        run_memory = None if run_phase is None else run_phase.get("memory")
+        if isinstance(run_memory, Mapping) and run_memory:
+            lines.extend(
+                [
+                    "",
+                    "## Run memory counters",
+                    "",
+                    "| Metric | First | Last | Minimum | Maximum | Net change | Positive delta |",
+                    "|---|---:|---:|---:|---:|---:|---:|",
+                ]
+            )
+            for name, values in sorted(run_memory.items()):
+                if not isinstance(values, Mapping):
+                    continue
+                lines.append(
+                    f"| `{name}` | {values['first']} | {values['last']} | {values['minimum']} | "
+                    f"{values['maximum']} | {values['net_change']} | {values['positive_delta']} |"
+                )
         lines.append("")
         return "\n".join(lines)
 

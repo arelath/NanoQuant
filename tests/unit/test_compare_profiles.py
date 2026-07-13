@@ -13,12 +13,13 @@ def _write_profile(
     *,
     fingerprint: str = "same",
     coverage: float = 0.95,
+    schema_version: int = 1,
     phases: tuple[tuple[str, int, float, float], ...],
 ) -> None:
     path.write_text(
         json.dumps(
             {
-                "schema_version": 1,
+                "schema_version": schema_version,
                 "run_id": path.stem,
                 "environment": {"runtime_fingerprint": fingerprint},
                 "coverage": {"fraction": coverage, "wall_total_seconds": 10.0},
@@ -85,7 +86,11 @@ def test_environment_mismatch_is_informational_and_bad_schema_is_rejected(tmp_pa
     assert result["actionable_regression_count"] == 0
 
     bad = tmp_path / "bad.json"
-    bad.write_text('{"schema_version": 2}', encoding="utf-8")
+    version_two = tmp_path / "version-two.json"
+    _write_profile(version_two, schema_version=2, phases=(("run/a", 1, 1.0, 1.0),))
+    assert load_profile(version_two).phases["run/a"].wall_seconds == 1.0
+
+    bad.write_text('{"schema_version": 3}', encoding="utf-8")
     with pytest.raises(ValueError, match="schema"):
         load_profile(bad)
 

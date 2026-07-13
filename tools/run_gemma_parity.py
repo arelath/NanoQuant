@@ -83,6 +83,7 @@ def main() -> None:
     parser.add_argument("--profile-span-events", action="store_true")
     parser.add_argument("--profile-cuda-timing", action="store_true")
     parser.add_argument("--profile-cuda-sample-every", type=int, default=16)
+    parser.add_argument("--profile-memory-counters", action="store_true")
     args = parser.parse_args()
     nonfactorized_schedule = tuple(
         int(value.strip()) for value in args.nonfactorized_tuning_schedule.split(",") if value.strip()
@@ -167,6 +168,7 @@ def main() -> None:
             level=ProfilingLevel(args.profile),
             cuda_timing=args.profile_cuda_timing,
             cuda_sample_every=args.profile_cuda_sample_every,
+            memory_counters=args.profile_memory_counters,
             emit_span_events=args.profile_span_events,
         ),
     )

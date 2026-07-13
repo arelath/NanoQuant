@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import ctypes
 import importlib
+import mmap
 import os
 import platform
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, cast
 
 
@@ -24,8 +27,18 @@ class _ProcessMemoryCounters(ctypes.Structure):
     ]
 
 
-def peak_process_memory_bytes() -> int:
-    """Return peak resident/working-set bytes for the current process."""
+@dataclass(frozen=True, slots=True)
+class ProcessMemorySnapshot:
+    """Current and lifetime-high-water process memory counters."""
+
+    working_set_bytes: int
+    peak_working_set_bytes: int
+    private_bytes: int
+    peak_private_bytes: int
+
+
+def process_memory_snapshot() -> ProcessMemorySnapshot:
+    """Return non-synchronizing process memory counters when the platform exposes them."""
     if os.name == "nt":
         counters = _ProcessMemoryCounters()
         counters.cb = ctypes.sizeof(counters)
@@ -40,7 +53,25 @@ def peak_process_memory_bytes() -> int:
         process = kernel32.GetCurrentProcess()
         if not psapi.GetProcessMemoryInfo(process, ctypes.byref(counters), counters.cb):
             raise OSError(ctypes.get_last_error(), "GetProcessMemoryInfo failed")
-        return int(counters.PeakWorkingSetSize)
+        return ProcessMemorySnapshot(
+            int(counters.WorkingSetSize),
+            int(counters.PeakWorkingSetSize),
+            int(counters.PagefileUsage),
+            int(counters.PeakPagefileUsage),
+        )
     resource = cast(Any, importlib.import_module("resource"))
-    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    return int(peak if platform.system() == "Darwin" else peak * 1024)
+    raw_peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    peak = int(raw_peak if platform.system() == "Darwin" else raw_peak * 1024)
+    current = peak
+    if platform.system() == "Linux":
+        try:
+            fields = Path("/proc/self/statm").read_text(encoding="ascii").split()
+            current = int(fields[1]) * mmap.PAGESIZE
+        except (OSError, IndexError, ValueError):
+            current = peak
+    return ProcessMemorySnapshot(current, peak, 0, 0)
+
+
+def peak_process_memory_bytes() -> int:
+    """Return peak resident/working-set bytes for the current process."""
+    return process_memory_snapshot().peak_working_set_bytes

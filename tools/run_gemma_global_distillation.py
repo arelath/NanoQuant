@@ -40,6 +40,7 @@ def main() -> None:
     )
     parser.add_argument("--profile-cuda-timing", action="store_true")
     parser.add_argument("--profile-cuda-sample-every", type=int, default=16)
+    parser.add_argument("--profile-memory-counters", action="store_true")
     parser.add_argument(
         "--replace-global-tuning",
         action="store_true",
@@ -102,6 +103,7 @@ def main() -> None:
             level=ProfilingLevel(args.profile),
             cuda_timing=args.profile_cuda_timing,
             cuda_sample_every=args.profile_cuda_sample_every,
+            memory_counters=args.profile_memory_counters,
             emit_span_events=False,
         ),
     )

@@ -6,9 +6,11 @@ from pathlib import Path
 
 import pytest
 
+import nanoquant.infrastructure.profiling as profiling_module
 from nanoquant.config.schema import ProfilingConfig, ProfilingLevel
 from nanoquant.domain.profiling import NULL_RECORDER
 from nanoquant.infrastructure.profiling import Profiler, ProfileWriter, profiled_run
+from nanoquant.infrastructure.resource_usage import ProcessMemorySnapshot
 from nanoquant.ports.event_sink import Event
 
 
@@ -181,7 +183,7 @@ def test_writer_versions_per_process_artifacts_and_renders_summary(tmp_path: Pat
     assert second_json.name == "profile.2.json"
     assert second_markdown.name == "profile.2.md"
     payload = json.loads(first_json.read_text(encoding="utf-8"))
-    assert payload["schema_version"] == 1
+    assert payload["schema_version"] == 2
     assert payload["run_id"] == "write-test"
     assert payload["environment"]["runtime_fingerprint"].startswith("sha256:")
     summary = first_markdown.read_text(encoding="utf-8")
@@ -227,6 +229,104 @@ def test_micro_level_is_supported_and_trace_fails_explicitly() -> None:
     assert not events.events
     with pytest.raises(NotImplementedError, match="trace"):
         Profiler(ProfilingConfig(level=ProfilingLevel.TRACE), run_id="trace")
+
+
+def test_memory_counters_record_phase_boundaries_without_initializing_cuda() -> None:
+    samples = iter(
+        (
+            {"host.private_bytes": 100, "host.peak_private_bytes": 100},
+            {"host.private_bytes": 120, "host.peak_private_bytes": 120},
+            {"host.private_bytes": 110, "host.peak_private_bytes": 120},
+            {"host.private_bytes": 160, "host.peak_private_bytes": 160},
+        )
+    )
+    profiler = Profiler(
+        ProfilingConfig(memory_counters=True),
+        run_id="memory",
+        memory_sampler=lambda: next(samples),
+    )
+    with profiler.phase("run"):
+        with profiler.phase("work"):
+            pass
+
+    payload = profiler.snapshot()
+    phases = _phases(payload)
+    assert payload["memory_counters"] == {"enabled": True, "available": True}
+    assert phases["run"]["memory"]["host.private_bytes"] == {
+        "count": 1,
+        "first": 100,
+        "last": 160,
+        "minimum": 100,
+        "maximum": 160,
+        "net_change": 60,
+        "positive_delta": 60,
+    }
+    assert phases["run/work"]["memory"]["host.private_bytes"] == {
+        "count": 1,
+        "first": 120,
+        "last": 110,
+        "minimum": 110,
+        "maximum": 120,
+        "net_change": -10,
+        "positive_delta": 0,
+    }
+    summary = ProfileWriter.render_markdown(payload)
+    assert "## Run memory counters" in summary
+    assert "`host.private_bytes` | 100 | 160" in summary
+
+
+def test_runtime_memory_sample_separates_live_reserved_and_device_visible_cuda_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        profiling_module,
+        "process_memory_snapshot",
+        lambda: ProcessMemorySnapshot(10, 20, 30, 40),
+    )
+    monkeypatch.setattr(profiling_module.torch.cuda, "_initialized", True)
+    monkeypatch.setattr(
+        profiling_module.torch.cuda,
+        "memory_stats",
+        lambda: {
+            "allocated_bytes.all.current": 100,
+            "reserved_bytes.all.current": 180,
+            "allocated_bytes.all.peak": 200,
+            "reserved_bytes.all.peak": 240,
+            "allocation.all.allocated": 7,
+            "allocation.all.freed": 3,
+        },
+    )
+    monkeypatch.setattr(profiling_module.torch.cuda, "mem_get_info", lambda: (250, 1_000))
+
+    assert profiling_module._runtime_memory_sample() == {
+        "host.working_set_bytes": 10,
+        "host.peak_working_set_bytes": 20,
+        "host.private_bytes": 30,
+        "host.peak_private_bytes": 40,
+        "cuda.allocated_bytes": 100,
+        "cuda.reserved_bytes": 180,
+        "cuda.peak_allocated_bytes": 200,
+        "cuda.peak_reserved_bytes": 240,
+        "cuda.device_free_bytes": 250,
+        "cuda.device_used_bytes": 750,
+        "cuda.device_total_bytes": 1_000,
+        "cuda.allocation_count": 7,
+        "cuda.free_count": 3,
+    }
+
+
+def test_memory_counter_failure_is_diagnostic_only() -> None:
+    def fail() -> dict[str, int]:
+        raise OSError("unavailable")
+
+    profiler = Profiler(ProfilingConfig(memory_counters=True), run_id="memory-failure", memory_sampler=fail)
+    with profiler.phase("run"):
+        pass
+    payload = profiler.snapshot()
+
+    assert payload["memory_counters"] == {"enabled": True, "available": False}
+    assert any(warning["code"] == "PERF004" for warning in payload["warnings"])
+    assert _phases(payload)["run"]["memory"] == {}
 
 
 def test_cuda_timing_is_sampled_deferred_resolved_once_and_estimated() -> None:

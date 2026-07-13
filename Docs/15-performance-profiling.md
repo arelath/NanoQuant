@@ -204,9 +204,10 @@ This is the core micro-profiling subtlety and drives most of the design:
   `cuda_sample_every` (default 16) so only every Nth iteration carries events. Wall accumulation remains
   unsampled — `perf_counter` pairs and dict updates are ~1–2 µs and the outer loops run at iteration costs
   of milliseconds.
-- **Memory counters without sync.** At micro tier, phase boundaries snapshot
-  `torch.cuda.memory_stats()` deltas (host-side, no sync) for `allocated.peak` and allocator
-  alloc/free counts — allocator churn is a prime suspect for host-bound gaps.
+- **Memory counters without sync.** When explicitly enabled, phase boundaries snapshot current and peak host
+  working-set/private bytes plus `torch.cuda.memory_stats()` current/peak allocated and reserved bytes and allocator
+  alloc/free counts. Each phase reports first/last/minimum/maximum/net/positive deltas. This separates live tensor
+  growth from PyTorch/driver cache growth and Windows commit sawteeth without adding a device synchronization.
 - Streams: the pipeline is effectively single-stream today; event pairs assume the default stream. If the
   streaming executor introduces side streams, each phase records on the stream it was entered under (open
   question 4).
@@ -302,7 +303,7 @@ class ProfilingConfig:
   (`_resident_config_hash`) **excluded**, like other non-numerical toggles, so profiled and unprofiled runs
   share cache/commit identity — justified by the parity-safety test (section 15).
 - `tools/run_gemma_parity.py` gains `--profile {off,macro,micro,trace}`, `--profile-cuda-timing`,
-  `--profile-trace-block N`.
+  `--profile-memory-counters`, and `--profile-trace-block N`.
 - Environment override `NANOQUANT_PROFILE=micro` for quick use on existing runfiles without editing them
   (resolved in the composition root only, respecting the configuration-resolution rules).
 
@@ -314,7 +315,7 @@ Per process, written into the run output directory next to `events.jsonl`:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "run_id": "resident-quantization",
   "process_started": "2026-07-12T05:29:26Z",
   "level": "micro",
@@ -322,6 +323,7 @@ Per process, written into the run output directory next to `events.jsonl`:
                    "torch": "2.6.0", "python": "3.10.11", "power_mode": "...",
                    "runtime_fingerprint": "sha256:..." },
   "coverage": { "wall_total_seconds": 5231.4, "attributed_seconds": 4986.1, "fraction": 0.953 },
+  "memory_counters": { "enabled": true, "available": true },
   "phases": [
     { "path": "run/blocks/block/layer/factorize/attempt",
       "count": 616, "wall_seconds": 2410.8, "self_seconds": 31.2, "cuda_seconds": 2214.9,
@@ -509,6 +511,11 @@ Gemma launcher exposes CUDA timing and sampling controls. Fake-event tests prove
 single-resolution, and failure behavior without touching the active GPU; the real profiled-versus-unprofiled
 CUDA replay and overhead measurement remain pending device availability. Other micro paths and trace level
 remain incomplete; trace requests still fail explicitly rather than emitting partial data under that label.
+Opt-in memory counters now record host working set/private commit and CUDA allocated/reserved/current/high-water
+state at every phase boundary, together with allocator allocation/free deltas. Sampling is non-synchronizing,
+failures produce `PERF004`, and both pinned Gemma launchers expose the control. This directly distinguishes the
+active long-run host commit sawtooth from a monotonic live-memory leak and driver-visible VRAM reservations from
+PyTorch's allocated tensor high-water.
 
 P0 and P2 are pure instrumentation and can land before parity sign-off (they are parity-neutral by C1 and
 cheap to review); P1 blocks on parity per the agreed sequencing, because baselines captured before parity
