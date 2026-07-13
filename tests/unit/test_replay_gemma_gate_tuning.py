@@ -3,7 +3,10 @@ from pathlib import Path
 import torch
 from safetensors.torch import save_file
 
+import tools.replay_gemma_gate_tuning as replay
+from nanoquant.infrastructure.device_lease import DeviceLeaseError
 from tools.replay_gemma_gate_tuning import (
+    _acquire_or_wait,
     _comparison,
     _legacy_initial,
     _rewrite_initial,
@@ -50,3 +53,33 @@ def test_initial_state_loaders_map_legacy_and_rewrite_names(tmp_path: Path) -> N
     assert comparison["left"]["agreement"] == 1.0  # type: ignore[index]
     assert torch.equal(legacy["outlier_indices"], rewrite["outlier_indices"])
     assert torch.equal(rewrite_pre_fit["scale_mid"], scales["scale_mid"])
+
+
+def test_acquire_or_wait_retries_without_bypassing_lease(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    attempts = 0
+    sleeps: list[float] = []
+
+    class Lease:
+        def __enter__(self) -> None:
+            return None
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+    def acquire(_device: str) -> Lease:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise DeviceLeaseError("busy")
+        return Lease()
+
+    monotonic = iter((0.0, 1.0))
+    monkeypatch.setattr(replay, "acquire_device_lease", acquire)
+    monkeypatch.setattr(replay.time, "monotonic", lambda: next(monotonic))
+    monkeypatch.setattr(replay.time, "sleep", sleeps.append)
+
+    with _acquire_or_wait("cuda", 10.0, poll_seconds=2.0):
+        pass
+
+    assert attempts == 2
+    assert sleeps == [2.0]

@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import json
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, cast
 
@@ -17,7 +19,7 @@ from nanoquant.application.layers import BlockEditor, TrainableFactorizedLinear
 from nanoquant.application.prefix_capture import capture_prefix_invocations
 from nanoquant.application.tuning import TuningRequest, tune_factorized
 from nanoquant.domain.models import ArtifactRef
-from nanoquant.infrastructure.device_lease import acquire_device_lease
+from nanoquant.infrastructure.device_lease import DeviceLeaseError, acquire_device_lease
 from nanoquant.infrastructure.hf_calibration_dataset import load_pinned_calibration
 from nanoquant.infrastructure.model_adapters import adapter_for_config
 from nanoquant.infrastructure.safetensors_source import SafetensorsModelSource
@@ -148,6 +150,24 @@ def _comparison(left: dict[str, torch.Tensor], right: dict[str, torch.Tensor]) -
     return result
 
 
+@contextmanager
+def _acquire_or_wait(device: str, wait_seconds: float, poll_seconds: float = 30.0) -> Iterator[None]:
+    if wait_seconds < 0 or poll_seconds <= 0:
+        raise ValueError("device lease wait settings are invalid")
+    deadline = time.monotonic() + wait_seconds
+    while True:
+        try:
+            lease = acquire_device_lease(device)
+            break
+        except DeviceLeaseError:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise
+            time.sleep(min(poll_seconds, remaining))
+    with lease:
+        yield
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--snapshot", type=Path, required=True)
@@ -164,6 +184,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--microbatch-size", type=int, default=8)
     parser.add_argument("--block-forward-batch-size", type=int, default=4)
     parser.add_argument("--device", default="cuda")
+    parser.add_argument(
+        "--wait-for-device-seconds",
+        type=float,
+        default=0.0,
+        help="wait this long for the named device lease instead of failing immediately",
+    )
     return parser
 
 
@@ -205,7 +231,7 @@ def main() -> None:
         "runs": [],
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    with acquire_device_lease(args.device), _legacy_cuda_numerics():
+    with _acquire_or_wait(args.device, args.wait_for_device_seconds), _legacy_cuda_numerics():
         tokens = calibration.input_ids[: args.samples].to(args.device)
         model = cast(
             nn.Module,
