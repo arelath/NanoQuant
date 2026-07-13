@@ -14,6 +14,14 @@ from nanoquant.infrastructure.device_lease import (
 )
 
 
+def _base_python_environment() -> tuple[str, dict[str, str]]:
+    environment = os.environ.copy()
+    source_root = str(Path(__file__).parents[2] / "src")
+    existing = environment.get("PYTHONPATH")
+    environment["PYTHONPATH"] = source_root if not existing else os.pathsep.join((source_root, existing))
+    return str(getattr(sys, "_base_executable", sys.executable)), environment
+
+
 def test_device_lease_rejects_concurrent_owner_and_releases(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -57,7 +65,7 @@ def test_device_lease_rejects_owner_with_different_environment_roots(
     child_temp.mkdir()
     child_local_app_data = tmp_path / "child-local-app-data"
     child_local_app_data.mkdir()
-    child_environment = os.environ.copy()
+    child_python, child_environment = _base_python_environment()
     child_environment.update(
         {
             "TEMP": str(child_temp),
@@ -68,7 +76,7 @@ def test_device_lease_rejects_owner_with_different_environment_roots(
         }
     )
     child = subprocess.Popen(
-        [sys.executable, "-c", code],
+        [child_python, "-c", code],
         env=child_environment,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -94,8 +102,10 @@ def test_windows_cuda_lease_rejects_cross_process_owner() -> None:
         "print('ready', flush=True); "
         "time.sleep(30)"
     )
+    child_python, child_environment = _base_python_environment()
     child = subprocess.Popen(
-        [sys.executable, "-c", code],
+        [child_python, "-c", code],
+        env=child_environment,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
