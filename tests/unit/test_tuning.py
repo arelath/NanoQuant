@@ -1,12 +1,15 @@
+from contextlib import nullcontext
 from copy import deepcopy
 
 import pytest
 import torch
 from torch import nn
 
+import nanoquant.application.tuning as tuning_module
 from nanoquant.application.layers import TrainableFactorizedLinear
 from nanoquant.application.tuning import (
     TuningRequest,
+    _PinnedBatchStager,
     _release_cuda_cache_under_pressure,
     post_block_refit,
     tune_factorized,
@@ -40,6 +43,68 @@ class _DeviceProperties:
     total_memory = 100
 
 
+class _FakeEvent:
+    def __init__(self, name: str, calls: list[str]) -> None:
+        self.name = name
+        self.calls = calls
+
+    def synchronize(self) -> None:
+        self.calls.append(f"{self.name}.synchronize")
+
+    def record(self, _stream: object) -> None:
+        self.calls.append(f"{self.name}.record")
+
+
+class _FakeHostBuffer:
+    def __init__(self, name: str, calls: list[str]) -> None:
+        self.name = name
+        self.calls = calls
+
+    def __getitem__(self, _item: object) -> "_FakeHostBuffer":
+        return self
+
+
+class _FakeDeviceBuffer(_FakeHostBuffer):
+    def copy_(self, source: _FakeHostBuffer, *, non_blocking: bool) -> None:
+        assert non_blocking
+        self.calls.append(f"{self.name}.copy({source.name})")
+
+
+class _FakeStream:
+    def __init__(self, calls: list[str]) -> None:
+        self.calls = calls
+
+    def wait_event(self, event: _FakeEvent) -> None:
+        self.calls.append(f"copy.wait({event.name})")
+
+
+class _FakeSource:
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+
+class _FakeTrainingStager:
+    def __init__(self, inputs: torch.Tensor, targets: torch.Tensor) -> None:
+        self.inputs = inputs
+        self.targets = targets
+        self.consumed: list[int] = []
+        self.closed = False
+
+    def batches(self, indexes: tuple[torch.Tensor, ...]):  # type: ignore[no-untyped-def]
+        for position, selected in enumerate(indexes):
+            yield tuning_module._StagedTrainingBatch(
+                self.inputs[selected],
+                self.targets[selected],
+                position % 2,
+            )
+
+    def mark_consumed(self, slot: int) -> None:
+        self.consumed.append(slot)
+
+    def close(self) -> None:
+        self.closed = True
+
+
 @pytest.mark.parametrize(("reserved", "expected_calls"), [(79, 0), (80, 1)])
 def test_cuda_cache_release_is_gated_on_reserved_memory_pressure(
     monkeypatch: pytest.MonkeyPatch, reserved: int, expected_calls: int
@@ -57,6 +122,65 @@ def test_cuda_cache_release_is_gated_on_reserved_memory_pressure(
     _release_cuda_cache_under_pressure(torch.device("cuda"))
 
     assert calls == expected_calls
+
+
+def test_pinned_batch_stager_reuses_fixed_device_slot_after_compute_consumption(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    stager = object.__new__(_PinnedBatchStager)
+    stager.inputs = _FakeSource("input")  # type: ignore[assignment]
+    stager.targets = _FakeSource("target")  # type: ignore[assignment]
+    stager.input_buffers = (_FakeHostBuffer("input_host", calls),)  # type: ignore[assignment]
+    stager.target_buffers = (_FakeHostBuffer("target_host", calls),)  # type: ignore[assignment]
+    stager.device_input_buffers = (_FakeDeviceBuffer("input_device", calls),)  # type: ignore[assignment]
+    stager.device_target_buffers = (_FakeDeviceBuffer("target_device", calls),)  # type: ignore[assignment]
+    stager.device = torch.device("cuda")
+    stager.copy_stream = _FakeStream(calls)  # type: ignore[assignment]
+    stager.ready_events = (_FakeEvent("ready", calls),)  # type: ignore[assignment]
+    stager.consumed_events = (_FakeEvent("consumed", calls),)  # type: ignore[assignment]
+    stager.ready_recorded = [True]
+    stager.consumed_recorded = [True]
+    monkeypatch.setattr(torch.cuda, "stream", lambda _stream: nullcontext())
+    monkeypatch.setattr(
+        torch,
+        "index_select",
+        lambda source, _dim, _indexes, *, out: calls.append(f"{source.name}.index_select") or out,
+    )
+
+    stager._schedule(torch.tensor([0, 1]), 0)
+
+    assert calls == [
+        "ready.synchronize",
+        "input.index_select",
+        "target.index_select",
+        "copy.wait(consumed)",
+        "input_device.copy(input_host)",
+        "target_device.copy(target_host)",
+        "ready.record",
+    ]
+    assert stager.ready_recorded == [True]
+    assert stager.consumed_recorded == [False]
+
+
+def test_tuning_marks_each_staged_batch_consumed_and_closes_stager(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = Hybrid()
+    inputs = torch.randn(8, 3, generator=torch.Generator().manual_seed(40))
+    targets = torch.randn(8, 2, generator=torch.Generator().manual_seed(41))
+    stager = _FakeTrainingStager(inputs, targets)
+    monkeypatch.setattr(tuning_module, "_pinned_batch_stager", lambda *_args: stager)
+
+    tune_factorized(
+        model,
+        "quant",
+        TuningRequest(inputs, targets, 1, 4, 0.01, seed=42, microbatch_size=2),
+        _forward,
+    )
+
+    assert stager.consumed == [0, 1, 0, 1]
+    assert stager.closed is True
 
 
 def test_nonfactorized_tuning_is_independent_and_restores_best_state() -> None:

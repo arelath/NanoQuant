@@ -43,6 +43,13 @@ class _TrainingMicrobatch:
     finishes_step: bool
 
 
+@dataclass(frozen=True, slots=True)
+class _StagedTrainingBatch:
+    inputs: torch.Tensor
+    targets: torch.Tensor
+    slot: int | None
+
+
 class _PinnedBatchStager:
     def __init__(
         self,
@@ -54,6 +61,8 @@ class _PinnedBatchStager:
         self.inputs = inputs
         self.targets = targets
         self.device = device
+        self.copy_stream = torch.cuda.Stream(device=device)  # type: ignore[no-untyped-call]
+        self.compute_stream = torch.cuda.current_stream(device)
         self.input_buffers = tuple(
             torch.empty(
                 (maximum_batch_size, *inputs.shape[1:]),
@@ -72,48 +81,86 @@ class _PinnedBatchStager:
             )
             for _ in range(2)
         )
-        self.copy_stream = torch.cuda.Stream(device=device)  # type: ignore[no-untyped-call]
-        self.compute_stream = torch.cuda.current_stream(device)
-        self.events = tuple(torch.cuda.Event() for _ in range(2))  # type: ignore[no-untyped-call]
-        self.recorded = [False, False]
+        self.device_input_buffers = tuple(
+            torch.empty(
+                (maximum_batch_size, *inputs.shape[1:]),
+                dtype=inputs.dtype,
+                device=device,
+            )
+            for _ in range(2)
+        )
+        self.device_target_buffers = tuple(
+            torch.empty(
+                (maximum_batch_size, *targets.shape[1:]),
+                dtype=targets.dtype,
+                device=device,
+            )
+            for _ in range(2)
+        )
+        self.ready_events = tuple(torch.cuda.Event() for _ in range(2))  # type: ignore[no-untyped-call]
+        self.consumed_events = tuple(torch.cuda.Event() for _ in range(2))  # type: ignore[no-untyped-call]
+        self.ready_recorded = [False, False]
+        self.consumed_recorded = [False, False]
 
     def _schedule(self, indexes: torch.Tensor, slot: int) -> tuple[torch.Tensor, torch.Tensor, torch.cuda.Event]:
-        if self.recorded[slot]:
-            self.events[slot].synchronize()
+        if self.ready_recorded[slot]:
+            # The previous H2D copy has to stop reading this pinned host slot
+            # before index_select refills it. This event normally completed while
+            # the prior batch was computing and does not wait for compute itself.
+            self.ready_events[slot].synchronize()
         count = indexes.numel()
         input_host = self.input_buffers[slot][:count]
         target_host = self.target_buffers[slot][:count]
         torch.index_select(self.inputs, 0, indexes, out=input_host)
         torch.index_select(self.targets, 0, indexes, out=target_host)
         with torch.cuda.stream(self.copy_stream):
-            input_batch = input_host.to(self.device, non_blocking=True)
-            target_batch = target_host.to(self.device, non_blocking=True)
-            self.events[slot].record(self.copy_stream)
-        self.recorded[slot] = True
-        return input_batch, target_batch, self.events[slot]
+            # Reusing fixed device slots avoids creating one allocator block per
+            # queued microbatch. The copy stream waits on device consumption
+            # without blocking the host, then overlaps this copy with compute in
+            # the other slot.
+            if self.consumed_recorded[slot]:
+                self.copy_stream.wait_event(self.consumed_events[slot])
+            input_batch = self.device_input_buffers[slot][:count]
+            target_batch = self.device_target_buffers[slot][:count]
+            input_batch.copy_(input_host, non_blocking=True)
+            target_batch.copy_(target_host, non_blocking=True)
+            self.ready_events[slot].record(self.copy_stream)
+        self.ready_recorded[slot] = True
+        self.consumed_recorded[slot] = False
+        return input_batch, target_batch, self.ready_events[slot]
 
-    def batches(self, indexes: tuple[torch.Tensor, ...]) -> Iterator[tuple[torch.Tensor, torch.Tensor]]:
+    def batches(self, indexes: tuple[torch.Tensor, ...]) -> Iterator[_StagedTrainingBatch]:
         if not indexes:
             return
-        current = self._schedule(indexes[0], 0)
+        current = (*self._schedule(indexes[0], 0), 0)
         next_slot = 1
         for next_index in range(1, len(indexes) + 1):
-            input_batch, target_batch, ready = current
+            input_batch, target_batch, ready, slot = current
             self.compute_stream.wait_event(ready)
             input_batch.record_stream(self.compute_stream)
             target_batch.record_stream(self.compute_stream)
-            following = self._schedule(indexes[next_index], next_slot) if next_index < len(indexes) else None
-            next_slot = (next_slot + 1) % len(self.events)
-            yield input_batch, target_batch
+            following = (
+                (*self._schedule(indexes[next_index], next_slot), next_slot)
+                if next_index < len(indexes)
+                else None
+            )
+            next_slot = (next_slot + 1) % len(self.ready_events)
+            yield _StagedTrainingBatch(input_batch, target_batch, slot)
             if following is None:
                 break
             current = following
 
+    def mark_consumed(self, slot: int) -> None:
+        self.consumed_events[slot].record(self.compute_stream)
+        self.consumed_recorded[slot] = True
+
     def close(self) -> None:
         self.compute_stream.wait_stream(self.copy_stream)
-        for event, recorded in zip(self.events, self.recorded, strict=True):
-            if recorded:
-                event.synchronize()
+        # The final yielded batch is normally marked consumed explicitly. A
+        # synchronization here also closes the exceptional path where a caller
+        # exits between yield and mark_consumed, and is free on the normal tuning
+        # path because final loss materialization has already synchronized.
+        self.compute_stream.synchronize()
 
 
 def _pinned_batch_stager(
@@ -297,11 +344,12 @@ def tune(
             with recorder.phase("epoch", epoch=epoch):
                 order = torch.randperm(request.inputs.shape[0], generator=generator)
                 microbatches = _training_microbatches(order, request.batch_size, request.microbatch_size)
-                device_batches: Iterator[tuple[torch.Tensor, torch.Tensor]] = (
+                device_batches: Iterator[_StagedTrainingBatch] = (
                     (
-                        (
+                        _StagedTrainingBatch(
                             request.inputs[item.indexes].to(device, non_blocking=True),
                             request.targets[item.indexes].to(device, non_blocking=True),
+                            None,
                         )
                         for item in microbatches
                     )
@@ -311,18 +359,20 @@ def tune(
                 device_batch_iterator = iter(device_batches)
                 for item in microbatches:
                     if recorder is NULL_RECORDER:
-                        input_batch, target_batch = next(device_batch_iterator)
+                        staged_batch = next(device_batch_iterator)
                     else:
                         with recorder.phase("batch_stage"):
-                            input_batch, target_batch = next(device_batch_iterator)
+                            staged_batch = next(device_batch_iterator)
                             _record_transfer(
                                 recorder,
                                 request.inputs.device,
                                 device,
-                                input_batch,
-                                target_batch,
+                                staged_batch.inputs,
+                                staged_batch.targets,
                             )
-                            recorder.add("tuning.tokens", _logical_token_count(input_batch))
+                            recorder.add("tuning.tokens", _logical_token_count(staged_batch.inputs))
+                    input_batch = staged_batch.inputs
+                    target_batch = staged_batch.targets
                     if item.starts_step:
                         if recorder is NULL_RECORDER:
                             optimizer.zero_grad(set_to_none=True)
@@ -343,6 +393,9 @@ def tune(
                     # Do not retain the final microbatch's autograd graph through
                     # optimizer/evaluation/factorization phase boundaries.
                     del input_batch, target_batch, prediction, loss
+                    if stager is not None and staged_batch.slot is not None:
+                        stager.mark_consumed(staged_batch.slot)
+                    del staged_batch
                     if item.finishes_step:
                         if recorder is NULL_RECORDER:
                             optimizer.step()

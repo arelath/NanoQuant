@@ -128,6 +128,28 @@ identical loss; the full tuning oracle also produces bitwise-identical parameter
 design adds only one future input/target pair, about 75 MiB at parity batch 8, and completes this item. A
 full Gemma rerun is still required to replace the original run-level estimate with an end-to-end number.
 
+**Device-backpressure correction validated (2026-07-13).** Live sampling of the retained-Fisher
+long-tuning run exposed a flaw in that two-slot claim. Over 58 seconds, driver-visible GPU use climbed from
+3,029 to 11,673 MiB while Windows private commit climbed from 17.74 to 25.87 GiB, then both fell to 5,840 MiB
+and 20.23 GiB; the 7.89 GiB working set and 26.31 GiB lifetime private high-water stayed flat. This is a
+bounded allocation sawtooth rather than a cross-layer leak, but the pinned stager was waiting only for a
+slot's H2D-ready event. It could therefore allocate later device batches after the copy completed while the
+compute stream still consumed earlier batches. The correction allocates exactly two fixed device input/target
+pairs, records a compute-completion event after each backward, and makes the copy stream wait on that event
+before overwriting a device slot. The host waits only for the prior H2D-ready event before refilling the matching
+pinned host buffer, retaining one-batch copy/compute overlap without creating disposable device tensors.
+
+On a 64-sample, 2,048-token, width-1,152 BF16 staging canary with eight parity-sized batches, the old path
+reserved 360 MiB for 144 MiB of live pairs; fixed slots reserved and allocated exactly 144 MiB (**60% less
+reservation**). Across five runs with deliberately delayed compute, median wall was 0.08381 s old versus
+0.08496 s fixed-slot (**1.4% difference**, within the short-canary spread), whereas the initial host-synchronized
+backpressure prototype took 0.10667 s and was rejected. All 17 focused CUDA tests pass, including bitwise
+pinned-versus-pageable tuning and the block batching oracles; CPU/static and full-suite checks also pass. A
+resumed real run remains the final driver-visible peak confirmation.
+This does not change `RESIDENT_ALGORITHM_VERSION`: it changes only when a reusable H2D staging slot may allocate
+again; compute-stream operation order, batches, RNG, arithmetic, optimizer steps, and committed semantics are
+unchanged. The CUDA bitwise check passed that compatibility gate.
+
 ### [x] 3.2 Foreach ParityAdamW (S0)
 
 **Where.** [parity_adamw.py:66–93](../src/nanoquant/application/parity_adamw.py) — a Python loop over
