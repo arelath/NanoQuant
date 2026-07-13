@@ -477,6 +477,10 @@ Resident causal, block, and streamed calibration now expose opt-in micro phases 
 construction, backward execution, input/output accumulation, the two-phase threshold pass, and final shrinkage,
 plus batch, sample, and accumulator-update counters. The resident composition passes this recorder only at micro
 level, and direct profiled/control tests cover both causal online Fisher and block two-phase Fisher bit exactly.
+The resident artifact store and tensor store now attribute serialization, content hashing, durable writes, and
+activation bytes across frozen tensors and layer/block commits. Profiled/control tests require identical tensor,
+layer, block, and external activation-generation artifact identities, so the observation boundary cannot alter
+persisted bytes or resume references.
 Micro spans suppress durable span events and use the documented 5% recorder-time warning ceiling; macro
 profiling retains its stricter 0.5% ceiling and optional span-event mirror.
 Deferred CUDA timing is now implemented for macro and micro profiles: event pairs are sampled and bounded per

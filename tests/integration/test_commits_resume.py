@@ -4,6 +4,7 @@ import pytest
 import torch
 
 from nanoquant.application.loss_snapshots import BlockLossRecorder
+from nanoquant.config.schema import ProfilingConfig, ProfilingLevel
 from nanoquant.domain.models import (
     ArtifactRef,
     AttemptSummary,
@@ -39,6 +40,7 @@ from nanoquant.infrastructure.commits import (
     load_committed_layer,
     retire_block_activations,
 )
+from nanoquant.infrastructure.profiling import Profiler
 from nanoquant.infrastructure.progress import ProgressJournal
 
 
@@ -200,6 +202,42 @@ def test_post_commit_failure_artifacts_equal_uninterrupted_controls(tmp_path: Pa
         if '"artifact_type": "block-result"' in path.read_text(encoding="utf-8")
     )
     assert failure_block_id == control_block.reference.artifact_id
+
+
+def test_commit_io_profile_preserves_layer_block_and_activation_artifact_identities(tmp_path: Path) -> None:
+    layer_result, _plan, frozen_block, losses = _objects()
+    identity = CommitIdentity("config", "model", "plan")
+    control_store = LocalArtifactStore(tmp_path / "control")
+    profiler = Profiler(
+        ProfilingConfig(level=ProfilingLevel.MICRO, emit_span_events=False),
+        run_id="commit-io-micro",
+    )
+    profiled_store = LocalArtifactStore(tmp_path / "profiled", recorder=profiler)
+    teacher = torch.arange(12, dtype=torch.float32).reshape(2, 3, 2)
+    compressed = teacher + 1
+
+    control_layer = commit_layer(layer_result, control_store, identity)
+    profiled_layer = commit_layer(layer_result, profiled_store, identity)
+    control_block = commit_block(
+        BlockId(0), (layer_result,), frozen_block, losses, teacher, compressed, 0, control_store, identity
+    )
+    profiled_block = commit_block(
+        BlockId(0), (layer_result,), frozen_block, losses, teacher, compressed, 0, profiled_store, identity
+    )
+
+    assert profiled_layer.reference.artifact_id == control_layer.reference.artifact_id
+    assert profiled_block.reference.artifact_id == control_block.reference.artifact_id
+    assert (
+        profiled_block.result.teacher_outputs.artifact.artifact_id
+        == control_block.result.teacher_outputs.artifact.artifact_id
+    )
+    payload = profiler.snapshot()
+    phase_paths = {str(phase["path"]) for phase in payload["phases"]}  # type: ignore[index]
+    assert {"serialize", "hash", "write"} <= phase_paths
+    counters = {str(counter["name"]): counter for counter in payload["counters"]}  # type: ignore[index]
+    assert counters["io.artifacts"]["total"] == 3
+    assert counters["io.commit_bytes"]["total"] > 0
+    assert counters["io.activation_bytes_written"]["total"] > 0
 
 
 def test_committed_layer_block_and_activations_round_trip_as_typed_results(tmp_path: Path) -> None:

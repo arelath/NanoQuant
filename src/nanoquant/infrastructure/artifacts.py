@@ -11,6 +11,7 @@ import time
 from dataclasses import asdict
 from pathlib import Path
 
+from nanoquant.domain.profiling import NULL_RECORDER, PhaseRecorder
 from nanoquant.ports.artifact_store import ArtifactDescriptor, ArtifactFile
 
 
@@ -40,35 +41,50 @@ class LocalArtifactWriter:
     def commit(self) -> ArtifactDescriptor:
         if self._committed:
             raise RuntimeError("writer was already committed")
-        files: list[ArtifactFile] = []
-        for path in sorted(
-            candidate for candidate in self.path.rglob("*") if candidate.is_file() and candidate.name != ".lease.json"
-        ):
-            relative = path.relative_to(self.path).as_posix()
-            if relative.startswith("../") or Path(relative).is_absolute():
-                raise ValueError("artifact path traversal is not allowed")
-            files.append(ArtifactFile(relative, path.stat().st_size, _hash_file(path)))
-        identity_payload = json.dumps(
-            {"type": self.artifact_type, "schema": self.schema_version, "files": [asdict(item) for item in files]},
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        content_hash = hashlib.sha256(identity_payload.encode("utf-8")).hexdigest()
-        artifact_id = f"sha256-{content_hash}"
-        descriptor = ArtifactDescriptor(
-            self.schema_version, self.artifact_type, artifact_id, f"sha256:{content_hash}", tuple(files), time.time()
-        )
-        (self.path / ".lease.json").unlink()
-        (self.path / "descriptor.json").write_text(
-            json.dumps(asdict(descriptor), sort_keys=True, indent=2), encoding="utf-8"
-        )
-        destination = self.store.root / content_hash[:2] / artifact_id
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        if destination.exists():
-            shutil.rmtree(self.path)
-        else:
-            os.replace(self.path, destination)
-        self.store._remember_validation(descriptor, destination)
+        with self.store.recorder.phase("hash"):
+            files: list[ArtifactFile] = []
+            for path in sorted(
+                candidate
+                for candidate in self.path.rglob("*")
+                if candidate.is_file() and candidate.name != ".lease.json"
+            ):
+                relative = path.relative_to(self.path).as_posix()
+                if relative.startswith("../") or Path(relative).is_absolute():
+                    raise ValueError("artifact path traversal is not allowed")
+                files.append(ArtifactFile(relative, path.stat().st_size, _hash_file(path)))
+            identity_payload = json.dumps(
+                {
+                    "type": self.artifact_type,
+                    "schema": self.schema_version,
+                    "files": [asdict(item) for item in files],
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            content_hash = hashlib.sha256(identity_payload.encode("utf-8")).hexdigest()
+            artifact_id = f"sha256-{content_hash}"
+            descriptor = ArtifactDescriptor(
+                self.schema_version,
+                self.artifact_type,
+                artifact_id,
+                f"sha256:{content_hash}",
+                tuple(files),
+                time.time(),
+            )
+        with self.store.recorder.phase("write"):
+            (self.path / ".lease.json").unlink()
+            (self.path / "descriptor.json").write_text(
+                json.dumps(asdict(descriptor), sort_keys=True, indent=2), encoding="utf-8"
+            )
+            destination = self.store.root / content_hash[:2] / artifact_id
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            if destination.exists():
+                shutil.rmtree(self.path)
+            else:
+                os.replace(self.path, destination)
+            self.store._remember_validation(descriptor, destination)
+        self.store.recorder.add("io.commit_bytes", sum(item.bytes for item in files))
+        self.store.recorder.add("io.artifacts", 1, artifact_type=self.artifact_type)
         self._committed = True
         return descriptor
 
@@ -87,12 +103,14 @@ class LocalArtifactStore:
         temporary_root: str | Path | None = None,
         *,
         use_persistent_validation_cache: bool = True,
+        recorder: PhaseRecorder = NULL_RECORDER,
     ) -> None:
         self.root = Path(root)
         self.temporary_root = Path(temporary_root) if temporary_root else self.root / ".tmp"
         self.root.mkdir(parents=True, exist_ok=True)
         self.temporary_root.mkdir(parents=True, exist_ok=True)
         self._use_persistent_validation_cache = use_persistent_validation_cache
+        self.recorder = recorder
         self._validated: dict[str, tuple[ArtifactDescriptor, tuple[tuple[str, int, int], ...]]] = {}
         self._validation_cache_path = self.root / ".validation-cache.json"
         if not use_persistent_validation_cache:

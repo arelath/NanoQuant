@@ -4,7 +4,9 @@ import pytest
 import torch
 from safetensors.torch import save_file
 
+from nanoquant.config.schema import ProfilingConfig, ProfilingLevel
 from nanoquant.infrastructure.artifacts import ArtifactCorruptionError, LocalArtifactStore
+from nanoquant.infrastructure.profiling import Profiler
 from nanoquant.infrastructure.tensor_store import LocalTensorStore
 
 
@@ -49,3 +51,23 @@ def test_cached_tensor_verification_does_not_bypass_artifact_corruption_detectio
     with pytest.raises(ArtifactCorruptionError, match="ART001"):
         with tensors.read(reference):
             pass
+
+
+def test_profiled_tensor_write_preserves_reference_and_records_io_phases(tmp_path: Path) -> None:
+    values = {"first": torch.arange(16), "second": torch.eye(3)}
+    control = LocalTensorStore(LocalArtifactStore(tmp_path / "control")).put("fixture", values)
+    profiler = Profiler(
+        ProfilingConfig(level=ProfilingLevel.MICRO, emit_span_events=False),
+        run_id="tensor-io-micro",
+    )
+    profiled = LocalTensorStore(LocalArtifactStore(tmp_path / "profiled", recorder=profiler)).put(
+        "fixture", values
+    )
+
+    assert profiled == control
+    payload = profiler.snapshot()
+    phase_paths = {str(phase["path"]) for phase in payload["phases"]}  # type: ignore[index]
+    assert {"serialize", "hash", "write"} <= phase_paths
+    counters = {str(counter["name"]): counter for counter in payload["counters"]}  # type: ignore[index]
+    assert counters["io.artifacts"]["total"] == 1
+    assert counters["io.commit_bytes"]["total"] > 0

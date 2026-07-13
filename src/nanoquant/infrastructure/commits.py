@@ -159,8 +159,11 @@ def commit_layer(
 ) -> CommittedLayer:
     inject("before_layer_commit")
     with artifacts.begin_write("layer-result") as writer:
-        payload = {"identity": to_dict(identity), "result": to_dict(result)}
-        (writer.path / "layer-result.json").write_text(json.dumps(payload, sort_keys=True, indent=2), encoding="utf-8")
+        with artifacts.recorder.phase("serialize"):
+            payload = {"identity": to_dict(identity), "result": to_dict(result)}
+            encoded = json.dumps(payload, sort_keys=True, indent=2)
+        with artifacts.recorder.phase("write"):
+            (writer.path / "layer-result.json").write_text(encoded, encoding="utf-8")
         descriptor = writer.commit()
     reference = ArtifactRef("layer-result", descriptor.artifact_id, 1)
     inject("after_layer_commit")
@@ -187,50 +190,58 @@ def commit_block(
     if teacher_outputs.shape != compressed_outputs.shape:
         raise ValueError("teacher/compressed activation shapes differ")
     inject("before_block_commit")
-    activation_core = {
-        "schema_version": 1,
-        "identity": to_dict(identity),
-        "boundary_after_block": block.index,
-        "teacher_shape": list(teacher_outputs.shape),
-        "compressed_shape": list(compressed_outputs.shape),
-        "teacher_dtype": str(teacher_outputs.dtype).removeprefix("torch."),
-        "compressed_dtype": str(compressed_outputs.dtype).removeprefix("torch."),
-    }
+    with artifacts.recorder.phase("serialize"):
+        activation_core = {
+            "schema_version": 1,
+            "identity": to_dict(identity),
+            "boundary_after_block": block.index,
+            "teacher_shape": list(teacher_outputs.shape),
+            "compressed_shape": list(compressed_outputs.shape),
+            "teacher_dtype": str(teacher_outputs.dtype).removeprefix("torch."),
+            "compressed_dtype": str(compressed_outputs.dtype).removeprefix("torch."),
+        }
+        encoded_activation_core = json.dumps(activation_core, sort_keys=True, indent=2)
     with artifacts.begin_write("activation-generation") as writer:
-        save_file(
-            {"teacher_outputs": teacher_outputs.detach().cpu().contiguous()},
-            writer.path / "teacher-activations.safetensors",
-        )
-        save_file(
-            {"compressed_outputs": compressed_outputs.detach().cpu().contiguous()},
-            writer.path / "compressed-activations.safetensors",
-        )
-        (writer.path / "activation-generation.json").write_text(
-            json.dumps(activation_core, sort_keys=True, indent=2), encoding="utf-8"
-        )
+        with artifacts.recorder.phase("write"):
+            save_file(
+                {"teacher_outputs": teacher_outputs.detach().cpu().contiguous()},
+                writer.path / "teacher-activations.safetensors",
+            )
+            save_file(
+                {"compressed_outputs": compressed_outputs.detach().cpu().contiguous()},
+                writer.path / "compressed-activations.safetensors",
+            )
+            (writer.path / "activation-generation.json").write_text(encoded_activation_core, encoding="utf-8")
         activation_descriptor = writer.commit()
+    artifacts.recorder.add(
+        "io.activation_bytes_written",
+        sum(item.bytes for item in activation_descriptor.files if item.path.endswith(".safetensors")),
+    )
     activation_reference = ArtifactRef("activation-generation", activation_descriptor.artifact_id, 1)
     inject("after_activation_commit")
-    core = {
-        "schema_version": 2,
-        "identity": to_dict(identity),
-        "block": to_dict(block),
-        "layers": to_dict(layers),
-        "frozen_state": to_dict(frozen_state),
-        "losses": to_dict(losses),
-        "extra_bits_used": extra_bits_used,
-        "wall_seconds": wall_seconds,
-        "peak_gpu_bytes": peak_gpu_bytes,
-        "peak_host_bytes": peak_host_bytes,
-        "warnings": list(warnings),
-        "teacher_shape": list(teacher_outputs.shape),
-        "compressed_shape": list(compressed_outputs.shape),
-        "teacher_dtype": str(teacher_outputs.dtype).removeprefix("torch."),
-        "compressed_dtype": str(compressed_outputs.dtype).removeprefix("torch."),
-        "activation_generation": to_dict(activation_reference),
-    }
+    with artifacts.recorder.phase("serialize"):
+        core = {
+            "schema_version": 2,
+            "identity": to_dict(identity),
+            "block": to_dict(block),
+            "layers": to_dict(layers),
+            "frozen_state": to_dict(frozen_state),
+            "losses": to_dict(losses),
+            "extra_bits_used": extra_bits_used,
+            "wall_seconds": wall_seconds,
+            "peak_gpu_bytes": peak_gpu_bytes,
+            "peak_host_bytes": peak_host_bytes,
+            "warnings": list(warnings),
+            "teacher_shape": list(teacher_outputs.shape),
+            "compressed_shape": list(compressed_outputs.shape),
+            "teacher_dtype": str(teacher_outputs.dtype).removeprefix("torch."),
+            "compressed_dtype": str(compressed_outputs.dtype).removeprefix("torch."),
+            "activation_generation": to_dict(activation_reference),
+        }
+        encoded_core = json.dumps(core, sort_keys=True, indent=2)
     with artifacts.begin_write("block-result") as writer:
-        (writer.path / "block-result.json").write_text(json.dumps(core, sort_keys=True, indent=2), encoding="utf-8")
+        with artifacts.recorder.phase("write"):
+            (writer.path / "block-result.json").write_text(encoded_core, encoding="utf-8")
         descriptor = writer.commit()
     reference = ArtifactRef("block-result", descriptor.artifact_id, 1)
     teacher_ref = ActivationStreamRef(

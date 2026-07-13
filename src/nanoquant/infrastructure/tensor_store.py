@@ -34,10 +34,13 @@ class LocalTensorStore:
     def put(self, artifact_type: str, tensors: dict[str, torch.Tensor]) -> dict[str, TensorRef]:
         if not tensors:
             raise ValueError("tensor artifact must not be empty")
-        copied = {key: value.detach().cpu().clone().contiguous() for key, value in tensors.items()}
-        content_hashes = {key: _tensor_hash(value) for key, value in copied.items()}
+        with self.artifacts.recorder.phase("serialize"):
+            copied = {key: value.detach().cpu().clone().contiguous() for key, value in tensors.items()}
+        with self.artifacts.recorder.phase("hash"):
+            content_hashes = {key: _tensor_hash(value) for key, value in copied.items()}
         with self.artifacts.begin_write(artifact_type) as writer:
-            save_file(copied, writer.path / "tensors.safetensors")
+            with self.artifacts.recorder.phase("write"):
+                save_file(copied, writer.path / "tensors.safetensors")
             descriptor = writer.commit()
         artifact = ArtifactRef(artifact_type, descriptor.artifact_id, descriptor.schema_version)
         references = {

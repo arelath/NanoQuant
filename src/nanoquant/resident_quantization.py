@@ -848,7 +848,7 @@ def _run_resident_quantization_impl(
         or request.post_block_refit_epochs > 0
     ):
         raise ValueError("deferred layer losses are incompatible with activation-based tuning")
-    artifacts = LocalArtifactStore(request.output / "artifacts")
+    artifacts = LocalArtifactStore(request.output / "artifacts", recorder=micro_recorder)
     tensors = LocalTensorStore(artifacts)
     executor = ResidentExecutor()
     context = StageContext("resident-quantization", executor, artifacts, tensors, events, Cancellation())
