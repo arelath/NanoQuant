@@ -78,6 +78,30 @@ def test_factorized_tuning_changes_only_selected_module_and_restores_best() -> N
     assert torch.equal(model.base.weight, base_before)
 
 
+def test_tuning_epoch_observer_receives_full_evaluation_trajectory() -> None:
+    model = Hybrid()
+    inputs = torch.randn(8, 3, generator=torch.Generator().manual_seed(20))
+    targets = torch.randn(8, 2, generator=torch.Generator().manual_seed(21))
+    trajectory: list[tuple[int, float]] = []
+
+    metrics = tune_factorized(
+        model,
+        "quant",
+        TuningRequest(
+            inputs,
+            targets,
+            3,
+            4,
+            0.02,
+            epoch_observer=lambda epoch, loss: trajectory.append((epoch, loss)),
+        ),
+        _forward,
+    )
+
+    assert [epoch for epoch, _loss in trajectory] == [0, 1, 2, 3]
+    assert trajectory[0][1] == metrics.before.loss
+
+
 def test_post_block_refit_updates_scales_without_latent_changes() -> None:
     model = Hybrid()
     inputs = torch.randn(12, 3, generator=torch.Generator().manual_seed(4))

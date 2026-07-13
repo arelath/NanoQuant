@@ -31,6 +31,7 @@ class TuningRequest:
     output_importance: torch.Tensor | None = None
     seed: int = 0
     microbatch_size: int | None = None
+    epoch_observer: Callable[[int, float], None] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -222,6 +223,8 @@ def tune(
     device = request.inputs.device if model_parameter is None else model_parameter.device
     importance = _resolve_output_importance(request.output_importance, device, torch.float32)
     before_value = _evaluate_loss(model, request, forward)
+    if request.epoch_observer is not None:
+        request.epoch_observer(0, before_value)
     best_value = before_value
     best_epoch = -1
     best_state = {name: parameter.detach().clone() for name, parameter in selected}
@@ -264,6 +267,8 @@ def tune(
                     scheduler.step()
             epochs_completed = epoch + 1
             current = _evaluate_loss(model, request, forward)
+            if request.epoch_observer is not None:
+                request.epoch_observer(epoch + 1, current)
             if current < best_value:
                 improvement = (best_value - current) / max(abs(best_value), 1e-12)
                 best_value = current

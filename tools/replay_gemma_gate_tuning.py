@@ -310,6 +310,7 @@ def main() -> None:
                         args.block_forward_batch_size,
                     )
                     started = time.perf_counter()
+                    trajectory: list[dict[str, float | int]] = []
                     metrics = tune_factorized(
                         block,
                         GATE_PATH,
@@ -322,6 +323,9 @@ def main() -> None:
                             output_importance=block_output_importance,
                             seed=0,
                             microbatch_size=args.microbatch_size,
+                            epoch_observer=lambda epoch, loss, trajectory=trajectory: trajectory.append(
+                                {"epoch": epoch, "full_evaluation_loss": loss}
+                            ),
                         ),
                         lambda module, value: adapter.run_block(module, value, **metadata),
                     )
@@ -339,6 +343,7 @@ def main() -> None:
                         "best_loss": metrics.best.loss,
                         "final_loss": metrics.final.loss,
                         "best_epoch": metrics.best_epoch,
+                        "trajectory": trajectory,
                         "initial_weight": before_weight,
                         "final_weight": after_weight,
                         "wall_seconds": time.perf_counter() - started,
