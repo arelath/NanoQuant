@@ -179,7 +179,11 @@ def _run(args: argparse.Namespace, recorder: PhaseRecorder) -> None:
         frozen_global_tuning = None if loaded.global_tuning is None else loaded.global_tuning.artifact_id
         with recorder.phase("frozen_evaluate"):
             results["frozen"] = _evaluate(loaded.model, tokens, args.device, args.batch_size, recorder)
-        del loaded
+        with recorder.phase("frozen_release"):
+            del loaded
+            gc.collect()
+            if args.device.startswith("cuda"):
+                torch.cuda.empty_cache()
     payload = {
         "schema_version": 1,
         "model": "google/gemma-3-1b-it",
