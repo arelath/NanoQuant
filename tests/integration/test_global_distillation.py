@@ -21,8 +21,13 @@ from nanoquant.infrastructure.global_tuning import active_global_tuning, load_gl
 from nanoquant.resident_quantization import ResidentQuantizationRequest, run_resident_quantization
 
 
+@pytest.mark.parametrize("field", ("initial_cooldown_seconds", "epoch_cooldown_seconds"))
 @pytest.mark.parametrize("cooldown", (-1.0, float("inf"), float("nan")))
-def test_global_distillation_rejects_invalid_epoch_cooldown(tmp_path: Path, cooldown: float) -> None:
+def test_global_distillation_rejects_invalid_cooldown(
+    tmp_path: Path,
+    field: str,
+    cooldown: float,
+) -> None:
     request = GlobalDistillationRequest(
         tmp_path / "run",
         tmp_path / "snapshot",
@@ -30,11 +35,10 @@ def test_global_distillation_rejects_invalid_epoch_cooldown(tmp_path: Path, cool
         "pinned-test-revision",
         ((1,),),
         device="cpu",
-        epoch_cooldown_seconds=cooldown,
     )
 
     with pytest.raises(ValueError, match="cooldown must be finite and non-negative"):
-        run_global_topk_distillation(request)
+        run_global_topk_distillation(replace(request, **{field: cooldown}))
 
 
 def test_complete_frozen_run_can_be_distilled_committed_and_reloaded(
@@ -104,12 +108,13 @@ def test_complete_frozen_run_can_be_distilled_committed_and_reloaded(
             weight_decay=0.0,
         ),
         device="cpu",
+        initial_cooldown_seconds=1.5,
         epoch_cooldown_seconds=3.25,
     )
     with pytest.raises(InterruptedError, match="after 1 distillation epoch checkpoint"):
         run_global_topk_distillation(replace(request, interrupt_after_epoch_commits=1))
     distilled = run_global_topk_distillation(request)
-    assert cooldowns == [3.25]
+    assert cooldowns == [1.5, 1.5, 3.25]
 
     active = active_global_tuning(output)
     assert active == distilled.reference

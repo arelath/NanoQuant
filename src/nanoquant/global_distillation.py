@@ -58,6 +58,7 @@ class GlobalDistillationRequest:
     verify_hashes: bool = True
     replace_existing_global_tuning: bool = False
     interrupt_after_epoch_commits: int | None = None
+    initial_cooldown_seconds: float = 0.0
     epoch_cooldown_seconds: float = 0.0
 
 
@@ -233,8 +234,12 @@ def _run_global_topk_distillation(request: GlobalDistillationRequest) -> GlobalD
     started = time.perf_counter()
     if request.interrupt_after_epoch_commits is not None and request.interrupt_after_epoch_commits <= 0:
         raise ValueError("distillation epoch interrupt count must be positive")
+    if not 0.0 <= request.initial_cooldown_seconds < float("inf"):
+        raise ValueError("distillation initial cooldown must be finite and non-negative")
     if not 0.0 <= request.epoch_cooldown_seconds < float("inf"):
         raise ValueError("distillation epoch cooldown must be finite and non-negative")
+    if request.initial_cooldown_seconds:
+        time.sleep(request.initial_cooldown_seconds)
     tokens = _tokens(request.token_ids)
     token_bytes = tokens.contiguous().view(torch.uint8).numpy().tobytes()
     protocol_hash = "sha256:" + hashlib.sha256(canonical_json(request.config).encode()).hexdigest()

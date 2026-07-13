@@ -555,10 +555,11 @@ must be remeasured rather than inferred from the speedup.
   **02:24:03** (during the prior continuous attempt) and **03:13:05** (39 seconds into the next resume),
   while the checkpoint pointer correctly remained at the last durable epoch. The one-epoch checkpoint
   boundary is validated, but neither interrupted interval is evidence for or against a code optimization;
-  quality and end-to-end timing remain pending a stable-GPU completion. An opt-in epoch cooldown now idles
-  only after activating each non-final checkpoint while retaining the CUDA lease. It keeps the recurrence
-  and protocol identity unchanged, avoids repeated model reload/allocation, and prevents another worker
-  from filling the intended thermal-rest window; its sleep time is excluded from performance comparisons.
+  quality and end-to-end timing remain pending a stable-GPU completion. Opt-in initial and between-epoch
+  cooldowns now retain the CUDA lease: the initial delay happens before model loading, and later delays
+  happen only after activating each non-final checkpoint. They keep the recurrence and protocol identity
+  unchanged, avoid repeated model reload/allocation, and prevent another worker from filling the intended
+  thermal-rest windows; their sleep time is excluded from performance comparisons.
 - **Cross-environment CUDA lease split fixed (2026-07-13):** two workers used `%TEMP%` roots `Temp` and
   `Temp\\1`, created independent `cuda:0` leases, and together drove WDDM usage to 11–12 GiB; the corrected
   KD run was terminated during epoch 2 but retained its epoch-1 checkpoint. Device leases now live under

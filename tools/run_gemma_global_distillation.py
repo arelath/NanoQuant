@@ -43,6 +43,12 @@ def main() -> None:
         help="Exit cleanly after this many new durable epoch checkpoints; resume with the same command.",
     )
     parser.add_argument(
+        "--initial-cooldown-seconds",
+        type=float,
+        default=0.0,
+        help="Acquire the CUDA lease, then idle before loading the frozen model.",
+    )
+    parser.add_argument(
         "--epoch-cooldown-seconds",
         type=float,
         default=0.0,
@@ -82,6 +88,7 @@ def main() -> None:
         pad_token_id=tokenizer.pad_token_id,
         replace_existing_global_tuning=args.replace_global_tuning,
         interrupt_after_epoch_commits=args.interrupt_after_epoch_commits,
+        initial_cooldown_seconds=args.initial_cooldown_seconds,
         epoch_cooldown_seconds=args.epoch_cooldown_seconds,
     )
     try:
