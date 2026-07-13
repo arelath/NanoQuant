@@ -151,7 +151,7 @@ DEFINITIONS = (
 
 
 class TransformersModelAdapter:
-    version = "2"
+    version = "3"
 
     def __init__(self, definition: AdapterDefinition) -> None:
         self.definition = definition
@@ -289,17 +289,58 @@ class TransformersModelAdapter:
         return tuple(LayerId(block_id, path) for path in self.definition.layer_paths)
 
     def run_prefix(self, model: nn.Module, tokens: torch.Tensor) -> torch.Tensor:
+        if self.family == "opt":
+            decoder = getattr(getattr(model, "model", None), "decoder", None)
+            if not isinstance(decoder, nn.Module):
+                raise UnsupportedModelVariant("SRC001 OPT model has no decoder")
+            embeddings = cast(Any, decoder).embed_tokens(tokens.view(-1, tokens.shape[-1]))
+            attention_mask = torch.ones(
+                embeddings.shape[:2],
+                device=embeddings.device,
+                dtype=torch.long,
+            )
+            position_ids = (torch.cumsum(attention_mask, dim=1) * attention_mask - 1).long()
+            positions = cast(Any, decoder).embed_positions(
+                attention_mask,
+                0,
+                position_ids=position_ids,
+            )
+            project_in = getattr(decoder, "project_in", None)
+            if isinstance(project_in, nn.Module):
+                embeddings = project_in(embeddings)
+            return cast(torch.Tensor, embeddings + positions.to(embeddings.device))
         get_embeddings = cast(Callable[[], nn.Module], cast(Any, model).get_input_embeddings)
-        return cast(torch.Tensor, get_embeddings()(tokens))
+        embeddings = cast(torch.Tensor, get_embeddings()(tokens))
+        if self.definition.model_types[0] in {"gemma", "gemma2"}:
+            config = cast(Any, model).config
+            normalizer = torch.tensor(config.hidden_size**0.5, dtype=embeddings.dtype)
+            embeddings = embeddings * normalizer
+        return embeddings
 
     def run_block(self, block: nn.Module, inputs: torch.Tensor, **kwargs: object) -> torch.Tensor:
         result = block(inputs, **kwargs)
         return cast(torch.Tensor, result[0] if isinstance(result, tuple) else result)
 
     def run_suffix(self, model: nn.Module, inputs: torch.Tensor) -> torch.Tensor:
+        if self.family == "opt":
+            decoder = getattr(getattr(model, "model", None), "decoder", None)
+            if not isinstance(decoder, nn.Module):
+                raise UnsupportedModelVariant("SRC001 OPT model has no decoder")
+            final_layer_norm = getattr(decoder, "final_layer_norm", None)
+            if isinstance(final_layer_norm, nn.Module):
+                inputs = final_layer_norm(inputs)
+            project_out = getattr(decoder, "project_out", None)
+            if isinstance(project_out, nn.Module):
+                inputs = project_out(inputs)
+            return cast(torch.Tensor, self.lm_head(model)(inputs))
         base = getattr(model, "model", model)
         norm = getattr(base, "norm", nn.Identity())
-        return cast(torch.Tensor, self.lm_head(model)(norm(inputs)))
+        logits = cast(torch.Tensor, self.lm_head(model)(norm(inputs)))
+        if self.definition.model_types[0] in {"gemma2", "gemma3_text"}:
+            softcap = getattr(cast(Any, model).config, "final_logit_softcapping", None)
+            if softcap is not None:
+                logits = torch.tanh(logits / softcap) * softcap
+        return logits
 
     def lm_head(self, model: nn.Module) -> nn.Module:
         head = getattr(model, "lm_head", None)

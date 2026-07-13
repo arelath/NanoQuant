@@ -1,22 +1,49 @@
 import json
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
 import torch
 from safetensors.torch import save_file
+from transformers.models.gemma.configuration_gemma import GemmaConfig
+from transformers.models.gemma.modeling_gemma import GemmaForCausalLM
+from transformers.models.gemma2.configuration_gemma2 import Gemma2Config
+from transformers.models.gemma2.modeling_gemma2 import Gemma2ForCausalLM
 from transformers.models.gemma3.configuration_gemma3 import Gemma3TextConfig
 from transformers.models.gemma3.modeling_gemma3 import Gemma3ForCausalLM
 from transformers.models.llama.configuration_llama import LlamaConfig
+from transformers.models.llama.modeling_llama import LlamaForCausalLM
 from transformers.models.opt.configuration_opt import OPTConfig
+from transformers.models.opt.modeling_opt import OPTForCausalLM
 from transformers.models.qwen3.configuration_qwen3 import Qwen3Config
+from transformers.models.qwen3.modeling_qwen3 import Qwen3ForCausalLM
 
 from nanoquant.application.prefix_capture import capture_prefix_invocations
-from nanoquant.domain.models import BlockId
+from nanoquant.domain.models import BlockId, CheckpointInventory, SourceTensor
 from nanoquant.infrastructure.model_adapters import UnsupportedModelVariant, adapter_for_config
 from nanoquant.infrastructure.safetensors_source import SafetensorsModelSource
 
 CONFIGS = (
     LlamaConfig(
+        vocab_size=32,
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=4,
+    ),
+    GemmaConfig(
+        vocab_size=32,
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=4,
+    ),
+    Gemma2Config(
         vocab_size=32,
         hidden_size=16,
         intermediate_size=32,
@@ -47,6 +74,39 @@ CONFIGS = (
         vocab_size=32, hidden_size=16, ffn_dim=32, num_hidden_layers=1, num_attention_heads=4, word_embed_proj_dim=16
     ),
 )
+
+MODEL_FACTORIES = {
+    "llama": LlamaForCausalLM,
+    "gemma": GemmaForCausalLM,
+    "gemma2": Gemma2ForCausalLM,
+    "gemma3_text": Gemma3ForCausalLM,
+    "qwen3": Qwen3ForCausalLM,
+    "opt": OPTForCausalLM,
+}
+
+
+class TrackingSource:
+    def __init__(self, source: SafetensorsModelSource) -> None:
+        self.source = source.source
+        self.revision = source.revision
+        self._source = source
+        self.active_reads = 0
+        self.maximum_active_reads = 0
+        self.read_keys: list[str] = []
+
+    def inventory(self) -> CheckpointInventory:
+        return self._source.inventory()
+
+    @contextmanager
+    def read_tensor(self, tensor: SourceTensor, device: str = "cpu") -> Iterator[object]:
+        self.active_reads += 1
+        self.maximum_active_reads = max(self.maximum_active_reads, self.active_reads)
+        self.read_keys.append(tensor.source_key)
+        try:
+            with self._source.read_tensor(tensor, device) as value:
+                yield value
+        finally:
+            self.active_reads -= 1
 
 
 def _source(tmp_path: Path, config: object) -> tuple[SafetensorsModelSource, dict[str, torch.Tensor]]:
@@ -107,3 +167,65 @@ def test_gemma3_text_stack_capture_preserves_position_and_attention_metadata() -
     assert {"position_embeddings_global", "position_embeddings_local", "attention_mask", "position_ids"} <= set(
         capture.keyword
     )
+
+
+@pytest.mark.parametrize("base_config", CONFIGS, ids=lambda config: config.model_type)
+def test_adapter_full_replay_tied_inventory_and_streamed_loading(tmp_path: Path, base_config: object) -> None:
+    values = base_config.to_dict()  # type: ignore[attr-defined]
+    values.update(num_hidden_layers=2, tie_word_embeddings=True, use_cache=False)
+    adapter = adapter_for_config(values)
+    config = adapter.definition.config_factory(values)
+    model = MODEL_FACTORIES[values["model_type"]](config).eval()
+    tokens = torch.tensor(((1, 2, 3, 4), (4, 3, 2, 1)))
+    layers = (
+        model.model.decoder.layers  # type: ignore[union-attr]
+        if values["model_type"] == "opt"
+        else model.model.layers  # type: ignore[union-attr]
+    )
+
+    first_capture = capture_prefix_invocations(
+        layers[0],
+        (lambda: model(input_ids=tokens, use_cache=False),),
+    )[0]
+    second_capture = capture_prefix_invocations(
+        layers[1],
+        (lambda: model(input_ids=tokens, use_cache=False),),
+    )[0]
+    with torch.no_grad():
+        reference_logits = model(input_ids=tokens, use_cache=False).logits
+        hidden = adapter.run_prefix(model, tokens)
+        torch.testing.assert_close(hidden, first_capture.positional[0], rtol=0, atol=0)
+        hidden = adapter.run_block(layers[0], hidden, **first_capture.keyword)
+        torch.testing.assert_close(hidden, second_capture.positional[0], rtol=0, atol=0)
+        hidden = adapter.run_block(layers[1], hidden, **second_capture.keyword)
+        replay_logits = adapter.run_suffix(model, hidden)
+    torch.testing.assert_close(replay_logits, reference_logits, rtol=0, atol=0)
+    assert adapter.lm_head(model).weight.data_ptr() == model.get_input_embeddings().weight.data_ptr()
+
+    snapshot = tmp_path / str(values["model_type"])
+    model.save_pretrained(snapshot, safe_serialization=True)
+    (snapshot / "tokenizer.json").write_text("{}", encoding="utf-8")
+    source = SafetensorsModelSource(
+        snapshot,
+        source=f"fixture/{values['model_type']}",
+        revision="full-contract",
+        verify_hashes=False,
+    )
+    inventory = adapter.model_inventory(source)
+    mapped_keys = [tensor.source_key for block in inventory.blocks for tensor in block.source_tensors] + [
+        tensor.source_key for tensor in inventory.shared_tensors
+    ]
+    checkpoint_keys = [tensor.key for tensor in source.inventory().tensors]
+    assert len(inventory.blocks) == 2
+    assert [block.block.index for block in inventory.blocks] == [0, 1]
+    assert len(mapped_keys) == len(set(mapped_keys))
+    assert set(mapped_keys) == set(checkpoint_keys)
+
+    tracking = TrackingSource(source)
+    loaded = adapter.load_block(tracking, BlockId(1), "cpu")  # type: ignore[arg-type]
+    assert tracking.active_reads == 0
+    assert tracking.maximum_active_reads == 1
+    assert set(tracking.read_keys) == {tensor.source_key for tensor in inventory.blocks[1].source_tensors}
+    expected = layers[1].state_dict()
+    for key, value in loaded.state_dict().items():
+        assert torch.equal(value, expected[key])
