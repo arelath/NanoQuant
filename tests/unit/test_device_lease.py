@@ -1,6 +1,7 @@
 import os
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 
 import pytest
@@ -81,3 +82,31 @@ def test_device_lease_rejects_owner_with_different_environment_roots(
     finally:
         child.terminate()
         child.wait(timeout=10)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows named-mutex lease")
+def test_windows_cuda_lease_rejects_cross_process_owner() -> None:
+    device = f"cuda:test-{uuid.uuid4().hex}"
+    code = (
+        "import time; "
+        "from nanoquant.infrastructure.device_lease import acquire_device_lease; "
+        f"lease = acquire_device_lease({device!r}); "
+        "print('ready', flush=True); "
+        "time.sleep(30)"
+    )
+    child = subprocess.Popen(
+        [sys.executable, "-c", code],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert child.stdout is not None
+        assert child.stdout.readline().strip() == "ready"
+        with pytest.raises(DeviceLeaseError, match="already leased"):
+            acquire_device_lease(device)
+    finally:
+        child.terminate()
+        child.wait(timeout=10)
+    with acquire_device_lease(device) as lease:
+        assert lease.device == device

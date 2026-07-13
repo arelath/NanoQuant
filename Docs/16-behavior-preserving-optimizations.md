@@ -582,14 +582,13 @@ must be remeasured rather than inferred from the speedup.
 - **Cross-environment CUDA lease splits fixed (2026-07-13):** two workers first used `%TEMP%` roots `Temp`
   and `Temp\\1`, created independent `cuda:0` leases, and together drove WDDM usage to 11–12 GiB. Moving the
   lease under `%LOCALAPPDATA%` closed that split, but a later diagnostic deliberately redirected
-  `%LOCALAPPDATA%` to the repository and again admitted a second CUDA owner. Windows lease discovery now
-  asks the OS shell for the Local AppData known folder, independent of `TEMP`, `TMP`, `TMPDIR`, and
-  `LOCALAPPDATA`; POSIX uses a stable per-UID `/tmp` root. A subprocess regression test changes all four
-  environment roots and proves the second owner is rejected. Non-CUDA fixture tests may explicitly set an
-  absolute `NANOQUANT_DEVICE_LEASE_ROOT`, but CUDA devices ignore it: allowing a per-process CUDA override
-  recreated the split when a Codex runner selected `.localappdata` while the canonical namespace remained
-  free. A bounded KD stop also showed the checkpoint exception releasing its lease while Python still held
-  roughly 3.5 GiB of CUDA state; exceptional exits now offload the student, synchronize, and empty the
+  `%LOCALAPPDATA%` to the repository and again admitted a second CUDA owner. Windows CUDA leases now use a
+  session-wide named kernel mutex, independent of `TEMP`, `TMP`, `TMPDIR`, `LOCALAPPDATA`, and filesystem
+  ACLs; process death releases it automatically. POSIX retains a stable per-UID `/tmp` root. A true Windows
+  CUDA subprocess test proves a second owner is rejected and that termination releases the mutex.
+  Non-CUDA fixture tests may explicitly set an absolute `NANOQUANT_DEVICE_LEASE_ROOT`, but CUDA devices
+  ignore it. A bounded KD stop also showed the checkpoint exception releasing its lease while Python still
+  held roughly 3.5 GiB of CUDA state; exceptional exits now offload the student, synchronize, and empty the
   cache before the lease scope unwinds.
 - **Corrected KD exposed a cache-sampling parity bug (2026-07-13):** the completed zero-decay/Kahan run
   reduced cached-target loss from **2.39330782** to **2.14116740**, but exact retained WikiText-2
