@@ -742,7 +742,7 @@ must be remeasured rather than inferred from the speedup.
   **15,284 s** total, making the observed full-run gap roughly **40%**. Exact phase boundaries and the
   newly landed hot-path changes must be remeasured in a fresh rewrite run before assigning that entire
   difference to current code, but the result raises rather than closes the post-parity performance gate.
-- **Extra LS passes rejected; longer tuning promoted (2026-07-13):** the exact block-0 gate replay swept
+- **Extra LS passes and a uniform 32-epoch horizon rejected (2026-07-13):** the exact block-0 gate replay swept
   0/1/2/4/8 alternating LS passes. Full block losses were respectively **0.976456**, **0.818065**,
   **0.818384**, **0.818384**, and **0.818384**. Four and eight passes are a numerical plateau, while the
   one-pass result is only 0.039% below the legacy-compatible two-pass result and does not justify changing
@@ -759,8 +759,16 @@ must be remeasured rather than inferred from the speedup.
   lowers post-refit loss from **1.378489** to **0.826978** (40.0%) and beats historical **1.1624** by 28.9%.
   Block 1 likewise improves from the retained full-run boundary **3.583139** to **2.658979** (25.8%).
   Block-0 wall time rises from **476.06 s** to **1201.49 s** (2.52x), but peak allocation is effectively
-  unchanged (**6,195,498,496** versus **6,194,081,280** bytes). The 26-block promotion is therefore a
-  quality candidate, not a performance optimization, and remains an active detached run.
+  unchanged (**6,195,498,496** versus **6,194,081,280** bytes). That early-block gain did not survive the
+  complete trajectory. Blocks 0–9 remained below the contemporary legacy boundary, but block 10 reached
+  **4,958.35** versus **697.85** historical and **1,459.10** contemporary. The following full-attention
+  boundary reduced entry loss to **1,439.74**, yet all seven factorized tunes retained their initial state
+  (`best_epoch=-1`) and block 11 froze at **2,255.56**, versus **309.57** historical and **331.60**
+  contemporary. The candidate was stopped at the clean block-11 commit (journal sequence 96). A uniform
+  longer cosine horizon is therefore rejected: it improves the early local objective but changes the
+  optimization path enough to produce substantially worse downstream error. The next full candidate uses
+  the legacy-compatible eight-epoch horizon; any future longer schedule must be adaptive and pass boundary
+  trajectory gates, not merely improve block 0.
 - **Batched inference graph retention fixed (2026-07-13):** the first gate replay accumulated every
   source-block autograd graph through `copy_` into its host result, reaching 10.85 GiB allocated before an
   eager-attention allocation failed. `_run_block_batched` is now intrinsically no-grad and has a regression
