@@ -227,3 +227,5 @@ __marimo__/
 /runs/
 /.nanoquant/
 /evidence
+/.tmp
+.context
