@@ -298,10 +298,11 @@ def _run_block_batched(
         input_batch = inputs[start:end].to(compute_device, non_blocking=True)
         output = adapter.run_block(block, input_batch, **metadata)
         if result is None:
-            result = torch.empty(
-                (inputs.shape[0], *output.shape[1:]),
-                device=destination,
-                dtype=output.dtype,
+            shape = (inputs.shape[0], *output.shape[1:])
+            result = (
+                torch.empty(shape, device=destination, dtype=output.dtype, pin_memory=True)
+                if destination.type == "cpu" and compute_device.type == "cuda"
+                else torch.empty(shape, device=destination, dtype=output.dtype)
             )
         result[start:end].copy_(output)
     if result is None:
@@ -325,10 +326,11 @@ def _run_prefix_batched(
             end = min(start + batch_size, tokens.shape[0])
             output = adapter.run_prefix(model, tokens[start:end])
             if result is None:
-                result = torch.empty(
-                    (tokens.shape[0], *output.shape[1:]),
-                    device=destination,
-                    dtype=output.dtype,
+                shape = (tokens.shape[0], *output.shape[1:])
+                result = (
+                    torch.empty(shape, device=destination, dtype=output.dtype, pin_memory=True)
+                    if destination.type == "cpu" and output.device.type == "cuda"
+                    else torch.empty(shape, device=destination, dtype=output.dtype)
                 )
             result[start:end].copy_(output)
     if result is None:
@@ -1020,6 +1022,9 @@ def _run_resident_quantization(request: ResidentQuantizationRequest) -> Resident
     budget = BudgetState(plan.planned_cost.total, accepted_bits, retry_bits_spent)
     if committed_blocks:
         teacher_inputs, compressed_inputs = load_block_activations(committed_blocks[-1][0], artifacts, "cpu")
+        if request.device.startswith("cuda"):
+            teacher_inputs = teacher_inputs.pin_memory()
+            compressed_inputs = compressed_inputs.pin_memory()
     else:
         teacher_inputs = initial_inputs
         compressed_inputs = initial_inputs

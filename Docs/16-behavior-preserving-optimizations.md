@@ -98,6 +98,15 @@ tier), overlap plus pinned bandwidth (~2–3× pageable) recovers most of it: **
 (smaller share). Confidence: Medium (transfer-boundedness inferred, not yet measured). Effort: M. Pinned
 memory pressure must respect the existing resource-planning rules (1.2 GB × up to 4 live streams).
 
+**Pinned half done (2026-07-12).** CUDA-produced CPU activation streams are now allocated directly in
+pinned host memory, and activation streams loaded at a CUDA resume boundary are pinned once. The tuning
+loop already requests nonblocking H2D copies, so every subsequent factorized, non-factorized, refit, and
+loss pass reuses those pinned tensors without an extra copy. On the parity GPU, an exact 37.75 MiB BF16
+batch transferred in a median 3.045 ms pinned versus 3.997 ms pageable (**1.31x**); blocking D2H improved
+only 1.05x. A CUDA regression test confirms pinned block outputs are bitwise equal. This does not check the
+item off: double buffering is deferred until copy-stream lifetimes and the four-stream pinned-memory budget
+are represented by the resource plan.
+
 ### [x] 3.2 Foreach ParityAdamW (S0)
 
 **Where.** [parity_adamw.py:66–93](../src/nanoquant/application/parity_adamw.py) — a Python loop over
@@ -404,6 +413,10 @@ Do not reach for these while parity is the gate; each changes floating-point res
   harness;
 - replacing SHA-256 with a faster hash (artifact identity is schema surface);
 - reducing probe iterations, ADMM iterations, epochs, or early-stop thresholds (quality/behavior);
+- batching exact causal-evaluation windows: measured batch 8 at 1.092 s versus serial at 4.857 s
+  (**4.45x**), but total NLL changed from 49,559.943115 to 49,554.102051 and peak GPU memory rose from
+  2.30 GB to 4.63 GB. It is useful only as an explicitly approximate evaluation mode, not for the pinned
+  parity protocol;
 - skipping `verify_hashes` on loads (it is a documented integrity behavior; make it a config choice, not an
   optimization).
 
