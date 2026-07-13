@@ -53,49 +53,6 @@ def test_incomplete_generation_is_invisible_and_cleanup_removes_orphans(tmp_path
     assert store.cleanup_uncommitted() == 0
 
 
-@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-def test_sequential_generation_hashes_during_write_without_rereading(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dtype: torch.dtype
-) -> None:
-    store = MmapActivationStore(tmp_path / "activations")
-    expected = torch.arange(12, dtype=torch.float32).reshape(4, 3).to(dtype)
-
-    def reject_reread(_path: Path) -> str:
-        raise AssertionError("sequential commit reread its completed data file")
-
-    with monkeypatch.context() as commit_patch:
-        commit_patch.setattr("nanoquant.infrastructure.activation_store._hash_file", reject_reread)
-        with store.begin_generation("sequential", tuple(expected.shape), dtype) as writer:
-            writer.write(slice(0, 2), expected[:2])
-            writer.write(slice(2, 4), expected[2:])
-            writer.commit()
-
-    with store.read("sequential") as actual:
-        assert torch.equal(actual, expected)
-
-
-def test_out_of_order_generation_falls_back_to_commit_time_hash(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    store = MmapActivationStore(tmp_path / "activations")
-    expected = torch.arange(12, dtype=torch.float32).reshape(4, 3)
-    calls = 0
-
-    from nanoquant.infrastructure.activation_store import _hash_file
-
-    def count_reread(path: Path) -> str:
-        nonlocal calls
-        calls += 1
-        return _hash_file(path)
-
-    monkeypatch.setattr("nanoquant.infrastructure.activation_store._hash_file", count_reread)
-    with store.begin_generation("out-of-order", tuple(expected.shape)) as writer:
-        writer.write(slice(2, 4), expected[2:])
-        writer.write(slice(0, 2), expected[:2])
-        writer.commit()
-    assert calls == 1
-
-
 def test_disk_full_during_descriptor_commit_leaves_invisible_recoverable_orphan(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

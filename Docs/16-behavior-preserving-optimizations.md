@@ -50,7 +50,7 @@ in section 6 so nobody drifts into it by accident.
 | Done | # | Finding | Class | Phase affected | Est. saving (phase) | Est. saving (run) | Confidence | Effort |
 |------|---|---------|-------|----------------|--------------------|-------------------|------------|--------|
 | [ ] | 1 | Pin + double-buffer tuning/forward datasets | S1 | tuning, block forwards | 25–50% of transfer-bound steps | 10–25% of full protocol | Medium | M |
-| [ ] | 2 | Foreach ParityAdamW step | S0 | tuning | 50–80% of optimizer host time | 2–6% of full protocol | Medium-High | M |
+| [x] | 2 | Foreach ParityAdamW step | S0 | tuning | 50–80% of optimizer host time | 2–6% of full protocol | High | M |
 | [ ] | 3 | Gate `torch.cuda.empty_cache()` on pressure | S1 | tuning, per-block | ~390 calls avoided | 1–4% of full protocol | Medium | S |
 | [ ] | 4 | Overlap block-activation persistence with compute | S1 | block commit | most of ~3–5 s/block | 4–7% of 1439 s anchor | Medium | M |
 | [ ] | 5 | Halve/defer ADMM cholesky `info` syncs | S0* | factorization | 1–3% of ADMM | ~1–2% of anchor | Medium | S |
@@ -61,7 +61,7 @@ in section 6 so nobody drifts into it by accident.
 | [ ] | 10 | Hash during write instead of write-then-reread (mmap store) | S0 | activation commits | one full re-read per generation | 1–3% of anchor | High | S |
 | [ ] | 11 | Device-side KD loss accumulation + pinned teacher cache | S0/S1 | global KD | 1–3% of KD phase | ≤1% of full protocol | Medium | S |
 | [x] | 12 | Keep the JSONL event file handle open | S0 | events | ~3k opens/run | ~0.1% | High | S |
-| [ ] | 13 | Device-side calibration threshold accumulation | S0 | calibration | ~20k small syncs | ~0.1–0.2% | Medium | S |
+| [x] | 13 | Device-side calibration threshold accumulation | S0 | calibration | ~20k small syncs | ~0.1–0.2% | High | S |
 
 Combined outlook, avoiding double counting: roughly **8–15% on the factor+scale anchor** (items 4–6, 8–10)
 and **15–35% on the full protocol** once tuning and KD phases exist to optimize (items 1–3, 7, 11 dominate).
@@ -98,7 +98,7 @@ tier), overlap plus pinned bandwidth (~2–3× pageable) recovers most of it: **
 (smaller share). Confidence: Medium (transfer-boundedness inferred, not yet measured). Effort: M. Pinned
 memory pressure must respect the existing resource-planning rules (1.2 GB × up to 4 live streams).
 
-### [ ] 3.2 Foreach ParityAdamW (S0)
+### [x] 3.2 Foreach ParityAdamW (S0)
 
 **Where.** [parity_adamw.py:66–93](../src/nanoquant/application/parity_adamw.py) — a Python loop over
 parameters issuing ~8–10 elementwise kernels each (`mul_`, `lerp_`, `addcmul_`, fresh `sqrt().add_()`
@@ -117,6 +117,13 @@ steps) locks this in.
 
 **Estimate.** 50–80% of optimizer host time; **2–6% of a full-protocol run** (scales with tuning share).
 Confidence: Medium-High. Effort: M.
+
+**Done (2026-07-12).** `ParityAdamW` groups parameters by device, dtype, and Kahan mode, applies the legacy
+recurrence with `torch._foreach_*`, and reuses a state-owned denominator buffer. Tuning also resolves the
+model device once per call instead of once per batch. The scalar-loop oracle is bitwise-equal for FP32 and
+BF16/Kahan, with and without weight decay, on CPU and CUDA across multiple tensors and steps. On a
+representative five-tensor BF16/Kahan CUDA workload, 128 optimizer steps improved from a median 0.0735 s
+to 0.0322 s (**2.28x**).
 
 ### [ ] 3.3 Gate `torch.cuda.empty_cache()` on memory pressure (S1)
 
@@ -278,6 +285,12 @@ hashes files post hoc).
 **Estimate.** Removes a full-file read per generation: **15–40 s per anchor-scale run where the mmap tier
 is used (1–3%)**; also cuts page-cache pressure alongside item 4. Confidence: High. Effort: S.
 
+**Attempted, not accepted (2026-07-12).** An incremental SHA-256 implementation preserved identities and
+the out-of-order-write fallback in unit-sized tests, but a 128 MiB Windows mmap benchmark failed to finish
+within a 10-minute cap. Because it did not produce a trustworthy before/after measurement and could add
+critical-path page reads to every `write`, it was reverted. Revisit only with chunk-level profiling and a
+bounded benchmark before changing this checkbox.
+
 ### [ ] 3.11 KD step-loop hygiene (S0/S1)
 
 **Where.** [distillation.py:387–405](../src/nanoquant/application/distillation.py): per step,
@@ -309,7 +322,7 @@ concurrent reader or a second append-mode handle to the same path (load-bearing 
 `test_events_are_monotonic_across_reopen_and_spans`, which opens a second sink on the same path). All 162
 tests, ruff, and `mypy --strict` pass.
 
-### [ ] 3.13 Device-side calibration threshold accumulation (S0)
+### [x] 3.13 Device-side calibration threshold accumulation (S0)
 
 **Where.** [calibration_math.py:48](../src/nanoquant/domain/calibration_math.py) and the profiling hooks in
 [calibration.py:225–235](../src/nanoquant/application/calibration.py): `robust_tau(...).cpu()` and
@@ -320,10 +333,15 @@ and order-insensitive here, so results are bit-identical.
 
 **Estimate.** 1–3 s of the calibration phase (~0.1–0.2% of a run). Confidence: Medium. Effort: S.
 
+**Done (2026-07-12).** Both causal-model and block two-phase Fisher hooks now initialize their scalar
+threshold maxima on each layer's device and update them without `.cpu()`. CUDA validation showed the
+device maximum, the former host maximum, and the resulting clipped importance arithmetic are bitwise
+equal; a CUDA two-phase calibration completed with finite input and output importance.
+
 ## 4. Smaller observations (bundle opportunistically)
 
-- `next(iter(model.parameters()), None)` executes per batch step in `tune`
-  ([tuning.py:107](../src/nanoquant/application/tuning.py)) — resolve the device once per call.
+- [x] `next(iter(model.parameters()), None)` previously executed per batch step in `tune`; the foreach
+  optimizer change now resolves the device once per tuning call.
 - `FactorizationAttemptStage` computes `latent_prediction=left_latent @ right_latent` per attempt for
   metrics ([quantization_stages.py:212](../src/nanoquant/application/quantization_stages.py)) — necessary,
   but a candidate to fold into the attempt-level metrics pass if the profiler shows it (~0.05% each).

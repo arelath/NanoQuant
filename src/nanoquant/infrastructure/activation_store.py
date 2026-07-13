@@ -96,8 +96,6 @@ class MmapGenerationWriter:
             output.truncate(self.numel * torch.empty((), dtype=dtype).element_size())
         self._mapping = torch.from_file(str(self.temporary), shared=True, size=self.numel, dtype=dtype).reshape(shape)
         self._committed = False
-        self._digest: Any = hashlib.sha256()
-        self._next_hash_row = 0
 
     def write(self, selection: slice, values: torch.Tensor) -> None:
         start, stop, step = selection.indices(self.shape[0])
@@ -109,13 +107,6 @@ class MmapGenerationWriter:
         if self._written[start:stop].any():
             raise ValueError("activation batch overlaps a prior write")
         self._mapping[start:stop].copy_(values.detach().to(device="cpu", dtype=self.dtype))
-        if self._digest is not None and start == self._next_hash_row:
-            byte_view = self._mapping[start:stop].contiguous().view(torch.uint8).numpy()
-            self._digest.update(memoryview(cast(Any, byte_view)))
-            self._next_hash_row = stop
-        else:
-            # Out-of-order writes remain supported, but cannot feed a sequential SHA-256 stream.
-            self._digest = None
         self._written[start:stop] = True
 
     def commit(self) -> str:
@@ -125,11 +116,7 @@ class MmapGenerationWriter:
             missing = torch.where(~self._written)[0].tolist()
             raise ValueError(f"activation generation has unwritten batches: {missing[:8]}")
         del self._mapping
-        content_hash = (
-            "sha256:" + self._digest.hexdigest()
-            if self._digest is not None and self._next_hash_row == self.shape[0]
-            else _hash_file(self.temporary)
-        )
+        content_hash = _hash_file(self.temporary)
         destination = self.store._data(self.key)
         os.replace(self.temporary, destination)
         metadata = {
