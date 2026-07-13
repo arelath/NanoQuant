@@ -18,7 +18,13 @@ def _commit_block(root: Path, block: int, loss: float, identity: dict[str, str])
     artifacts = LocalArtifactStore(root / "artifacts")
     with artifacts.begin_write("block-result") as writer:
         (writer.path / "block-result.json").write_text(
-            json.dumps({"block": {"index": block}, "losses": {"final_frozen_pre_kd": loss}}),
+            json.dumps(
+                {
+                    "block": {"index": block},
+                    "identity": identity,
+                    "losses": {"final_frozen_pre_kd": loss},
+                }
+            ),
             encoding="utf-8",
         )
         descriptor = writer.commit()
@@ -113,4 +119,17 @@ def test_rewrite_trajectory_validates_block_artifact_hashes(tmp_path: Path) -> N
     block_path.write_text("{}", encoding="utf-8")
 
     with pytest.raises(ArtifactCorruptionError, match="ART001"):
+        load_rewrite_trajectory(tmp_path)
+
+
+def test_rewrite_trajectory_rejects_block_payload_from_another_identity(tmp_path: Path) -> None:
+    active = {"config_hash": "new", "model_hash": "model", "plan_hash": "plan"}
+    stale = {"config_hash": "old", "model_hash": "model", "plan_hash": "plan"}
+    record = _commit_block(tmp_path, 0, 1.0, stale)
+    record["identity"] = active
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "journal.jsonl").write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="invalid block result"):
         load_rewrite_trajectory(tmp_path)

@@ -34,7 +34,7 @@ def _identity_key(value: object) -> tuple[str, str, str]:
 
 def load_rewrite_trajectory(run_output: str | Path) -> RewriteTrajectory:
     root = Path(run_output)
-    artifacts = LocalArtifactStore(root / "artifacts")
+    artifacts = LocalArtifactStore(root / "artifacts", use_persistent_validation_cache=False)
     journal = root / "state" / "journal.jsonl"
     records: list[dict[str, Any]] = []
     for line_number, line in enumerate(journal.read_text(encoding="utf-8").splitlines(), start=1):
@@ -75,10 +75,11 @@ def load_rewrite_trajectory(run_output: str | Path) -> RewriteTrajectory:
         payload: Any = json.loads((artifact_root / "block-result.json").read_text(encoding="utf-8"))
         try:
             payload_block = int(payload["block"]["index"])
+            payload_identity = _identity_key(payload["identity"])
             loss = float(payload["losses"]["final_frozen_pre_kd"])
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError(f"malformed block result for journal block {block}") from exc
-        if payload_block != block or not math.isfinite(loss):
+        if payload_block != block or payload_identity != active_key or not math.isfinite(loss):
             raise ValueError(f"invalid block result for journal block {block}")
         losses.append(loss)
     return RewriteTrajectory(
