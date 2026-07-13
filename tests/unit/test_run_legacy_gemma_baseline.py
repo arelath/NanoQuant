@@ -1,5 +1,8 @@
 import json
+import subprocess
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -9,6 +12,7 @@ from tools.run_legacy_gemma_baseline import (
     CALIBRATION_ARTIFACT,
     _atomic_json,
     _calibration_tensor_path,
+    _detach,
 )
 
 
@@ -49,3 +53,21 @@ def test_atomic_json_replaces_existing_payload(tmp_path: Path) -> None:
 
     assert json.loads(path.read_text(encoding="utf-8")) == {"status": "complete"}
     assert not path.with_suffix(".json.tmp").exists()
+
+
+def test_detach_option_is_not_forwarded_to_child(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_popen(command: list[str], **options: object) -> SimpleNamespace:
+        captured.update({"command": command, "options": options})
+        return SimpleNamespace(pid=123)
+
+    monkeypatch.setattr(sys, "argv", ["tool", "--output", "run", "--detach", "--validate-only"])
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+
+    assert _detach(tmp_path / "run") == 0
+
+    assert "--detach" not in captured["command"]  # type: ignore[operator]
+    assert "--validate-only" in captured["command"]  # type: ignore[operator]
+    assert (tmp_path / "run.launcher.stdout.log").exists()
+    assert (tmp_path / "run.launcher.stderr.log").exists()

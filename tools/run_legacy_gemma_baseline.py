@@ -81,6 +81,45 @@ def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
     temporary.replace(path)
 
 
+def _detach(output: Path) -> int:
+    output = output.resolve()
+    if output.exists() and any(output.iterdir()):
+        raise FileExistsError(f"refusing to overwrite non-empty evidence directory: {output}")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    stdout_path = output.with_name(output.name + ".launcher.stdout.log")
+    stderr_path = output.with_name(output.name + ".launcher.stderr.log")
+    if stdout_path.exists() or stderr_path.exists():
+        raise FileExistsError("refusing to overwrite existing detached launcher logs")
+    command = [sys.executable, str(Path(__file__).resolve()), *(value for value in sys.argv[1:] if value != "--detach")]
+    options: dict[str, Any] = {}
+    if os.name == "nt":
+        options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+    else:
+        options["start_new_session"] = True
+    with stdout_path.open("x", encoding="utf-8") as stdout, stderr_path.open("x", encoding="utf-8") as stderr:
+        process = subprocess.Popen(
+            command,
+            cwd=Path(__file__).resolve().parents[1],
+            stdin=subprocess.DEVNULL,
+            stdout=stdout,
+            stderr=stderr,
+            close_fds=True,
+            **options,
+        )
+    print(
+        json.dumps(
+            {
+                "process_id": process.pid,
+                "output": str(output),
+                "stdout": str(stdout_path),
+                "stderr": str(stderr_path),
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
 def _patch_legacy_inputs(module: ModuleType, snapshot: Path, calibration_tensors: Path) -> None:
     import numpy as np
     import torch
@@ -224,6 +263,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--validate-only", action="store_true")
+    parser.add_argument("--detach", action="store_true")
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--probe", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--rewrite-root", type=Path, help=argparse.SUPPRESS)
@@ -239,6 +279,8 @@ def main() -> int:
         if any(value is None for value in required):
             raise ValueError("worker arguments are incomplete")
         return _worker(args)
+    if args.detach:
+        return _detach(args.output)
 
     rewrite_root = Path(__file__).resolve().parents[1]
     legacy_root = args.legacy_root.resolve()
