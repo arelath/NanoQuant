@@ -93,6 +93,9 @@ def tune(
         parameter.requires_grad_(False)
     for _, parameter in selected:
         parameter.requires_grad_(True)
+    model_parameter = next(iter(model.parameters()), None)
+    device = request.inputs.device if model_parameter is None else model_parameter.device
+    importance = _resolve_output_importance(request.output_importance, device, torch.float32)
     before_value = _evaluate_loss(model, request, forward)
     best_value = before_value
     best_epoch = -1
@@ -113,9 +116,6 @@ def tune(
             for start in range(0, request.inputs.shape[0], request.batch_size):
                 indexes = order[start : start + request.batch_size]
                 optimizer.zero_grad(set_to_none=True)
-                model_parameter = next(iter(model.parameters()), None)
-                device = request.inputs.device if model_parameter is None else model_parameter.device
-                importance = _resolve_output_importance(request.output_importance, device, torch.float32)
                 microbatch_size = request.microbatch_size or indexes.numel()
                 for microbatch_start in range(0, indexes.numel(), microbatch_size):
                     microbatch_indexes = indexes[microbatch_start : microbatch_start + microbatch_size]
@@ -152,8 +152,7 @@ def tune(
             parameter.requires_grad_(original_requires_grad[id(parameter)])
     elements = request.targets.numel()
     del optimizer, scheduler, best_state
-    cleanup_parameter = next(iter(model.parameters()), None)
-    if cleanup_parameter is not None and cleanup_parameter.device.type == "cuda":
+    if device.type == "cuda":
         torch.cuda.empty_cache()
     return TuningMetrics(
         LossMetrics(before_value, elements, request.objective),

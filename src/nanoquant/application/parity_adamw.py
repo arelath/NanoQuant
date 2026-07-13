@@ -19,6 +19,40 @@ def _debiased_beta(beta: float, step: int) -> float:
     return (beta**step - beta) / (beta**step - 1.0)
 
 
+def _foreach_update(
+    parameters: list[Tensor],
+    gradients: list[Tensor],
+    exp_avgs: list[Tensor],
+    exp_avg_sqs: list[Tensor],
+    denominators: list[Tensor],
+    compensations: list[Tensor] | None,
+    *,
+    beta1: float,
+    beta2: float,
+    learning_rate: float,
+    epsilon: float,
+    weight_decay: float,
+) -> None:
+    """Apply the legacy elementwise recurrence with one launch per operation."""
+
+    if weight_decay:
+        torch._foreach_mul_(parameters, 1.0 - learning_rate * weight_decay)
+    torch._foreach_lerp_(exp_avgs, gradients, weight=1.0 - beta1)
+    torch._foreach_mul_(exp_avg_sqs, beta2)
+    torch._foreach_addcmul_(exp_avg_sqs, gradients, gradients, value=1.0 - beta2)
+    torch._foreach_copy_(denominators, exp_avg_sqs)
+    torch._foreach_sqrt_(denominators)
+    torch._foreach_add_(denominators, epsilon)
+    if compensations is not None:
+        torch._foreach_addcdiv_(compensations, exp_avgs, denominators, value=-learning_rate)
+        torch._foreach_copy_(gradients, parameters)
+        torch._foreach_add_(parameters, compensations)
+        torch._foreach_sub_(gradients, parameters)
+        torch._foreach_add_(compensations, gradients)
+    else:
+        torch._foreach_addcdiv_(parameters, exp_avgs, denominators, value=-learning_rate)
+
+
 class ParityAdamW(Optimizer):
     """AdamW with the numerical defaults and low-precision updates used by legacy NanoQuant."""
 
@@ -63,6 +97,10 @@ class ParityAdamW(Optimizer):
             learning_rate = float(group["lr"])
             epsilon = float(group["eps"])
             weight_decay = float(group["weight_decay"])
+            buckets: dict[
+                tuple[torch.device, torch.dtype, bool],
+                tuple[list[Tensor], list[Tensor], list[Tensor], list[Tensor], list[Tensor], list[Tensor]],
+            ] = {}
             for parameter in group["params"]:
                 if parameter.grad is None:
                     continue
@@ -76,19 +114,35 @@ class ParityAdamW(Optimizer):
                         if parameter.dtype in {torch.float16, torch.bfloat16}
                         else None
                     )
+                    state["denominator"] = torch.empty_like(parameter, memory_format=torch.preserve_format)
                 exp_avg = state["exp_avg"]
                 exp_avg_sq = state["exp_avg_sq"]
-                if weight_decay:
-                    parameter.mul_(1.0 - learning_rate * weight_decay)
-                exp_avg.lerp_(gradient, weight=1.0 - beta1_hat)
-                exp_avg_sq.mul_(beta2_hat).addcmul_(gradient, gradient, value=1.0 - beta2_hat)
-                denominator = exp_avg_sq.sqrt().add_(epsilon)
                 compensation = state["kahan_comp"]
+                denominator = state.get("denominator")
+                if not isinstance(denominator, Tensor):
+                    denominator = torch.empty_like(parameter, memory_format=torch.preserve_format)
+                    state["denominator"] = denominator
+                key = (parameter.device, parameter.dtype, isinstance(compensation, Tensor))
+                bucket = buckets.setdefault(key, ([], [], [], [], [], []))
+                bucket[0].append(parameter)
+                bucket[1].append(gradient)
+                bucket[2].append(exp_avg)
+                bucket[3].append(exp_avg_sq)
+                bucket[4].append(denominator)
                 if isinstance(compensation, Tensor):
-                    compensation.addcdiv_(exp_avg, denominator, value=-learning_rate)
-                    gradient.copy_(parameter.detach())
-                    parameter.add_(compensation)
-                    compensation.add_(gradient.sub_(parameter))
-                else:
-                    parameter.addcdiv_(exp_avg, denominator, value=-learning_rate)
+                    bucket[5].append(compensation)
+            for parameters, gradients, exp_avgs, exp_avg_sqs, denominators, compensations in buckets.values():
+                _foreach_update(
+                    parameters,
+                    gradients,
+                    exp_avgs,
+                    exp_avg_sqs,
+                    denominators,
+                    compensations if compensations else None,
+                    beta1=beta1_hat,
+                    beta2=beta2_hat,
+                    learning_rate=learning_rate,
+                    epsilon=epsilon,
+                    weight_decay=weight_decay,
+                )
         return loss
