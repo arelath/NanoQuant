@@ -2,7 +2,7 @@ import pytest
 import torch
 from torch import nn
 
-from nanoquant.resident_quantization import _run_block_batched
+from nanoquant.resident_quantization import _block_loss, _run_block_batched
 
 
 class _BlockAdapter:
@@ -22,5 +22,22 @@ def test_cuda_block_forward_produces_bitwise_equal_pinned_host_activations() -> 
 
     assert actual.is_pinned()
     assert torch.equal(actual, expected)
+    del block
+    torch.cuda.empty_cache()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="pinned CUDA transfer requires a GPU")
+def test_prefetched_block_loss_matches_pageable_accumulation_bitwise() -> None:
+    inputs = torch.randn(7, 4, dtype=torch.bfloat16, generator=torch.Generator().manual_seed(42))
+    targets = torch.randn(7, 3, dtype=torch.bfloat16, generator=torch.Generator().manual_seed(43))
+    importance = torch.linspace(0.5, 1.5, 3)
+    block = nn.Linear(4, 3, bias=False, dtype=torch.bfloat16, device="cuda")
+
+    pageable = _block_loss(_BlockAdapter(), block, inputs, targets, importance, {}, 2)
+    prefetched = _block_loss(
+        _BlockAdapter(), block, inputs.pin_memory(), targets.pin_memory(), importance, {}, 2
+    )
+
+    assert prefetched == pageable
     del block
     torch.cuda.empty_cache()

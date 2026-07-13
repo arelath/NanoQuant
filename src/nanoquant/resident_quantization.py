@@ -25,6 +25,7 @@ from nanoquant.application.calibration_artifacts import (
     build_objectives,
     persist_calibration,
 )
+from nanoquant.application.device_batches import iter_device_batches
 from nanoquant.application.layers import (
     BlockEditor,
     LayerFreezer,
@@ -269,11 +270,8 @@ def _block_loss(
     with torch.no_grad():
         squared_error = torch.zeros((), device=device)
         elements = 0
-        for start in range(0, inputs.shape[0], batch_size):
-            end = min(start + batch_size, inputs.shape[0])
-            input_batch = inputs[start:end].to(device, non_blocking=True)
+        for input_batch, target in iter_device_batches((inputs, targets), batch_size, device):
             prediction = adapter.run_block(block, input_batch, **metadata)
-            target = targets[start:end].to(device, non_blocking=True)
             squared_error += ((prediction.float() - target.float()).square() * weights).sum()
             elements += target.numel()
         return float(squared_error / elements)
@@ -293,9 +291,9 @@ def _run_block_batched(
     compute_device = inputs.device if block_parameter is None else block_parameter.device
     destination = inputs.device if storage_device is None else torch.device(storage_device)
     result: torch.Tensor | None = None
-    for start in range(0, inputs.shape[0], batch_size):
+    for batch_index, (input_batch,) in enumerate(iter_device_batches((inputs,), batch_size, compute_device)):
+        start = batch_index * batch_size
         end = min(start + batch_size, inputs.shape[0])
-        input_batch = inputs[start:end].to(compute_device, non_blocking=True)
         output = adapter.run_block(block, input_batch, **metadata)
         if result is None:
             shape = (inputs.shape[0], *output.shape[1:])

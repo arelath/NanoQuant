@@ -110,9 +110,12 @@ two-tensor shuffled transfers this reduced 0.4051 s to 0.2688 s (**1.51x**) with
 values and tuning parameters. Evaluation loss passes now prefetch one pinned input/target pair on a copy
 stream while the prior pair computes, using two reusable readiness events. A representative BF16
 1152×1152 forward/loss pass improved from 0.0721 s to 0.0545 s (**1.32x**) with an identical accumulated
-loss. CUDA regression tests cover all three paths. This does not check the item off: training-step and
-block-forward copy-stream prefetch remain deferred until their stream lifetimes and the full pinned-memory
-budget are represented by the resource plan.
+loss. The iterator is now shared by block-loss snapshots and block forwards. On a representative
+seven-layer BF16 block, block loss improved from 0.1169 s to 0.0605 s (**1.93x**) and host-output block
+forward from 0.1136 s to 0.0613 s (**1.85x**), with bitwise-equal loss and outputs. CUDA regression tests
+cover every landed path. This does not check the item off: training-step copy-stream prefetch remains
+deferred because it crosses optimizer-step boundaries and needs explicit device-buffer lifetime and
+memory-budget representation.
 
 ### [x] 3.2 Foreach ParityAdamW (S0)
 
