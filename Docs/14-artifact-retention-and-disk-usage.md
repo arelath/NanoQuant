@@ -296,6 +296,12 @@ all payloads, but the resulting run is marked `metadata_only` and is no longer c
 3. Add the atomic active-resume-boundary pointer and crash-injection coverage.
 4. Make the workspace-level shared store the default for new runs.
 5. Replace global hash-regex rooting with manifest/store-aware GC; retain the scanner for legacy evidence.
+
+The implemented `tools/cleanup_run_activations.py` closes the reused-run-directory case that ordinary reachability
+GC cannot reclaim: historical block records intentionally root their old activation generations. The command keeps
+the latest block generation for the active (by default, latest) config identity and retires only activation-generation
+artifacts referenced by superseded identities or older active blocks. It is dry-run by default and leaves journals,
+block/layer results, frozen tensors, metrics, logs, and other evidence files untouched.
 6. Add v1-to-v2 migration and verified hard-link/clone import.
 7. Migrate or retire older Gemma stores only after dry-run reports and explicit retention decisions.
 8. Enforce rolling disk estimates in resident and streaming execution plans.

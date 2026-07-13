@@ -99,6 +99,9 @@ artifact store.
   cross-process test when modifying it.
 - Use `tools/cleanup_artifacts.py` for artifact reclamation. It is dry-run by default and preserves non-artifact
   evidence files; never manually delete content-addressed directories while a run is active.
+- For a reused run directory with many superseded commit identities, use `tools/cleanup_run_activations.py` after
+  confirming no worker is active. It preserves the latest active identity's resume generation and all journals,
+  block/layer results, frozen tensors, metrics, and other evidence; omission of `--apply` is always a dry run.
 - Preserve unrelated worktree changes. Much of the current dirty tree belongs to the ongoing parity effort.
 
 ## Git workflow

@@ -71,7 +71,9 @@ Read these in order for a full rewrite plan:
 13. [Lessons carried forward and local reference implementations](12-lessons-carried-forward.md)
 14. [Implementation task list and milestones](13-implementation-task-list.md)
 15. [Artifact retention and disk usage](14-artifact-retention-and-disk-usage.md)
-16. [Glossary](glossary.md)
+16. [Performance profiling and micro-profiling](15-performance-profiling.md)
+17. [Behavior-preserving optimization catalog](16-behavior-preserving-optimizations.md)
+18. [Glossary](glossary.md)
 
 The [architecture decision record directory](adr/README.md) records decisions that future contributors may otherwise be tempted to reverse without understanding their context.
 
