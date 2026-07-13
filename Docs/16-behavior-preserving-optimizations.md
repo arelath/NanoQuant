@@ -560,12 +560,13 @@ must be remeasured rather than inferred from the speedup.
   happen only after activating each non-final checkpoint. They keep the recurrence and protocol identity
   unchanged, avoid repeated model reload/allocation, and prevent another worker from filling the intended
   thermal-rest windows; their sleep time is excluded from performance comparisons.
-- **Cross-environment CUDA lease split fixed (2026-07-13):** two workers used `%TEMP%` roots `Temp` and
-  `Temp\\1`, created independent `cuda:0` leases, and together drove WDDM usage to 11–12 GiB; the corrected
-  KD run was terminated during epoch 2 but retained its epoch-1 checkpoint. Device leases now live under
-  the stable per-user `%LOCALAPPDATA%\\NanoQuant\\leases` root on Windows (and a stable per-UID `/tmp`
-  root on POSIX). A subprocess regression test deliberately changes `TEMP`, `TMP`, and `TMPDIR` and proves
-  the second owner is rejected.
+- **Cross-environment CUDA lease splits fixed (2026-07-13):** two workers first used `%TEMP%` roots `Temp`
+  and `Temp\\1`, created independent `cuda:0` leases, and together drove WDDM usage to 11–12 GiB. Moving the
+  lease under `%LOCALAPPDATA%` closed that split, but a later diagnostic deliberately redirected
+  `%LOCALAPPDATA%` to the repository and again admitted a second CUDA owner. Windows lease discovery now
+  asks the OS shell for the Local AppData known folder, independent of `TEMP`, `TMP`, `TMPDIR`, and
+  `LOCALAPPDATA`; POSIX uses a stable per-UID `/tmp` root. A subprocess regression test changes all four
+  environment roots and proves the second owner is rejected.
 - `JsonlEventSink._read_last_sequence` parses the whole event log at construction — only matters for
   resumed runs with large logs; fine today, worth a tail-scan if event volume grows.
 - **Measured, not implemented (2026-07-13):** a fresh process inventories the pinned Gemma snapshot in a

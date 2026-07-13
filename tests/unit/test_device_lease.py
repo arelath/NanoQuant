@@ -21,7 +21,7 @@ def test_default_cuda_alias_uses_cuda_zero_lease() -> None:
     assert canonical_device_name("CUDA:1") == "cuda:1"
 
 
-def test_device_lease_rejects_owner_in_another_process_with_different_temp_root(tmp_path: Path) -> None:
+def test_device_lease_rejects_owner_with_different_environment_roots(tmp_path: Path) -> None:
     code = (
         "import time; "
         "from nanoquant.infrastructure.device_lease import acquire_device_lease; "
@@ -31,8 +31,17 @@ def test_device_lease_rejects_owner_in_another_process_with_different_temp_root(
     )
     child_temp = tmp_path / "child-temp"
     child_temp.mkdir()
+    child_local_app_data = tmp_path / "child-local-app-data"
+    child_local_app_data.mkdir()
     child_environment = os.environ.copy()
-    child_environment.update({"TEMP": str(child_temp), "TMP": str(child_temp), "TMPDIR": str(child_temp)})
+    child_environment.update(
+        {
+            "TEMP": str(child_temp),
+            "TMP": str(child_temp),
+            "TMPDIR": str(child_temp),
+            "LOCALAPPDATA": str(child_local_app_data),
+        }
+    )
     child = subprocess.Popen(
         [sys.executable, "-c", code],
         env=child_environment,

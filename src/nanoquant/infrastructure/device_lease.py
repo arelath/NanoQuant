@@ -92,12 +92,17 @@ def _lease_root() -> Path:
     """Return a per-user root that is stable across process temp environments."""
 
     if os.name == "nt":
-        local_app_data = os.environ.get("LOCALAPPDATA")
-        return (
-            Path(local_app_data) / "NanoQuant" / "leases"
-            if local_app_data
-            else Path.home() / ".nanoquant" / "leases"
-        )
+        import ctypes
+
+        # CSIDL_LOCAL_APPDATA resolves through the Windows shell/registry rather
+        # than the caller's environment. Diagnostic launchers commonly override
+        # LOCALAPPDATA for isolation; using that variable would silently split
+        # the device-lock namespace and permit concurrent CUDA owners.
+        buffer = ctypes.create_unicode_buffer(32768)
+        result = ctypes.windll.shell32.SHGetFolderPathW(None, 0x001C, None, 0, buffer)
+        if result == 0 and buffer.value:
+            return Path(buffer.value) / "NanoQuant" / "leases"
+        return Path.home() / ".nanoquant" / "leases"
     getuid = getattr(os, "getuid", None)
     user = str(getuid()) if callable(getuid) else str(Path.home()).replace(os.sep, "-")
     return Path("/tmp") / f"nanoquant-{user}" / "leases"
