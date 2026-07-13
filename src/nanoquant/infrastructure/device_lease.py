@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import tempfile
 import uuid
 from pathlib import Path
 
@@ -89,10 +88,27 @@ def _remove_stale_lease(path: Path) -> bool:
     return True
 
 
+def _lease_root() -> Path:
+    """Return a per-user root that is stable across process temp environments."""
+
+    if os.name == "nt":
+        local_app_data = os.environ.get("LOCALAPPDATA")
+        return (
+            Path(local_app_data) / "NanoQuant" / "leases"
+            if local_app_data
+            else Path.home() / ".nanoquant" / "leases"
+        )
+    getuid = getattr(os, "getuid", None)
+    user = str(getuid()) if callable(getuid) else str(Path.home()).replace(os.sep, "-")
+    return Path("/tmp") / f"nanoquant-{user}" / "leases"
+
+
 def acquire_device_lease(device: str) -> DeviceLease:
     canonical = canonical_device_name(device)
     safe_name = "".join(character if character.isalnum() else "-" for character in canonical)
-    path = Path(tempfile.gettempdir()) / f"nanoquant-resident-{safe_name}.lease"
+    root = _lease_root()
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path = root / f"nanoquant-resident-{safe_name}.lease"
     for _attempt in range(2):
         try:
             path.mkdir()

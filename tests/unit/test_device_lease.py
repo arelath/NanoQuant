@@ -1,5 +1,7 @@
+import os
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -19,7 +21,7 @@ def test_default_cuda_alias_uses_cuda_zero_lease() -> None:
     assert canonical_device_name("CUDA:1") == "cuda:1"
 
 
-def test_device_lease_rejects_owner_in_another_process() -> None:
+def test_device_lease_rejects_owner_in_another_process_with_different_temp_root(tmp_path: Path) -> None:
     code = (
         "import time; "
         "from nanoquant.infrastructure.device_lease import acquire_device_lease; "
@@ -27,8 +29,13 @@ def test_device_lease_rejects_owner_in_another_process() -> None:
         "print('ready', flush=True); "
         "time.sleep(30)"
     )
+    child_temp = tmp_path / "child-temp"
+    child_temp.mkdir()
+    child_environment = os.environ.copy()
+    child_environment.update({"TEMP": str(child_temp), "TMP": str(child_temp), "TMPDIR": str(child_temp)})
     child = subprocess.Popen(
         [sys.executable, "-c", code],
+        env=child_environment,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
