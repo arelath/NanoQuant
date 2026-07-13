@@ -73,6 +73,8 @@ def test_resident_quantization_commits_complete_transformers_model(tmp_path: Pat
     assert math.isfinite(result.logit_mse)
     assert 0 <= result.argmax_agreement <= 1
     assert result.peak_host_bytes > 0
+    assert all(block.peak_host_bytes > 0 for block in result.blocks)
+    assert all(block.peak_gpu_bytes == 0 for block in result.blocks)
     assert result.artifact_bytes > 0
     artifacts = LocalArtifactStore(output / "artifacts")
     artifacts.validate(result.report.artifact_id)

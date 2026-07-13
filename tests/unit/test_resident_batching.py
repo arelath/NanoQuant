@@ -2,7 +2,7 @@ import pytest
 import torch
 from torch import nn
 
-from nanoquant.resident_quantization import _block_loss, _run_block_batched
+from nanoquant.resident_quantization import _block_loss, _peak_device_memory_bytes, _run_block_batched
 
 
 class _BlockAdapter:
@@ -18,6 +18,16 @@ def test_block_forward_does_not_retain_autograd_graphs() -> None:
 
     assert not actual.requires_grad
     assert actual.grad_fn is None
+
+
+def test_peak_device_memory_uses_reserved_allocator_high_water(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(torch.cuda, "max_memory_allocated", lambda _device: 6_000)
+    monkeypatch.setattr(torch.cuda, "max_memory_reserved", lambda _device: 9_000)
+
+    assert _peak_device_memory_bytes("cuda:0") == 9_000
+    monkeypatch.setattr(torch.cuda, "max_memory_reserved", lambda _device: 4_000)
+    assert _peak_device_memory_bytes("cuda:0") == 6_000
+    assert _peak_device_memory_bytes("cpu") == 0
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="pinned CUDA transfer requires a GPU")

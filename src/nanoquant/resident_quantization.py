@@ -378,6 +378,19 @@ def _artifact_bytes(root: Path) -> int:
     return sum(path.stat().st_size for path in root.rglob("*") if path.is_file())
 
 
+def _peak_device_memory_bytes(device: str) -> int:
+    if not device.startswith("cuda"):
+        return 0
+    # Reserved allocator memory, not only live tensor allocations, determines
+    # whether another CUDA operation can fit and matches the VRAM pressure seen
+    # by device-level monitoring. Keep allocated as a defensive lower bound for
+    # mocked/alternative allocators.
+    return max(
+        int(torch.cuda.max_memory_allocated(device)),
+        int(torch.cuda.max_memory_reserved(device)),
+    )
+
+
 def _token_tensor(value: torch.Tensor | tuple[tuple[int, ...], ...], device: str) -> torch.Tensor:
     result = value.detach().clone() if isinstance(value, torch.Tensor) else torch.tensor(value, dtype=torch.long)
     if result.ndim != 2 or result.shape[0] == 0 or result.shape[1] == 0:
@@ -1530,9 +1543,8 @@ def _run_resident_quantization_impl(
                 (),
                 auxiliary_parameters,
             )
-            block_peak = (
-                int(torch.cuda.max_memory_allocated(request.device)) if request.device.startswith("cuda") else 0
-            )
+            block_peak = _peak_device_memory_bytes(request.device)
+            block_peak_host = peak_process_memory_bytes()
             peak_device_bytes = max(peak_device_bytes, block_peak)
         with _profile_block_phase(recorder, block_index, "commit"):
             committed = commit_block(
@@ -1547,6 +1559,7 @@ def _run_resident_quantization_impl(
                 identity,
                 wall_seconds=time.perf_counter() - block_started,
                 peak_gpu_bytes=block_peak,
+                peak_host_bytes=block_peak_host,
                 warnings=()
                 if request.factorized_tuning_epochs > 0 and request.scale_fit.enabled
                 else (("tuning_disabled",) if request.scale_fit.enabled else ("scale_fit_disabled", "tuning_disabled")),

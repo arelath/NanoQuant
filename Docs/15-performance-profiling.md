@@ -206,8 +206,9 @@ This is the core micro-profiling subtlety and drives most of the design:
   of milliseconds.
 - **Memory counters without sync.** When explicitly enabled, phase boundaries snapshot current and peak host
   working-set/private bytes plus `torch.cuda.memory_stats()` current/peak allocated and reserved bytes and allocator
-  alloc/free counts. Each phase reports first/last/minimum/maximum/net/positive deltas. This separates live tensor
-  growth from PyTorch/driver cache growth and Windows commit sawteeth without adding a device synchronization.
+  alloc/free counts, together with device-wide free/used/total bytes. Each phase reports
+  first/last/minimum/maximum/net/positive deltas. This separates live tensor growth from PyTorch allocator
+  reservations, other device pressure, and Windows commit sawteeth without adding a device synchronization.
 - Streams: the pipeline is effectively single-stream today; event pairs assume the default stream. If the
   streaming executor introduces side streams, each phase records on the stream it was entered under (open
   question 4).
@@ -511,11 +512,14 @@ Gemma launcher exposes CUDA timing and sampling controls. Fake-event tests prove
 single-resolution, and failure behavior without touching the active GPU; the real profiled-versus-unprofiled
 CUDA replay and overhead measurement remain pending device availability. Other micro paths and trace level
 remain incomplete; trace requests still fail explicitly rather than emitting partial data under that label.
-Opt-in memory counters now record host working set/private commit and CUDA allocated/reserved/current/high-water
-state at every phase boundary, together with allocator allocation/free deltas. Sampling is non-synchronizing,
+Opt-in memory counters now record host working set/private commit, CUDA allocated/reserved/current/high-water,
+and device-wide free/used/total state at every phase boundary, together with allocator allocation/free deltas. Sampling is non-synchronizing,
 failures produce `PERF004`, and both pinned Gemma launchers expose the control. This directly distinguishes the
 active long-run host commit sawtooth from a monotonic live-memory leak and driver-visible VRAM reservations from
 PyTorch's allocated tensor high-water.
+Resident block results now also persist the process working-set high-water and the larger of CUDA allocated or
+allocator-reserved high-water. Earlier results recorded allocated memory only (and host block peaks as zero), which
+underreported active-run device pressure when `nvidia-smi` showed almost all 12 GiB reserved.
 
 P0 and P2 are pure instrumentation and can land before parity sign-off (they are parity-neutral by C1 and
 cheap to review); P1 blocks on parity per the agreed sequencing, because baselines captured before parity

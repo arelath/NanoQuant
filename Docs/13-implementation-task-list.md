@@ -196,6 +196,10 @@ Outcome: the same pipeline operates from GPU-resident 1B models through disk-str
   The tiny half is covered by an exact two-block comparison using full-batch resident execution versus
   batch-bounded streaming through committed mmap activation generations; the required 1B comparison remains open.
 - [ ] **M5.19** Compare planned versus actual peak GPU, host, temporary disk, and I/O use and set estimator error thresholds.
+  Actual block commits now retain host high-water and CUDA reserved high-water instead of zero/allocated-only
+  values, and opt-in profiles separate host working/private memory, CUDA allocated/reserved memory, device-wide
+  pressure, allocator churn, and I/O bytes. Protocol-matched planned/actual comparisons and acceptance thresholds
+  remain required before closing this item.
 - [ ] **M5.20** Implement the distributed-executor port and decide which distributed calibration/tuning operations are required for the first release.
 - [ ] **M5.21** Run a 70B metadata-only plan and validate source/output/storage estimates before weight execution.
 - [ ] **M5.22** Run a real large-model selected-block canary using disk-backed state and resume it after intentional interruption.
