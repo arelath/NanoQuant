@@ -657,6 +657,11 @@ must be remeasured rather than inferred from the speedup.
   **51.161 -> 50.999 (0.32%)**, comparable to the historical relative improvement
   **39.557 -> 39.464 (0.24%)**; the absolute objectives use differently scaled realized Fisher vectors
   and are not directly comparable, while normalized post-fit errors are **0.1972** and **0.1984**.
+  Across the first 59 contemporary fits emitted by the still-running baseline (including retries), the
+  mean relative LS improvement is **0.2107%** and the aggregate-objective improvement is **0.2137%**.
+  The complete historical log's 197 fits report **0.2079%** and **0.2126%**, respectively. This broader
+  distribution agrees just as closely as the first-layer comparison; increasing LS passes remains an
+  explicit block-loss sweep, not a proposed correction to the two-pass implementation.
   Therefore neither residual selection, LS-fit equations, nor loss reporting explains the old advantage.
   The retained historical gate initialization differs from the rewrite by only 0.06--0.16% of factor
   signs and roughly 0.14--0.20% relative L2 in fitted scales, so a shared-evaluator replay and extended
@@ -667,6 +672,12 @@ must be remeasured rather than inferred from the speedup.
   Experiment 018's **1.1624**. This confirms that most of the apparent 18.59% rewrite quality gap was a
   historical numerical-realization gap. The seven contemporary-legacy versus rewrite post-layer losses
   differ by only **-0.83% to +1.70%** and straddle zero rather than showing a systematic evaluator bias.
+  The first eight complete post-refit block boundaries provide the stronger accumulating-state check:
+  rewrite versus contemporary legacy differs by only **-2.20% to +1.06%** at every boundary. Both can
+  differ dramatically from the historical trajectory at the same point (for example, block 8 is
+  **250.52** rewrite and **256.14** contemporary legacy, versus **115.45** historical), so the historical
+  activation-loss path is not evidence of a rewrite-specific regression. The contemporary full
+  checkpoint and exact WikiText evaluation remain required before declaring end-to-end parity.
   Contemporary legacy took **424.87 s** for block 0 versus the
   rewrite's **476.06 s**, leaving a measured **12.0%** rewrite wall-time gap on this block; this timing is
   actionable performance evidence, unlike the historical quality delta.
