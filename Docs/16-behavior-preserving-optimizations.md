@@ -644,6 +644,23 @@ must be remeasured rather than inferred from the speedup.
   **0.370981** final and historical **0.31145**. The variation cannot explain the historical gate gap, so
   no multi-start selection logic or further per-seed tuning runs are being added. The parity CLI retains
   an explicit seed option for bounded diagnostics and exact replay; its default remains legacy seed 0.
+- **Contemporary legacy gate isolates the historical initialization basin (2026-07-13):** the pinned
+  contemporary Experiment 018 launcher recomputed Fisher state from the exact rewrite calibration tensor
+  and reached gate `Fact-tune summary` loss **0.37733**, close to the rewrite's exact-retained-Fisher
+  **0.37098** and not the historical log's **0.31145**. Its pre-tune quantized block loss was **0.86194**
+  versus historical **0.74527**. This is not an online-versus-evaluation reporting mistake: legacy's epoch
+  value is the accumulated online statistic, but `Fact-tune summary` calls the hardened full-calibration
+  evaluator (contemporary epoch 8 **0.37748**, final **0.37733**; historical **0.31162**, final
+  **0.31145**). The gate residual selection is already exact to the retained historical state
+  (`[367, 768]`, with bitwise-equal BF16 salient values), and current legacy/rewrite implement the same
+  residual-score formula. Contemporary legacy's LS scale fit improved its own weighted objective
+  **51.161 -> 50.999 (0.32%)**, comparable to the historical relative improvement
+  **39.557 -> 39.464 (0.24%)**; the absolute objectives use differently scaled realized Fisher vectors
+  and are not directly comparable, while normalized post-fit errors are **0.1972** and **0.1984**.
+  Therefore neither residual selection, LS-fit equations, nor loss reporting explains the old advantage.
+  The retained historical gate initialization differs from the rewrite by only 0.06--0.16% of factor
+  signs and roughly 0.14--0.20% relative L2 in fitted scales, so a shared-evaluator replay and extended
+  training run are retained as behavior-changing parity diagnostics rather than folded into this perf pass.
 - `JsonlEventSink._read_last_sequence` parses the whole event log at construction — only matters for
   resumed runs with large logs; fine today, worth a tail-scan if event volume grows.
 - **Measured, not implemented (2026-07-13):** a fresh process inventories the pinned Gemma snapshot in a
