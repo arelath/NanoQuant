@@ -230,6 +230,16 @@ def _freeze_tuned_blocks(
     return tuple(result)
 
 
+def _offload_student(student: nn.Module, device: str) -> None:
+    """Finish CUDA work and release model allocations before the device lease."""
+
+    student.cpu()
+    gc.collect()
+    if device.startswith("cuda"):
+        torch.cuda.synchronize(device)
+        torch.cuda.empty_cache()
+
+
 def _run_global_topk_distillation(request: GlobalDistillationRequest) -> GlobalDistillationRunResult:
     started = time.perf_counter()
     if request.interrupt_after_epoch_commits is not None and request.interrupt_after_epoch_commits <= 0:
@@ -347,23 +357,29 @@ def _run_global_topk_distillation(request: GlobalDistillationRequest) -> GlobalD
         if state.completed_epochs < request.config.epochs and request.epoch_cooldown_seconds:
             time.sleep(request.epoch_cooldown_seconds)
 
-    metrics = distill_topk(
-        student,
-        tokens,
-        _lm_head(student),
-        _hidden_states,
-        teacher_cache,
-        request.config,
-        lambda _name, parameter: id(parameter) in selected,
-        device=request.device,
-        resume=None if active_checkpoint is None else active_checkpoint.state,
-        checkpoint_sink=checkpoint_sink,
-    )
+    try:
+        metrics = distill_topk(
+            student,
+            tokens,
+            _lm_head(student),
+            _hidden_states,
+            teacher_cache,
+            request.config,
+            lambda _name, parameter: id(parameter) in selected,
+            device=request.device,
+            resume=None if active_checkpoint is None else active_checkpoint.state,
+            checkpoint_sink=checkpoint_sink,
+        )
+    except BaseException:
+        try:
+            _offload_student(student, request.device)
+        except Exception:
+            # Preserve the training/checkpoint exception. The lease still stays
+            # held until this cleanup attempt returns.
+            pass
+        raise
     peak_gpu = int(torch.cuda.max_memory_allocated(request.device)) if request.device.startswith("cuda") else 0
-    student.cpu()
-    gc.collect()
-    if request.device.startswith("cuda"):
-        torch.cuda.empty_cache()
+    _offload_student(student, request.device)
 
     tuned_blocks = _freeze_tuned_blocks(loaded, trainable, tensors)
     parameter_map = dict(student.named_parameters())

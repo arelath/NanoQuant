@@ -8,6 +8,7 @@ import torch
 from transformers.models.gemma3.configuration_gemma3 import Gemma3TextConfig
 from transformers.models.gemma3.modeling_gemma3 import Gemma3ForCausalLM
 
+import nanoquant.global_distillation as global_distillation_module
 from nanoquant.application.distillation import TopKDistillationConfig
 from nanoquant.config.schema import ADMMConfig
 from nanoquant.global_distillation import GlobalDistillationRequest, run_global_topk_distillation
@@ -89,7 +90,15 @@ def test_complete_frozen_run_can_be_distilled_committed_and_reloaded(
         before_logits = cast(Any, before.model)(input_ids=tokens, use_cache=False).logits.detach()
 
     cooldowns: list[float] = []
+    offloads: list[str] = []
     monkeypatch.setattr("nanoquant.global_distillation.time.sleep", cooldowns.append)
+    original_offload = global_distillation_module._offload_student
+
+    def observe_offload(student: torch.nn.Module, device: str) -> None:
+        offloads.append(device)
+        original_offload(student, device)
+
+    monkeypatch.setattr(global_distillation_module, "_offload_student", observe_offload)
     request = GlobalDistillationRequest(
         output,
         snapshot,
@@ -113,8 +122,10 @@ def test_complete_frozen_run_can_be_distilled_committed_and_reloaded(
     )
     with pytest.raises(InterruptedError, match="after 1 distillation epoch checkpoint"):
         run_global_topk_distillation(replace(request, interrupt_after_epoch_commits=1))
+    assert offloads == ["cpu"]
     distilled = run_global_topk_distillation(request)
     assert cooldowns == [1.5, 1.5, 3.25]
+    assert offloads == ["cpu", "cpu"]
 
     active = active_global_tuning(output)
     assert active == distilled.reference
