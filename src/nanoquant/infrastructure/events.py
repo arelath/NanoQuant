@@ -24,6 +24,10 @@ class JsonlEventSink:
         self._sequence = self._read_last_sequence()
         self._lock = threading.Lock()
         self._observer = observer
+        # Held open for the sink's lifetime instead of reopened per emit; append mode
+        # ("a") seeks to end-of-file on every write, so this is safe alongside other
+        # readers/writers of the same path (verified for the Windows target platform).
+        self._handle = self.path.open("a", encoding="utf-8", newline="\n")
 
     def _read_last_sequence(self) -> int:
         if not self.path.exists():
@@ -59,12 +63,22 @@ class JsonlEventSink:
                 span_id,
                 parent_span_id,
             )
-            with self.path.open("a", encoding="utf-8", newline="\n") as output:
-                output.write(json.dumps(asdict(event), sort_keys=True, separators=(",", ":"), default=str) + "\n")
-                output.flush()
+            self._handle.write(json.dumps(asdict(event), sort_keys=True, separators=(",", ":"), default=str) + "\n")
+            self._handle.flush()
         if self._observer is not None:
             self._observer(event)
         return event
+
+    def close(self) -> None:
+        with self._lock:
+            if not self._handle.closed:
+                self._handle.close()
+
+    def __enter__(self) -> JsonlEventSink:
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        self.close()
 
     @contextmanager
     def span(self, stage: str, name: str, parent_span_id: str | None = None, **fields: object) -> Iterator[str]:

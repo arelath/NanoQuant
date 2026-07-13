@@ -342,6 +342,7 @@ def run_tiny_pipeline(root: str | Path, *, seed: int = 0) -> TinyPipelineResult:
     )
     report = render_reconstruction_tables(tuple(result for _, result in committed_blocks))
     (root / "report.md").write_text(report, encoding="utf-8")
+    events.close()
     return TinyPipelineResult(
         frozen_model,
         plan,

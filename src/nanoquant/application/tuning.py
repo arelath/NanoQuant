@@ -30,6 +30,12 @@ class TuningRequest:
     microbatch_size: int | None = None
 
 
+def _resolve_output_importance(
+    importance: torch.Tensor | None, device: torch.device, dtype: torch.dtype
+) -> torch.Tensor | None:
+    return None if importance is None else importance.to(device=device, dtype=dtype)
+
+
 def _loss_sum(prediction: torch.Tensor, target: torch.Tensor, importance: torch.Tensor | None) -> torch.Tensor:
     if prediction.shape != target.shape:
         raise ValueError("tuning prediction and target shapes differ")
@@ -37,6 +43,8 @@ def _loss_sum(prediction: torch.Tensor, target: torch.Tensor, importance: torch.
     if importance is not None:
         if importance.ndim != 1 or importance.shape[0] != prediction.shape[-1]:
             raise ValueError("tuning output importance must match the output feature dimension")
+        # .to() is a no-op (same tensor, no copy) when already matching, so callers on a hot
+        # loop should resolve device/dtype once with _resolve_output_importance and reuse it.
         error = error * importance.to(device=error.device, dtype=error.dtype)
     return error.sum()
 
@@ -44,6 +52,7 @@ def _loss_sum(prediction: torch.Tensor, target: torch.Tensor, importance: torch.
 def _evaluate_loss(model: nn.Module, request: TuningRequest, forward: ForwardFunction) -> float:
     parameter = next(iter(model.parameters()), None)
     device = request.inputs.device if parameter is None else parameter.device
+    importance = _resolve_output_importance(request.output_importance, device, torch.float32)
     total = torch.zeros((), device=device)
     with torch.no_grad():
         evaluation_batch_size = request.microbatch_size or request.batch_size
@@ -51,7 +60,7 @@ def _evaluate_loss(model: nn.Module, request: TuningRequest, forward: ForwardFun
             end = min(start + evaluation_batch_size, request.inputs.shape[0])
             prediction = forward(model, request.inputs[start:end].to(device, non_blocking=True))
             target = request.targets[start:end].to(device, non_blocking=True)
-            total += _loss_sum(prediction, target, request.output_importance)
+            total += _loss_sum(prediction, target, importance)
             del prediction, target
     return float(total / request.targets.numel())
 
@@ -106,13 +115,14 @@ def tune(
                 optimizer.zero_grad(set_to_none=True)
                 model_parameter = next(iter(model.parameters()), None)
                 device = request.inputs.device if model_parameter is None else model_parameter.device
+                importance = _resolve_output_importance(request.output_importance, device, torch.float32)
                 microbatch_size = request.microbatch_size or indexes.numel()
                 for microbatch_start in range(0, indexes.numel(), microbatch_size):
                     microbatch_indexes = indexes[microbatch_start : microbatch_start + microbatch_size]
                     input_batch = request.inputs[microbatch_indexes].to(device, non_blocking=True)
                     target_batch = request.targets[microbatch_indexes].to(device, non_blocking=True)
                     prediction = forward(model, input_batch)
-                    loss = _loss_sum(prediction, target_batch, request.output_importance) / max(1, indexes.numel())
+                    loss = _loss_sum(prediction, target_batch, importance) / max(1, indexes.numel())
                     torch.autograd.backward(loss)
                     # Do not retain the final microbatch's autograd graph through
                     # optimizer/evaluation/factorization phase boundaries.

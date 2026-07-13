@@ -47,28 +47,28 @@ in section 6 so nobody drifts into it by accident.
 
 ## 3. Findings, ranked by expected impact
 
-| # | Finding | Class | Phase affected | Est. saving (phase) | Est. saving (run) | Confidence | Effort |
-|---|---------|-------|----------------|--------------------|-------------------|------------|--------|
-| 1 | Pin + double-buffer tuning/forward datasets | S1 | tuning, block forwards | 25–50% of transfer-bound steps | 10–25% of full protocol | Medium | M |
-| 2 | Foreach ParityAdamW step | S0 | tuning | 50–80% of optimizer host time | 2–6% of full protocol | Medium-High | M |
-| 3 | Gate `torch.cuda.empty_cache()` on pressure | S1 | tuning, per-block | ~390 calls avoided | 1–4% of full protocol | Medium | S |
-| 4 | Overlap block-activation persistence with compute | S1 | block commit | most of ~3–5 s/block | 4–7% of 1439 s anchor | Medium | M |
-| 5 | Halve/defer ADMM cholesky `info` syncs | S0* | factorization | 1–3% of ADMM | ~1–2% of anchor | Medium | S |
-| 6 | Skip the always-zero self-reference MSE | S0 | per-block bookkeeping | ~0.3–1 s/block | 0.5–1.5% of anchor | High | S |
-| 7 | Hoist per-microbatch `importance.to(device)` | S0 | tuning, block loss | ~0.1–0.2 s/layer | 0.5–2% of tuning phase | High | S |
-| 8 | Fix `_run_block_batched` double copy | S0 | block forwards | one 1.2 GB copy per pass | 0.5–1.5% of anchor | High | S |
-| 9 | Stop persisting rejected-attempt tensors (or make puts async) | S2/S1 | factorization | store I/O ≈ halved | 1–3% of anchor | Medium | M |
-| 10 | Hash during write instead of write-then-reread (mmap store) | S0 | activation commits | one full re-read per generation | 1–3% of anchor | High | S |
-| 11 | Device-side KD loss accumulation + pinned teacher cache | S0/S1 | global KD | 1–3% of KD phase | ≤1% of full protocol | Medium | S |
-| 12 | Keep the JSONL event file handle open | S0 | events | ~3k opens/run | ~0.1% | High | S |
-| 13 | Device-side calibration threshold accumulation | S0 | calibration | ~20k small syncs | ~0.1–0.2% | Medium | S |
+| Done | # | Finding | Class | Phase affected | Est. saving (phase) | Est. saving (run) | Confidence | Effort |
+|------|---|---------|-------|----------------|--------------------|-------------------|------------|--------|
+| [ ] | 1 | Pin + double-buffer tuning/forward datasets | S1 | tuning, block forwards | 25–50% of transfer-bound steps | 10–25% of full protocol | Medium | M |
+| [ ] | 2 | Foreach ParityAdamW step | S0 | tuning | 50–80% of optimizer host time | 2–6% of full protocol | Medium-High | M |
+| [ ] | 3 | Gate `torch.cuda.empty_cache()` on pressure | S1 | tuning, per-block | ~390 calls avoided | 1–4% of full protocol | Medium | S |
+| [ ] | 4 | Overlap block-activation persistence with compute | S1 | block commit | most of ~3–5 s/block | 4–7% of 1439 s anchor | Medium | M |
+| [ ] | 5 | Halve/defer ADMM cholesky `info` syncs | S0* | factorization | 1–3% of ADMM | ~1–2% of anchor | Medium | S |
+| [x] | 6 | Skip the always-zero self-reference MSE | S0 | per-block bookkeeping | ~0.3–1 s/block | 0.5–1.5% of anchor | High | S |
+| [x] | 7 | Hoist per-microbatch `importance.to(device)` | S0 | tuning, block loss | ~0.1–0.2 s/layer | 0.5–2% of tuning phase | High | S |
+| [x] | 8 | Fix `_run_block_batched` double copy | S0 | block forwards | one 1.2 GB copy per pass | 0.5–1.5% of anchor | High | S |
+| [ ] | 9 | Stop persisting rejected-attempt tensors (or make puts async) | S2/S1 | factorization | store I/O ≈ halved | 1–3% of anchor | Medium | M |
+| [ ] | 10 | Hash during write instead of write-then-reread (mmap store) | S0 | activation commits | one full re-read per generation | 1–3% of anchor | High | S |
+| [ ] | 11 | Device-side KD loss accumulation + pinned teacher cache | S0/S1 | global KD | 1–3% of KD phase | ≤1% of full protocol | Medium | S |
+| [x] | 12 | Keep the JSONL event file handle open | S0 | events | ~3k opens/run | ~0.1% | High | S |
+| [ ] | 13 | Device-side calibration threshold accumulation | S0 | calibration | ~20k small syncs | ~0.1–0.2% | Medium | S |
 
 Combined outlook, avoiding double counting: roughly **8–15% on the factor+scale anchor** (items 4–6, 8–10)
 and **15–35% on the full protocol** once tuning and KD phases exist to optimize (items 1–3, 7, 11 dominate).
 Against the ~30% gap to legacy recorded in the agent guide, this catalog plausibly covers a large fraction —
 but only the Docs/15 baseline can apportion it.
 
-### 3.1 Pin and double-buffer the tuning/forward datasets (S1)
+### [ ] 3.1 Pin and double-buffer the tuning/forward datasets (S1)
 
 **Where.** `_run_block_batched` stores teacher/compressed activations into plain pageable CPU tensors
 ([resident_quantization.py:1079](../src/nanoquant/resident_quantization.py) `storage_device="cpu"`, same at
@@ -98,7 +98,7 @@ tier), overlap plus pinned bandwidth (~2–3× pageable) recovers most of it: **
 (smaller share). Confidence: Medium (transfer-boundedness inferred, not yet measured). Effort: M. Pinned
 memory pressure must respect the existing resource-planning rules (1.2 GB × up to 4 live streams).
 
-### 3.2 Foreach ParityAdamW (S0)
+### [ ] 3.2 Foreach ParityAdamW (S0)
 
 **Where.** [parity_adamw.py:66–93](../src/nanoquant/application/parity_adamw.py) — a Python loop over
 parameters issuing ~8–10 elementwise kernels each (`mul_`, `lerp_`, `addcmul_`, fresh `sqrt().add_()`
@@ -118,7 +118,7 @@ steps) locks this in.
 **Estimate.** 50–80% of optimizer host time; **2–6% of a full-protocol run** (scales with tuning share).
 Confidence: Medium-High. Effort: M.
 
-### 3.3 Gate `torch.cuda.empty_cache()` on memory pressure (S1)
+### [ ] 3.3 Gate `torch.cuda.empty_cache()` on memory pressure (S1)
 
 **Where.** [tuning.py:147](../src/nanoquant/application/tuning.py) — every `tune()` call ends with
 `empty_cache()`; also per block at
@@ -142,7 +142,7 @@ behavior, not to failure.
 **Estimate.** **1–4% of a full-protocol run**; near zero on the factor+scale anchor. Confidence: Medium.
 Effort: S. Verify with the interruption/OOM-injection tests, not just replay.
 
-### 3.4 Overlap block-activation persistence with compute (S1)
+### [ ] 3.4 Overlap block-activation persistence with compute (S1)
 
 **Where.** Block commits persist both activation streams for resume (`commit_block` /
 `load_block_activations`, [commits.py:118,170](../src/nanoquant/infrastructure/commits.py)); rolling
@@ -163,7 +163,7 @@ Confidence: Medium (depends on how much compute is available to overlap). Effort
 single-worker writer with strict completion-before-journal semantics, exercised by the existing
 interruption matrix.
 
-### 3.5 Reduce ADMM cholesky `info` synchronizations (S0, one caveat)
+### [ ] 3.5 Reduce ADMM cholesky `info` synchronizations (S0, one caveat)
 
 **Where.** [factorization.py:113](../src/nanoquant/domain/factorization.py):
 `int(info.max())` after every `cholesky_ex` — a host-device sync **twice per outer iteration**, i.e. 1600
@@ -187,7 +187,7 @@ launch-bound and stalls bite. The convergence check already syncs deliberately o
 **Estimate.** 1–3% of the ADMM phase ≈ **10–35 s of the anchor**; more on launch-bound small layers
 (the Docs/15 wall-vs-CUDA divergence flag will show exactly how much). Confidence: Medium. Effort: S.
 
-### 3.6 Skip the always-zero self-reference MSE (S0)
+### [x] 3.6 Skip the always-zero self-reference MSE (S0)
 
 **Where.** [resident_quantization.py:1098](../src/nanoquant/resident_quantization.py):
 `record_source_reference(_weighted_mse(teacher_outputs, teacher_outputs, ...))` — computes the weighted MSE
@@ -201,7 +201,11 @@ fall back to the full computation. One pass instead of four-plus, and the common
 
 **Estimate.** ~0.3–1 s per block × 26 ≈ **10–25 s, 0.5–1.5% of the anchor**. Confidence: High. Effort: S.
 
-### 3.7 Hoist loop-invariant `importance.to(device)` (S0)
+**Done (2026-07-12).** Added `_self_reference_weighted_mse` in `resident_quantization.py`, called at the
+former call site instead of `_weighted_mse(teacher_outputs, teacher_outputs, ...)`. All 162 tests, ruff, and
+`mypy --strict` pass.
+
+### [x] 3.7 Hoist loop-invariant `importance.to(device)` (S0)
 
 **Where.** [tuning.py:40](../src/nanoquant/application/tuning.py) — `_loss_sum` re-materializes
 `importance.to(device, dtype)` on every microbatch (train and eval), i.e. ~4000+ times per tune call when
@@ -215,7 +219,11 @@ returns a fresh copy of the same values each time — hoisting is bit-identical.
 protocol** (and it removes per-step sync points that item 1's overlap would otherwise trip on).
 Confidence: High. Effort: S.
 
-### 3.8 Remove the `_run_block_batched` double copy (S0)
+**Done (2026-07-12).** Added `_resolve_output_importance` helper in `tuning.py`; hoisted the resolved
+importance out of `_evaluate_loss`'s microbatch loop and `tune()`'s per-step microbatch loop, and out of
+`_block_loss`'s batch loop in `resident_quantization.py`. All 162 tests, ruff, and `mypy --strict` pass.
+
+### [x] 3.8 Remove the `_run_block_batched` double copy (S0)
 
 **Where.** [resident_quantization.py:300](../src/nanoquant/resident_quantization.py):
 `result[start:end].copy_(output.to(destination))` — `output.to(destination)` allocates a full intermediate
@@ -228,7 +236,11 @@ becomes pinned and the copy becomes async.)
 **Estimate.** Saves one full activation-sized copy per pass; with ~3–4 full passes per block, **~10–25 s
 per anchor run (0.5–1.5%)**. Confidence: High. Effort: S.
 
-### 3.9 Stop persisting rejected-attempt tensors, or persist asynchronously (S2 / S1)
+**Done (2026-07-12).** `_run_block_batched` and `_run_prefix_batched` in `resident_quantization.py` now do
+`result[start:end].copy_(output)` instead of `copy_(output.to(destination))`. All 162 tests, ruff, and
+`mypy --strict` pass.
+
+### [ ] 3.9 Stop persisting rejected-attempt tensors, or persist asynchronously (S2 / S1)
 
 **Where.** Every attempt writes its outputs through `LocalTensorStore.put`
 ([tensor_store.py:33–38](../src/nanoquant/infrastructure/tensor_store.py)): outlier selection persists the
@@ -252,7 +264,7 @@ written+hashed; ×238 attempts ≈ 8–12 GB, consistent with the 12.4 GB
 **1–3% of the anchor**, plus reduced allocator/sync churn inside `execute_attempt`. Confidence: Medium.
 Effort: M.
 
-### 3.10 Hash during write instead of write-then-re-read (S0)
+### [ ] 3.10 Hash during write instead of write-then-re-read (S0)
 
 **Where.** [activation_store.py:67–72](../src/nanoquant/infrastructure/activation_store.py):
 `MmapGenerationWriter.commit` writes the full mapping, then `_hash_file` re-reads the entire file from disk
@@ -266,7 +278,7 @@ hashes files post hoc).
 **Estimate.** Removes a full-file read per generation: **15–40 s per anchor-scale run where the mmap tier
 is used (1–3%)**; also cuts page-cache pressure alongside item 4. Confidence: High. Effort: S.
 
-### 3.11 KD step-loop hygiene (S0/S1)
+### [ ] 3.11 KD step-loop hygiene (S0/S1)
 
 **Where.** [distillation.py:387–405](../src/nanoquant/application/distillation.py): per step,
 `cpu_tokens.index_select(...).to(device)` and three teacher-target `.to(device)` transfers from pageable
@@ -279,7 +291,7 @@ same order, so the recorded `epoch_losses` are bit-identical.
 
 **Estimate.** 1–3% of the KD phase (≤1% of a full-protocol run). Confidence: Medium. Effort: S.
 
-### 3.12 Keep the JSONL event file handle open (S0)
+### [x] 3.12 Keep the JSONL event file handle open (S0)
 
 **Where.** `JsonlEventSink.emit` ([events.py](../src/nanoquant/infrastructure/events.py)) opens, appends,
 flushes, and closes the file for every event; a parity run emits a few thousand events (per-attempt stage
@@ -289,7 +301,15 @@ events dominate). Windows file opens are ~0.1–0.5 ms.
 **Estimate.** ~0.5–1.5 s per run (~0.1%). Confidence: High. Effort: S. Do it opportunistically alongside
 Docs/15 P0, which touches the same file.
 
-### 3.13 Device-side calibration threshold accumulation (S0)
+**Done (2026-07-12).** `JsonlEventSink` now opens the handle once in `__init__` and reuses it in `emit()`;
+added `close()` plus context-manager support, called at the natural finalize point in
+`_run_resident_quantization`, `_run_resident_factorization_slice` (in its `finally`), and
+`run_tiny_pipeline`. Verified empirically on Windows that a persistent append-mode handle does not block a
+concurrent reader or a second append-mode handle to the same path (load-bearing for
+`test_events_are_monotonic_across_reopen_and_spans`, which opens a second sink on the same path). All 162
+tests, ruff, and `mypy --strict` pass.
+
+### [ ] 3.13 Device-side calibration threshold accumulation (S0)
 
 **Where.** [calibration_math.py:48](../src/nanoquant/domain/calibration_math.py) and the profiling hooks in
 [calibration.py:225–235](../src/nanoquant/application/calibration.py): `robust_tau(...).cpu()` and
@@ -361,6 +381,7 @@ Every item, regardless of class, lands with:
 ## 8. Suggested sequencing
 
 1. **Now (S0, small):** items 6, 7, 8, 12 — trivial diffs, measurable individually, no design risk.
+   **Done (2026-07-12).**
 2. **With Docs/15 P0 baselines in hand:** items 5 and 2 (verify the sync/launch-bound hypothesis first),
    then 1 (largest but needs the transfer-boundedness numbers to size the buffering).
 3. **Design-reviewed (S1 durability):** items 4, 9, 10 as one "store path" workstream — shared writer
