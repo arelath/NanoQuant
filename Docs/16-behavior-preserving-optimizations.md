@@ -492,6 +492,11 @@ alternating benchmark, median time for 512 solves improved from 381.324 ms to 36
   for the largest 6912×1056 MLP factor, 32-call median time regressed from 27.724 ms to 31.760 ms
   (**0.87x**). Both produced bitwise-identical projections, but the side-stream/event design was not
   implemented because it degraded both relevant shapes.
+- **Deferred pending a clean GPU measurement (2026-07-13):** replacing `_sign`'s full-size `+1`/`-1`
+  branch tensors with boolean-to-bf16 in-place arithmetic preserved `+0`, `-0`, infinity, and NaN behavior
+  and passed the exact CPU recurrence suite. Initial CUDA samples appeared faster, but they coincided with
+  a separately launched full Gemma replacement-KD run and are therefore contaminated. The prototype was
+  removed rather than accepting untrustworthy timing; repeat it only after that process releases the GPU.
 - `JsonlEventSink._read_last_sequence` parses the whole event log at construction — only matters for
   resumed runs with large logs; fine today, worth a tail-scan if event volume grows.
 - `_artifact_bytes` walks the whole artifact tree once at report time — keep an eye on it as artifact
