@@ -664,8 +664,9 @@ must be remeasured rather than inferred from the speedup.
   explicit block-loss sweep, not a proposed correction to the two-pass implementation.
   Therefore neither residual selection, LS-fit equations, nor loss reporting explains the old advantage.
   The retained historical gate initialization differs from the rewrite by only 0.06--0.16% of factor
-  signs and roughly 0.14--0.20% relative L2 in fitted scales, so a shared-evaluator replay and extended
-  training run are retained as behavior-changing parity diagnostics rather than folded into this perf pass.
+  signs and roughly 0.14--0.20% relative L2 in fitted scales. The shared-evaluator replay and extended
+  training run below test those behavior-changing parity hypotheses rather than folding them into this
+  behavior-preserving perf pass.
   The same contemporary run finished the complete first block at **1.3728** after joint refit, versus the
   rewrite's **1.37848997** with the same pinned tokens/downstream profile and independently realized
   current-versus-retained Fisher state (**0.41% higher**), and historical
@@ -677,8 +678,19 @@ must be remeasured rather than inferred from the speedup.
   **1623.59** versus **1619.00**. Both can differ dramatically from the historical trajectory at the
   same point (for example, block 8 is
   **250.52** rewrite and **256.14** contemporary legacy, versus **115.45** historical), so the historical
-  activation-loss path is not evidence of a rewrite-specific regression. The contemporary full
-  checkpoint and exact WikiText evaluation remain required before declaring end-to-end parity.
+  activation-loss path is not evidence of a rewrite-specific regression. The contemporary checkpoint
+  contains all 182 layers at exactly the rewrite ranks (rank sum **105,856** for both), so binary BPW and
+  count-based outlier cost match exactly. Residual-selected indices differ in 123 layers and same-rank
+  signs agree at the expected independent-basin rate of roughly 50%, consistent with the measured CCE
+  nondeterminism rather than a structural allocation mismatch. Its eight model-KD losses
+  `[2.3977, 2.2443, 2.2136, 2.1837, 2.1664, 2.1524, 2.1462, 2.1430]` nearly overlay the rewrite's
+  `[2.40027, 2.24464, 2.20950, 2.18233, 2.16111, 2.14793, 2.14395, 2.14040]`.
+  Exact serial WikiText evaluation reports **444.3328** PPL for contemporary legacy versus
+  **454.4314** for the rewrite's legacy-sampled tuned artifact (**2.27%** higher) and **432.9306** for
+  immutable rewrite pre-KD (**2.57%** lower). The rank/BPW, block trajectory, optimizer trajectory,
+  resume/replay, and end-quality comparisons therefore close M4 parity with the numerical-realization
+  spread explicitly approved; the historical 383.94 PPL checkpoint remains a retained historical
+  quality reference, not a reproducible current-run oracle.
   Contemporary legacy took **424.87 s** for block 0 versus the
   rewrite's **476.06 s**, leaving a measured **12.0%** rewrite wall-time gap on this block; this timing is
   actionable performance evidence, unlike the historical quality delta. The complete contemporary
@@ -686,6 +698,23 @@ must be remeasured rather than inferred from the speedup.
   **15,284 s** total, making the observed full-run gap roughly **40%**. Exact phase boundaries and the
   newly landed hot-path changes must be remeasured in a fresh rewrite run before assigning that entire
   difference to current code, but the result raises rather than closes the post-parity performance gate.
+- **Extra LS passes rejected; longer tuning promoted (2026-07-13):** the exact block-0 gate replay swept
+  0/1/2/4/8 alternating LS passes. Full block losses were respectively **0.976456**, **0.818065**,
+  **0.818384**, **0.818384**, and **0.818384**. Four and eight passes are a numerical plateau, while the
+  one-pass result is only 0.039% below the legacy-compatible two-pass result and does not justify changing
+  the parity default. In contrast, a 32-epoch tuning horizon changes the cosine schedule materially: gate
+  loss reaches **0.303956** by epoch 8 and **0.221278** by epoch 32, versus **0.371515** for the separate
+  eight-epoch schedule and historical **0.31145**. Promoting 32 epochs through the complete first block
+  lowers post-refit loss from **1.378489** to **0.826978** (40.0%) and beats historical **1.1624** by 28.9%.
+  Block 1 likewise improves from the retained full-run boundary **3.583139** to **2.658979** (25.8%).
+  Block-0 wall time rises from **476.06 s** to **1201.49 s** (2.52x), but peak allocation is effectively
+  unchanged (**6,195,498,496** versus **6,194,081,280** bytes). The 26-block promotion is therefore a
+  quality candidate, not a performance optimization, and remains an active detached run.
+- **Batched inference graph retention fixed (2026-07-13):** the first gate replay accumulated every
+  source-block autograd graph through `copy_` into its host result, reaching 10.85 GiB allocated before an
+  eager-attention allocation failed. `_run_block_batched` is now intrinsically no-grad and has a regression
+  test; the completed replay peaks at 4.05 GiB during tuning. This was a diagnostic-path lifetime bug, not
+  evidence that the 1B model itself requires the full 12 GiB card.
 - `JsonlEventSink._read_last_sequence` parses the whole event log at construction — only matters for
   resumed runs with large logs; fine today, worth a tail-scan if event volume grows.
 - **Measured, not implemented (2026-07-13):** a fresh process inventories the pinned Gemma snapshot in a
