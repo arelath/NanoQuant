@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import random
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import cast
@@ -30,6 +31,7 @@ class TopKDistillationConfig:
     weight_decay: float = 0.0
     seed: int = 0
     optimizer_version: str = "legacy-optimi-adamw-v1"
+    sampling_version: str = "legacy-python-device-rng-v1"
 
     def __post_init__(self) -> None:
         if self.epochs <= 0 or self.batch_size <= 0:
@@ -44,6 +46,8 @@ class TopKDistillationConfig:
             raise ValueError("distillation weight decay cannot be negative")
         if self.optimizer_version != "legacy-optimi-adamw-v1":
             raise ValueError("unsupported distillation optimizer version")
+        if self.sampling_version != "legacy-python-device-rng-v1":
+            raise ValueError("unsupported distillation sampling version")
 
 
 @dataclass(frozen=True, slots=True)
@@ -255,18 +259,34 @@ def cache_topk_teacher_epoch(
     if epoch_index < 0 or epoch_index >= config.epochs:
         raise ValueError("distillation teacher-cache epoch index is out of range")
     cpu_tokens = token_ids.detach().cpu()
-    order_generator = torch.Generator(device="cpu").manual_seed(config.seed)
-    token_generator = torch.Generator(device="cpu").manual_seed(config.seed)
-    order = torch.arange(cpu_tokens.shape[0])
+    # Match the legacy cache plan exactly. Hugging Face ``set_seed`` seeded
+    # Python's RNG and the default RNG on the training device once; the legacy
+    # loop then shuffled one persistent Python list and selected token positions
+    # with ``torch.randperm(..., device=batch.device)`` across all epochs.
+    # Replaying from the seed through ``epoch_index`` keeps independently
+    # resumable epoch commits bitwise-compatible with that stateful loop.
+    order_generator = random.Random(config.seed)
+    generator_device = torch.device(device)
+    token_generator = torch.Generator(device=generator_device).manual_seed(config.seed)
+    order = list(range(cpu_tokens.shape[0]))
     epoch_plan: list[tuple[torch.Tensor, torch.Tensor]] = []
     for current_epoch in range(epoch_index + 1):
-        permutation = torch.randperm(order.numel(), generator=order_generator)
-        order = order.index_select(0, permutation)
-        for start in range(0, order.numel(), config.batch_size):
-            indices = order[start : start + config.batch_size]
+        order_generator.shuffle(order)
+        for start in range(0, len(order), config.batch_size):
+            indices = torch.tensor(order[start : start + config.batch_size], dtype=torch.long)
             batch = cpu_tokens.index_select(0, indices)
             mask = torch.ones_like(batch, dtype=torch.bool) if pad_token_id is None else batch != pad_token_id
-            selected = select_kd_token_indices(mask, config.maximum_tokens_per_batch, token_generator)
+            valid = torch.nonzero(mask.reshape(-1), as_tuple=False).flatten()
+            maximum_tokens = config.maximum_tokens_per_batch
+            if maximum_tokens is not None and valid.numel() > maximum_tokens:
+                permutation = torch.randperm(
+                    valid.numel(),
+                    generator=token_generator,
+                    device=generator_device,
+                )[:maximum_tokens].cpu()
+                selected = valid.index_select(0, permutation)
+            else:
+                selected = valid
             if current_epoch == epoch_index and selected.numel() > 0:
                 epoch_plan.append((indices.clone(), selected))
     batches = []

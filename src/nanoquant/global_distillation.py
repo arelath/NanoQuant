@@ -283,7 +283,12 @@ def _run_global_topk_distillation(request: GlobalDistillationRequest) -> GlobalD
 
     if request.device.startswith("cuda"):
         torch.cuda.reset_peak_memory_stats(request.device)
-    cache_journal = load_teacher_cache_journal(request.run_output, cache_identity, request.config.epochs)
+    cache_journal = load_teacher_cache_journal(
+        request.run_output,
+        cache_identity,
+        request.config.epochs,
+        replace_mismatched=request.replace_existing_global_tuning,
+    )
     if any(reference is None for reference in cache_journal.epochs):
         teacher = cast(
             nn.Module,

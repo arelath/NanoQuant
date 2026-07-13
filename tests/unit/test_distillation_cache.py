@@ -47,3 +47,12 @@ def test_teacher_cache_epochs_commit_resume_and_materialize(tmp_path: Path) -> N
     assert cache.bytes == first.bytes + second.bytes
     with pytest.raises(ValueError, match="does not match"):
         load_teacher_cache_journal(tmp_path, TeacherCacheIdentity("different", "sha256:tokens"), 2)
+    replacement_identity = TeacherCacheIdentity("different", "sha256:tokens")
+    replacement = load_teacher_cache_journal(
+        tmp_path,
+        replacement_identity,
+        3,
+        replace_mismatched=True,
+    )
+    assert replacement.identity == replacement_identity
+    assert replacement.epochs == (None, None, None)

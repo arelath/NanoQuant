@@ -114,6 +114,8 @@ def load_teacher_cache_journal(
     run_output: str | Path,
     identity: TeacherCacheIdentity,
     epoch_count: int,
+    *,
+    replace_mismatched: bool = False,
 ) -> TeacherCacheJournal:
     path = Path(run_output) / "global-distillation-cache.json"
     if not path.exists():
@@ -124,6 +126,8 @@ def load_teacher_cache_journal(
         path="teacher_cache_journal",
     )
     if journal.identity != identity or len(journal.epochs) != epoch_count:
+        if replace_mismatched:
+            return TeacherCacheJournal(1, identity, (None,) * epoch_count)
         raise ValueError("existing teacher-cache journal does not match the requested protocol")
     return journal
 

@@ -34,6 +34,48 @@ def _hidden(model: nn.Module, token_ids: torch.Tensor) -> torch.Tensor:
 
 def test_distillation_config_uses_legacy_zero_weight_decay() -> None:
     assert TopKDistillationConfig().weight_decay == 0.0
+    assert TopKDistillationConfig().sampling_version == "legacy-python-device-rng-v1"
+
+
+def test_teacher_cache_plan_matches_legacy_python_and_device_rng() -> None:
+    torch.manual_seed(6)
+    teacher = ToyLanguageModel()
+    tokens = torch.arange(20).remainder(17).reshape(4, 5)
+    config = TopKDistillationConfig(
+        epochs=2,
+        batch_size=1,
+        top_k=3,
+        vocabulary_chunk_size=8,
+        token_chunk_size=4,
+        maximum_tokens_per_batch=2,
+        seed=7,
+    )
+
+    first, _ = cache_topk_teacher_epoch(
+        teacher,
+        tokens,
+        teacher.lm_head,
+        _hidden,
+        config,
+        epoch_index=0,
+        device="cpu",
+        pad_token_id=None,
+    )
+    second, _ = cache_topk_teacher_epoch(
+        teacher,
+        tokens,
+        teacher.lm_head,
+        _hidden,
+        config,
+        epoch_index=1,
+        device="cpu",
+        pad_token_id=None,
+    )
+
+    assert [batch.sample_indices for batch in first] == [(3,), (1,), (0,), (2,)]
+    assert [batch.token_indices.tolist() for batch in first] == [[0, 1], [3, 4], [3, 2], [3, 2]]
+    assert [batch.sample_indices for batch in second] == [(1,), (0,), (2,), (3,)]
+    assert [batch.token_indices.tolist() for batch in second] == [[1, 0], [1, 0], [3, 1], [0, 3]]
 
 
 def test_chunked_teacher_topk_matches_dense_logits() -> None:
