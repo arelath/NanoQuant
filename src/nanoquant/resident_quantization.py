@@ -106,7 +106,7 @@ from nanoquant.infrastructure.resource_usage import peak_process_memory_bytes
 from nanoquant.infrastructure.safetensors_source import SafetensorsModelSource
 from nanoquant.infrastructure.tensor_store import LocalTensorStore
 
-RESIDENT_ALGORITHM_VERSION = 17
+RESIDENT_ALGORITHM_VERSION = 19
 
 
 @contextmanager
@@ -1072,6 +1072,7 @@ def _run_resident_quantization(request: ResidentQuantizationRequest) -> Resident
     outlier_stage = OutlierSelectionStage(
         device=request.device,
         residual_probe_iterations=request.outliers.residual_probe.iterations,
+        residual_probe_inner_iterations=request.admm.inner_iterations,
     )
     scale_stage = ScaleFitStage(request.scale_fit, device=request.device)
 
@@ -1625,6 +1626,7 @@ def _run_resident_factorization_slice(request: ResidentQuantizationRequest) -> R
         outlier_stage = OutlierSelectionStage(
             device=request.device,
             residual_probe_iterations=request.outliers.residual_probe.iterations,
+            residual_probe_inner_iterations=request.admm.inner_iterations,
         )
         scale_stage = ScaleFitStage(request.scale_fit, device=request.device)
         with source.read_tensor(layer_plan.source_weight, device="cpu") as source_weight:

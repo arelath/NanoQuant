@@ -49,13 +49,20 @@ def _summary(value: torch.Tensor) -> StatisticSummary:
 
 class OutlierSelectionStage:
     name = "select-outliers"
-    version = "3"
+    version = "5"
 
-    def __init__(self, *, device: str = "cpu", residual_probe_iterations: int = 20) -> None:
-        if residual_probe_iterations <= 0:
-            raise ValueError("residual probe iterations must be positive")
+    def __init__(
+        self,
+        *,
+        device: str = "cpu",
+        residual_probe_iterations: int = 20,
+        residual_probe_inner_iterations: int = 3,
+    ) -> None:
+        if residual_probe_iterations <= 0 or residual_probe_inner_iterations <= 0:
+            raise ValueError("residual probe iteration counts must be positive")
         self.device = device
         self.residual_probe_iterations = residual_probe_iterations
+        self.residual_probe_inner_iterations = residual_probe_inner_iterations
 
     def estimate(self, request: OutlierSelectionRequest, host: HostInventory) -> ResourceEstimate:
         elements = 1
@@ -93,7 +100,7 @@ class OutlierSelectionStage:
                             rank,
                             generator,
                             outer_iterations=self.residual_probe_iterations,
-                            inner_iterations=3,
+                            inner_iterations=self.residual_probe_inner_iterations,
                         ).reconstruction
 
                     scores = residual_probe_scores(
@@ -110,7 +117,8 @@ class OutlierSelectionStage:
                 residual, raw_values = remove_columns(weight, indices)
                 factor_input_importance = input_importance.clone()
                 if request.plan.removed_column_importance == "zero":
-                    factor_input_importance[indices.long()] = 0
+                    median = factor_input_importance.median().clamp_min(1e-12)
+                    factor_input_importance[indices.long()] = median * 1e-4
                 elif request.plan.removed_column_importance != "keep":
                     raise ValueError(
                         "unsupported removed-column importance mode: "

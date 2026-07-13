@@ -164,10 +164,10 @@ Outcome: a complete 1B-class run uses the new pipeline and survives interruption
 - [x] **M4.23** Implement `FrozenModelResult` assembly from block artifacts without requiring a mutable full model object.
 - [x] **M4.24** Render the Experiment 019-style per-layer reconstruction and final-block-pre-KD tables from structured results.
 - [x] **M4.25** Run the deterministic tiny end-to-end pipeline entirely on new components.
-- [ ] **M4.26** Run a representative 1B resident quantization and compare factors, BPW, block losses, quality, memory, and time with the legacy baseline.
+- [x] **M4.26** Run a representative 1B resident quantization and compare factors, BPW, block losses, quality, memory, and time with the legacy baseline.
 - [x] **M4.27** Meet the captured-layer under-60-second and tiny-model under-10-minute feedback targets where the reference hardware/factorizer settings permit them.
 - [x] **M4.28** Implement memory-bounded top-k model-level distillation, durable per-epoch teacher-cache and optimizer resume, immutable tuned-state persistence, atomic activation, and frozen-loader integration with a complete tiny-model test.
-- [ ] **M4.29** Run the pinned 1B eight-epoch model-level KD protocol, evaluate the tuned artifact, and compare its quality/memory/time with the retained legacy result.
+- [ ] **M4.29** Run the pinned 1B eight-epoch model-level KD protocol, evaluate the tuned artifact, and compare its quality/memory/time with the retained legacy result. The optimizer-corrected run reached PPL 462.208 versus immutable pre-KD 432.078 and retained legacy 384.954, but source comparison then proved its sample/token RNG plan differed from legacy. Repeat with the versioned legacy Python/device-RNG cache sampler before closing this task.
 - [ ] **M4.GATE** Complete, interrupt, resume, replay, and compare a 1B resident run with no legacy quantization/orchestration dependency and approved parity differences only.
 
 ## Milestone 5 — Add bounded-memory streaming and 70B scaling
