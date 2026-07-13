@@ -240,7 +240,11 @@ class Profiler:
         path = f"{parent.path}/{name}" if parent is not None else name
         span_id = None
         parent_span_id = None if parent is None else parent.span_id
-        if self.config.emit_span_events and self._events is not None:
+        if (
+            self.config.level is ProfilingLevel.MACRO
+            and self.config.emit_span_events
+            and self._events is not None
+        ):
             self._span_sequence += 1
             span_id = f"profile-{os.getpid()}-{self._span_sequence}"
             self._events.emit(
@@ -272,7 +276,11 @@ class Profiler:
             self._stack[-1].child_seconds += elapsed
         else:
             self._top_level_seconds += elapsed
-        if self.config.emit_span_events and self._events is not None:
+        if (
+            self.config.level is ProfilingLevel.MACRO
+            and self.config.emit_span_events
+            and self._events is not None
+        ):
             severity = "error" if error is not None else "info"
             fields: dict[str, object] = {
                 "path": frame.path,
@@ -351,11 +359,15 @@ class Profiler:
                     "fraction": coverage,
                 }
             )
-        if recorder_fraction > 0.005:
+        recorder_budget = 0.005 if self.config.level is ProfilingLevel.MACRO else 0.05
+        if recorder_fraction > recorder_budget:
             warnings.append(
                 {
                     "code": "PERF002",
-                    "message": "macro profiling recorder time exceeds 0.5%",
+                    "message": (
+                        f"{self.config.level.value} profiling recorder time exceeds "
+                        f"{recorder_budget:.1%}"
+                    ),
                     "fraction": recorder_fraction,
                 }
             )

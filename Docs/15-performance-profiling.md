@@ -400,7 +400,9 @@ tractable:
 - Micro tier: ≤ 3% target, 5% hard ceiling on a parity factorization slice. Cost drivers and mitigations:
   per-iteration `perf_counter` pairs (µs-scale, accepted), CUDA event records (sampled via
   `cuda_sample_every`), reservoir updates (bounded, integer-indexed), attribute grouping (pre-interned
-  group keys, no string formatting on the hot path).
+  group keys, no string formatting on the hot path). Micro spans are never mirrored to `events.jsonl`,
+  even when event mirroring is enabled for the run, because the durable flush on every hot-loop boundary
+  would dominate the measurement. Macro spans remain the event-mirroring boundary.
 - The profiler measures itself: cumulative recorder time is tracked and reported in `profile.json`;
   exceeding budget raises `PERF002` as a run warning rather than failing the run.
 - Parity safety (C1) is enforced by construction — no sync, no RNG, no allocation on tensors — and verified
@@ -464,6 +466,8 @@ Resident calibration, replay, global distillation, the stage executor, and the t
 still need equivalent P0 wiring before the framework-wide rollout item is complete. The resident tuning path
 supports opt-in micro phases for staging, forward, loss, backward, optimizer steps, evaluation, synchronization,
 and best-state cloning, with token/step/clone/transfer counters and exact profiled/control parity coverage.
+Micro spans suppress durable span events and use the documented 5% recorder-time warning ceiling; macro
+profiling retains its stricter 0.5% ceiling and optional span-event mirror.
 Other micro paths, CUDA timing, and trace levels remain incomplete; CUDA/trace requests fail explicitly rather
 than emitting partial data under those labels.
 

@@ -194,7 +194,12 @@ def test_profiler_rejects_invalid_names_attributes_and_open_snapshot() -> None:
 
 
 def test_micro_level_is_supported_and_trace_and_cuda_timing_fail_explicitly() -> None:
-    assert Profiler(ProfilingConfig(level=ProfilingLevel.MICRO), run_id="micro").config.level is ProfilingLevel.MICRO
+    events = MemoryEvents()
+    profiler = Profiler(ProfilingConfig(level=ProfilingLevel.MICRO), run_id="micro", events=events)
+    with profiler.phase("iteration"):
+        pass
+    assert profiler.config.level is ProfilingLevel.MICRO
+    assert not events.events
     with pytest.raises(NotImplementedError, match="trace"):
         Profiler(ProfilingConfig(level=ProfilingLevel.TRACE), run_id="trace")
     with pytest.raises(NotImplementedError, match="CUDA"):
