@@ -79,6 +79,7 @@ class _PhaseAggregate:
     minimum: float = float("inf")
     maximum: float = 0.0
     samples: list[float] = field(default_factory=list)
+    self_samples: list[float] = field(default_factory=list)
     groups: dict[str, _GroupAggregate] = field(default_factory=dict)
 
     def record(self, elapsed: float, self_seconds: float, attributes: Mapping[str, object], failed: bool) -> None:
@@ -90,10 +91,13 @@ class _PhaseAggregate:
         self.maximum = max(self.maximum, elapsed)
         if len(self.samples) < self.sample_limit:
             self.samples.append(elapsed)
+            self.self_samples.append(self_seconds)
         else:
             # A deterministic ring preserves a bounded recent distribution without
             # consuming the application's random-number state.
-            self.samples[(self.count - 1) % self.sample_limit] = elapsed
+            sample_index = (self.count - 1) % self.sample_limit
+            self.samples[sample_index] = elapsed
+            self.self_samples[sample_index] = self_seconds
         if attributes:
             self.groups.setdefault(_group_key(attributes), _GroupAggregate()).record(elapsed, self_seconds)
 
@@ -108,6 +112,8 @@ class _PhaseAggregate:
             "min": 0.0 if self.count == 0 else self.minimum,
             "p50": _percentile(self.samples, 0.50),
             "p90": _percentile(self.samples, 0.90),
+            "self_p50": _percentile(self.self_samples, 0.50),
+            "self_p90": _percentile(self.self_samples, 0.90),
             "max": self.maximum,
             "groups": {name: group.payload() for name, group in sorted(self.groups.items())},
         }

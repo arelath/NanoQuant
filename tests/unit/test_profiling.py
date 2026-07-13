@@ -110,6 +110,8 @@ def test_profiler_records_repeated_samples_and_failure_without_swallowing_except
     assert phases["work"]["min"] == 1.0
     assert phases["work"]["p50"] == 2.0
     assert phases["work"]["p90"] == 3.0
+    assert phases["work"]["self_p50"] == 2.0
+    assert phases["work"]["self_p90"] == 3.0
     assert phases["work"]["max"] == 3.0
     assert phases["failed"]["failed_count"] == 1
 

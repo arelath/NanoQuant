@@ -325,7 +325,8 @@ Per process, written into the run output directory next to `events.jsonl`:
   "phases": [
     { "path": "run/blocks/block/layer/factorize/attempt",
       "count": 616, "wall_seconds": 2410.8, "self_seconds": 31.2, "cuda_seconds": 2214.9,
-      "min": 1.9, "p50": 3.6, "p90": 5.8, "max": 11.2,
+      "min": 1.9, "p50": 3.6, "p90": 5.8, "self_p50": 0.04, "self_p90": 0.09,
+      "max": 11.2,
       "groups": { "shape=1152x6912|rank=256": { "count": 88, "wall_seconds": 512.3 } } }
   ],
   "counters": [ { "name": "transfer.h2d_bytes", "total": 91234567890,
@@ -456,6 +457,9 @@ interrupt/resume integration run records 45 phase paths, **94.12%** leaf-phase w
 recorder time with span-event mirroring disabled. The same test compares a profiling-off control with the
 profiled resume and preserves frozen numerical results; profiling is excluded from resident commit identity.
 Span-event mirroring measured roughly 2.9% recorder time on the same short workload and is therefore opt-in.
+The profile comparison CLI now checks stable phase paths, identical invocation counts, runtime fingerprints,
+aggregate deltas, and the matching reservoir median; aggregate-only movement without median confirmation is
+reported as noise, and environment-mismatched regressions are informational rather than actionable.
 Resident calibration, replay, global distillation, the stage executor, and the tiny-pipeline composition roots
 still need equivalent P0 wiring before the framework-wide rollout item is complete. Micro/CUDA/trace levels
 fail explicitly until P2/P3 rather than emitting incomplete data under those labels.
