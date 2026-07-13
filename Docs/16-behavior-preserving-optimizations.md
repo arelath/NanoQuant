@@ -47,31 +47,35 @@ in section 6 so nobody drifts into it by accident.
 
 ## 3. Findings, ranked by expected impact
 
-| Done | # | Finding | Class | Phase affected | Est. saving (phase) | Est. saving (run) | Confidence | Effort |
-|------|---|---------|-------|----------------|--------------------|-------------------|------------|--------|
-| [x] | 1 | Pin + double-buffer tuning/forward datasets | S1 | tuning, block forwards | measured below | full-run rerun pending | High | M |
-| [x] | 2 | Foreach ParityAdamW step | S0 | tuning | 50–80% of optimizer host time | 2–6% of full protocol | High | M |
-| [x] | 3 | Gate `torch.cuda.empty_cache()` on pressure | S1 | tuning, per-block | ~390 calls avoided | measured below | High | S |
-| [ ] | 4 | Overlap block-activation persistence with compute | S1 | block commit | most of ~3–5 s/block | 4–7% of 1439 s anchor | Medium | M |
-| [ ] | 5 | Halve/defer ADMM cholesky `info` syncs | S0* | factorization | 1–3% of ADMM | ~1–2% of anchor | Medium | S |
-| [x] | 6 | Skip the always-zero self-reference MSE | S0 | per-block bookkeeping | ~0.3–1 s/block | 0.5–1.5% of anchor | High | S |
-| [x] | 7 | Hoist per-microbatch `importance.to(device)` | S0 | tuning, block loss | ~0.1–0.2 s/layer | 0.5–2% of tuning phase | High | S |
-| [x] | 8 | Fix `_run_block_batched` double copy | S0 | block forwards | one 1.2 GB copy per pass | 0.5–1.5% of anchor | High | S |
-| [ ] | 9 | Stop persisting rejected-attempt tensors (or make puts async) | S2/S1 | factorization | store I/O ≈ halved | 1–3% of anchor | Medium | M |
-| [ ] | 10 | Hash during write instead of write-then-reread (mmap store) | S0 | activation commits | one full re-read per generation | 1–3% of anchor | High | S |
-| [ ] | 11 | KD loss accumulation + teacher-cache prefetch (rejected) | S0/S1 | global KD | measured ≤0.02% | negligible | High | S |
-| [x] | 12 | Keep the JSONL event file handle open | S0 | events | ~3k opens/run | ~0.1% | High | S |
-| [x] | 13 | Device-side calibration threshold accumulation | S0 | calibration | ~20k small syncs | ~0.1–0.2% | High | S |
-| [x] | 14 | Cache verified tensor hashes by immutable file signature | S0 | tensor loads | repeated memory hashes removed | ~10–20 s | High | S |
-| [x] | 15 | Bypass STE signs for immutable binary KD factors | S0 | global KD | measured 24% per layer-step | full-run rerun pending | High | S |
-| [x] | 16 | Fuse ADMM factor promotion into FP32 additions | S0 | factorization | measured 2.1% per solve | ~5–6 s of anchor | High | XS |
-| [x] | 17 | Reuse ADMM symmetrization storage | S0 | factorization | measured 3.6% per solve | ~9–10 s of anchor | High | XS |
-| [x] | 18 | Lower-allocation binary sign extraction | S0 | factorization, factorized tuning | measured 1.21–1.92x per sign | ~3–12 s factorization, tuning rerun pending | High | XS |
+`Done` means implemented and retained. `Rejected` means a measured candidate was reverted or deliberately not
+implemented. `Deferred` means the candidate needs a contract decision or stronger profile evidence. The detailed
+disposition under each unchecked item is authoritative; unchecked items are not silently pending implementation.
 
-Combined outlook, avoiding double counting: roughly **8–15% on the factor+scale anchor** (items 4–6, 8–10)
-and **15–35% on the full protocol** once tuning phases exist to optimize (items 1–3, 7, and 15 dominate).
-Against the ~30% gap to legacy recorded in the agent guide, this catalog plausibly covers a large fraction —
-but only the Docs/15 baseline can apportion it.
+| Disposition | # | Finding | Class | Phase affected | Est. saving (phase) | Est. saving (run) | Confidence | Effort |
+|-------------|---|---------|-------|----------------|--------------------|-------------------|------------|--------|
+| Done | 1 | Pin + double-buffer tuning/forward datasets | S1 | tuning, block forwards | measured below | full-run rerun pending | High | M |
+| Done | 2 | Foreach ParityAdamW step | S0 | tuning | 50–80% of optimizer host time | 2–6% of full protocol | High | M |
+| Done | 3 | Gate `torch.cuda.empty_cache()` on pressure | S1 | tuning, per-block | ~390 calls avoided | measured below | High | S |
+| Rejected | 4 | Overlap block-activation persistence with compute | S1 | block commit | measured 1.16x over the safe overlap window | ~17 s over 26 blocks | High | M |
+| Rejected | 5 | Halve/defer ADMM cholesky `info` syncs | S0* | factorization | proposed launch order is not recurrence-preserving | none accepted | High | S |
+| Done | 6 | Skip the always-zero self-reference MSE | S0 | per-block bookkeeping | ~0.3–1 s/block | 0.5–1.5% of anchor | High | S |
+| Done | 7 | Hoist per-microbatch `importance.to(device)` | S0 | tuning, block loss | ~0.1–0.2 s/layer | 0.5–2% of tuning phase | High | S |
+| Done | 8 | Fix `_run_block_batched` double copy | S0 | block forwards | one 1.2 GB copy per pass | 0.5–1.5% of anchor | High | S |
+| Deferred | 9 | Stop persisting rejected-attempt tensors (or make puts async) | S2/S1 | factorization | requires artifact-contract approval or stronger I/O attribution | none accepted | Medium | M |
+| Rejected | 10 | Hash during write instead of write-then-reread (mmap store) | S0 | activation commits | bounded Windows benchmark did not finish | none accepted | High | S |
+| Rejected | 11 | KD loss accumulation + teacher-cache prefetch | S0/S1 | global KD | measured ≤0.02% | negligible | High | S |
+| Done | 12 | Keep the JSONL event file handle open | S0 | events | ~3k opens/run | ~0.1% | High | S |
+| Done | 13 | Device-side calibration threshold accumulation | S0 | calibration | ~20k small syncs | ~0.1–0.2% | High | S |
+| Done | 14 | Cache verified tensor hashes by immutable file signature | S0 | tensor loads | repeated memory hashes removed | ~10–20 s | High | S |
+| Done | 15 | Bypass STE signs for immutable binary KD factors | S0 | global KD | measured 24% per layer-step | full-run rerun pending | High | S |
+| Done | 16 | Fuse ADMM factor promotion into FP32 additions | S0 | factorization | measured 2.1% per solve | ~5–6 s of anchor | High | XS |
+| Done | 17 | Reuse ADMM symmetrization storage | S0 | factorization | measured 3.6% per solve | ~9–10 s of anchor | High | XS |
+| Done | 18 | Lower-allocation binary sign extraction | S0 | factorization, factorized tuning | measured 1.21–1.92x per sign | ~3–12 s factorization, tuning rerun pending | High | XS |
+
+The retained factor+scale changes currently support an estimated **roughly 3–7% anchor improvement** before
+interaction effects; the earlier 8–15% outlook incorrectly counted rejected/deferred store and synchronization
+items. The full-protocol tuning changes still have larger measured phase-local gains, but their end-to-end share
+remains pending a clean, protocol-matched rerun. Only the Docs/15 baseline can apportion the remaining gap.
 
 ### [x] 3.1 Pin and double-buffer the tuning/forward datasets (S1)
 
@@ -544,6 +548,14 @@ must be remeasured rather than inferred from the speedup.
   thermal slowdown at 86 C, with the SM clock falling as low as 765 MHz. Peak allocated CUDA memory was
   6,194,949,632 versus 6,120,173,056 bytes. The exact numerical replay accepts the code path, but the wall
   result is excluded from performance comparisons until it is repeated without thermal throttling.
+- **Corrected-KD timing remains invalid after driver resets (2026-07-13):** the legacy-matched BF16,
+  zero-weight-decay recurrence durably reached epoch 4 with losses **2.39330782, 2.25053802, 2.20468449,
+  and 2.18120250**. Epoch 4 overlapped another process's CPU/model preparation and took approximately
+  15 minutes, so it is not a performance sample. Windows then recorded `nvlddmkm` event 153 resets at
+  **02:24:03** (during the prior continuous attempt) and **03:13:05** (39 seconds into the next resume),
+  while the checkpoint pointer correctly remained at the last durable epoch. The one-epoch checkpoint
+  boundary is validated, but neither interrupted interval is evidence for or against a code optimization;
+  quality and end-to-end timing remain pending a stable-GPU completion.
 - **Cross-environment CUDA lease split fixed (2026-07-13):** two workers used `%TEMP%` roots `Temp` and
   `Temp\\1`, created independent `cuda:0` leases, and together drove WDDM usage to 11–12 GiB; the corrected
   KD run was terminated during epoch 2 but retained its epoch-1 checkpoint. Device leases now live under
