@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import torch
-from datasets import load_dataset
+from datasets import Dataset, load_dataset
 from torch import nn
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -28,7 +28,24 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--samples", type=int, default=64)
     parser.add_argument("--sequence-length", type=int, default=128)
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=1,
+        help="Evaluation window batch size; values above 1 are faster but approximate for parity.",
+    )
     parser.add_argument("--device", default="cuda")
+    parser.add_argument("--backend", choices=("factorized", "dense"), default="factorized")
+    parser.add_argument(
+        "--dataset-arrow",
+        type=Path,
+        help="Previously materialized WikiText test Arrow file; bypasses dataset-builder startup.",
+    )
+    parser.add_argument(
+        "--ignore-global-tuning",
+        action="store_true",
+        help="Evaluate immutable pre-KD block commits even when a global-tuning artifact is active.",
+    )
     parser.add_argument("--evaluate-base", action="store_true")
     return parser
 
@@ -42,10 +59,19 @@ def _checkpoint_dtype(snapshot: Path) -> torch.dtype:
     }.get(config.get("torch_dtype"), torch.float32)
 
 
-def _protocol_tokens(snapshot: Path, samples: int, sequence_length: int) -> tuple[torch.Tensor, str, int]:
+def _protocol_tokens(
+    snapshot: Path,
+    samples: int,
+    sequence_length: int,
+    dataset_arrow: Path | None = None,
+) -> tuple[torch.Tensor, str, int]:
     if samples <= 0 or sequence_length < 2:
         raise ValueError("samples must be positive and sequence length must be at least two")
-    dataset = load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1", split="test")
+    dataset = (
+        Dataset.from_file(str(dataset_arrow))
+        if dataset_arrow is not None
+        else load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1", split="test")
+    )
     tokenizer = AutoTokenizer.from_pretrained(snapshot, local_files_only=True)
     encoded = tokenizer("\n\n".join(dataset["text"]), return_tensors="pt").input_ids
     bos_id = tokenizer.bos_token_id
@@ -64,7 +90,7 @@ def _protocol_tokens(snapshot: Path, samples: int, sequence_length: int) -> tupl
     return tokens, fingerprint, int(bos_id)
 
 
-def _evaluate(model: nn.Module, tokens: torch.Tensor, device: str) -> dict[str, object]:
+def _evaluate(model: nn.Module, tokens: torch.Tensor, device: str, batch_size: int) -> dict[str, object]:
     started = time.perf_counter()
     if device.startswith("cuda"):
         torch.cuda.reset_peak_memory_stats(device)
@@ -72,6 +98,7 @@ def _evaluate(model: nn.Module, tokens: torch.Tensor, device: str) -> dict[str, 
         tokens.to(device),
         max_length=tokens.shape[1],
         stride=tokens.shape[1],
+        batch_size=batch_size,
     )
     result = evaluate_causal_nll(request, model_logits(model))
     return {
@@ -88,8 +115,14 @@ def _evaluate(model: nn.Module, tokens: torch.Tensor, device: str) -> dict[str, 
 
 def main() -> None:
     args = _parser().parse_args()
-    tokens, dataset_fingerprint, bos_id = _protocol_tokens(args.snapshot, args.samples, args.sequence_length)
+    tokens, dataset_fingerprint, bos_id = _protocol_tokens(
+        args.snapshot,
+        args.samples,
+        args.sequence_length,
+        args.dataset_arrow,
+    )
     results: dict[str, object] = {}
+    frozen_global_tuning: str | None = None
     if args.evaluate_base:
         base = cast(
             nn.Module,
@@ -101,7 +134,7 @@ def main() -> None:
         ).to(args.device)
         base.eval()
         cast(Any, base).config.use_cache = False
-        results["base"] = _evaluate(base, tokens, args.device)
+        results["base"] = _evaluate(base, tokens, args.device, args.batch_size)
         del base
         gc.collect()
         if args.device.startswith("cuda"):
@@ -113,9 +146,11 @@ def main() -> None:
             source_name="google/gemma-3-1b-it",
             revision=args.revision,
             device=args.device,
-            backend="factorized",
+            backend=args.backend,
+            use_global_tuning=not args.ignore_global_tuning,
         )
-        results["frozen"] = _evaluate(loaded.model, tokens, args.device)
+        frozen_global_tuning = None if loaded.global_tuning is None else loaded.global_tuning.artifact_id
+        results["frozen"] = _evaluate(loaded.model, tokens, args.device, args.batch_size)
         del loaded
     payload = {
         "schema_version": 1,
@@ -125,8 +160,12 @@ def main() -> None:
         "run_output": None if args.run_output is None else str(args.run_output.resolve()),
         "dataset": "Salesforce/wikitext:wikitext-2-raw-v1:test",
         "dataset_fingerprint": dataset_fingerprint,
+        "dataset_arrow": None if args.dataset_arrow is None else str(args.dataset_arrow.resolve()),
         "samples": args.samples,
         "sequence_length": args.sequence_length,
+        "batch_size": args.batch_size,
+        "backend": args.backend,
+        "global_tuning_artifact": frozen_global_tuning,
         "bos_token_id": bos_id,
         "token_hash": "sha256:" + hashlib.sha256(tokens.contiguous().view(torch.uint8).numpy().tobytes()).hexdigest(),
         "results": results,

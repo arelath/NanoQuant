@@ -85,6 +85,23 @@ def test_bos_eos_padding_and_multiple_sequences_have_exact_denominator() -> None
     assert result.perplexity == pytest.approx(16)
 
 
+def test_batched_windows_match_serial_causal_nll() -> None:
+    tokens = torch.tensor([[1, 2, 3, 4, 5], [6, 7, 8, 9, 10]])
+    serial = evaluate_causal_nll(
+        CausalEvaluationRequest(tokens, max_length=4, stride=2, batch_size=1),
+        _uniform_logits(16),
+    )
+    batched = evaluate_causal_nll(
+        CausalEvaluationRequest(tokens, max_length=4, stride=2, batch_size=3),
+        _uniform_logits(16),
+    )
+
+    assert batched.token_count == serial.token_count
+    assert batched.window_count == serial.window_count
+    assert batched.total_negative_log_likelihood == pytest.approx(serial.total_negative_log_likelihood)
+    assert batched.perplexity == pytest.approx(serial.perplexity)
+
+
 def test_invalid_padding_and_empty_targets_are_rejected() -> None:
     with pytest.raises(ValueError, match="contiguous right padding"):
         evaluate_causal_nll(

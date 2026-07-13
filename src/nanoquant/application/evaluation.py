@@ -36,6 +36,7 @@ class CausalEvaluationRequest:
     stride: int = 2048
     prepend_bos_token_id: int | None = None
     append_eos_token_id: int | None = None
+    batch_size: int = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -256,11 +257,11 @@ def evaluate_causal_nll(request: CausalEvaluationRequest, logits: LogitsFunction
         raise ValueError("causal evaluation token IDs must be a non-empty rank-2 tensor")
     if request.max_length < 2 or request.stride <= 0 or request.stride > request.max_length:
         raise ValueError("causal evaluation requires max_length >= 2 and stride in [1, max_length]")
+    if request.batch_size <= 0:
+        raise ValueError("causal evaluation batch size must be positive")
     if request.attention_mask is not None and request.attention_mask.shape != tokens.shape:
         raise ValueError("attention mask shape does not match token IDs")
-    total_nll = 0.0
-    token_count = 0
-    window_count = 0
+    windows: list[tuple[torch.Tensor, torch.Tensor]] = []
     for row in range(tokens.shape[0]):
         mask = None if request.attention_mask is None else request.attention_mask[row]
         sequence = _valid_sequence(
@@ -278,26 +279,39 @@ def evaluate_causal_nll(request: CausalEvaluationRequest, logits: LogitsFunction
             first_scored_global = max(previous_end, begin + 1)
             labels = window.clone()
             labels[:, : first_scored_global - begin] = -100
-            prediction = logits(window, torch.ones_like(window))
-            if prediction.shape != (*window.shape, prediction.shape[-1]):
-                raise ValueError("causal evaluator logits have an invalid shape")
-            shifted_prediction = prediction[:, :-1].float().reshape(-1, prediction.shape[-1])
-            shifted_labels = labels[:, 1:].reshape(-1)
-            count = int((shifted_labels != -100).sum())
-            if count:
-                loss = torch.nn.functional.cross_entropy(
-                    shifted_prediction,
-                    shifted_labels,
-                    ignore_index=-100,
-                    reduction="sum",
-                )
-                total_nll += float(loss)
-                token_count += count
-            window_count += 1
+            windows.append((window, labels))
             previous_end = end
             if end == sequence.numel():
                 break
+    total_nll = 0.0
+    token_count = 0
+    for start in range(0, len(windows), request.batch_size):
+        selected = windows[start : start + request.batch_size]
+        length = max(window.shape[1] for window, _labels in selected)
+        batch = tokens.new_zeros((len(selected), length))
+        mask = tokens.new_zeros((len(selected), length))
+        batch_labels = tokens.new_full((len(selected), length), -100)
+        for index, (window, labels) in enumerate(selected):
+            width = window.shape[1]
+            batch[index, :width] = window[0]
+            mask[index, :width] = 1
+            batch_labels[index, :width] = labels[0]
+        prediction = logits(batch, mask)
+        if prediction.ndim != 3 or prediction.shape[:2] != batch.shape:
+            raise ValueError("causal evaluator logits have an invalid shape")
+        shifted_prediction = prediction[:, :-1].float().reshape(-1, prediction.shape[-1])
+        shifted_labels = batch_labels[:, 1:].reshape(-1)
+        count = int((shifted_labels != -100).sum())
+        if count:
+            loss = torch.nn.functional.cross_entropy(
+                shifted_prediction,
+                shifted_labels,
+                ignore_index=-100,
+                reduction="sum",
+            )
+            total_nll += float(loss)
+            token_count += count
     if token_count == 0:
         raise ValueError("causal evaluation has no target tokens")
     mean = total_nll / token_count
-    return CausalEvaluationResult(total_nll, mean, math.exp(mean), token_count, window_count)
+    return CausalEvaluationResult(total_nll, mean, math.exp(mean), token_count, len(windows))
