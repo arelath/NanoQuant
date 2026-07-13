@@ -486,6 +486,12 @@ alternating benchmark, median time for 512 solves improved from 381.324 ms to 36
   duplicate weighted-error pass 2.158 ms. Even charging both to all 238 attempts gives an upper bound of
   only **0.87 s per anchor**, and real attention-layer shapes are smaller. Adding an original-prediction
   field to the internal result contract is not justified by that bound.
+- **Measured, rejected (2026-07-12):** SVID sign extraction and power iteration only read their shared
+  input, but overlapping the sign kernel on a reusable CUDA stream caused resource contention. For a
+  1152×448 attention factor, 128-call median time regressed from 108.936 ms to 116.592 ms (**0.93x**);
+  for the largest 6912×1056 MLP factor, 32-call median time regressed from 27.724 ms to 31.760 ms
+  (**0.87x**). Both produced bitwise-identical projections, but the side-stream/event design was not
+  implemented because it degraded both relevant shapes.
 - `JsonlEventSink._read_last_sequence` parses the whole event log at construction — only matters for
   resumed runs with large logs; fine today, worth a tail-scan if event volume grows.
 - `_artifact_bytes` walks the whole artifact tree once at report time — keep an eye on it as artifact
