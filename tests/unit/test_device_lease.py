@@ -5,10 +5,18 @@ from pathlib import Path
 
 import pytest
 
-from nanoquant.infrastructure.device_lease import DeviceLeaseError, acquire_device_lease, canonical_device_name
+from nanoquant.infrastructure.device_lease import (
+    DeviceLeaseError,
+    _lease_root,
+    acquire_device_lease,
+    canonical_device_name,
+)
 
 
-def test_device_lease_rejects_concurrent_owner_and_releases() -> None:
+def test_device_lease_rejects_concurrent_owner_and_releases(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NANOQUANT_DEVICE_LEASE_ROOT", str(tmp_path / "leases"))
     with acquire_device_lease("fixture:0"):
         with pytest.raises(DeviceLeaseError, match="already leased"):
             acquire_device_lease("fixture:0")
@@ -21,7 +29,22 @@ def test_default_cuda_alias_uses_cuda_zero_lease() -> None:
     assert canonical_device_name("CUDA:1") == "cuda:1"
 
 
-def test_device_lease_rejects_owner_with_different_environment_roots(tmp_path: Path) -> None:
+def test_explicit_fixture_root_cannot_redirect_cuda(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    explicit = tmp_path / "isolated-leases"
+    monkeypatch.setenv("NANOQUANT_DEVICE_LEASE_ROOT", str(explicit))
+
+    assert _lease_root("fixture:0") == explicit
+    assert _lease_root("cuda:0") != explicit
+
+
+def test_device_lease_rejects_owner_with_different_environment_roots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lease_root = tmp_path / "shared-leases"
+    monkeypatch.setenv("NANOQUANT_DEVICE_LEASE_ROOT", str(lease_root))
     code = (
         "import time; "
         "from nanoquant.infrastructure.device_lease import acquire_device_lease; "
@@ -40,6 +63,7 @@ def test_device_lease_rejects_owner_with_different_environment_roots(tmp_path: P
             "TMP": str(child_temp),
             "TMPDIR": str(child_temp),
             "LOCALAPPDATA": str(child_local_app_data),
+            "NANOQUANT_DEVICE_LEASE_ROOT": str(lease_root),
         }
     )
     child = subprocess.Popen(

@@ -88,9 +88,15 @@ def _remove_stale_lease(path: Path) -> bool:
     return True
 
 
-def _lease_root() -> Path:
+def _lease_root(device: str) -> Path:
     """Return a per-user root that is stable across process temp environments."""
 
+    explicit_root = os.environ.get("NANOQUANT_DEVICE_LEASE_ROOT")
+    if explicit_root and not device.startswith("cuda"):
+        root = Path(explicit_root)
+        if not root.is_absolute():
+            raise ValueError("NANOQUANT_DEVICE_LEASE_ROOT must be an absolute path")
+        return root
     if os.name == "nt":
         import ctypes
 
@@ -111,7 +117,7 @@ def _lease_root() -> Path:
 def acquire_device_lease(device: str) -> DeviceLease:
     canonical = canonical_device_name(device)
     safe_name = "".join(character if character.isalnum() else "-" for character in canonical)
-    root = _lease_root()
+    root = _lease_root(canonical)
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     path = root / f"nanoquant-resident-{safe_name}.lease"
     for _attempt in range(2):

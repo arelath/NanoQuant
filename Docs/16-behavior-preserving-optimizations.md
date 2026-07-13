@@ -575,7 +575,12 @@ must be remeasured rather than inferred from the speedup.
   `%LOCALAPPDATA%` to the repository and again admitted a second CUDA owner. Windows lease discovery now
   asks the OS shell for the Local AppData known folder, independent of `TEMP`, `TMP`, `TMPDIR`, and
   `LOCALAPPDATA`; POSIX uses a stable per-UID `/tmp` root. A subprocess regression test changes all four
-  environment roots and proves the second owner is rejected.
+  environment roots and proves the second owner is rejected. Non-CUDA fixture tests may explicitly set an
+  absolute `NANOQUANT_DEVICE_LEASE_ROOT`, but CUDA devices ignore it: allowing a per-process CUDA override
+  recreated the split when a Codex runner selected `.localappdata` while the canonical namespace remained
+  free. A bounded KD stop also showed the checkpoint exception releasing its lease while Python still held
+  roughly 3.5 GiB of CUDA state; exceptional exits now offload the student, synchronize, and empty the
+  cache before the lease scope unwinds.
 - `JsonlEventSink._read_last_sequence` parses the whole event log at construction — only matters for
   resumed runs with large logs; fine today, worth a tail-scan if event volume grows.
 - **Measured, not implemented (2026-07-13):** a fresh process inventories the pinned Gemma snapshot in a
