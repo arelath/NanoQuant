@@ -283,6 +283,10 @@ Outcome: runs produce cheap-to-expensive decision evidence and actionable report
 - [ ] **M8.15** Implement diagnostic rules for calibration instability, Hessian conditioning, ADMM plateau, export gaps, ineffective retry/outliers, poor tuning recovery, and runtime fallback.
 - [ ] **M8.16** Implement complete summary reports for completed, failed, interrupted, resumed, and forked runs.
 - [ ] **M8.17** Implement candidate-versus-baseline reports with semantic config diff, artifact reuse, per-layer/block alignment, uncertainty, warnings, and Pareto dimensions.
+  `tools/compare_block_trajectories.py` now provides the block-alignment slice: it selects the latest journal
+  identity, rejects stale/noncontiguous prefixes, resolves committed block artifacts, and compares any number of
+  named legacy post-refit trajectories with JSON/Markdown deltas. Config/artifact reuse, uncertainty, warnings,
+  and Pareto reporting remain open.
 - [ ] **M8.18** Include experiment number, zero-argument runfile path/hash, purpose, hypothesis, baseline, environment, cost, conclusion, and recommended next action.
 - [ ] **M8.19** Implement evaluator and task-result caching using complete semantic identities.
 - [ ] **M8.20** Add golden report tests using Experiment 019 data and synthetic near-zero denominators.
