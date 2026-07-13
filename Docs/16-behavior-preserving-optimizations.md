@@ -51,7 +51,7 @@ in section 6 so nobody drifts into it by accident.
 |------|---|---------|-------|----------------|--------------------|-------------------|------------|--------|
 | [ ] | 1 | Pin + double-buffer tuning/forward datasets | S1 | tuning, block forwards | 25–50% of transfer-bound steps | 10–25% of full protocol | Medium | M |
 | [x] | 2 | Foreach ParityAdamW step | S0 | tuning | 50–80% of optimizer host time | 2–6% of full protocol | High | M |
-| [ ] | 3 | Gate `torch.cuda.empty_cache()` on pressure | S1 | tuning, per-block | ~390 calls avoided | 1–4% of full protocol | Medium | S |
+| [x] | 3 | Gate `torch.cuda.empty_cache()` on pressure | S1 | tuning, per-block | ~390 calls avoided | measured below | High | S |
 | [ ] | 4 | Overlap block-activation persistence with compute | S1 | block commit | most of ~3–5 s/block | 4–7% of 1439 s anchor | Medium | M |
 | [ ] | 5 | Halve/defer ADMM cholesky `info` syncs | S0* | factorization | 1–3% of ADMM | ~1–2% of anchor | Medium | S |
 | [x] | 6 | Skip the always-zero self-reference MSE | S0 | per-block bookkeeping | ~0.3–1 s/block | 0.5–1.5% of anchor | High | S |
@@ -125,7 +125,7 @@ BF16/Kahan, with and without weight decay, on CPU and CUDA across multiple tenso
 representative five-tensor BF16/Kahan CUDA workload, 128 optimizer steps improved from a median 0.0735 s
 to 0.0322 s (**2.28x**).
 
-### [ ] 3.3 Gate `torch.cuda.empty_cache()` on memory pressure (S1)
+### [x] 3.3 Gate `torch.cuda.empty_cache()` on memory pressure (S1)
 
 **Where.** [tuning.py:147](../src/nanoquant/application/tuning.py) — every `tune()` call ends with
 `empty_cache()`; also per block at
@@ -148,6 +148,14 @@ behavior, not to failure.
 
 **Estimate.** **1–4% of a full-protocol run**; near zero on the factor+scale anchor. Confidence: Medium.
 Effort: S. Verify with the interruption/OOM-injection tests, not just replay.
+
+**Done (2026-07-12).** Per-tune cleanup now retains the allocator cache unless reserved memory reaches
+80% of device capacity. Prefix, resume, calibration, global-distillation, and per-block boundary flushes
+remain unchanged, so the existing coarse fragmentation/OOM safeguards still run. On the parity GPU, 30
+representative 256 MiB allocation cycles took a median 0.829 ms when reusing cached storage and 8.159 ms
+after a flush, a **9.84x re-warm penalty** (excluding the flush call itself). At 390 tune calls this avoids
+at least about 2.9 seconds of re-warm work; the original 1–4% run estimate was too optimistic. Pressure
+boundary tests and the tuning/optimizer suite pass.
 
 ### [ ] 3.4 Overlap block-activation persistence with compute (S1)
 
@@ -193,6 +201,14 @@ launch-bound and stalls bite. The convergence check already syncs deliberately o
 
 **Estimate.** 1–3% of the ADMM phase ≈ **10–35 s of the anchor**; more on launch-bound small layers
 (the Docs/15 wall-vs-CUDA divergence flag will show exactly how much). Confidence: Medium. Effort: S.
+
+**Inspected, not accepted (2026-07-12).** The proposed one-sync variant is not executable without changing
+the recurrence: the right-hand solve consumes `left` from the left-hand solve, so both Cholesky
+factorizations cannot be launched before checking the first result. Deferring either `info` check also
+changes the documented fallback behavior because a failed factorization would feed invalid values into
+later operations before `torch.linalg.solve` could replace it. Always trusting regularization to make the
+systems SPD would remove the syncs, but changes failure behavior and is therefore outside S0. Keep this
+item unimplemented unless profiling justifies an explicitly behavior-changing policy decision.
 
 ### [x] 3.6 Skip the always-zero self-reference MSE (S0)
 
@@ -303,6 +319,14 @@ stream, and accumulate `loss.detach()` into a float64 device scalar, converting 
 same order, so the recorded `epoch_losses` are bit-identical.
 
 **Estimate.** 1–3% of the KD phase (≤1% of a full-protocol run). Confidence: Medium. Effort: S.
+
+**Partially tested, not accepted (2026-07-12).** Replacing 2,048 per-step Python-float additions with
+sequential float64 device additions preserved the final double bit-for-bit, but improved the isolated
+accumulation loop only from 21.878 ms to 16.859 ms (**1.30x, just 5 ms absolute**) while adding one CUDA
+kernel per step. That does not justify the extra device work or support the estimated run-level saving, so
+device-side accumulation was not implemented. Pinned teacher-cache transfer and prefetch remain deferred
+to the shared pinned/double-buffer design in item 1; implementing them independently would duplicate the
+same memory-budget and copy-stream machinery.
 
 ### [x] 3.12 Keep the JSONL event file handle open (S0)
 

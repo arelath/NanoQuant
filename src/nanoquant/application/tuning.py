@@ -14,6 +14,8 @@ from nanoquant.domain.models import LossMetrics, TuningMetrics
 ForwardFunction = Callable[[nn.Module, torch.Tensor], torch.Tensor]
 ParameterSelector = Callable[[str, nn.Parameter], bool]
 
+_CUDA_CACHE_PRESSURE_FRACTION = 0.8
+
 
 @dataclass(frozen=True, slots=True)
 class TuningRequest:
@@ -34,6 +36,13 @@ def _resolve_output_importance(
     importance: torch.Tensor | None, device: torch.device, dtype: torch.dtype
 ) -> torch.Tensor | None:
     return None if importance is None else importance.to(device=device, dtype=dtype)
+
+
+def _release_cuda_cache_under_pressure(device: torch.device) -> None:
+    reserved = torch.cuda.memory_reserved(device)
+    total = torch.cuda.get_device_properties(device).total_memory
+    if reserved >= total * _CUDA_CACHE_PRESSURE_FRACTION:
+        torch.cuda.empty_cache()
 
 
 def _loss_sum(prediction: torch.Tensor, target: torch.Tensor, importance: torch.Tensor | None) -> torch.Tensor:
@@ -153,7 +162,7 @@ def tune(
     elements = request.targets.numel()
     del optimizer, scheduler, best_state
     if device.type == "cuda":
-        torch.cuda.empty_cache()
+        _release_cuda_cache_under_pressure(device)
     return TuningMetrics(
         LossMetrics(before_value, elements, request.objective),
         LossMetrics(best_value, elements, request.objective),

@@ -5,7 +5,13 @@ import torch
 from torch import nn
 
 from nanoquant.application.layers import TrainableFactorizedLinear
-from nanoquant.application.tuning import TuningRequest, post_block_refit, tune_factorized, tune_non_factorized
+from nanoquant.application.tuning import (
+    TuningRequest,
+    _release_cuda_cache_under_pressure,
+    post_block_refit,
+    tune_factorized,
+    tune_non_factorized,
+)
 
 
 class Hybrid(nn.Module):
@@ -26,6 +32,29 @@ class Hybrid(nn.Module):
 
 def _forward(model: nn.Module, value: torch.Tensor) -> torch.Tensor:
     return model(value)
+
+
+class _DeviceProperties:
+    total_memory = 100
+
+
+@pytest.mark.parametrize(("reserved", "expected_calls"), [(79, 0), (80, 1)])
+def test_cuda_cache_release_is_gated_on_reserved_memory_pressure(
+    monkeypatch: pytest.MonkeyPatch, reserved: int, expected_calls: int
+) -> None:
+    calls = 0
+
+    def empty_cache() -> None:
+        nonlocal calls
+        calls += 1
+
+    monkeypatch.setattr(torch.cuda, "memory_reserved", lambda _device: reserved)
+    monkeypatch.setattr(torch.cuda, "get_device_properties", lambda _device: _DeviceProperties())
+    monkeypatch.setattr(torch.cuda, "empty_cache", empty_cache)
+
+    _release_cuda_cache_under_pressure(torch.device("cuda"))
+
+    assert calls == expected_calls
 
 
 def test_nonfactorized_tuning_is_independent_and_restores_best_state() -> None:
