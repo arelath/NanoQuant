@@ -661,6 +661,12 @@ must be remeasured rather than inferred from the speedup.
   The retained historical gate initialization differs from the rewrite by only 0.06--0.16% of factor
   signs and roughly 0.14--0.20% relative L2 in fitted scales, so a shared-evaluator replay and extended
   training run are retained as behavior-changing parity diagnostics rather than folded into this perf pass.
+  The same contemporary run finished the complete first block at **1.3728** after joint refit, versus the
+  rewrite's **1.37848997** under the same pinned/current protocol (**0.41% higher**) and historical
+  Experiment 018's **1.1624**. This confirms that most of the apparent 18.59% rewrite quality gap was a
+  historical numerical-realization gap. Contemporary legacy took **424.87 s** for block 0 versus the
+  rewrite's **476.06 s**, leaving a measured **12.0%** rewrite wall-time gap on this block; this timing is
+  actionable performance evidence, unlike the historical quality delta.
 - `JsonlEventSink._read_last_sequence` parses the whole event log at construction — only matters for
   resumed runs with large logs; fine today, worth a tail-scan if event volume grows.
 - **Measured, not implemented (2026-07-13):** a fresh process inventories the pinned Gemma snapshot in a
