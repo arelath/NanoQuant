@@ -141,6 +141,11 @@ def test_complete_frozen_run_can_be_distilled_committed_and_reloaded(
     }
     assert {
         "run/load_frozen",
+        "run/load_frozen/inventory",
+        "run/load_frozen/commits",
+        "run/load_frozen/model_load",
+        "run/load_frozen/install_block",
+        "run/load_frozen/install_block/install_layer",
         "run/thaw",
         "run/teacher_cache_epoch",
         "run/student_setup",

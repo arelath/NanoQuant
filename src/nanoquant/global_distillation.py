@@ -284,6 +284,7 @@ def _run_global_topk_distillation(
             verify_hashes=request.verify_hashes,
             backend="factorized",
             use_global_tuning=not request.replace_existing_global_tuning,
+            recorder=recorder,
         )
     if loaded.global_tuning is not None:
         raise ValueError("run already has an active global tuning result")

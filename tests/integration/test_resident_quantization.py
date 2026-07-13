@@ -154,9 +154,25 @@ def test_resident_quantization_commits_complete_transformers_model(tmp_path: Pat
         outer_iterations=2,
         inner_iterations=1,
         device="cpu",
+        profiling=ProfilingConfig(level=ProfilingLevel.MICRO, emit_span_events=False),
     )
     assert replay.replay.expected_close is True
     assert replay.elapsed_seconds < 60
+    replay_profiles = [
+        json.loads(profile.read_text(encoding="utf-8"))
+        for profile in resumed_output.glob("profile*.json")
+        if json.loads(profile.read_text(encoding="utf-8"))["run_id"] == "resident-layer-replay"
+    ]
+    assert len(replay_profiles) == 1
+    replay_paths = {str(phase["path"]) for phase in replay_profiles[0]["phases"]}
+    assert {
+        "run/journal",
+        "run/load_commit",
+        "run/source",
+        "run/load_tensors/reconstruct",
+        "run/load_tensors/capture",
+        "run/replay",
+    } <= replay_paths
 
 
 def test_resident_tuning_recipe_refits_blocks_and_resumes_exactly(tmp_path: Path) -> None:
