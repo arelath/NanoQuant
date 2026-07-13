@@ -213,8 +213,8 @@ def calibrate_causal_model(
 
     try:
         if method == "two_phase_fisher":
-            input_thresholds = {path: torch.zeros(()) for path, _module in layers}
-            output_thresholds = {path: torch.zeros(()) for path, _module in layers}
+            input_thresholds = {path: module.weight.new_zeros((), dtype=torch.float32) for path, module in layers}
+            output_thresholds = {path: module.weight.new_zeros((), dtype=torch.float32) for path, module in layers}
             handles: list[torch.utils.hooks.RemovableHandle] = []
             try:
                 for path, module in layers:
@@ -222,7 +222,7 @@ def calibrate_causal_model(
                     def profile_forward(
                         _module: nn.Module, inputs: tuple[torch.Tensor, ...], _output: object, path: str = path
                     ) -> None:
-                        input_thresholds[path] = torch.maximum(input_thresholds[path], robust_tau(inputs[0]).cpu())
+                        input_thresholds[path] = torch.maximum(input_thresholds[path], robust_tau(inputs[0]))
 
                     def profile_backward(
                         _module: nn.Module,
@@ -232,7 +232,7 @@ def calibrate_causal_model(
                     ) -> None:
                         if outputs[0] is not None:
                             output_thresholds[path] = torch.maximum(
-                                output_thresholds[path], robust_tau(outputs[0], pre_scale=1e6).cpu()
+                                output_thresholds[path], robust_tau(outputs[0], pre_scale=1e6)
                             )
 
                     handles.append(module.register_forward_hook(profile_forward))
@@ -425,8 +425,12 @@ def calibrate_block(
                 handle.remove()
 
     if method == "two_phase_fisher":
-        input_thresholds = {path: torch.zeros(()) for path in linears}
-        output_thresholds = {path: torch.zeros(()) for path in linears}
+        input_thresholds = {
+            path: module.weight.new_zeros((), dtype=torch.float32) for path, module in linears.items()
+        }
+        output_thresholds = {
+            path: module.weight.new_zeros((), dtype=torch.float32) for path, module in linears.items()
+        }
         handles = []
         try:
             for path, module in linears.items():
@@ -434,7 +438,7 @@ def calibrate_block(
                 def profile_forward(
                     _module: nn.Module, inputs: tuple[torch.Tensor, ...], _output: object, path: str = path
                 ) -> None:
-                    input_thresholds[path] = torch.maximum(input_thresholds[path], robust_tau(inputs[0]).cpu())
+                    input_thresholds[path] = torch.maximum(input_thresholds[path], robust_tau(inputs[0]))
 
                 def profile_backward(
                     _module: nn.Module,
@@ -444,7 +448,7 @@ def calibrate_block(
                 ) -> None:
                     if outputs[0] is not None:
                         output_thresholds[path] = torch.maximum(
-                            output_thresholds[path], robust_tau(outputs[0], pre_scale=1e6).cpu()
+                            output_thresholds[path], robust_tau(outputs[0], pre_scale=1e6)
                         )
 
                 handles.append(module.register_forward_hook(profile_forward))
