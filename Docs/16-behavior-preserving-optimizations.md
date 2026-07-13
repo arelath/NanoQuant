@@ -550,7 +550,15 @@ must be remeasured rather than inferred from the speedup.
   2.15325 to 2.13831, the exact serial WikiText-2 result regressed from **444.7151 to 459.7149 perplexity
   (3.37%)**, and is **6.19% worse** than the 432.9306 pre-KD result. The artifact remains as evidence but
   is not accepted as a parity improvement. Profiling then found the BF16 and zero-weight-decay mismatches
-  described above; the corrected recurrence requires a fresh quality run.
+  described above; the corrected run below shows those mismatches did not explain the quality gap.
+- **Legacy-matched BF16/zero-decay KD also rejected (2026-07-13):** artifact
+  `sha256-078aeb721c8257347297eb9d5d477da8899f5530addad4dcb7e9d7479b32774a` completed all 2,048
+  steps with final cached-target loss **2.14116740**, 2,702,332,928 peak allocated CUDA bytes, and
+  4,114,694,144 peak host bytes. The exact serial 64×128 WikiText-2 evaluation produced **461.5446
+  perplexity**: 6.61% worse than the 432.9306 immutable pre-KD result, 0.40% worse than the 459.7149
+  FP32/weight-decay replacement, and 19.90% worse than the retained 384.954 legacy result. The lower-memory,
+  faster recurrence is retained because it matches legacy behavior, but KD is rejected as a quality
+  improvement; the remaining parity error is upstream or elsewhere in the distillation protocol.
 - **Thermally throttled block timing rejected (2026-07-13):** a full-protocol, batch-8 block-0 canary
   reproduced every retained layer loss and the final 1.37940836 loss exactly, but took **654.99 s** versus
   **546.75 s** for the matching prior artifact (19.8% slower). During the run NVIDIA reported software
@@ -563,8 +571,10 @@ must be remeasured rather than inferred from the speedup.
   15 minutes, so it is not a performance sample. Windows then recorded `nvlddmkm` event 153 resets at
   **02:24:03** (during the prior continuous attempt) and **03:13:05** (39 seconds into the next resume),
   while the checkpoint pointer correctly remained at the last durable epoch. The one-epoch checkpoint
-  boundary is validated, but neither interrupted interval is evidence for or against a code optimization;
-  quality and end-to-end timing remain pending a stable-GPU completion. Opt-in initial and between-epoch
+  boundary is validated, but neither interrupted interval is evidence for or against a code optimization.
+  Quality is now complete and rejected above; end-to-end timing remains unavailable because the run spans
+  thermally contaminated, driver-reset, and deliberately cooled processes. The final epoch-8 process took
+  165.90 seconds including reload and finalization, which is not a full-run sample. Opt-in initial and between-epoch
   cooldowns now retain the CUDA lease: the initial delay happens before model loading, and later delays
   happen only after activating each non-final checkpoint. They keep the recurrence and protocol identity
   unchanged, avoid repeated model reload/allocation, and prevent another worker from filling the intended
@@ -581,6 +591,16 @@ must be remeasured rather than inferred from the speedup.
   free. A bounded KD stop also showed the checkpoint exception releasing its lease while Python still held
   roughly 3.5 GiB of CUDA state; exceptional exits now offload the student, synchronize, and empty the
   cache before the lease scope unwinds.
+- **Corrected KD exposed a cache-sampling parity bug (2026-07-13):** the completed zero-decay/Kahan run
+  reduced cached-target loss from **2.39330782** to **2.14116740**, but exact retained WikiText-2
+  evaluation regressed from pre-KD PPL **432.078117** to **462.207656** (legacy checkpoint
+  **383.938808**). The rewrite cache began epoch 1 with samples `[172, 55, 225, ...]`; the seeded legacy
+  loop begins `[1, 88, 132, ...]`. Legacy carries Python `random.shuffle` state for sample order and the
+  training-device Torch RNG for token subsampling across all epochs, whereas the rewrite used two CPU
+  Torch generators. Cache planning now replays the legacy Python/device RNG streams, records a sampling
+  version in the protocol identity, and allows an explicit replacement run to atomically supersede a
+  mismatched cache journal without deleting its immutable artifacts. The corrected real-model rerun is
+  required before using KD quality or timing as a performance baseline.
 - `JsonlEventSink._read_last_sequence` parses the whole event log at construction — only matters for
   resumed runs with large logs; fine today, worth a tail-scan if event volume grows.
 - **Measured, not implemented (2026-07-13):** a fresh process inventories the pinned Gemma snapshot in a
