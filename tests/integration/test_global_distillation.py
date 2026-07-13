@@ -47,16 +47,18 @@ def test_complete_frozen_run_can_be_distilled_committed_and_reloaded(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     snapshot = tmp_path / "snapshot"
-    config = Gemma3TextConfig(
-        vocab_size=24,
-        hidden_size=8,
-        intermediate_size=16,
-        num_hidden_layers=1,
-        num_attention_heads=2,
-        num_key_value_heads=1,
-        head_dim=4,
-    )
-    Gemma3ForCausalLM(config).save_pretrained(snapshot, safe_serialization=True)
+    with torch.random.fork_rng():
+        torch.manual_seed(0)
+        config = Gemma3TextConfig(
+            vocab_size=24,
+            hidden_size=8,
+            intermediate_size=16,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            num_key_value_heads=1,
+            head_dim=4,
+        )
+        Gemma3ForCausalLM(config).save_pretrained(snapshot, safe_serialization=True)
     output = tmp_path / "run"
     tokens = torch.tensor(
         (
