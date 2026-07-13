@@ -615,6 +615,15 @@ must be remeasured rather than inferred from the speedup.
   fixture, proportional to layer weight size), so it is limited to the explicitly dense reference
   backend. `FactorizedReferenceLinear` opts out and continues executing mutable/trainable factors
   directly, including global KD.
+- **Legacy hook-chunk replay measured and rejected as a parity improvement (2026-07-13):** replaying
+  Experiment 018's ordered 512-token hook reductions made all 182 input-importance vectors bitwise
+  equal to the retained statistics, but output error moved from **0.490226% to 0.543882%** layer-mean.
+  Independent one-sample repeats had exact inputs and **0.271838%** output disagreement because the
+  pinned CCE Triton kernels use lock-protected multi-CTA accumulation. The regenerated allocation was
+  unchanged at 38 legacy rank mismatches. Its seven-layer untuned block-0 canary matched only one
+  outlier set, retained the `o_proj` rank mismatch, and averaged approximately 50% factor-sign agreement.
+  The code-faithful numerical path remains implemented and versioned, but the expensive tuned/full run
+  is not being performed because the measured structural gate did not improve.
 - `JsonlEventSink._read_last_sequence` parses the whole event log at construction — only matters for
   resumed runs with large logs; fine today, worth a tail-scan if event volume grows.
 - **Measured, not implemented (2026-07-13):** a fresh process inventories the pinned Gemma snapshot in a
