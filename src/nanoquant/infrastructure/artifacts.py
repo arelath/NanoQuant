@@ -95,9 +95,31 @@ class LocalArtifactStore:
             self._persistent_validation = {}
 
     def _persist_validation(self) -> None:
-        temporary = self._validation_cache_path.with_suffix(".tmp")
-        temporary.write_text(json.dumps(self._persistent_validation, sort_keys=True), encoding="utf-8")
-        os.replace(temporary, self._validation_cache_path)
+        # This cache is advisory: artifact descriptors and member hashes remain the
+        # source of truth. Multiple readers and writers can share one artifact
+        # store, so never let a transient Windows sharing violation fail an
+        # otherwise durable artifact commit.
+        descriptor, temporary = tempfile.mkstemp(
+            prefix=".validation-cache-", suffix=".tmp", dir=self.root
+        )
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as output:
+                output.write(json.dumps(self._persistent_validation, sort_keys=True))
+            for attempt in range(5):
+                try:
+                    os.replace(temporary, self._validation_cache_path)
+                    return
+                except PermissionError:
+                    if attempt == 4:
+                        return
+                    time.sleep(0.01 * (2**attempt))
+                except OSError:
+                    return
+        finally:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
 
     def _remember_validation(self, descriptor: ArtifactDescriptor, root: Path) -> None:
         signatures = tuple(

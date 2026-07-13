@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -57,6 +58,51 @@ def test_content_addressed_commit_deduplicates_and_detects_corruption(tmp_path: 
     (store.path_for(ids[0]) / "value.txt").write_text("changed", encoding="utf-8")
     with pytest.raises(ArtifactCorruptionError, match="ART001"):
         store.validate(ids[0])
+
+
+def test_validation_cache_uses_unique_temporary_files_across_store_instances(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "artifacts"
+    stores = (LocalArtifactStore(root), LocalArtifactStore(root))
+    real_replace = os.replace
+    cache_temporaries: list[Path] = []
+
+    def record_cache_temporary(source: str | Path, destination: str | Path) -> None:
+        if Path(destination).name == ".validation-cache.json":
+            cache_temporaries.append(Path(source))
+        real_replace(source, destination)
+
+    monkeypatch.setattr("nanoquant.infrastructure.artifacts.os.replace", record_cache_temporary)
+    for index, store in enumerate(stores):
+        with store.begin_write("fixture") as writer:
+            (writer.path / "value.txt").write_text(str(index), encoding="utf-8")
+            writer.commit()
+
+    assert len(cache_temporaries) == 2
+    assert cache_temporaries[0] != cache_temporaries[1]
+    assert not list(root.glob(".validation-cache-*.tmp"))
+
+
+def test_validation_cache_failure_does_not_fail_durable_artifact_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = LocalArtifactStore(tmp_path / "artifacts")
+    real_replace = os.replace
+
+    def deny_cache_replace(source: str | Path, destination: str | Path) -> None:
+        if Path(destination).name == ".validation-cache.json":
+            raise PermissionError("simulated Windows sharing violation")
+        real_replace(source, destination)
+
+    monkeypatch.setattr("nanoquant.infrastructure.artifacts.os.replace", deny_cache_replace)
+    with store.begin_write("fixture") as writer:
+        (writer.path / "value.txt").write_text("durable", encoding="utf-8")
+        artifact_id = writer.commit().artifact_id
+
+    assert store.path_for(artifact_id).is_dir()
+    assert store.validate(artifact_id).artifact_id == artifact_id
+    assert not list(store.root.glob(".validation-cache-*.tmp"))
 
 
 def test_uncommitted_writer_is_not_discoverable(tmp_path: Path) -> None:
