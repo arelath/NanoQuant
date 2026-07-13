@@ -6,11 +6,13 @@ from pathlib import Path
 
 import pytest
 
+import nanoquant.infrastructure.device_lease as device_lease
 from nanoquant.infrastructure.device_lease import (
     DeviceLeaseError,
     _lease_root,
     acquire_device_lease,
     canonical_device_name,
+    wait_for_device_lease,
 )
 
 
@@ -36,6 +38,37 @@ def test_device_lease_rejects_concurrent_owner_and_releases(
 def test_default_cuda_alias_uses_cuda_zero_lease() -> None:
     assert canonical_device_name("cuda") == "cuda:0"
     assert canonical_device_name("CUDA:1") == "cuda:1"
+
+
+def test_wait_for_device_lease_retries_without_bypassing_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts = 0
+    sleeps: list[float] = []
+
+    def acquire(_device: str) -> object:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise DeviceLeaseError("busy")
+        return object()
+
+    monotonic = iter((0.0, 1.0))
+    monkeypatch.setattr(device_lease, "acquire_device_lease", acquire)
+    monkeypatch.setattr(device_lease.time, "monotonic", lambda: next(monotonic))
+    monkeypatch.setattr(device_lease.time, "sleep", sleeps.append)
+
+    lease = wait_for_device_lease("cuda", 10.0, poll_seconds=2.0)
+
+    assert type(lease) is object
+    assert attempts == 2
+    assert sleeps == [2.0]
+
+
+@pytest.mark.parametrize("timeout,poll", [(-1.0, 1.0), (1.0, 0.0)])
+def test_wait_for_device_lease_rejects_invalid_settings(timeout: float, poll: float) -> None:
+    with pytest.raises(ValueError, match="wait settings"):
+        wait_for_device_lease("cuda", timeout, poll_seconds=poll)
 
 
 def test_explicit_fixture_root_cannot_redirect_cuda(

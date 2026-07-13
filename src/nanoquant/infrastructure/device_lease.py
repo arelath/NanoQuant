@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 import uuid
 from pathlib import Path
 
@@ -221,3 +222,24 @@ def acquire_device_lease(device: str) -> DeviceLease:
             raise
         return DeviceLease(canonical, path, token)
     raise DeviceLeaseError(f"resident quantization device lease could not be acquired: {canonical}")
+
+
+def wait_for_device_lease(
+    device: str,
+    timeout_seconds: float,
+    *,
+    poll_seconds: float = 30.0,
+) -> DeviceLease:
+    """Acquire a device lease, waiting within a caller-supplied bound if busy."""
+
+    if timeout_seconds < 0 or poll_seconds <= 0:
+        raise ValueError("device lease wait settings are invalid")
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        try:
+            return acquire_device_lease(device)
+        except DeviceLeaseError:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise
+            time.sleep(min(poll_seconds, remaining))
