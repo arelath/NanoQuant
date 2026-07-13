@@ -5,9 +5,12 @@ import pytest
 import torch
 
 from nanoquant.application.stages import StageContext, StageRegistry, execute_stage
+from nanoquant.config.schema import ProfilingConfig, ProfilingLevel
+from nanoquant.domain.profiling import NULL_RECORDER, PhaseRecorder
 from nanoquant.domain.stages import HostInventory, ResourceEstimate, ValidationFinding, ValidationReport
 from nanoquant.infrastructure.artifacts import LocalArtifactStore
 from nanoquant.infrastructure.events import JsonlEventSink
+from nanoquant.infrastructure.profiling import Profiler
 from nanoquant.infrastructure.resident_executor import Cancellation, ResidentExecutor
 from nanoquant.infrastructure.tensor_store import LocalTensorStore
 
@@ -31,7 +34,11 @@ class DoubleStage:
         return ValidationReport(() if result >= 0 else (ValidationFinding("NEG001", "negative"),))
 
 
-def _context(tmp_path: Path, cancellation: Cancellation | None = None) -> StageContext:
+def _context(
+    tmp_path: Path,
+    cancellation: Cancellation | None = None,
+    recorder: PhaseRecorder | None = None,
+) -> StageContext:
     artifacts = LocalArtifactStore(tmp_path / "artifacts")
     return StageContext(
         "run",
@@ -40,6 +47,7 @@ def _context(tmp_path: Path, cancellation: Cancellation | None = None) -> StageC
         LocalTensorStore(artifacts),
         JsonlEventSink(tmp_path / "events.jsonl", "run"),
         cancellation or Cancellation(),
+        recorder=recorder or NULL_RECORDER,
     )
 
 
@@ -74,3 +82,24 @@ def test_cancellation_prevents_stage_execution(tmp_path: Path) -> None:
     cancellation.cancel()
     with pytest.raises(InterruptedError):
         execute_stage(DoubleStage(), Request(1), _context(tmp_path, cancellation))
+
+
+def test_stage_executor_profiles_lifecycle_without_changing_result_or_failure(tmp_path: Path) -> None:
+    profiler = Profiler(
+        ProfilingConfig(level=ProfilingLevel.MACRO, emit_span_events=False),
+        run_id="stage-profile",
+    )
+    assert execute_stage(DoubleStage(), Request(2), _context(tmp_path / "success", recorder=profiler)) == 4
+    with pytest.raises(ValueError, match="NEG001"):
+        execute_stage(
+            DoubleStage(),
+            Request(-1),
+            _context(tmp_path / "failure", recorder=profiler),
+        )
+
+    payload = profiler.snapshot()
+    phases = {str(phase["path"]): phase for phase in payload["phases"]}  # type: ignore[index]
+    assert {"stage/cancellation", "stage/event", "stage/execute", "stage/validate"} <= set(phases)
+    assert phases["stage"]["count"] == 2
+    assert phases["stage"]["failed_count"] == 1
+    assert phases["stage/validate"]["failed_count"] == 1

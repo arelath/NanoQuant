@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Generic, Protocol, TypeVar
 
 from nanoquant.config.codec import canonical_json
+from nanoquant.domain.profiling import NULL_RECORDER, PhaseRecorder
 from nanoquant.domain.stages import HostInventory, ResourceEstimate, ValidationReport
 from nanoquant.ports.artifact_store import ArtifactStore
 from nanoquant.ports.event_sink import EventSink
@@ -29,6 +30,7 @@ class StageContext:
     tensor_store: TensorStore
     events: EventSink
     cancellation: CancellationToken
+    recorder: PhaseRecorder = NULL_RECORDER
 
 
 class Stage(Generic[RequestT, ResultT], Protocol):
@@ -64,23 +66,30 @@ class StageRegistry:
 
 
 def execute_stage(stage: Stage[RequestT, ResultT], request: RequestT, context: StageContext) -> ResultT:
-    context.cancellation.raise_if_cancelled()
-    context.events.emit(stage.name, "info", "stage.started", version=stage.version)
-    try:
-        result = stage.execute(request, context)
-        report = stage.validate(result, context)
-        if not report.valid:
-            details = "; ".join(f"{finding.code}: {finding.message}" for finding in report.findings)
-            raise ValueError(f"stage output validation failed: {details}")
-    except BaseException as error:
-        context.events.emit(
-            stage.name,
-            "error",
-            "stage.failed",
-            version=stage.version,
-            error_type=type(error).__name__,
-            error=str(error),
-        )
-        raise
-    context.events.emit(stage.name, "info", "stage.completed", version=stage.version)
-    return result
+    with context.recorder.phase("stage", stage=stage.name, version=stage.version):
+        with context.recorder.phase("cancellation"):
+            context.cancellation.raise_if_cancelled()
+        with context.recorder.phase("event"):
+            context.events.emit(stage.name, "info", "stage.started", version=stage.version)
+        try:
+            with context.recorder.phase("execute"):
+                result = stage.execute(request, context)
+            with context.recorder.phase("validate"):
+                report = stage.validate(result, context)
+                if not report.valid:
+                    details = "; ".join(f"{finding.code}: {finding.message}" for finding in report.findings)
+                    raise ValueError(f"stage output validation failed: {details}")
+        except BaseException as error:
+            with context.recorder.phase("event"):
+                context.events.emit(
+                    stage.name,
+                    "error",
+                    "stage.failed",
+                    version=stage.version,
+                    error_type=type(error).__name__,
+                    error=str(error),
+                )
+            raise
+        with context.recorder.phase("event"):
+            context.events.emit(stage.name, "info", "stage.completed", version=stage.version)
+        return result

@@ -462,8 +462,8 @@ Span-event mirroring measured roughly 2.9% recorder time on the same short workl
 The profile comparison CLI now checks stable phase paths, identical invocation counts, runtime fingerprints,
 aggregate deltas, and the matching reservoir median; aggregate-only movement without median confirmation is
 reported as noise, and environment-mismatched regressions are informational rather than actionable.
-Resident calibration, the stage executor, and the tiny-pipeline composition roots still need equivalent P0
-wiring before the framework-wide rollout item is complete. The resident tuning path
+Resident calibration and the tiny-pipeline composition roots still need equivalent P0 wiring before the
+framework-wide rollout item is complete. The resident tuning path
 supports opt-in micro phases for staging, forward, loss, backward, optimizer steps, evaluation, synchronization,
 and best-state cloning, with token/step/clone/transfer counters and exact profiled/control parity coverage.
 The resident ADMM path now adds opt-in micro phases for setup, both linear solves, SVID projections, dual updates,
@@ -491,6 +491,9 @@ Frozen-run assembly and resident layer replay now expose inventory/journal reads
 per-block/per-layer installation, tensor reconstruction, capture, and replay. Replay writes a distinct per-process
 profile artifact, while callers such as global distillation nest loader phases beneath their existing macro span
 and share the micro recorder with artifact and tensor I/O.
+The generic stage executor now profiles cancellation checks, lifecycle event writes, numerical execution, and
+validation beneath a stage-name/version group. Success and failure tests preserve return/exception behavior, and
+the resident composition supplies its run recorder without changing stage semantic keys or persisted results.
 Micro spans suppress durable span events and use the documented 5% recorder-time warning ceiling; macro
 profiling retains its stricter 0.5% ceiling and optional span-event mirror.
 Deferred CUDA timing is now implemented for macro and micro profiles: event pairs are sampled and bounded per

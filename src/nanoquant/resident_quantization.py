@@ -851,7 +851,7 @@ def _run_resident_quantization_impl(
     artifacts = LocalArtifactStore(request.output / "artifacts", recorder=micro_recorder)
     tensors = LocalTensorStore(artifacts)
     executor = ResidentExecutor()
-    context = StageContext("resident-quantization", executor, artifacts, tensors, events, Cancellation())
+    context = StageContext("resident-quantization", executor, artifacts, tensors, events, Cancellation(), recorder)
     with recorder.phase("setup"):
         with recorder.phase("inventory"):
             source = SafetensorsModelSource(
