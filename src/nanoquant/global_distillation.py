@@ -57,6 +57,7 @@ class GlobalDistillationRequest:
     pad_token_id: int | None = None
     verify_hashes: bool = True
     replace_existing_global_tuning: bool = False
+    interrupt_after_epoch_commits: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -229,6 +230,8 @@ def _freeze_tuned_blocks(
 
 def _run_global_topk_distillation(request: GlobalDistillationRequest) -> GlobalDistillationRunResult:
     started = time.perf_counter()
+    if request.interrupt_after_epoch_commits is not None and request.interrupt_after_epoch_commits <= 0:
+        raise ValueError("distillation epoch interrupt count must be positive")
     tokens = _tokens(request.token_ids)
     token_bytes = tokens.contiguous().view(torch.uint8).numpy().tobytes()
     protocol_hash = "sha256:" + hashlib.sha256(canonical_json(request.config).encode()).hexdigest()
@@ -319,9 +322,20 @@ def _run_global_topk_distillation(request: GlobalDistillationRequest) -> GlobalD
     )
     active_checkpoint = active_distillation_checkpoint(request.run_output, checkpoint_identity, artifacts)
 
+    epoch_commits = 0
+
     def checkpoint_sink(state: DistillationResumeState) -> None:
+        nonlocal epoch_commits
         committed_checkpoint = commit_distillation_checkpoint(state, checkpoint_identity, artifacts)
         activate_distillation_checkpoint(request.run_output, committed_checkpoint.reference)
+        epoch_commits += 1
+        if (
+            request.interrupt_after_epoch_commits is not None
+            and epoch_commits >= request.interrupt_after_epoch_commits
+        ):
+            raise InterruptedError(
+                f"requested interruption after {epoch_commits} distillation epoch checkpoint(s)"
+            )
 
     metrics = distill_topk(
         student,

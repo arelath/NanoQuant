@@ -37,6 +37,11 @@ def main() -> None:
         action="store_true",
         help="Start from immutable pre-KD commits and atomically replace the active tuned result.",
     )
+    parser.add_argument(
+        "--interrupt-after-epoch-commits",
+        type=int,
+        help="Exit cleanly after this many new durable epoch checkpoints; resume with the same command.",
+    )
     args = parser.parse_args()
 
     calibration = load_pinned_calibration(
@@ -46,33 +51,37 @@ def main() -> None:
     if args.samples <= 0 or args.samples > calibration.input_ids.shape[0]:
         raise ValueError("distillation sample count is outside the pinned calibration dataset")
     tokenizer = AutoTokenizer.from_pretrained(args.snapshot, local_files_only=True)
-    result = run_global_topk_distillation(
-        GlobalDistillationRequest(
-            args.run_output,
-            args.snapshot,
-            "google/gemma-3-1b-it",
-            MODEL_REVISION,
-            calibration.input_ids[: args.samples],
-            TopKDistillationConfig(
-                epochs=args.epochs,
-                batch_size=args.batch_size,
-                learning_rate=args.learning_rate,
-                temperature=args.temperature,
-                top_k=args.top_k,
-                vocabulary_chunk_size=args.vocabulary_chunk_size,
-                token_chunk_size=args.token_chunk_size,
-                maximum_tokens_per_batch=args.maximum_tokens_per_batch,
-                gradient_checkpointing=True,
-                # The legacy Optimi AdamW invocation leaves weight decay at its
-                # zero default. Keep this explicit in the pinned protocol.
-                weight_decay=0.0,
-                seed=0,
-            ),
-            device=args.device,
-            pad_token_id=tokenizer.pad_token_id,
-            replace_existing_global_tuning=args.replace_global_tuning,
-        )
+    request = GlobalDistillationRequest(
+        args.run_output,
+        args.snapshot,
+        "google/gemma-3-1b-it",
+        MODEL_REVISION,
+        calibration.input_ids[: args.samples],
+        TopKDistillationConfig(
+            epochs=args.epochs,
+            batch_size=args.batch_size,
+            learning_rate=args.learning_rate,
+            temperature=args.temperature,
+            top_k=args.top_k,
+            vocabulary_chunk_size=args.vocabulary_chunk_size,
+            token_chunk_size=args.token_chunk_size,
+            maximum_tokens_per_batch=args.maximum_tokens_per_batch,
+            gradient_checkpointing=True,
+            # The legacy Optimi AdamW invocation leaves weight decay at its
+            # zero default. Keep this explicit in the pinned protocol.
+            weight_decay=0.0,
+            seed=0,
+        ),
+        device=args.device,
+        pad_token_id=tokenizer.pad_token_id,
+        replace_existing_global_tuning=args.replace_global_tuning,
+        interrupt_after_epoch_commits=args.interrupt_after_epoch_commits,
     )
+    try:
+        result = run_global_topk_distillation(request)
+    except InterruptedError as exc:
+        print(json.dumps({"status": "interrupted", "reason": str(exc)}, indent=2))
+        return
     print(
         json.dumps(
             {

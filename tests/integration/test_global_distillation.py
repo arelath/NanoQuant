@@ -1,7 +1,9 @@
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 
+import pytest
 import torch
 from transformers.models.gemma3.configuration_gemma3 import Gemma3TextConfig
 from transformers.models.gemma3.modeling_gemma3 import Gemma3ForCausalLM
@@ -63,27 +65,28 @@ def test_complete_frozen_run_can_be_distilled_committed_and_reloaded(tmp_path: P
     with torch.no_grad():
         before_logits = cast(Any, before.model)(input_ids=tokens, use_cache=False).logits.detach()
 
-    distilled = run_global_topk_distillation(
-        GlobalDistillationRequest(
-            output,
-            snapshot,
-            "fixture/gemma3",
-            "pinned-test-revision",
-            tokens,
-            TopKDistillationConfig(
-                epochs=3,
-                batch_size=2,
-                learning_rate=0.02,
-                top_k=8,
-                vocabulary_chunk_size=7,
-                token_chunk_size=4,
-                maximum_tokens_per_batch=8,
-                gradient_checkpointing=False,
-                weight_decay=0.0,
-            ),
-            device="cpu",
-        )
+    request = GlobalDistillationRequest(
+        output,
+        snapshot,
+        "fixture/gemma3",
+        "pinned-test-revision",
+        tokens,
+        TopKDistillationConfig(
+            epochs=3,
+            batch_size=2,
+            learning_rate=0.02,
+            top_k=8,
+            vocabulary_chunk_size=7,
+            token_chunk_size=4,
+            maximum_tokens_per_batch=8,
+            gradient_checkpointing=False,
+            weight_decay=0.0,
+        ),
+        device="cpu",
     )
+    with pytest.raises(InterruptedError, match="after 1 distillation epoch checkpoint"):
+        run_global_topk_distillation(replace(request, interrupt_after_epoch_commits=1))
+    distilled = run_global_topk_distillation(request)
 
     active = active_global_tuning(output)
     assert active == distilled.reference
