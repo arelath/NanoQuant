@@ -21,7 +21,26 @@ from nanoquant.infrastructure.global_tuning import active_global_tuning, load_gl
 from nanoquant.resident_quantization import ResidentQuantizationRequest, run_resident_quantization
 
 
-def test_complete_frozen_run_can_be_distilled_committed_and_reloaded(tmp_path: Path) -> None:
+@pytest.mark.parametrize("cooldown", (-1.0, float("inf"), float("nan")))
+def test_global_distillation_rejects_invalid_epoch_cooldown(tmp_path: Path, cooldown: float) -> None:
+    request = GlobalDistillationRequest(
+        tmp_path / "run",
+        tmp_path / "snapshot",
+        "fixture/gemma3",
+        "pinned-test-revision",
+        ((1,),),
+        device="cpu",
+        epoch_cooldown_seconds=cooldown,
+    )
+
+    with pytest.raises(ValueError, match="cooldown must be finite and non-negative"):
+        run_global_topk_distillation(request)
+
+
+def test_complete_frozen_run_can_be_distilled_committed_and_reloaded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     snapshot = tmp_path / "snapshot"
     config = Gemma3TextConfig(
         vocab_size=24,
@@ -65,6 +84,8 @@ def test_complete_frozen_run_can_be_distilled_committed_and_reloaded(tmp_path: P
     with torch.no_grad():
         before_logits = cast(Any, before.model)(input_ids=tokens, use_cache=False).logits.detach()
 
+    cooldowns: list[float] = []
+    monkeypatch.setattr("nanoquant.global_distillation.time.sleep", cooldowns.append)
     request = GlobalDistillationRequest(
         output,
         snapshot,
@@ -83,10 +104,12 @@ def test_complete_frozen_run_can_be_distilled_committed_and_reloaded(tmp_path: P
             weight_decay=0.0,
         ),
         device="cpu",
+        epoch_cooldown_seconds=3.25,
     )
     with pytest.raises(InterruptedError, match="after 1 distillation epoch checkpoint"):
         run_global_topk_distillation(replace(request, interrupt_after_epoch_commits=1))
     distilled = run_global_topk_distillation(request)
+    assert cooldowns == [3.25]
 
     active = active_global_tuning(output)
     assert active == distilled.reference

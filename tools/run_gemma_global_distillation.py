@@ -42,6 +42,12 @@ def main() -> None:
         type=int,
         help="Exit cleanly after this many new durable epoch checkpoints; resume with the same command.",
     )
+    parser.add_argument(
+        "--epoch-cooldown-seconds",
+        type=float,
+        default=0.0,
+        help="Idle after each non-final durable epoch checkpoint while retaining the CUDA lease.",
+    )
     args = parser.parse_args()
 
     calibration = load_pinned_calibration(
@@ -76,6 +82,7 @@ def main() -> None:
         pad_token_id=tokenizer.pad_token_id,
         replace_existing_global_tuning=args.replace_global_tuning,
         interrupt_after_epoch_commits=args.interrupt_after_epoch_commits,
+        epoch_cooldown_seconds=args.epoch_cooldown_seconds,
     )
     try:
         result = run_global_topk_distillation(request)

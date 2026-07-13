@@ -555,7 +555,10 @@ must be remeasured rather than inferred from the speedup.
   **02:24:03** (during the prior continuous attempt) and **03:13:05** (39 seconds into the next resume),
   while the checkpoint pointer correctly remained at the last durable epoch. The one-epoch checkpoint
   boundary is validated, but neither interrupted interval is evidence for or against a code optimization;
-  quality and end-to-end timing remain pending a stable-GPU completion.
+  quality and end-to-end timing remain pending a stable-GPU completion. An opt-in epoch cooldown now idles
+  only after activating each non-final checkpoint while retaining the CUDA lease. It keeps the recurrence
+  and protocol identity unchanged, avoids repeated model reload/allocation, and prevents another worker
+  from filling the intended thermal-rest window; its sleep time is excluded from performance comparisons.
 - **Cross-environment CUDA lease split fixed (2026-07-13):** two workers used `%TEMP%` roots `Temp` and
   `Temp\\1`, created independent `cuda:0` leases, and together drove WDDM usage to 11–12 GiB; the corrected
   KD run was terminated during epoch 2 but retained its epoch-1 checkpoint. Device leases now live under
@@ -564,6 +567,11 @@ must be remeasured rather than inferred from the speedup.
   the second owner is rejected.
 - `JsonlEventSink._read_last_sequence` parses the whole event log at construction — only matters for
   resumed runs with large logs; fine today, worth a tail-scan if event volume grows.
+- **Measured, not implemented (2026-07-13):** a fresh process inventories the pinned Gemma snapshot in a
+  median **1.759 s** with source-shard verification versus **0.038 s** without it. A cross-process
+  signature cache would save about 1.72 s per bounded resume (roughly 14 s across eight epoch processes),
+  but less than 0.1% of an uninterrupted full run and at the cost of broadening the snapshot-integrity
+  trust boundary. The existing verification remains enabled.
 - `_artifact_bytes` walks the whole artifact tree once at report time — keep an eye on it as artifact
   counts grow (currently once per run).
 
