@@ -62,6 +62,7 @@ def main() -> None:
     parser.add_argument("--samples", type=int, default=256)
     parser.add_argument("--admm-outer-iterations", type=int, default=800)
     parser.add_argument("--admm-inner-iterations", type=int, default=5)
+    parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--block-forward-batch-size", type=int, default=4)
     parser.add_argument("--calibration-artifact")
@@ -130,6 +131,7 @@ def main() -> None:
             post_block_refit_learning_rate=1e-5,
             tuning_microbatch_size=args.tuning_microbatch_size,
             legacy_tuning_seed_reset=True,
+            seed=args.seed,
             activation_retention=args.activation_retention,
             calibration_method="online_fisher",
             calibration_shrinkage=0.6,
