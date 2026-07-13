@@ -103,9 +103,12 @@ pinned host memory, and activation streams loaded at a CUDA resume boundary are 
 loop already requests nonblocking H2D copies, so every subsequent factorized, non-factorized, refit, and
 loss pass reuses those pinned tensors without an extra copy. On the parity GPU, an exact 37.75 MiB BF16
 batch transferred in a median 3.045 ms pinned versus 3.997 ms pageable (**1.31x**); blocking D2H improved
-only 1.05x. A CUDA regression test confirms pinned block outputs are bitwise equal. This does not check the
-item off: double buffering is deferred until copy-stream lifetimes and the four-stream pinned-memory budget
-are represented by the resource plan.
+only 1.05x. Shuffled advanced indexing was found to discard pinning, so training now gathers into two
+reusable pinned buffers and waits only for each buffer's prior H2D event before reuse. Across 32 exact
+two-tensor shuffled transfers this reduced 0.4051 s to 0.2688 s (**1.51x**) with bitwise-equal device
+values and tuning parameters. CUDA regression tests cover both paths. This does not check the item off:
+copy-stream prefetch is deferred until stream lifetimes and the full pinned-memory budget are represented
+by the resource plan.
 
 ### [x] 3.2 Foreach ParityAdamW (S0)
 
@@ -186,6 +189,13 @@ included in the estimate's low end.)
 Confidence: Medium (depends on how much compute is available to overlap). Effort: M — needs a small
 single-worker writer with strict completion-before-journal semantics, exercised by the existing
 interruption matrix.
+
+**Measured, not accepted (2026-07-12).** Persisting one real 2.416 GB block activation generation took
+2.167 s to write and 1.800 s to hash (3.968 s total). The final weighted metric scan available for safe
+same-block overlap took only 0.760 s; running both concurrently reduced their combined 4.727 s to 4.082 s
+(**1.16x**), about 17 seconds over 26 blocks. Cross-block overlap could hide more but would reorder durable
+block and next-block layer commits, complicate resume discovery, and require thread-safe store composition.
+That risk is not justified by the measured bound, so no asynchronous persistence code was added.
 
 ### [ ] 3.5 Reduce ADMM cholesky `info` synchronizations (S0, one caveat)
 
@@ -295,6 +305,12 @@ written+hashed; ×238 attempts ≈ 8–12 GB, consistent with the 12.4 GB
 **Estimate.** Store traffic ≈ halved (retries + rejected attempts) and round-trips off the critical path:
 **1–3% of the anchor**, plus reduced allocator/sync churn inside `execute_attempt`. Confidence: Medium.
 Effort: M.
+
+**Deferred (2026-07-12).** The S2 variant intentionally changes the retained evidence surface and report
+byte count, so it will not be implemented without explicit approval of that contract change. The S1
+variant needs the same thread-safe artifact-writer and tensor-lifetime machinery as item 4; the real-block
+measurement there found too little hideable store time to justify that infrastructure yet. Revisit if
+micro-profiling attributes a material share of `factorize-attempt` wall time to `LocalTensorStore.put`.
 
 ### [ ] 3.10 Hash during write instead of write-then-re-read (S0)
 

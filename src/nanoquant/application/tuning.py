@@ -32,6 +32,75 @@ class TuningRequest:
     microbatch_size: int | None = None
 
 
+class _PinnedBatchStager:
+    def __init__(
+        self,
+        inputs: torch.Tensor,
+        targets: torch.Tensor,
+        maximum_batch_size: int,
+        device: torch.device,
+    ) -> None:
+        self.inputs = inputs
+        self.targets = targets
+        self.device = device
+        self.input_buffers = tuple(
+            torch.empty(
+                (maximum_batch_size, *inputs.shape[1:]),
+                dtype=inputs.dtype,
+                device="cpu",
+                pin_memory=True,
+            )
+            for _ in range(2)
+        )
+        self.target_buffers = tuple(
+            torch.empty(
+                (maximum_batch_size, *targets.shape[1:]),
+                dtype=targets.dtype,
+                device="cpu",
+                pin_memory=True,
+            )
+            for _ in range(2)
+        )
+        self.events = tuple(torch.cuda.Event() for _ in range(2))  # type: ignore[no-untyped-call]
+        self.recorded = [False, False]
+        self.next_slot = 0
+
+    def stage(self, indexes: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        slot = self.next_slot
+        self.next_slot = (slot + 1) % len(self.input_buffers)
+        if self.recorded[slot]:
+            self.events[slot].synchronize()
+        count = indexes.numel()
+        input_host = self.input_buffers[slot][:count]
+        target_host = self.target_buffers[slot][:count]
+        torch.index_select(self.inputs, 0, indexes, out=input_host)
+        torch.index_select(self.targets, 0, indexes, out=target_host)
+        input_batch = input_host.to(self.device, non_blocking=True)
+        target_batch = target_host.to(self.device, non_blocking=True)
+        self.events[slot].record(torch.cuda.current_stream(self.device))
+        self.recorded[slot] = True
+        return input_batch, target_batch
+
+    def close(self) -> None:
+        for event, recorded in zip(self.events, self.recorded, strict=True):
+            if recorded:
+                event.synchronize()
+
+
+def _pinned_batch_stager(
+    request: TuningRequest, device: torch.device, maximum_batch_size: int
+) -> _PinnedBatchStager | None:
+    if (
+        device.type != "cuda"
+        or request.inputs.device.type != "cpu"
+        or request.targets.device.type != "cpu"
+        or not request.inputs.is_pinned()
+        or not request.targets.is_pinned()
+    ):
+        return None
+    return _PinnedBatchStager(request.inputs, request.targets, maximum_batch_size, device)
+
+
 def _resolve_output_importance(
     importance: torch.Tensor | None, device: torch.device, dtype: torch.dtype
 ) -> torch.Tensor | None:
@@ -117,6 +186,10 @@ def tune(
         optimizer, T_max=total_steps, eta_min=request.learning_rate * 1e-4
     )
     generator = torch.Generator(device="cpu").manual_seed(request.seed)
+    maximum_microbatch_size = min(
+        request.inputs.shape[0], request.microbatch_size or request.batch_size
+    )
+    stager = _pinned_batch_stager(request, device, maximum_microbatch_size)
     epochs_completed = 0
     stopped_early = False
     try:
@@ -128,8 +201,11 @@ def tune(
                 microbatch_size = request.microbatch_size or indexes.numel()
                 for microbatch_start in range(0, indexes.numel(), microbatch_size):
                     microbatch_indexes = indexes[microbatch_start : microbatch_start + microbatch_size]
-                    input_batch = request.inputs[microbatch_indexes].to(device, non_blocking=True)
-                    target_batch = request.targets[microbatch_indexes].to(device, non_blocking=True)
+                    if stager is None:
+                        input_batch = request.inputs[microbatch_indexes].to(device, non_blocking=True)
+                        target_batch = request.targets[microbatch_indexes].to(device, non_blocking=True)
+                    else:
+                        input_batch, target_batch = stager.stage(microbatch_indexes)
                     prediction = forward(model, input_batch)
                     loss = _loss_sum(prediction, target_batch, importance) / max(1, indexes.numel())
                     torch.autograd.backward(loss)
@@ -157,6 +233,8 @@ def tune(
                 parameter_map[name].copy_(value)
         final_value = _evaluate_loss(model, request, forward)
     finally:
+        if stager is not None:
+            stager.close()
         for parameter in model.parameters():
             parameter.requires_grad_(original_requires_grad[id(parameter)])
     elements = request.targets.numel()

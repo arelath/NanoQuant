@@ -105,3 +105,32 @@ def test_microbatch_accumulation_preserves_optimizer_batch_update() -> None:
         full_batch_model.quant.parameters(), microbatch_model.quant.parameters(), strict=True
     ):
         assert torch.allclose(full_parameter, micro_parameter, rtol=1e-6, atol=1e-7)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="pinned tuning staging requires a GPU")
+def test_pinned_shuffle_staging_matches_pageable_tuning_bitwise() -> None:
+    pageable_model = Hybrid().cuda().to(torch.bfloat16)
+    pinned_model = deepcopy(pageable_model)
+    inputs = torch.randn(8, 3, dtype=torch.bfloat16, generator=torch.Generator().manual_seed(17))
+    targets = torch.randn(8, 2, dtype=torch.bfloat16, generator=torch.Generator().manual_seed(18))
+    request = TuningRequest(inputs, targets, 2, 4, 0.01, seed=19, microbatch_size=2)
+    pinned_request = TuningRequest(
+        inputs.pin_memory(),
+        targets.pin_memory(),
+        request.epochs,
+        request.batch_size,
+        request.learning_rate,
+        seed=request.seed,
+        microbatch_size=request.microbatch_size,
+    )
+
+    pageable_metrics = tune_factorized(pageable_model, "quant", request, _forward)
+    pinned_metrics = tune_factorized(pinned_model, "quant", pinned_request, _forward)
+
+    assert pinned_metrics == pageable_metrics
+    for pageable_parameter, pinned_parameter in zip(
+        pageable_model.parameters(), pinned_model.parameters(), strict=True
+    ):
+        assert torch.equal(pageable_parameter, pinned_parameter)
+    del pageable_model, pinned_model
+    torch.cuda.empty_cache()
