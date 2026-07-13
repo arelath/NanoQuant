@@ -106,9 +106,12 @@ batch transferred in a median 3.045 ms pinned versus 3.997 ms pageable (**1.31x*
 only 1.05x. Shuffled advanced indexing was found to discard pinning, so training now gathers into two
 reusable pinned buffers and waits only for each buffer's prior H2D event before reuse. Across 32 exact
 two-tensor shuffled transfers this reduced 0.4051 s to 0.2688 s (**1.51x**) with bitwise-equal device
-values and tuning parameters. CUDA regression tests cover both paths. This does not check the item off:
-copy-stream prefetch is deferred until stream lifetimes and the full pinned-memory budget are represented
-by the resource plan.
+values and tuning parameters. Evaluation loss passes now prefetch one pinned input/target pair on a copy
+stream while the prior pair computes, using two reusable readiness events. A representative BF16
+1152×1152 forward/loss pass improved from 0.0721 s to 0.0545 s (**1.32x**) with an identical accumulated
+loss. CUDA regression tests cover all three paths. This does not check the item off: training-step and
+block-forward copy-stream prefetch remain deferred until their stream lifetimes and the full pinned-memory
+budget are represented by the resource plan.
 
 ### [x] 3.2 Foreach ParityAdamW (S0)
 

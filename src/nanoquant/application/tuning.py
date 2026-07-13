@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 
 import torch
@@ -107,6 +107,60 @@ def _resolve_output_importance(
     return None if importance is None else importance.to(device=device, dtype=dtype)
 
 
+def _device_batches(
+    inputs: torch.Tensor,
+    targets: torch.Tensor,
+    batch_size: int,
+    device: torch.device,
+) -> Iterator[tuple[torch.Tensor, torch.Tensor]]:
+    if inputs.shape[0] == 0:
+        return
+    if (
+        device.type != "cuda"
+        or inputs.device.type != "cpu"
+        or targets.device.type != "cpu"
+        or not inputs.is_pinned()
+        or not targets.is_pinned()
+    ):
+        for start in range(0, inputs.shape[0], batch_size):
+            end = min(start + batch_size, inputs.shape[0])
+            yield (
+                inputs[start:end].to(device, non_blocking=True),
+                targets[start:end].to(device, non_blocking=True),
+            )
+        return
+
+    copy_stream = torch.cuda.Stream(device=device)  # type: ignore[no-untyped-call]
+    compute_stream = torch.cuda.current_stream(device)
+    ready_events = tuple(torch.cuda.Event() for _ in range(2))  # type: ignore[no-untyped-call]
+
+    def schedule(start: int, slot: int) -> tuple[torch.Tensor, torch.Tensor, torch.cuda.Event]:
+        end = min(start + batch_size, inputs.shape[0])
+        with torch.cuda.stream(copy_stream):
+            input_batch = inputs[start:end].to(device, non_blocking=True)
+            target_batch = targets[start:end].to(device, non_blocking=True)
+            ready = ready_events[slot]
+            ready.record(copy_stream)
+        return input_batch, target_batch, ready
+
+    current = schedule(0, 0)
+    next_slot = 1
+    try:
+        for next_start in range(batch_size, inputs.shape[0] + batch_size, batch_size):
+            input_batch, target_batch, ready = current
+            compute_stream.wait_event(ready)
+            input_batch.record_stream(compute_stream)
+            target_batch.record_stream(compute_stream)
+            following = schedule(next_start, next_slot) if next_start < inputs.shape[0] else None
+            next_slot = (next_slot + 1) % len(ready_events)
+            yield input_batch, target_batch
+            if following is None:
+                break
+            current = following
+    finally:
+        compute_stream.wait_stream(copy_stream)
+
+
 def _release_cuda_cache_under_pressure(device: torch.device) -> None:
     reserved = torch.cuda.memory_reserved(device)
     total = torch.cuda.get_device_properties(device).total_memory
@@ -134,12 +188,12 @@ def _evaluate_loss(model: nn.Module, request: TuningRequest, forward: ForwardFun
     total = torch.zeros((), device=device)
     with torch.no_grad():
         evaluation_batch_size = request.microbatch_size or request.batch_size
-        for start in range(0, request.inputs.shape[0], evaluation_batch_size):
-            end = min(start + evaluation_batch_size, request.inputs.shape[0])
-            prediction = forward(model, request.inputs[start:end].to(device, non_blocking=True))
-            target = request.targets[start:end].to(device, non_blocking=True)
+        for input_batch, target in _device_batches(
+            request.inputs, request.targets, evaluation_batch_size, device
+        ):
+            prediction = forward(model, input_batch)
             total += _loss_sum(prediction, target, importance)
-            del prediction, target
+            del input_batch, prediction, target
     return float(total / request.targets.numel())
 
 
