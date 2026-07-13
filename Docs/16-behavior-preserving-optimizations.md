@@ -150,6 +150,23 @@ This does not change `RESIDENT_ALGORITHM_VERSION`: it changes only when a reusab
 again; compute-stream operation order, batches, RNG, arithmetic, optimizer steps, and committed semantics are
 unchanged. The CUDA bitwise check passed that compatibility gate.
 
+**Generic evaluation/forward prefetch correction validated (2026-07-13).** The fixed shuffled-training stager
+removed about 5.5 GiB of Windows/CUDA commit from the live run, but driver-visible use still touched 11.63 GiB.
+Per-four-batch allocator tracing isolated the remaining growth to `iter_device_batches`: training stayed at
+2.59 GiB allocated and 8.14 GiB reserved, then each epoch evaluation added about 0.9 GiB of reservation
+(8.14 → 9.05 → 9.95 GiB) without increasing live allocation. The generic iterator had the same defect: its
+two readiness events did not represent two reusable device slots, so every evaluation allocated a new pair.
+
+The iterator now owns two fixed device-buffer tuples. A consumed event gates copy-stream overwrite of each slot,
+while the existing ready event gates compute; this preserves one-batch overlap and works for evaluation loss,
+block-loss snapshots, and resident block forwards. On a two-tensor 64×1,024×512 BF16 CUDA canary, incremental
+reservation fell from 162 to 42 MiB (**74% less**) with median wall 0.06236 s versus 0.06011 s old across five
+runs. The direct iterator and all downstream CUDA bitwise tests pass. More importantly, a full 32-epoch real
+Gemma attention-layer diagnostic held reservation at 7,346–7,348 MiB with 2,176 MiB maximum allocation, zero
+allocator retries, and zero OOMs; preceding non-factorized schedules shared the same 7,338 MiB plateau. The
+driver-visible sample was about 8.0 GiB, leaving roughly 4 GiB of physical headroom instead of paging against
+the 12 GiB limit.
+
 ### [x] 3.2 Foreach ParityAdamW (S0)
 
 **Where.** [parity_adamw.py:66–93](../src/nanoquant/application/parity_adamw.py) — a Python loop over
