@@ -51,6 +51,29 @@ def _decoder_layers(model: nn.Module) -> tuple[nn.Module, ...]:
     return tuple(values)
 
 
+def _latest_complete_identity(
+    records: list[dict[str, Any]], expected_blocks: int
+) -> tuple[CommitIdentity, dict[int, dict[str, Any]]]:
+    """Select the newest journal identity with one complete contiguous block set."""
+    seen: set[str] = set()
+    for candidate in reversed(records):
+        payload = candidate.get("identity")
+        if not isinstance(payload, dict):
+            continue
+        key = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        if key in seen:
+            continue
+        seen.add(key)
+        block_records = {
+            int(record["block"]): record
+            for record in records
+            if record.get("kind") == "block" and record.get("identity") == payload
+        }
+        if sorted(block_records) == list(range(expected_blocks)):
+            return from_dict(CommitIdentity, payload, path="identity"), block_records
+    raise ValueError("frozen run does not contain a complete contiguous block identity")
+
+
 def load_frozen_run(
     run_output: str | Path,
     snapshot: str | Path,
@@ -75,11 +98,8 @@ def load_frozen_run(
     records = [json.loads(line) for line in (run_output / "state" / "journal.jsonl").read_text().splitlines()]
     if not records:
         raise ValueError("frozen run journal is empty")
-    identity = from_dict(CommitIdentity, records[0]["identity"], path="identity")
-    block_records = {int(record["block"]): record for record in records if record.get("kind") == "block"}
     expected_blocks = adapter.decoder_block_count(source)
-    if sorted(block_records) != list(range(expected_blocks)):
-        raise ValueError("frozen run does not contain complete contiguous block commits")
+    identity, block_records = _latest_complete_identity(records, expected_blocks)
     committed = tuple(
         load_committed_block(
             ArtifactRef("block-result", str(block_records[index]["artifact_id"]), 1),

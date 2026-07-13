@@ -75,6 +75,11 @@ def test_resident_quantization_commits_complete_transformers_model(tmp_path: Pat
     assert result.artifact_bytes > 0
     artifacts = LocalArtifactStore(output / "artifacts")
     artifacts.validate(result.report.artifact_id)
+    journal_path = output / "state" / "journal.jsonl"
+    journal_lines = journal_path.read_text().splitlines()
+    stale = json.loads(next(line for line in journal_lines if json.loads(line)["kind"] == "block"))
+    stale["identity"] = {**stale["identity"], "config_hash": "stale-config"}
+    journal_path.write_text(json.dumps(stale) + "\n" + "\n".join(journal_lines) + "\n")
     loaded = load_frozen_run(
         output,
         snapshot,
