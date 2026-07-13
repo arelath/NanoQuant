@@ -165,7 +165,12 @@ runs. The direct iterator and all downstream CUDA bitwise tests pass. More impor
 Gemma attention-layer diagnostic held reservation at 7,346–7,348 MiB with 2,176 MiB maximum allocation, zero
 allocator retries, and zero OOMs; preceding non-factorized schedules shared the same 7,338 MiB plateau. The
 driver-visible sample was about 8.0 GiB, leaving roughly 4 GiB of physical headroom instead of paging against
-the 12 GiB limit.
+the 12 GiB limit. The resumed 26-block production run confirms the result outside the isolated diagnostic:
+driver-visible use held at 7.74–8.25 GiB through tuning and a block transition, versus the previous 11.63 GiB
+high-water. Windows private commit held near 16.7 GiB during tuning and peaked at 22.82 GiB during refit,
+versus 26.31 GiB before the corrections. The Windows private-commit figures include host tensors and the WDDM
+CUDA reservation and therefore are not physical VRAM; the driver-visible figures are the relevant card-pressure
+measurement.
 
 ### [x] 3.2 Foreach ParityAdamW (S0)
 
