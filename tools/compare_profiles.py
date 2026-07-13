@@ -15,8 +15,10 @@ class ProfilePhase:
     count: int
     wall_seconds: float
     self_seconds: float
+    cuda_seconds: float
     wall_p50: float
     self_p50: float
+    cuda_p50: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,8 +50,10 @@ def load_profile(path: str | Path) -> LoadedProfile:
             int(value["count"]),
             float(value["wall_seconds"]),
             float(value["self_seconds"]),
+            float(value.get("cuda_seconds", 0.0)),
             float(value["p50"]),
             float(value["self_p50"]),
+            float(value.get("cuda_p50", 0.0)),
         )
         if phase.path in phases:
             raise ValueError(f"duplicate phase path in profile: {phase.path}")
@@ -72,8 +76,8 @@ def compare_profiles(
     minimum_seconds: float = 1.0,
     threshold_percent: float = 5.0,
 ) -> dict[str, object]:
-    if metric not in {"self", "wall"}:
-        raise ValueError("profile comparison metric must be 'self' or 'wall'")
+    if metric not in {"self", "wall", "cuda"}:
+        raise ValueError("profile comparison metric must be 'self', 'wall', or 'cuda'")
     if minimum_seconds < 0 or threshold_percent < 0:
         raise ValueError("profile comparison thresholds cannot be negative")
     metric_field = f"{metric}_seconds"
@@ -91,9 +95,7 @@ def compare_profiles(
         baseline_median = 0.0 if baseline_phase is None else float(getattr(baseline_phase, median_field))
         candidate_median = 0.0 if candidate_phase is None else float(getattr(candidate_phase, median_field))
         median_delta_percent = (
-            None
-            if baseline_median == 0
-            else 100.0 * (candidate_median - baseline_median) / baseline_median
+            None if baseline_median == 0 else 100.0 * (candidate_median - baseline_median) / baseline_median
         )
         if baseline_phase is None:
             status = "new"
@@ -203,7 +205,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--baseline", type=Path, required=True)
     parser.add_argument("--candidate", type=Path, required=True)
-    parser.add_argument("--metric", choices=("self", "wall"), default="self")
+    parser.add_argument("--metric", choices=("self", "wall", "cuda"), default="self")
     parser.add_argument("--min-seconds", type=float, default=1.0)
     parser.add_argument("--threshold-pct", type=float, default=5.0)
     parser.add_argument("--format", choices=("markdown", "json"), default="markdown")
@@ -217,9 +219,7 @@ def main() -> int:
         threshold_percent=args.threshold_pct,
     )
     rendered = (
-        json.dumps(comparison, sort_keys=True, indent=2)
-        if args.format == "json"
-        else render_markdown(comparison)
+        json.dumps(comparison, sort_keys=True, indent=2) if args.format == "json" else render_markdown(comparison)
     )
     if args.output is None:
         print(rendered)

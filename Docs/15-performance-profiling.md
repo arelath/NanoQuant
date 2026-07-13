@@ -468,8 +468,14 @@ supports opt-in micro phases for staging, forward, loss, backward, optimizer ste
 and best-state cloning, with token/step/clone/transfer counters and exact profiled/control parity coverage.
 Micro spans suppress durable span events and use the documented 5% recorder-time warning ceiling; macro
 profiling retains its stricter 0.5% ceiling and optional span-event mirror.
-Other micro paths, CUDA timing, and trace levels remain incomplete; CUDA/trace requests fail explicitly rather
-than emitting partial data under those labels.
+Deferred CUDA timing is now implemented for macro and micro profiles: event pairs are sampled and bounded per
+stable phase path, recorded without hot-loop synchronization, resolved once at profile finalization, and
+reported as estimated aggregate `cuda_seconds` with sample counts and percentiles. Resolution failures produce
+`PERF003` without replacing a pipeline result or exception. The comparison CLI accepts `--metric cuda`, and the
+Gemma launcher exposes CUDA timing and sampling controls. Fake-event tests prove sampling, estimation,
+single-resolution, and failure behavior without touching the active GPU; the real profiled-versus-unprofiled
+CUDA replay and overhead measurement remain pending device availability. Other micro paths and trace level
+remain incomplete; trace requests still fail explicitly rather than emitting partial data under that label.
 
 P0 and P2 are pure instrumentation and can land before parity sign-off (they are parity-neutral by C1 and
 cheap to review); P1 blocks on parity per the agreed sequencing, because baselines captured before parity

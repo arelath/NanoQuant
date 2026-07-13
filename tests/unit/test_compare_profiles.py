@@ -117,3 +117,31 @@ def test_total_delta_without_median_confirmation_is_classified_as_noise(tmp_path
 
     assert phase["status"] == "noisy"
     assert result["regression_count"] == 0
+
+
+def test_cuda_device_time_can_be_compared_and_old_profiles_default_to_zero(tmp_path: Path) -> None:
+    baseline_path = tmp_path / "baseline.json"
+    candidate_path = tmp_path / "candidate.json"
+    _write_profile(baseline_path, phases=(("run/a", 2, 10.0, 8.0),))
+    _write_profile(candidate_path, phases=(("run/a", 2, 10.0, 8.0),))
+    baseline_payload = json.loads(baseline_path.read_text(encoding="utf-8"))
+    candidate_payload = json.loads(candidate_path.read_text(encoding="utf-8"))
+    baseline_payload["phases"][0].update(cuda_seconds=6.0, cuda_p50=3.0)
+    candidate_payload["phases"][0].update(cuda_seconds=4.0, cuda_p50=2.0)
+    baseline_path.write_text(json.dumps(baseline_payload), encoding="utf-8")
+    candidate_path.write_text(json.dumps(candidate_payload), encoding="utf-8")
+
+    result = compare_profiles(
+        load_profile(baseline_path),
+        load_profile(candidate_path),
+        metric="cuda",
+        minimum_seconds=1.0,
+        threshold_percent=10.0,
+    )
+    phase = next(value for value in result["phases"] if value["path"] == "run/a")
+    assert phase["status"] == "improvement"
+    assert phase["delta_seconds"] == -2.0
+
+    old_path = tmp_path / "old.json"
+    _write_profile(old_path, phases=(("run/a", 1, 1.0, 1.0),))
+    assert load_profile(old_path).phases["run/a"].cuda_seconds == 0.0

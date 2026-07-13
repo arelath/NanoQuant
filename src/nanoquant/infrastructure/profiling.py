@@ -15,7 +15,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from types import TracebackType
-from typing import cast
+from typing import Protocol, cast
 
 import torch
 
@@ -80,6 +80,7 @@ class _PhaseAggregate:
     maximum: float = 0.0
     samples: list[float] = field(default_factory=list)
     self_samples: list[float] = field(default_factory=list)
+    cuda_samples: list[float] = field(default_factory=list)
     groups: dict[str, _GroupAggregate] = field(default_factory=dict)
 
     def record(self, elapsed: float, self_seconds: float, attributes: Mapping[str, object], failed: bool) -> None:
@@ -101,7 +102,12 @@ class _PhaseAggregate:
         if attributes:
             self.groups.setdefault(_group_key(attributes), _GroupAggregate()).record(elapsed, self_seconds)
 
+    def record_cuda(self, elapsed: float) -> None:
+        self.cuda_samples.append(elapsed)
+
     def payload(self, path: str) -> dict[str, object]:
+        cuda_sample_count = len(self.cuda_samples)
+        cuda_seconds = 0.0 if cuda_sample_count == 0 else sum(self.cuda_samples) * self.count / cuda_sample_count
         return {
             "path": path,
             "count": self.count,
@@ -114,6 +120,10 @@ class _PhaseAggregate:
             "p90": _percentile(self.samples, 0.90),
             "self_p50": _percentile(self.self_samples, 0.50),
             "self_p90": _percentile(self.self_samples, 0.90),
+            "cuda_seconds": cuda_seconds,
+            "cuda_sample_count": cuda_sample_count,
+            "cuda_p50": _percentile(self.cuda_samples, 0.50),
+            "cuda_p90": _percentile(self.cuda_samples, 0.90),
             "max": self.maximum,
             "groups": {name: group.payload() for name, group in sorted(self.groups.items())},
         }
@@ -148,7 +158,25 @@ class _Frame:
     attributes: dict[str, object]
     span_id: str | None
     parent_span_id: str | None
+    cuda_start: _CudaEvent | None = None
     child_seconds: float = 0.0
+
+
+class _CudaEvent(Protocol):
+    def record(self) -> None: ...
+
+    def elapsed_time(self, end_event: _CudaEvent) -> float: ...
+
+
+def _torch_cuda_event() -> _CudaEvent:
+    return cast(_CudaEvent, torch.cuda.Event(enable_timing=True))  # type: ignore[no-untyped-call]
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingCudaSample:
+    path: str
+    started: _CudaEvent
+    ended: _CudaEvent
 
 
 class _MeasuredPhase(AbstractContextManager[None]):
@@ -186,15 +214,19 @@ class Profiler:
         run_id: str,
         events: EventSink | None = None,
         clock: Callable[[], float] = time.perf_counter,
+        cuda_event_factory: Callable[[], _CudaEvent] | None = None,
+        cuda_synchronize: Callable[[], None] | None = None,
     ) -> None:
         if config.level is ProfilingLevel.OFF:
             raise ValueError("disabled profiling must use NULL_RECORDER")
         if config.level not in (ProfilingLevel.MACRO, ProfilingLevel.MICRO):
             raise NotImplementedError(f"profiling level {config.level.value!r} is not implemented yet")
-        if config.cuda_timing:
-            raise NotImplementedError("CUDA phase timing is not implemented yet")
         if config.raw_samples_per_phase <= 0:
             raise ValueError("raw_samples_per_phase must be positive")
+        if config.cuda_sample_every <= 0:
+            raise ValueError("cuda_sample_every must be positive")
+        if config.cuda_timing and cuda_event_factory is None and not torch.cuda.is_available():
+            raise RuntimeError("CUDA phase timing requested without CUDA")
         self.config = config
         self.run_id = run_id
         self._events = events
@@ -210,6 +242,17 @@ class Profiler:
         self._top_level_seconds = 0.0
         self._recorder_seconds = 0.0
         self._span_sequence = 0
+        self._cuda_event_factory = (
+            cuda_event_factory
+            if cuda_event_factory is not None
+            else _torch_cuda_event
+        )
+        self._cuda_synchronize = cuda_synchronize or torch.cuda.synchronize
+        self._cuda_invocations: dict[str, int] = {}
+        self._cuda_sample_counts: dict[str, int] = {}
+        self._pending_cuda_samples: list[_PendingCudaSample] = []
+        self._cuda_resolution_error: str | None = None
+        self._cuda_resolved = False
 
     def _now(self) -> float:
         return float(self._clock())
@@ -238,13 +281,22 @@ class Profiler:
         self._check_thread()
         parent = self._stack[-1] if self._stack else None
         path = f"{parent.path}/{name}" if parent is not None else name
+        cuda_start = None
+        if self.config.cuda_timing and self._cuda_resolution_error is None:
+            invocation = self._cuda_invocations.get(path, 0)
+            self._cuda_invocations[path] = invocation + 1
+            sample_count = self._cuda_sample_counts.get(path, 0)
+            if invocation % self.config.cuda_sample_every == 0 and sample_count < self.config.raw_samples_per_phase:
+                try:
+                    cuda_start = self._cuda_event_factory()
+                    cuda_start.record()
+                    self._cuda_sample_counts[path] = sample_count + 1
+                except Exception as error:
+                    self._cuda_resolution_error = f"{type(error).__name__}: {error}"
+                    cuda_start = None
         span_id = None
         parent_span_id = None if parent is None else parent.span_id
-        if (
-            self.config.level is ProfilingLevel.MACRO
-            and self.config.emit_span_events
-            and self._events is not None
-        ):
+        if self.config.level is ProfilingLevel.MACRO and self.config.emit_span_events and self._events is not None:
             self._span_sequence += 1
             span_id = f"profile-{os.getpid()}-{self._span_sequence}"
             self._events.emit(
@@ -256,12 +308,19 @@ class Profiler:
                 path=path,
                 **attributes,
             )
-        frame = _Frame(path, self._now(), attributes, span_id, parent_span_id)
+        frame = _Frame(path, self._now(), attributes, span_id, parent_span_id, cuda_start)
         self._stack.append(frame)
         self._recorder_seconds += self._now() - overhead_started
         return frame
 
     def _exit(self, frame: _Frame, error: BaseException | None) -> None:
+        if frame.cuda_start is not None:
+            try:
+                cuda_end = self._cuda_event_factory()
+                cuda_end.record()
+                self._pending_cuda_samples.append(_PendingCudaSample(frame.path, frame.cuda_start, cuda_end))
+            except Exception as cuda_error:
+                self._cuda_resolution_error = f"{type(cuda_error).__name__}: {cuda_error}"
         ended = self._now()
         overhead_started = ended
         self._check_thread()
@@ -276,11 +335,7 @@ class Profiler:
             self._stack[-1].child_seconds += elapsed
         else:
             self._top_level_seconds += elapsed
-        if (
-            self.config.level is ProfilingLevel.MACRO
-            and self.config.emit_span_events
-            and self._events is not None
-        ):
+        if self.config.level is ProfilingLevel.MACRO and self.config.emit_span_events and self._events is not None:
             severity = "error" if error is not None else "info"
             fields: dict[str, object] = {
                 "path": frame.path,
@@ -333,6 +388,26 @@ class Profiler:
             raise RuntimeError("cannot finish a profile with open phases")
         if self._finished is None:
             self._finished = self._now()
+        self._resolve_cuda_samples()
+
+    def _resolve_cuda_samples(self) -> None:
+        if self._cuda_resolved or not self.config.cuda_timing:
+            return
+        self._cuda_resolved = True
+        if self._cuda_resolution_error is not None:
+            self._pending_cuda_samples.clear()
+            return
+        try:
+            self._cuda_synchronize()
+            for sample in self._pending_cuda_samples:
+                elapsed = max(0.0, float(sample.started.elapsed_time(sample.ended)) / 1000.0)
+                aggregate = self._phases.get(sample.path)
+                if aggregate is not None:
+                    aggregate.record_cuda(elapsed)
+        except Exception as error:  # Profiling must not mask the pipeline's result or original failure.
+            self._cuda_resolution_error = f"{type(error).__name__}: {error}"
+        finally:
+            self._pending_cuda_samples.clear()
 
     def snapshot(self) -> dict[str, object]:
         self.finish()
@@ -364,11 +439,16 @@ class Profiler:
             warnings.append(
                 {
                     "code": "PERF002",
-                    "message": (
-                        f"{self.config.level.value} profiling recorder time exceeds "
-                        f"{recorder_budget:.1%}"
-                    ),
+                    "message": (f"{self.config.level.value} profiling recorder time exceeds {recorder_budget:.1%}"),
                     "fraction": recorder_fraction,
+                }
+            )
+        if self._cuda_resolution_error is not None:
+            warnings.append(
+                {
+                    "code": "PERF003",
+                    "message": "CUDA event pairs could not be resolved",
+                    "error": self._cuda_resolution_error,
                 }
             )
         environment = _environment_payload()
@@ -386,6 +466,11 @@ class Profiler:
             },
             "recorder_seconds": self._recorder_seconds,
             "recorder_fraction": recorder_fraction,
+            "cuda_timing": {
+                "enabled": self.config.cuda_timing,
+                "sample_every": self.config.cuda_sample_every,
+                "resolved": self.config.cuda_timing and self._cuda_resolution_error is None,
+            },
             "warnings": warnings,
             "phases": [aggregate.payload(path) for path, aggregate in sorted(self._phases.items())],
             "counters": [counter.payload(name) for name, counter in sorted(self._counters.items())],
@@ -458,8 +543,8 @@ class ProfileWriter:
             "",
             "## Top phases by self time",
             "",
-            "| Phase | Count | Self seconds | Inclusive seconds | Failed |",
-            "|---|---:|---:|---:|---:|",
+            "| Phase | Count | Self seconds | Inclusive seconds | CUDA seconds | Failed |",
+            "|---|---:|---:|---:|---:|---:|",
         ]
         warnings_value = payload.get("warnings", [])
         if isinstance(warnings_value, list) and warnings_value:
@@ -470,20 +555,22 @@ class ProfileWriter:
         for phase in sorted(phases, key=lambda item: float(item["self_seconds"]), reverse=True)[:20]:
             lines.append(
                 f"| `{phase['path']}` | {phase['count']} | {float(phase['self_seconds']):.6f} | "
-                f"{float(phase['wall_seconds']):.6f} | {phase['failed_count']} |"
+                f"{float(phase['wall_seconds']):.6f} | {float(phase['cuda_seconds']):.6f} | "
+                f"{phase['failed_count']} |"
             )
         lines.extend(
             [
                 "",
                 "## Top phases by inclusive time",
                 "",
-                "| Phase | Count | Inclusive seconds | P50 | P90 | Maximum |",
-                "|---|---:|---:|---:|---:|---:|",
+                "| Phase | Count | Inclusive seconds | CUDA seconds | CUDA samples | P50 | P90 | Maximum |",
+                "|---|---:|---:|---:|---:|---:|---:|---:|",
             ]
         )
         for phase in sorted(phases, key=lambda item: float(item["wall_seconds"]), reverse=True)[:20]:
             lines.append(
                 f"| `{phase['path']}` | {phase['count']} | {float(phase['wall_seconds']):.6f} | "
+                f"{float(phase['cuda_seconds']):.6f} | {phase['cuda_sample_count']} | "
                 f"{float(phase['p50']):.6f} | {float(phase['p90']):.6f} | {float(phase['max']):.6f} |"
             )
         lines.append("")

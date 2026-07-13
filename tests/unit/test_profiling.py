@@ -23,6 +23,31 @@ class Clock:
         self.value += seconds
 
 
+@dataclass
+class FakeCudaClock:
+    value_ms: float = 0.0
+
+    def event(self) -> FakeCudaEvent:
+        return FakeCudaEvent(self)
+
+    def advance(self, milliseconds: float) -> None:
+        self.value_ms += milliseconds
+
+
+class FakeCudaEvent:
+    def __init__(self, clock: FakeCudaClock) -> None:
+        self.clock = clock
+        self.recorded_ms: float | None = None
+
+    def record(self) -> None:
+        self.recorded_ms = self.clock.value_ms
+
+    def elapsed_time(self, end_event: FakeCudaEvent) -> float:
+        assert self.recorded_ms is not None
+        assert end_event.recorded_ms is not None
+        return end_event.recorded_ms - self.recorded_ms
+
+
 class MemoryEvents:
     def __init__(self) -> None:
         self.events: list[Event] = []
@@ -193,7 +218,7 @@ def test_profiler_rejects_invalid_names_attributes_and_open_snapshot() -> None:
     phase.__exit__(None, None, None)
 
 
-def test_micro_level_is_supported_and_trace_and_cuda_timing_fail_explicitly() -> None:
+def test_micro_level_is_supported_and_trace_fails_explicitly() -> None:
     events = MemoryEvents()
     profiler = Profiler(ProfilingConfig(level=ProfilingLevel.MICRO), run_id="micro", events=events)
     with profiler.phase("iteration"):
@@ -202,5 +227,59 @@ def test_micro_level_is_supported_and_trace_and_cuda_timing_fail_explicitly() ->
     assert not events.events
     with pytest.raises(NotImplementedError, match="trace"):
         Profiler(ProfilingConfig(level=ProfilingLevel.TRACE), run_id="trace")
-    with pytest.raises(NotImplementedError, match="CUDA"):
-        Profiler(ProfilingConfig(cuda_timing=True), run_id="cuda")
+
+
+def test_cuda_timing_is_sampled_deferred_resolved_once_and_estimated() -> None:
+    wall_clock = Clock()
+    cuda_clock = FakeCudaClock()
+    synchronizations: list[None] = []
+    profiler = Profiler(
+        ProfilingConfig(
+            level=ProfilingLevel.MICRO,
+            cuda_timing=True,
+            cuda_sample_every=2,
+            raw_samples_per_phase=2,
+            emit_span_events=False,
+        ),
+        run_id="cuda",
+        clock=wall_clock,
+        cuda_event_factory=cuda_clock.event,
+        cuda_synchronize=lambda: synchronizations.append(None),
+    )
+    for duration_ms in (10.0, 20.0, 30.0, 40.0, 50.0):
+        with profiler.phase("work"):
+            wall_clock.advance(1.0)
+            cuda_clock.advance(duration_ms)
+
+    payload = profiler.snapshot()
+    phase = _phases(payload)["work"]
+    assert synchronizations == [None]
+    assert phase["cuda_sample_count"] == 2
+    assert phase["cuda_seconds"] == pytest.approx(0.1)
+    assert phase["cuda_p50"] == pytest.approx(0.03)
+    assert phase["cuda_p90"] == pytest.approx(0.03)
+    assert payload["cuda_timing"] == {"enabled": True, "sample_every": 2, "resolved": True}
+    profiler.snapshot()
+    assert synchronizations == [None]
+
+
+def test_cuda_resolution_failure_warns_without_masking_profile() -> None:
+    cuda_clock = FakeCudaClock()
+
+    def fail_synchronize() -> None:
+        raise RuntimeError("device lost")
+
+    profiler = Profiler(
+        ProfilingConfig(cuda_timing=True),
+        run_id="cuda-failure",
+        cuda_event_factory=cuda_clock.event,
+        cuda_synchronize=fail_synchronize,
+    )
+    with profiler.phase("work"):
+        cuda_clock.advance(1.0)
+    payload = profiler.snapshot()
+
+    warnings = payload["warnings"]
+    assert isinstance(warnings, list)
+    assert any(item["code"] == "PERF003" for item in warnings)
+    assert payload["cuda_timing"] == {"enabled": True, "sample_every": 16, "resolved": False}
