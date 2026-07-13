@@ -662,7 +662,8 @@ must be remeasured rather than inferred from the speedup.
   signs and roughly 0.14--0.20% relative L2 in fitted scales, so a shared-evaluator replay and extended
   training run are retained as behavior-changing parity diagnostics rather than folded into this perf pass.
   The same contemporary run finished the complete first block at **1.3728** after joint refit, versus the
-  rewrite's **1.37848997** under the same pinned/current protocol (**0.41% higher**) and historical
+  rewrite's **1.37848997** with the same pinned tokens/downstream profile and independently realized
+  current-versus-retained Fisher state (**0.41% higher**), and historical
   Experiment 018's **1.1624**. This confirms that most of the apparent 18.59% rewrite quality gap was a
   historical numerical-realization gap. Contemporary legacy took **424.87 s** for block 0 versus the
   rewrite's **476.06 s**, leaving a measured **12.0%** rewrite wall-time gap on this block; this timing is
