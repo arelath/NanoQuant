@@ -636,6 +636,13 @@ must be remeasured rather than inferred from the speedup.
   sum **105,216**), consistent with historical numerical-environment drift across discrete allocation
   thresholds rather than a rewrite planner error. The retained-Fisher block is evidence, not a candidate
   for extension through the remaining 25 blocks.
+- **ADMM multi-start rejected (2026-07-13):** an exact-retained-objective block-0 `gate_proj` sweep over
+  legacy-reset seeds 0 through 7 produced weighted normalized errors from **0.1971011 to 0.1972472**.
+  The best seed improved seed 0 by only 0.0000508 absolute (**0.026% relative**) while each additional
+  start costs another complete 800-iteration factorization. This variation is orders of magnitude too
+  small to explain the historical gate tuning gap (`0.37098` rewrite versus `0.31145` legacy), so no
+  multi-start selection logic or expensive per-seed tuning runs are being added. The parity CLI retains
+  an explicit seed option for bounded diagnostics and exact replay; its default remains legacy seed 0.
 - `JsonlEventSink._read_last_sequence` parses the whole event log at construction — only matters for
   resumed runs with large logs; fine today, worth a tail-scan if event volume grows.
 - **Measured, not implemented (2026-07-13):** a fresh process inventories the pinned Gemma snapshot in a
