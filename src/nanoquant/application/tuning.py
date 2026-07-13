@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 
 import torch
@@ -31,6 +31,14 @@ class TuningRequest:
     output_importance: torch.Tensor | None = None
     seed: int = 0
     microbatch_size: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _TrainingMicrobatch:
+    indexes: torch.Tensor
+    batch_elements: int
+    starts_step: bool
+    finishes_step: bool
 
 
 class _PinnedBatchStager:
@@ -62,13 +70,12 @@ class _PinnedBatchStager:
             )
             for _ in range(2)
         )
+        self.copy_stream = torch.cuda.Stream(device=device)  # type: ignore[no-untyped-call]
+        self.compute_stream = torch.cuda.current_stream(device)
         self.events = tuple(torch.cuda.Event() for _ in range(2))  # type: ignore[no-untyped-call]
         self.recorded = [False, False]
-        self.next_slot = 0
 
-    def stage(self, indexes: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        slot = self.next_slot
-        self.next_slot = (slot + 1) % len(self.input_buffers)
+    def _schedule(self, indexes: torch.Tensor, slot: int) -> tuple[torch.Tensor, torch.Tensor, torch.cuda.Event]:
         if self.recorded[slot]:
             self.events[slot].synchronize()
         count = indexes.numel()
@@ -76,13 +83,32 @@ class _PinnedBatchStager:
         target_host = self.target_buffers[slot][:count]
         torch.index_select(self.inputs, 0, indexes, out=input_host)
         torch.index_select(self.targets, 0, indexes, out=target_host)
-        input_batch = input_host.to(self.device, non_blocking=True)
-        target_batch = target_host.to(self.device, non_blocking=True)
-        self.events[slot].record(torch.cuda.current_stream(self.device))
+        with torch.cuda.stream(self.copy_stream):
+            input_batch = input_host.to(self.device, non_blocking=True)
+            target_batch = target_host.to(self.device, non_blocking=True)
+            self.events[slot].record(self.copy_stream)
         self.recorded[slot] = True
-        return input_batch, target_batch
+        return input_batch, target_batch, self.events[slot]
+
+    def batches(self, indexes: tuple[torch.Tensor, ...]) -> Iterator[tuple[torch.Tensor, torch.Tensor]]:
+        if not indexes:
+            return
+        current = self._schedule(indexes[0], 0)
+        next_slot = 1
+        for next_index in range(1, len(indexes) + 1):
+            input_batch, target_batch, ready = current
+            self.compute_stream.wait_event(ready)
+            input_batch.record_stream(self.compute_stream)
+            target_batch.record_stream(self.compute_stream)
+            following = self._schedule(indexes[next_index], next_slot) if next_index < len(indexes) else None
+            next_slot = (next_slot + 1) % len(self.events)
+            yield input_batch, target_batch
+            if following is None:
+                break
+            current = following
 
     def close(self) -> None:
+        self.compute_stream.wait_stream(self.copy_stream)
         for event, recorded in zip(self.events, self.recorded, strict=True):
             if recorded:
                 event.synchronize()
@@ -100,6 +126,26 @@ def _pinned_batch_stager(
     ):
         return None
     return _PinnedBatchStager(request.inputs, request.targets, maximum_batch_size, device)
+
+
+def _training_microbatches(
+    order: torch.Tensor, batch_size: int, microbatch_size: int | None
+) -> tuple[_TrainingMicrobatch, ...]:
+    batches = []
+    for start in range(0, order.numel(), batch_size):
+        indexes = order[start : start + batch_size]
+        size = microbatch_size or indexes.numel()
+        starts = tuple(range(0, indexes.numel(), size))
+        for position, microbatch_start in enumerate(starts):
+            batches.append(
+                _TrainingMicrobatch(
+                    indexes[microbatch_start : microbatch_start + size],
+                    indexes.numel(),
+                    position == 0,
+                    position == len(starts) - 1,
+                )
+            )
+    return tuple(batches)
 
 
 def _resolve_output_importance(
@@ -196,25 +242,26 @@ def tune(
     try:
         for epoch in range(request.epochs):
             order = torch.randperm(request.inputs.shape[0], generator=generator)
-            for start in range(0, request.inputs.shape[0], request.batch_size):
-                indexes = order[start : start + request.batch_size]
-                optimizer.zero_grad(set_to_none=True)
-                microbatch_size = request.microbatch_size or indexes.numel()
-                for microbatch_start in range(0, indexes.numel(), microbatch_size):
-                    microbatch_indexes = indexes[microbatch_start : microbatch_start + microbatch_size]
-                    if stager is None:
-                        input_batch = request.inputs[microbatch_indexes].to(device, non_blocking=True)
-                        target_batch = request.targets[microbatch_indexes].to(device, non_blocking=True)
-                    else:
-                        input_batch, target_batch = stager.stage(microbatch_indexes)
-                    prediction = forward(model, input_batch)
-                    loss = _loss_sum(prediction, target_batch, importance) / max(1, indexes.numel())
-                    torch.autograd.backward(loss)
-                    # Do not retain the final microbatch's autograd graph through
-                    # optimizer/evaluation/factorization phase boundaries.
-                    del input_batch, target_batch, prediction, loss
-                optimizer.step()
-                scheduler.step()
+            microbatches = _training_microbatches(order, request.batch_size, request.microbatch_size)
+            device_batches: Iterator[tuple[torch.Tensor, torch.Tensor]] = (
+                (
+                    request.inputs[item.indexes].to(device, non_blocking=True),
+                    request.targets[item.indexes].to(device, non_blocking=True),
+                )
+                for item in microbatches
+            ) if stager is None else stager.batches(tuple(item.indexes for item in microbatches))
+            for item, (input_batch, target_batch) in zip(microbatches, device_batches, strict=True):
+                if item.starts_step:
+                    optimizer.zero_grad(set_to_none=True)
+                prediction = forward(model, input_batch)
+                loss = _loss_sum(prediction, target_batch, importance) / max(1, item.batch_elements)
+                torch.autograd.backward(loss)
+                # Do not retain the final microbatch's autograd graph through
+                # optimizer/evaluation/factorization phase boundaries.
+                del input_batch, target_batch, prediction, loss
+                if item.finishes_step:
+                    optimizer.step()
+                    scheduler.step()
             epochs_completed = epoch + 1
             current = _evaluate_loss(model, request, forward)
             if current < best_value:

@@ -49,7 +49,7 @@ in section 6 so nobody drifts into it by accident.
 
 | Done | # | Finding | Class | Phase affected | Est. saving (phase) | Est. saving (run) | Confidence | Effort |
 |------|---|---------|-------|----------------|--------------------|-------------------|------------|--------|
-| [ ] | 1 | Pin + double-buffer tuning/forward datasets | S1 | tuning, block forwards | 25–50% of transfer-bound steps | 10–25% of full protocol | Medium | M |
+| [x] | 1 | Pin + double-buffer tuning/forward datasets | S1 | tuning, block forwards | measured below | full-run rerun pending | High | M |
 | [x] | 2 | Foreach ParityAdamW step | S0 | tuning | 50–80% of optimizer host time | 2–6% of full protocol | High | M |
 | [x] | 3 | Gate `torch.cuda.empty_cache()` on pressure | S1 | tuning, per-block | ~390 calls avoided | measured below | High | S |
 | [ ] | 4 | Overlap block-activation persistence with compute | S1 | block commit | most of ~3–5 s/block | 4–7% of 1439 s anchor | Medium | M |
@@ -69,7 +69,7 @@ and **15–35% on the full protocol** once tuning and KD phases exist to optimiz
 Against the ~30% gap to legacy recorded in the agent guide, this catalog plausibly covers a large fraction —
 but only the Docs/15 baseline can apportion it.
 
-### [ ] 3.1 Pin and double-buffer the tuning/forward datasets (S1)
+### [x] 3.1 Pin and double-buffer the tuning/forward datasets (S1)
 
 **Where.** `_run_block_batched` stores teacher/compressed activations into plain pageable CPU tensors
 ([resident_quantization.py:1079](../src/nanoquant/resident_quantization.py) `storage_device="cpu"`, same at
@@ -113,9 +113,12 @@ stream while the prior pair computes, using two reusable readiness events. A rep
 loss. The iterator is now shared by block-loss snapshots and block forwards. On a representative
 seven-layer BF16 block, block loss improved from 0.1169 s to 0.0605 s (**1.93x**) and host-output block
 forward from 0.1136 s to 0.0613 s (**1.85x**), with bitwise-equal loss and outputs. CUDA regression tests
-cover every landed path. This does not check the item off: training-step copy-stream prefetch remains
-deferred because it crosses optimizer-step boundaries and needs explicit device-buffer lifetime and
-memory-budget representation.
+cover every landed path. Shuffled training now schedules microbatch k+1 on the same bounded copy stream
+before microbatch k's forward/backward, without moving optimizer or scheduler steps. Across 32
+representative three-layer BF16 forward/backward steps this reduced 0.6408 s to 0.2826 s (**2.27x**) with
+identical loss; the full tuning oracle also produces bitwise-identical parameters and metrics. The two-slot
+design adds only one future input/target pair, about 75 MiB at parity batch 8, and completes this item. A
+full Gemma rerun is still required to replace the original run-level estimate with an end-to-end number.
 
 ### [x] 3.2 Foreach ParityAdamW (S0)
 
