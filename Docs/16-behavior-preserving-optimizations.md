@@ -64,6 +64,7 @@ in section 6 so nobody drifts into it by accident.
 | [x] | 13 | Device-side calibration threshold accumulation | S0 | calibration | ~20k small syncs | ~0.1–0.2% | High | S |
 | [x] | 14 | Cache verified tensor hashes by immutable file signature | S0 | tensor loads | repeated memory hashes removed | ~10–20 s | High | S |
 | [x] | 15 | Bypass STE signs for immutable binary KD factors | S0 | global KD | measured 24% per layer-step | full-run rerun pending | High | S |
+| [x] | 16 | Fuse ADMM factor promotion into FP32 additions | S0 | factorization | measured 2.1% per solve | ~5–6 s of anchor | High | XS |
 
 Combined outlook, avoiding double counting: roughly **8–15% on the factor+scale anchor** (items 4–6, 8–10)
 and **15–35% on the full protocol** once tuning phases exist to optimize (items 1–3, 7, and 15 dominate).
@@ -438,6 +439,20 @@ steps averaged 14.345 ms with redundant STE materialization versus 10.941 ms on 
 (**1.31x**, or **24% less layer-step wall**). Outputs, loss, and all scale gradients were bitwise equal.
 Unit coverage verifies both the frozen-factor fast path and the trainable-factor fallback; the global
 distillation integration path also passes. A full Gemma rerun is still required for the run-level saving.
+
+### [x] 3.16 Fuse ADMM factor promotion into FP32 additions (S0)
+
+**Where.** `_solve` converted both `projected` and `dual` from bf16 to float32 into standalone temporary
+tensors immediately before adding them to the already-float32 right-hand side. `Tensor.add_` promotes each
+bf16 input to its float32 destination dtype exactly, so the conversion kernels and allocations were
+redundant.
+
+**Done (2026-07-12).** Both additions now consume the bf16 tensors directly. A parity-shaped
+1152×448 design / 448×1152 right-hand-side CUDA solve produced bitwise-identical bf16 output. Across six
+alternating 256-solve samples, median wall time improved from 183.867 ms to 180.057 ms (**1.021x**), with
+matching CUDA-event time. At 800 iterations, two solves per iteration, and 238 attempts, the measured
+per-solve delta projects to roughly **5–6 seconds on the anchor**. The existing exact bf16 recurrence
+oracle protects the operation-order result.
 
 ## 4. Smaller observations (bundle opportunistically)
 

@@ -107,8 +107,10 @@ def _solve(
     stabilizer = (rho * system.diagonal().mean().abs() + regularization).clamp_min(epsilon)
     system.diagonal().add_(stabilizer)
     rhs = design32.mT @ target.float()
-    rhs.add_(projected.float(), alpha=rho)
-    rhs.add_(dual.float(), alpha=-rho)
+    # rhs is float32, so add_ promotes the bf16 factor inputs exactly while
+    # avoiding two standalone conversion kernels and their temporary tensors.
+    rhs.add_(projected, alpha=rho)
+    rhs.add_(dual, alpha=-rho)
     factor, info = torch.linalg.cholesky_ex(system)
     solution = torch.cholesky_solve(rhs, factor) if int(info.max()) == 0 else torch.linalg.solve(system, rhs)
     return solution.to(design.dtype)
