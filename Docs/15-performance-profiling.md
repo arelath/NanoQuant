@@ -466,6 +466,10 @@ Resident calibration, replay, global distillation, the stage executor, and the t
 still need equivalent P0 wiring before the framework-wide rollout item is complete. The resident tuning path
 supports opt-in micro phases for staging, forward, loss, backward, optimizer steps, evaluation, synchronization,
 and best-state cloning, with token/step/clone/transfer counters and exact profiled/control parity coverage.
+The resident ADMM path now adds opt-in micro phases for setup, both linear solves, SVID projections, dual updates,
+convergence checks, export balancing/SVID, reconstruction, and result materialization, with iteration/check/rank/
+weight-size counters and an exact profiled/control tensor comparison. Macro profiles continue to see only the
+bounded attempt-level `admm` span.
 Micro spans suppress durable span events and use the documented 5% recorder-time warning ceiling; macro
 profiling retains its stricter 0.5% ceiling and optional span-event mirror.
 Deferred CUDA timing is now implemented for macro and micro profiles: event pairs are sampled and bounded per

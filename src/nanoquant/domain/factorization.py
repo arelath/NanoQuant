@@ -8,6 +8,8 @@ from dataclasses import dataclass
 
 import torch
 
+from nanoquant.domain.profiling import NULL_RECORDER, PhaseRecorder
+
 
 @dataclass(frozen=True, slots=True)
 class ADMMTracePoint:
@@ -134,6 +136,7 @@ def factorize_admm(
     convergence_check_interval: int = 100,
     early_stop_tolerance: float | None = None,
     epsilon: float = 1e-12,
+    recorder: PhaseRecorder = NULL_RECORDER,
 ) -> ADMMResult:
     if weight.ndim != 2 or rank <= 0 or rank > min(weight.shape):
         raise ValueError("weight must be a matrix and rank within its dimensions")
@@ -145,86 +148,116 @@ def factorize_admm(
         schedule = SCHEDULES[penalty_schedule]
     except KeyError as exc:
         raise ValueError(f"unknown penalty schedule: {penalty_schedule}") from exc
-    dtype = weight.dtype if weight.is_floating_point() else torch.float32
-    target = weight.detach().to(dtype=dtype)
-    input_scale = input_importance.detach().float().sqrt().clamp_min(epsilon)
-    output_scale = output_importance.detach().float().sqrt().clamp_min(epsilon).reshape(-1, 1)
-    normalized = target * input_scale.reshape(1, -1) * output_scale
-    left = torch.randn((weight.shape[0], rank), dtype=dtype, device=weight.device, generator=generator)
-    right = torch.randn((rank, weight.shape[1]), dtype=dtype, device=weight.device, generator=generator)
-    left_projected = _rank_one_sign_projection(left, inner_iterations, generator, epsilon)
-    right_projected = _rank_one_sign_projection(right, inner_iterations, generator, epsilon)
-    left_dual = left - left_projected
-    right_dual = right - right_projected
+    recorder.add("admm.weight_elements", weight.numel())
+    recorder.add("admm.rank", rank)
+    with recorder.phase("setup"):
+        dtype = weight.dtype if weight.is_floating_point() else torch.float32
+        target = weight.detach().to(dtype=dtype)
+        input_scale = input_importance.detach().float().sqrt().clamp_min(epsilon)
+        output_scale = output_importance.detach().float().sqrt().clamp_min(epsilon).reshape(-1, 1)
+        normalized = target * input_scale.reshape(1, -1) * output_scale
+        left = torch.randn((weight.shape[0], rank), dtype=dtype, device=weight.device, generator=generator)
+        right = torch.randn((rank, weight.shape[1]), dtype=dtype, device=weight.device, generator=generator)
+    with recorder.phase("initial_projection"):
+        left_projected = _rank_one_sign_projection(left, inner_iterations, generator, epsilon)
+        right_projected = _rank_one_sign_projection(right, inner_iterations, generator, epsilon)
+        left_dual = left - left_projected
+        right_dual = right - right_projected
     trace: list[ADMMTracePoint] = []
     stopped = False
     completed = 0
     for iteration in range(outer_iterations):
-        rho = schedule(iteration / max(1, outer_iterations))
-        right_norm = right_projected.norm(dim=1).clamp_min(epsilon)
-        left = _solve(
-            right_projected.mT / right_norm,
-            normalized.mT,
-            left_projected.mT,
-            left_dual.mT,
-            rho,
-            regularization,
-            epsilon,
-        ).mT
-        left_norm = left_projected.norm(dim=0).clamp_min(epsilon)
-        right = _solve(
-            left_projected / left_norm, normalized, right_projected, right_dual, rho, regularization, epsilon
+        with recorder.phase("iteration"):
+            rho = schedule(iteration / max(1, outer_iterations))
+            with recorder.phase("solve_left"):
+                right_norm = right_projected.norm(dim=1).clamp_min(epsilon)
+                left = _solve(
+                    right_projected.mT / right_norm,
+                    normalized.mT,
+                    left_projected.mT,
+                    left_dual.mT,
+                    rho,
+                    regularization,
+                    epsilon,
+                ).mT
+            with recorder.phase("solve_right"):
+                left_norm = left_projected.norm(dim=0).clamp_min(epsilon)
+                right = _solve(
+                    left_projected / left_norm,
+                    normalized,
+                    right_projected,
+                    right_dual,
+                    rho,
+                    regularization,
+                    epsilon,
+                )
+            previous_left = left_projected
+            previous_right = right_projected
+            with recorder.phase("projection"):
+                left_projected = _rank_one_sign_projection(left + left_dual, inner_iterations, generator, epsilon)
+                right_projected = _rank_one_sign_projection(right + right_dual, inner_iterations, generator, epsilon)
+            with recorder.phase("dual_update"):
+                left_dual.add_(left - left_projected)
+                right_dual.add_(right - right_projected)
+            completed = iteration + 1
+            recorder.add("admm.iterations", 1)
+            if iteration == 0 or completed % convergence_check_interval == 0 or completed == outer_iterations:
+                with recorder.phase("convergence"):
+                    primal = float((left - left_projected).norm() + (right - right_projected).norm())
+                    dual = float(
+                        rho
+                        * ((left_projected - previous_left).norm() + (right_projected - previous_right).norm())
+                    )
+                    trace.append(ADMMTracePoint(completed, rho, primal, dual))
+                    recorder.add("admm.convergence_checks", 1)
+                    if (
+                        early_stop_tolerance is not None
+                        and primal <= early_stop_tolerance
+                        and dual <= early_stop_tolerance
+                    ):
+                        stopped = True
+                        break
+    with recorder.phase("export_balance"):
+        left_unbalanced = left_projected / output_scale
+        right_unbalanced = right_projected / input_scale
+        balance = (right_unbalanced.norm().clamp_min(epsilon) / left_unbalanced.norm().clamp_min(epsilon)).sqrt()
+        left_export = left_unbalanced * balance
+        right_export = right_unbalanced / balance
+        # Legacy NanoQuant tunes the primal-plus-dual variables, while export is
+        # derived from the SVID-projected variables. Their signs agree initially,
+        # but their margins to zero carry essential STE optimization state.
+        left_latent = ((left + left_dual) / output_scale) * balance
+        right_latent = ((right + right_dual) / input_scale) / balance
+        scale_factor = left_projected.norm(dim=0).clamp_min(epsilon).reciprocal()
+        left_export = left_export * scale_factor
+    with recorder.phase("export_svid"):
+        right_u, scale_pre, right_binary = _svid_components(
+            right_export.float(), inner_iterations, generator, epsilon
         )
-        previous_left = left_projected
-        previous_right = right_projected
-        left_projected = _rank_one_sign_projection(left + left_dual, inner_iterations, generator, epsilon)
-        right_projected = _rank_one_sign_projection(right + right_dual, inner_iterations, generator, epsilon)
-        left_dual.add_(left - left_projected)
-        right_dual.add_(right - right_projected)
-        completed = iteration + 1
-        if iteration == 0 or completed % convergence_check_interval == 0 or completed == outer_iterations:
-            primal = float((left - left_projected).norm() + (right - right_projected).norm())
-            dual = float(rho * ((left_projected - previous_left).norm() + (right_projected - previous_right).norm()))
-            trace.append(ADMMTracePoint(completed, rho, primal, dual))
-            if early_stop_tolerance is not None and primal <= early_stop_tolerance and dual <= early_stop_tolerance:
-                stopped = True
-                break
-    left_unbalanced = left_projected / output_scale
-    right_unbalanced = right_projected / input_scale
-    balance = (right_unbalanced.norm().clamp_min(epsilon) / left_unbalanced.norm().clamp_min(epsilon)).sqrt()
-    left_export = left_unbalanced * balance
-    right_export = right_unbalanced / balance
-    # Legacy NanoQuant tunes the primal-plus-dual variables, while export is
-    # derived from the SVID-projected variables. Their signs agree initially,
-    # but their margins to zero carry essential STE optimization state.
-    left_latent = ((left + left_dual) / output_scale) * balance
-    right_latent = ((right + right_dual) / input_scale) / balance
-    scale_factor = left_projected.norm(dim=0).clamp_min(epsilon).reciprocal()
-    left_export = left_export * scale_factor
-    right_u, scale_pre, right_binary = _svid_components(
-        right_export.float(), inner_iterations, generator, epsilon
-    )
-    left_u, scale_post, left_sign = _svid_components(
-        left_export.mT.float(), inner_iterations, generator, epsilon
-    )
-    left_binary = left_sign.mT.to(dtype).clone(memory_format=torch.contiguous_format)
-    right_binary = right_binary.to(dtype).contiguous()
-    scale_pre = scale_pre.to(dtype)
-    scale_mid = (right_u * left_u).to(dtype)
-    scale_post = scale_post.to(dtype)
-    reconstruction = (left_binary * scale_post.reshape(-1, 1)) @ (
-        right_binary * scale_mid.reshape(-1, 1) * scale_pre.reshape(1, -1)
-    )
-    return ADMMResult(
-        left_latent.clone().contiguous(),
-        right_latent.clone().contiguous(),
-        left_binary.contiguous(),
-        right_binary.contiguous(),
-        scale_pre.contiguous(),
-        scale_mid.contiguous(),
-        scale_post.contiguous(),
-        reconstruction.contiguous(),
-        completed,
-        stopped,
-        tuple(trace),
-    )
+        left_u, scale_post, left_sign = _svid_components(
+            left_export.mT.float(), inner_iterations, generator, epsilon
+        )
+        left_binary = left_sign.mT.to(dtype).clone(memory_format=torch.contiguous_format)
+        right_binary = right_binary.to(dtype).contiguous()
+        scale_pre = scale_pre.to(dtype)
+        scale_mid = (right_u * left_u).to(dtype)
+        scale_post = scale_post.to(dtype)
+    with recorder.phase("reconstruction"):
+        reconstruction = (left_binary * scale_post.reshape(-1, 1)) @ (
+            right_binary * scale_mid.reshape(-1, 1) * scale_pre.reshape(1, -1)
+        )
+    with recorder.phase("result_materialization"):
+        result = ADMMResult(
+            left_latent.clone().contiguous(),
+            right_latent.clone().contiguous(),
+            left_binary.contiguous(),
+            right_binary.contiguous(),
+            scale_pre.contiguous(),
+            scale_mid.contiguous(),
+            scale_post.contiguous(),
+            reconstruction.contiguous(),
+            completed,
+            stopped,
+            tuple(trace),
+        )
+    return result

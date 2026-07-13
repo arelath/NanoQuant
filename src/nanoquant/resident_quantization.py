@@ -1154,7 +1154,8 @@ def _run_resident_quantization_impl(
     factorization_wall_seconds = 0.0
     new_layer_commits = 0
     new_block_commits = 0
-    factor_stage = FactorizationAttemptStage(request.admm, device=request.device)
+    micro_recorder = recorder if request.profiling.level is ProfilingLevel.MICRO else NULL_RECORDER
+    factor_stage = FactorizationAttemptStage(request.admm, device=request.device, recorder=micro_recorder)
     outlier_stage = OutlierSelectionStage(
         device=request.device,
         residual_probe_iterations=request.outliers.residual_probe.iterations,
@@ -1217,7 +1218,7 @@ def _run_resident_quantization_impl(
         layer_results: list[LayerResult] = []
         frozen_states = []
         quantization_targets: dict[str, TensorRef] = {}
-        tuning_recorder = recorder if request.profiling.level is ProfilingLevel.MICRO else NULL_RECORDER
+        tuning_recorder = micro_recorder
 
         for layer_position, layer_plan in enumerate(block_plan.layers):
             nonfactorized_epochs = _nonfactorized_epochs(request, layer_position)

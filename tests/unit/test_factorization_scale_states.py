@@ -4,6 +4,7 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 import nanoquant.domain.scale_fit as scale_fit_module
+from nanoquant.config.schema import ProfilingConfig, ProfilingLevel
 from nanoquant.domain.factorization import SCHEDULES, _sign, factorize_admm
 from nanoquant.domain.metrics import weighted_squared_error
 from nanoquant.domain.models import ArtifactRef, AttemptSummary, BitCost
@@ -12,6 +13,7 @@ from nanoquant.domain.packing import pack_sign_bits, unpack_sign_bits
 from nanoquant.domain.planning import allocate_rank_budget, decide_retry
 from nanoquant.domain.scale_fit import fit_scales, reconstruct
 from nanoquant.domain.states import TrainableNanoQuantState, freeze_state
+from nanoquant.infrastructure.profiling import Profiler
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
@@ -56,6 +58,71 @@ def test_admm_is_deterministic_uses_generator_and_does_not_mutate_inputs() -> No
     assert set(torch.unique(first.left_binary).tolist()) <= {-1.0, 1.0}
     assert first.iterations_completed == 4
     assert [point.iteration for point in first.trace] == [1, 2, 4]
+
+
+def test_admm_micro_profiling_preserves_result_and_records_hot_loop_phases() -> None:
+    weight = torch.tensor([[1.0, -2.0, 0.5], [-1.0, 0.25, 2.0], [0.5, 1.0, -1.0]])
+    input_importance = torch.tensor([1.0, 2.0, 0.5])
+    output_importance = torch.tensor([0.75, 1.25, 2.0])
+    control = factorize_admm(
+        weight,
+        input_importance,
+        output_importance,
+        2,
+        torch.Generator().manual_seed(41),
+        outer_iterations=4,
+        inner_iterations=2,
+        convergence_check_interval=2,
+    )
+    profiler = Profiler(
+        ProfilingConfig(level=ProfilingLevel.MICRO, emit_span_events=False),
+        run_id="admm-micro",
+    )
+    profiled = factorize_admm(
+        weight,
+        input_importance,
+        output_importance,
+        2,
+        torch.Generator().manual_seed(41),
+        outer_iterations=4,
+        inner_iterations=2,
+        convergence_check_interval=2,
+        recorder=profiler,
+    )
+
+    for name in (
+        "left_latent",
+        "right_latent",
+        "left_binary",
+        "right_binary",
+        "scale_pre",
+        "scale_mid",
+        "scale_post",
+        "reconstruction",
+    ):
+        assert torch.equal(getattr(profiled, name), getattr(control, name))
+    assert profiled.iterations_completed == control.iterations_completed
+    assert profiled.stopped_early == control.stopped_early
+    assert profiled.trace == control.trace
+    payload = profiler.snapshot()
+    phase_paths = {str(phase["path"]) for phase in payload["phases"]}  # type: ignore[index]
+    assert {
+        "setup",
+        "initial_projection",
+        "iteration/solve_left",
+        "iteration/solve_right",
+        "iteration/projection",
+        "iteration/dual_update",
+        "iteration/convergence",
+        "export_balance",
+        "export_svid",
+        "reconstruction",
+        "result_materialization",
+    } <= phase_paths
+    counters = {str(counter["name"]): counter for counter in payload["counters"]}  # type: ignore[index]
+    assert counters["admm.iterations"]["total"] == 4
+    assert counters["admm.convergence_checks"]["total"] == 3
+    assert counters["admm.weight_elements"]["total"] == weight.numel()
 
 
 def test_admm_rejects_invalid_schedule_and_dimensions() -> None:

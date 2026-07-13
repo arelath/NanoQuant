@@ -33,6 +33,7 @@ from nanoquant.domain.outliers import (
     store_outlier_values,
 )
 from nanoquant.domain.planning import outlier_bit_cost
+from nanoquant.domain.profiling import NULL_RECORDER, PhaseRecorder
 from nanoquant.domain.scale_fit import fit_scales, reconstruct
 from nanoquant.domain.stages import HostInventory, ResourceEstimate, ValidationFinding, ValidationReport
 
@@ -170,9 +171,16 @@ class FactorizationAttemptStage:
     name = "factorize-attempt"
     version = "4"
 
-    def __init__(self, admm: ADMMConfig | None = None, *, device: str = "cpu") -> None:
+    def __init__(
+        self,
+        admm: ADMMConfig | None = None,
+        *,
+        device: str = "cpu",
+        recorder: PhaseRecorder = NULL_RECORDER,
+    ) -> None:
         self.admm = admm or ADMMConfig(outer_iterations=400)
         self.device = device
+        self.recorder = recorder
 
     def estimate(self, request: FactorizationRequest, host: HostInventory) -> ResourceEstimate:
         output, inputs = request.source_weight.spec.shape
@@ -210,6 +218,7 @@ class FactorizationAttemptStage:
                     penalty_schedule=self.admm.penalty_schedule,
                     convergence_check_interval=self.admm.convergence_check_interval,
                     early_stop_tolerance=self.admm.early_stop_tolerance,
+                    recorder=self.recorder,
                 )
                 metrics = reconstruction_metrics(
                     residual,
