@@ -524,6 +524,10 @@ Resident teacher/propagation forwards and block-loss snapshots now expose opt-in
 forward execution, output storage/D2H, weighted loss construction, and the final scalar synchronization, with
 H2D/D2H byte and batch/element counters. The default path retains a separate instrumentation-free loop, while
 profiled/control CPU tests preserve outputs and accumulated losses exactly.
+The exact WikiText evaluator now uses the same profiling controls and CUDA lease as compression/distillation. Its
+macro profile separates dataset/token preparation, base and frozen loading, exact causal NLL, model release, and
+reporting; nested frozen-load phases retain per-block/layer attribution. Token/window counters and a profiled/control
+serial test preserve the pinned accumulation result.
 
 P0 and P2 are pure instrumentation and can land before parity sign-off (they are parity-neutral by C1 and
 cheap to review); P1 blocks on parity per the agreed sequencing, because baselines captured before parity
