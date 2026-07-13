@@ -12,6 +12,8 @@ from nanoquant.application.tuning import (
     tune_factorized,
     tune_non_factorized,
 )
+from nanoquant.config.schema import ProfilingConfig, ProfilingLevel
+from nanoquant.infrastructure.profiling import Profiler
 
 
 class Hybrid(nn.Module):
@@ -129,6 +131,43 @@ def test_microbatch_accumulation_preserves_optimizer_batch_update() -> None:
         full_batch_model.quant.parameters(), microbatch_model.quant.parameters(), strict=True
     ):
         assert torch.allclose(full_parameter, micro_parameter, rtol=1e-6, atol=1e-7)
+
+
+def test_micro_profiling_preserves_tuning_result_and_records_hot_loop_phases() -> None:
+    control_model = Hybrid()
+    profiled_model = deepcopy(control_model)
+    inputs = torch.randn(8, 3, generator=torch.Generator().manual_seed(30))
+    targets = torch.randn(8, 2, generator=torch.Generator().manual_seed(31))
+    request = TuningRequest(inputs, targets, 2, 4, 0.01, seed=32, microbatch_size=2)
+
+    control_metrics = tune_factorized(control_model, "quant", request, _forward)
+    profiler = Profiler(
+        ProfilingConfig(level=ProfilingLevel.MICRO, emit_span_events=False),
+        run_id="tuning-micro",
+    )
+    profiled_metrics = tune_factorized(profiled_model, "quant", request, _forward, profiler)
+
+    assert profiled_metrics == control_metrics
+    for control_parameter, profiled_parameter in zip(
+        control_model.parameters(), profiled_model.parameters(), strict=True
+    ):
+        assert torch.equal(profiled_parameter, control_parameter)
+    payload = profiler.snapshot()
+    phase_paths = {str(phase["path"]) for phase in payload["phases"]}  # type: ignore[index]
+    assert {
+        "initial_evaluation",
+        "epoch/batch_stage",
+        "epoch/forward",
+        "epoch/loss",
+        "epoch/backward",
+        "epoch/optimizer_step",
+        "epoch/epoch_evaluation/synchronize",
+        "final_evaluation",
+    } <= phase_paths
+    counters = {str(counter["name"]): counter for counter in payload["counters"]}  # type: ignore[index]
+    assert counters["tuning.tokens"]["total"] == 16
+    assert counters["tuning.steps"]["total"] == 4
+    assert counters["tuning.best_state_clones"]["total"] >= 1
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="pinned tuning staging requires a GPU")

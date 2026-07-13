@@ -53,6 +53,7 @@ from nanoquant.config.schema import (
     ObjectiveConfig,
     OutlierConfig,
     ProfilingConfig,
+    ProfilingLevel,
     RankAllocationConfig,
     RankBoundsConfig,
     RankRetryConfig,
@@ -411,9 +412,7 @@ def _nonfactorized_epochs(request: ResidentQuantizationRequest, layer_position: 
     return schedule[min(layer_position, len(schedule) - 1)]
 
 
-def _tuning_seed(
-    request: ResidentQuantizationRequest, stage: str, block: int, layer: str | None
-) -> int:
+def _tuning_seed(request: ResidentQuantizationRequest, stage: str, block: int, layer: str | None) -> int:
     if request.legacy_tuning_seed_reset:
         return request.seed
     return logical_seed(request.seed, stage, block, layer, 0)
@@ -499,11 +498,7 @@ def _run_resident_factorization_attempts(
                 ),
                 context,
             )
-        probe_peak = (
-            int(torch.cuda.max_memory_allocated(request.device))
-            if request.device.startswith("cuda")
-            else 0
-        )
+        probe_peak = int(torch.cuda.max_memory_allocated(request.device)) if request.device.startswith("cuda") else 0
         objective = replace(
             layer_plan.objective,
             input_importance=outliers.factor_input_importance,
@@ -780,8 +775,7 @@ def _load_precomputed_preprocessing(
     objectives = PersistedObjectives(
         objectives_ref,
         tuple(
-            from_dict(ObjectiveSpec, item, path=f"objectives[{index}]")
-            for index, item in enumerate(objective_payload)
+            from_dict(ObjectiveSpec, item, path=f"objectives[{index}]") for index, item in enumerate(objective_payload)
         ),
     )
     plan_payload = json.loads((artifacts.path_for(plan_ref.artifact_id) / "plan.json").read_text(encoding="utf-8"))
@@ -1104,9 +1098,7 @@ def _run_resident_quantization_impl(
         for _reference, old_block in committed_blocks[:-1]:
             retire_block_activations(old_block, artifacts)
     accepted_bits = sum(layer.actual_bit_cost.total for _, block in committed_blocks for layer in block.layers)
-    retry_bits_spent = sum(
-        layer.extra_retry_bits for _, block in committed_blocks for layer in block.layers
-    )
+    retry_bits_spent = sum(layer.extra_retry_bits for _, block in committed_blocks for layer in block.layers)
     budget = BudgetState(plan.planned_cost.total, accepted_bits, retry_bits_spent)
     with recorder.phase("resume"):
         with recorder.phase("activations"):
@@ -1225,13 +1217,12 @@ def _run_resident_quantization_impl(
         layer_results: list[LayerResult] = []
         frozen_states = []
         quantization_targets: dict[str, TensorRef] = {}
+        tuning_recorder = recorder if request.profiling.level is ProfilingLevel.MICRO else NULL_RECORDER
 
         for layer_position, layer_plan in enumerate(block_plan.layers):
             nonfactorized_epochs = _nonfactorized_epochs(request, layer_position)
             if nonfactorized_epochs > 0:
-                with _profile_layer_phase(
-                    recorder, block_index, layer_plan.layer.path, "nonfactorized_tuning"
-                ):
+                with _profile_layer_phase(recorder, block_index, layer_plan.layer.path, "nonfactorized_tuning"):
                     tune_non_factorized(
                         working_block,
                         TuningRequest(
@@ -1240,16 +1231,13 @@ def _run_resident_quantization_impl(
                             nonfactorized_epochs,
                             request.nonfactorized_tuning_batch_size,
                             request.nonfactorized_tuning_learning_rate,
-                            early_stop_relative_tolerance=(
-                                request.nonfactorized_tuning_early_stop_relative_tolerance
-                            ),
+                            early_stop_relative_tolerance=(request.nonfactorized_tuning_early_stop_relative_tolerance),
                             output_importance=block_output_importance,
-                            seed=_tuning_seed(
-                                request, "nonfactorized-tuning", block_index, layer_plan.layer.path
-                            ),
+                            seed=_tuning_seed(request, "nonfactorized-tuning", block_index, layer_plan.layer.path),
                             microbatch_size=request.tuning_microbatch_size,
                         ),
                         lambda module, value: adapter.run_block(module, value, **metadata),
+                        tuning_recorder,
                     )
             with _profile_layer_phase(recorder, block_index, layer_plan.layer.path, "materialize"):
                 source_linear = _module_at_path(working_block, layer_plan.layer.path)
@@ -1357,9 +1345,7 @@ def _run_resident_quantization_impl(
             tuning = None
             if request.factorized_tuning_epochs > 0:
                 BlockEditor().install_trainable_layer(working_block, layer_plan.layer.path, trainable)
-                with _profile_layer_phase(
-                    recorder, block_index, layer_plan.layer.path, "factorized_tuning"
-                ):
+                with _profile_layer_phase(recorder, block_index, layer_plan.layer.path, "factorized_tuning"):
                     tuning = tune_factorized(
                         working_block,
                         layer_plan.layer.path,
@@ -1374,6 +1360,7 @@ def _run_resident_quantization_impl(
                             microbatch_size=request.tuning_microbatch_size,
                         ),
                         lambda module, value: adapter.run_block(module, value, **metadata),
+                        tuning_recorder,
                     )
             with _profile_layer_phase(recorder, block_index, layer_plan.layer.path, "freeze"):
                 frozen_outliers = (
@@ -1402,9 +1389,7 @@ def _run_resident_quantization_impl(
                 frozen_module = frozen.module.to(device=request.device, dtype=compressed_inputs.dtype)
                 BlockEditor().install_frozen_layer(working_block, layer_plan.layer.path, frozen_module)
                 frozen_states.append(frozen.state)
-                accepted_attempt = next(
-                    index for index, attempt in enumerate(accepted.attempts) if attempt.accepted
-                )
+                accepted_attempt = next(index for index, attempt in enumerate(accepted.attempts) if attempt.accepted)
                 layer_result = LayerResult(
                     1,
                     layer_plan.layer,
@@ -1421,9 +1406,7 @@ def _run_resident_quantization_impl(
                     ()
                     if request.factorized_tuning_epochs > 0 and request.scale_fit.enabled
                     else (
-                        ("tuning_disabled",)
-                        if request.scale_fit.enabled
-                        else ("scale_fit_disabled", "tuning_disabled")
+                        ("tuning_disabled",) if request.scale_fit.enabled else ("scale_fit_disabled", "tuning_disabled")
                     ),
                 )
             with _profile_layer_phase(recorder, block_index, layer_plan.layer.path, "commit"):
@@ -1481,6 +1464,7 @@ def _run_resident_quantization_impl(
                         microbatch_size=request.tuning_microbatch_size,
                     ),
                     lambda module, value: adapter.run_block(module, value, **metadata),
+                    tuning_recorder,
                 )
             refitted_states = []
             refitted_results = []
@@ -1562,11 +1546,7 @@ def _run_resident_quantization_impl(
                 peak_gpu_bytes=block_peak,
                 warnings=()
                 if request.factorized_tuning_epochs > 0 and request.scale_fit.enabled
-                else (
-                    ("tuning_disabled",)
-                    if request.scale_fit.enabled
-                    else ("scale_fit_disabled", "tuning_disabled")
-                ),
+                else (("tuning_disabled",) if request.scale_fit.enabled else ("scale_fit_disabled", "tuning_disabled")),
             )
             journal.append("block", block_index, None, committed.reference.artifact_id, identity)
             if request.activation_retention == "rolling" and committed_blocks:
@@ -1614,9 +1594,7 @@ def _run_resident_quantization_impl(
                 reference_nll = _nll(reference_logits, quality_tokens)
                 compressed_nll = _nll(compressed_logits, quality_tokens)
                 logit_mse = _mse(compressed_logits, reference_logits)
-                argmax_agreement = float(
-                    (compressed_logits.argmax(-1) == reference_logits.argmax(-1)).float().mean()
-                )
+                argmax_agreement = float((compressed_logits.argmax(-1) == reference_logits.argmax(-1)).float().mean())
     with recorder.phase("finalize"):
         with recorder.phase("report_prepare"):
             elapsed = time.perf_counter() - started
@@ -1833,9 +1811,7 @@ def _run_resident_factorization_slice(request: ResidentQuantizationRequest) -> R
                 input_importance,
                 output_importance,
             )
-        accepted_attempt = next(
-            index for index, attempt in enumerate(accepted.attempts) if attempt.accepted
-        )
+        accepted_attempt = next(index for index, attempt in enumerate(accepted.attempts) if attempt.accepted)
         layer_result = LayerResult(
             1,
             layer_plan.layer,

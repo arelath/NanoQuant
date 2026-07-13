@@ -11,6 +11,7 @@ from torch import nn
 from nanoquant.application.device_batches import iter_device_batches
 from nanoquant.application.parity_adamw import ParityAdamW
 from nanoquant.domain.models import LossMetrics, TuningMetrics
+from nanoquant.domain.profiling import NULL_RECORDER, PhaseRecorder
 
 ForwardFunction = Callable[[nn.Module, torch.Tensor], torch.Tensor]
 ParameterSelector = Callable[[str, nn.Parameter], bool]
@@ -175,20 +176,61 @@ def _loss_sum(prediction: torch.Tensor, target: torch.Tensor, importance: torch.
     return error.sum()
 
 
-def _evaluate_loss(model: nn.Module, request: TuningRequest, forward: ForwardFunction) -> float:
+def _logical_token_count(value: torch.Tensor) -> int:
+    if value.ndim < 2 or value.shape[-1] == 0:
+        return value.numel()
+    return value.numel() // value.shape[-1]
+
+
+def _record_transfer(
+    recorder: PhaseRecorder,
+    source_device: torch.device,
+    destination_device: torch.device,
+    *values: torch.Tensor,
+) -> None:
+    if source_device.type == "cpu" and destination_device.type == "cuda":
+        recorder.add(
+            "transfer.h2d_bytes",
+            sum(value.numel() * value.element_size() for value in values),
+        )
+
+
+def _evaluate_loss(
+    model: nn.Module,
+    request: TuningRequest,
+    forward: ForwardFunction,
+    recorder: PhaseRecorder = NULL_RECORDER,
+) -> float:
     parameter = next(iter(model.parameters()), None)
     device = request.inputs.device if parameter is None else parameter.device
     importance = _resolve_output_importance(request.output_importance, device, torch.float32)
     total = torch.zeros((), device=device)
     with torch.no_grad():
         evaluation_batch_size = request.microbatch_size or request.batch_size
-        for input_batch, target in iter_device_batches(
-            (request.inputs, request.targets), evaluation_batch_size, device
-        ):
-            prediction = forward(model, input_batch)
-            total += _loss_sum(prediction, target, importance)
+        batches = iter(iter_device_batches((request.inputs, request.targets), evaluation_batch_size, device))
+        while True:
+            try:
+                if recorder is NULL_RECORDER:
+                    input_batch, target = next(batches)
+                else:
+                    with recorder.phase("batch_stage"):
+                        input_batch, target = next(batches)
+                        _record_transfer(recorder, request.inputs.device, device, input_batch, target)
+            except StopIteration:
+                break
+            if recorder is NULL_RECORDER:
+                prediction = forward(model, input_batch)
+                total += _loss_sum(prediction, target, importance)
+            else:
+                with recorder.phase("forward"):
+                    prediction = forward(model, input_batch)
+                with recorder.phase("loss"):
+                    total += _loss_sum(prediction, target, importance)
             del input_batch, prediction, target
-    return float(total / request.targets.numel())
+    if recorder is NULL_RECORDER:
+        return float(total / request.targets.numel())
+    with recorder.phase("synchronize"):
+        return float(total / request.targets.numel())
 
 
 def _loss(model: nn.Module, request: TuningRequest, forward: ForwardFunction) -> torch.Tensor:
@@ -203,6 +245,7 @@ def tune(
     request: TuningRequest,
     forward: ForwardFunction,
     selector: ParameterSelector,
+    recorder: PhaseRecorder = NULL_RECORDER,
 ) -> TuningMetrics:
     if (
         request.epochs < 0
@@ -222,12 +265,21 @@ def tune(
     model_parameter = next(iter(model.parameters()), None)
     device = request.inputs.device if model_parameter is None else model_parameter.device
     importance = _resolve_output_importance(request.output_importance, device, torch.float32)
-    before_value = _evaluate_loss(model, request, forward)
+    if recorder is NULL_RECORDER:
+        before_value = _evaluate_loss(model, request, forward)
+    else:
+        with recorder.phase("initial_evaluation"):
+            before_value = _evaluate_loss(model, request, forward, recorder)
     if request.epoch_observer is not None:
         request.epoch_observer(0, before_value)
     best_value = before_value
     best_epoch = -1
-    best_state = {name: parameter.detach().clone() for name, parameter in selected}
+    if recorder is NULL_RECORDER:
+        best_state = {name: parameter.detach().clone() for name, parameter in selected}
+    else:
+        with recorder.phase("best_state_clone"):
+            best_state = {name: parameter.detach().clone() for name, parameter in selected}
+            recorder.add("tuning.best_state_clones", 1)
     optimizer = ParityAdamW(
         [parameter for _, parameter in selected], lr=request.learning_rate, weight_decay=request.weight_decay
     )
@@ -236,55 +288,109 @@ def tune(
         optimizer, T_max=total_steps, eta_min=request.learning_rate * 1e-4
     )
     generator = torch.Generator(device="cpu").manual_seed(request.seed)
-    maximum_microbatch_size = min(
-        request.inputs.shape[0], request.microbatch_size or request.batch_size
-    )
+    maximum_microbatch_size = min(request.inputs.shape[0], request.microbatch_size or request.batch_size)
     stager = _pinned_batch_stager(request, device, maximum_microbatch_size)
     epochs_completed = 0
     stopped_early = False
     try:
         for epoch in range(request.epochs):
-            order = torch.randperm(request.inputs.shape[0], generator=generator)
-            microbatches = _training_microbatches(order, request.batch_size, request.microbatch_size)
-            device_batches: Iterator[tuple[torch.Tensor, torch.Tensor]] = (
-                (
-                    request.inputs[item.indexes].to(device, non_blocking=True),
-                    request.targets[item.indexes].to(device, non_blocking=True),
+            with recorder.phase("epoch", epoch=epoch):
+                order = torch.randperm(request.inputs.shape[0], generator=generator)
+                microbatches = _training_microbatches(order, request.batch_size, request.microbatch_size)
+                device_batches: Iterator[tuple[torch.Tensor, torch.Tensor]] = (
+                    (
+                        (
+                            request.inputs[item.indexes].to(device, non_blocking=True),
+                            request.targets[item.indexes].to(device, non_blocking=True),
+                        )
+                        for item in microbatches
+                    )
+                    if stager is None
+                    else stager.batches(tuple(item.indexes for item in microbatches))
                 )
-                for item in microbatches
-            ) if stager is None else stager.batches(tuple(item.indexes for item in microbatches))
-            for item, (input_batch, target_batch) in zip(microbatches, device_batches, strict=True):
-                if item.starts_step:
-                    optimizer.zero_grad(set_to_none=True)
-                prediction = forward(model, input_batch)
-                loss = _loss_sum(prediction, target_batch, importance) / max(1, item.batch_elements)
-                torch.autograd.backward(loss)
-                # Do not retain the final microbatch's autograd graph through
-                # optimizer/evaluation/factorization phase boundaries.
-                del input_batch, target_batch, prediction, loss
-                if item.finishes_step:
-                    optimizer.step()
-                    scheduler.step()
-            epochs_completed = epoch + 1
-            current = _evaluate_loss(model, request, forward)
-            if request.epoch_observer is not None:
-                request.epoch_observer(epoch + 1, current)
-            if current < best_value:
-                improvement = (best_value - current) / max(abs(best_value), 1e-12)
-                best_value = current
-                best_epoch = epoch
-                best_state = {name: parameter.detach().clone() for name, parameter in selected}
-                if (
-                    request.early_stop_relative_tolerance is not None
-                    and improvement < request.early_stop_relative_tolerance
-                ):
-                    stopped_early = True
-                    break
+                device_batch_iterator = iter(device_batches)
+                for item in microbatches:
+                    if recorder is NULL_RECORDER:
+                        input_batch, target_batch = next(device_batch_iterator)
+                    else:
+                        with recorder.phase("batch_stage"):
+                            input_batch, target_batch = next(device_batch_iterator)
+                            _record_transfer(
+                                recorder,
+                                request.inputs.device,
+                                device,
+                                input_batch,
+                                target_batch,
+                            )
+                            recorder.add("tuning.tokens", _logical_token_count(input_batch))
+                    if item.starts_step:
+                        if recorder is NULL_RECORDER:
+                            optimizer.zero_grad(set_to_none=True)
+                        else:
+                            with recorder.phase("zero_grad"):
+                                optimizer.zero_grad(set_to_none=True)
+                    if recorder is NULL_RECORDER:
+                        prediction = forward(model, input_batch)
+                        loss = _loss_sum(prediction, target_batch, importance) / max(1, item.batch_elements)
+                        torch.autograd.backward(loss)
+                    else:
+                        with recorder.phase("forward"):
+                            prediction = forward(model, input_batch)
+                        with recorder.phase("loss"):
+                            loss = _loss_sum(prediction, target_batch, importance) / max(1, item.batch_elements)
+                        with recorder.phase("backward"):
+                            torch.autograd.backward(loss)
+                    # Do not retain the final microbatch's autograd graph through
+                    # optimizer/evaluation/factorization phase boundaries.
+                    del input_batch, target_batch, prediction, loss
+                    if item.finishes_step:
+                        if recorder is NULL_RECORDER:
+                            optimizer.step()
+                            scheduler.step()
+                        else:
+                            with recorder.phase("optimizer_step"):
+                                optimizer.step()
+                                scheduler.step()
+                                recorder.add("tuning.steps", 1)
+                epochs_completed = epoch + 1
+                if recorder is NULL_RECORDER:
+                    current = _evaluate_loss(model, request, forward)
+                else:
+                    with recorder.phase("epoch_evaluation"):
+                        current = _evaluate_loss(model, request, forward, recorder)
+                if request.epoch_observer is not None:
+                    request.epoch_observer(epoch + 1, current)
+                if current < best_value:
+                    improvement = (best_value - current) / max(abs(best_value), 1e-12)
+                    best_value = current
+                    best_epoch = epoch
+                    if recorder is NULL_RECORDER:
+                        best_state = {name: parameter.detach().clone() for name, parameter in selected}
+                    else:
+                        with recorder.phase("best_state_clone"):
+                            best_state = {name: parameter.detach().clone() for name, parameter in selected}
+                            recorder.add("tuning.best_state_clones", 1)
+                    if (
+                        request.early_stop_relative_tolerance is not None
+                        and improvement < request.early_stop_relative_tolerance
+                    ):
+                        stopped_early = True
+                        break
         parameter_map = dict(model.named_parameters())
-        with torch.no_grad():
-            for name, value in best_state.items():
-                parameter_map[name].copy_(value)
-        final_value = _evaluate_loss(model, request, forward)
+        if recorder is NULL_RECORDER:
+            with torch.no_grad():
+                for name, value in best_state.items():
+                    parameter_map[name].copy_(value)
+        else:
+            with recorder.phase("restore_best"):
+                with torch.no_grad():
+                    for name, value in best_state.items():
+                        parameter_map[name].copy_(value)
+        if recorder is NULL_RECORDER:
+            final_value = _evaluate_loss(model, request, forward)
+        else:
+            with recorder.phase("final_evaluation"):
+                final_value = _evaluate_loss(model, request, forward, recorder)
     finally:
         if stager is not None:
             stager.close()
@@ -305,7 +411,12 @@ def tune(
     )
 
 
-def tune_non_factorized(model: nn.Module, request: TuningRequest, forward: ForwardFunction) -> TuningMetrics:
+def tune_non_factorized(
+    model: nn.Module,
+    request: TuningRequest,
+    forward: ForwardFunction,
+    recorder: PhaseRecorder = NULL_RECORDER,
+) -> TuningMetrics:
     factorized_prefixes = {
         name for name, module in model.named_modules() if module.__class__.__name__ == "TrainableFactorizedLinear"
     }
@@ -316,16 +427,26 @@ def tune_non_factorized(model: nn.Module, request: TuningRequest, forward: Forwa
         lambda name, _parameter: (
             not any(name == prefix or name.startswith(prefix + ".") for prefix in factorized_prefixes)
         ),
+        recorder,
     )
 
 
 def tune_factorized(
-    model: nn.Module, module_path: str, request: TuningRequest, forward: ForwardFunction
+    model: nn.Module,
+    module_path: str,
+    request: TuningRequest,
+    forward: ForwardFunction,
+    recorder: PhaseRecorder = NULL_RECORDER,
 ) -> TuningMetrics:
     prefix = module_path + "."
-    return tune(model, request, forward, lambda name, _parameter: name.startswith(prefix))
+    return tune(model, request, forward, lambda name, _parameter: name.startswith(prefix), recorder)
 
 
-def post_block_refit(model: nn.Module, request: TuningRequest, forward: ForwardFunction) -> TuningMetrics:
+def post_block_refit(
+    model: nn.Module,
+    request: TuningRequest,
+    forward: ForwardFunction,
+    recorder: PhaseRecorder = NULL_RECORDER,
+) -> TuningMetrics:
     tunable_suffixes = ("scale_pre", "scale_mid", "scale_post", "outlier_values", "bias")
-    return tune(model, request, forward, lambda name, _parameter: name.endswith(tunable_suffixes))
+    return tune(model, request, forward, lambda name, _parameter: name.endswith(tunable_suffixes), recorder)

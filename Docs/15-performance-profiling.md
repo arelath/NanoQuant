@@ -461,8 +461,11 @@ The profile comparison CLI now checks stable phase paths, identical invocation c
 aggregate deltas, and the matching reservoir median; aggregate-only movement without median confirmation is
 reported as noise, and environment-mismatched regressions are informational rather than actionable.
 Resident calibration, replay, global distillation, the stage executor, and the tiny-pipeline composition roots
-still need equivalent P0 wiring before the framework-wide rollout item is complete. Micro/CUDA/trace levels
-fail explicitly until P2/P3 rather than emitting incomplete data under those labels.
+still need equivalent P0 wiring before the framework-wide rollout item is complete. The resident tuning path
+supports opt-in micro phases for staging, forward, loss, backward, optimizer steps, evaluation, synchronization,
+and best-state cloning, with token/step/clone/transfer counters and exact profiled/control parity coverage.
+Other micro paths, CUDA timing, and trace levels remain incomplete; CUDA/trace requests fail explicitly rather
+than emitting partial data under those labels.
 
 P0 and P2 are pure instrumentation and can land before parity sign-off (they are parity-neutral by C1 and
 cheap to review); P1 blocks on parity per the agreed sequencing, because baselines captured before parity

@@ -189,7 +189,7 @@ class Profiler:
     ) -> None:
         if config.level is ProfilingLevel.OFF:
             raise ValueError("disabled profiling must use NULL_RECORDER")
-        if config.level is not ProfilingLevel.MACRO:
+        if config.level not in (ProfilingLevel.MACRO, ProfilingLevel.MICRO):
             raise NotImplementedError(f"profiling level {config.level.value!r} is not implemented yet")
         if config.cuda_timing:
             raise NotImplementedError("CUDA phase timing is not implemented yet")
@@ -220,8 +220,11 @@ class Profiler:
 
     @staticmethod
     def _validate_name(name: str, kind: str) -> None:
-        if not name or "." in name or name.lower() != name or not all(
-            character.isalnum() or character == "_" for character in name
+        if (
+            not name
+            or "." in name
+            or name.lower() != name
+            or not all(character.isalnum() or character == "_" for character in name)
         ):
             raise ValueError(f"invalid profiling {kind} name: {name!r}")
 

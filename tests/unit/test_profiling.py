@@ -67,9 +67,7 @@ def test_profiler_aggregates_nested_self_time_counters_groups_and_coverage() -> 
     assert phases["run"]["wall_seconds"] == 6.0
     assert phases["run"]["self_seconds"] == 4.0
     assert phases["run/block"]["wall_seconds"] == 2.0
-    assert phases["run/block"]["groups"] == {
-        "block=3": {"count": 1, "self_seconds": 2.0, "wall_seconds": 2.0}
-    }
+    assert phases["run/block"]["groups"] == {"block=3": {"count": 1, "self_seconds": 2.0, "wall_seconds": 2.0}}
     assert payload["coverage"] == {
         "wall_total_seconds": 6.0,
         "attributed_seconds": 2.0,
@@ -195,8 +193,9 @@ def test_profiler_rejects_invalid_names_attributes_and_open_snapshot() -> None:
     phase.__exit__(None, None, None)
 
 
-def test_unimplemented_levels_and_cuda_timing_fail_explicitly() -> None:
-    with pytest.raises(NotImplementedError, match="micro"):
-        Profiler(ProfilingConfig(level=ProfilingLevel.MICRO), run_id="micro")
+def test_micro_level_is_supported_and_trace_and_cuda_timing_fail_explicitly() -> None:
+    assert Profiler(ProfilingConfig(level=ProfilingLevel.MICRO), run_id="micro").config.level is ProfilingLevel.MICRO
+    with pytest.raises(NotImplementedError, match="trace"):
+        Profiler(ProfilingConfig(level=ProfilingLevel.TRACE), run_id="trace")
     with pytest.raises(NotImplementedError, match="CUDA"):
         Profiler(ProfilingConfig(cuda_timing=True), run_id="cuda")
