@@ -302,6 +302,14 @@ GC cannot reclaim: historical block records intentionally root their old activat
 the latest block generation for the active (by default, latest) config identity and retires only activation-generation
 artifacts referenced by superseded identities or older active blocks. It is dry-run by default and leaves journals,
 block/layer results, frozen tensors, metrics, logs, and other evidence files untouched.
+
+`tools/validate_resident_run.py` provides the corresponding pre-consumption audit. It validates the journal as a
+strict, single-identity sequence; checks every layer and block envelope against its journal position; follows every
+transitive typed artifact reference; and re-hashes descriptor members without reading or updating the persistent
+validation cache. Missing predecessor `activation-generation` objects are reported as intentionally retired under
+rolling retention, while a missing latest generation or any missing durable factor/result artifact fails the audit.
+`--require-complete` additionally requires a contiguous zero-based prefix equal to `--expected-blocks` (26 by
+default). Run this before global KD, final evaluation, or cleanup of a release candidate.
 6. Add v1-to-v2 migration and verified hard-link/clone import.
 7. Migrate or retire older Gemma stores only after dry-run reports and explicit retention decisions.
 8. Enforce rolling disk estimates in resident and streaming execution plans.

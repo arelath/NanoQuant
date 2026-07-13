@@ -99,6 +99,11 @@ artifact store.
   cross-process test when modifying it.
 - Use `tools/cleanup_artifacts.py` for artifact reclamation. It is dry-run by default and preserves non-artifact
   evidence files; never manually delete content-addressed directories while a run is active.
+- Before global tuning or final evaluation of a completed resident run, use
+  `tools/validate_resident_run.py --require-complete`. It strictly checks journal sequencing and identity,
+  commit envelopes, descriptor/member hashes, transitive artifact types, the contiguous block prefix, and the
+  rolling-retention exception for retired predecessor activation generations. Validation bypasses the persistent
+  cache so its result is a fresh hash audit and the command does not rewrite evidence.
 - For a reused run directory with many superseded commit identities, use `tools/cleanup_run_activations.py` after
   confirming no worker is active. It preserves the latest active identity's resume generation and all journals,
   block/layer results, frozen tensors, metrics, and other evidence; omission of `--apply` is always a dry run.

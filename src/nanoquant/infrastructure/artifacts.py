@@ -81,20 +81,32 @@ class LocalArtifactWriter:
 
 
 class LocalArtifactStore:
-    def __init__(self, root: str | Path, temporary_root: str | Path | None = None) -> None:
+    def __init__(
+        self,
+        root: str | Path,
+        temporary_root: str | Path | None = None,
+        *,
+        use_persistent_validation_cache: bool = True,
+    ) -> None:
         self.root = Path(root)
         self.temporary_root = Path(temporary_root) if temporary_root else self.root / ".tmp"
         self.root.mkdir(parents=True, exist_ok=True)
         self.temporary_root.mkdir(parents=True, exist_ok=True)
+        self._use_persistent_validation_cache = use_persistent_validation_cache
         self._validated: dict[str, tuple[ArtifactDescriptor, tuple[tuple[str, int, int], ...]]] = {}
         self._validation_cache_path = self.root / ".validation-cache.json"
-        try:
-            cached = json.loads(self._validation_cache_path.read_text(encoding="utf-8"))
-            self._persistent_validation = cached if isinstance(cached, dict) else {}
-        except (OSError, json.JSONDecodeError):
+        if not use_persistent_validation_cache:
             self._persistent_validation = {}
+        else:
+            try:
+                cached = json.loads(self._validation_cache_path.read_text(encoding="utf-8"))
+                self._persistent_validation = cached if isinstance(cached, dict) else {}
+            except (OSError, json.JSONDecodeError):
+                self._persistent_validation = {}
 
     def _persist_validation(self) -> None:
+        if not self._use_persistent_validation_cache:
+            return
         # This cache is advisory: artifact descriptors and member hashes remain the
         # source of truth. Multiple readers and writers can share one artifact
         # store, so never let a transient Windows sharing violation fail an
