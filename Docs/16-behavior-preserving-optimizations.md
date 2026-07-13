@@ -624,6 +624,18 @@ must be remeasured rather than inferred from the speedup.
   outlier set, retained the `o_proj` rank mismatch, and averaged approximately 50% factor-sign agreement.
   The code-faithful numerical path remains implemented and versioned, but the expensive tuned/full run
   is not being performed because the measured structural gate did not improve.
+- **Exact retained-Fisher replay also rejected as a full-run candidate (2026-07-13):** preprocessing can
+  now validate and replay all 364 retained Experiment 018 importance vectors exactly, isolating every
+  downstream stage from CCE accumulation variance. On block 0, untuned normalized reconstruction was
+  equal or better than the historical log for five of seven layers; the two regressions were only 0.07
+  and 0.23 percentage points. The historical-batch eight-epoch tune and two-epoch refit nevertheless
+  finished at **1.3784899712**, effectively identical to v19 and still 18.59% above the retained legacy
+  **1.1624**. It took 476.06 seconds inside the block and peaked at 6,194,081,280 allocated CUDA bytes.
+  Current official rank allocation and the rewrite plan match on all 182 layers when given these exact
+  vectors (rank sum **105,376**); Experiment 018's logged initial allocation differs in 32 layers (rank
+  sum **105,216**), consistent with historical numerical-environment drift across discrete allocation
+  thresholds rather than a rewrite planner error. The retained-Fisher block is evidence, not a candidate
+  for extension through the remaining 25 blocks.
 - `JsonlEventSink._read_last_sequence` parses the whole event log at construction — only matters for
   resumed runs with large logs; fine today, worth a tail-scan if event volume grows.
 - **Measured, not implemented (2026-07-13):** a fresh process inventories the pinned Gemma snapshot in a
