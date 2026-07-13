@@ -526,13 +526,15 @@ must be remeasured rather than inferred from the speedup.
   for the largest 6912×1056 MLP factor, 32-call median time regressed from 27.724 ms to 31.760 ms
   (**0.87x**). Both produced bitwise-identical projections, but the side-stream/event design was not
   implemented because it degraded both relevant shapes.
-- **Right-factor stride timing is inconclusive (2026-07-13):** a legacy-style transposed-stride
-  `right_latent` canary reproduced the full-batch control's final reconstruction and frozen tensor
-  identities, including the exact **0.3734416366** best/final tuning loss. Its layer interval was
-  **1335.03 s** versus **88.33 s** for the contiguous control, but the canary bypassed the then-current
-  lease root, overlapped the corrected KD worker, and crossed the 03:58:38 `nvlddmkm` reset. The 15.1x
-  slowdown is therefore rejected as a performance measurement; the layout candidate remains unimplemented
-  pending an exclusive, thermally stable microbenchmark.
+- **Legacy right-factor stride rejected for S0 (2026-07-13):** a transposed-stride `right_latent` canary
+  reproduced the full-batch control's final reconstruction and frozen tensor identities, including the
+  exact **0.3734416366** best/final tuning loss. Its 1335.03 s layer interval is not usable because it
+  overlapped KD and crossed the 03:58:38 `nvlddmkm` reset. A subsequent exclusive BF16 microbenchmark on
+  the actual 8×2048×1152→1056 shape found no repeatable speedup across three reversed grouped rounds; the
+  first stable forward group regressed from **0.605 ms to 0.974 ms**. More importantly, forward values and
+  input gradients were exact but trainable-weight gradients differed in **695,904 elements** (maximum
+  absolute delta 4). Changing the layout is therefore outside this behavior-preserving pass and is not
+  implemented; any future parity-motivated layout change needs quality validation as a numerical change.
 - **Resolved after a clean GPU measurement (2026-07-13):** the lower-allocation `_sign` candidate is now
   implemented as item 3.18. Its uncontaminated speedups were 1.21x on the representative attention shape
   and 1.92x on the largest MLP shape, with exact edge semantics and recurrence coverage.
