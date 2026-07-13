@@ -603,7 +603,11 @@ must be remeasured rather than inferred from the speedup.
   serial PPL **454.431449**. This improves on the incompatible-cache serial PPL **461.544627**, but remains
   worse than immutable pre-KD **432.930572** and the legacy checkpoint through the rewrite backend
   **383.938808**. KD is therefore not the clean end-to-end performance baseline; upstream frozen-state
-  parity remains the quality gate.
+  parity remains the quality gate. The retained Experiment 018 log strengthens that attribution: legacy
+  selected the same 885 parameters and reduced top-k loss **2.3058 -> 2.0443** (delta 0.2615), while the
+  exact-sampler rewrite reduced **2.400274 -> 2.140396** (delta 0.259878). The nearly equal optimization
+  gain with a persistent ~0.10 starting/ending offset is consistent with KD receiving a worse frozen
+  student rather than executing a materially different update rule.
 - **Dense reference weights cached (2026-07-13):** `FrozenReferenceLinear` previously reconstructed its
   immutable dense weight from both binary factors on every forward. A single-threaded 256x64x256 CPU
   fixture with an 8x256 input measured **0.1197 ms** median uncached versus **0.0233 ms** cached
