@@ -45,6 +45,50 @@ class TrackingAdapter:
         return block(inputs)
 
 
+class IndexedLinearBlock(nn.Module):
+    def __init__(self, index: int) -> None:
+        super().__init__()
+        matrices = (
+            torch.tensor(
+                (
+                    (1.0, 1.0, 0.0, 0.0),
+                    (0.0, 1.0, 1.0, 0.0),
+                    (0.0, 0.0, 1.0, 1.0),
+                    (1.0, 0.0, 0.0, 1.0),
+                )
+            ),
+            torch.tensor(
+                (
+                    (1.0, 0.0, 1.0, 0.0),
+                    (0.0, 1.0, 0.0, 1.0),
+                    (1.0, 0.0, 0.0, 1.0),
+                    (0.0, 1.0, 1.0, 0.0),
+                )
+            ),
+        )
+        self.index = index
+        self.linear = nn.Linear(4, 4, bias=False)
+        with torch.no_grad():
+            self.linear.weight.copy_(matrices[index])
+
+    def forward(self, value: torch.Tensor) -> torch.Tensor:
+        return self.linear(value)
+
+
+class IndexedAdapter:
+    def __init__(self) -> None:
+        self.loads: list[int] = []
+
+    def load_block(self, source: object, block: BlockId, device: str) -> nn.Module:
+        del source
+        self.loads.append(block.index)
+        return IndexedLinearBlock(block.index).to(device)
+
+    def run_block(self, block: nn.Module, inputs: torch.Tensor, **kwargs: object) -> torch.Tensor:
+        scale = float(kwargs.get("output_scale", 1.0))
+        return block(inputs) * scale
+
+
 def test_streaming_block_releases_teacher_before_working_and_commits_generations(tmp_path: Path) -> None:
     inputs = MmapActivationStore(tmp_path / "inputs")
     outputs = MmapActivationStore(tmp_path / "outputs")
@@ -110,3 +154,73 @@ def test_forward_only_streamed_calibration_matches_in_memory_batches(tmp_path: P
     assert streamed[0].sample_count == 5
     assert torch.equal(streamed[0].input_importance, direct[0].input_importance)
     assert torch.equal(streamed[0].output_importance, direct[0].output_importance)
+
+
+def test_tiny_multiblock_streaming_matches_resident_execution_with_mmap_boundaries(tmp_path: Path) -> None:
+    values = torch.arange(56, dtype=torch.float32).reshape(7, 2, 4) / 4
+    metadata = ({"output_scale": 0.5}, {"output_scale": 2.0})
+
+    def prepare_working(block: nn.Module) -> nn.Module:
+        with torch.no_grad():
+            cast(IndexedLinearBlock, block).linear.weight.mul_(0.5)
+        return block
+
+    resident_adapter = IndexedAdapter()
+    resident_teacher = values.clone()
+    resident_compressed = values.clone()
+    for index in range(2):
+        source_block = resident_adapter.load_block(object(), BlockId(index), "cpu")
+        resident_teacher = resident_adapter.run_block(source_block, resident_teacher, **metadata[index])
+        working_block = prepare_working(
+            resident_adapter.load_block(object(), BlockId(index), "cpu")
+        )
+        resident_compressed = resident_adapter.run_block(
+            working_block,
+            resident_compressed,
+            **metadata[index],
+        )
+
+    activations = MmapActivationStore(tmp_path / "multiblock-activations")
+    activations.put("teacher-0", values)
+    activations.put("compressed-0", values)
+    streaming_adapter = IndexedAdapter()
+    executor = StreamingBlockExecutor(ResidentExecutor(), "cpu", batch_size=3)
+    results = []
+    for index in range(2):
+        results.append(
+            executor.execute(
+                StreamingBlockRequest(
+                    BlockId(index),
+                    f"teacher-{index}",
+                    f"compressed-{index}",
+                    f"teacher-{index + 1}",
+                    f"compressed-{index + 1}",
+                    metadata[index],
+                ),
+                cast(ModelAdapter, streaming_adapter),
+                cast(ModelSource, object()),
+                activations,
+                activations,
+                prepare_working,
+            )
+        )
+
+    with (
+        activations.read("teacher-2") as streamed_teacher,
+        activations.read("compressed-2") as streamed_compressed,
+    ):
+        assert torch.equal(streamed_teacher, resident_teacher)
+        assert torch.equal(streamed_compressed, resident_compressed)
+        assert not torch.equal(streamed_teacher, streamed_compressed)
+    assert resident_adapter.loads == streaming_adapter.loads == [0, 0, 1, 1]
+    assert all(result.teacher.batch_count == result.compressed.batch_count == 3 for result in results)
+    assert all(
+        result.teacher.maximum_staged_rows == result.compressed.maximum_staged_rows == 3
+        for result in results
+    )
+    expected_bytes = values.numel() * values.element_size()
+    assert all(result.teacher.bytes_read == result.teacher.bytes_written == expected_bytes for result in results)
+    assert all(
+        result.compressed.bytes_read == result.compressed.bytes_written == expected_bytes
+        for result in results
+    )

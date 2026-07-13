@@ -193,6 +193,8 @@ Outcome: the same pipeline operates from GPU-resident 1B models through disk-str
 - [x] **M5.16** Implement disk-full, corrupt-shard, changed-source, and interrupted-activation-generation recovery behavior.
 - [x] **M5.17** Add a constrained-resource integration test that forces mmap activation storage on a tiny model.
 - [ ] **M5.18** Verify resident and streaming executors produce equivalent tiny/1B results within approved tolerances.
+  The tiny half is covered by an exact two-block comparison using full-batch resident execution versus
+  batch-bounded streaming through committed mmap activation generations; the required 1B comparison remains open.
 - [ ] **M5.19** Compare planned versus actual peak GPU, host, temporary disk, and I/O use and set estimator error thresholds.
 - [ ] **M5.20** Implement the distributed-executor port and decide which distributed calibration/tuning operations are required for the first release.
 - [ ] **M5.21** Run a 70B metadata-only plan and validate source/output/storage estimates before weight execution.
