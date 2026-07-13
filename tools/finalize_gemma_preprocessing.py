@@ -9,8 +9,9 @@ from dataclasses import replace
 from pathlib import Path
 
 import torch
+from safetensors import safe_open
 
-from nanoquant.application.calibration import materialize_causal_online_state
+from nanoquant.application.calibration import MaterializedLayerCalibration, materialize_causal_online_state
 from nanoquant.application.calibration_artifacts import build_objectives, persist_calibration
 from nanoquant.application.planning import PlanningRequest, build_quantization_plan, persist_plan
 from nanoquant.config.codec import to_dict
@@ -49,6 +50,51 @@ LAYER_ORDER = (
 )
 
 
+def _retained_key(path: str, kind: str) -> str:
+    if not path.startswith("block."):
+        raise ValueError(f"unsupported Fisher layer path: {path}")
+    prefix = "i" if kind == "input" else "o"
+    return f"{prefix}.{path.replace('block.', 'model.layers.', 1)}"
+
+
+def load_retained_fisher(
+    materialized: tuple[MaterializedLayerCalibration, ...], reference_path: Path
+) -> tuple[MaterializedLayerCalibration, ...]:
+    """Replace freshly materialized vectors with an exact retained legacy realization."""
+    expected = {
+        _retained_key(item.path, kind)
+        for item in materialized
+        for kind in ("input", "output")
+    }
+    loaded: list[MaterializedLayerCalibration] = []
+    with safe_open(reference_path, framework="pt", device="cpu") as reference:
+        available = set(reference.keys())
+        missing = sorted(expected - available)
+        unexpected = sorted(available - expected)
+        if missing or unexpected:
+            raise ValueError(
+                "retained Fisher keys do not exactly match the checkpoint: "
+                f"missing={missing[:5]}, unexpected={unexpected[:5]}"
+            )
+        for item in materialized:
+            input_importance = reference.get_tensor(_retained_key(item.path, "input")).float()
+            output_importance = reference.get_tensor(_retained_key(item.path, "output")).float()
+            if input_importance.shape != item.input_importance.shape:
+                raise ValueError(f"retained input Fisher shape mismatch for {item.path}")
+            if output_importance.shape != item.output_importance.shape:
+                raise ValueError(f"retained output Fisher shape mismatch for {item.path}")
+            if not torch.isfinite(input_importance).all() or not torch.isfinite(output_importance).all():
+                raise ValueError(f"retained Fisher contains non-finite values for {item.path}")
+            loaded.append(
+                replace(
+                    item,
+                    input_importance=input_importance.contiguous(),
+                    output_importance=output_importance.contiguous(),
+                )
+            )
+    return tuple(loaded)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--snapshot", type=Path, required=True)
@@ -57,6 +103,11 @@ def main() -> None:
     parser.add_argument("--calibration", type=Path, default=Path("evidence/m3/experiment018-calibration"))
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--shrinkage", type=float, default=0.6)
+    parser.add_argument(
+        "--retained-fisher",
+        type=Path,
+        help="exact retained i./o. Fisher safetensors to replay instead of the checkpoint realization",
+    )
     args = parser.parse_args()
     if not 0.0 <= args.shrinkage <= 1.0:
         raise ValueError("shrinkage must be in [0, 1]")
@@ -98,6 +149,8 @@ def main() -> None:
         "raw-token-ids-v1",
     )
     materialized = materialize_causal_online_state(state, shrinkage=args.shrinkage)
+    if args.retained_fisher is not None:
+        materialized = load_retained_fisher(materialized, args.retained_fisher)
     calibration_values = tuple(
         (LayerId(BlockId(int(item.path.split(".", 2)[1])), item.path.split(".", 2)[2]), item)
         for item in materialized
