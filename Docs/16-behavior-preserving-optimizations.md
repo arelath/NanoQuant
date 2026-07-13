@@ -65,6 +65,7 @@ in section 6 so nobody drifts into it by accident.
 | [x] | 14 | Cache verified tensor hashes by immutable file signature | S0 | tensor loads | repeated memory hashes removed | ~10–20 s | High | S |
 | [x] | 15 | Bypass STE signs for immutable binary KD factors | S0 | global KD | measured 24% per layer-step | full-run rerun pending | High | S |
 | [x] | 16 | Fuse ADMM factor promotion into FP32 additions | S0 | factorization | measured 2.1% per solve | ~5–6 s of anchor | High | XS |
+| [x] | 17 | Reuse ADMM symmetrization storage | S0 | factorization | measured 3.6% per solve | ~9–10 s of anchor | High | XS |
 
 Combined outlook, avoiding double counting: roughly **8–15% on the factor+scale anchor** (items 4–6, 8–10)
 and **15–35% on the full protocol** once tuning phases exist to optimize (items 1–3, 7, and 15 dominate).
@@ -454,6 +455,18 @@ matching CUDA-event time. At 800 iterations, two solves per iteration, and 238 a
 per-solve delta projects to roughly **5–6 seconds on the anchor**. The existing exact bf16 recurrence
 oracle protects the operation-order result.
 
+### [x] 3.17 Reuse ADMM symmetrization storage (S0)
+
+**Where.** `_solve` formed `0.5 * (system + system.mT)` as two out-of-place elementwise operations after
+the Gram matrix, allocating a second rank² result solely for multiplication by 0.5. The addition result is
+fresh and has no other consumer, so the multiplication can update it in place with identical arithmetic.
+
+**Done (2026-07-12).** Symmetrization now adds out of place, then calls `mul_(0.5)` on that result. A
+parity-shaped 1152×448 design / 448×1152 right-hand-side solve remained bitwise identical. In a longer
+alternating benchmark, median time for 512 solves improved from 381.324 ms to 368.214 ms (**1.036x**), a
+0.0256 ms saving per solve. Across 800 iterations × two solves × 238 attempts, that projects to roughly
+**9–10 seconds on the anchor**, with no extra memory or fallback change.
+
 ## 4. Smaller observations (bundle opportunistically)
 
 - [x] `next(iter(model.parameters()), None)` previously executed per batch step in `tune`; the foreach
@@ -461,6 +474,18 @@ oracle protects the operation-order result.
 - `FactorizationAttemptStage` computes `latent_prediction=left_latent @ right_latent` per attempt for
   metrics ([quantization_stages.py:212](../src/nanoquant/application/quantization_stages.py)) — necessary,
   but a candidate to fold into the attempt-level metrics pass if the profiler shows it (~0.05% each).
+- **Measured, not implemented (2026-07-12):** `reconstruction_metrics` rebuilds the same input/output
+  importance grid for each weighted error and recomputes the export weighted error when no separate
+  unwhitened prediction is supplied. Reusing one grid and the identical export scalar preserved every
+  reported value exactly and improved 16 largest-shape (6912×1152) calls from a median 88.736 ms to
+  67.172 ms (**1.32x**), but that is only **1.35 ms per attempt**, or roughly 0.3 s across 238 attempts.
+  The extra private metric path and validation-order risk are not justified by that run-level bound.
+- **Measured, not implemented (2026-07-12):** `ScaleFitStage` and `fit_scales` both materialize the
+  original reconstruction, while `fit_scales` also rescans the selected best error that it already holds.
+  At the largest 6912×1056×1152 Gemma MLP shape, the duplicate reconstruction measured 1.491 ms and the
+  duplicate weighted-error pass 2.158 ms. Even charging both to all 238 attempts gives an upper bound of
+  only **0.87 s per anchor**, and real attention-layer shapes are smaller. Adding an original-prediction
+  field to the internal result contract is not justified by that bound.
 - `JsonlEventSink._read_last_sequence` parses the whole event log at construction — only matters for
   resumed runs with large logs; fine today, worth a tail-scan if event volume grows.
 - `_artifact_bytes` walks the whole artifact tree once at report time — keep an eye on it as artifact

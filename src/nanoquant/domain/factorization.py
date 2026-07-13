@@ -103,7 +103,8 @@ def _solve(
 ) -> torch.Tensor:
     design32 = design.float()
     system = design32.mT @ design32
-    system = 0.5 * (system + system.mT)
+    system = system + system.mT
+    system.mul_(0.5)
     stabilizer = (rho * system.diagonal().mean().abs() + regularization).clamp_min(epsilon)
     system.diagonal().add_(stabilizer)
     rhs = design32.mT @ target.float()
