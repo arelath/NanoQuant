@@ -598,8 +598,12 @@ must be remeasured rather than inferred from the speedup.
   training-device Torch RNG for token subsampling across all epochs, whereas the rewrite used two CPU
   Torch generators. Cache planning now replays the legacy Python/device RNG streams, records a sampling
   version in the protocol identity, and allows an explicit replacement run to atomically supersede a
-  mismatched cache journal without deleting its immutable artifacts. The corrected real-model rerun is
-  required before using KD quality or timing as a performance baseline.
+  mismatched cache journal without deleting its immutable artifacts. The corrected run completed all
+  2,048 steps with final cached-target loss **2.14039628**, 2.70 GB peak allocated CUDA memory, and exact
+  serial PPL **454.431449**. This improves on the incompatible-cache serial PPL **461.544627**, but remains
+  worse than immutable pre-KD **432.930572** and the legacy checkpoint through the rewrite backend
+  **383.938808**. KD is therefore not the clean end-to-end performance baseline; upstream frozen-state
+  parity remains the quality gate.
 - **Dense reference weights cached (2026-07-13):** `FrozenReferenceLinear` previously reconstructed its
   immutable dense weight from both binary factors on every forward. A single-threaded 256x64x256 CPU
   fixture with an 8x256 input measured **0.1197 ms** median uncached versus **0.0233 ms** cached
