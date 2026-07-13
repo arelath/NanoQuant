@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 from pathlib import Path
 
@@ -24,6 +25,25 @@ def test_tiny_pipeline_runs_entirely_on_rewrite_components(tmp_path: Path) -> No
     assert "Per-layer objective-weighted reconstruction" in result.report
     assert (tmp_path / "report.md").read_text(encoding="utf-8") == result.report
     assert result.elapsed_seconds < 600
+    profile = json.loads((tmp_path / "profile.json").read_text(encoding="utf-8"))
+    assert profile["run_id"] == "tiny-pipeline"
+    assert profile["level"] == "macro"
+    assert profile["coverage"]["fraction"] >= 0.90
+    assert not any(warning["code"] == "PERF001" for warning in profile["warnings"])
+    phases = {str(phase["path"]): phase for phase in profile["phases"]}
+    assert {
+        "run",
+        "run/stage",
+        "run/stage/cancellation",
+        "run/stage/execute",
+        "run/stage/validate",
+        "run/stage/event",
+    } <= phases.keys()
+    assert set(phases["run/stage"]["groups"]) == {
+        "stage=factorize-attempt|version=4",
+        "stage=fit-scales|version=2",
+        "stage=select-outliers|version=5",
+    }
 
     identity = CommitIdentity(
         "tiny-config-v1", result.frozen_model.model.config_hash, result.frozen_model.plan.artifact_id

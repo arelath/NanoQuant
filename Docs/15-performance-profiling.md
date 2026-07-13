@@ -462,8 +462,10 @@ Span-event mirroring measured roughly 2.9% recorder time on the same short workl
 The profile comparison CLI now checks stable phase paths, identical invocation counts, runtime fingerprints,
 aggregate deltas, and the matching reservoir median; aggregate-only movement without median confirmation is
 reported as noise, and environment-mismatched regressions are informational rather than actionable.
-Resident calibration and the tiny-pipeline composition roots still need equivalent P0 wiring before the
-framework-wide rollout item is complete. The resident tuning path
+The tiny-pipeline composition root now emits the same P0 macro profile as the resident run. A direct CPU run
+records **92.53%** leaf-phase wall coverage with **0.023%** recorder time and exercises the generic stage
+execute/validate/event paths. The standalone resident-calibration composition root still needs equivalent P0
+wiring before the framework-wide rollout item is complete. The resident tuning path
 supports opt-in micro phases for staging, forward, loss, backward, optimizer steps, evaluation, synchronization,
 and best-state cloning, with token/step/clone/transfer counters and exact profiled/control parity coverage.
 The resident ADMM path now adds opt-in micro phases for setup, both linear solves, SVID projections, dual updates,

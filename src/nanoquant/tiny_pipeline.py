@@ -29,6 +29,8 @@ from nanoquant.config.schema import (
     AllocationStrategy,
     ObjectiveConfig,
     OutlierConfig,
+    ProfilingConfig,
+    ProfilingLevel,
     RankAllocationConfig,
     RankBoundsConfig,
     RankRetryConfig,
@@ -55,15 +57,19 @@ from nanoquant.domain.models import (
     SourceTensor,
     TensorId,
 )
+from nanoquant.domain.profiling import NULL_RECORDER, PhaseRecorder
 from nanoquant.domain.runs import BudgetState
 from nanoquant.domain.seeds import logical_seed
 from nanoquant.infrastructure.artifacts import LocalArtifactStore
 from nanoquant.infrastructure.commits import CommitIdentity, commit_block, commit_layer
 from nanoquant.infrastructure.events import JsonlEventSink
+from nanoquant.infrastructure.profiling import profiled_run
 from nanoquant.infrastructure.progress import ProgressJournal
 from nanoquant.infrastructure.resident_executor import Cancellation, ResidentExecutor
 from nanoquant.infrastructure.tensor_store import LocalTensorStore
 from nanoquant.infrastructure.tiny_model import TinyCausalTransformer, TinyModelAdapter, TinyModelConfig
+
+_DEFAULT_PROFILING = ProfilingConfig()
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,13 +95,20 @@ def _mse(prediction: torch.Tensor, target: torch.Tensor) -> float:
     return float((prediction.detach().float() - target.detach().float()).square().mean())
 
 
-def run_tiny_pipeline(root: str | Path, *, seed: int = 0) -> TinyPipelineResult:
+def _run_tiny_pipeline(
+    root: str | Path,
+    *,
+    seed: int,
+    recorder: PhaseRecorder,
+    profiling: ProfilingConfig,
+) -> TinyPipelineResult:
     started = time.perf_counter()
     root = Path(root)
-    artifacts = LocalArtifactStore(root / "artifacts")
+    micro_recorder = recorder if profiling.level is ProfilingLevel.MICRO else NULL_RECORDER
+    artifacts = LocalArtifactStore(root / "artifacts", recorder=micro_recorder)
     tensors = LocalTensorStore(artifacts)
     events = JsonlEventSink(root / "events.jsonl", "tiny-run")
-    context = StageContext("tiny-run", ResidentExecutor(), artifacts, tensors, events, Cancellation())
+    context = StageContext("tiny-run", ResidentExecutor(), artifacts, tensors, events, Cancellation(), recorder)
     config = TinyModelConfig(vocabulary_size=32, hidden_size=8, intermediate_size=12, block_count=2)
     teacher = TinyCausalTransformer(config, seed=seed)
     working = TinyCausalTransformer(config, seed=seed)
@@ -125,7 +138,12 @@ def run_tiny_pipeline(root: str | Path, *, seed: int = 0) -> TinyPipelineResult:
     for block_index, block in enumerate(teacher.blocks):
         block_id = BlockId(block_index)
         calibrated = calibrate_block(
-            block, (calibration_inputs,), layer_paths, lambda module, value: module(value), method="forward_only"
+            block,
+            (calibration_inputs,),
+            layer_paths,
+            lambda module, value: module(value),
+            method="forward_only",
+            recorder=micro_recorder,
         )
         calibration_materialized.extend((LayerId(block_id, stats.path), stats) for stats in calibrated)
         layer_inventory = []
@@ -196,9 +214,9 @@ def run_tiny_pipeline(root: str | Path, *, seed: int = 0) -> TinyPipelineResult:
         working_block = working.blocks[block_index]
         with torch.no_grad():
             teacher_outputs = source_block(teacher_inputs).detach()
-        recorder = BlockLossRecorder()
-        recorder.record_source_reference(_mse(source_block(teacher_inputs), teacher_outputs))
-        recorder.record_block_entry(_mse(working_block(compressed_inputs), teacher_outputs))
+        loss_recorder = BlockLossRecorder()
+        loss_recorder.record_source_reference(_mse(source_block(teacher_inputs), teacher_outputs))
+        loss_recorder.record_block_entry(_mse(working_block(compressed_inputs), teacher_outputs))
         layer_results = []
         frozen_states = []
         for layer_plan in block_plan.layers:
@@ -268,6 +286,7 @@ def run_tiny_pipeline(root: str | Path, *, seed: int = 0) -> TinyPipelineResult:
                 path,
                 TuningRequest(compressed_inputs, teacher_outputs, 1, 2, 1e-2),
                 lambda module, value: module(value),
+                micro_recorder,
             )
             frozen = LayerFreezer().freeze(layer_plan.layer, trainable, tensors)
             BlockEditor().install_frozen_layer(working_block, path, frozen.module)
@@ -310,16 +329,18 @@ def run_tiny_pipeline(root: str | Path, *, seed: int = 0) -> TinyPipelineResult:
             journal.append("layer", block_index, path, committed_layer.reference.artifact_id, identity)
             layer_results.append(layer_result)
             budget = replace(budget, accepted_bits=budget.accepted_bits + layer_plan.estimated_cost.total)
-            recorder.record_after_layer(layer_plan.layer, _mse(working_block(compressed_inputs), teacher_outputs))
+            loss_recorder.record_after_layer(
+                layer_plan.layer, _mse(working_block(compressed_inputs), teacher_outputs)
+            )
         with torch.no_grad():
             compressed_outputs = working_block(compressed_inputs).detach()
-        recorder.record_final_frozen_pre_kd(_mse(compressed_outputs, teacher_outputs))
+        loss_recorder.record_final_frozen_pre_kd(_mse(compressed_outputs, teacher_outputs))
         frozen_block = FrozenBlockState(block_plan.block, tuple(frozen_states), ())
         committed = commit_block(
             block_plan.block,
             tuple(layer_results),
             frozen_block,
-            recorder.finalize(),
+            loss_recorder.finalize(),
             teacher_outputs,
             compressed_outputs,
             budget.retry_bits_spent,
@@ -353,3 +374,20 @@ def run_tiny_pipeline(root: str | Path, *, seed: int = 0) -> TinyPipelineResult:
         time.perf_counter() - started,
         root,
     )
+
+
+def run_tiny_pipeline(
+    root: str | Path,
+    *,
+    seed: int = 0,
+    profiling: ProfilingConfig = _DEFAULT_PROFILING,
+) -> TinyPipelineResult:
+    output = Path(root)
+    with profiled_run(profiling, output, None, run_id="tiny-pipeline") as recorder:
+        with recorder.phase("run"):
+            return _run_tiny_pipeline(
+                output,
+                seed=seed,
+                recorder=recorder,
+                profiling=profiling,
+            )
