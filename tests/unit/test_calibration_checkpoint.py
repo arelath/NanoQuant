@@ -21,6 +21,7 @@ def test_causal_calibration_checkpoint_round_trips(tmp_path: Path) -> None:
 
     loaded = load_causal_calibration_state(tmp_path)
     assert loaded.sample_count == 4
+    assert loaded.algorithm_version == state.algorithm_version
     assert loaded.layers[0].path == state.layers[0].path
     assert torch.equal(loaded.layers[0].inputs.total, inputs.total)
     assert torch.equal(loaded.layers[0].inputs.global_max, inputs.global_max)

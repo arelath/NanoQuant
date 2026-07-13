@@ -5,6 +5,8 @@ import torch
 from torch import nn
 
 from nanoquant.application.calibration import (
+    CAUSAL_CALIBRATION_ALGORITHM_VERSION,
+    CausalOnlineCalibrationState,
     UnsupportedCalibrationMode,
     calibrate_block,
     calibrate_causal_model,
@@ -89,6 +91,16 @@ def test_activation_math_known_values_and_shrinkage() -> None:
     assert robust_tau(value, percentile=0.5) == 5
     assert torch.equal(activation_square_mean(value), torch.tensor([4.5, 10.0]))
     assert torch.equal(shrink_importance(torch.tensor([1.0, 3.0]), 0.5), torch.tensor([1.5, 2.5]))
+
+
+def test_activation_square_mean_matches_legacy_512_token_partial_accumulation() -> None:
+    values = torch.randn(1025, 7, generator=torch.Generator().manual_seed(19))
+    expected = torch.zeros(7)
+    for start in range(0, values.shape[0], 512):
+        expected.add_(values[start : start + 512].float().square().sum(dim=0))
+    expected.div_(values.shape[0])
+
+    assert torch.equal(activation_square_mean(values), expected)
 
 
 def test_online_forward_and_two_phase_calibration_are_typed_finite_and_remove_hooks() -> None:
@@ -212,3 +224,15 @@ def test_resumed_online_causal_accumulators_match_uninterrupted_result() -> None
     assert states[-1].sample_count == 4
     assert torch.equal(uninterrupted[0].input_importance, resumed[0].input_importance)
     assert torch.equal(uninterrupted[0].output_importance, resumed[0].output_importance)
+
+
+def test_online_causal_calibration_rejects_incompatible_numerical_state() -> None:
+    model = TinyCausalModel()
+    incompatible = CausalOnlineCalibrationState((), 0, CAUSAL_CALIBRATION_ALGORITHM_VERSION - 1)
+    with pytest.raises(ValueError, match="incompatible numerical algorithm"):
+        calibrate_causal_model(
+            model,
+            (torch.tensor([[0, 1, 2]]),),
+            (("hidden", model.hidden),),
+            initial_state=incompatible,
+        )

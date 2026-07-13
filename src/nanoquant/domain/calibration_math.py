@@ -3,16 +3,26 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import cast
 
 import torch
 
+LEGACY_CALIBRATION_CHUNK_TOKENS = 512
+
+
+def _row_chunks(rows: torch.Tensor) -> tuple[torch.Tensor, ...]:
+    return tuple(
+        rows[start : start + LEGACY_CALIBRATION_CHUNK_TOKENS]
+        for start in range(0, rows.shape[0], LEGACY_CALIBRATION_CHUNK_TOKENS)
+    )
+
 
 def robust_tau(tensor: torch.Tensor, percentile: float = 0.999, pre_scale: float = 1.0) -> torch.Tensor:
-    rows = tensor.detach().flatten(0, -2).float() * pre_scale
-    norms = torch.linalg.vector_norm(rows, dim=1)
-    if norms.numel() == 0:
-        return cast(torch.Tensor, norms.new_zeros(()))
+    rows = tensor.detach().flatten(0, -2)
+    if rows.shape[0] == 0:
+        return rows.new_zeros((), dtype=torch.float32)
+    norms = torch.cat(
+        tuple(torch.linalg.vector_norm(chunk.float() * pre_scale, dim=1) for chunk in _row_chunks(rows))
+    )
     count = max(1, int(norms.numel() * (1 - percentile)))
     return torch.topk(norms, count).values[-1]
 
@@ -20,13 +30,19 @@ def robust_tau(tensor: torch.Tensor, percentile: float = 0.999, pre_scale: float
 def activation_square_mean(
     tensor: torch.Tensor, *, pre_scale: float = 1.0, post_scale: float = 1.0, clip_tau: torch.Tensor | None = None
 ) -> torch.Tensor:
-    rows = tensor.detach().flatten(0, -2).float() * pre_scale
+    rows = tensor.detach().flatten(0, -2)
     if rows.shape[0] == 0:
         raise ValueError("cannot accumulate an empty activation batch")
-    if clip_tau is not None:
-        norms = torch.linalg.vector_norm(rows, dim=1, keepdim=True)
-        rows = rows * torch.clamp(clip_tau.float() / (norms + 1e-8), max=1.0)
-    return rows.square().mean(dim=0) * post_scale
+    total = torch.zeros(rows.shape[-1], dtype=torch.float32, device="cpu")
+    threshold = None if clip_tau is None else clip_tau.to(device=rows.device, dtype=torch.float32)
+    for chunk in _row_chunks(rows):
+        values = chunk.float() * pre_scale
+        if threshold is not None:
+            norms = torch.linalg.vector_norm(values, dim=1, keepdim=True)
+            values = values * torch.clamp(threshold / (norms + 1e-8), max=1.0)
+        total.add_(values.square().sum(dim=0).cpu())
+    total.div_(rows.shape[0])
+    return total * post_scale
 
 
 @dataclass(slots=True)

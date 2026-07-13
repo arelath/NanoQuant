@@ -18,6 +18,8 @@ from nanoquant.domain.calibration_math import (
 )
 from nanoquant.ports.activation_store import ActivationStore
 
+CAUSAL_CALIBRATION_ALGORITHM_VERSION = 2
+
 
 @dataclass(frozen=True, slots=True)
 class MaterializedLayerCalibration:
@@ -49,6 +51,7 @@ class CausalOnlineLayerSnapshot:
 class CausalOnlineCalibrationState:
     layers: tuple[CausalOnlineLayerSnapshot, ...]
     processed_samples: int
+    algorithm_version: int = CAUSAL_CALIBRATION_ALGORITHM_VERSION
 
     @property
     def sample_count(self) -> int:
@@ -109,6 +112,11 @@ def calibrate_causal_model(
         raise ValueError("causal calibration layer paths must be unique")
     if method != "online_fisher" and (initial_state is not None or state_sink is not None):
         raise ValueError("durable causal calibration state is supported only for online Fisher")
+    if (
+        initial_state is not None
+        and initial_state.algorithm_version != CAUSAL_CALIBRATION_ALGORITHM_VERSION
+    ):
+        raise ValueError("causal calibration state uses an incompatible numerical algorithm")
     state_by_path = {} if initial_state is None else {layer.path: layer for layer in initial_state.layers}
     if initial_state is not None and set(state_by_path) != {path for path, _module in layers}:
         raise ValueError("causal calibration state does not exactly match requested layers")
@@ -283,6 +291,7 @@ def calibrate_causal_model(
                         for path, _module in layers
                     ),
                     logical_sample_count,
+                    CAUSAL_CALIBRATION_ALGORITHM_VERSION,
                 )
             )
         return tuple(

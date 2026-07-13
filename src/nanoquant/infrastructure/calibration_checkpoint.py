@@ -39,7 +39,12 @@ def save_causal_calibration_state(path: str | Path, state: CausalOnlineCalibrati
                 "percentile": snapshot.percentile,
             }
         layers.append(layer_manifest)
-    manifest = {"schema_version": 1, "sample_count": state.sample_count, "layers": layers}
+    manifest = {
+        "schema_version": 2,
+        "algorithm_version": state.algorithm_version,
+        "sample_count": state.sample_count,
+        "layers": layers,
+    }
     tensor_tmp = root / "state.safetensors.tmp"
     manifest_tmp = root / "manifest.json.tmp"
     save_file(tensors, tensor_tmp)
@@ -51,7 +56,7 @@ def save_causal_calibration_state(path: str | Path, state: CausalOnlineCalibrati
 def load_causal_calibration_state(path: str | Path) -> CausalOnlineCalibrationState:
     root = Path(path)
     manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
-    if manifest.get("schema_version") != 1:
+    if manifest.get("schema_version") not in {1, 2}:
         raise ValueError("unsupported causal calibration checkpoint schema")
     layers = []
     with safe_open(root / "state.safetensors", framework="pt", device="cpu") as handle:
@@ -72,7 +77,11 @@ def load_causal_calibration_state(path: str | Path) -> CausalOnlineCalibrationSt
                     )
                 )
             layers.append(CausalOnlineLayerSnapshot(str(layer["path"]), snapshots[0], snapshots[1]))
-    state = CausalOnlineCalibrationState(tuple(layers), int(manifest["sample_count"]))
+    state = CausalOnlineCalibrationState(
+        tuple(layers),
+        int(manifest["sample_count"]),
+        int(manifest.get("algorithm_version", 1)),
+    )
     if state.sample_count != int(manifest["sample_count"]):
         raise ValueError("causal calibration checkpoint sample count disagrees with tensors")
     return state
