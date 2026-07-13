@@ -34,6 +34,7 @@ class TrainableFactorizedLinear(nn.Module):
     outlier_indices: torch.Tensor | None
     outlier_values: nn.Parameter | None
     outlier_scales: torch.Tensor | None
+    immutable_binary_factors: bool
 
     def __init__(
         self,
@@ -46,6 +47,8 @@ class TrainableFactorizedLinear(nn.Module):
         outlier_indices: torch.Tensor | None = None,
         outlier_values: torch.Tensor | None = None,
         outlier_scales: torch.Tensor | None = None,
+        *,
+        immutable_binary_factors: bool = False,
     ) -> None:
         super().__init__()
         if left_latent.shape[1] != right_latent.shape[0]:
@@ -66,6 +69,7 @@ class TrainableFactorizedLinear(nn.Module):
             outlier_scales = None
         self.outlier_values = None if outlier_values is None else nn.Parameter(outlier_values.detach().clone())
         self.register_buffer("outlier_scales", None if outlier_scales is None else outlier_scales.detach().clone())
+        self.immutable_binary_factors = immutable_binary_factors
 
     def dense_weight(self) -> torch.Tensor:
         apply_sign = cast(Any, _SignSTE).apply
@@ -87,14 +91,22 @@ class TrainableFactorizedLinear(nn.Module):
 
     def forward(self, value: torch.Tensor) -> torch.Tensor:
         apply_sign = cast(Any, _SignSTE).apply
-        right = cast(torch.Tensor, apply_sign(self.right_latent)).to(device=value.device, dtype=value.dtype)
+        right = (
+            self.right_latent
+            if self.immutable_binary_factors and not self.right_latent.requires_grad
+            else cast(torch.Tensor, apply_sign(self.right_latent))
+        ).to(device=value.device, dtype=value.dtype)
         scale_pre = _mask_outlier_columns(self.scale_pre, self.outlier_indices)
         latent = torch.nn.functional.linear(
             value * scale_pre.to(device=value.device, dtype=value.dtype),
             right,
         )
         latent = latent * self.scale_mid.to(device=value.device, dtype=value.dtype)
-        left = cast(torch.Tensor, apply_sign(self.left_latent)).to(device=value.device, dtype=value.dtype)
+        left = (
+            self.left_latent
+            if self.immutable_binary_factors and not self.left_latent.requires_grad
+            else cast(torch.Tensor, apply_sign(self.left_latent))
+        ).to(device=value.device, dtype=value.dtype)
         output = torch.nn.functional.linear(latent, left)
         output = output * self.scale_post.to(device=value.device, dtype=value.dtype)
         if self.outlier_indices is not None and self.outlier_values is not None:

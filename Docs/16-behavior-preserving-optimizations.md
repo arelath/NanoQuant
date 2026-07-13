@@ -63,9 +63,10 @@ in section 6 so nobody drifts into it by accident.
 | [x] | 12 | Keep the JSONL event file handle open | S0 | events | ~3k opens/run | ~0.1% | High | S |
 | [x] | 13 | Device-side calibration threshold accumulation | S0 | calibration | ~20k small syncs | ~0.1–0.2% | High | S |
 | [x] | 14 | Cache verified tensor hashes by immutable file signature | S0 | tensor loads | repeated memory hashes removed | ~10–20 s | High | S |
+| [x] | 15 | Bypass STE signs for immutable binary KD factors | S0 | global KD | measured 24% per layer-step | full-run rerun pending | High | S |
 
 Combined outlook, avoiding double counting: roughly **8–15% on the factor+scale anchor** (items 4–6, 8–10)
-and **15–35% on the full protocol** once tuning phases exist to optimize (items 1–3 and 7 dominate).
+and **15–35% on the full protocol** once tuning phases exist to optimize (items 1–3, 7, and 15 dominate).
 Against the ~30% gap to legacy recorded in the agent guide, this catalog plausibly covers a large fraction —
 but only the Docs/15 baseline can apportion it.
 
@@ -420,6 +421,23 @@ full validation and tensor rehashing. Hashing all seven tensors in a real 51.1 M
 median 20.2 ms; eliminating two to three repeats across 321 attempts bounds the saving at roughly
 10–20 seconds. Tests prove reopened-store behavior and that cached tensor verification does not bypass
 artifact corruption detection.
+
+### [x] 3.15 Bypass STE signs for immutable binary KD factors (S0)
+
+**Where.** Global distillation thaws each committed `left_binary`/`right_binary` tensor into a
+`TrainableFactorizedLinear`, but selects only scales, outlier values, biases, and norm parameters for
+optimization. Even after `distill_topk` disables gradients on both factors, every forward calls `_SignSTE`
+and materializes two full-size `torch.where` results. The inputs are already exactly ±1 and cannot change
+during this phase, so those values are redundant.
+
+**Done (2026-07-12).** The global-KD thaw path now marks its factors as immutable binary values. Forward
+uses those parameters directly only while they do not require gradients; ordinary factorized tuning still
+uses `_SignSTE`, including when a marked module is later made trainable. This adds no cached tensor and no
+VRAM. On a parity-shaped 1152×448×1152 bf16 layer with 2,048 tokens, 16 forward/backward scale-training
+steps averaged 14.345 ms with redundant STE materialization versus 10.941 ms on the direct-binary path
+(**1.31x**, or **24% less layer-step wall**). Outputs, loss, and all scale gradients were bitwise equal.
+Unit coverage verifies both the frozen-factor fast path and the trainable-factor fallback; the global
+distillation integration path also passes. A full Gemma rerun is still required for the run-level saving.
 
 ## 4. Smaller observations (bundle opportunistically)
 

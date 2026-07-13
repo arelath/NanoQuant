@@ -152,6 +152,7 @@ def _thaw_frozen_layers(
                 outlier_indices=frozen.outlier_indices,
                 outlier_values=frozen.outlier_values,
                 outlier_scales=frozen.outlier_scales,
+                immutable_binary_factors=True,
             )
             editor.install_trainable_layer(block, state.layer.path, module)
             trainable[(state.layer.block.index, state.layer.path)] = module
