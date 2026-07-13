@@ -66,7 +66,7 @@ def main() -> None:
     parser.add_argument("--admm-inner-iterations", type=int, default=5)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="cuda")
-    parser.add_argument("--block-forward-batch-size", type=int, default=4)
+    parser.add_argument("--block-forward-batch-size", type=int, default=8)
     parser.add_argument("--calibration-artifact")
     parser.add_argument("--objectives-artifact")
     parser.add_argument("--plan-artifact")

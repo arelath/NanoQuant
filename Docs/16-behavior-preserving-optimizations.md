@@ -769,6 +769,16 @@ must be remeasured rather than inferred from the speedup.
   optimization path enough to produce substantially worse downstream error. The next full candidate uses
   the legacy-compatible eight-epoch horizon; any future longer schedule must be adaptive and pass boundary
   trajectory gates, not merely improve block 0.
+- **Legacy block-forward batching restored (2026-07-13):** experiment 018 explicitly reports
+  `block_forward_batch_size=8`, matching both tuning batch sizes, while the rewrite parity runner defaulted
+  to 4. This is not a quality-neutral memory knob for BF16 parity. With otherwise identical retained-Fisher
+  inputs, the batch-8 block-0 control reached **1.378490** and improved all seven factorized layers; the
+  batch-4 rerun used byte-identical factorization and LS-fit artifacts but froze at **4.385438**, with
+  `best_epoch=-1` for every layer. Even the initial gate evaluation changed from **0.820060** to **0.820567**:
+  batch-dependent BF16 teacher activations were enough to send the straight-through binary optimization down
+  a different path. The parity runner now defaults to 8, consistent with the legacy log and the configuration
+  reference. Lower forward batches remain available explicitly for constrained devices, but constitute a
+  different quality trajectory and must not be used as legacy-parity evidence.
 - **Batched inference graph retention fixed (2026-07-13):** the first gate replay accumulated every
   source-block autograd graph through `copy_` into its host result, reaching 10.85 GiB allocated before an
   eager-attention allocation failed. `_run_block_batched` is now intrinsically no-grad and has a regression
