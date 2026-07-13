@@ -702,7 +702,14 @@ must be remeasured rather than inferred from the speedup.
   0/1/2/4/8 alternating LS passes. Full block losses were respectively **0.976456**, **0.818065**,
   **0.818384**, **0.818384**, and **0.818384**. Four and eight passes are a numerical plateau, while the
   one-pass result is only 0.039% below the legacy-compatible two-pass result and does not justify changing
-  the parity default. In contrast, a 32-epoch tuning horizon changes the cosine schedule materially: gate
+  the parity default. A source audit also found that legacy performs its final rollback comparison after
+  casting the fitted reconstruction to the export dtype. The rewrite now does the same: its reported
+  before/after objective is measured on the actual exported tensors, and a rare BF16 rounding regression
+  rolls back the fitted scales instead of failing stage validation. The resident algorithm and scale-fit
+  stage versions were advanced so older commits cannot be adopted under the corrected boundary. This does
+  not alter successful fits in the active isolated run, whose persisted stage metrics already validate
+  every accepted export against its pre-fit reconstruction. In contrast, a 32-epoch tuning horizon changes
+  the cosine schedule materially: gate
   loss reaches **0.303956** by epoch 8 and **0.221278** by epoch 32, versus **0.371515** for the separate
   eight-epoch schedule and historical **0.31145**. Promoting 32 epochs through the complete first block
   lowers post-refit loss from **1.378489** to **0.826978** (40.0%) and beats historical **1.1624** by 28.9%.
@@ -755,6 +762,14 @@ Do not reach for these while parity is the gate; each changes floating-point res
   harness;
 - replacing SHA-256 with a faster hash (artifact identity is schema surface);
 - reducing probe iterations, ADMM iterations, epochs, or early-stop thresholds (quality/behavior);
+- removing the rewrite's full-dataset tuning evaluations or best-epoch restore. For `E` epochs the rewrite
+  intentionally performs `E` training passes plus an initial evaluation, `E` epoch evaluations, and a final
+  restored-state evaluation (`2E + 2` dataset passes; 18 at the parity setting of 8 epochs). Contemporary
+  legacy non-factorized and factorized tuning use the accumulated pre-update training loss and do not restore
+  the best epoch, so they normally execute only `E` dataset passes. That structural difference is a credible
+  part of the measured wall-time gap, but deleting the extra passes would change the selected weights and
+  tuning metrics. The micro profile must measure these phases separately; any semantic alignment belongs in
+  an explicitly behavior-changing parity decision, not this optimization list;
 - batching exact causal-evaluation windows: measured batch 8 at 1.092 s versus serial at 4.857 s
   (**4.45x**), but total NLL changed from 49,559.943115 to 49,554.102051 and peak GPU memory rose from
   2.30 GB to 4.63 GB. It is useful only as an explicitly approximate evaluation mode, not for the pinned

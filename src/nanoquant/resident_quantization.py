@@ -110,7 +110,7 @@ from nanoquant.infrastructure.resource_usage import peak_process_memory_bytes
 from nanoquant.infrastructure.safetensors_source import SafetensorsModelSource
 from nanoquant.infrastructure.tensor_store import LocalTensorStore
 
-RESIDENT_ALGORITHM_VERSION = 20
+RESIDENT_ALGORITHM_VERSION = 21
 
 
 @contextmanager

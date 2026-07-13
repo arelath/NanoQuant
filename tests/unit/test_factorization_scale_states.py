@@ -3,6 +3,7 @@ import torch
 from hypothesis import given
 from hypothesis import strategies as st
 
+import nanoquant.domain.scale_fit as scale_fit_module
 from nanoquant.domain.factorization import SCHEDULES, _sign, factorize_admm
 from nanoquant.domain.metrics import weighted_squared_error
 from nanoquant.domain.models import ArtifactRef, AttemptSummary, BitCost
@@ -230,6 +231,38 @@ def test_scale_fit_weight_matches_reported_objective() -> None:
     )
     measured = float(weighted_squared_error(target, result.reconstruction, torch.ones(2), torch.ones(2)))
     assert measured == pytest.approx(result.after_error)
+
+
+def test_scale_fit_rolls_back_export_dtype_regression(monkeypatch: pytest.MonkeyPatch) -> None:
+    export_errors = iter((torch.tensor(1.0), torch.tensor(2.0)))
+    monkeypatch.setattr(
+        scale_fit_module,
+        "_weighted_prediction_error",
+        lambda *_args, **_kwargs: next(export_errors),
+    )
+    target = torch.eye(2, dtype=torch.bfloat16)
+    pre = torch.ones(2, dtype=torch.bfloat16)
+    mid = torch.ones(1, dtype=torch.bfloat16)
+    post = torch.ones(2, dtype=torch.bfloat16)
+
+    result = fit_scales(
+        target,
+        torch.ones(2, 1, dtype=torch.bfloat16),
+        torch.ones(1, 2, dtype=torch.bfloat16),
+        pre,
+        mid,
+        post,
+        torch.ones(2),
+        torch.ones(2),
+    )
+
+    assert result.accepted is False
+    assert result.rollback_reason == "export_weighted_objective_regressed"
+    assert result.before_error == result.after_error == 1.0
+    assert result.reconstruction.dtype is torch.bfloat16
+    assert torch.equal(result.scale_pre, pre)
+    assert torch.equal(result.scale_mid, mid)
+    assert torch.equal(result.scale_post, post)
 
 
 @given(st.lists(st.booleans(), min_size=1, max_size=257))

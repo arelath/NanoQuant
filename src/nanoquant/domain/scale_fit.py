@@ -56,6 +56,25 @@ def _weighted_error(
     return total
 
 
+def _weighted_prediction_error(
+    target: torch.Tensor,
+    prediction: torch.Tensor,
+    input_importance: torch.Tensor,
+    output_importance: torch.Tensor,
+    chunk_rows: int,
+) -> torch.Tensor:
+    total = torch.zeros((), device=target.device, dtype=torch.float32)
+    for start in range(0, target.shape[0], chunk_rows):
+        end = min(start + chunk_rows, target.shape[0])
+        difference = prediction[start:end].float() - target[start:end]
+        total += (
+            difference.square()
+            * output_importance[start:end, None]
+            * input_importance[None, :]
+        ).sum()
+    return total
+
+
 def _fit_post(
     target: torch.Tensor,
     left: torch.Tensor,
@@ -155,11 +174,10 @@ def fit_scales(
     target32 = target.detach().float()
     input_weight = input_importance.detach().float().reshape(-1).clamp_min(epsilon)
     output_weight = output_importance.detach().float().reshape(-1).clamp_min(epsilon)
-    original = reconstruct(left, right, pre, mid, post)
+    original = reconstruct(left, right, pre, mid, post).to(target.dtype)
     before_tensor = _weighted_error(
         target32, left, right, pre, mid, post, input_weight, output_weight, chunk_rows
     )
-    before = float(before_tensor)
     protected = None if protected_columns is None else protected_columns.detach().long().reshape(-1)
     best_error = before_tensor
     best_pre = pre.clone()
@@ -180,33 +198,39 @@ def fit_scales(
             best_mid = mid.clone()
             best_post = post.clone()
     candidate = reconstruct(left, right, best_pre, best_mid, best_post).to(target.dtype)
-    after = float(
-        _weighted_error(
-            target32,
-            left,
-            right,
-            best_pre,
-            best_mid,
-            best_post,
-            input_weight,
-            output_weight,
-            chunk_rows,
+    export_before = float(
+        _weighted_prediction_error(
+            target32, original, input_weight, output_weight, chunk_rows
         )
     )
-    finite = torch.isfinite(candidate).all().item() and math_is_finite(after)
-    if not finite or (rollback_on_regression and after > before):
-        reason = "non_finite_candidate" if not finite else "weighted_objective_regressed"
+    export_after = float(
+        _weighted_prediction_error(
+            target32, candidate, input_weight, output_weight, chunk_rows
+        )
+    )
+    finite = torch.isfinite(candidate).all().item() and math_is_finite(export_after)
+    if not finite or (rollback_on_regression and export_after > export_before):
+        reason = "non_finite_candidate" if not finite else "export_weighted_objective_regressed"
         return MaterializedScaleFitResult(
             scale_pre.detach().clone(),
             scale_mid.detach().clone(),
             scale_post.detach().clone(),
-            original.to(target.dtype),
-            before,
-            before,
+            original,
+            export_before,
+            export_before,
             False,
             reason,
         )
-    return MaterializedScaleFitResult(best_pre, best_mid, best_post, candidate, before, after, True, None)
+    return MaterializedScaleFitResult(
+        best_pre,
+        best_mid,
+        best_post,
+        candidate,
+        export_before,
+        export_after,
+        True,
+        None,
+    )
 
 
 def math_is_finite(value: float) -> bool:

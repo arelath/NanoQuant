@@ -285,7 +285,7 @@ class MaterializedScaleFitStageRequest:
 
 class ScaleFitStage:
     name = "fit-scales"
-    version = "1"
+    version = "2"
 
     def __init__(self, config: ScaleFitConfig | None = None, *, device: str = "cpu") -> None:
         self.config = config or ScaleFitConfig()
@@ -314,7 +314,7 @@ class ScaleFitStage:
                 if item.protected_columns is not None:
                     with context.tensor_store.read(item.protected_columns, self.device) as value:
                         protected = value.clone()
-                original_prediction = reconstruct(left, right, pre, mid, post)
+                original_prediction = reconstruct(left, right, pre, mid, post).to(target.dtype)
                 fitted = fit_scales(
                     target,
                     left,
