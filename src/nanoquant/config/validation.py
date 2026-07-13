@@ -58,6 +58,13 @@ def validate(config: RunConfig, phase: ValidationPhase = ValidationPhase.PRE_RES
         "factorization.admm.outer_iterations",
         "must be positive",
     )
+    require(config.profiling.cuda_sample_every > 0, "CFG015", "profiling.cuda_sample_every", "must be positive")
+    require(
+        config.profiling.raw_samples_per_phase > 0,
+        "CFG016",
+        "profiling.raw_samples_per_phase",
+        "must be positive",
+    )
     if config.calibration.objective.kind is ObjectiveKind.BLOCK_DIAGONAL:
         require(
             bool(config.calibration.objective.block_size and config.calibration.objective.block_size > 0),

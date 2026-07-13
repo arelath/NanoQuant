@@ -294,7 +294,7 @@ class ProfilingConfig:
     raw_samples_per_phase: int = 64          # reservoir size for percentile estimates
     trace_blocks: tuple[int, ...] = ()       # torch.profiler / NVTX capture window
     trace_layers: tuple[str, ...] = ()
-    emit_span_events: bool = True            # mirror macro boundaries to events.jsonl
+    emit_span_events: bool = False           # opt-in mirror; durable flushes exceed the tiny-run overhead budget
 ```
 
 - `ResidentQuantizationRequest` (and the calibration/distillation/replay requests) gain
@@ -447,6 +447,18 @@ Integration:
 - **P3 — deep dive and guard.** NVTX mirror, windowed `torch.profiler`, Nsight/py-spy recipes,
   `compare_profiles`, evidence layout, performance-lane wiring. Exit: optimization PRs are provable and
   regression-guarded end to end.
+
+### Implementation status (2026-07-13)
+
+The P0 aggregate framework, canonical configuration, stable diagnostics, resident macro instrumentation,
+per-process resume files, and Gemma parity-launcher controls are implemented. A CPU tiny-Gemma
+interrupt/resume integration run records 45 phase paths, **94.12%** leaf-phase wall coverage, and **0.23%**
+recorder time with span-event mirroring disabled. The same test compares a profiling-off control with the
+profiled resume and preserves frozen numerical results; profiling is excluded from resident commit identity.
+Span-event mirroring measured roughly 2.9% recorder time on the same short workload and is therefore opt-in.
+Resident calibration, replay, global distillation, the stage executor, and the tiny-pipeline composition roots
+still need equivalent P0 wiring before the framework-wide rollout item is complete. Micro/CUDA/trace levels
+fail explicitly until P2/P3 rather than emitting incomplete data under those labels.
 
 P0 and P2 are pure instrumentation and can land before parity sign-off (they are parity-neutral by C1 and
 cheap to review); P1 blocks on parity per the agreed sequencing, because baselines captured before parity

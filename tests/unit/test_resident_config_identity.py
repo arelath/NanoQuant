@@ -5,6 +5,7 @@ import pytest
 import torch
 
 import nanoquant.resident_quantization as resident
+from nanoquant.config.schema import ProfilingConfig, ProfilingLevel
 from nanoquant.resident_quantization import ResidentQuantizationRequest
 
 
@@ -51,6 +52,19 @@ def test_legacy_tuning_seed_mode_invalidates_commit_identity() -> None:
 
     assert resident._resident_config_hash(request) != resident._resident_config_hash(
         replace(request, legacy_tuning_seed_reset=True)
+    )
+
+
+def test_profiling_does_not_invalidate_commit_identity() -> None:
+    request = ResidentQuantizationRequest(
+        Path("snapshot"), Path("output"), "fixture/model", "revision", ((1, 2, 3),), device="cpu"
+    )
+
+    assert resident._resident_config_hash(request) == resident._resident_config_hash(
+        replace(
+            request,
+            profiling=ProfilingConfig(level=ProfilingLevel.MICRO, cuda_timing=True),
+        )
     )
 
 

@@ -57,5 +57,23 @@ for _definition in (
         "Select a registered adapter/checkpoint variant.",
         "Docs/02-architecture.md",
     ),
+    DiagnosticDefinition(
+        "PERF001",
+        "Insufficient profile coverage",
+        "Instrument the largest unattributed parent phase until coverage reaches 90%.",
+        "Docs/15-performance-profiling.md",
+    ),
+    DiagnosticDefinition(
+        "PERF002",
+        "Profiling overhead exceeded budget",
+        "Disable span-event mirroring or reduce profiling granularity.",
+        "Docs/15-performance-profiling.md",
+    ),
+    DiagnosticDefinition(
+        "PERF003",
+        "CUDA timing records were unresolved",
+        "Inspect the device state and increase the deferred timing buffer.",
+        "Docs/15-performance-profiling.md",
+    ),
 ):
     register(_definition)

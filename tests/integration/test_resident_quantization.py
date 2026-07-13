@@ -9,7 +9,7 @@ import torch
 from transformers.models.gemma3.configuration_gemma3 import Gemma3TextConfig
 from transformers.models.gemma3.modeling_gemma3 import Gemma3ForCausalLM
 
-from nanoquant.config.schema import ADMMConfig
+from nanoquant.config.schema import ADMMConfig, ProfilingConfig, ProfilingLevel
 from nanoquant.infrastructure.artifacts import ArtifactCorruptionError, LocalArtifactStore
 from nanoquant.infrastructure.commits import load_block_activations
 from nanoquant.infrastructure.frozen_model_loader import load_frozen_run
@@ -47,6 +47,7 @@ def test_resident_quantization_commits_complete_transformers_model(tmp_path: Pat
             target_bpw=8.0,
             rank_multiple=1,
             admm=ADMMConfig(outer_iterations=2, inner_iterations=1),
+            profiling=ProfilingConfig(level=ProfilingLevel.OFF),
         )
     )
 
@@ -116,6 +117,15 @@ def test_resident_quantization_commits_complete_transformers_model(tmp_path: Pat
     with pytest.raises(InterruptedError, match="after 3"):
         run_resident_quantization(interrupted_request)
     resumed = run_resident_quantization(replace(interrupted_request, interrupt_after_layer_commits=None))
+
+    assert (resumed_output / "profile.json").is_file()
+    assert (resumed_output / "profile.2.json").is_file()
+    resumed_profile = json.loads((resumed_output / "profile.2.json").read_text(encoding="utf-8"))
+    assert resumed_profile["coverage"]["fraction"] >= 0.90
+    assert any(
+        phase["path"].endswith("/factorize/attempt")
+        for phase in resumed_profile["phases"]
+    )
 
     assert resumed.reused_commit_count == 3
     assert resumed.plan == result.plan

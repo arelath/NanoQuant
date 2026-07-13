@@ -76,6 +76,13 @@ class EvaluationTier(StringEnum):
     FULL = "full"
 
 
+class ProfilingLevel(StringEnum):
+    OFF = "off"
+    MACRO = "macro"
+    MICRO = "micro"
+    TRACE = "trace"
+
+
 @dataclass(frozen=True, slots=True)
 class IntentConfig:
     experiment_number: int | None = None
@@ -404,6 +411,18 @@ class ObservabilityConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class ProfilingConfig:
+    level: ProfilingLevel = ProfilingLevel.MACRO
+    cuda_timing: bool = False
+    cuda_sample_every: int = 16
+    memory_counters: bool = False
+    raw_samples_per_phase: int = 64
+    trace_blocks: tuple[int, ...] = ()
+    trace_layers: tuple[str, ...] = ()
+    emit_span_events: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class OutputConfig:
     run_root: str = "runs"
     artifact_root: str = ".nanoquant/artifacts"
@@ -429,4 +448,5 @@ class RunConfig:
     packing: PackingConfig = field(default_factory=PackingConfig)
     evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
     observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
+    profiling: ProfilingConfig = field(default_factory=ProfilingConfig)
     output: OutputConfig = field(default_factory=OutputConfig)

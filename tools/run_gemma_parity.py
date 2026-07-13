@@ -14,6 +14,8 @@ from nanoquant.config.schema import (
     DType,
     OutlierConfig,
     OutlierSelector,
+    ProfilingConfig,
+    ProfilingLevel,
     ResidualProbeConfig,
     ScaleFitConfig,
 )
@@ -73,6 +75,8 @@ def main() -> None:
     parser.add_argument("--factor-only", action="store_true")
     parser.add_argument("--factor-only-count", type=int, default=1)
     parser.add_argument("--skip-source-hash-verification", action="store_true")
+    parser.add_argument("--profile", choices=(ProfilingLevel.OFF.value, ProfilingLevel.MACRO.value), default="macro")
+    parser.add_argument("--profile-span-events", action="store_true")
     args = parser.parse_args()
     nonfactorized_schedule = tuple(
         int(value.strip()) for value in args.nonfactorized_tuning_schedule.split(",") if value.strip()
@@ -155,6 +159,10 @@ def main() -> None:
             restore_completed_blocks=not args.defer_model_restore,
             evaluate_inline_quality=not args.defer_model_restore,
             defer_layer_loss_snapshots=args.defer_layer_loss_snapshots,
+            profiling=ProfilingConfig(
+                level=ProfilingLevel(args.profile),
+                emit_span_events=args.profile_span_events,
+            ),
         )
     if args.factor_only:
         if args.factor_only_count <= 0:

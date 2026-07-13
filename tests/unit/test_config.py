@@ -11,6 +11,8 @@ from nanoquant.config.schema import (
     DType,
     ModelConfig,
     ObjectiveKind,
+    ProfilingConfig,
+    ProfilingLevel,
     RunConfig,
 )
 from nanoquant.config.validation import ValidationPhase, validate
@@ -22,12 +24,15 @@ def test_round_trip_decodes_nested_enums_tuples_and_optionals() -> None:
         "dataset": {"sources": [{"name": "fixture", "revision": None}], "shuffle": False},
         "runtime": {"activations": {"kind": "mmap"}},
         "calibration": {"objective": {"kind": "low_rank_diagonal", "low_rank": 4}},
+        "profiling": {"level": "micro", "trace_blocks": [3, 7]},
     }
     config = from_dict(RunConfig, raw)
     assert config.model.load_dtype is DType.FLOAT16
     assert config.dataset.sources == (DatasetSourceConfig(name="fixture"),)
     assert config.runtime.activations.kind is ActivationStoreKind.MMAP
     assert config.calibration.objective.kind is ObjectiveKind.LOW_RANK_DIAGONAL
+    assert config.profiling.level is ProfilingLevel.MICRO
+    assert config.profiling.trace_blocks == (3, 7)
     assert from_dict(RunConfig, to_dict(config)) == config
 
 
@@ -58,6 +63,11 @@ def test_validation_phases_have_stable_codes() -> None:
     config = RunConfig(ModelConfig("x"))
     assert validate(config) == ()
     assert {issue.code for issue in validate(config, ValidationPhase.RESOLVED)} == {"RES001", "RES002"}
+    invalid = RunConfig(
+        ModelConfig("x"),
+        profiling=ProfilingConfig(cuda_sample_every=0, raw_samples_per_phase=0),
+    )
+    assert {issue.code for issue in validate(invalid)} == {"CFG015", "CFG016"}
 
 
 def test_legacy_migration_is_total_and_rejects_uninventoried_fields() -> None:

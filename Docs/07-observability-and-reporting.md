@@ -57,6 +57,11 @@ Timed spans include:
 
 Each span reports wall duration. GPU spans optionally report device-event duration, but GPU timing must not introduce hot-loop synchronization in ordinary runs.
 
+The aggregate implementation and its versioned `profile.json`/`profile.md` artifacts are defined in
+[Performance Profiling and Micro-Profiling](15-performance-profiling.md). Durable phase-event mirroring is
+opt-in because measured JSONL flush overhead exceeds the ordinary macro-profiling budget on short runs;
+the existing decision, stage, warning, and commit events remain first-class audit evidence.
+
 ## 4. Metric namespaces
 
 Metrics use stable names and explicit units:
