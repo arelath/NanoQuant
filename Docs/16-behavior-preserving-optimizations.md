@@ -497,6 +497,14 @@ alternating benchmark, median time for 512 solves improved from 381.324 ms to 36
   and passed the exact CPU recurrence suite. Initial CUDA samples appeared faster, but they coincided with
   a separately launched full Gemma replacement-KD run and are therefore contaminated. The prototype was
   removed rather than accepting untrustworthy timing; repeat it only after that process releases the GPU.
+- **Active-run regression to profile (2026-07-13):** the uncommitted replacement-KD path using the new
+  parity optimizer committed 256, 512, and 768 steps at 23:59:38, 00:09:46, and 00:19:48. Its two complete
+  epoch intervals are therefore **608 s and 602 s**. The prior run's matching 256→512 interval was 292 s,
+  and its median interval after the first checkpoint was about 174 s. Read-only snapshots during the new
+  run showed only 29–34% GPU utilization, 21–28% memory-controller utilization, and about 5.2 GiB VRAM,
+  so it is neither compute-saturated nor VRAM-bound. Do not accept the replacement path as a performance
+  improvement on current evidence. Its optimizer step and factorized forward/backward need isolated
+  profiling after the correctness run finishes; the concurrent implementation was left untouched.
 - `JsonlEventSink._read_last_sequence` parses the whole event log at construction — only matters for
   resumed runs with large logs; fine today, worth a tail-scan if event volume grows.
 - `_artifact_bytes` walks the whole artifact tree once at report time — keep an eye on it as artifact
