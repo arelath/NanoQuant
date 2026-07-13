@@ -469,7 +469,10 @@ and best-state cloning, with token/step/clone/transfer counters and exact profil
 The resident ADMM path now adds opt-in micro phases for setup, both linear solves, SVID projections, dual updates,
 convergence checks, export balancing/SVID, reconstruction, and result materialization, with iteration/check/rank/
 weight-size counters and an exact profiled/control tensor comparison. Macro profiles continue to see only the
-bounded attempt-level `admm` span.
+bounded attempt-level `admm` span. The default `NULL_RECORDER` takes a separate context-free hot-loop branch:
+an initial 100-iteration CPU slice showed a roughly 7--15% regression when no-op contexts remained inside every
+iteration, while the corrected branch was within benchmark noise of the pre-instrumentation implementation and
+retained bit-exact output.
 Micro spans suppress durable span events and use the documented 5% recorder-time warning ceiling; macro
 profiling retains its stricter 0.5% ceiling and optional span-event mirror.
 Deferred CUDA timing is now implemented for macro and micro profiles: event pairs are sampled and bounded per

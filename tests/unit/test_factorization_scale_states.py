@@ -60,7 +60,10 @@ def test_admm_is_deterministic_uses_generator_and_does_not_mutate_inputs() -> No
     assert [point.iteration for point in first.trace] == [1, 2, 4]
 
 
-def test_admm_micro_profiling_preserves_result_and_records_hot_loop_phases() -> None:
+@pytest.mark.parametrize("early_stop_tolerance", [None, 1e9])
+def test_admm_micro_profiling_preserves_result_and_records_hot_loop_phases(
+    early_stop_tolerance: float | None,
+) -> None:
     weight = torch.tensor([[1.0, -2.0, 0.5], [-1.0, 0.25, 2.0], [0.5, 1.0, -1.0]])
     input_importance = torch.tensor([1.0, 2.0, 0.5])
     output_importance = torch.tensor([0.75, 1.25, 2.0])
@@ -73,6 +76,7 @@ def test_admm_micro_profiling_preserves_result_and_records_hot_loop_phases() -> 
         outer_iterations=4,
         inner_iterations=2,
         convergence_check_interval=2,
+        early_stop_tolerance=early_stop_tolerance,
     )
     profiler = Profiler(
         ProfilingConfig(level=ProfilingLevel.MICRO, emit_span_events=False),
@@ -87,6 +91,7 @@ def test_admm_micro_profiling_preserves_result_and_records_hot_loop_phases() -> 
         outer_iterations=4,
         inner_iterations=2,
         convergence_check_interval=2,
+        early_stop_tolerance=early_stop_tolerance,
         recorder=profiler,
     )
 
@@ -120,8 +125,8 @@ def test_admm_micro_profiling_preserves_result_and_records_hot_loop_phases() -> 
         "result_materialization",
     } <= phase_paths
     counters = {str(counter["name"]): counter for counter in payload["counters"]}  # type: ignore[index]
-    assert counters["admm.iterations"]["total"] == 4
-    assert counters["admm.convergence_checks"]["total"] == 3
+    assert counters["admm.iterations"]["total"] == control.iterations_completed
+    assert counters["admm.convergence_checks"]["total"] == len(control.trace)
     assert counters["admm.weight_elements"]["total"] == weight.numel()
 
 

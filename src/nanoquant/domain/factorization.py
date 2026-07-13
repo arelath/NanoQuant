@@ -166,57 +166,105 @@ def factorize_admm(
     trace: list[ADMMTracePoint] = []
     stopped = False
     completed = 0
-    for iteration in range(outer_iterations):
-        with recorder.phase("iteration"):
+    # The null recorder is the production/default path. Keep the hot loop free
+    # of context-manager calls: even allocation-free no-op phases measurably
+    # slow the many short ADMM operations. The profiled branch intentionally
+    # mirrors the same operation order and is covered by exact tensor parity.
+    if recorder is NULL_RECORDER:
+        for iteration in range(outer_iterations):
             rho = schedule(iteration / max(1, outer_iterations))
-            with recorder.phase("solve_left"):
-                right_norm = right_projected.norm(dim=1).clamp_min(epsilon)
-                left = _solve(
-                    right_projected.mT / right_norm,
-                    normalized.mT,
-                    left_projected.mT,
-                    left_dual.mT,
-                    rho,
-                    regularization,
-                    epsilon,
-                ).mT
-            with recorder.phase("solve_right"):
-                left_norm = left_projected.norm(dim=0).clamp_min(epsilon)
-                right = _solve(
-                    left_projected / left_norm,
-                    normalized,
-                    right_projected,
-                    right_dual,
-                    rho,
-                    regularization,
-                    epsilon,
-                )
+            right_norm = right_projected.norm(dim=1).clamp_min(epsilon)
+            left = _solve(
+                right_projected.mT / right_norm,
+                normalized.mT,
+                left_projected.mT,
+                left_dual.mT,
+                rho,
+                regularization,
+                epsilon,
+            ).mT
+            left_norm = left_projected.norm(dim=0).clamp_min(epsilon)
+            right = _solve(
+                left_projected / left_norm,
+                normalized,
+                right_projected,
+                right_dual,
+                rho,
+                regularization,
+                epsilon,
+            )
             previous_left = left_projected
             previous_right = right_projected
-            with recorder.phase("projection"):
-                left_projected = _rank_one_sign_projection(left + left_dual, inner_iterations, generator, epsilon)
-                right_projected = _rank_one_sign_projection(right + right_dual, inner_iterations, generator, epsilon)
-            with recorder.phase("dual_update"):
-                left_dual.add_(left - left_projected)
-                right_dual.add_(right - right_projected)
+            left_projected = _rank_one_sign_projection(left + left_dual, inner_iterations, generator, epsilon)
+            right_projected = _rank_one_sign_projection(right + right_dual, inner_iterations, generator, epsilon)
+            left_dual.add_(left - left_projected)
+            right_dual.add_(right - right_projected)
             completed = iteration + 1
-            recorder.add("admm.iterations", 1)
             if iteration == 0 or completed % convergence_check_interval == 0 or completed == outer_iterations:
-                with recorder.phase("convergence"):
-                    primal = float((left - left_projected).norm() + (right - right_projected).norm())
-                    dual = float(
-                        rho
-                        * ((left_projected - previous_left).norm() + (right_projected - previous_right).norm())
+                primal = float((left - left_projected).norm() + (right - right_projected).norm())
+                dual = float(
+                    rho * ((left_projected - previous_left).norm() + (right_projected - previous_right).norm())
+                )
+                trace.append(ADMMTracePoint(completed, rho, primal, dual))
+                if early_stop_tolerance is not None and primal <= early_stop_tolerance and dual <= early_stop_tolerance:
+                    stopped = True
+                    break
+    else:
+        for iteration in range(outer_iterations):
+            with recorder.phase("iteration"):
+                rho = schedule(iteration / max(1, outer_iterations))
+                with recorder.phase("solve_left"):
+                    right_norm = right_projected.norm(dim=1).clamp_min(epsilon)
+                    left = _solve(
+                        right_projected.mT / right_norm,
+                        normalized.mT,
+                        left_projected.mT,
+                        left_dual.mT,
+                        rho,
+                        regularization,
+                        epsilon,
+                    ).mT
+                with recorder.phase("solve_right"):
+                    left_norm = left_projected.norm(dim=0).clamp_min(epsilon)
+                    right = _solve(
+                        left_projected / left_norm,
+                        normalized,
+                        right_projected,
+                        right_dual,
+                        rho,
+                        regularization,
+                        epsilon,
                     )
-                    trace.append(ADMMTracePoint(completed, rho, primal, dual))
-                    recorder.add("admm.convergence_checks", 1)
-                    if (
-                        early_stop_tolerance is not None
-                        and primal <= early_stop_tolerance
-                        and dual <= early_stop_tolerance
-                    ):
-                        stopped = True
-                        break
+                previous_left = left_projected
+                previous_right = right_projected
+                with recorder.phase("projection"):
+                    left_projected = _rank_one_sign_projection(
+                        left + left_dual, inner_iterations, generator, epsilon
+                    )
+                    right_projected = _rank_one_sign_projection(
+                        right + right_dual, inner_iterations, generator, epsilon
+                    )
+                with recorder.phase("dual_update"):
+                    left_dual.add_(left - left_projected)
+                    right_dual.add_(right - right_projected)
+                completed = iteration + 1
+                recorder.add("admm.iterations", 1)
+                if iteration == 0 or completed % convergence_check_interval == 0 or completed == outer_iterations:
+                    with recorder.phase("convergence"):
+                        primal = float((left - left_projected).norm() + (right - right_projected).norm())
+                        dual = float(
+                            rho
+                            * ((left_projected - previous_left).norm() + (right_projected - previous_right).norm())
+                        )
+                        trace.append(ADMMTracePoint(completed, rho, primal, dual))
+                        recorder.add("admm.convergence_checks", 1)
+                        if (
+                            early_stop_tolerance is not None
+                            and primal <= early_stop_tolerance
+                            and dual <= early_stop_tolerance
+                        ):
+                            stopped = True
+                            break
     with recorder.phase("export_balance"):
         left_unbalanced = left_projected / output_scale
         right_unbalanced = right_projected / input_scale
