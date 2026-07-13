@@ -538,6 +538,18 @@ must be remeasured rather than inferred from the speedup.
   (3.37%)**, and is **6.19% worse** than the 432.9306 pre-KD result. The artifact remains as evidence but
   is not accepted as a parity improvement. Profiling then found the BF16 and zero-weight-decay mismatches
   described above; the corrected recurrence requires a fresh quality run.
+- **Thermally throttled block timing rejected (2026-07-13):** a full-protocol, batch-8 block-0 canary
+  reproduced every retained layer loss and the final 1.37940836 loss exactly, but took **654.99 s** versus
+  **546.75 s** for the matching prior artifact (19.8% slower). During the run NVIDIA reported software
+  thermal slowdown at 86 C, with the SM clock falling as low as 765 MHz. Peak allocated CUDA memory was
+  6,194,949,632 versus 6,120,173,056 bytes. The exact numerical replay accepts the code path, but the wall
+  result is excluded from performance comparisons until it is repeated without thermal throttling.
+- **Cross-environment CUDA lease split fixed (2026-07-13):** two workers used `%TEMP%` roots `Temp` and
+  `Temp\\1`, created independent `cuda:0` leases, and together drove WDDM usage to 11–12 GiB; the corrected
+  KD run was terminated during epoch 2 but retained its epoch-1 checkpoint. Device leases now live under
+  the stable per-user `%LOCALAPPDATA%\\NanoQuant\\leases` root on Windows (and a stable per-UID `/tmp`
+  root on POSIX). A subprocess regression test deliberately changes `TEMP`, `TMP`, and `TMPDIR` and proves
+  the second owner is rejected.
 - `JsonlEventSink._read_last_sequence` parses the whole event log at construction — only matters for
   resumed runs with large logs; fine today, worth a tail-scan if event volume grows.
 - `_artifact_bytes` walks the whole artifact tree once at report time — keep an eye on it as artifact
