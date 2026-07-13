@@ -464,8 +464,11 @@ aggregate deltas, and the matching reservoir median; aggregate-only movement wit
 reported as noise, and environment-mismatched regressions are informational rather than actionable.
 The tiny-pipeline composition root now emits the same P0 macro profile as the resident run. A direct CPU run
 records **92.53%** leaf-phase wall coverage with **0.023%** recorder time and exercises the generic stage
-execute/validate/event paths. The standalone resident-calibration composition root still needs equivalent P0
-wiring before the framework-wide rollout item is complete. The resident tuning path
+execute/validate/event paths. Standalone resident calibration now profiles source/model loading, reference and
+prefix execution, per-block load/calibrate/propagate work, suffix validation, objective persistence, and reporting.
+Its one-block Gemma fixture records **98.78%** coverage with **0.12%** recorder time; a profiling-off control
+preserves calibration/objective artifact identities and exact replay metrics. This completes the P0 composition-root
+wiring listed above. The resident tuning path
 supports opt-in micro phases for staging, forward, loss, backward, optimizer steps, evaluation, synchronization,
 and best-state cloning, with token/step/clone/transfer counters and exact profiled/control parity coverage.
 The resident ADMM path now adds opt-in micro phases for setup, both linear solves, SVID projections, dual updates,

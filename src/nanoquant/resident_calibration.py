@@ -17,15 +17,18 @@ from nanoquant.application.calibration import MaterializedLayerCalibration, cali
 from nanoquant.application.calibration_artifacts import build_objectives, persist_calibration
 from nanoquant.application.prefix_capture import capture_prefix_invocations
 from nanoquant.config.codec import to_dict
-from nanoquant.config.schema import ObjectiveConfig
+from nanoquant.config.schema import ObjectiveConfig, ProfilingConfig, ProfilingLevel
 from nanoquant.domain.models import (
     ArtifactRef,
     DatasetIdentity,
     LayerId,
     ModelInventory,
 )
+from nanoquant.domain.profiling import NULL_RECORDER, PhaseRecorder
 from nanoquant.infrastructure.artifacts import LocalArtifactStore
+from nanoquant.infrastructure.device_lease import acquire_device_lease
 from nanoquant.infrastructure.model_adapters import adapter_for_config
+from nanoquant.infrastructure.profiling import profiled_run
 from nanoquant.infrastructure.safetensors_source import SafetensorsModelSource
 from nanoquant.infrastructure.tensor_store import LocalTensorStore
 
@@ -40,6 +43,7 @@ class ResidentCalibrationRequest:
     device: str = "cuda"
     verify_hashes: bool = True
     shrinkage: float = 0.0
+    profiling: ProfilingConfig = ProfilingConfig()
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,7 +84,10 @@ def _checkpoint_dtype(config: dict[str, object]) -> torch.dtype:
     }.get(value, torch.float32)
 
 
-def run_resident_calibration(request: ResidentCalibrationRequest) -> ResidentCalibrationResult:
+def _run_resident_calibration(
+    request: ResidentCalibrationRequest,
+    recorder: PhaseRecorder,
+) -> ResidentCalibrationResult:
     """Calibrate every quantizable layer and validate adapter replay against the full model."""
     started = time.perf_counter()
     if not request.token_ids or any(not row for row in request.token_ids):
@@ -90,42 +97,47 @@ def run_resident_calibration(request: ResidentCalibrationRequest) -> ResidentCal
     if request.device.startswith("cuda") and not torch.cuda.is_available():
         raise RuntimeError("CUDA resident calibration requested without CUDA")
 
-    artifacts = LocalArtifactStore(request.output / "artifacts")
+    micro_recorder = recorder if request.profiling.level is ProfilingLevel.MICRO else NULL_RECORDER
+    artifacts = LocalArtifactStore(request.output / "artifacts", recorder=micro_recorder)
     tensors = LocalTensorStore(artifacts)
-    source = SafetensorsModelSource(
-        request.snapshot,
-        source=request.source,
-        revision=request.revision,
-        verify_hashes=request.verify_hashes,
-    )
-    checkpoint = source.inventory()
-    adapter = adapter_for_config(checkpoint.config)
-    inventory = adapter.model_inventory(source)
+    with recorder.phase("source"):
+        source = SafetensorsModelSource(
+            request.snapshot,
+            source=request.source,
+            revision=request.revision,
+            verify_hashes=request.verify_hashes,
+        )
+        checkpoint = source.inventory()
+        adapter = adapter_for_config(checkpoint.config)
+        inventory = adapter.model_inventory(source)
     tokens = torch.tensor(request.token_ids, dtype=torch.long, device=request.device)
     if request.device.startswith("cuda"):
         torch.cuda.reset_peak_memory_stats(request.device)
 
-    model = cast(
-        nn.Module,
-        AutoModelForCausalLM.from_pretrained(
-            request.snapshot,
-            local_files_only=True,
-            torch_dtype=_checkpoint_dtype(checkpoint.config),
-            attn_implementation=adapter.attention_implementation,
-        ),
-    ).to(request.device)
-    model.eval()
-    decoder_layers = _layers(model)
-    if len(decoder_layers) != len(inventory.blocks):
-        raise ValueError("adapter inventory and loaded model disagree on decoder block count")
+    with recorder.phase("model_load"):
+        model = cast(
+            nn.Module,
+            AutoModelForCausalLM.from_pretrained(
+                request.snapshot,
+                local_files_only=True,
+                torch_dtype=_checkpoint_dtype(checkpoint.config),
+                attn_implementation=adapter.attention_implementation,
+            ),
+        ).to(request.device)
+        model.eval()
+        decoder_layers = _layers(model)
+        if len(decoder_layers) != len(inventory.blocks):
+            raise ValueError("adapter inventory and loaded model disagree on decoder block count")
 
-    with torch.no_grad():
-        reference_output = cast(Any, model)(input_ids=tokens, use_cache=False)
-        reference_logits = cast(torch.Tensor, reference_output.logits).detach()
-    capture = capture_prefix_invocations(
-        decoder_layers[0],
-        (lambda: cast(Any, model)(input_ids=tokens, use_cache=False),),
-    )[0]
+    with recorder.phase("reference"):
+        with torch.no_grad():
+            reference_output = cast(Any, model)(input_ids=tokens, use_cache=False)
+            reference_logits = cast(torch.Tensor, reference_output.logits).detach()
+    with recorder.phase("prefix_capture"):
+        capture = capture_prefix_invocations(
+            decoder_layers[0],
+            (lambda: cast(Any, model)(input_ids=tokens, use_cache=False),),
+        )[0]
     hidden = capture.positional[0]
     if not isinstance(hidden, torch.Tensor):
         raise TypeError("captured first-block hidden state is not a tensor")
@@ -134,31 +146,39 @@ def run_resident_calibration(request: ResidentCalibrationRequest) -> ResidentCal
 
     for block_inventory in inventory.blocks:
         block_id = block_inventory.block
-        block = adapter.load_block(source, block_id, request.device)
-        block.eval()
-        layer_paths = tuple(layer.path for layer in adapter.quantizable_layers(block, block_id))
+        with recorder.phase("block", block=block_id.index):
+            with recorder.phase("load"):
+                block = adapter.load_block(source, block_id, request.device)
+                block.eval()
+                layer_paths = tuple(layer.path for layer in adapter.quantizable_layers(block, block_id))
 
-        def runner(module: nn.Module, value: torch.Tensor) -> torch.Tensor:
-            return adapter.run_block(module, value, **metadata)
+            def runner(module: nn.Module, value: torch.Tensor) -> torch.Tensor:
+                return adapter.run_block(module, value, **metadata)
 
-        stats = calibrate_block(
-            block,
-            (hidden,),
-            layer_paths,
-            runner,
-            method="forward_only",
-            shrinkage=request.shrinkage,
-        )
-        materialized.extend((LayerId(block_id, item.path), item) for item in stats)
+            with recorder.phase("calibrate"):
+                stats = calibrate_block(
+                    block,
+                    (hidden,),
+                    layer_paths,
+                    runner,
+                    method="forward_only",
+                    shrinkage=request.shrinkage,
+                    recorder=micro_recorder,
+                )
+            materialized.extend((LayerId(block_id, item.path), item) for item in stats)
+            recorder.add("calibration.layers", len(stats))
+            with recorder.phase("propagate"):
+                with torch.no_grad():
+                    hidden = runner(block, hidden).detach()
+            del block
+            recorder.add("calibration.blocks", 1)
+
+    with recorder.phase("suffix"):
         with torch.no_grad():
-            hidden = runner(block, hidden).detach()
-        del block
-
-    with torch.no_grad():
-        replay_logits = adapter.run_suffix(model, hidden).detach()
-    difference = (reference_logits.float() - replay_logits.float()).abs()
-    maximum_difference = float(difference.max())
-    logit_mse = float(difference.square().mean())
+            replay_logits = adapter.run_suffix(model, hidden).detach()
+        difference = (reference_logits.float() - replay_logits.float()).abs()
+        maximum_difference = float(difference.max())
+        logit_mse = float(difference.square().mean())
     total_tokens = tokens.numel()
     dataset = DatasetIdentity(
         _token_fingerprint(tokens),
@@ -167,17 +187,20 @@ def run_resident_calibration(request: ResidentCalibrationRequest) -> ResidentCal
         checkpoint.tokenizer_hash,
         "raw-token-ids-v1",
     )
-    calibration = persist_calibration(
-        tuple(materialized),
-        inventory.model,
-        dataset,
-        "forward_only",
-        "float32",
-        artifacts,
-        tensors,
-        total_tokens=total_tokens,
-    )
-    objectives = build_objectives(calibration, ObjectiveConfig(), artifacts)
+    recorder.add("calibration.tokens", total_tokens)
+    with recorder.phase("persist_calibration"):
+        calibration = persist_calibration(
+            tuple(materialized),
+            inventory.model,
+            dataset,
+            "forward_only",
+            "float32",
+            artifacts,
+            tensors,
+            total_tokens=total_tokens,
+        )
+    with recorder.phase("build_objectives"):
+        objectives = build_objectives(calibration, ObjectiveConfig(), artifacts)
     peak_device_bytes = int(torch.cuda.max_memory_allocated(request.device)) if request.device.startswith("cuda") else 0
     elapsed = time.perf_counter() - started
     report_payload = {
@@ -195,9 +218,12 @@ def run_resident_calibration(request: ResidentCalibrationRequest) -> ResidentCal
         "peak_device_bytes": peak_device_bytes,
         "elapsed_seconds": elapsed,
     }
-    with artifacts.begin_write("resident-calibration-report") as writer:
-        (writer.path / "report.json").write_text(json.dumps(report_payload, sort_keys=True, indent=2), encoding="utf-8")
-        descriptor = writer.commit()
+    with recorder.phase("report"):
+        with artifacts.begin_write("resident-calibration-report") as writer:
+            (writer.path / "report.json").write_text(
+                json.dumps(report_payload, sort_keys=True, indent=2), encoding="utf-8"
+            )
+            descriptor = writer.commit()
     report = ArtifactRef("resident-calibration-report", descriptor.artifact_id, descriptor.schema_version)
     return ResidentCalibrationResult(
         inventory,
@@ -211,3 +237,20 @@ def run_resident_calibration(request: ResidentCalibrationRequest) -> ResidentCal
         peak_device_bytes,
         elapsed,
     )
+
+
+def run_resident_calibration(request: ResidentCalibrationRequest) -> ResidentCalibrationResult:
+    def execute() -> ResidentCalibrationResult:
+        with profiled_run(
+            request.profiling,
+            request.output,
+            None,
+            run_id="resident-calibration",
+        ) as recorder:
+            with recorder.phase("run"):
+                return _run_resident_calibration(request, recorder)
+
+    if request.device.startswith("cuda"):
+        with acquire_device_lease(request.device):
+            return execute()
+    return execute()
