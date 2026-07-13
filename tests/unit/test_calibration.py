@@ -1,3 +1,4 @@
+from copy import deepcopy
 from types import SimpleNamespace
 
 import pytest
@@ -13,7 +14,9 @@ from nanoquant.application.calibration import (
     causal_language_model_loss,
     materialize_causal_online_state,
 )
+from nanoquant.config.schema import ProfilingConfig, ProfilingLevel
 from nanoquant.domain.calibration_math import activation_square_mean, robust_tau, shrink_importance
+from nanoquant.infrastructure.profiling import Profiler
 
 
 class CalibrationBlock(nn.Module):
@@ -236,3 +239,82 @@ def test_online_causal_calibration_rejects_incompatible_numerical_state() -> Non
             (("hidden", model.hidden),),
             initial_state=incompatible,
         )
+
+
+def test_causal_calibration_micro_profile_preserves_results_and_records_accumulation() -> None:
+    control_model = TinyCausalModel()
+    profiled_model = deepcopy(control_model)
+    batches = (torch.tensor([[0, 1, 2, 3]]), torch.tensor([[3, 2, 1, 0]]))
+    control = calibrate_causal_model(
+        control_model,
+        batches,
+        (("hidden", control_model.hidden),),
+        shrinkage=0.2,
+    )
+    profiler = Profiler(
+        ProfilingConfig(level=ProfilingLevel.MICRO, emit_span_events=False),
+        run_id="calibration-micro",
+    )
+    profiled = calibrate_causal_model(
+        profiled_model,
+        batches,
+        (("hidden", profiled_model.hidden),),
+        shrinkage=0.2,
+        recorder=profiler,
+    )
+
+    assert len(profiled) == len(control)
+    for actual, expected in zip(profiled, control, strict=True):
+        assert actual.path == expected.path
+        assert actual.sample_count == expected.sample_count
+        assert actual.method == expected.method
+        assert torch.equal(actual.input_importance, expected.input_importance)
+        assert torch.equal(actual.output_importance, expected.output_importance)
+    payload = profiler.snapshot()
+    phase_paths = {str(phase["path"]) for phase in payload["phases"]}  # type: ignore[index]
+    assert {
+        "forward",
+        "forward/accumulate",
+        "loss",
+        "backward",
+        "backward/accumulate",
+        "shrinkage",
+    } <= phase_paths
+    counters = {str(counter["name"]): counter for counter in payload["counters"]}  # type: ignore[index]
+    assert counters["calibration.batches"]["total"] == 2
+    assert counters["calibration.samples"]["total"] == 2
+    assert counters["calibration.accumulator_updates"]["total"] == 4
+
+
+def test_two_phase_block_calibration_profiles_both_passes_without_changing_results() -> None:
+    batches = (torch.randn(2, 3, generator=torch.Generator().manual_seed(23)),)
+    control_block = CalibrationBlock()
+    profiled_block = deepcopy(control_block)
+    control = calibrate_block(
+        control_block,
+        batches,
+        ("first", "second"),
+        _runner,
+        method="two_phase_fisher",
+    )
+    profiler = Profiler(
+        ProfilingConfig(level=ProfilingLevel.MICRO, emit_span_events=False),
+        run_id="block-calibration-micro",
+    )
+    profiled = calibrate_block(
+        profiled_block,
+        batches,
+        ("first", "second"),
+        _runner,
+        method="two_phase_fisher",
+        recorder=profiler,
+    )
+
+    for actual, expected in zip(profiled, control, strict=True):
+        assert torch.equal(actual.input_importance, expected.input_importance)
+        assert torch.equal(actual.output_importance, expected.output_importance)
+    payload = profiler.snapshot()
+    counters = {str(counter["name"]): counter for counter in payload["counters"]}  # type: ignore[index]
+    assert counters["calibration.batches"]["total"] == 2
+    assert counters["calibration.samples"]["total"] == 4
+    assert counters["calibration.accumulator_updates"]["total"] == 8

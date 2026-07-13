@@ -840,6 +840,7 @@ def _run_resident_quantization_impl(
         raise ValueError("resident quantization activation retention must be 'rolling' or 'all'")
     if request.device.startswith("cuda") and not torch.cuda.is_available():
         raise RuntimeError("CUDA resident quantization requested without CUDA")
+    micro_recorder = recorder if request.profiling.level is ProfilingLevel.MICRO else NULL_RECORDER
     if request.defer_layer_loss_snapshots and (
         request.factorized_tuning_epochs > 0
         or request.nonfactorized_tuning_epochs > 0
@@ -969,6 +970,7 @@ def _run_resident_quantization_impl(
                 tuple(causal_layers),
                 method=request.calibration_method,
                 shrinkage=request.calibration_shrinkage,
+                recorder=micro_recorder,
             )
         calibration_values.extend((causal_ids[item.path], item) for item in stats)
     elif request.calibration_method == "forward_only":
@@ -992,6 +994,7 @@ def _run_resident_quantization_impl(
                     calibration_runner,
                     method="forward_only",
                     shrinkage=request.calibration_shrinkage,
+                    recorder=micro_recorder,
                 )
             calibration_values.extend((LayerId(block_inventory.block, item.path), item) for item in stats)
             with torch.no_grad():
@@ -1154,7 +1157,6 @@ def _run_resident_quantization_impl(
     factorization_wall_seconds = 0.0
     new_layer_commits = 0
     new_block_commits = 0
-    micro_recorder = recorder if request.profiling.level is ProfilingLevel.MICRO else NULL_RECORDER
     factor_stage = FactorizationAttemptStage(request.admm, device=request.device, recorder=micro_recorder)
     outlier_stage = OutlierSelectionStage(
         device=request.device,

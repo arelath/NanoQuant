@@ -16,6 +16,7 @@ from nanoquant.domain.calibration_math import (
     robust_tau,
     shrink_importance,
 )
+from nanoquant.domain.profiling import NULL_RECORDER, PhaseRecorder
 from nanoquant.ports.activation_store import ActivationStore
 
 CAUSAL_CALIBRATION_ALGORITHM_VERSION = 2
@@ -96,6 +97,7 @@ def calibrate_causal_model(
     shrinkage: float = 0.0,
     initial_state: CausalOnlineCalibrationState | None = None,
     state_sink: Callable[[CausalOnlineCalibrationState], None] | None = None,
+    recorder: PhaseRecorder = NULL_RECORDER,
 ) -> tuple[MaterializedLayerCalibration, ...]:
     """Collect legacy-compatible full-model input and output Fisher diagonals.
 
@@ -139,55 +141,60 @@ def calibrate_causal_model(
         config.use_cache = False
     model.train()
 
-    def run_batch(batch: torch.Tensor) -> torch.Tensor:
-        output = cast(Any, model)(input_ids=batch, use_cache=False)
-        logits = getattr(output, "logits", output)
-        if not isinstance(logits, torch.Tensor):
-            raise TypeError("causal calibration model did not return tensor logits")
-        return logits
-
     def backward_batch(batch: torch.Tensor) -> None:
         text_model = getattr(model, "model", None)
         lm_head = getattr(model, "lm_head", None)
         if isinstance(text_model, nn.Module) and isinstance(lm_head, nn.Module):
-            text_output = cast(Any, text_model)(input_ids=batch, use_cache=False)
-            hidden = getattr(text_output, "last_hidden_state", None)
-            if hidden is None and isinstance(text_output, (tuple, list)) and text_output:
-                hidden = text_output[0]
-            if not isinstance(hidden, torch.Tensor):
-                raise TypeError("causal calibration text model did not return hidden states")
+            with recorder.phase("forward"):
+                text_output = cast(Any, text_model)(input_ids=batch, use_cache=False)
+                hidden = getattr(text_output, "last_hidden_state", None)
+                if hidden is None and isinstance(text_output, (tuple, list)) and text_output:
+                    hidden = text_output[0]
+                if not isinstance(hidden, torch.Tensor):
+                    raise TypeError("causal calibration text model did not return hidden states")
             lm_head_weight = getattr(lm_head, "weight", None)
             if (
                 hidden.is_cuda
                 and isinstance(lm_head_weight, torch.Tensor)
                 and lm_head_weight.is_cuda
             ):
-                loss = linear_cross_entropy(
-                    hidden,
-                    lm_head_weight,
-                    batch.to(hidden.device),
-                    shift=1,
-                )
-                loss.backward()
+                with recorder.phase("loss"):
+                    loss = linear_cross_entropy(
+                        hidden,
+                        lm_head_weight,
+                        batch.to(hidden.device),
+                        shift=1,
+                    )
+                with recorder.phase("backward"):
+                    loss.backward()
                 return
             hidden_gradient = torch.zeros_like(hidden)
             target_count = batch.shape[0] * (batch.shape[1] - 1)
             token_chunk = 128
-            for start in range(0, batch.shape[1] - 1, token_chunk):
-                end = min(start + token_chunk, batch.shape[1] - 1)
-                detached = hidden[:, start:end].detach().requires_grad_(True)
-                logits = lm_head(detached)
-                loss = torch.nn.functional.cross_entropy(
-                    logits.float().reshape(-1, logits.shape[-1]),
-                    batch[:, start + 1 : end + 1].reshape(-1),
-                    reduction="sum",
-                ) / target_count
-                gradient = torch.autograd.grad(loss, detached)[0]
-                hidden_gradient[:, start:end].copy_(gradient)
-            torch.autograd.backward(hidden, hidden_gradient)
+            with recorder.phase("loss"):
+                for start in range(0, batch.shape[1] - 1, token_chunk):
+                    end = min(start + token_chunk, batch.shape[1] - 1)
+                    detached = hidden[:, start:end].detach().requires_grad_(True)
+                    logits = lm_head(detached)
+                    loss = torch.nn.functional.cross_entropy(
+                        logits.float().reshape(-1, logits.shape[-1]),
+                        batch[:, start + 1 : end + 1].reshape(-1),
+                        reduction="sum",
+                    ) / target_count
+                    gradient = torch.autograd.grad(loss, detached)[0]
+                    hidden_gradient[:, start:end].copy_(gradient)
+            with recorder.phase("backward"):
+                torch.autograd.backward(hidden, hidden_gradient)
             return
-        logits = run_batch(batch)
-        torch.autograd.backward(causal_language_model_loss(logits, batch))
+        with recorder.phase("forward"):
+            output = cast(Any, model)(input_ids=batch, use_cache=False)
+            logits = getattr(output, "logits", output)
+            if not isinstance(logits, torch.Tensor):
+                raise TypeError("causal calibration model did not return tensor logits")
+        with recorder.phase("loss"):
+            loss = causal_language_model_loss(logits, batch)
+        with recorder.phase("backward"):
+            torch.autograd.backward(loss)
 
     def execute(
         input_accumulators: dict[str, Accumulator], output_accumulators: dict[str, Accumulator]
@@ -199,7 +206,12 @@ def calibrate_causal_model(
                 def forward_hook(
                     _module: nn.Module, inputs: tuple[torch.Tensor, ...], _output: object, path: str = path
                 ) -> None:
-                    input_accumulators[path].update(inputs[0])
+                    if recorder is NULL_RECORDER:
+                        input_accumulators[path].update(inputs[0])
+                    else:
+                        with recorder.phase("accumulate", direction="input"):
+                            input_accumulators[path].update(inputs[0])
+                        recorder.add("calibration.accumulator_updates", 1, direction="input")
 
                 def backward_hook(
                     _module: nn.Module,
@@ -208,13 +220,20 @@ def calibrate_causal_model(
                     path: str = path,
                 ) -> None:
                     if outputs[0] is not None:
-                        output_accumulators[path].update(outputs[0])
+                        if recorder is NULL_RECORDER:
+                            output_accumulators[path].update(outputs[0])
+                        else:
+                            with recorder.phase("accumulate", direction="output"):
+                                output_accumulators[path].update(outputs[0])
+                            recorder.add("calibration.accumulator_updates", 1, direction="output")
 
                 handles.append(module.register_forward_hook(forward_hook))
                 handles.append(module.register_full_backward_hook(backward_hook))
             for batch in batches:
                 model.zero_grad(set_to_none=True)
                 backward_batch(batch)
+                recorder.add("calibration.batches", 1)
+                recorder.add("calibration.samples", batch.shape[0])
         finally:
             for handle in handles:
                 handle.remove()
@@ -230,7 +249,14 @@ def calibrate_causal_model(
                     def profile_forward(
                         _module: nn.Module, inputs: tuple[torch.Tensor, ...], _output: object, path: str = path
                     ) -> None:
-                        input_thresholds[path] = torch.maximum(input_thresholds[path], robust_tau(inputs[0]))
+                        if recorder is NULL_RECORDER:
+                            input_thresholds[path] = torch.maximum(input_thresholds[path], robust_tau(inputs[0]))
+                        else:
+                            with recorder.phase("accumulate", direction="input", pass_name="threshold"):
+                                input_thresholds[path] = torch.maximum(
+                                    input_thresholds[path], robust_tau(inputs[0])
+                                )
+                            recorder.add("calibration.accumulator_updates", 1, direction="input")
 
                     def profile_backward(
                         _module: nn.Module,
@@ -239,15 +265,24 @@ def calibrate_causal_model(
                         path: str = path,
                     ) -> None:
                         if outputs[0] is not None:
-                            output_thresholds[path] = torch.maximum(
-                                output_thresholds[path], robust_tau(outputs[0], pre_scale=1e6)
-                            )
+                            if recorder is NULL_RECORDER:
+                                output_thresholds[path] = torch.maximum(
+                                    output_thresholds[path], robust_tau(outputs[0], pre_scale=1e6)
+                                )
+                            else:
+                                with recorder.phase("accumulate", direction="output", pass_name="threshold"):
+                                    output_thresholds[path] = torch.maximum(
+                                        output_thresholds[path], robust_tau(outputs[0], pre_scale=1e6)
+                                    )
+                                recorder.add("calibration.accumulator_updates", 1, direction="output")
 
                     handles.append(module.register_forward_hook(profile_forward))
                     handles.append(module.register_full_backward_hook(profile_backward))
                 for batch in batches:
                     model.zero_grad(set_to_none=True)
                     backward_batch(batch)
+                    recorder.add("calibration.batches", 1, pass_name="threshold")
+                    recorder.add("calibration.samples", batch.shape[0], pass_name="threshold")
             finally:
                 for handle in handles:
                     handle.remove()
@@ -294,16 +329,17 @@ def calibrate_causal_model(
                     CAUSAL_CALIBRATION_ALGORITHM_VERSION,
                 )
             )
-        return tuple(
-            MaterializedLayerCalibration(
-                path,
-                shrink_importance(cast(Any, inputs[path]).total / logical_sample_count, shrinkage),
-                shrink_importance(cast(Any, outputs[path]).total / logical_sample_count, shrinkage),
-                logical_sample_count,
-                method,
+        with recorder.phase("shrinkage"):
+            return tuple(
+                MaterializedLayerCalibration(
+                    path,
+                    shrink_importance(cast(Any, inputs[path]).total / logical_sample_count, shrinkage),
+                    shrink_importance(cast(Any, outputs[path]).total / logical_sample_count, shrinkage),
+                    logical_sample_count,
+                    method,
+                )
+                for path, _module in layers
             )
-            for path, _module in layers
-        )
     finally:
         model.zero_grad(set_to_none=True)
         if callable(disable_inputs):
@@ -391,6 +427,7 @@ def calibrate_block(
     method: str = "online_fisher",
     shrinkage: float = 0.0,
     loss_builder: LossBuilder | None = None,
+    recorder: PhaseRecorder = NULL_RECORDER,
 ) -> tuple[MaterializedLayerCalibration, ...]:
     if not batches:
         raise ValueError("calibration requires at least one batch")
@@ -408,7 +445,12 @@ def calibrate_block(
                 def forward_hook(
                     _module: nn.Module, inputs: tuple[torch.Tensor, ...], _output: object, path: str = path
                 ) -> None:
-                    input_accumulators[path].update(inputs[0])
+                    if recorder is NULL_RECORDER:
+                        input_accumulators[path].update(inputs[0])
+                    else:
+                        with recorder.phase("accumulate", direction="input"):
+                            input_accumulators[path].update(inputs[0])
+                        recorder.add("calibration.accumulator_updates", 1, direction="input")
 
                 handles.append(module.register_forward_hook(forward_hook))
                 if requires_backward:
@@ -420,15 +462,26 @@ def calibrate_block(
                         path: str = path,
                     ) -> None:
                         if outputs[0] is not None:
-                            output_accumulators[path].update(outputs[0])
+                            if recorder is NULL_RECORDER:
+                                output_accumulators[path].update(outputs[0])
+                            else:
+                                with recorder.phase("accumulate", direction="output"):
+                                    output_accumulators[path].update(outputs[0])
+                                recorder.add("calibration.accumulator_updates", 1, direction="output")
 
                     handles.append(module.register_full_backward_hook(backward_hook))
             for batch in batches:
                 block.zero_grad(set_to_none=True)
                 batch_input = batch.detach().requires_grad_(requires_backward)
-                output = runner(block, batch_input)
+                with recorder.phase("forward"):
+                    output = runner(block, batch_input)
                 if requires_backward:
-                    torch.autograd.backward(objective(output, batch))
+                    with recorder.phase("loss"):
+                        loss = objective(output, batch)
+                    with recorder.phase("backward"):
+                        torch.autograd.backward(loss)
+                recorder.add("calibration.batches", 1)
+                recorder.add("calibration.samples", batch.shape[0])
         finally:
             for handle in handles:
                 handle.remove()
@@ -447,7 +500,12 @@ def calibrate_block(
                 def profile_forward(
                     _module: nn.Module, inputs: tuple[torch.Tensor, ...], _output: object, path: str = path
                 ) -> None:
-                    input_thresholds[path] = torch.maximum(input_thresholds[path], robust_tau(inputs[0]))
+                    if recorder is NULL_RECORDER:
+                        input_thresholds[path] = torch.maximum(input_thresholds[path], robust_tau(inputs[0]))
+                    else:
+                        with recorder.phase("accumulate", direction="input", pass_name="threshold"):
+                            input_thresholds[path] = torch.maximum(input_thresholds[path], robust_tau(inputs[0]))
+                        recorder.add("calibration.accumulator_updates", 1, direction="input")
 
                 def profile_backward(
                     _module: nn.Module,
@@ -456,16 +514,29 @@ def calibrate_block(
                     path: str = path,
                 ) -> None:
                     if outputs[0] is not None:
-                        output_thresholds[path] = torch.maximum(
-                            output_thresholds[path], robust_tau(outputs[0], pre_scale=1e6)
-                        )
+                        if recorder is NULL_RECORDER:
+                            output_thresholds[path] = torch.maximum(
+                                output_thresholds[path], robust_tau(outputs[0], pre_scale=1e6)
+                            )
+                        else:
+                            with recorder.phase("accumulate", direction="output", pass_name="threshold"):
+                                output_thresholds[path] = torch.maximum(
+                                    output_thresholds[path], robust_tau(outputs[0], pre_scale=1e6)
+                                )
+                            recorder.add("calibration.accumulator_updates", 1, direction="output")
 
                 handles.append(module.register_forward_hook(profile_forward))
                 handles.append(module.register_full_backward_hook(profile_backward))
             for batch in batches:
                 block.zero_grad(set_to_none=True)
-                output = runner(block, batch.detach().requires_grad_(True))
-                torch.autograd.backward(objective(output, batch))
+                with recorder.phase("forward"):
+                    output = runner(block, batch.detach().requires_grad_(True))
+                with recorder.phase("loss"):
+                    loss = objective(output, batch)
+                with recorder.phase("backward"):
+                    torch.autograd.backward(loss)
+                recorder.add("calibration.batches", 1, pass_name="threshold")
+                recorder.add("calibration.samples", batch.shape[0], pass_name="threshold")
         finally:
             for handle in handles:
                 handle.remove()
@@ -485,18 +556,19 @@ def calibrate_block(
             else {}
         )
     execute(inputs, outputs)
-    return tuple(
-        MaterializedLayerCalibration(
-            path,
-            shrink_importance(inputs[path].finalize(), shrinkage),
-            shrink_importance(outputs[path].finalize(), shrinkage)
-            if requires_backward
-            else torch.ones(module.out_features),
-            sum(batch.shape[0] for batch in batches),
-            method,
+    with recorder.phase("shrinkage"):
+        return tuple(
+            MaterializedLayerCalibration(
+                path,
+                shrink_importance(inputs[path].finalize(), shrinkage),
+                shrink_importance(outputs[path].finalize(), shrinkage)
+                if requires_backward
+                else torch.ones(module.out_features),
+                sum(batch.shape[0] for batch in batches),
+                method,
+            )
+            for path, module in linears.items()
         )
-        for path, module in linears.items()
-    )
 
 
 def calibrate_block_streamed(
@@ -509,6 +581,7 @@ def calibrate_block_streamed(
     batch_size: int,
     device: str = "cpu",
     shrinkage: float = 0.0,
+    recorder: PhaseRecorder = NULL_RECORDER,
 ) -> tuple[MaterializedLayerCalibration, ...]:
     """Accumulate forward-only statistics from batch views over an activation generation."""
     if batch_size <= 0:
@@ -524,4 +597,5 @@ def calibrate_block_streamed(
             runner,
             method="forward_only",
             shrinkage=shrinkage,
+            recorder=recorder,
         )
