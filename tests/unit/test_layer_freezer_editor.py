@@ -223,8 +223,25 @@ def test_freezer_can_return_factorized_execution_backend(tmp_path: Path) -> None
     )
 
     assert isinstance(frozen.module, FactorizedReferenceLinear)
+    assert frozen.module._cached_dense_weight is None
     inputs = torch.randn(4, 3, generator=torch.Generator().manual_seed(7))
     assert torch.allclose(frozen.module(inputs), trainable(inputs), atol=1e-6)
+
+
+def test_dense_reference_caches_immutable_materialized_weight() -> None:
+    module = FrozenReferenceLinear(
+        torch.tensor([[1.0], [-1.0]]),
+        torch.tensor([[1.0, -1.0, 1.0]]),
+        torch.ones(3),
+        torch.ones(1),
+        torch.ones(2),
+    )
+    expected = module.dense_weight().clone()
+    assert torch.equal(expected, module._materialize_dense_weight())
+
+    module.left_binary.zero_()
+
+    assert torch.equal(module.dense_weight(), expected)
 
 
 @pytest.mark.parametrize(

@@ -132,6 +132,7 @@ class FrozenReferenceLinear(nn.Module):
     outlier_indices: torch.Tensor | None
     outlier_values: torch.Tensor | None
     outlier_scales: torch.Tensor | None
+    _cached_dense_weight: torch.Tensor | None
 
     def __init__(
         self,
@@ -144,6 +145,8 @@ class FrozenReferenceLinear(nn.Module):
         outlier_indices: torch.Tensor | None = None,
         outlier_values: torch.Tensor | None = None,
         outlier_scales: torch.Tensor | None = None,
+        *,
+        cache_dense_weight: bool = True,
     ) -> None:
         super().__init__()
         self.register_buffer("left_binary", left_binary.detach().clone())
@@ -159,8 +162,13 @@ class FrozenReferenceLinear(nn.Module):
             raise ValueError("outlier indices and values must be provided together")
         if outlier_scales is not None and outlier_values is None:
             raise ValueError("outlier scales require outlier values")
+        self.register_buffer(
+            "_cached_dense_weight",
+            self._materialize_dense_weight() if cache_dense_weight else None,
+            persistent=False,
+        )
 
-    def dense_weight(self) -> torch.Tensor:
+    def _materialize_dense_weight(self) -> torch.Tensor:
         scale_pre = _mask_outlier_columns(self.scale_pre, self.outlier_indices)
         result = (self.left_binary * self.scale_post.reshape(-1, 1)) @ (
             self.right_binary * self.scale_mid.reshape(-1, 1) * scale_pre.reshape(1, -1)
@@ -173,11 +181,39 @@ class FrozenReferenceLinear(nn.Module):
             result[:, self.outlier_indices.long()] += values.to(result.dtype)
         return result
 
+    def dense_weight(self) -> torch.Tensor:
+        return self._materialize_dense_weight() if self._cached_dense_weight is None else self._cached_dense_weight
+
     def forward(self, value: torch.Tensor) -> torch.Tensor:
         return torch.nn.functional.linear(value, self.dense_weight(), self.bias)
 
 
 class FactorizedReferenceLinear(FrozenReferenceLinear):
+    def __init__(
+        self,
+        left_binary: torch.Tensor,
+        right_binary: torch.Tensor,
+        scale_pre: torch.Tensor,
+        scale_mid: torch.Tensor,
+        scale_post: torch.Tensor,
+        bias: torch.Tensor | None = None,
+        outlier_indices: torch.Tensor | None = None,
+        outlier_values: torch.Tensor | None = None,
+        outlier_scales: torch.Tensor | None = None,
+    ) -> None:
+        super().__init__(
+            left_binary,
+            right_binary,
+            scale_pre,
+            scale_mid,
+            scale_post,
+            bias,
+            outlier_indices,
+            outlier_values,
+            outlier_scales,
+            cache_dense_weight=False,
+        )
+
     def forward(self, value: torch.Tensor) -> torch.Tensor:
         scale_pre = _mask_outlier_columns(self.scale_pre, self.outlier_indices)
         latent = torch.nn.functional.linear(value * scale_pre, self.right_binary)

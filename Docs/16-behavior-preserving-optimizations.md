@@ -600,6 +600,13 @@ must be remeasured rather than inferred from the speedup.
   version in the protocol identity, and allows an explicit replacement run to atomically supersede a
   mismatched cache journal without deleting its immutable artifacts. The corrected real-model rerun is
   required before using KD quality or timing as a performance baseline.
+- **Dense reference weights cached (2026-07-13):** `FrozenReferenceLinear` previously reconstructed its
+  immutable dense weight from both binary factors on every forward. A single-threaded 256x64x256 CPU
+  fixture with an 8x256 input measured **0.1197 ms** median uncached versus **0.0233 ms** cached
+  (**5.14x**) with exactly equal output. The cache costs one dense-weight allocation (256 KiB in the
+  fixture, proportional to layer weight size), so it is limited to the explicitly dense reference
+  backend. `FactorizedReferenceLinear` opts out and continues executing mutable/trainable factors
+  directly, including global KD.
 - `JsonlEventSink._read_last_sequence` parses the whole event log at construction — only matters for
   resumed runs with large logs; fine today, worth a tail-scan if event volume grows.
 - **Measured, not implemented (2026-07-13):** a fresh process inventories the pinned Gemma snapshot in a
