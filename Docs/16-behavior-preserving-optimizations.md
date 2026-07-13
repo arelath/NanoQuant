@@ -59,13 +59,13 @@ in section 6 so nobody drifts into it by accident.
 | [x] | 8 | Fix `_run_block_batched` double copy | S0 | block forwards | one 1.2 GB copy per pass | 0.5–1.5% of anchor | High | S |
 | [ ] | 9 | Stop persisting rejected-attempt tensors (or make puts async) | S2/S1 | factorization | store I/O ≈ halved | 1–3% of anchor | Medium | M |
 | [ ] | 10 | Hash during write instead of write-then-reread (mmap store) | S0 | activation commits | one full re-read per generation | 1–3% of anchor | High | S |
-| [ ] | 11 | Device-side KD loss accumulation + pinned teacher cache | S0/S1 | global KD | 1–3% of KD phase | ≤1% of full protocol | Medium | S |
+| [ ] | 11 | KD loss accumulation + teacher-cache prefetch (rejected) | S0/S1 | global KD | measured ≤0.02% | negligible | High | S |
 | [x] | 12 | Keep the JSONL event file handle open | S0 | events | ~3k opens/run | ~0.1% | High | S |
 | [x] | 13 | Device-side calibration threshold accumulation | S0 | calibration | ~20k small syncs | ~0.1–0.2% | High | S |
 | [x] | 14 | Cache verified tensor hashes by immutable file signature | S0 | tensor loads | repeated memory hashes removed | ~10–20 s | High | S |
 
 Combined outlook, avoiding double counting: roughly **8–15% on the factor+scale anchor** (items 4–6, 8–10)
-and **15–35% on the full protocol** once tuning and KD phases exist to optimize (items 1–3, 7, 11 dominate).
+and **15–35% on the full protocol** once tuning phases exist to optimize (items 1–3 and 7 dominate).
 Against the ~30% gap to legacy recorded in the agent guide, this catalog plausibly covers a large fraction —
 but only the Docs/15 baseline can apportion it.
 
@@ -355,13 +355,22 @@ same order, so the recorded `epoch_losses` are bit-identical.
 
 **Estimate.** 1–3% of the KD phase (≤1% of a full-protocol run). Confidence: Medium. Effort: S.
 
-**Partially tested, not accepted (2026-07-12).** Replacing 2,048 per-step Python-float additions with
+**Tested, not accepted (2026-07-12).** Replacing 2,048 per-step Python-float additions with
 sequential float64 device additions preserved the final double bit-for-bit, but improved the isolated
 accumulation loop only from 21.878 ms to 16.859 ms (**1.30x, just 5 ms absolute**) while adding one CUDA
 kernel per step. That does not justify the extra device work or support the estimated run-level saving, so
-device-side accumulation was not implemented. Pinned teacher-cache transfer and prefetch remain deferred
-to the shared pinned/double-buffer design in item 1; implementing them independently would duplicate the
-same memory-budget and copy-stream machinery.
+device-side accumulation was not implemented.
+
+A bounded two-slot CUDA prototype staged the token IDs, selected-token indices, teacher values, and teacher
+vocabulary indices into pinned buffers and prefetched step *k+1* while step *k* computed. It preserved the
+epoch loss and updated parameters bit-for-bit. Across 128 parity-shaped transfers (one 2048-token sample,
+512 selected tokens, and top-64 bf16/int32 targets), it improved 50.168 ms to 29.799 ms (**1.68x**)—only
+**0.159 ms per step**. A deliberately compute-light four-layer, width-1152 surrogate improved from a mean
+0.6546 s to 0.6225 s across 128 steps (**1.05x**), but it spent only about 5 ms per step. The real Gemma KD
+checkpoints show roughly 0.8 s per step, so even the transfer-only saving is an upper bound of about
+**0.02% of the KD phase** (roughly 0.3 s over all 2,048 steps). The prototype was reverted: its extra
+copy-stream/event machinery and pinned buffers are not justified by that run-level bound. Both parts of
+this item are therefore rejected unless a future profile shows a materially different transfer share.
 
 ### [x] 3.12 Keep the JSONL event file handle open (S0)
 
@@ -482,7 +491,8 @@ Every item, regardless of class, lands with:
    then 1 (largest but needs the transfer-boundedness numbers to size the buffering).
 3. **Design-reviewed (S1 durability):** items 4, 9, 10 as one "store path" workstream — shared writer
    infrastructure, shared interruption-matrix validation.
-4. **When tuning/KD phases are enabled in anger:** items 3 and 11, measured on the full protocol.
+4. **When tuning/KD phases are enabled in anger:** item 3 is complete; item 11 was measured and rejected
+   because its run-level upper bound is negligible.
 
 Items 1–4 of this sequence are independent of parity sign-off (all preserve behavior by construction);
 only their *measurement* waits for the Docs/15 P1 baseline if we want clean before/after evidence.
