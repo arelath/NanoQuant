@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from nanoquant.infrastructure.artifacts import LocalArtifactStore
+
 _LEGACY_BLOCK_LOSS = re.compile(
     r"Post-block scale refit summary:.*?->\s*([0-9]+(?:\.[0-9]*)?(?:[eE][+-]?[0-9]+)?)"
 )
@@ -32,6 +34,7 @@ def _identity_key(value: object) -> tuple[str, str, str]:
 
 def load_rewrite_trajectory(run_output: str | Path) -> RewriteTrajectory:
     root = Path(run_output)
+    artifacts = LocalArtifactStore(root / "artifacts")
     journal = root / "state" / "journal.jsonl"
     records: list[dict[str, Any]] = []
     for line_number, line in enumerate(journal.read_text(encoding="utf-8").splitlines(), start=1):
@@ -65,9 +68,10 @@ def load_rewrite_trajectory(run_output: str | Path) -> RewriteTrajectory:
     losses = []
     for block in expected:
         artifact_id = str(by_block[block]["artifact_id"])
-        if not artifact_id.startswith("sha256-") or len(artifact_id) != 71:
-            raise ValueError(f"invalid block artifact id for journal block {block}")
-        artifact_root = root / "artifacts" / artifact_id[7:9] / artifact_id
+        descriptor = artifacts.validate(artifact_id)
+        if descriptor.artifact_type != "block-result":
+            raise ValueError(f"journal block {block} references {descriptor.artifact_type}, not block-result")
+        artifact_root = artifacts.path_for(artifact_id)
         payload: Any = json.loads((artifact_root / "block-result.json").read_text(encoding="utf-8"))
         try:
             payload_block = int(payload["block"]["index"])

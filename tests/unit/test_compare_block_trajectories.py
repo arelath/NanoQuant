@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from nanoquant.infrastructure.artifacts import ArtifactCorruptionError, LocalArtifactStore
 from tools.compare_block_trajectories import (
     compare_trajectories,
     load_legacy_trajectory,
@@ -13,24 +14,24 @@ from tools.compare_block_trajectories import (
 )
 
 
-def _commit_block(root: Path, block: int, loss: float, identity: dict[str, str], suffix: str) -> dict[str, object]:
-    artifact_id = "sha256-" + suffix * 64
-    artifact = root / "artifacts" / artifact_id[7:9] / artifact_id
-    artifact.mkdir(parents=True)
-    (artifact / "block-result.json").write_text(
-        json.dumps({"block": {"index": block}, "losses": {"final_frozen_pre_kd": loss}}),
-        encoding="utf-8",
-    )
-    return {"kind": "block", "block": block, "artifact_id": artifact_id, "identity": identity}
+def _commit_block(root: Path, block: int, loss: float, identity: dict[str, str]) -> dict[str, object]:
+    artifacts = LocalArtifactStore(root / "artifacts")
+    with artifacts.begin_write("block-result") as writer:
+        (writer.path / "block-result.json").write_text(
+            json.dumps({"block": {"index": block}, "losses": {"final_frozen_pre_kd": loss}}),
+            encoding="utf-8",
+        )
+        descriptor = writer.commit()
+    return {"kind": "block", "block": block, "artifact_id": descriptor.artifact_id, "identity": identity}
 
 
 def test_trajectory_comparison_uses_latest_identity_and_aligns_multiple_baselines(tmp_path: Path) -> None:
     old = {"config_hash": "old", "model_hash": "model", "plan_hash": "plan"}
     active = {"config_hash": "new", "model_hash": "model", "plan_hash": "plan"}
     records = [
-        _commit_block(tmp_path, 0, 99.0, old, "a"),
-        _commit_block(tmp_path, 0, 1.0, active, "b"),
-        _commit_block(tmp_path, 1, 2.0, active, "c"),
+        _commit_block(tmp_path, 0, 99.0, old),
+        _commit_block(tmp_path, 0, 1.0, active),
+        _commit_block(tmp_path, 1, 2.0, active),
     ]
     state = tmp_path / "state"
     state.mkdir()
@@ -71,7 +72,7 @@ def test_trajectory_comparison_uses_latest_identity_and_aligns_multiple_baseline
 
 def test_rewrite_trajectory_rejects_noncontiguous_active_prefix(tmp_path: Path) -> None:
     identity = {"config_hash": "new", "model_hash": "model", "plan_hash": "plan"}
-    records = [_commit_block(tmp_path, 1, 2.0, identity, "d")]
+    records = [_commit_block(tmp_path, 1, 2.0, identity)]
     state = tmp_path / "state"
     state.mkdir()
     (state / "journal.jsonl").write_text(json.dumps(records[0]) + "\n", encoding="utf-8")
@@ -83,7 +84,7 @@ def test_rewrite_trajectory_rejects_noncontiguous_active_prefix(tmp_path: Path) 
 def test_rewrite_trajectory_does_not_fall_back_to_stale_identity(tmp_path: Path) -> None:
     old = {"config_hash": "old", "model_hash": "model", "plan_hash": "plan"}
     active = {"config_hash": "new", "model_hash": "model", "plan_hash": "plan"}
-    old_block = _commit_block(tmp_path, 0, 1.0, old, "e")
+    old_block = _commit_block(tmp_path, 0, 1.0, old)
     active_layer = {
         "kind": "layer",
         "block": 0,
@@ -98,4 +99,18 @@ def test_rewrite_trajectory_does_not_fall_back_to_stale_identity(tmp_path: Path)
     )
 
     with pytest.raises(ValueError, match="active journal identity"):
+        load_rewrite_trajectory(tmp_path)
+
+
+def test_rewrite_trajectory_validates_block_artifact_hashes(tmp_path: Path) -> None:
+    identity = {"config_hash": "new", "model_hash": "model", "plan_hash": "plan"}
+    record = _commit_block(tmp_path, 0, 1.0, identity)
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "journal.jsonl").write_text(json.dumps(record) + "\n", encoding="utf-8")
+    artifacts = LocalArtifactStore(tmp_path / "artifacts")
+    block_path = artifacts.path_for(str(record["artifact_id"])) / "block-result.json"
+    block_path.write_text("{}", encoding="utf-8")
+
+    with pytest.raises(ArtifactCorruptionError, match="ART001"):
         load_rewrite_trajectory(tmp_path)
