@@ -6,7 +6,7 @@ import hashlib
 import json
 import statistics
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -71,6 +71,7 @@ from nanoquant.domain.metrics import reconstruction_metrics
 from nanoquant.domain.models import (
     ArtifactRef,
     ArtifactTypes,
+    BlockPlan,
     BlockResult,
     CalibrationStats,
     CheckpointInventory,
@@ -111,9 +112,9 @@ from nanoquant.infrastructure.commits import (
 from nanoquant.infrastructure.device_lease import acquire_device_lease
 from nanoquant.infrastructure.device_memory import PeakWindow
 from nanoquant.infrastructure.environment import capture_environment
-from nanoquant.infrastructure.model_adapters import adapter_for_config
+from nanoquant.infrastructure.model_adapters import TransformersModelAdapter, adapter_for_config
 from nanoquant.infrastructure.profiling import profiled_run
-from nanoquant.infrastructure.progress import ProgressJournal
+from nanoquant.infrastructure.progress import JournalRecord, ProgressJournal
 from nanoquant.infrastructure.resident_executor import Cancellation, ResidentExecutor
 from nanoquant.infrastructure.resource_usage import peak_device_memory_bytes, peak_process_memory_bytes
 from nanoquant.infrastructure.run_session import open_run_session
@@ -1190,14 +1191,7 @@ def _run_resident_quantization(request: ResidentQuantizationRequest) -> Resident
         return result
 
 
-def _run_resident_quantization_impl(
-    request: ResidentQuantizationRequest,
-    events: EventSink,
-    recorder: PhaseRecorder,
-    run_id: str,
-) -> ResidentQuantizationResult:
-    """Quantize all decoder linears while the source model remains resident on one device."""
-    started = time.perf_counter()
+def _validate_resident_request(request: ResidentQuantizationRequest) -> None:
     if request.block_forward_batch_size <= 0:
         raise ValueError("resident quantization block forward batch size must be positive")
     if request.factorized_tuning_epoch_cooldown_seconds < 0:
@@ -1235,7 +1229,6 @@ def _run_resident_quantization_impl(
         raise ValueError("resident quantization activation retention must be 'rolling' or 'all'")
     if request.device.startswith("cuda") and not torch.cuda.is_available():
         raise RuntimeError("CUDA resident quantization requested without CUDA")
-    micro_recorder = recorder if request.profiling.level is ProfilingLevel.MICRO else NULL_RECORDER
     if request.defer_layer_loss_snapshots and (
         request.factorized_tuning_epochs > 0
         or request.nonfactorized_tuning_epochs > 0
@@ -1243,10 +1236,56 @@ def _run_resident_quantization_impl(
         or request.post_block_refit_epochs > 0
     ):
         raise ValueError("deferred layer losses are incompatible with activation-based tuning")
-    artifacts = LocalArtifactStore(request.output / "artifacts", recorder=micro_recorder)
-    tensors = LocalTensorStore(artifacts)
-    executor = ResidentExecutor()
-    context = StageContext(run_id, executor, artifacts, tensors, events, Cancellation(), recorder)
+
+
+@dataclass(frozen=True, slots=True)
+class _ResidentEnvironment:
+    source: SafetensorsModelSource
+    checkpoint: CheckpointInventory
+    adapter: TransformersModelAdapter
+    inventory: ModelInventory
+    tokens: torch.Tensor
+    quality_tokens: torch.Tensor
+    model: nn.Module
+    decoder_layers: nn.ModuleList
+
+
+@dataclass(frozen=True, slots=True)
+class _ResidentResumeState:
+    config_hash: str
+    identity: CommitIdentity
+    journal: ProgressJournal
+    discovered_records: tuple[JournalRecord, ...]
+    committed_blocks: list[tuple[ArtifactRef, BlockResult]]
+    budget: BudgetState
+    teacher_inputs: torch.Tensor
+    compressed_inputs: torch.Tensor
+    completed_block_indexes: set[int]
+    layer_container: nn.ModuleList
+    partial_layer_records: dict[tuple[int, str | None], JournalRecord]
+
+
+@dataclass(frozen=True, slots=True)
+class _ResidentBlockWork:
+    started: float
+    peak_window: PeakWindow
+    index: int
+    metadata: dict[str, object]
+    tuning_forward: Callable[[nn.Module, torch.Tensor], torch.Tensor]
+    working_block: nn.Module
+    teacher_outputs: torch.Tensor
+    output_importance: torch.Tensor
+    loss_recorder: BlockLossRecorder
+    deferred_slice: bool
+
+
+def _setup_resident_environment(
+    request: ResidentQuantizationRequest,
+    events: EventSink,
+    recorder: PhaseRecorder,
+) -> _ResidentEnvironment:
+    """Load immutable source metadata, inputs, and the mutable model shell."""
+
     with _logged_operation(
         events,
         "inventory",
@@ -1306,7 +1345,288 @@ def _run_resident_quantization_impl(
                     ),
                 ).to(request.device)
     model.eval()
-    decoder_layers = adapter.get_decoder_layers(model)
+    return _ResidentEnvironment(
+        source,
+        checkpoint,
+        adapter,
+        inventory,
+        tokens,
+        quality_tokens,
+        model,
+        adapter.get_decoder_layers(model),
+    )
+
+
+def _restore_committed_state(
+    request: ResidentQuantizationRequest,
+    events: EventSink,
+    recorder: PhaseRecorder,
+    run_id: str,
+    artifacts: LocalArtifactStore,
+    tensors: LocalTensorStore,
+    environment: _ResidentEnvironment,
+    plan: QuantizationPlan,
+    persisted_plan: PersistedPlan,
+    initial_inputs: torch.Tensor,
+) -> _ResidentResumeState:
+    """Discover durable progress, restore the model shell, and load activations."""
+
+    config_hash = _resident_config_hash(request)
+    identity = CommitIdentity(
+        config_hash,
+        environment.inventory.model.config_hash,
+        persisted_plan.reference.artifact_id,
+    )
+    journal = ProgressJournal(request.output / "state", run_id, artifacts)
+    with _logged_operation(events, "resume_discovery"):
+        with recorder.phase("resume"):
+            with recorder.phase("discover"):
+                discovery = journal.discover(plan, identity)
+    discovered_records = (*discovery.valid_records, *discovery.orphan_records)
+    events.emit(
+        "resident-quantization",
+        "info",
+        "resume.discovery_completed",
+        valid_records=len(discovery.valid_records),
+        orphan_records=len(discovery.orphan_records),
+        first_incomplete_block=(None if discovery.first_incomplete is None else discovery.first_incomplete.block),
+        first_incomplete_layer=(None if discovery.first_incomplete is None else discovery.first_incomplete.layer),
+    )
+    block_records = sorted(
+        (record for record in discovered_records if record.kind == "block"),
+        key=lambda record: record.block,
+    )
+    with _logged_operation(events, "resume_commit_load", blocks=len(block_records)):
+        with recorder.phase("resume"):
+            with recorder.phase("load_commits"):
+                committed_blocks = [
+                    (
+                        ArtifactRef(ArtifactTypes.BLOCK_RESULT, record.artifact_id, 1),
+                        load_committed_block(
+                            ArtifactRef(ArtifactTypes.BLOCK_RESULT, record.artifact_id, 1),
+                            artifacts,
+                            identity,
+                        ).result,
+                    )
+                    for record in block_records
+                ]
+    if request.activation_retention == "rolling":
+        for _reference, old_block in committed_blocks[:-1]:
+            retire_block_activations(old_block, artifacts)
+    accepted_bits = sum(layer.actual_bit_cost.total for _, block in committed_blocks for layer in block.layers)
+    retry_bits_spent = sum(layer.extra_retry_bits for _, block in committed_blocks for layer in block.layers)
+    budget = BudgetState(plan.planned_cost.total, accepted_bits, retry_bits_spent)
+    with _logged_operation(
+        events,
+        "resume_activation_load",
+        resumed=bool(committed_blocks),
+        source_block=(None if not committed_blocks else committed_blocks[-1][1].block.index),
+    ):
+        with recorder.phase("resume"):
+            with recorder.phase("activations"):
+                if committed_blocks:
+                    teacher_inputs, compressed_inputs = load_block_activations(
+                        committed_blocks[-1][0], artifacts, "cpu"
+                    )
+                    if request.device.startswith("cuda"):
+                        teacher_inputs = teacher_inputs.pin_memory()
+                        compressed_inputs = compressed_inputs.pin_memory()
+                else:
+                    teacher_inputs = initial_inputs
+                    compressed_inputs = initial_inputs
+    completed_block_indexes = {block.block.index for _, block in committed_blocks}
+    layer_container = environment.adapter.get_decoder_layers(environment.model)
+    if request.restore_completed_blocks:
+        with _logged_operation(events, "resume_model_restore", blocks=len(committed_blocks)):
+            with recorder.phase("resume"):
+                with recorder.phase("restore"):
+                    for _, completed_block in committed_blocks:
+                        restored_block = layer_container[completed_block.block.index]
+                        for state in completed_block.frozen_state.quantized_layers:
+                            frozen = LayerFreezer().load(
+                                state,
+                                tensors,
+                                device=request.device,
+                                dtype=compressed_inputs.dtype,
+                                backend="factorized",
+                            )
+                            BlockEditor().install_frozen_layer(
+                                restored_block,
+                                state.layer.path,
+                                frozen.module,
+                            )
+                        restore_block_auxiliary_parameters(
+                            restored_block,
+                            completed_block.frozen_state.auxiliary_parameters,
+                            tensors,
+                            device=request.device,
+                        )
+    released_decoder_blocks = _release_uncompleted_decoder_blocks(
+        layer_container,
+        completed_block_indexes if request.restore_completed_blocks else set(),
+    )
+    if request.device.startswith("cuda"):
+        torch.cuda.empty_cache()
+    if released_decoder_blocks:
+        events.emit(
+            "resident-quantization",
+            "info",
+            "decoder_blocks_released",
+            released_blocks=released_decoder_blocks,
+        )
+    partial_layer_records = {
+        (record.block, record.layer): record
+        for record in discovered_records
+        if record.kind == "layer" and record.block not in completed_block_indexes
+    }
+    return _ResidentResumeState(
+        config_hash,
+        identity,
+        journal,
+        discovered_records,
+        committed_blocks,
+        budget,
+        teacher_inputs,
+        compressed_inputs,
+        completed_block_indexes,
+        layer_container,
+        partial_layer_records,
+    )
+
+
+def _process_resident_block(
+    request: ResidentQuantizationRequest,
+    events: EventSink,
+    recorder: PhaseRecorder,
+    micro_recorder: PhaseRecorder,
+    environment: _ResidentEnvironment,
+    block_plan: BlockPlan,
+    calibration: PersistedCalibration,
+    tensors: LocalTensorStore,
+    teacher_inputs: torch.Tensor,
+    compressed_inputs: torch.Tensor,
+    captured_metadata: dict[str, object],
+    completed_block_indexes: set[int],
+) -> _ResidentBlockWork:
+    """Prepare one block's isolated source, teacher targets, and entry loss."""
+
+    block_started = time.perf_counter()
+    block_window = PeakWindow(request.device).start()
+    deferred_slice = request.defer_layer_loss_snapshots
+    block_index = block_plan.block.index
+    metadata = _clone_forward_metadata(captured_metadata)
+    events.emit(
+        "resident-quantization",
+        "info",
+        "block.started",
+        block=block_index,
+        layers=len(block_plan.layers),
+        completed_blocks=len(completed_block_indexes),
+    )
+
+    def tuning_forward(module: nn.Module, value: torch.Tensor) -> torch.Tensor:
+        return environment.adapter.run_block(module, value, **metadata)
+
+    with _logged_operation(events, "block_prepare", block=block_index, device=request.device):
+        with _profile_block_phase(recorder, block_index, "prepare"):
+            working_block = environment.adapter.load_block(
+                environment.source, block_plan.block, request.device
+            )
+            working_block.eval()
+    with _logged_operation(
+        events,
+        "block_teacher_forward",
+        block=block_index,
+        samples=int(teacher_inputs.shape[0]),
+        batch_size=request.block_forward_batch_size,
+        destination="cpu",
+    ):
+        with _profile_block_phase(recorder, block_index, "teacher_forward"):
+            with torch.no_grad():
+                teacher_outputs = _run_block_batched(
+                    environment.adapter,
+                    working_block,
+                    teacher_inputs,
+                    metadata,
+                    request.block_forward_batch_size,
+                    "cpu",
+                    recorder=micro_recorder,
+                ).detach()
+    block_output_stats = next(
+        (
+            item
+            for item in calibration.stats.layers
+            if item.layer.block.index == block_index and item.layer.path == "mlp.down_proj"
+        ),
+        next(item for item in calibration.stats.layers if item.layer.block.index == block_index),
+    )
+    with _logged_operation(
+        events,
+        "block_entry_loss",
+        block=block_index,
+        deferred=deferred_slice,
+        samples=int(compressed_inputs.shape[0]),
+    ):
+        with _profile_block_phase(recorder, block_index, "entry_loss"):
+            with tensors.read(block_output_stats.output_importance, request.device) as value:
+                block_output_importance = value.clone()
+            loss_recorder = BlockLossRecorder()
+            loss_recorder.record_source_reference(
+                _self_reference_weighted_mse(teacher_outputs, block_output_importance)
+            )
+            loss_recorder.record_block_entry(
+                0.0
+                if deferred_slice
+                else _block_loss(
+                    environment.adapter,
+                    working_block,
+                    compressed_inputs,
+                    teacher_outputs,
+                    block_output_importance,
+                    metadata,
+                    request.block_forward_batch_size,
+                    micro_recorder,
+                )
+            )
+    if request.device.startswith("cuda"):
+        torch.cuda.empty_cache()
+    return _ResidentBlockWork(
+        block_started,
+        block_window,
+        block_index,
+        metadata,
+        tuning_forward,
+        working_block,
+        teacher_outputs,
+        block_output_importance,
+        loss_recorder,
+        deferred_slice,
+    )
+
+
+def _run_resident_quantization_impl(
+    request: ResidentQuantizationRequest,
+    events: EventSink,
+    recorder: PhaseRecorder,
+    run_id: str,
+) -> ResidentQuantizationResult:
+    """Quantize all decoder linears while the source model remains resident on one device."""
+    started = time.perf_counter()
+    _validate_resident_request(request)
+    micro_recorder = recorder if request.profiling.level is ProfilingLevel.MICRO else NULL_RECORDER
+    artifacts = LocalArtifactStore(request.output / "artifacts", recorder=micro_recorder)
+    tensors = LocalTensorStore(artifacts)
+    executor = ResidentExecutor()
+    context = StageContext(run_id, executor, artifacts, tensors, events, Cancellation(), recorder)
+    environment = _setup_resident_environment(request, events, recorder)
+    source = environment.source
+    checkpoint = environment.checkpoint
+    adapter = environment.adapter
+    inventory = environment.inventory
+    tokens = environment.tokens
+    quality_tokens = environment.quality_tokens
+    model = environment.model
+    decoder_layers = environment.decoder_layers
     reference_logits = None
     if request.evaluate_inline_quality:
         with _logged_operation(
@@ -1558,113 +1878,31 @@ def _run_resident_quantization_impl(
         blocks=len(plan.blocks),
         planned_bits=plan.planned_cost.total,
     )
-    config_hash = _resident_config_hash(request)
-    identity = CommitIdentity(config_hash, inventory.model.config_hash, persisted_plan.reference.artifact_id)
-    journal = ProgressJournal(request.output / "state", run_id, artifacts)
-    with _logged_operation(events, "resume_discovery"):
-        with recorder.phase("resume"):
-            with recorder.phase("discover"):
-                discovery = journal.discover(plan, identity)
-    discovered_records = (*discovery.valid_records, *discovery.orphan_records)
-    events.emit(
-        "resident-quantization",
-        "info",
-        "resume.discovery_completed",
-        valid_records=len(discovery.valid_records),
-        orphan_records=len(discovery.orphan_records),
-        first_incomplete_block=(None if discovery.first_incomplete is None else discovery.first_incomplete.block),
-        first_incomplete_layer=(None if discovery.first_incomplete is None else discovery.first_incomplete.layer),
-    )
-    block_records = sorted(
-        (record for record in discovered_records if record.kind == "block"), key=lambda record: record.block
-    )
-    with _logged_operation(events, "resume_commit_load", blocks=len(block_records)):
-        with recorder.phase("resume"):
-            with recorder.phase("load_commits"):
-                committed_blocks = [
-                    (
-                        ArtifactRef(ArtifactTypes.BLOCK_RESULT, record.artifact_id, 1),
-                        load_committed_block(
-                            ArtifactRef(ArtifactTypes.BLOCK_RESULT, record.artifact_id, 1), artifacts, identity
-                        ).result,
-                    )
-                    for record in block_records
-                ]
-    if request.activation_retention == "rolling":
-        for _reference, old_block in committed_blocks[:-1]:
-            retire_block_activations(old_block, artifacts)
-    accepted_bits = sum(layer.actual_bit_cost.total for _, block in committed_blocks for layer in block.layers)
-    retry_bits_spent = sum(layer.extra_retry_bits for _, block in committed_blocks for layer in block.layers)
-    budget = BudgetState(plan.planned_cost.total, accepted_bits, retry_bits_spent)
-    with _logged_operation(
+    resume = _restore_committed_state(
+        request,
         events,
-        "resume_activation_load",
-        resumed=bool(committed_blocks),
-        source_block=(None if not committed_blocks else committed_blocks[-1][1].block.index),
-    ):
-        with recorder.phase("resume"):
-            with recorder.phase("activations"):
-                if committed_blocks:
-                    teacher_inputs, compressed_inputs = load_block_activations(
-                        committed_blocks[-1][0], artifacts, "cpu"
-                    )
-                    if request.device.startswith("cuda"):
-                        teacher_inputs = teacher_inputs.pin_memory()
-                        compressed_inputs = compressed_inputs.pin_memory()
-                else:
-                    teacher_inputs = initial_inputs
-                    compressed_inputs = initial_inputs
-    del initial_inputs
-    completed_block_indexes = {block.block.index for _, block in committed_blocks}
-    layer_container = adapter.get_decoder_layers(model)
-    if request.restore_completed_blocks:
-        with _logged_operation(events, "resume_model_restore", blocks=len(committed_blocks)):
-            with recorder.phase("resume"):
-                with recorder.phase("restore"):
-                    for _, completed_block in committed_blocks:
-                        restored_block = layer_container[completed_block.block.index]
-                        for state in completed_block.frozen_state.quantized_layers:
-                            frozen = LayerFreezer().load(
-                                state,
-                                tensors,
-                                device=request.device,
-                                dtype=compressed_inputs.dtype,
-                                backend="factorized",
-                            )
-                            BlockEditor().install_frozen_layer(
-                                restored_block,
-                                state.layer.path,
-                                frozen.module,
-                            )
-                        restore_block_auxiliary_parameters(
-                            restored_block,
-                            completed_block.frozen_state.auxiliary_parameters,
-                            tensors,
-                            device=request.device,
-                        )
-    del decoder_layers
-    released_decoder_blocks = _release_uncompleted_decoder_blocks(
-        layer_container,
-        completed_block_indexes if request.restore_completed_blocks else set(),
+        recorder,
+        run_id,
+        artifacts,
+        tensors,
+        environment,
+        plan,
+        persisted_plan,
+        initial_inputs,
     )
-    if request.device.startswith("cuda"):
-        # The checkpoint-backed working block supplies both the teacher forward
-        # and the mutable quantization block. Not-yet-processed dense model
-        # blocks are therefore duplicates. Return their storage at this coarse
-        # boundary so factorization/tuning starts from the compact model shell.
-        torch.cuda.empty_cache()
-    if released_decoder_blocks:
-        events.emit(
-            "resident-quantization",
-            "info",
-            "decoder_blocks_released",
-            released_blocks=released_decoder_blocks,
-        )
-    partial_layer_records = {
-        (record.block, record.layer): record
-        for record in discovered_records
-        if record.kind == "layer" and record.block not in completed_block_indexes
-    }
+    config_hash = resume.config_hash
+    identity = resume.identity
+    journal = resume.journal
+    discovered_records = resume.discovered_records
+    committed_blocks = resume.committed_blocks
+    budget = resume.budget
+    teacher_inputs = resume.teacher_inputs
+    compressed_inputs = resume.compressed_inputs
+    completed_block_indexes = resume.completed_block_indexes
+    layer_container = resume.layer_container
+    partial_layer_records = resume.partial_layer_records
+    del initial_inputs
+    del decoder_layers
     peak_device_bytes = 0
     factorization_wall_seconds = 0.0
     new_layer_commits = 0
@@ -1687,90 +1925,30 @@ def _run_resident_quantization_impl(
     for block_plan in plan.blocks:
         if block_plan.block.index in completed_block_indexes:
             continue
-        block_started = time.perf_counter()
-        block_window = PeakWindow(request.device).start()
-        deferred_slice = request.defer_layer_loss_snapshots
-        block_index = block_plan.block.index
-        metadata = _clone_forward_metadata(captured_metadata)
-        events.emit(
-            "resident-quantization",
-            "info",
-            "block.started",
-            block=block_index,
-            layers=len(block_plan.layers),
-            completed_blocks=len(completed_block_indexes),
-        )
-
-        def tuning_forward(
-            module: nn.Module,
-            value: torch.Tensor,
-            block_metadata: dict[str, object] = metadata,
-        ) -> torch.Tensor:
-            return adapter.run_block(module, value, **block_metadata)
-
-        with _logged_operation(events, "block_prepare", block=block_index, device=request.device):
-            with _profile_block_phase(recorder, block_index, "prepare"):
-                working_block = adapter.load_block(source, block_plan.block, request.device)
-                working_block.eval()
-        with _logged_operation(
+        block_work = _process_resident_block(
+            request,
             events,
-            "block_teacher_forward",
-            block=block_index,
-            samples=int(teacher_inputs.shape[0]),
-            batch_size=request.block_forward_batch_size,
-            destination="cpu",
-        ):
-            with _profile_block_phase(recorder, block_index, "teacher_forward"):
-                with torch.no_grad():
-                    teacher_outputs = _run_block_batched(
-                        adapter,
-                        working_block,
-                        teacher_inputs,
-                        metadata,
-                        request.block_forward_batch_size,
-                        "cpu",
-                        recorder=micro_recorder,
-                    ).detach()
-        block_output_stats = next(
-            (
-                item
-                for item in calibration.stats.layers
-                if item.layer.block.index == block_index and item.layer.path == "mlp.down_proj"
-            ),
-            next(item for item in calibration.stats.layers if item.layer.block.index == block_index),
+            recorder,
+            micro_recorder,
+            environment,
+            block_plan,
+            calibration,
+            tensors,
+            teacher_inputs,
+            compressed_inputs,
+            captured_metadata,
+            completed_block_indexes,
         )
-        with _logged_operation(
-            events,
-            "block_entry_loss",
-            block=block_index,
-            deferred=deferred_slice,
-            samples=int(compressed_inputs.shape[0]),
-        ):
-            with _profile_block_phase(recorder, block_index, "entry_loss"):
-                with tensors.read(block_output_stats.output_importance, request.device) as value:
-                    block_output_importance = value.clone()
-                loss_recorder = BlockLossRecorder()
-                loss_recorder.record_source_reference(
-                    _self_reference_weighted_mse(teacher_outputs, block_output_importance)
-                )
-                loss_recorder.record_block_entry(
-                    0.0
-                    if deferred_slice
-                    else _block_loss(
-                        adapter,
-                        working_block,
-                        compressed_inputs,
-                        teacher_outputs,
-                        block_output_importance,
-                        metadata,
-                        request.block_forward_batch_size,
-                        micro_recorder,
-                    )
-                )
-        if request.device.startswith("cuda"):
-            # The no-grad source/output probes use the larger forward batch and
-            # otherwise leave attention workspaces reserved during backprop.
-            torch.cuda.empty_cache()
+        block_started = block_work.started
+        block_window = block_work.peak_window
+        deferred_slice = block_work.deferred_slice
+        block_index = block_work.index
+        metadata = block_work.metadata
+        tuning_forward = block_work.tuning_forward
+        working_block = block_work.working_block
+        teacher_outputs = block_work.teacher_outputs
+        block_output_importance = block_work.output_importance
+        loss_recorder = block_work.loss_recorder
         layer_results: list[LayerResult] = []
         frozen_states = []
         quantization_targets: dict[str, TensorRef] = {}

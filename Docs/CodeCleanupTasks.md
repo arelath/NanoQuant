@@ -2,7 +2,7 @@ Based on a static analysis of the codebase you provided, the architecture is rem
 
 However, because the codebase has grown rapidly to achieve 1B parity and implement complex profiling/resume logic, a few "God functions" and leaky abstractions have emerged. Here are the highest-value, behavior-preserving (S0) refactoring and code cleanup tasks you should tackle:
 
-### [ ] 1. Decompose the `_run_resident_quantization_impl` God Function
+### [x] 1. Decompose the `_run_resident_quantization_impl` God Function
 **Location:** `src/nanoquant/resident_quantization.py`
 **Problem:** This function is currently over 450 lines long. It handles model loading, prefix capture, preprocessing, calibration, planning, journal discovery, block restoration, block loops, tuning, freezing, commits, and reporting. It has up to 7 levels of indentation inside nested `recorder.phase()` contexts.
 **Action:** Extract the major phases into private helper functions.
