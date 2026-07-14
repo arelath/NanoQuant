@@ -942,6 +942,22 @@ The higher per-event ratio is accepted because the absolute run-level cost is sm
 redaction, deterministic serialization, required/optional failure isolation, and canonical-superset filtering.
 Per-event `fsync`, writer-maintained `run.log`, and default per-iteration ADMM emission remain rejected.
 
+### VRAM meter overhead (accepted, 2026-07-14)
+
+The VRAM diagnostics implementation centralizes the profiler, periodic sampler, lifecycle checkpoints, OOM
+forensics, and GPU-test budgets on one non-synchronizing meter function. The same event benchmark now measures the
+host-only meter path with CUDA deliberately hidden. Across 2,000 samples and seven repeats, the median was **54.77
+ms**, or **27.38 µs per sample**. At the default five-second cadence this is an estimated **0.00055% of one CPU
+core**. The CUDA path adds `memory_stats()` and `mem_get_info()` reads but contains no `synchronize`, event timing,
+tensor transfer, or peak reset. Periodic samples and phase counters are read-only; only explicit hierarchical
+`PeakWindow` owners reset counters, folding nested factorization peaks into the enclosing block.
+
+Allocator history remains rejected as a default-on instrument because PyTorch records allocation stacks on the
+allocator path and snapshot files can be large. It is available only through `capture_cuda_trace`,
+`--capture-cuda-trace`, or `NANOQUANT_VRAM_HISTORY=1`. OOM summaries are failure-path-only and are likewise outside
+the steady-state budget. No batching, fallback, retention, artifact identity, or numerical policy changes were made
+for the diagnostics.
+
 ## 5. What was checked and found already efficient
 
 For future readers: these were inspected and are *not* wasteful under the parity contract.

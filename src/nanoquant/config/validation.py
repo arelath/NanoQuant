@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from enum import Enum
 
@@ -90,6 +91,22 @@ def validate(config: RunConfig, phase: ValidationPhase = ValidationPhase.PRE_RES
             "OBS003",
             "observability.record_admm_steps",
             "requires observability.event_level=debug",
+        )
+    resource_interval = config.observability.record_resource_interval_seconds
+    require(
+        math.isfinite(resource_interval),
+        "OBS004",
+        "observability.record_resource_interval_seconds",
+        "must be finite; values at or below zero disable resource sampling",
+    )
+    if math.isfinite(resource_interval) and 0 < resource_interval < 1:
+        issues.append(
+            ValidationIssue(
+                "OBS004",
+                "observability.record_resource_interval_seconds",
+                "intervals below one second may create excessive event volume",
+                "warning",
+            )
         )
     if config.calibration.objective.kind is ObjectiveKind.BLOCK_DIAGONAL:
         require(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -10,6 +11,13 @@ from pathlib import Path
 from nanoquant.config.codec import from_dict
 from nanoquant.config.schema import ObservabilityConfig
 from nanoquant.domain.runs import RunManifest
+from nanoquant.infrastructure.device_memory import (
+    CudaMemoryHistory,
+    ResourceEventSink,
+    ResourceSampler,
+    capture_oom_forensics,
+    is_cuda_oom,
+)
 from nanoquant.infrastructure.events import (
     ConsoleEventDestination,
     EventDestination,
@@ -40,6 +48,8 @@ def _levels(observability: ObservabilityConfig) -> tuple[Severity, Severity]:
         raise ValueError("observability.event_level must be at least as verbose as console_level")
     if observability.record_admm_steps and event_level is not Severity.DEBUG:
         raise ValueError("record_admm_steps requires event_level=debug")
+    if not math.isfinite(observability.record_resource_interval_seconds):
+        raise ValueError("record_resource_interval_seconds must be finite")
     return event_level, console_level
 
 
@@ -70,6 +80,9 @@ def open_run_session(
     lease = directory.lease()
     lease.acquire()
     router: EventRouter | None = None
+    events: ResourceEventSink | None = None
+    sampler: ResourceSampler | None = None
+    history: CudaMemoryHistory | None = None
     try:
         initial_sequence, recovered_bytes = prepare_event_stream(directory.events_path)
         last_event = read_last_event(directory.events_path)
@@ -82,6 +95,32 @@ def open_run_session(
             destinations=tuple(destinations),
             initial_sequence=initial_sequence,
         )
+        history = CudaMemoryHistory(
+            directory.root / "state",
+            observability.capture_cuda_trace,
+        )
+        if history.requested and not history.start():
+            router.emit(
+                "observability",
+                "warning",
+                "observability.vram_history_unavailable",
+                error_type=history.unavailable_error_type,
+            )
+        events = ResourceEventSink(
+            router,
+            event_level,
+            oom_callback=lambda error, stage, block, layer: capture_oom_forensics(
+                directory.root,
+                router,
+                error,
+                history,
+                stage=stage,
+                block=block,
+                layer=layer,
+            ),
+        )
+        sampler = ResourceSampler(router, observability.record_resource_interval_seconds)
+        sampler.start()
         previous_run_id = None if last_event is None or last_event.run_id == adopted.run_id else last_event.run_id
         if recovered_bytes:
             router.emit(
@@ -116,10 +155,27 @@ def open_run_session(
                     "run.registry_registration_failed",
                     error_type=type(exc).__name__,
                 )
-        yield RunSession(adopted.run_id, directory.root, router, adopted, had_existing_state, previous_run_id)
+        try:
+            yield RunSession(adopted.run_id, directory.root, events, adopted, had_existing_state, previous_run_id)
+        except BaseException as exc:
+            if is_cuda_oom(exc) and events is not None:
+                events.capture_oom(exc)
+            raise
     finally:
         try:
             if router is not None:
+                if sampler is not None:
+                    sampler.stop()
+                if history is not None and history.active:
+                    snapshot = history.dump("terminal")
+                    if snapshot is not None:
+                        router.emit(
+                            "observability",
+                            "info",
+                            "observability.vram_history_dumped",
+                            path=str(snapshot.relative_to(directory.root)),
+                        )
+                    history.stop()
                 router.flush()
                 try:
                     render_event_log(directory.events_path, directory.root / "run.log")

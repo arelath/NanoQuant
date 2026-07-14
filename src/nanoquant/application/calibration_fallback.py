@@ -8,7 +8,7 @@ from typing import TypeVar
 
 import torch
 
-from nanoquant.ports.event_sink import EventSink
+from nanoquant.ports.event_sink import EventSink, capture_oom_if_supported
 
 T = TypeVar("T")
 
@@ -51,6 +51,7 @@ def run_with_oom_fallback(
         except BaseException as error:
             if not _is_cuda_oom(error):
                 raise
+            capture_oom_if_supported(events, error, stage="calibration")
             action = next((candidate for candidate in actions if candidate not in attempted_actions), "fail")
             attempted_actions.add(action)
             if action == "fail":

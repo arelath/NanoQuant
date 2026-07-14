@@ -108,6 +108,7 @@ from nanoquant.infrastructure.commits import (
     retire_block_activations,
 )
 from nanoquant.infrastructure.device_lease import acquire_device_lease
+from nanoquant.infrastructure.device_memory import PeakWindow
 from nanoquant.infrastructure.environment import capture_environment
 from nanoquant.infrastructure.model_adapters import adapter_for_config
 from nanoquant.infrastructure.profiling import profiled_run
@@ -622,8 +623,7 @@ def _run_resident_factorization_attempts(
 
     def execute_attempt_body(rank: int, attempt: int) -> FactorizationResult:
         started = time.perf_counter()
-        if request.device.startswith("cuda"):
-            torch.cuda.reset_peak_memory_stats(request.device)
+        attempt_window = PeakWindow(request.device).start()
         outlier_seed = (
             request.seed
             if request.legacy_tuning_seed_reset
@@ -660,6 +660,17 @@ def _run_resident_factorization_attempts(
                 context,
             )
         probe_peak = int(torch.cuda.max_memory_allocated(request.device)) if request.device.startswith("cuda") else 0
+        context.events.emit(
+            "resident-quantization",
+            "debug",
+            "probe.completed",
+            probe_kind="salient_residual",
+            block=layer_plan.layer.block.index,
+            layer=layer_plan.layer.path,
+            rank=rank,
+            attempt=attempt,
+            peak_allocated_bytes=probe_peak,
+        )
         objective = replace(
             layer_plan.objective,
             input_importance=outliers.factor_input_importance,
@@ -733,8 +744,9 @@ def _run_resident_factorization_attempts(
                     output_importance,
                 )
         companions.append((outliers, fitted))
+        attempt_window.finish()
         peak = (
-            max(probe_peak, int(torch.cuda.max_memory_allocated(request.device)))
+            max(probe_peak, attempt_window.peak_allocated_bytes)
             if request.device.startswith("cuda")
             else factorized.peak_workspace_bytes
         )
@@ -1468,6 +1480,7 @@ def _run_resident_quantization_impl(
         device=request.device,
         recorder=micro_recorder,
         record_admm_steps=request.observability.record_admm_steps,
+        reset_peak_memory=False,
     )
     outlier_stage = OutlierSelectionStage(
         device=request.device,
@@ -1480,6 +1493,7 @@ def _run_resident_quantization_impl(
         if block_plan.block.index in completed_block_indexes:
             continue
         block_started = time.perf_counter()
+        block_window = PeakWindow(request.device).start()
         deferred_slice = request.defer_layer_loss_snapshots
         block_index = block_plan.block.index
         metadata = _clone_forward_metadata(captured_metadata)
@@ -1961,7 +1975,11 @@ def _run_resident_quantization_impl(
                 (),
                 auxiliary_parameters,
             )
-            block_peak = _peak_device_memory_bytes(request.device)
+            block_window.finish()
+            block_peak = max(
+                block_window.peak_allocated_bytes,
+                block_window.peak_reserved_bytes,
+            )
             block_peak_host = peak_process_memory_bytes()
             peak_device_bytes = max(peak_device_bytes, block_peak)
         with _profile_block_phase(recorder, block_index, "commit"):
@@ -1988,7 +2006,7 @@ def _run_resident_quantization_impl(
             if request.activation_retention == "rolling" and committed_blocks:
                 retire_block_activations(committed_blocks[-1][1], artifacts)
         committed_blocks.append((committed.reference, committed.result))
-        events.emit(
+        cast(Any, events).emit(
             "resident-quantization",
             "info",
             "block.completed",
@@ -2000,6 +2018,10 @@ def _run_resident_quantization_impl(
             wall_seconds=committed.result.wall_seconds,
             gpu_peak_bytes=committed.result.peak_gpu_bytes,
             host_peak_bytes=committed.result.peak_host_bytes,
+            **{
+                "cuda.window_peak_allocated_bytes": block_window.peak_allocated_bytes,
+                "cuda.window_peak_reserved_bytes": block_window.peak_reserved_bytes,
+            },
         )
         new_block_commits += 1
         if (
@@ -2206,13 +2228,13 @@ def _run_resident_factorization_slice_impl(
     block_index = layer_plan.layer.block.index
     executor = ResidentExecutor()
     context = StageContext(run_id, executor, artifacts, tensors, events, Cancellation())
-    if request.device.startswith("cuda"):
-        torch.cuda.reset_peak_memory_stats(request.device)
+    slice_window = PeakWindow(request.device).start()
     try:
         factor_stage = FactorizationAttemptStage(
             request.admm,
             device=request.device,
             record_admm_steps=request.observability.record_admm_steps,
+            reset_peak_memory=False,
         )
         outlier_stage = OutlierSelectionStage(
             device=request.device,
@@ -2317,7 +2339,8 @@ def _run_resident_factorization_slice_impl(
             weighted_error=layer_result.final_reconstruction.export_weighted_normalized_error,
             raw_error=layer_result.final_reconstruction.raw_normalized_error,
         )
-        peak = int(torch.cuda.max_memory_allocated(request.device)) if request.device.startswith("cuda") else 0
+        slice_window.finish()
+        peak = slice_window.peak_allocated_bytes
         return ResidentFactorizationSliceResult(
             layer_result,
             identity,
@@ -2326,6 +2349,7 @@ def _run_resident_factorization_slice_impl(
             len(pending) - 1,
         )
     finally:
+        slice_window.finish()
         executor.release()
 
 

@@ -1,8 +1,11 @@
 import json
 import socket
+import threading
+import time
 from pathlib import Path
 
 import pytest
+import torch
 
 from nanoquant.config.schema import ModelConfig, ObservabilityConfig, RunConfig
 from nanoquant.infrastructure.run_session import open_run_session
@@ -102,3 +105,42 @@ def test_registry_failure_degrades_to_canonical_warning(
 
     events = [json.loads(line) for line in (output / "events.jsonl").read_text(encoding="utf-8").splitlines()]
     assert [event["name"] for event in events] == ["run.registry_registration_failed", "run.started"]
+
+
+def test_run_session_emits_host_resource_samples_and_stops_sampler(tmp_path: Path) -> None:
+    output = tmp_path / "sampled"
+    with open_run_session(
+        output,
+        manifest=_manifest(tmp_path),
+        observability=ObservabilityConfig(record_resource_interval_seconds=0.01),
+        console=False,
+    ) as session:
+        session.events.emit("run", "info", "run.started")
+        time.sleep(0.04)
+
+    events = [json.loads(line) for line in (output / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    samples = [event for event in events if event["name"] == "resource.sample"]
+    assert samples
+    assert "host.working_set_bytes" in samples[0]["fields"]
+    assert not any(thread.name == "nanoquant-resource-sampler" for thread in threading.enumerate())
+
+
+def test_run_session_captures_fatal_oom_without_masking_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output = tmp_path / "oom"
+    monkeypatch.setattr(torch.cuda, "memory_summary", lambda: "allocator state")
+
+    with pytest.raises(torch.OutOfMemoryError, match="Tried to allocate"):
+        with open_run_session(
+            output,
+            manifest=_manifest(tmp_path),
+            observability=ObservabilityConfig(record_resource_interval_seconds=0),
+            console=False,
+        ):
+            raise torch.OutOfMemoryError("CUDA out of memory. Tried to allocate 4 MiB")
+
+    events = [json.loads(line) for line in (output / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    snapshot = next(event for event in events if event["name"] == "resource.oom_snapshot")
+    assert snapshot["fields"]["requested_bytes"] == 4 * 2**20
+    assert (output / snapshot["fields"]["oom_report_path"]).read_text(encoding="utf-8") == "allocator state"

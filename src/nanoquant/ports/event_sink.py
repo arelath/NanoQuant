@@ -45,3 +45,18 @@ class EventSink(Protocol):
         parent_span_id: str | None = None,
         **fields: object,
     ) -> Event | None: ...
+
+
+def capture_oom_if_supported(
+    sink: EventSink,
+    error: BaseException,
+    *,
+    stage: str | None = None,
+    block: int | None = None,
+    layer: str | None = None,
+) -> None:
+    """Invoke an infrastructure OOM observer without requiring it of every sink."""
+
+    callback = getattr(sink, "capture_oom", None)
+    if callable(callback):
+        callback(error, stage=stage, block=block, layer=layer)

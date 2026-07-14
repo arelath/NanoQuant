@@ -74,3 +74,57 @@ def test_unmanaged_path_is_read_only_and_missing_selector_has_stable_code(tmp_pa
 
     assert main(["runs", "show", "missing", "--run-root", str(tmp_path / "runs")]) == 3
     assert "no run matches" in capsys.readouterr().err
+
+
+def test_runs_vram_folds_samples_and_block_windows_without_writing(tmp_path: Path, capsys) -> None:
+    run = tmp_path / "vram-run"
+    with JsonlEventSink(run / "events.jsonl", "vram-fixture") as events:
+        events.emit(
+            "run",
+            "info",
+            "run.started",
+            **{
+                "cuda.allocated_bytes": 100,
+                "cuda.reserved_bytes": 150,
+                "cuda.device_total_bytes": 1_000,
+            },
+        )
+        events.emit(
+            "resource",
+            "info",
+            "resource.sample",
+            **{"cuda.allocated_bytes": 300, "cuda.reserved_bytes": 500},
+        )
+        events.emit(
+            "resource",
+            "info",
+            "resource.sample",
+            **{"cuda.allocated_bytes": 250, "cuda.reserved_bytes": 350},
+        )
+        events.emit(
+            "resident",
+            "info",
+            "block.completed",
+            block=2,
+            planned_device_bytes=400,
+            **{
+                "cuda.window_peak_allocated_bytes": 325,
+                "cuda.window_peak_reserved_bytes": 500,
+            },
+        )
+
+    assert main(["runs", "vram", "--path", str(run), "--json"]) == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["sample_count"] == 2
+    assert summary["peak_reserved_bytes"] == 500
+    assert summary["empty_cache_sawtooth_count"] == 1
+    assert summary["block_peaks"] == [
+        {
+            "block": 2,
+            "budget_utilization": 1.25,
+            "planned_device_bytes": 400,
+            "window_peak_allocated_bytes": 325,
+            "window_peak_reserved_bytes": 500,
+        }
+    ]
+    assert not (run / "manifest.json").exists()

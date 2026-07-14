@@ -94,6 +94,8 @@ def main() -> None:
     parser.add_argument("--event-level", choices=("debug", "info", "warning", "error"), default="info")
     parser.add_argument("--console-level", choices=("debug", "info", "warning", "error"), default="info")
     parser.add_argument("--record-admm-steps", action="store_true")
+    parser.add_argument("--resource-interval-seconds", type=float, default=5.0)
+    parser.add_argument("--capture-cuda-trace", action="store_true")
     args = parser.parse_args()
     nonfactorized_schedule = tuple(
         int(value.strip()) for value in args.nonfactorized_tuning_schedule.split(",") if value.strip()
@@ -196,6 +198,8 @@ def main() -> None:
             event_level=args.event_level,
             console_level=args.console_level,
             record_admm_steps=args.record_admm_steps,
+            record_resource_interval_seconds=args.resource_interval_seconds,
+            capture_cuda_trace=args.capture_cuda_trace,
         ),
     )
     if args.factor_only:

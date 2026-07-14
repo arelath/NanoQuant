@@ -13,6 +13,7 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 
+from nanoquant.infrastructure.device_memory import sample_device_memory
 from nanoquant.infrastructure.events import (
     ConsoleEventDestination,
     EventRouter,
@@ -86,6 +87,13 @@ def _router(path: Path, count: int, *, console: bool) -> float:
     return time.perf_counter() - started
 
 
+def _meters(count: int) -> float:
+    started = time.perf_counter()
+    for _index in range(count):
+        sample_device_memory()
+    return time.perf_counter() - started
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--events", type=int, default=2000)
@@ -94,7 +102,12 @@ def main() -> None:
     if args.events <= 0 or args.repeats <= 0:
         raise ValueError("events and repeats must be positive")
 
-    measurements: dict[str, list[float]] = {"legacy_like": [], "router_jsonl": [], "router_console": []}
+    measurements: dict[str, list[float]] = {
+        "legacy_like": [],
+        "router_jsonl": [],
+        "router_console": [],
+        "resource_meter": [],
+    }
     with tempfile.TemporaryDirectory(prefix="nanoquant-event-benchmark-") as directory:
         root = Path(directory)
         for repeat in range(args.repeats):
@@ -103,9 +116,11 @@ def main() -> None:
             measurements["router_console"].append(
                 _router(root / f"console-{repeat}.jsonl", args.events, console=True)
             )
+            measurements["resource_meter"].append(_meters(args.events))
 
     medians = {name: statistics.median(values) for name, values in measurements.items()}
     baseline = medians["legacy_like"]
+    meter_microseconds = medians["resource_meter"] * 1_000_000 / args.events
     print(
         json.dumps(
             {
@@ -116,6 +131,11 @@ def main() -> None:
                     name: seconds * 1_000_000 / args.events for name, seconds in medians.items()
                 },
                 "ratio_to_legacy_like": {name: seconds / baseline for name, seconds in medians.items()},
+                "resource_sampler": {
+                    "microseconds_per_sample": meter_microseconds,
+                    "estimated_default_cpu_fraction": meter_microseconds / 5_000_000,
+                    "cuda_stream_synchronizations": 0,
+                },
             },
             sort_keys=True,
             indent=2,

@@ -179,6 +179,7 @@ class FactorizationAttemptStage:
         recorder: PhaseRecorder = NULL_RECORDER,
         record_admm_steps: bool = False,
         admm_sample_every: int = 4,
+        reset_peak_memory: bool = True,
     ) -> None:
         if admm_sample_every <= 0:
             raise ValueError("ADMM event sample cadence must be positive")
@@ -187,6 +188,7 @@ class FactorizationAttemptStage:
         self.recorder = recorder
         self.record_admm_steps = record_admm_steps
         self.admm_sample_every = admm_sample_every
+        self.reset_peak_memory = reset_peak_memory
 
     def _sampled_trace(self, trace: tuple[ADMMTracePoint, ...]) -> tuple[ADMMTracePoint, ...]:
         selected: list[ADMMTracePoint] = []
@@ -209,7 +211,7 @@ class FactorizationAttemptStage:
 
     def execute(self, request: FactorizationRequest, context: StageContext) -> FactorizationResult:
         started = time.perf_counter()
-        if self.device.startswith("cuda"):
+        if self.device.startswith("cuda") and self.reset_peak_memory:
             torch.cuda.reset_peak_memory_stats(self.device)
         with context.executor.device_scope(self.device):
             with (

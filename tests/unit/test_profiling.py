@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+import nanoquant.infrastructure.device_memory as device_memory_module
 import nanoquant.infrastructure.profiling as profiling_module
 from nanoquant.config.schema import ProfilingConfig, ProfilingLevel
 from nanoquant.domain.profiling import NULL_RECORDER
@@ -278,14 +279,10 @@ def test_memory_counters_record_phase_boundaries_without_initializing_cuda() -> 
 def test_runtime_memory_sample_separates_live_reserved_and_device_visible_cuda_bytes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(device_memory_module, "process_memory_snapshot", lambda: ProcessMemorySnapshot(10, 20, 30, 40))
+    monkeypatch.setattr(device_memory_module.torch.cuda, "_initialized", True)
     monkeypatch.setattr(
-        profiling_module,
-        "process_memory_snapshot",
-        lambda: ProcessMemorySnapshot(10, 20, 30, 40),
-    )
-    monkeypatch.setattr(profiling_module.torch.cuda, "_initialized", True)
-    monkeypatch.setattr(
-        profiling_module.torch.cuda,
+        device_memory_module.torch.cuda,
         "memory_stats",
         lambda: {
             "allocated_bytes.all.current": 100,
@@ -296,7 +293,7 @@ def test_runtime_memory_sample_separates_live_reserved_and_device_visible_cuda_b
             "allocation.all.freed": 3,
         },
     )
-    monkeypatch.setattr(profiling_module.torch.cuda, "mem_get_info", lambda: (250, 1_000))
+    monkeypatch.setattr(device_memory_module.torch.cuda, "mem_get_info", lambda: (250, 1_000))
 
     assert profiling_module._runtime_memory_sample() == {
         "host.working_set_bytes": 10,

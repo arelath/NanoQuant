@@ -1,3 +1,4 @@
+import math
 from dataclasses import FrozenInstanceError
 
 import pytest
@@ -92,6 +93,26 @@ def test_observability_levels_are_validated_without_changing_schema() -> None:
         observability=ObservabilityConfig(event_level="debug", record_admm_steps=True),
     )
     assert validate(debug_admm) == ()
+
+
+def test_resource_interval_validation_rejects_nonfinite_and_warns_on_high_volume() -> None:
+    invalid = RunConfig(
+        ModelConfig("x"),
+        observability=ObservabilityConfig(record_resource_interval_seconds=math.inf),
+    )
+    assert [(issue.code, issue.severity) for issue in validate(invalid)] == [("OBS004", "error")]
+
+    noisy = RunConfig(
+        ModelConfig("x"),
+        observability=ObservabilityConfig(record_resource_interval_seconds=0.5),
+    )
+    assert [(issue.code, issue.severity) for issue in validate(noisy)] == [("OBS004", "warning")]
+
+    disabled = RunConfig(
+        ModelConfig("x"),
+        observability=ObservabilityConfig(record_resource_interval_seconds=0),
+    )
+    assert validate(disabled) == ()
 
 
 def test_legacy_migration_is_total_and_rejects_uninventoried_fields() -> None:

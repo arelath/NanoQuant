@@ -8,7 +8,7 @@ from typing import TypeVar
 
 import torch
 
-from nanoquant.ports.event_sink import EventSink
+from nanoquant.ports.event_sink import EventSink, capture_oom_if_supported
 
 T = TypeVar("T")
 
@@ -53,6 +53,7 @@ def run_with_runtime_fallback(
         except BaseException as error:
             if not _is_oom(error):
                 raise
+            capture_oom_if_supported(events, error, stage="runtime")
             action = next((candidate for candidate in actions if candidate not in attempted), "fail")
             attempted.add(action)
             before = state

@@ -21,7 +21,7 @@ import torch
 
 from nanoquant.config.schema import ProfilingConfig, ProfilingLevel
 from nanoquant.domain.profiling import NULL_RECORDER, PhaseRecorder
-from nanoquant.infrastructure.resource_usage import process_memory_snapshot
+from nanoquant.infrastructure.device_memory import sample_device_memory
 from nanoquant.ports.event_sink import EventSink
 
 _PROFILE_SCHEMA_VERSION = 2
@@ -213,31 +213,7 @@ def _torch_cuda_event() -> _CudaEvent:
     return cast(_CudaEvent, torch.cuda.Event(enable_timing=True))  # type: ignore[no-untyped-call]
 
 
-def _runtime_memory_sample() -> dict[str, int]:
-    process = process_memory_snapshot()
-    sample = {
-        "host.working_set_bytes": process.working_set_bytes,
-        "host.peak_working_set_bytes": process.peak_working_set_bytes,
-        "host.private_bytes": process.private_bytes,
-        "host.peak_private_bytes": process.peak_private_bytes,
-    }
-    if bool(getattr(torch.cuda, "_initialized", False)):
-        stats = torch.cuda.memory_stats()
-        free_bytes, total_bytes = torch.cuda.mem_get_info()
-        sample.update(
-            {
-                "cuda.allocated_bytes": int(stats.get("allocated_bytes.all.current", 0)),
-                "cuda.reserved_bytes": int(stats.get("reserved_bytes.all.current", 0)),
-                "cuda.peak_allocated_bytes": int(stats.get("allocated_bytes.all.peak", 0)),
-                "cuda.peak_reserved_bytes": int(stats.get("reserved_bytes.all.peak", 0)),
-                "cuda.device_free_bytes": int(free_bytes),
-                "cuda.device_used_bytes": int(total_bytes - free_bytes),
-                "cuda.device_total_bytes": int(total_bytes),
-                "cuda.allocation_count": int(stats.get("allocation.all.allocated", 0)),
-                "cuda.free_count": int(stats.get("allocation.all.freed", 0)),
-            }
-        )
-    return sample
+_runtime_memory_sample = sample_device_memory
 
 
 @dataclass(frozen=True, slots=True)

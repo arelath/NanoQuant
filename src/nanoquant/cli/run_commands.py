@@ -6,8 +6,10 @@ import argparse
 import json
 import sys
 import time
+from collections.abc import Iterable
 from dataclasses import asdict
 from pathlib import Path
+from typing import cast
 
 from nanoquant.config.codec import to_dict
 from nanoquant.domain.runs import RunStatus
@@ -68,6 +70,11 @@ def add_run_commands(subcommands: argparse._SubParsersAction[argparse.ArgumentPa
     rebuild = run_commands.add_parser("rebuild-registry", help="rebuild immutable external-run pointers")
     _add_root(rebuild)
     rebuild.add_argument("--include-root", type=Path, action="append", default=[])
+
+    vram = run_commands.add_parser("vram", help="summarize VRAM samples and checkpoint peaks")
+    _add_root(vram)
+    _add_selector(vram)
+    vram.add_argument("--json", action="store_true")
 
     logs = subcommands.add_parser("logs", help="render or follow canonical run events")
     _add_root(logs)
@@ -170,6 +177,114 @@ def _path(args: argparse.Namespace) -> int:
     return 0
 
 
+def _integer_field(event: Event, name: str) -> int | None:
+    value = event.fields.get(name)
+    return int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+
+def summarize_vram_events(events: Iterable[Event]) -> dict[str, object]:
+    """Fold the canonical event stream into a read-only VRAM comparison view."""
+
+    baseline: dict[str, int] | None = None
+    latest: dict[str, int] = {}
+    block_peaks: list[dict[str, int | float | None]] = []
+    peak_allocated = 0
+    peak_reserved = 0
+    device_total = 0
+    sample_count = 0
+    sawtooth_count = 0
+    previous_sample_reserved: int | None = None
+    meter_names = (
+        "cuda.allocated_bytes",
+        "cuda.reserved_bytes",
+        "cuda.device_free_bytes",
+        "cuda.device_used_bytes",
+        "cuda.device_total_bytes",
+    )
+    for event in events:
+        current = {name: value for name in meter_names if (value := _integer_field(event, name)) is not None}
+        if current:
+            latest.update(current)
+        if baseline is None and event.name in {"run.started", "run.resumed"} and current:
+            baseline = current
+        allocated_candidates = (
+            _integer_field(event, "cuda.allocated_bytes"),
+            _integer_field(event, "cuda.peak_allocated_bytes"),
+            _integer_field(event, "cuda.window_peak_allocated_bytes"),
+        )
+        reserved_candidates = (
+            _integer_field(event, "cuda.reserved_bytes"),
+            _integer_field(event, "cuda.peak_reserved_bytes"),
+            _integer_field(event, "cuda.window_peak_reserved_bytes"),
+            _integer_field(event, "gpu_peak_bytes"),
+        )
+        peak_allocated = max(peak_allocated, *(value for value in allocated_candidates if value is not None))
+        peak_reserved = max(peak_reserved, *(value for value in reserved_candidates if value is not None))
+        device_total = max(device_total, _integer_field(event, "cuda.device_total_bytes") or 0)
+        if event.name == "resource.sample":
+            sample_count += 1
+            reserved = _integer_field(event, "cuda.reserved_bytes")
+            if reserved is not None and previous_sample_reserved is not None and reserved < previous_sample_reserved:
+                sawtooth_count += 1
+            if reserved is not None:
+                previous_sample_reserved = reserved
+        if event.name == "block.completed":
+            window_allocated = _integer_field(event, "cuda.window_peak_allocated_bytes")
+            window_reserved = _integer_field(event, "cuda.window_peak_reserved_bytes")
+            planned = _integer_field(event, "planned_device_bytes")
+            measured = max(window_allocated or 0, window_reserved or 0)
+            block_peaks.append(
+                {
+                    "block": _integer_field(event, "block"),
+                    "window_peak_allocated_bytes": window_allocated,
+                    "window_peak_reserved_bytes": window_reserved,
+                    "planned_device_bytes": planned,
+                    "budget_utilization": measured / planned if planned and measured else None,
+                }
+            )
+    return {
+        "sample_count": sample_count,
+        "baseline": baseline,
+        "latest": latest or None,
+        "peak_allocated_bytes": peak_allocated,
+        "peak_reserved_bytes": peak_reserved,
+        "device_total_bytes": device_total,
+        "empty_cache_sawtooth_count": sawtooth_count,
+        "block_peaks": block_peaks,
+    }
+
+
+def _vram(args: argparse.Namespace) -> int:
+    item = _resolve(args)
+    events_path = item.path / "events.jsonl"
+    if not events_path.exists():
+        raise CommandError(f"event stream does not exist: {events_path}", 3)
+    summary = summarize_vram_events(read_event_prefix(events_path))
+    if args.json:
+        print(json.dumps(summary, sort_keys=True, indent=2))
+        return 0
+    print(f"run: {item.run_id}")
+    print(f"samples: {summary['sample_count']}")
+    print(f"peak allocated bytes: {summary['peak_allocated_bytes']}")
+    print(f"peak reserved bytes: {summary['peak_reserved_bytes']}")
+    print(f"device total bytes: {summary['device_total_bytes']}")
+    print(f"empty-cache sawtooths: {summary['empty_cache_sawtooth_count']}")
+    blocks = cast(list[dict[str, object]], summary["block_peaks"])
+    if blocks:
+        print("block  allocated peak  reserved peak  planned  utilization")
+        for block in blocks:
+            utilization = block["budget_utilization"]
+            rendered_utilization = (
+                f"{utilization:.3f}" if isinstance(utilization, (int, float)) else "-"
+            )
+            print(
+                f"{str(block['block']):5} {str(block['window_peak_allocated_bytes']):14} "
+                f"{str(block['window_peak_reserved_bytes']):13} {str(block['planned_device_bytes']):8} "
+                f"{rendered_utilization}"
+            )
+    return 0
+
+
 def _print_event(event: Event, *, json_output: bool) -> None:
     if json_output:
         print(json.dumps(asdict(event), sort_keys=True, separators=(",", ":")), flush=True)
@@ -241,6 +356,8 @@ def execute_run_command(args: argparse.Namespace) -> int:
             return _show(args)
         if args.runs_command == "path":
             return _path(args)
+        if args.runs_command == "vram":
+            return _vram(args)
         if args.runs_command == "rebuild-registry":
             count = rebuild_registry(args.run_root, tuple(args.include_root))
             print(count)
