@@ -32,6 +32,11 @@ class _QualityModel(nn.Module):
         return SimpleNamespace(logits=self.logits_by_token[input_ids])
 
 
+class _QualityAdapter:
+    def run_full_forward(self, model: nn.Module, tokens: torch.Tensor) -> torch.Tensor:
+        return model(input_ids=tokens, use_cache=False).logits  # type: ignore[no-any-return, operator]
+
+
 def test_quality_evaluation_streams_sequences_to_pageable_cpu_and_matches_full_metrics() -> None:
     sample_count = 3
     sequence_length = 300
@@ -47,8 +52,9 @@ def test_quality_evaluation_streams_sequences_to_pageable_cpu_and_matches_full_m
     )
     reference_model = _QualityModel(base_logits)
     compressed_model = _QualityModel(base_logits + perturbation)
+    adapter = _QualityAdapter()
 
-    reference_logits = _run_quality_logits_batched(reference_model, tokens, "cpu")
+    reference_logits = _run_quality_logits_batched(adapter, reference_model, tokens, "cpu")  # type: ignore[arg-type]
 
     assert reference_model.batch_sizes == [1] * sample_count
     assert reference_logits.device.type == "cpu"
@@ -73,7 +79,9 @@ def test_quality_evaluation_streams_sequences_to_pageable_cpu_and_matches_full_m
     )
     compressed_model.batch_sizes.clear()
 
-    actual = _streamed_quality_metrics(compressed_model, tokens, reference_logits)
+    actual = _streamed_quality_metrics(  # type: ignore[arg-type]
+        adapter, compressed_model, tokens, reference_logits
+    )
 
     assert compressed_model.batch_sizes == [1] * sample_count
     assert actual == pytest.approx(expected, rel=1e-6, abs=1e-7)

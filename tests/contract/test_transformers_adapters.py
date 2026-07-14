@@ -205,22 +205,18 @@ def test_adapter_full_replay_tied_inventory_and_streamed_loading(tmp_path: Path,
     config = adapter.definition.config_factory(values)
     model = MODEL_FACTORIES[values["model_type"]](config).eval()
     tokens = torch.tensor(((1, 2, 3, 4), (4, 3, 2, 1)))
-    layers = (
-        model.model.decoder.layers  # type: ignore[union-attr]
-        if values["model_type"] == "opt"
-        else model.model.layers  # type: ignore[union-attr]
-    )
+    layers = adapter.get_decoder_layers(model)
 
     first_capture = capture_prefix_invocations(
         layers[0],
-        (lambda: model(input_ids=tokens, use_cache=False),),
+        (lambda: adapter.run_decoder_forward(model, tokens),),
     )[0]
     second_capture = capture_prefix_invocations(
         layers[1],
-        (lambda: model(input_ids=tokens, use_cache=False),),
+        (lambda: adapter.run_decoder_forward(model, tokens),),
     )[0]
     with torch.no_grad():
-        reference_logits = model(input_ids=tokens, use_cache=False).logits
+        reference_logits = adapter.run_full_forward(model, tokens)
         hidden = adapter.run_prefix(model, tokens)
         torch.testing.assert_close(hidden, first_capture.positional[0], rtol=0, atol=0)
         hidden = adapter.run_block(layers[0], hidden, **first_capture.keyword)

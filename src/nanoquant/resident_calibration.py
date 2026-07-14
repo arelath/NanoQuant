@@ -7,7 +7,7 @@ import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import cast
 
 import torch
 from torch import nn
@@ -66,14 +66,6 @@ def _token_fingerprint(tokens: torch.Tensor) -> str:
     return "sha256:" + hashlib.sha256(value.view(torch.uint8).numpy().tobytes()).hexdigest()
 
 
-def _layers(model: nn.Module) -> tuple[nn.Module, ...]:
-    base = getattr(model, "model", None)
-    values = getattr(base, "layers", None)
-    if not isinstance(values, nn.ModuleList):
-        raise TypeError("model does not expose a supported decoder layer stack")
-    return tuple(values)
-
-
 def _checkpoint_dtype(config: dict[str, object]) -> torch.dtype:
     value = config.get("torch_dtype")
     if not isinstance(value, str):
@@ -126,18 +118,17 @@ def _run_resident_calibration(
             ),
         ).to(request.device)
         model.eval()
-        decoder_layers = _layers(model)
+        decoder_layers = adapter.get_decoder_layers(model)
         if len(decoder_layers) != len(inventory.blocks):
             raise ValueError("adapter inventory and loaded model disagree on decoder block count")
 
     with recorder.phase("reference"):
         with torch.no_grad():
-            reference_output = cast(Any, model)(input_ids=tokens, use_cache=False)
-            reference_logits = cast(torch.Tensor, reference_output.logits).detach()
+            reference_logits = adapter.run_full_forward(model, tokens).detach()
     with recorder.phase("prefix_capture"):
         capture = capture_prefix_invocations(
             decoder_layers[0],
-            (lambda: cast(Any, model)(input_ids=tokens, use_cache=False),),
+            (lambda: adapter.run_decoder_forward(model, tokens),),
         )[0]
     hidden = capture.positional[0]
     if not isinstance(hidden, torch.Tensor):

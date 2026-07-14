@@ -28,7 +28,7 @@ However, in `resident_quantization.py` you correctly realized that PyTorch's *re
 *   Extract this logic into utility functions within `src/nanoquant/application/parity_adamw.py` (e.g., `capture_optimizer_state(optimizer) -> list[TuningOptimizerState]` and `restore_optimizer_state(optimizer, states)`).
 *   *Why:* Reduces the size of the massive `tune()` and `distill_topk()` functions and centralizes the complex Kahan/BF16 tensor moving.
 
-### [ ] 4. Plug Hugging Face Abstraction Leaks using `ModelAdapter`
+### [x] 4. Plug Hugging Face Abstraction Leaks using `ModelAdapter`
 **Location:** `src/nanoquant/resident_quantization.py` and `src/nanoquant/resident_calibration.py`
 **Problem:** The application layer is meant to be architecture-agnostic via `ModelAdapter`. However, the orchestration code still does manual Hugging Face topology traversals, such as:
 *   `text_model = getattr(model, "model", model)`

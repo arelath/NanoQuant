@@ -302,6 +302,27 @@ class TransformersModelAdapter:
             raise UnsupportedModelVariant(f"SRC001 block lacks expected linear modules: {missing}")
         return tuple(LayerId(block_id, path) for path in self.definition.layer_paths)
 
+    def get_decoder_layers(self, model: nn.Module) -> nn.ModuleList:
+        base = getattr(model, "model", None)
+        container = getattr(base, "decoder", None) if self.family == "opt" else base
+        layers = getattr(container, "layers", None)
+        if not isinstance(layers, nn.ModuleList):
+            raise UnsupportedModelVariant("SRC001 model has no mutable decoder layer stack")
+        return layers
+
+    def run_decoder_forward(self, model: nn.Module, tokens: torch.Tensor) -> object:
+        base = getattr(model, "model", None)
+        if not isinstance(base, nn.Module):
+            raise UnsupportedModelVariant("SRC001 model has no decoder model")
+        return cast(Any, base)(input_ids=tokens, use_cache=False)
+
+    def run_full_forward(self, model: nn.Module, tokens: torch.Tensor) -> torch.Tensor:
+        output = cast(Any, model)(input_ids=tokens, use_cache=False)
+        logits = getattr(output, "logits", None)
+        if not isinstance(logits, torch.Tensor):
+            raise UnsupportedModelVariant("SRC001 causal model forward returned no logits")
+        return logits
+
     def run_prefix(self, model: nn.Module, tokens: torch.Tensor) -> torch.Tensor:
         if self.family == "opt":
             decoder = getattr(getattr(model, "model", None), "decoder", None)

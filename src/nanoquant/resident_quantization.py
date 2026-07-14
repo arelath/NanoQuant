@@ -131,6 +131,7 @@ from nanoquant.infrastructure.tuning_checkpoint import (
     save_tuning_checkpoint,
 )
 from nanoquant.ports.event_sink import EventSink
+from nanoquant.ports.model_adapter import ModelAdapter
 
 RESIDENT_ALGORITHM_VERSION = 24
 
@@ -314,14 +315,6 @@ def _checkpoint_dtype(config: dict[str, object]) -> torch.dtype:
         "float16": torch.float16,
         "float32": torch.float32,
     }.get(value, torch.float32)
-
-
-def _decoder_layers(model: nn.Module) -> tuple[nn.Module, ...]:
-    base = getattr(model, "model", None)
-    values = getattr(base, "layers", None)
-    if not isinstance(values, nn.ModuleList):
-        raise TypeError("model does not expose a supported decoder layer stack")
-    return tuple(values)
 
 
 def _release_uncompleted_decoder_blocks(
@@ -517,7 +510,10 @@ _QUALITY_CHUNK_POSITIONS = 256
 
 @torch.no_grad()
 def _run_quality_logits_batched(
-    model: nn.Module, tokens: torch.Tensor, storage_device: str | torch.device
+    adapter: ModelAdapter,
+    model: nn.Module,
+    tokens: torch.Tensor,
+    storage_device: str | torch.device,
 ) -> torch.Tensor:
     """Run the full model one sequence at a time and park the logits off-device.
 
@@ -530,10 +526,7 @@ def _run_quality_logits_batched(
     destination = torch.device(storage_device)
     result: torch.Tensor | None = None
     for index in range(tokens.shape[0]):
-        output = cast(
-            torch.Tensor,
-            cast(Any, model)(input_ids=tokens[index : index + 1], use_cache=False).logits,
-        ).detach()
+        output = adapter.run_full_forward(model, tokens[index : index + 1]).detach()
         if result is None:
             result = torch.empty((tokens.shape[0], *output.shape[1:]), device=destination, dtype=output.dtype)
         result[index].copy_(output[0])
@@ -548,7 +541,10 @@ def _run_quality_logits_batched(
 
 @torch.no_grad()
 def _streamed_quality_metrics(
-    model: nn.Module, tokens: torch.Tensor, reference_logits: torch.Tensor
+    adapter: ModelAdapter,
+    model: nn.Module,
+    tokens: torch.Tensor,
+    reference_logits: torch.Tensor,
 ) -> tuple[float, float, float, float]:
     """Return (reference NLL, compressed NLL, logit MSE, argmax agreement).
 
@@ -563,10 +559,7 @@ def _streamed_quality_metrics(
     squared_error_sum = torch.zeros((), device=device)
     argmax_matches = torch.zeros((), device=device)
     for index in range(tokens.shape[0]):
-        compressed = cast(
-            torch.Tensor,
-            cast(Any, model)(input_ids=tokens[index : index + 1], use_cache=False).logits,
-        ).detach()[0]
+        compressed = adapter.run_full_forward(model, tokens[index : index + 1]).detach()[0]
         targets = tokens[index, 1:]
         positions = compressed.shape[0]
         for start in range(0, positions, _QUALITY_CHUNK_POSITIONS):
@@ -1312,7 +1305,7 @@ def _run_resident_quantization_impl(
                     ),
                 ).to(request.device)
     model.eval()
-    decoder_layers = _decoder_layers(model)
+    decoder_layers = adapter.get_decoder_layers(model)
     reference_logits = None
     if request.evaluate_inline_quality:
         with _logged_operation(
@@ -1326,14 +1319,13 @@ def _run_resident_quantization_impl(
                     # Held on CPU for the whole run: on-device reference logits
                     # would otherwise occupy sample*sequence*vocabulary bytes of
                     # VRAM through every block's factorization and tuning.
-                    reference_logits = _run_quality_logits_batched(model, quality_tokens, "cpu")
-    text_model = getattr(model, "model", model)
+                    reference_logits = _run_quality_logits_batched(adapter, model, quality_tokens, "cpu")
     with _logged_operation(events, "prefix_metadata_capture", samples=1):
         with recorder.phase("setup"):
             with recorder.phase("prefix_capture"):
                 capture = capture_prefix_invocations(
                     decoder_layers[0],
-                    (lambda: cast(Any, text_model)(input_ids=tokens[:1], use_cache=False),),
+                    (lambda: adapter.run_decoder_forward(model, tokens[:1]),),
                 )[0]
     captured_input = capture.positional[0]
     if not isinstance(captured_input, torch.Tensor):
@@ -1623,9 +1615,7 @@ def _run_resident_quantization_impl(
                     compressed_inputs = initial_inputs
     del initial_inputs
     completed_block_indexes = {block.block.index for _, block in committed_blocks}
-    layer_container = getattr(getattr(model, "model", None), "layers", None)
-    if not isinstance(layer_container, nn.ModuleList):
-        raise TypeError("model does not expose a mutable decoder layer stack")
+    layer_container = adapter.get_decoder_layers(model)
     if request.restore_completed_blocks:
         with _logged_operation(events, "resume_model_restore", blocks=len(committed_blocks)):
             with recorder.phase("resume"):
@@ -2415,7 +2405,7 @@ def _run_resident_quantization_impl(
                         raise ValueError("inline quality evaluation requires completed-block restoration")
                     if reference_logits is None:
                         raise AssertionError("inline quality evaluation requires captured reference logits")
-                    quality_metrics = _streamed_quality_metrics(model, quality_tokens, reference_logits)
+                    quality_metrics = _streamed_quality_metrics(adapter, model, quality_tokens, reference_logits)
     original_elements = sum(
         layer.in_features * layer.out_features for block in inventory.blocks for layer in block.quantizable_layers
     )
