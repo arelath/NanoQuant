@@ -839,6 +839,14 @@ must be remeasured rather than inferred from the speedup.
   The replacement bounded v21 replay uses the already parity-approved v17/current-CCE basin. Performance work
   remains gated on its two retained boundaries; once accurate, profiles must separate checkpoint serialization,
   gradient synchronization, and the rewrite's full best-state evaluations before changing a hot path.
+- **Current-environment v21 two-block gate passed (2026-07-13):** the replacement CCE-basin run now has a
+  store-validated contiguous two-block/14-layer prefix. Block 0 is **1.3784899712** versus contemporary legacy
+  **1.3728** (+0.41%); block 1 is **3.5971968174** versus **3.6029** (-0.16%). Mean absolute boundary delta is
+  **0.29%**, well inside the approved 2.20% realization envelope and, unlike the exact-retained-Fisher replay,
+  the accumulating error direction remains aligned. Validation followed 79 reachable artifacts totaling
+  3,153,557,256 bytes. The cooldown-aware block-1 resume peaked at 4,788,224,512 allocated CUDA bytes; live
+  board sampling held near 7.6 GiB and 73--80 C. This passes the extension gate. Its wall time includes deliberate
+  execution-only sleeps and must not be used for the post-parity performance comparison.
 - `JsonlEventSink._read_last_sequence` parses the whole event log at construction — only matters for
   resumed runs with large logs; fine today, worth a tail-scan if event volume grows.
 - **Measured, not implemented (2026-07-13):** a fresh process inventories the pinned Gemma snapshot in a
