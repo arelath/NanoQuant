@@ -892,7 +892,15 @@ must be remeasured rather than inferred from the speedup.
   source block are therefore not the divergent state. The remaining process-local input is the prefix-captured
   attention/position metadata, which was reused after thousands of block-0 forwards. Resident algorithm version
   24 preserves that capture as a pristine template and recursively clones every tensor/container for each
-  calibration and quantization block. A fresh two-block replay is required before extension.
+  calibration and quantization block.
+- **Metadata-isolated v24 two-block gate passed (2026-07-14):** the fresh replay restored block-1 entry loss to
+  **5.0029702187** and final loss to **3.5971968174**, both bit-identical to v21, versus contemporary legacy
+  **3.6029** (-0.16%). Block 0 remained **1.3784899712** versus **1.3728** (+0.41%), for a two-boundary mean
+  absolute delta of **0.29%**. Store validation followed all 79 reachable artifacts (3,153,557,257 bytes), found
+  one identity, 16 active journal records, zero inactive records, all 14 expected layers, and 1.017989 effective
+  BPW. The run's allocated CUDA peak was **4,799,958,528 bytes**; block evidence recorded a 5,815,402,496-byte
+  board-level peak. The gate passes and may extend to block 2, the first prefix block where final-epoch retention
+  is expected to change serialized tuning state relative to v21.
 - `JsonlEventSink._read_last_sequence` parses the whole event log at construction — only matters for
   resumed runs with large logs; fine today, worth a tail-scan if event volume grows.
 - **Measured, not implemented (2026-07-13):** a fresh process inventories the pinned Gemma snapshot in a
