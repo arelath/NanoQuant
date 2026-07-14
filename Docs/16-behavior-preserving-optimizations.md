@@ -640,6 +640,13 @@ must be remeasured rather than inferred from the speedup.
   happen only after activating each non-final checkpoint. They keep the recurrence and protocol identity
   unchanged, avoid repeated model reload/allocation, and prevent another worker from filling the intended
   thermal-rest windows; their sleep time is excluded from performance comparisons.
+- **Resident tuning cooldown added after thermal resets (2026-07-13):** the low-memory full-protocol
+  candidate completed two blocks at 4.74--4.84 GB peak allocated memory, but Windows reset the driver at
+  86 C during the third continuous block. A three-minute inter-block cooldown was insufficient: the next
+  bounded resume again reached 86 C midway through block 3. The resident runner now supports an execution-only
+  cooldown after each durable factorized-tuning epoch. It holds the CUDA lease while sleeping, does not enter
+  the numerical configuration hash, and can therefore be adjusted across resumes without invalidating exact
+  state. Cooldown wall time is excluded from performance comparisons.
 - **Cross-environment CUDA lease splits fixed (2026-07-13):** two workers first used `%TEMP%` roots `Temp`
   and `Temp\\1`, created independent `cuda:0` leases, and together drove WDDM usage to 11–12 GiB. Moving the
   lease under `%LOCALAPPDATA%` closed that split, but a later diagnostic deliberately redirected
@@ -815,6 +822,17 @@ must be remeasured rather than inferred from the speedup.
   retains the **2.60 GB** peak. The uninterrupted eight-epoch resident gate then reproduced the standalone
   trajectory exactly, ending at **0.3709969819** with **2,600,680,960 peak allocated bytes**. Broader
   per-batch diagnostic synchronization is not retained.
+- **Exact-retained-Fisher memory replay rejected at block 1 (2026-07-13):**
+  `gemma-retained-fisher-legacy-schedule-barrier-v3` store validates all 41 artifacts reachable from its
+  first block commit. Its seven ranks exactly match contemporary legacy, and post-refit loss is
+  **1.3784899712** versus **1.3728** (+0.414%). Peak allocated CUDA is **4.74 GB**, but block wall time is
+  **578.73 s** versus contemporary legacy **424.87 s** (36.2% slower). The validated block-1 boundary then
+  reached **6.0843391418** versus **3.6029** (+68.87%) with all 14 prefix ranks equal, so the run was stopped.
+  Its block-0 activation generation is byte-identical to the earlier exact-Fisher replay, ruling out new
+  staging/persistence corruption: the exact objective's factor basin has the wrong accumulating error direction.
+  The replacement bounded v21 replay uses the already parity-approved v17/current-CCE basin. Performance work
+  remains gated on its two retained boundaries; once accurate, profiles must separate checkpoint serialization,
+  gradient synchronization, and the rewrite's full best-state evaluations before changing a hot path.
 - `JsonlEventSink._read_last_sequence` parses the whole event log at construction — only matters for
   resumed runs with large logs; fine today, worth a tail-scan if event volume grows.
 - **Measured, not implemented (2026-07-13):** a fresh process inventories the pinned Gemma snapshot in a

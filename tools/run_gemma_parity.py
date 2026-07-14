@@ -47,6 +47,7 @@ def main() -> None:
     parser.add_argument("--calibration", type=Path, default=Path("evidence/m3/experiment018-calibration"))
     parser.add_argument("--factorized-tuning-epochs", type=int, default=0)
     parser.add_argument("--factorized-tuning-batch-size", type=int, default=8)
+    parser.add_argument("--factorized-tuning-epoch-cooldown-seconds", type=float, default=0.0)
     parser.add_argument("--nonfactorized-tuning-epochs", type=int, default=0)
     parser.add_argument("--nonfactorized-tuning-schedule", default="")
     parser.add_argument("--nonfactorized-tuning-batch-size", type=int, default=8)
@@ -134,6 +135,7 @@ def main() -> None:
         factorized_tuning_epochs=args.factorized_tuning_epochs,
         factorized_tuning_batch_size=args.factorized_tuning_batch_size,
         factorized_tuning_learning_rate=1e-5,
+        factorized_tuning_epoch_cooldown_seconds=args.factorized_tuning_epoch_cooldown_seconds,
         nonfactorized_tuning_epochs=args.nonfactorized_tuning_epochs,
         nonfactorized_tuning_epochs_by_layer=nonfactorized_schedule,
         nonfactorized_tuning_batch_size=args.nonfactorized_tuning_batch_size,
