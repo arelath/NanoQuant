@@ -55,6 +55,16 @@ def test_legacy_tuning_seed_mode_invalidates_commit_identity() -> None:
     )
 
 
+def test_tuning_epoch_loss_mode_invalidates_commit_identity() -> None:
+    request = ResidentQuantizationRequest(
+        Path("snapshot"), Path("output"), "fixture/model", "revision", ((1, 2, 3),), device="cpu"
+    )
+
+    assert resident._resident_config_hash(request) != resident._resident_config_hash(
+        replace(request, restore_best_tuning_state=False, tuning_epoch_loss_mode="legacy_training")
+    )
+
+
 def test_profiling_does_not_invalidate_commit_identity() -> None:
     request = ResidentQuantizationRequest(
         Path("snapshot"), Path("output"), "fixture/model", "revision", ((1, 2, 3),), device="cpu"
@@ -79,6 +89,7 @@ def test_observability_does_not_invalidate_commit_identity() -> None:
             observability=ObservabilityConfig(event_level="debug"),
         )
     )
+
 
 def test_legacy_cuda_numerics_enables_and_restores_tf32() -> None:
     original_matmul = torch.backends.cuda.matmul.allow_tf32

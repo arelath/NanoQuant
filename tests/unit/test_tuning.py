@@ -252,6 +252,68 @@ def test_factorized_tuning_can_keep_final_epoch_state(monkeypatch: pytest.Monkey
     assert not torch.equal(observed[-1], observed[1])
 
 
+def test_legacy_training_loss_avoids_redundant_epoch_forwards_without_changing_updates() -> None:
+    full_model = Hybrid()
+    legacy_model = deepcopy(full_model)
+    inputs = torch.randn(8, 3, generator=torch.Generator().manual_seed(72))
+    targets = torch.randn(8, 2, generator=torch.Generator().manual_seed(73))
+    full_forwards = 0
+    legacy_forwards = 0
+    legacy_trajectory: list[tuple[int, float]] = []
+
+    def full_forward(model: nn.Module, value: torch.Tensor) -> torch.Tensor:
+        nonlocal full_forwards
+        full_forwards += 1
+        return model(value)
+
+    def legacy_forward(model: nn.Module, value: torch.Tensor) -> torch.Tensor:
+        nonlocal legacy_forwards
+        legacy_forwards += 1
+        return model(value)
+
+    request = TuningRequest(inputs, targets, 2, 4, 0.02, seed=74, restore_best_state=False)
+    tune_factorized(full_model, "quant", request, full_forward)
+    legacy_metrics = tune_factorized(
+        legacy_model,
+        "quant",
+        TuningRequest(
+            inputs,
+            targets,
+            2,
+            4,
+            0.02,
+            seed=74,
+            restore_best_state=False,
+            epoch_loss_mode="legacy_training",
+            epoch_observer=lambda epoch, loss: legacy_trajectory.append((epoch, loss)),
+        ),
+        legacy_forward,
+    )
+
+    assert full_forwards == 12
+    assert legacy_forwards == 6
+    assert [epoch for epoch, _loss in legacy_trajectory] == [0, 1, 2]
+    assert legacy_metrics.final.loss == legacy_trajectory[-1][1]
+    for full_parameter, legacy_parameter in zip(
+        full_model.parameters(), legacy_model.parameters(), strict=True
+    ):
+        assert torch.equal(full_parameter, legacy_parameter)
+
+
+def test_legacy_training_loss_requires_final_epoch_state() -> None:
+    model = Hybrid()
+    inputs = torch.randn(4, 3, generator=torch.Generator().manual_seed(75))
+    targets = torch.randn(4, 2, generator=torch.Generator().manual_seed(76))
+
+    with pytest.raises(ValueError, match="cannot restore"):
+        tune_factorized(
+            model,
+            "quant",
+            TuningRequest(inputs, targets, 1, 2, 0.02, epoch_loss_mode="legacy_training"),
+            _forward,
+        )
+
+
 def test_tuning_epoch_observer_receives_full_evaluation_trajectory() -> None:
     model = Hybrid()
     inputs = torch.randn(8, 3, generator=torch.Generator().manual_seed(20))

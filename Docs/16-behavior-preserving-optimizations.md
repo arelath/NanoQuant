@@ -548,6 +548,35 @@ iterations, and twice during export. Applying the measured deltas across the anc
 attempts projects to roughly **3–12 seconds** saved in factorization. Factorized tuning invokes the same
 STE twice per forward, so it should benefit as well; its run-level effect still needs the next full run.
 
+### [x] 3.19 Reuse the legacy tuning-pass loss instead of re-evaluating every epoch (parity correction)
+
+**Where.** `application/tuning.py::tune` previously ran a complete no-grad evaluation before training,
+after every epoch, and once more at the end. An eight-epoch factorized phase therefore executed ten
+evaluation passes in addition to eight training passes. Legacy `tune_nonfact` and `tune_fact` accumulate
+the already-computed training-batch loss on device and materialize it once per epoch; they do not perform
+the epoch/final evaluation passes. Legacy also applies early stopping to consecutive training-pass losses.
+
+**Done (2026-07-14).** `TuningRequest.epoch_loss_mode="legacy_training"` now accumulates the exact raw
+weighted loss already used for backward, converts the device scalar once per epoch, and uses consecutive
+epoch values for legacy-compatible early stopping. It retains one initial evaluation for the typed
+`TuningMetrics.before` contract, but skips all redundant epoch and final forwards. This mode requires
+`restore_best_state=False`, matching legacy non-factorized/factorized tuning; post-block refit retains the
+full-evaluation/best-state path because legacy refit also evaluates and rolls back. The resident semantic
+identity includes the mode, and the Gemma parity launcher selects it explicitly. Focused tests prove the
+full-evaluation and legacy-loss modes produce bitwise-identical parameter updates, reduce a two-epoch
+fixture from 12 to 6 forwards, and preserve epoch-checkpoint resume.
+
+The retained real gate in `evidence/m4/gemma-gate-legacy-loss-perf/epochs8-repeat.json` used the pinned Gemma
+snapshot, the same 256×2,048 calibration set, block-0 gate initialization, batch/microbatch 8, and no
+cooldown. The legacy-initialized eight-epoch tune fell from **32.709 s** in the prior same-workload replay
+to **20.430 s**, a **37.5% reduction**. Peak allocated CUDA remained essentially flat at **4.048 GB**
+before versus **4.047 GB** after. The reported epoch trajectory now has the same training-pass definition
+as the contemporary legacy log; frozen block-boundary loss remains the independent quality oracle. Two
+earlier clean candidate samples were **20.842 s** and **20.790 s**. An immediate third back-to-back run
+slowed both initializations to 38–40 seconds without changing any numerical result; it is retained as
+`epochs8.json` but excluded as a thermally/externally contaminated performance sample. After a 60-second
+idle interval, the clean 20.430/20.512-second pair reproduced the original rate.
+
 ### Parity corrections discovered by performance profiling (not S0)
 
 The global-KD profile exposed two rewrite/legacy differences, so these are correctness fixes rather than

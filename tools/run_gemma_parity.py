@@ -160,6 +160,7 @@ def main() -> None:
         tuning_microbatch_size=args.tuning_microbatch_size,
         legacy_tuning_seed_reset=True,
         restore_best_tuning_state=False,
+        tuning_epoch_loss_mode="legacy_training",
         seed=args.seed,
         activation_retention=args.activation_retention,
         calibration_method="online_fisher",

@@ -1,0 +1,307 @@
+{
+  "environment": {
+    "cuda": "13.0",
+    "gpu": "NVIDIA RTX 4000 Ada Generation Laptop GPU",
+    "torch": "2.12.1+cu130"
+  },
+  "epoch_loss_mode": "legacy_training",
+  "epochs": [
+    8
+  ],
+  "initial_state_comparison": {
+    "left": {
+      "agreement": 1.0,
+      "exact": true,
+      "maximum_absolute_difference": 0.0,
+      "relative_l2_difference": 0.0,
+      "shape": [
+        6912,
+        1056
+      ]
+    },
+    "outlier_indices_exact": true,
+    "outlier_values": {
+      "agreement": 0.05765335634350777,
+      "exact": false,
+      "maximum_absolute_difference": 0.00146484375,
+      "relative_l2_difference": 0.016063008457422256,
+      "shape": [
+        6912,
+        2
+      ]
+    },
+    "right": {
+      "agreement": 1.0,
+      "exact": true,
+      "maximum_absolute_difference": 0.0,
+      "relative_l2_difference": 0.0,
+      "shape": [
+        1056,
+        1152
+      ]
+    },
+    "scale_mid": {
+      "agreement": 0.0009469697251915932,
+      "exact": false,
+      "maximum_absolute_difference": 0.007802009582519531,
+      "relative_l2_difference": 0.0019624605774879456,
+      "shape": [
+        1,
+        1056
+      ]
+    },
+    "scale_post": {
+      "agreement": 0.0,
+      "exact": false,
+      "maximum_absolute_difference": 6.049498915672302e-05,
+      "relative_l2_difference": 0.001412089099176228,
+      "shape": [
+        1,
+        6912
+      ]
+    },
+    "scale_pre": {
+      "agreement": 0.0017361111240461469,
+      "exact": false,
+      "maximum_absolute_difference": 0.00012182071805000305,
+      "relative_l2_difference": 0.0014148254413157701,
+      "shape": [
+        1,
+        1152
+      ]
+    }
+  },
+  "ls_scale_fit_passes": [
+    2
+  ],
+  "ls_scale_fit_sweep": [
+    {
+      "accepted": true,
+      "alternating_passes": 2,
+      "block_loss": 0.7050702571868896,
+      "full_weight": {
+        "target_weighted_norm": 260.1732177734375,
+        "weighted_error": 51.31572723388672,
+        "weighted_normalized_error": 0.1972367763519287
+      },
+      "persisted_rewrite_scale_comparison": {
+        "left": {
+          "agreement": 1.0,
+          "exact": true,
+          "maximum_absolute_difference": 0.0,
+          "relative_l2_difference": 0.0,
+          "shape": [
+            6912,
+            1056
+          ]
+        },
+        "outlier_indices_exact": true,
+        "outlier_values": {
+          "agreement": 1.0,
+          "exact": true,
+          "maximum_absolute_difference": 0.0,
+          "relative_l2_difference": 0.0,
+          "shape": [
+            6912,
+            2
+          ]
+        },
+        "right": {
+          "agreement": 1.0,
+          "exact": true,
+          "maximum_absolute_difference": 0.0,
+          "relative_l2_difference": 0.0,
+          "shape": [
+            1056,
+            1152
+          ]
+        },
+        "scale_mid": {
+          "agreement": 0.0,
+          "exact": false,
+          "maximum_absolute_difference": 0.0046422481536865234,
+          "relative_l2_difference": 0.0005601735902018845,
+          "shape": [
+            1056
+          ]
+        },
+        "scale_post": {
+          "agreement": 0.0,
+          "exact": false,
+          "maximum_absolute_difference": 0.00019566155970096588,
+          "relative_l2_difference": 0.0015966602368280292,
+          "shape": [
+            6912
+          ]
+        },
+        "scale_pre": {
+          "agreement": 0.0017361111240461469,
+          "exact": false,
+          "maximum_absolute_difference": 8.282717317342758e-05,
+          "relative_l2_difference": 0.0007256704848259687,
+          "shape": [
+            1152
+          ]
+        }
+      },
+      "residual_weighted_error_after": 51.274024963378906,
+      "residual_weighted_error_before": 51.457061767578125,
+      "rollback_reason": null
+    }
+  ],
+  "model_revision": "dcc83ea841ab6100d6b47a070329e1ba4cf78752",
+  "protocol": {
+    "batch_size": 8,
+    "block_forward_batch_size": 8,
+    "calibration": "D:\\dev\\research\\NanoQuantRewrite\\evidence\\m3\\experiment018-calibration",
+    "device": "cuda",
+    "fisher": "D:\\dev\\research\\NanoQuantRewrite\\evidence\\m4\\legacy018-fisher-stats\\stats.safetensors",
+    "legacy_initial": "D:\\dev\\research\\NanoQuantRewrite\\evidence\\m4\\legacy-gate-initial\\tensors.safetensors",
+    "microbatch_size": 8,
+    "rewrite_factor": "D:\\dev\\research\\NanoQuantRewrite\\evidence\\m4\\gemma-retained-fisher-legacy-schedule-barrier-v3\\artifacts\\31\\sha256-3173739d7d55e777be137ed811e5fd3c19b794d7f04fb416215db0a572e1ab19\\tensors.safetensors",
+    "rewrite_frozen": "D:\\dev\\research\\NanoQuantRewrite\\evidence\\m4\\gemma-retained-fisher-legacy-schedule-barrier-v3\\artifacts\\b4\\sha256-b46a481ddfe65f58ec6400d4aaa6dae736916ce2177c277bcd0ddea9017b8990\\tensors.safetensors",
+    "rewrite_scales": "D:\\dev\\research\\NanoQuantRewrite\\evidence\\m4\\gemma-retained-fisher-legacy-schedule-barrier-v3\\artifacts\\7a\\sha256-7a32b49eedd716709416442f44e50c0081e4b6b9f8b31e2379b70755333daf68\\tensors.safetensors",
+    "snapshot": "C:\\Users\\pdykstra\\.cache\\huggingface\\hub\\models--google--gemma-3-1b-it\\snapshots\\dcc83ea841ab6100d6b47a070329e1ba4cf78752"
+  },
+  "rewrite_ls_scale_fit": {
+    "after": {
+      "target_weighted_norm": 260.1732177734375,
+      "weighted_error": 51.31609344482422,
+      "weighted_normalized_error": 0.19723819196224213
+    },
+    "before": {
+      "target_weighted_norm": 260.1732177734375,
+      "weighted_error": 51.496673583984375,
+      "weighted_normalized_error": 0.19793225824832916
+    },
+    "weighted_error_improvement_fraction": 0.003506636964922667
+  },
+  "runs": [
+    {
+      "before_block_loss": 0.8200597763061523,
+      "best_epoch": 7,
+      "best_loss": 0.3711305260658264,
+      "epochs": 8,
+      "final_cuda_allocated_bytes": 2213442048,
+      "final_cuda_reserved_bytes": 4596957184,
+      "final_loss": 0.3711305260658264,
+      "final_weight": {
+        "target_weighted_norm": 260.1732177734375,
+        "weighted_error": 51.962955474853516,
+        "weighted_normalized_error": 0.1997244656085968
+      },
+      "initial_weight": {
+        "target_weighted_norm": 260.1732177734375,
+        "weighted_error": 51.29787063598633,
+        "weighted_normalized_error": 0.19716814160346985
+      },
+      "initialization": "legacy",
+      "peak_cuda_allocated_bytes": 4046923776,
+      "peak_cuda_reserved_bytes": 4596957184,
+      "trajectory": [
+        {
+          "epoch": 0,
+          "loss": 0.8200597763061523
+        },
+        {
+          "epoch": 1,
+          "loss": 0.6790398359298706
+        },
+        {
+          "epoch": 2,
+          "loss": 0.5008254051208496
+        },
+        {
+          "epoch": 3,
+          "loss": 0.4371691644191742
+        },
+        {
+          "epoch": 4,
+          "loss": 0.4053114950656891
+        },
+        {
+          "epoch": 5,
+          "loss": 0.38743487000465393
+        },
+        {
+          "epoch": 6,
+          "loss": 0.37724173069000244
+        },
+        {
+          "epoch": 7,
+          "loss": 0.37254106998443604
+        },
+        {
+          "epoch": 8,
+          "loss": 0.3711305260658264
+        }
+      ],
+      "tuning_before_loss": 0.8200597763061523,
+      "wall_seconds": 20.4304659999907
+    },
+    {
+      "before_block_loss": 0.7065189480781555,
+      "best_epoch": 7,
+      "best_loss": 0.3581123650074005,
+      "epochs": 8,
+      "final_cuda_allocated_bytes": 2213442048,
+      "final_cuda_reserved_bytes": 4466933760,
+      "final_loss": 0.3581123650074005,
+      "final_weight": {
+        "target_weighted_norm": 260.1732177734375,
+        "weighted_error": 51.94132995605469,
+        "weighted_normalized_error": 0.19964134693145752
+      },
+      "initial_weight": {
+        "target_weighted_norm": 260.1732177734375,
+        "weighted_error": 51.31609344482422,
+        "weighted_normalized_error": 0.19723819196224213
+      },
+      "initialization": "rewrite",
+      "peak_cuda_allocated_bytes": 4045948928,
+      "peak_cuda_reserved_bytes": 4466933760,
+      "trajectory": [
+        {
+          "epoch": 0,
+          "loss": 0.7065189480781555
+        },
+        {
+          "epoch": 1,
+          "loss": 0.5920474529266357
+        },
+        {
+          "epoch": 2,
+          "loss": 0.4591890871524811
+        },
+        {
+          "epoch": 3,
+          "loss": 0.4137956202030182
+        },
+        {
+          "epoch": 4,
+          "loss": 0.38824939727783203
+        },
+        {
+          "epoch": 5,
+          "loss": 0.3725276291370392
+        },
+        {
+          "epoch": 6,
+          "loss": 0.36369407176971436
+        },
+        {
+          "epoch": 7,
+          "loss": 0.3595869541168213
+        },
+        {
+          "epoch": 8,
+          "loss": 0.3581123650074005
+        }
+      ],
+      "tuning_before_loss": 0.7065189480781555,
+      "wall_seconds": 20.511902900005225
+    }
+  ],
+  "samples": 256,
+  "schema_version": 1
+}

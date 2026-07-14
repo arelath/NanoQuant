@@ -159,9 +159,11 @@ def _weighted_weight_metrics(
         target.square() * input_importance.float().reshape(1, -1) * output_importance.float().reshape(-1, 1)
     ).sum()
     return {
-        "weighted_error": float(weighted_error),
-        "target_weighted_norm": float(target_norm),
-        "weighted_normalized_error": float(weighted_error / target_norm.clamp_min(1e-12)),
+        "weighted_error": float(weighted_error.detach()),
+        "target_weighted_norm": float(target_norm.detach()),
+        "weighted_normalized_error": float(
+            (weighted_error / target_norm.clamp_min(1e-12)).detach()
+        ),
     }
 
 
@@ -255,7 +257,26 @@ def main() -> None:
         "model_revision": MODEL_REVISION,
         "samples": args.samples,
         "epochs": list(epochs),
+        "epoch_loss_mode": "legacy_training",
         "ls_scale_fit_passes": list(ls_scale_fit_passes),
+        "protocol": {
+            "snapshot": str(args.snapshot.resolve()),
+            "calibration": str(args.calibration.resolve()),
+            "fisher": str(args.fisher.resolve()),
+            "legacy_initial": str(args.legacy_initial.resolve()),
+            "rewrite_factor": str(args.rewrite_factor.resolve()),
+            "rewrite_scales": str(args.rewrite_scales.resolve()),
+            "rewrite_frozen": str(args.rewrite_frozen.resolve()),
+            "device": args.device,
+            "batch_size": args.batch_size,
+            "microbatch_size": args.microbatch_size,
+            "block_forward_batch_size": args.block_forward_batch_size,
+        },
+        "environment": {
+            "torch": str(torch.__version__),
+            "cuda": torch.version.cuda,
+            "gpu": torch.cuda.get_device_name(args.device) if args.device.startswith("cuda") else None,
+        },
         "initial_state_comparison": _comparison(legacy, rewrite),
         "runs": [],
     }
@@ -393,8 +414,10 @@ def main() -> None:
                             output_importance=block_output_importance,
                             seed=0,
                             microbatch_size=args.microbatch_size,
+                            restore_best_state=False,
+                            epoch_loss_mode="legacy_training",
                             epoch_observer=lambda epoch, loss, trajectory=trajectory: trajectory.append(
-                                {"epoch": epoch, "full_evaluation_loss": loss}
+                                {"epoch": epoch, "loss": loss}
                             ),
                         ),
                         lambda module, value: adapter.run_block(module, value, **metadata),

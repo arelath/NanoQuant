@@ -46,6 +46,7 @@ from nanoquant.application.reconstruction_report import render_reconstruction_ta
 from nanoquant.application.retry_loop import AcceptedFactorization, run_factorization_attempts
 from nanoquant.application.stages import StageContext, execute_stage
 from nanoquant.application.tuning import (
+    EpochLossMode,
     TuningRequest,
     TuningResumeState,
     post_block_refit,
@@ -252,6 +253,7 @@ class ResidentQuantizationRequest:
     tuning_microbatch_size: int | None = None
     legacy_tuning_seed_reset: bool = False
     restore_best_tuning_state: bool = True
+    tuning_epoch_loss_mode: EpochLossMode = "full_evaluation"
     activation_retention: str = "rolling"
     seed: int = 0
     verify_hashes: bool = True
@@ -901,6 +903,7 @@ def _resident_config_hash(request: ResidentQuantizationRequest) -> str:
                     "block_forward_batch_size": request.block_forward_batch_size,
                     "legacy_tuning_seed_reset": request.legacy_tuning_seed_reset,
                     "restore_best_tuning_state": request.restore_best_tuning_state,
+                    "tuning_epoch_loss_mode": request.tuning_epoch_loss_mode,
                     "activation_retention": request.activation_retention,
                     "calibration_method": request.calibration_method,
                     "calibration_shrinkage": request.calibration_shrinkage,
@@ -1225,6 +1228,10 @@ def _validate_resident_request(request: ResidentQuantizationRequest) -> None:
         raise ValueError("resident quantization post-block refit batch size must be positive")
     if request.tuning_microbatch_size is not None and request.tuning_microbatch_size <= 0:
         raise ValueError("resident quantization tuning microbatch size must be positive")
+    if request.tuning_epoch_loss_mode not in ("full_evaluation", "legacy_training"):
+        raise ValueError(f"unsupported tuning epoch loss mode: {request.tuning_epoch_loss_mode}")
+    if request.tuning_epoch_loss_mode == "legacy_training" and request.restore_best_tuning_state:
+        raise ValueError("legacy training loss mode cannot restore best tuning state")
     if request.activation_retention not in {"rolling", "all"}:
         raise ValueError("resident quantization activation retention must be 'rolling' or 'all'")
     if request.device.startswith("cuda") and not torch.cuda.is_available():
@@ -2013,6 +2020,7 @@ def _run_resident_quantization_impl(
                                     layer=layer_plan.layer.path,
                                 ),
                                 restore_best_state=request.restore_best_tuning_state,
+                                epoch_loss_mode=request.tuning_epoch_loss_mode,
                             ),
                             tuning_forward,
                             tuning_recorder,
@@ -2238,6 +2246,7 @@ def _run_resident_quantization_impl(
                                 ),
                                 microbatch_size=request.tuning_microbatch_size,
                                 restore_best_state=request.restore_best_tuning_state,
+                                epoch_loss_mode=request.tuning_epoch_loss_mode,
                             ),
                             tuning_forward,
                             tuning_recorder,

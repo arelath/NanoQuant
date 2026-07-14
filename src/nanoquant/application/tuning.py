@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
-from typing import TypeAlias
+from typing import Literal, TypeAlias
 
 import torch
 from torch import nn
@@ -22,6 +22,7 @@ from nanoquant.domain.profiling import NULL_RECORDER, PhaseRecorder
 
 ForwardFunction = Callable[[nn.Module, torch.Tensor], torch.Tensor]
 ParameterSelector = Callable[[str, nn.Parameter], bool]
+EpochLossMode: TypeAlias = Literal["full_evaluation", "legacy_training"]
 
 _CUDA_CACHE_PRESSURE_FRACTION = 0.8
 
@@ -41,6 +42,7 @@ class TuningRequest:
     microbatch_size: int | None = None
     epoch_observer: Callable[[int, float], None] | None = None
     restore_best_state: bool = True
+    epoch_loss_mode: EpochLossMode = "full_evaluation"
 
 
 TuningOptimizerState: TypeAlias = ParityAdamWState
@@ -335,6 +337,10 @@ def tune(
         or (request.microbatch_size is not None and request.microbatch_size <= 0)
     ):
         raise ValueError("invalid tuning loop settings")
+    if request.epoch_loss_mode not in ("full_evaluation", "legacy_training"):
+        raise ValueError(f"unsupported tuning epoch loss mode: {request.epoch_loss_mode}")
+    if request.epoch_loss_mode == "legacy_training" and request.restore_best_state:
+        raise ValueError("legacy training loss mode cannot restore a best evaluation state")
     selected = [(name, parameter) for name, parameter in model.named_parameters() if selector(name, parameter)]
     if not selected:
         raise ValueError("tuning selector chose no parameters")
@@ -428,6 +434,11 @@ def tune(
             if stopped_early:
                 break
             with recorder.phase("epoch", epoch=epoch):
+                epoch_loss_sum = (
+                    torch.zeros((), device=device)
+                    if request.epoch_loss_mode == "legacy_training"
+                    else None
+                )
                 order = torch.randperm(request.inputs.shape[0], generator=generator)
                 microbatches = _training_microbatches(order, request.batch_size, request.microbatch_size)
                 device_batches: Iterator[_StagedTrainingBatch] = (
@@ -467,18 +478,22 @@ def tune(
                                 optimizer.zero_grad(set_to_none=True)
                     if recorder is NULL_RECORDER:
                         prediction = forward(model, input_batch)
-                        loss = _loss_sum(prediction, target_batch, importance) / max(1, item.batch_elements)
+                        loss_sum = _loss_sum(prediction, target_batch, importance)
+                        loss = loss_sum / max(1, item.batch_elements)
                         torch.autograd.backward(loss)
                     else:
                         with recorder.phase("forward"):
                             prediction = forward(model, input_batch)
                         with recorder.phase("loss"):
-                            loss = _loss_sum(prediction, target_batch, importance) / max(1, item.batch_elements)
+                            loss_sum = _loss_sum(prediction, target_batch, importance)
+                            loss = loss_sum / max(1, item.batch_elements)
                         with recorder.phase("backward"):
                             torch.autograd.backward(loss)
+                    if epoch_loss_sum is not None:
+                        epoch_loss_sum.add_(loss_sum.detach())
                     # Do not retain the final microbatch's autograd graph through
                     # optimizer/evaluation/factorization phase boundaries.
-                    del input_batch, target_batch, prediction, loss
+                    del input_batch, target_batch, prediction, loss_sum, loss
                     if stager is not None and staged_batch.slot is not None:
                         stager.mark_consumed(staged_batch.slot)
                     del staged_batch
@@ -497,7 +512,14 @@ def tune(
                                 scheduler.step()
                                 recorder.add("tuning.steps", 1)
                 epochs_completed = epoch + 1
-                if recorder is NULL_RECORDER:
+                if epoch_loss_sum is not None:
+                    if recorder is NULL_RECORDER:
+                        current = float(epoch_loss_sum / request.targets.numel())
+                    else:
+                        with recorder.phase("epoch_training_loss"):
+                            current = float(epoch_loss_sum / request.targets.numel())
+                    del epoch_loss_sum
+                elif recorder is NULL_RECORDER:
                     current = _evaluate_loss(model, request, forward)
                 else:
                     with recorder.phase("epoch_evaluation"):
@@ -505,8 +527,14 @@ def tune(
                 if request.epoch_observer is not None:
                     request.epoch_observer(epoch + 1, current)
                 epoch_losses.append(current)
+                previous_epoch_loss = epoch_losses[-2] if len(epoch_losses) > 2 else None
                 if current < best_value:
-                    improvement = (best_value - current) / max(abs(best_value), 1e-12)
+                    comparison_loss = (
+                        previous_epoch_loss
+                        if request.epoch_loss_mode == "legacy_training" and previous_epoch_loss is not None
+                        else best_value
+                    )
+                    improvement = (comparison_loss - current) / max(abs(comparison_loss), 1e-12)
                     best_value = current
                     best_epoch = epoch
                     if recorder is NULL_RECORDER:
@@ -519,6 +547,14 @@ def tune(
                         request.early_stop_relative_tolerance is not None
                         and improvement < request.early_stop_relative_tolerance
                     ):
+                        stopped_early = True
+                elif (
+                    request.epoch_loss_mode == "legacy_training"
+                    and request.early_stop_relative_tolerance is not None
+                    and previous_epoch_loss is not None
+                ):
+                    improvement = (previous_epoch_loss - current) / max(abs(previous_epoch_loss), 1e-12)
+                    if improvement < request.early_stop_relative_tolerance:
                         stopped_early = True
                 if checkpoint_sink is not None:
                     with recorder.phase("checkpoint_snapshot"):
@@ -548,7 +584,9 @@ def tune(
                     with torch.no_grad():
                         for name, value in best_state.items():
                             parameter_map[name].copy_(value)
-        if recorder is NULL_RECORDER:
+        if request.epoch_loss_mode == "legacy_training":
+            final_value = epoch_losses[-1]
+        elif recorder is NULL_RECORDER:
             final_value = _evaluate_loss(model, request, forward)
         else:
             with recorder.phase("final_evaluation"):
