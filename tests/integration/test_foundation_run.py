@@ -30,5 +30,7 @@ def test_numbered_application_run_produces_self_contained_audit_envelope(tmp_pat
     assert manifest["launcher"]["experiment_number"] == 19
     assert len(manifest["artifacts"]) == 2
     assert (directories[0] / "events.jsonl").is_file()
+    assert (directories[0] / "run.log").is_file()
+    assert "run.completed" in (directories[0] / "run.log").read_text(encoding="utf-8")
     report = (directories[0] / "reports" / "summary.md").read_text(encoding="utf-8")
     assert "foundation-smoke" in report and "Status: `completed`" in report

@@ -5,7 +5,7 @@ import pytest
 import torch
 
 import nanoquant.resident_quantization as resident
-from nanoquant.config.schema import ProfilingConfig, ProfilingLevel
+from nanoquant.config.schema import ObservabilityConfig, ProfilingConfig, ProfilingLevel
 from nanoquant.resident_quantization import ResidentQuantizationRequest
 
 
@@ -67,6 +67,18 @@ def test_profiling_does_not_invalidate_commit_identity() -> None:
         )
     )
 
+
+def test_observability_does_not_invalidate_commit_identity() -> None:
+    request = ResidentQuantizationRequest(
+        Path("snapshot"), Path("output"), "fixture/model", "revision", ((1, 2, 3),), device="cpu"
+    )
+
+    assert resident._resident_config_hash(request) == resident._resident_config_hash(
+        replace(
+            request,
+            observability=ObservabilityConfig(event_level="debug"),
+        )
+    )
 
 def test_legacy_cuda_numerics_enables_and_restores_tf32() -> None:
     original_matmul = torch.backends.cuda.matmul.allow_tf32

@@ -78,6 +78,11 @@ def test_resident_quantization_commits_complete_transformers_model(tmp_path: Pat
     assert all(block.peak_host_bytes > 0 for block in result.blocks)
     assert all(block.peak_gpu_bytes == 0 for block in result.blocks)
     assert result.artifact_bytes > 0
+    manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["run_id"].startswith("run_")
+    assert manifest["status"] == "completed"
+    assert manifest["resolved_config"]["component"] == "resident-quantization"
+    assert "run.completed" in (output / "run.log").read_text(encoding="utf-8")
     artifacts = LocalArtifactStore(output / "artifacts")
     artifacts.validate(result.report.artifact_id)
     journal_path = output / "state" / "journal.jsonl"
@@ -120,7 +125,13 @@ def test_resident_quantization_commits_complete_transformers_model(tmp_path: Pat
     )
     with pytest.raises(InterruptedError, match="after 3"):
         run_resident_quantization(interrupted_request)
+    interrupted_manifest = json.loads((resumed_output / "manifest.json").read_text(encoding="utf-8"))
+    assert interrupted_manifest["status"] == "interrupted"
+    interrupted_run_id = interrupted_manifest["run_id"]
     resumed = run_resident_quantization(replace(interrupted_request, interrupt_after_layer_commits=None))
+    completed_manifest = json.loads((resumed_output / "manifest.json").read_text(encoding="utf-8"))
+    assert completed_manifest["status"] == "completed"
+    assert completed_manifest["run_id"] == interrupted_run_id
 
     assert (resumed_output / "profile.json").is_file()
     assert (resumed_output / "profile.2.json").is_file()

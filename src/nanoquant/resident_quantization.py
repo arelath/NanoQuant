@@ -57,6 +57,7 @@ from nanoquant.config.schema import (
     ADMMConfig,
     AllocationStrategy,
     ObjectiveConfig,
+    ObservabilityConfig,
     OutlierConfig,
     ProfilingConfig,
     ProfilingLevel,
@@ -93,7 +94,7 @@ from nanoquant.domain.models import (
 )
 from nanoquant.domain.outliers import reconstruct_with_outliers
 from nanoquant.domain.profiling import NULL_RECORDER, PhaseRecorder
-from nanoquant.domain.runs import BudgetState
+from nanoquant.domain.runs import BudgetState, RunManifest, RunStatus
 from nanoquant.domain.scale_fit import reconstruct
 from nanoquant.domain.seeds import logical_seed
 from nanoquant.infrastructure.artifacts import LocalArtifactStore
@@ -107,12 +108,19 @@ from nanoquant.infrastructure.commits import (
     retire_block_activations,
 )
 from nanoquant.infrastructure.device_lease import acquire_device_lease
-from nanoquant.infrastructure.events import JsonlEventSink
+from nanoquant.infrastructure.environment import capture_environment
 from nanoquant.infrastructure.model_adapters import adapter_for_config
 from nanoquant.infrastructure.profiling import profiled_run
 from nanoquant.infrastructure.progress import ProgressJournal
 from nanoquant.infrastructure.resident_executor import Cancellation, ResidentExecutor
 from nanoquant.infrastructure.resource_usage import peak_process_memory_bytes
+from nanoquant.infrastructure.run_session import open_run_session
+from nanoquant.infrastructure.runs import (
+    RunDirectory,
+    initial_manifest_from_resolved,
+    launcher_provenance,
+    transition,
+)
 from nanoquant.infrastructure.safetensors_source import SafetensorsModelSource
 from nanoquant.infrastructure.tensor_store import LocalTensorStore
 from nanoquant.infrastructure.tuning_checkpoint import (
@@ -121,6 +129,7 @@ from nanoquant.infrastructure.tuning_checkpoint import (
     clear_tuning_checkpoint,
     save_tuning_checkpoint,
 )
+from nanoquant.ports.event_sink import EventSink
 
 RESIDENT_ALGORITHM_VERSION = 24
 
@@ -219,6 +228,7 @@ class ResidentQuantizationRequest:
     evaluate_inline_quality: bool = True
     defer_layer_loss_snapshots: bool = False
     profiling: ProfilingConfig = ProfilingConfig()
+    observability: ObservabilityConfig = ObservabilityConfig()
 
 
 @dataclass(frozen=True, slots=True)
@@ -785,6 +795,58 @@ def _resident_config_hash(request: ResidentQuantizationRequest) -> str:
     )
 
 
+def _manifest_tensor_identity(value: torch.Tensor | tuple[tuple[int, ...], ...] | None) -> object:
+    if value is None:
+        return None
+    tensor = value.detach().to(device="cpu").contiguous() if isinstance(value, torch.Tensor) else torch.tensor(value)
+    payload = tensor.view(torch.uint8).numpy().tobytes()
+    return {
+        "shape": list(tensor.shape),
+        "dtype": str(tensor.dtype),
+        "content_hash": "sha256:" + hashlib.sha256(payload).hexdigest(),
+    }
+
+
+def _resident_manifest_config(request: ResidentQuantizationRequest, component: str) -> dict[str, object]:
+    payload = cast(dict[str, object], to_dict(request))
+    payload["token_ids"] = _manifest_tensor_identity(request.token_ids)
+    payload["quality_token_ids"] = _manifest_tensor_identity(request.quality_token_ids)
+    payload["component"] = component
+    return payload
+
+
+def _resident_manifest(request: ResidentQuantizationRequest, component: str) -> RunManifest:
+    resolved = _resident_manifest_config(request, component)
+    resolved_hash = "sha256:" + hashlib.sha256(canonical_json(resolved).encode()).hexdigest()
+    return initial_manifest_from_resolved(
+        resolved_hash,
+        resolved,
+        launcher_provenance(__file__, None),
+        capture_environment(),
+    )
+
+
+def _start_resident_manifest(manifest: RunManifest, current: RunManifest) -> RunManifest:
+    if manifest.status in {RunStatus.CREATED, RunStatus.INTERRUPTED}:
+        started = transition(manifest, RunStatus.RUNNING)
+    elif manifest.status is RunStatus.RUNNING:
+        started = manifest
+    else:
+        raise ValueError(f"cannot resume resident run in terminal state {manifest.status.value}")
+    return replace(
+        started,
+        config_hash=current.config_hash,
+        resolved_config=current.resolved_config,
+        launcher=current.launcher,
+        environment=current.environment,
+        failure=None,
+    )
+
+
+def _write_resident_manifest(output: Path, manifest: RunManifest) -> None:
+    RunDirectory(output.parent, output.name).write_manifest(manifest)
+
+
 def _factor_slice_source_inventory(
     request: ResidentQuantizationRequest,
 ) -> tuple[SafetensorsModelSource, CheckpointInventory, ModelInventory]:
@@ -926,25 +988,65 @@ def _load_precomputed_preprocessing(
 
 
 def _run_resident_quantization(request: ResidentQuantizationRequest) -> ResidentQuantizationResult:
-    events = JsonlEventSink(request.output / "events.jsonl", "resident-quantization")
-    try:
+    proposed = _resident_manifest(request, "resident-quantization")
+    with open_run_session(
+        request.output,
+        manifest=proposed,
+        observability=request.observability,
+        registry_root=Path("runs"),
+        console=True,
+    ) as session:
+        manifest = _start_resident_manifest(session.manifest, proposed)
+        _write_resident_manifest(request.output, manifest)
+        session.events.emit(
+            "run",
+            "info",
+            "run.resumed" if session.resumed else "run.started",
+            stored_config_hash=session.manifest.config_hash,
+            current_config_hash=proposed.config_hash,
+            previous_run_id=session.previous_run_id,
+        )
         with profiled_run(
             request.profiling,
             request.output,
-            events,
-            run_id="resident-quantization",
+            session.events,
+            run_id=session.run_id,
         ) as recorder:
-            with recorder.phase("run"):
-                with recorder.phase("pipeline"):
-                    return _run_resident_quantization_impl(request, events, recorder)
-    finally:
-        events.close()
+            try:
+                with recorder.phase("run"):
+                    with recorder.phase("pipeline"):
+                        result = _run_resident_quantization_impl(request, session.events, recorder, session.run_id)
+            except (KeyboardInterrupt, InterruptedError) as exc:
+                session.events.emit("run", "warning", "run.interrupted", error_type=type(exc).__name__)
+                manifest = transition(manifest, RunStatus.INTERRUPTED)
+                _write_resident_manifest(request.output, manifest)
+                raise
+            except BaseException as exc:
+                session.events.emit(
+                    "run",
+                    "error",
+                    "run.failed",
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
+                manifest = transition(
+                    manifest,
+                    RunStatus.FAILED,
+                    failure={"type": type(exc).__name__, "message": str(exc)},
+                )
+                _write_resident_manifest(request.output, manifest)
+                raise
+        session.events.emit("run", "info", "run.completed", artifact_id=result.report.artifact_id)
+        manifest = transition(manifest, RunStatus.COMPLETED, artifacts=(result.report.artifact_id,))
+        _write_resident_manifest(request.output, manifest)
+        return result
 
 
 def _run_resident_quantization_impl(
     request: ResidentQuantizationRequest,
-    events: JsonlEventSink,
+    events: EventSink,
     recorder: PhaseRecorder,
+    run_id: str,
 ) -> ResidentQuantizationResult:
     """Quantize all decoder linears while the source model remains resident on one device."""
     started = time.perf_counter()
@@ -996,7 +1098,7 @@ def _run_resident_quantization_impl(
     artifacts = LocalArtifactStore(request.output / "artifacts", recorder=micro_recorder)
     tensors = LocalTensorStore(artifacts)
     executor = ResidentExecutor()
-    context = StageContext("resident-quantization", executor, artifacts, tensors, events, Cancellation(), recorder)
+    context = StageContext(run_id, executor, artifacts, tensors, events, Cancellation(), recorder)
     with recorder.phase("setup"):
         with recorder.phase("inventory"):
             source = SafetensorsModelSource(
@@ -1229,7 +1331,7 @@ def _run_resident_quantization_impl(
         plan = persisted_plan.plan
     config_hash = _resident_config_hash(request)
     identity = CommitIdentity(config_hash, inventory.model.config_hash, persisted_plan.reference.artifact_id)
-    journal = ProgressJournal(request.output / "state", "resident-quantization", artifacts)
+    journal = ProgressJournal(request.output / "state", run_id, artifacts)
     with recorder.phase("resume"):
         with recorder.phase("discover"):
             discovery = journal.discover(plan, identity)
@@ -1927,7 +2029,11 @@ def _run_resident_quantization_impl(
     )
 
 
-def _run_resident_factorization_slice(request: ResidentQuantizationRequest) -> ResidentFactorizationSliceResult:
+def _run_resident_factorization_slice_impl(
+    request: ResidentQuantizationRequest,
+    events: EventSink,
+    run_id: str,
+) -> ResidentFactorizationSliceResult:
     """Commit the next planned weight-only layer without loading the Transformers model."""
     started = time.perf_counter()
     if (
@@ -1956,7 +2062,7 @@ def _run_resident_factorization_slice(request: ResidentQuantizationRequest) -> R
     plan = persisted_plan.plan
     config_hash = _resident_config_hash(request)
     identity = CommitIdentity(config_hash, inventory.model.config_hash, persisted_plan.reference.artifact_id)
-    journal = ProgressJournal(request.output / "state", "resident-quantization", artifacts)
+    journal = ProgressJournal(request.output / "state", run_id, artifacts)
     discovery = journal.discover(plan, identity)
     records = (*discovery.valid_records, *discovery.orphan_records)
     complete_blocks = {record.block for record in records if record.kind == "block"}
@@ -1996,8 +2102,7 @@ def _run_resident_factorization_slice(request: ResidentQuantizationRequest) -> R
     layer_plan = pending[0]
     block_index = layer_plan.layer.block.index
     executor = ResidentExecutor()
-    events = JsonlEventSink(request.output / "events.jsonl", "resident-factorization-slice")
-    context = StageContext("resident-factorization-slice", executor, artifacts, tensors, events, Cancellation())
+    context = StageContext(run_id, executor, artifacts, tensors, events, Cancellation())
     if request.device.startswith("cuda"):
         torch.cuda.reset_peak_memory_stats(request.device)
     try:
@@ -2098,7 +2203,60 @@ def _run_resident_factorization_slice(request: ResidentQuantizationRequest) -> R
         )
     finally:
         executor.release()
-        events.close()
+
+
+def _run_resident_factorization_slice(request: ResidentQuantizationRequest) -> ResidentFactorizationSliceResult:
+    proposed = _resident_manifest(request, "resident-factorization-slice")
+    with open_run_session(
+        request.output,
+        manifest=proposed,
+        observability=request.observability,
+        registry_root=Path("runs"),
+        console=True,
+    ) as session:
+        manifest = _start_resident_manifest(session.manifest, proposed)
+        _write_resident_manifest(request.output, manifest)
+        session.events.emit(
+            "run",
+            "info",
+            "run.resumed" if session.resumed else "run.started",
+            stored_config_hash=session.manifest.config_hash,
+            current_config_hash=proposed.config_hash,
+            previous_run_id=session.previous_run_id,
+            component="resident-factorization-slice",
+        )
+        try:
+            result = _run_resident_factorization_slice_impl(request, session.events, session.run_id)
+        except (KeyboardInterrupt, InterruptedError) as exc:
+            session.events.emit("run", "warning", "run.interrupted", error_type=type(exc).__name__)
+            manifest = transition(manifest, RunStatus.INTERRUPTED)
+            _write_resident_manifest(request.output, manifest)
+            raise
+        except BaseException as exc:
+            session.events.emit(
+                "run",
+                "error",
+                "run.failed",
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            manifest = transition(
+                manifest,
+                RunStatus.FAILED,
+                failure={"type": type(exc).__name__, "message": str(exc)},
+            )
+            _write_resident_manifest(request.output, manifest)
+            raise
+        session.events.emit(
+            "run",
+            "warning",
+            "run.interrupted",
+            reason="factorization_slice_boundary",
+            remaining_layers=result.remaining_layers,
+        )
+        manifest = transition(manifest, RunStatus.INTERRUPTED)
+        _write_resident_manifest(request.output, manifest)
+        return result
 
 
 def run_resident_factorization_slice(request: ResidentQuantizationRequest) -> ResidentFactorizationSliceResult:

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
+import tempfile
 import threading
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
@@ -125,6 +127,96 @@ def render_event_line(event: Event) -> str:
         f"{timestamp} {event.sequence:07d} {event.severity.upper():7} "
         f"{event.stage} {event.name}{suffix}"
     )
+
+
+def event_from_dict(payload: Mapping[str, object]) -> Event:
+    """Decode an event envelope while keeping schema-1 streams readable."""
+
+    fields = payload.get("fields")
+    if not isinstance(fields, dict):
+        raise EventStreamError("event fields must be an object")
+    schema_version = payload.get("schema_version")
+    sequence = payload.get("sequence")
+    if not isinstance(schema_version, int) or isinstance(schema_version, bool):
+        raise EventStreamError("event schema_version must be an integer")
+    if not isinstance(sequence, int) or isinstance(sequence, bool):
+        raise EventStreamError("event sequence must be an integer")
+    try:
+        return Event(
+            schema_version=schema_version,
+            timestamp=str(payload["timestamp"]),
+            run_id=str(payload["run_id"]),
+            sequence=sequence,
+            stage=str(payload["stage"]),
+            severity=Severity.parse(str(payload["severity"])).value,
+            name=str(payload["name"]),
+            fields={str(key): value for key, value in fields.items()},
+            span_id=None if payload.get("span_id") is None else str(payload["span_id"]),
+            parent_span_id=(
+                None if payload.get("parent_span_id") is None else str(payload["parent_span_id"])
+            ),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise EventStreamError("invalid event envelope") from exc
+
+
+def read_event_prefix(path: str | Path) -> Iterator[Event]:
+    """Yield the valid newline-terminated event prefix without modifying it."""
+
+    event_path = Path(path)
+    if not event_path.exists():
+        return
+    expected = 1
+    with event_path.open("rb") as source:
+        for raw_line in source:
+            if not raw_line.endswith(b"\n"):
+                break
+            if not raw_line.strip():
+                continue
+            try:
+                payload = json.loads(raw_line.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                break
+            if not isinstance(payload, dict):
+                break
+            try:
+                event = event_from_dict(payload)
+            except EventStreamError:
+                break
+            if event.sequence != expected:
+                break
+            yield event
+            expected += 1
+
+
+def read_last_event(path: str | Path) -> Event | None:
+    line = _read_last_line(Path(path))
+    if not line:
+        return None
+    try:
+        payload = json.loads(line.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise EventStreamError("event stream does not end in valid JSON") from exc
+    if not isinstance(payload, dict):
+        raise EventStreamError("event stream does not end in an event object")
+    return event_from_dict(payload)
+
+
+def render_event_log(events_path: str | Path, output_path: str | Path) -> None:
+    """Atomically render the canonical valid event prefix as a text snapshot."""
+
+    destination = Path(output_path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{destination.name}-", suffix=".tmp", dir=destination.parent)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as output:
+            for event in read_event_prefix(events_path):
+                output.write(render_event_line(event) + "\n")
+            output.flush()
+        os.replace(temporary, destination)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 
 
 def _read_last_line(path: Path) -> bytes:
@@ -426,6 +518,22 @@ class EventRouter:
             self._closed = True
             if first_required_error is not None:
                 raise first_required_error
+
+    def flush(self) -> None:
+        with self._lock:
+            if self._closed:
+                raise EventWriteError("event router is closed")
+            for index, destination in enumerate(self._destinations):
+                if index in self._disabled:
+                    continue
+                try:
+                    destination.flush()
+                except Exception as exc:
+                    if destination.role == "required":
+                        raise EventWriteError(
+                            f"required event destination flush failed: {type(destination).__name__}"
+                        ) from exc
+                    self._disabled.add(index)
 
 
 class JsonlEventSink:

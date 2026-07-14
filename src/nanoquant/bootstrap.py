@@ -12,7 +12,7 @@ from nanoquant.config.validation import raise_for_issues, validate
 from nanoquant.domain.runs import RunStatus
 from nanoquant.infrastructure.artifacts import LocalArtifactStore
 from nanoquant.infrastructure.environment import capture_environment
-from nanoquant.infrastructure.events import ConsoleRenderer, JsonlEventSink
+from nanoquant.infrastructure.run_session import open_run_session
 from nanoquant.infrastructure.runs import (
     RunDirectory,
     initial_manifest,
@@ -30,10 +30,16 @@ def run_experiment(
     provenance = launcher_provenance(launcher_path, config.intent.experiment_number)
     manifest = initial_manifest(config, provenance, capture_environment())
     directory = RunDirectory(config.output.run_root, manifest.run_id)
-    directory.write_manifest(manifest)
-    sink = JsonlEventSink(directory.events_path, manifest.run_id, ConsoleRenderer() if console else None)
     artifacts = LocalArtifactStore(config.output.artifact_root, config.output.temporary_root)
-    with directory.lease():
+    with open_run_session(
+        directory.root,
+        manifest=manifest,
+        observability=config.observability,
+        registry_root=directory.root.parent,
+        console=console,
+    ) as session:
+        manifest = session.manifest
+        sink = session.events
         manifest = transition(manifest, RunStatus.RUNNING)
         directory.write_manifest(manifest)
         sink.emit("run", "info", "run.started", config_hash=manifest.config_hash)

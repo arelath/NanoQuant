@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import socket
 import subprocess
 import tempfile
 from dataclasses import replace
@@ -74,15 +75,59 @@ class RunLease:
     def __init__(self, path: Path) -> None:
         self.path = path
         self.acquired = False
+        self.taken_over_owner: dict[str, object] | None = None
+
+    @staticmethod
+    def _owner(path: Path) -> dict[str, object]:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"RUN001 active lease is unreadable: {path}") from exc
+        if not isinstance(payload, dict):
+            raise RuntimeError(f"RUN001 active lease has invalid owner metadata: {path}")
+        return cast(dict[str, object], payload)
+
+    @staticmethod
+    def _pid_is_alive(pid: int) -> bool:
+        if pid <= 0:
+            return False
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        except OSError:
+            return False
+        return True
 
     def acquire(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         try:
             descriptor = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         except FileExistsError as exc:
-            raise RuntimeError(f"RUN001 active lease exists: {self.path}") from exc
+            owner = self._owner(self.path)
+            hostname = str(owner.get("hostname", ""))
+            raw_pid = owner.get("pid")
+            pid = raw_pid if type(raw_pid) is int else -1
+            if hostname == socket.gethostname() and not self._pid_is_alive(pid):
+                try:
+                    self.path.unlink()
+                    descriptor = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                except (FileNotFoundError, FileExistsError) as race:
+                    raise RuntimeError(f"RUN001 active lease changed while taking ownership: {self.path}") from race
+                self.taken_over_owner = owner
+            else:
+                raise RuntimeError(
+                    f"RUN001 active lease exists: {self.path}; owner={json.dumps(owner, sort_keys=True)}"
+                ) from exc
         with os.fdopen(descriptor, "w", encoding="utf-8") as output:
-            json.dump({"pid": os.getpid(), "acquired_at": _now()}, output)
+            json.dump(
+                {"pid": os.getpid(), "hostname": socket.gethostname(), "acquired_at": _now()},
+                output,
+                sort_keys=True,
+            )
+            output.flush()
         self.acquired = True
 
     def release(self) -> None:
@@ -141,6 +186,26 @@ def initial_manifest(
     parent_run_id: str | None = None,
     forked_from_stage: str | None = None,
 ) -> RunManifest:
+    return initial_manifest_from_resolved(
+        config_hash(config),
+        to_dict(config),
+        launcher,
+        environment,
+        run_id=run_id,
+        parent_run_id=parent_run_id,
+        forked_from_stage=forked_from_stage,
+    )
+
+
+def initial_manifest_from_resolved(
+    resolved_config_hash: str,
+    resolved_config: dict[str, object],
+    launcher: LauncherProvenance,
+    environment: dict[str, object],
+    run_id: str | None = None,
+    parent_run_id: str | None = None,
+    forked_from_stage: str | None = None,
+) -> RunManifest:
     now = _now()
     return RunManifest(
         1,
@@ -148,8 +213,8 @@ def initial_manifest(
         RunStatus.CREATED,
         now,
         now,
-        config_hash(config),
-        to_dict(config),
+        resolved_config_hash,
+        resolved_config,
         launcher,
         environment,
         parent_run_id,

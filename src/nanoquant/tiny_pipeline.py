@@ -25,9 +25,11 @@ from nanoquant.application.quantization_stages import (
 from nanoquant.application.reconstruction_report import render_reconstruction_tables
 from nanoquant.application.stages import StageContext, execute_stage
 from nanoquant.application.tuning import TuningRequest, tune_factorized
+from nanoquant.config.codec import canonical_json, to_dict
 from nanoquant.config.schema import (
     AllocationStrategy,
     ObjectiveConfig,
+    ObservabilityConfig,
     OutlierConfig,
     ProfilingConfig,
     ProfilingLevel,
@@ -58,18 +60,27 @@ from nanoquant.domain.models import (
     TensorId,
 )
 from nanoquant.domain.profiling import NULL_RECORDER, PhaseRecorder
-from nanoquant.domain.runs import BudgetState
+from nanoquant.domain.runs import BudgetState, RunStatus
 from nanoquant.domain.seeds import logical_seed
 from nanoquant.infrastructure.artifacts import LocalArtifactStore
 from nanoquant.infrastructure.commits import CommitIdentity, commit_block, commit_layer
-from nanoquant.infrastructure.events import JsonlEventSink
+from nanoquant.infrastructure.environment import capture_environment
 from nanoquant.infrastructure.profiling import profiled_run
 from nanoquant.infrastructure.progress import ProgressJournal
 from nanoquant.infrastructure.resident_executor import Cancellation, ResidentExecutor
+from nanoquant.infrastructure.run_session import open_run_session
+from nanoquant.infrastructure.runs import (
+    RunDirectory,
+    initial_manifest_from_resolved,
+    launcher_provenance,
+    transition,
+)
 from nanoquant.infrastructure.tensor_store import LocalTensorStore
 from nanoquant.infrastructure.tiny_model import TinyCausalTransformer, TinyModelAdapter, TinyModelConfig
+from nanoquant.ports.event_sink import EventSink
 
 _DEFAULT_PROFILING = ProfilingConfig()
+_DEFAULT_OBSERVABILITY = ObservabilityConfig()
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,14 +112,15 @@ def _run_tiny_pipeline(
     seed: int,
     recorder: PhaseRecorder,
     profiling: ProfilingConfig,
+    events: EventSink,
+    run_id: str,
 ) -> TinyPipelineResult:
     started = time.perf_counter()
     root = Path(root)
     micro_recorder = recorder if profiling.level is ProfilingLevel.MICRO else NULL_RECORDER
     artifacts = LocalArtifactStore(root / "artifacts", recorder=micro_recorder)
     tensors = LocalTensorStore(artifacts)
-    events = JsonlEventSink(root / "events.jsonl", "tiny-run")
-    context = StageContext("tiny-run", ResidentExecutor(), artifacts, tensors, events, Cancellation(), recorder)
+    context = StageContext(run_id, ResidentExecutor(), artifacts, tensors, events, Cancellation(), recorder)
     config = TinyModelConfig(vocabulary_size=32, hidden_size=8, intermediate_size=12, block_count=2)
     teacher = TinyCausalTransformer(config, seed=seed)
     working = TinyCausalTransformer(config, seed=seed)
@@ -202,7 +214,7 @@ def _run_tiny_pipeline(
     )
     persisted_plan = persist_plan(plan, artifacts)
     identity = CommitIdentity("tiny-config-v1", model_identity.config_hash, persisted_plan.reference.artifact_id)
-    journal = ProgressJournal(root / "state", "tiny-run", artifacts)
+    journal = ProgressJournal(root / "state", run_id, artifacts)
     budget = BudgetState(plan.planned_cost.total, 0, 0)
     teacher_inputs = teacher.embed(tokens).detach()
     compressed_inputs = working.embed(tokens).detach()
@@ -363,7 +375,6 @@ def _run_tiny_pipeline(
     )
     report = render_reconstruction_tables(tuple(result for _, result in committed_blocks))
     (root / "report.md").write_text(report, encoding="utf-8")
-    events.close()
     return TinyPipelineResult(
         frozen_model,
         plan,
@@ -381,13 +392,60 @@ def run_tiny_pipeline(
     *,
     seed: int = 0,
     profiling: ProfilingConfig = _DEFAULT_PROFILING,
+    observability: ObservabilityConfig = _DEFAULT_OBSERVABILITY,
 ) -> TinyPipelineResult:
     output = Path(root)
-    with profiled_run(profiling, output, None, run_id="tiny-pipeline") as recorder:
-        with recorder.phase("run"):
-            return _run_tiny_pipeline(
-                output,
-                seed=seed,
-                recorder=recorder,
-                profiling=profiling,
+    resolved = {
+        "component": "tiny-pipeline",
+        "seed": seed,
+        "profiling": to_dict(profiling),
+        "observability": to_dict(observability),
+    }
+    resolved_hash = "sha256:" + hashlib.sha256(canonical_json(resolved).encode()).hexdigest()
+    proposed = initial_manifest_from_resolved(
+        resolved_hash,
+        resolved,
+        launcher_provenance(__file__, None),
+        capture_environment(),
+    )
+    with open_run_session(
+        output,
+        manifest=proposed,
+        observability=observability,
+        registry_root=Path("runs"),
+        console=False,
+    ) as session:
+        directory = RunDirectory(output.parent, output.name)
+        manifest = transition(session.manifest, RunStatus.RUNNING)
+        directory.write_manifest(manifest)
+        session.events.emit("run", "info", "run.started", config_hash=manifest.config_hash)
+        try:
+            with profiled_run(profiling, output, session.events, run_id=session.run_id) as recorder:
+                with recorder.phase("run"):
+                    result = _run_tiny_pipeline(
+                        output,
+                        seed=seed,
+                        recorder=recorder,
+                        profiling=profiling,
+                        events=session.events,
+                        run_id=session.run_id,
+                    )
+        except BaseException as exc:
+            session.events.emit(
+                "run",
+                "error",
+                "run.failed",
+                error_type=type(exc).__name__,
+                error=str(exc),
             )
+            manifest = transition(
+                manifest,
+                RunStatus.FAILED,
+                failure={"type": type(exc).__name__, "message": str(exc)},
+            )
+            directory.write_manifest(manifest)
+            raise
+        session.events.emit("run", "info", "run.completed")
+        manifest = transition(manifest, RunStatus.COMPLETED)
+        directory.write_manifest(manifest)
+        return result

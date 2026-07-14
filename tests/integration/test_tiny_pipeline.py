@@ -24,9 +24,13 @@ def test_tiny_pipeline_runs_entirely_on_rewrite_components(tmp_path: Path) -> No
     assert math.isfinite(float((result.teacher_logits - result.compressed_logits).square().mean()))
     assert "Per-layer objective-weighted reconstruction" in result.report
     assert (tmp_path / "report.md").read_text(encoding="utf-8") == result.report
+    manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["run_id"].startswith("run_")
+    assert manifest["status"] == "completed"
+    assert "run.completed" in (tmp_path / "run.log").read_text(encoding="utf-8")
     assert result.elapsed_seconds < 600
     profile = json.loads((tmp_path / "profile.json").read_text(encoding="utf-8"))
-    assert profile["run_id"] == "tiny-pipeline"
+    assert profile["run_id"] == manifest["run_id"]
     assert profile["level"] == "macro"
     assert profile["coverage"]["fraction"] >= 0.90
     assert not any(warning["code"] == "PERF001" for warning in profile["warnings"])
