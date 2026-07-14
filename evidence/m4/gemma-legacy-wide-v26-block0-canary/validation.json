@@ -1,0 +1,54 @@
+{
+  "active_journal_records": 16,
+  "artifact_bytes": 3153557242,
+  "artifacts_by_type": {
+    "activation-generation": 1,
+    "block-result": 2,
+    "calibration-stats": 1,
+    "calibration-tensors": 1,
+    "factorization-attempt": 15,
+    "frozen-block-auxiliary": 2,
+    "frozen-layer": 28,
+    "layer-result": 14,
+    "quantization-plan": 1,
+    "scale-fit": 14
+  },
+  "artifacts_validated": 79,
+  "bit_cost_by_category": {
+    "binary_factor_bits": 52187136,
+    "outlier_index_bits": 406,
+    "outlier_value_bits": 1314816,
+    "padding_bits": 0,
+    "scale_bits": 1137152
+  },
+  "block_records": 2,
+  "block_wall_seconds": 806.6032358999946,
+  "committed_layer_count": 14,
+  "complete": false,
+  "completed_blocks": [
+    0,
+    1
+  ],
+  "effective_bpw": 1.0179887149796818,
+  "final_frozen_pre_kd_losses": [
+    1.367361068725586,
+    3.5729382038116455
+  ],
+  "identity": {
+    "config_hash": "sha256:763eeb4289f2c10590f8a784b9fe432526e567e90838ab7b7bf96ca427ebeef1",
+    "model_hash": "sha256:32d5b5d041e98027bc7415107bc79b580f9cce407535b4e30134e8f8aed3b130",
+    "plan_hash": "sha256-8656b828a48e72f07799726b92c8a70b257f775c77f6c4bd5787686b524e8a9d"
+  },
+  "inactive_journal_records": 0,
+  "journal_identity_count": 1,
+  "journal_records": 16,
+  "layer_records": 14,
+  "peak_gpu_bytes": 6295650304,
+  "peak_host_bytes": 11129999360,
+  "quantized_parameters": 53673984,
+  "rank_sum": 8352,
+  "retired_activation_generations": [
+    "sha256-1d205d82e716e9cd0daa2e635cf8c99b25586e620c182d603384f1813b28130b"
+  ],
+  "run_output": "D:\\dev\\research\\NanoQuantRewrite\\evidence\\m4\\gemma-legacy-wide-v26-block0-canary"
+}

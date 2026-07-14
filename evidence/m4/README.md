@@ -565,3 +565,17 @@ source-hashed legacy implementation, and all normalized-objective deltas are zer
 do not match their retained v23 native-orientation factor artifacts; version 26 prevents those commits from being
 adopted into a new run. A fresh resident trajectory is therefore required before superseding the accepted v19/v21
 end-to-end evidence.
+
+The first v26 resident prefix is retained under `gemma-legacy-wide-v26-block0-canary`. It reuses the validated v23
+content-addressed store through a directory junction, avoiding duplicate preprocessing and tensor objects. Block 0
+committed at `1.3673610687` versus contemporary legacy `1.3728` (**-0.40%**) and prior accepted rewrite
+`1.3784899712` (**-0.81%**). Block 1 committed at `3.5729382038` versus contemporary legacy `3.6029`
+(**-0.83%**) and prior corrected-v21 rewrite `3.5971968174` (**-0.67%**). All 14 ranks match contemporary legacy
+exactly (rank sum 8,352).
+
+Store-aware validation followed 79 reachable artifacts (3,153,557,242 bytes), found one identity and a contiguous
+two-block prefix, and reported 1.017989 effective BPW, 6,295,650,304 peak allocated CUDA bytes, and
+11,129,999,360 peak host bytes. Block 0 took 399.22 seconds, 6.0% faster than contemporary legacy's 424.87 seconds
+and 31.0% faster than the older 578.73-second rewrite gate; performance remains provisional until a complete run.
+`validation.json` and `legacy-comparison.{json,md}` retain the compact validation and comparison evidence. This
+prefix clears the accumulating-state gate for extension through the remaining blocks.
