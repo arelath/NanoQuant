@@ -71,7 +71,7 @@ While the trainable modules use the `_SignSTE` wrapper and the frozen ones do no
 *   Refactor the `nn.Module` classes to act as thin state-holding wrappers that just call these pure functions.
 *   *Why:* Guarantees that the training graph, scale-fitting, and inference references are mathematically locked together, preventing divergence bugs.
 
-### [ ] 7. Deduplicate Calibration Hook Generators
+### [x] 7. Deduplicate Calibration Hook Generators
 **Location:** `src/nanoquant/application/calibration.py`
 **Problem:** The logic that registers PyTorch hooks for statistic accumulation is almost entirely duplicated between `calibrate_causal_model()` (full model passes) and `calibrate_block()` (single block passes). Both functions define `forward_hook`, `backward_hook`, `profile_forward`, and `profile_backward` as nested closures, and manage their registration/removal. This accounts for ~100 lines of highly dense, repetitive code.
 **Action:**

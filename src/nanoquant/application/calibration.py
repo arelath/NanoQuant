@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Protocol, cast
 
@@ -20,6 +21,83 @@ from nanoquant.domain.profiling import NULL_RECORDER, PhaseRecorder
 from nanoquant.ports.activation_store import ActivationStore
 
 CAUSAL_CALIBRATION_ALGORITHM_VERSION = 2
+
+TensorUpdate = Callable[[str, torch.Tensor], None]
+
+
+@contextmanager
+def _apply_calibration_hooks(
+    modules: Iterable[tuple[str, nn.Module]],
+    input_update: TensorUpdate,
+    output_update: TensorUpdate | None,
+) -> Iterator[None]:
+    """Install one scoped set of input/output hooks and always remove it."""
+
+    handles: list[torch.utils.hooks.RemovableHandle] = []
+    try:
+        for path, module in modules:
+
+            def forward_hook(
+                _module: nn.Module,
+                inputs: tuple[torch.Tensor, ...],
+                _output: object,
+                path: str = path,
+            ) -> None:
+                input_update(path, inputs[0])
+
+            handles.append(module.register_forward_hook(forward_hook))
+            if output_update is not None:
+
+                def backward_hook(
+                    _module: nn.Module,
+                    _inputs: tuple[torch.Tensor | None, ...],
+                    outputs: tuple[torch.Tensor | None, ...],
+                    path: str = path,
+                ) -> None:
+                    if outputs[0] is not None:
+                        output_update(path, outputs[0])
+
+                handles.append(module.register_full_backward_hook(backward_hook))
+        yield
+    finally:
+        for handle in handles:
+            handle.remove()
+
+
+def _accumulator_updater(
+    accumulators: dict[str, Accumulator],
+    recorder: PhaseRecorder,
+    direction: str,
+) -> TensorUpdate:
+    def update(path: str, value: torch.Tensor) -> None:
+        if recorder is NULL_RECORDER:
+            accumulators[path].update(value)
+        else:
+            with recorder.phase("accumulate", direction=direction):
+                accumulators[path].update(value)
+            recorder.add("calibration.accumulator_updates", 1, direction=direction)
+
+    return update
+
+
+def _threshold_updater(
+    thresholds: dict[str, torch.Tensor],
+    recorder: PhaseRecorder,
+    direction: str,
+    *,
+    pre_scale: float = 1.0,
+) -> TensorUpdate:
+    def update(path: str, value: torch.Tensor) -> None:
+        if recorder is NULL_RECORDER:
+            thresholds[path] = torch.maximum(thresholds[path], robust_tau(value, pre_scale=pre_scale))
+        else:
+            with recorder.phase("accumulate", direction=direction, pass_name="threshold"):
+                thresholds[path] = torch.maximum(
+                    thresholds[path], robust_tau(value, pre_scale=pre_scale)
+                )
+            recorder.add("calibration.accumulator_updates", 1, direction=direction)
+
+    return update
 
 
 @dataclass(frozen=True, slots=True)
@@ -199,93 +277,31 @@ def calibrate_causal_model(
     def execute(
         input_accumulators: dict[str, Accumulator], output_accumulators: dict[str, Accumulator]
     ) -> None:
-        handles: list[torch.utils.hooks.RemovableHandle] = []
-        try:
-            for path, module in layers:
-
-                def forward_hook(
-                    _module: nn.Module, inputs: tuple[torch.Tensor, ...], _output: object, path: str = path
-                ) -> None:
-                    if recorder is NULL_RECORDER:
-                        input_accumulators[path].update(inputs[0])
-                    else:
-                        with recorder.phase("accumulate", direction="input"):
-                            input_accumulators[path].update(inputs[0])
-                        recorder.add("calibration.accumulator_updates", 1, direction="input")
-
-                def backward_hook(
-                    _module: nn.Module,
-                    _inputs: tuple[torch.Tensor | None, ...],
-                    outputs: tuple[torch.Tensor | None, ...],
-                    path: str = path,
-                ) -> None:
-                    if outputs[0] is not None:
-                        if recorder is NULL_RECORDER:
-                            output_accumulators[path].update(outputs[0])
-                        else:
-                            with recorder.phase("accumulate", direction="output"):
-                                output_accumulators[path].update(outputs[0])
-                            recorder.add("calibration.accumulator_updates", 1, direction="output")
-
-                handles.append(module.register_forward_hook(forward_hook))
-                handles.append(module.register_full_backward_hook(backward_hook))
+        with _apply_calibration_hooks(
+            layers,
+            _accumulator_updater(input_accumulators, recorder, "input"),
+            _accumulator_updater(output_accumulators, recorder, "output"),
+        ):
             for batch in batches:
                 model.zero_grad(set_to_none=True)
                 backward_batch(batch)
                 recorder.add("calibration.batches", 1)
                 recorder.add("calibration.samples", batch.shape[0])
-        finally:
-            for handle in handles:
-                handle.remove()
 
     try:
         if method == "two_phase_fisher":
             input_thresholds = {path: module.weight.new_zeros((), dtype=torch.float32) for path, module in layers}
             output_thresholds = {path: module.weight.new_zeros((), dtype=torch.float32) for path, module in layers}
-            handles: list[torch.utils.hooks.RemovableHandle] = []
-            try:
-                for path, module in layers:
-
-                    def profile_forward(
-                        _module: nn.Module, inputs: tuple[torch.Tensor, ...], _output: object, path: str = path
-                    ) -> None:
-                        if recorder is NULL_RECORDER:
-                            input_thresholds[path] = torch.maximum(input_thresholds[path], robust_tau(inputs[0]))
-                        else:
-                            with recorder.phase("accumulate", direction="input", pass_name="threshold"):
-                                input_thresholds[path] = torch.maximum(
-                                    input_thresholds[path], robust_tau(inputs[0])
-                                )
-                            recorder.add("calibration.accumulator_updates", 1, direction="input")
-
-                    def profile_backward(
-                        _module: nn.Module,
-                        _inputs: tuple[torch.Tensor | None, ...],
-                        outputs: tuple[torch.Tensor | None, ...],
-                        path: str = path,
-                    ) -> None:
-                        if outputs[0] is not None:
-                            if recorder is NULL_RECORDER:
-                                output_thresholds[path] = torch.maximum(
-                                    output_thresholds[path], robust_tau(outputs[0], pre_scale=1e6)
-                                )
-                            else:
-                                with recorder.phase("accumulate", direction="output", pass_name="threshold"):
-                                    output_thresholds[path] = torch.maximum(
-                                        output_thresholds[path], robust_tau(outputs[0], pre_scale=1e6)
-                                    )
-                                recorder.add("calibration.accumulator_updates", 1, direction="output")
-
-                    handles.append(module.register_forward_hook(profile_forward))
-                    handles.append(module.register_full_backward_hook(profile_backward))
+            with _apply_calibration_hooks(
+                layers,
+                _threshold_updater(input_thresholds, recorder, "input"),
+                _threshold_updater(output_thresholds, recorder, "output", pre_scale=1e6),
+            ):
                 for batch in batches:
                     model.zero_grad(set_to_none=True)
                     backward_batch(batch)
                     recorder.add("calibration.batches", 1, pass_name="threshold")
                     recorder.add("calibration.samples", batch.shape[0], pass_name="threshold")
-            finally:
-                for handle in handles:
-                    handle.remove()
             inputs: dict[str, Accumulator] = {
                 path: FixedClippedAccumulator(module.in_features, input_thresholds[path]) for path, module in layers
             }
@@ -438,38 +454,11 @@ def calibrate_block(
     objective = loss_builder or (lambda output, _batch: output.float().square().mean())
 
     def execute(input_accumulators: dict[str, Accumulator], output_accumulators: dict[str, Accumulator]) -> None:
-        handles: list[torch.utils.hooks.RemovableHandle] = []
-        try:
-            for path, module in linears.items():
-
-                def forward_hook(
-                    _module: nn.Module, inputs: tuple[torch.Tensor, ...], _output: object, path: str = path
-                ) -> None:
-                    if recorder is NULL_RECORDER:
-                        input_accumulators[path].update(inputs[0])
-                    else:
-                        with recorder.phase("accumulate", direction="input"):
-                            input_accumulators[path].update(inputs[0])
-                        recorder.add("calibration.accumulator_updates", 1, direction="input")
-
-                handles.append(module.register_forward_hook(forward_hook))
-                if requires_backward:
-
-                    def backward_hook(
-                        _module: nn.Module,
-                        _inputs: tuple[torch.Tensor | None, ...],
-                        outputs: tuple[torch.Tensor | None, ...],
-                        path: str = path,
-                    ) -> None:
-                        if outputs[0] is not None:
-                            if recorder is NULL_RECORDER:
-                                output_accumulators[path].update(outputs[0])
-                            else:
-                                with recorder.phase("accumulate", direction="output"):
-                                    output_accumulators[path].update(outputs[0])
-                                recorder.add("calibration.accumulator_updates", 1, direction="output")
-
-                    handles.append(module.register_full_backward_hook(backward_hook))
+        with _apply_calibration_hooks(
+            linears.items(),
+            _accumulator_updater(input_accumulators, recorder, "input"),
+            _accumulator_updater(output_accumulators, recorder, "output") if requires_backward else None,
+        ):
             for batch in batches:
                 block.zero_grad(set_to_none=True)
                 batch_input = batch.detach().requires_grad_(requires_backward)
@@ -482,9 +471,6 @@ def calibrate_block(
                         torch.autograd.backward(loss)
                 recorder.add("calibration.batches", 1)
                 recorder.add("calibration.samples", batch.shape[0])
-        finally:
-            for handle in handles:
-                handle.remove()
 
     if method == "two_phase_fisher":
         input_thresholds = {
@@ -493,40 +479,11 @@ def calibrate_block(
         output_thresholds = {
             path: module.weight.new_zeros((), dtype=torch.float32) for path, module in linears.items()
         }
-        handles = []
-        try:
-            for path, module in linears.items():
-
-                def profile_forward(
-                    _module: nn.Module, inputs: tuple[torch.Tensor, ...], _output: object, path: str = path
-                ) -> None:
-                    if recorder is NULL_RECORDER:
-                        input_thresholds[path] = torch.maximum(input_thresholds[path], robust_tau(inputs[0]))
-                    else:
-                        with recorder.phase("accumulate", direction="input", pass_name="threshold"):
-                            input_thresholds[path] = torch.maximum(input_thresholds[path], robust_tau(inputs[0]))
-                        recorder.add("calibration.accumulator_updates", 1, direction="input")
-
-                def profile_backward(
-                    _module: nn.Module,
-                    _inputs: tuple[torch.Tensor | None, ...],
-                    outputs: tuple[torch.Tensor | None, ...],
-                    path: str = path,
-                ) -> None:
-                    if outputs[0] is not None:
-                        if recorder is NULL_RECORDER:
-                            output_thresholds[path] = torch.maximum(
-                                output_thresholds[path], robust_tau(outputs[0], pre_scale=1e6)
-                            )
-                        else:
-                            with recorder.phase("accumulate", direction="output", pass_name="threshold"):
-                                output_thresholds[path] = torch.maximum(
-                                    output_thresholds[path], robust_tau(outputs[0], pre_scale=1e6)
-                                )
-                            recorder.add("calibration.accumulator_updates", 1, direction="output")
-
-                handles.append(module.register_forward_hook(profile_forward))
-                handles.append(module.register_full_backward_hook(profile_backward))
+        with _apply_calibration_hooks(
+            linears.items(),
+            _threshold_updater(input_thresholds, recorder, "input"),
+            _threshold_updater(output_thresholds, recorder, "output", pre_scale=1e6),
+        ):
             for batch in batches:
                 block.zero_grad(set_to_none=True)
                 with recorder.phase("forward"):
@@ -537,9 +494,6 @@ def calibrate_block(
                     torch.autograd.backward(loss)
                 recorder.add("calibration.batches", 1, pass_name="threshold")
                 recorder.add("calibration.samples", batch.shape[0], pass_name="threshold")
-        finally:
-            for handle in handles:
-                handle.remove()
         inputs: dict[str, Accumulator] = {
             path: FixedClippedAccumulator(module.in_features, input_thresholds[path])
             for path, module in linears.items()
