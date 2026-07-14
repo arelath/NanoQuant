@@ -45,7 +45,13 @@ from nanoquant.application.quantization_stages import (
 from nanoquant.application.reconstruction_report import render_reconstruction_tables
 from nanoquant.application.retry_loop import AcceptedFactorization, run_factorization_attempts
 from nanoquant.application.stages import StageContext, execute_stage
-from nanoquant.application.tuning import TuningRequest, post_block_refit, tune_factorized, tune_non_factorized
+from nanoquant.application.tuning import (
+    TuningRequest,
+    TuningResumeState,
+    post_block_refit,
+    tune_factorized,
+    tune_non_factorized,
+)
 from nanoquant.config.codec import canonical_json, from_dict, to_dict
 from nanoquant.config.schema import (
     ADMMConfig,
@@ -109,6 +115,12 @@ from nanoquant.infrastructure.resident_executor import Cancellation, ResidentExe
 from nanoquant.infrastructure.resource_usage import peak_process_memory_bytes
 from nanoquant.infrastructure.safetensors_source import SafetensorsModelSource
 from nanoquant.infrastructure.tensor_store import LocalTensorStore
+from nanoquant.infrastructure.tuning_checkpoint import (
+    TuningCheckpointIdentity,
+    active_tuning_checkpoint,
+    clear_tuning_checkpoint,
+    save_tuning_checkpoint,
+)
 
 RESIDENT_ALGORITHM_VERSION = 21
 
@@ -189,6 +201,7 @@ class ResidentQuantizationRequest:
     verify_hashes: bool = True
     interrupt_after_layer_commits: int | None = None
     interrupt_after_block_commits: int | None = None
+    interrupt_after_factorized_tuning_epoch_commits: int | None = None
     block_forward_batch_size: int = 8
     quality_token_ids: torch.Tensor | tuple[tuple[int, ...], ...] | None = None
     calibration_method: str = "forward_only"
@@ -901,6 +914,11 @@ def _run_resident_quantization_impl(
     started = time.perf_counter()
     if request.block_forward_batch_size <= 0:
         raise ValueError("resident quantization block forward batch size must be positive")
+    if (
+        request.interrupt_after_factorized_tuning_epoch_commits is not None
+        and request.interrupt_after_factorized_tuning_epoch_commits <= 0
+    ):
+        raise ValueError("factorized tuning epoch interruption count must be positive")
     if request.calibration_batch_size <= 0:
         raise ValueError("resident quantization calibration batch size must be positive")
     if request.factorized_tuning_epochs < 0 or request.nonfactorized_tuning_epochs < 0:
@@ -1253,6 +1271,7 @@ def _run_resident_quantization_impl(
     factorization_wall_seconds = 0.0
     new_layer_commits = 0
     new_block_commits = 0
+    new_factorized_tuning_epoch_commits = 0
     factor_stage = FactorizationAttemptStage(request.admm, device=request.device, recorder=micro_recorder)
     outlier_stage = OutlierSelectionStage(
         device=request.device,
@@ -1446,6 +1465,56 @@ def _run_resident_quantization_impl(
             tuning = None
             if request.factorized_tuning_epochs > 0:
                 BlockEditor().install_trainable_layer(working_block, layer_plan.layer.path, trainable)
+                tuning_checkpoint_identity = TuningCheckpointIdentity(
+                    identity.config_hash,
+                    identity.model_hash,
+                    identity.plan_hash,
+                    block_index,
+                    layer_plan.layer.path,
+                    "factorized",
+                )
+                active_checkpoint = active_tuning_checkpoint(request.output, tuning_checkpoint_identity)
+                events.emit(
+                    "resident-quantization",
+                    "info",
+                    "factorized_tuning.resume_checkpoint",
+                    block=block_index,
+                    layer=layer_plan.layer.path,
+                    found=active_checkpoint is not None,
+                    completed_epochs=(
+                        None if active_checkpoint is None else active_checkpoint.state.completed_epochs
+                    ),
+                )
+
+                def checkpoint_sink(
+                    state: TuningResumeState,
+                    *,
+                    checkpoint_identity: TuningCheckpointIdentity = tuning_checkpoint_identity,
+                    checkpoint_block: int = block_index,
+                    checkpoint_layer: str = layer_plan.layer.path,
+                ) -> None:
+                    nonlocal new_factorized_tuning_epoch_commits
+                    stored = save_tuning_checkpoint(request.output, state, checkpoint_identity)
+                    new_factorized_tuning_epoch_commits += 1
+                    events.emit(
+                        "resident-quantization",
+                        "info",
+                        "factorized_tuning.epoch_checkpoint_committed",
+                        block=checkpoint_block,
+                        layer=checkpoint_layer,
+                        completed_epochs=stored.state.completed_epochs,
+                        generation=stored.generation,
+                    )
+                    if (
+                        request.interrupt_after_factorized_tuning_epoch_commits is not None
+                        and new_factorized_tuning_epoch_commits
+                        >= request.interrupt_after_factorized_tuning_epoch_commits
+                    ):
+                        raise InterruptedError(
+                            "injected interruption after "
+                            f"{new_factorized_tuning_epoch_commits} factorized tuning epoch checkpoint(s)"
+                        )
+
                 with _profile_layer_phase(recorder, block_index, layer_plan.layer.path, "factorized_tuning"):
                     tuning = tune_factorized(
                         working_block,
@@ -1462,6 +1531,8 @@ def _run_resident_quantization_impl(
                         ),
                         lambda module, value: adapter.run_block(module, value, **metadata),
                         tuning_recorder,
+                        resume=None if active_checkpoint is None else active_checkpoint.state,
+                        checkpoint_sink=checkpoint_sink,
                     )
             with _profile_layer_phase(recorder, block_index, layer_plan.layer.path, "freeze"):
                 frozen_outliers = (
@@ -1519,6 +1590,7 @@ def _run_resident_quantization_impl(
                     committed_layer.reference.artifact_id,
                     identity,
                 )
+                clear_tuning_checkpoint(request.output)
             new_layer_commits += 1
             if (
                 request.interrupt_after_layer_commits is not None

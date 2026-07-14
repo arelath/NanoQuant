@@ -251,6 +251,48 @@ def test_tuning_epoch_observer_receives_full_evaluation_trajectory() -> None:
     assert trajectory[0][1] == metrics.before.loss
 
 
+def test_factorized_tuning_epoch_resume_is_bitwise_equivalent() -> None:
+    initial = Hybrid()
+    control = deepcopy(initial)
+    interrupted = deepcopy(initial)
+    inputs = torch.randn(12, 3, generator=torch.Generator().manual_seed(50))
+    targets = torch.randn(12, 2, generator=torch.Generator().manual_seed(51))
+    request = TuningRequest(inputs, targets, 5, 4, 0.02, seed=52, microbatch_size=2)
+    checkpoints = []
+
+    control_metrics = tune_factorized(control, "quant", request, _forward)
+
+    def checkpoint_sink(state):  # type: ignore[no-untyped-def]
+        checkpoints.append(state)
+        if state.completed_epochs == 2:
+            raise InterruptedError("injected epoch interruption")
+
+    with pytest.raises(InterruptedError, match="epoch interruption"):
+        tune_factorized(
+            interrupted,
+            "quant",
+            request,
+            _forward,
+            checkpoint_sink=checkpoint_sink,
+        )
+
+    assert checkpoints[-1].completed_epochs == 2
+    restarted = deepcopy(initial)
+    resumed_metrics = tune_factorized(
+        restarted,
+        "quant",
+        request,
+        _forward,
+        resume=checkpoints[-1],
+    )
+
+    assert resumed_metrics == control_metrics
+    for control_parameter, resumed_parameter in zip(
+        control.parameters(), restarted.parameters(), strict=True
+    ):
+        assert torch.equal(resumed_parameter, control_parameter)
+
+
 def test_post_block_refit_updates_scales_without_latent_changes() -> None:
     model = Hybrid()
     inputs = torch.randn(12, 3, generator=torch.Generator().manual_seed(4))

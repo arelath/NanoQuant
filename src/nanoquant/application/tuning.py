@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from typing import cast
 
 import torch
 from torch import nn
@@ -33,6 +35,30 @@ class TuningRequest:
     seed: int = 0
     microbatch_size: int | None = None
     epoch_observer: Callable[[int, float], None] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class TuningOptimizerState:
+    parameter_name: str
+    step: torch.Tensor
+    exponential_average: torch.Tensor
+    exponential_average_squared: torch.Tensor
+    kahan_compensation: torch.Tensor | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class TuningResumeState:
+    completed_epochs: int
+    epoch_losses: tuple[float, ...]
+    steps_completed: int
+    parameter_values: tuple[tuple[str, torch.Tensor], ...]
+    best_parameter_values: tuple[tuple[str, torch.Tensor], ...]
+    optimizer_states: tuple[TuningOptimizerState, ...]
+    best_epoch: int
+    stopped_early: bool
+
+
+TuningCheckpointSink = Callable[[TuningResumeState], None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -298,6 +324,9 @@ def tune(
     forward: ForwardFunction,
     selector: ParameterSelector,
     recorder: PhaseRecorder = NULL_RECORDER,
+    *,
+    resume: TuningResumeState | None = None,
+    checkpoint_sink: TuningCheckpointSink | None = None,
 ) -> TuningMetrics:
     if (
         request.epochs < 0
@@ -314,38 +343,117 @@ def tune(
         parameter.requires_grad_(False)
     for _, parameter in selected:
         parameter.requires_grad_(True)
+    selected_by_name = dict(selected)
     model_parameter = next(iter(model.parameters()), None)
     device = request.inputs.device if model_parameter is None else model_parameter.device
     importance = _resolve_output_importance(request.output_importance, device, torch.float32)
-    if recorder is NULL_RECORDER:
-        before_value = _evaluate_loss(model, request, forward)
+    if resume is not None:
+        if resume.completed_epochs < 0 or resume.completed_epochs > request.epochs:
+            raise ValueError("tuning resume epoch is out of range")
+        if len(resume.epoch_losses) != resume.completed_epochs + 1:
+            raise ValueError("tuning resume losses do not match completed epochs")
+        if resume.best_epoch < -1 or resume.best_epoch >= resume.completed_epochs:
+            raise ValueError("tuning resume best epoch is out of range")
+        parameter_values = dict(resume.parameter_values)
+        best_parameter_values = dict(resume.best_parameter_values)
+        if set(parameter_values) != set(selected_by_name) or set(best_parameter_values) != set(selected_by_name):
+            raise ValueError("tuning resume parameters do not match the selector")
+        with torch.no_grad():
+            for name, parameter in selected:
+                value = parameter_values[name]
+                best = best_parameter_values[name]
+                if value.shape != parameter.shape or best.shape != parameter.shape:
+                    raise ValueError(f"tuning resume parameter shape differs: {name}")
+                parameter.copy_(value.to(device=parameter.device, dtype=parameter.dtype))
+        before_value = resume.epoch_losses[0]
+        best_value = min(resume.epoch_losses)
+        expected_best_epoch = min(range(len(resume.epoch_losses)), key=resume.epoch_losses.__getitem__) - 1
+        if resume.best_epoch != expected_best_epoch:
+            raise ValueError("tuning resume best epoch disagrees with losses")
+        best_epoch = resume.best_epoch
+        best_state = {
+            name: value.to(device=selected_by_name[name].device, dtype=selected_by_name[name].dtype)
+            for name, value in best_parameter_values.items()
+        }
+        epoch_losses = list(resume.epoch_losses)
     else:
-        with recorder.phase("initial_evaluation"):
-            before_value = _evaluate_loss(model, request, forward, recorder)
-    if request.epoch_observer is not None:
-        request.epoch_observer(0, before_value)
-    best_value = before_value
-    best_epoch = -1
-    if recorder is NULL_RECORDER:
-        best_state = {name: parameter.detach().clone() for name, parameter in selected}
-    else:
-        with recorder.phase("best_state_clone"):
+        if recorder is NULL_RECORDER:
+            before_value = _evaluate_loss(model, request, forward)
+        else:
+            with recorder.phase("initial_evaluation"):
+                before_value = _evaluate_loss(model, request, forward, recorder)
+        best_value = before_value
+        best_epoch = -1
+        if recorder is NULL_RECORDER:
             best_state = {name: parameter.detach().clone() for name, parameter in selected}
-            recorder.add("tuning.best_state_clones", 1)
+        else:
+            with recorder.phase("best_state_clone"):
+                best_state = {name: parameter.detach().clone() for name, parameter in selected}
+                recorder.add("tuning.best_state_clones", 1)
+        epoch_losses = [before_value]
+    if request.epoch_observer is not None:
+        for epoch, observed_loss in enumerate(epoch_losses):
+            request.epoch_observer(epoch, observed_loss)
     optimizer = ParityAdamW(
         [parameter for _, parameter in selected], lr=request.learning_rate, weight_decay=request.weight_decay
     )
-    total_steps = max(1, request.epochs * ((request.inputs.shape[0] + request.batch_size - 1) // request.batch_size))
+    steps_per_epoch = (request.inputs.shape[0] + request.batch_size - 1) // request.batch_size
+    total_steps = max(1, request.epochs * steps_per_epoch)
+    starting_steps = 0 if resume is None else resume.steps_completed
+    if starting_steps != (0 if resume is None else resume.completed_epochs * steps_per_epoch):
+        raise ValueError("tuning resume step count disagrees with completed epochs")
+    if resume is not None:
+        optimizer_by_name = {state.parameter_name: state for state in resume.optimizer_states}
+        if set(optimizer_by_name) != set(selected_by_name):
+            raise ValueError("tuning resume optimizer states do not match the selector")
+        saved_steps = {int(state.step.item()) for state in resume.optimizer_states}
+        if saved_steps != {starting_steps}:
+            raise ValueError("tuning resume optimizer steps differ from completed steps")
+        for name, parameter in selected:
+            state = optimizer_by_name[name]
+            if state.exponential_average.shape != parameter.shape:
+                raise ValueError(f"tuning resume optimizer shape differs: {name}")
+            if parameter.dtype in {torch.float16, torch.bfloat16} and state.kahan_compensation is None:
+                raise ValueError(f"tuning resume Kahan state is missing: {name}")
+            optimizer.state[parameter] = {
+                "exp_avg": state.exponential_average.to(device=parameter.device, dtype=parameter.dtype),
+                "exp_avg_sq": state.exponential_average_squared.to(
+                    device=parameter.device, dtype=parameter.dtype
+                ),
+                "kahan_comp": None
+                if state.kahan_compensation is None
+                else state.kahan_compensation.to(device=parameter.device, dtype=parameter.dtype),
+                "denominator": torch.empty_like(parameter),
+            }
+        for group in optimizer.param_groups:
+            group["step"] = starting_steps
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=total_steps, eta_min=request.learning_rate * 1e-4
     )
+    if starting_steps:
+        eta_min = request.learning_rate * 1e-4
+        current_lr = eta_min + (request.learning_rate - eta_min) * (
+            1 + math.cos(math.pi * starting_steps / total_steps)
+        ) / 2
+        for group in optimizer.param_groups:
+            group["lr"] = current_lr
+        scheduler_state = scheduler.state_dict()
+        scheduler_state["last_epoch"] = starting_steps
+        scheduler_state["_step_count"] = starting_steps + 1
+        scheduler_state["_last_lr"] = [current_lr] * len(optimizer.param_groups)
+        scheduler.load_state_dict(scheduler_state)
     generator = torch.Generator(device="cpu").manual_seed(request.seed)
+    starting_epoch = 0 if resume is None else resume.completed_epochs
+    for _epoch in range(starting_epoch):
+        torch.randperm(request.inputs.shape[0], generator=generator)
     maximum_microbatch_size = min(request.inputs.shape[0], request.microbatch_size or request.batch_size)
     stager = _pinned_batch_stager(request, device, maximum_microbatch_size)
-    epochs_completed = 0
-    stopped_early = False
+    epochs_completed = starting_epoch
+    stopped_early = False if resume is None else resume.stopped_early
     try:
-        for epoch in range(request.epochs):
+        for epoch in range(starting_epoch, request.epochs):
+            if stopped_early:
+                break
             with recorder.phase("epoch", epoch=epoch):
                 order = torch.randperm(request.inputs.shape[0], generator=generator)
                 microbatches = _training_microbatches(order, request.batch_size, request.microbatch_size)
@@ -423,6 +531,7 @@ def tune(
                         current = _evaluate_loss(model, request, forward, recorder)
                 if request.epoch_observer is not None:
                     request.epoch_observer(epoch + 1, current)
+                epoch_losses.append(current)
                 if current < best_value:
                     improvement = (best_value - current) / max(abs(best_value), 1e-12)
                     best_value = current
@@ -438,7 +547,39 @@ def tune(
                         and improvement < request.early_stop_relative_tolerance
                     ):
                         stopped_early = True
-                        break
+                if checkpoint_sink is not None:
+                    with recorder.phase("checkpoint_snapshot"):
+                        optimizer_step = torch.tensor(
+                            int(optimizer.param_groups[0].get("step", 0)), dtype=torch.int64
+                        )
+                        optimizer_states = []
+                        for name, parameter in selected:
+                            state = optimizer.state[parameter]
+                            optimizer_states.append(
+                                TuningOptimizerState(
+                                    name,
+                                    optimizer_step.clone(),
+                                    cast(torch.Tensor, state["exp_avg"]).detach().cpu().clone(),
+                                    cast(torch.Tensor, state["exp_avg_sq"]).detach().cpu().clone(),
+                                    None
+                                    if state.get("kahan_comp") is None
+                                    else cast(torch.Tensor, state["kahan_comp"]).detach().cpu().clone(),
+                                )
+                            )
+                        checkpoint_sink(
+                            TuningResumeState(
+                                epoch + 1,
+                                tuple(epoch_losses),
+                                int(optimizer_step.item()),
+                                tuple((name, parameter.detach().cpu().clone()) for name, parameter in selected),
+                                tuple((name, value.detach().cpu().clone()) for name, value in best_state.items()),
+                                tuple(optimizer_states),
+                                best_epoch,
+                                stopped_early,
+                            )
+                        )
+                if stopped_early:
+                    break
         parameter_map = dict(model.named_parameters())
         if recorder is NULL_RECORDER:
             with torch.no_grad():
@@ -479,6 +620,9 @@ def tune_non_factorized(
     request: TuningRequest,
     forward: ForwardFunction,
     recorder: PhaseRecorder = NULL_RECORDER,
+    *,
+    resume: TuningResumeState | None = None,
+    checkpoint_sink: TuningCheckpointSink | None = None,
 ) -> TuningMetrics:
     factorized_prefixes = {
         name for name, module in model.named_modules() if module.__class__.__name__ == "TrainableFactorizedLinear"
@@ -491,6 +635,8 @@ def tune_non_factorized(
             not any(name == prefix or name.startswith(prefix + ".") for prefix in factorized_prefixes)
         ),
         recorder,
+        resume=resume,
+        checkpoint_sink=checkpoint_sink,
     )
 
 
@@ -500,9 +646,20 @@ def tune_factorized(
     request: TuningRequest,
     forward: ForwardFunction,
     recorder: PhaseRecorder = NULL_RECORDER,
+    *,
+    resume: TuningResumeState | None = None,
+    checkpoint_sink: TuningCheckpointSink | None = None,
 ) -> TuningMetrics:
     prefix = module_path + "."
-    return tune(model, request, forward, lambda name, _parameter: name.startswith(prefix), recorder)
+    return tune(
+        model,
+        request,
+        forward,
+        lambda name, _parameter: name.startswith(prefix),
+        recorder,
+        resume=resume,
+        checkpoint_sink=checkpoint_sink,
+    )
 
 
 def post_block_refit(
@@ -510,6 +667,17 @@ def post_block_refit(
     request: TuningRequest,
     forward: ForwardFunction,
     recorder: PhaseRecorder = NULL_RECORDER,
+    *,
+    resume: TuningResumeState | None = None,
+    checkpoint_sink: TuningCheckpointSink | None = None,
 ) -> TuningMetrics:
     tunable_suffixes = ("scale_pre", "scale_mid", "scale_post", "outlier_values", "bias")
-    return tune(model, request, forward, lambda name, _parameter: name.endswith(tunable_suffixes), recorder)
+    return tune(
+        model,
+        request,
+        forward,
+        lambda name, _parameter: name.endswith(tunable_suffixes),
+        recorder,
+        resume=resume,
+        checkpoint_sink=checkpoint_sink,
+    )

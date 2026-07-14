@@ -61,6 +61,7 @@ def main() -> None:
     parser.add_argument("--activation-retention", choices=("rolling", "all"), default="rolling")
     parser.add_argument("--interrupt-after-layer-commits", type=int)
     parser.add_argument("--interrupt-after-block-commits", type=int)
+    parser.add_argument("--interrupt-after-factorized-tuning-epoch-commits", type=int)
     parser.add_argument("--samples", type=int, default=256)
     parser.add_argument("--admm-outer-iterations", type=int, default=800)
     parser.add_argument("--admm-inner-iterations", type=int, default=5)
@@ -150,6 +151,9 @@ def main() -> None:
         block_forward_batch_size=args.block_forward_batch_size,
         interrupt_after_layer_commits=args.interrupt_after_layer_commits,
         interrupt_after_block_commits=args.interrupt_after_block_commits,
+        interrupt_after_factorized_tuning_epoch_commits=(
+            args.interrupt_after_factorized_tuning_epoch_commits
+        ),
         precomputed_calibration=(
             None
             if args.calibration_artifact is None

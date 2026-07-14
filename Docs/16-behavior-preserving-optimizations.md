@@ -812,7 +812,9 @@ must be remeasured rather than inferred from the speedup.
   slot release through the optimizer, and blocking host copies did not fix it and are therefore rejected as
   standalone remedies. A narrow CUDA-stream synchronization after each completed backward accumulation and
   before the optimizer step reproduces **0.6555455327**, completes the bounded canary in 29.9 seconds, and
-  retains the **2.60 GB** peak. Broader per-batch diagnostic synchronization is not retained.
+  retains the **2.60 GB** peak. The uninterrupted eight-epoch resident gate then reproduced the standalone
+  trajectory exactly, ending at **0.3709969819** with **2,600,680,960 peak allocated bytes**. Broader
+  per-batch diagnostic synchronization is not retained.
 - `JsonlEventSink._read_last_sequence` parses the whole event log at construction — only matters for
   resumed runs with large logs; fine today, worth a tail-scan if event volume grows.
 - **Measured, not implemented (2026-07-13):** a fresh process inventories the pinned Gemma snapshot in a

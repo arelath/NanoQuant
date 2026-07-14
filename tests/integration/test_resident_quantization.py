@@ -240,6 +240,37 @@ def test_resident_tuning_recipe_refits_blocks_and_resumes_exactly(tmp_path: Path
         abs=1e-7,
     )
 
+    epoch_output = tmp_path / "epoch-resumed"
+    with pytest.raises(InterruptedError, match="after 1"):
+        run_resident_quantization(
+            replace(base, output=epoch_output, interrupt_after_layer_commits=1)
+        )
+    epoch_request = replace(
+        base,
+        output=epoch_output,
+        interrupt_after_factorized_tuning_epoch_commits=1,
+    )
+    with pytest.raises(InterruptedError, match="factorized tuning epoch checkpoint"):
+        run_resident_quantization(epoch_request)
+    checkpoint_pointer = epoch_request.output / "state" / "tuning-checkpoint" / "active.json"
+    first_checkpoint_layer = json.loads(checkpoint_pointer.read_text(encoding="utf-8"))["identity"]["layer"]
+
+    with pytest.raises(InterruptedError, match="factorized tuning epoch checkpoint"):
+        run_resident_quantization(epoch_request)
+    second_checkpoint_layer = json.loads(checkpoint_pointer.read_text(encoding="utf-8"))["identity"]["layer"]
+    assert second_checkpoint_layer != first_checkpoint_layer
+
+    epoch_resumed = run_resident_quantization(
+        replace(epoch_request, interrupt_after_factorized_tuning_epoch_commits=None)
+    )
+
+    assert epoch_resumed.compressed_nll == pytest.approx(control.compressed_nll, rel=1e-6, abs=1e-7)
+    assert (
+        epoch_resumed.blocks[0].frozen_state.quantized_layers
+        == control.blocks[0].frozen_state.quantized_layers
+    )
+    assert not (epoch_request.output / "state" / "tuning-checkpoint").exists()
+
 
 def test_numerical_batch_shapes_invalidate_resume_identity(tmp_path: Path) -> None:
     request = ResidentQuantizationRequest(
