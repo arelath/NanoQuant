@@ -81,3 +81,24 @@ def test_run_lease_rejects_live_or_foreign_owner(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError, match="RUN001.*different-host"):
         RunLease(path).acquire()
     assert json.loads(path.read_text(encoding="utf-8")) == owner
+
+
+def test_registry_failure_degrades_to_canonical_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail_registration(*_args, **_kwargs):
+        raise PermissionError("injected registry failure")
+
+    monkeypatch.setattr("nanoquant.infrastructure.run_registry.register_external_run", fail_registration)
+    output = tmp_path / "external" / "run"
+    with open_run_session(
+        output,
+        manifest=_manifest(tmp_path),
+        observability=ObservabilityConfig(),
+        registry_root=tmp_path / "runs",
+        console=False,
+    ) as session:
+        session.events.emit("run", "info", "run.started")
+
+    events = [json.loads(line) for line in (output / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert [event["name"] for event in events] == ["run.registry_registration_failed", "run.started"]

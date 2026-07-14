@@ -202,6 +202,32 @@ def read_last_event(path: str | Path) -> Event | None:
     return event_from_dict(payload)
 
 
+def event_stream_integrity(path: str | Path) -> str:
+    """Classify an event stream without modifying its valid prefix."""
+
+    event_path = Path(path)
+    if not event_path.exists():
+        return "missing"
+    expected = 1
+    with event_path.open("rb") as source:
+        for raw_line in source:
+            if not raw_line.endswith(b"\n"):
+                return "torn"
+            if not raw_line.strip():
+                continue
+            try:
+                payload = json.loads(raw_line.decode("utf-8"))
+                if not isinstance(payload, dict):
+                    return "corrupt"
+                event = event_from_dict(payload)
+            except (UnicodeDecodeError, json.JSONDecodeError, EventStreamError):
+                return "corrupt"
+            if event.sequence != expected:
+                return "corrupt"
+            expected += 1
+    return "ok"
+
+
 def render_event_log(events_path: str | Path, output_path: str | Path) -> None:
     """Atomically render the canonical valid event prefix as a text snapshot."""
 

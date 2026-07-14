@@ -229,6 +229,7 @@ class ResidentQuantizationRequest:
     defer_layer_loss_snapshots: bool = False
     profiling: ProfilingConfig = ProfilingConfig()
     observability: ObservabilityConfig = ObservabilityConfig()
+    registry_root: Path | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -993,7 +994,7 @@ def _run_resident_quantization(request: ResidentQuantizationRequest) -> Resident
         request.output,
         manifest=proposed,
         observability=request.observability,
-        registry_root=Path("runs"),
+        registry_root=request.registry_root,
         console=True,
     ) as session:
         manifest = _start_resident_manifest(session.manifest, proposed)
@@ -2211,7 +2212,7 @@ def _run_resident_factorization_slice(request: ResidentQuantizationRequest) -> R
         request.output,
         manifest=proposed,
         observability=request.observability,
-        registry_root=Path("runs"),
+        registry_root=request.registry_root,
         console=True,
     ) as session:
         manifest = _start_resident_manifest(session.manifest, proposed)

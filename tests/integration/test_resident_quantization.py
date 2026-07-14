@@ -14,6 +14,7 @@ from nanoquant.infrastructure.artifacts import ArtifactCorruptionError, LocalArt
 from nanoquant.infrastructure.commits import load_block_activations
 from nanoquant.infrastructure.frozen_model_loader import load_frozen_run
 from nanoquant.infrastructure.progress import ProgressJournal
+from nanoquant.infrastructure.run_registry import select_run
 from nanoquant.resident_quantization import (
     ResidentQuantizationRequest,
     _clone_forward_metadata,
@@ -50,6 +51,7 @@ def test_resident_quantization_commits_complete_transformers_model(tmp_path: Pat
             rank_multiple=1,
             admm=ADMMConfig(outer_iterations=2, inner_iterations=1),
             profiling=ProfilingConfig(level=ProfilingLevel.OFF),
+            registry_root=tmp_path / "runs",
         )
     )
 
@@ -83,6 +85,7 @@ def test_resident_quantization_commits_complete_transformers_model(tmp_path: Pat
     assert manifest["status"] == "completed"
     assert manifest["resolved_config"]["component"] == "resident-quantization"
     assert "run.completed" in (output / "run.log").read_text(encoding="utf-8")
+    assert select_run(tmp_path / "runs", "latest").path == output.resolve()
     artifacts = LocalArtifactStore(output / "artifacts")
     artifacts.validate(result.report.artifact_id)
     journal_path = output / "state" / "journal.jsonl"

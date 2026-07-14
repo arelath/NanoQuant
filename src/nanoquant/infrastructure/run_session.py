@@ -54,7 +54,6 @@ def open_run_session(
 ) -> Iterator[RunSession]:
     """Open the sole event writer for a run and render its disposable log at close."""
 
-    del registry_root  # Registration is composed by the discovery layer in V3 phase 3.
     root = Path(output)
     directory = RunDirectory(root.parent, root.name)
     existing_manifest = directory.manifest_path.exists()
@@ -98,6 +97,25 @@ def open_run_session(
                 "run.lease_taken_over",
                 previous_owner=lease.taken_over_owner,
             )
+        if registry_root is not None:
+            try:
+                from nanoquant.infrastructure.run_registry import register_external_run
+
+                registry_owner = register_external_run(registry_root, directory.root, adopted)
+                if registry_owner is not None:
+                    router.emit(
+                        "run",
+                        "warning",
+                        "run.registry_lock_taken_over",
+                        previous_owner=registry_owner,
+                    )
+            except Exception as exc:
+                router.emit(
+                    "run",
+                    "warning",
+                    "run.registry_registration_failed",
+                    error_type=type(exc).__name__,
+                )
         yield RunSession(adopted.run_id, directory.root, router, adopted, had_existing_state, previous_run_id)
     finally:
         try:

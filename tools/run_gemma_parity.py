@@ -43,6 +43,7 @@ LAYER_ORDER = (
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--run-root", type=Path, default=Path("runs"))
     parser.add_argument("--snapshot", type=Path, required=True)
     parser.add_argument("--calibration", type=Path, default=Path("evidence/m3/experiment018-calibration"))
     parser.add_argument("--factorized-tuning-epochs", type=int, default=0)
@@ -186,6 +187,7 @@ def main() -> None:
             memory_counters=args.profile_memory_counters,
             emit_span_events=args.profile_span_events,
         ),
+        registry_root=args.run_root,
     )
     if args.factor_only:
         if args.factor_only_count <= 0:

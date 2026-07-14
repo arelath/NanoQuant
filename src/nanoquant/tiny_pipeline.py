@@ -393,6 +393,7 @@ def run_tiny_pipeline(
     seed: int = 0,
     profiling: ProfilingConfig = _DEFAULT_PROFILING,
     observability: ObservabilityConfig = _DEFAULT_OBSERVABILITY,
+    registry_root: Path | None = None,
 ) -> TinyPipelineResult:
     output = Path(root)
     resolved = {
@@ -412,7 +413,7 @@ def run_tiny_pipeline(
         output,
         manifest=proposed,
         observability=observability,
-        registry_root=Path("runs"),
+        registry_root=registry_root,
         console=False,
     ) as session:
         directory = RunDirectory(output.parent, output.name)
