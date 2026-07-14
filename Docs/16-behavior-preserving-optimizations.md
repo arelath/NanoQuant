@@ -919,6 +919,29 @@ must be remeasured rather than inferred from the speedup.
 - `_artifact_bytes` walks the whole artifact tree once at report time — keep an eye on it as artifact
   counts grow (currently once per run).
 
+### Logging V3 routing overhead (accepted, 2026-07-14)
+
+`tools/benchmark_events.py --events 2000 --repeats 7` compared the V3 sanitizer/router against the former
+single-lock JSONL envelope/write/flush shape using the same representative retry-decision fields. Median results on
+the Windows development host were:
+
+| Path | Median | Per event | Relative to former shape |
+|---|---:|---:|---:|
+| Former JSONL shape | 42.37 ms | 21.18 µs | 1.00x |
+| V3 router + JSONL | 87.52 ms | 43.76 µs | 2.07x |
+| V3 router + JSONL + one-line console rendering | 114.70 ms | 57.35 µs | 2.71x |
+
+The safety features cost 22.58 µs per canonical event without console and 36.17 µs with console. The default tiny
+pipeline emitted 110 events in 7.431 s, putting the measured JSONL delta at approximately 2.48 ms (0.034% of wall
+time), below both the 10 ms absolute and 2% relative V3 budgets. Resident runs emit at stage/epoch/commit boundaries,
+not per microbatch; this fixed microsecond cost is immaterial against minute-scale layer work and is far below the 1%
+resident budget. The event modules do not import `torch` or call a CUDA API, so the router introduces no CUDA
+synchronization. Per-ADMM-sample events remain opt-in through `record_admm_steps` and `event_level=debug`.
+
+The higher per-event ratio is accepted because the absolute run-level cost is small and buys bounded fields,
+redaction, deterministic serialization, required/optional failure isolation, and canonical-superset filtering.
+Per-event `fsync`, writer-maintained `run.log`, and default per-iteration ADMM emission remain rejected.
+
 ## 5. What was checked and found already efficient
 
 For future readers: these were inspected and are *not* wasteful under the parity contract.

@@ -1,3 +1,4 @@
+import json
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -85,7 +86,15 @@ def test_outlier_factorization_and_scale_fit_stages_commit_typed_results(tmp_pat
         "factor-config",
         outliers.factor_generator_state,
     )
-    factorized = execute_stage(FactorizationAttemptStage(), factor_request, context)
+    factorized = execute_stage(
+        FactorizationAttemptStage(
+            ADMMConfig(outer_iterations=5, inner_iterations=1, convergence_check_interval=1),
+            record_admm_steps=True,
+            admm_sample_every=2,
+        ),
+        factor_request,
+        context,
+    )
     assert factorized.rank == 1
     assert factorized.metrics.export_weighted_normalized_error >= 0
     scale_request = MaterializedScaleFitStageRequest(
@@ -96,6 +105,17 @@ def test_outlier_factorization_and_scale_fit_stages_commit_typed_results(tmp_pat
     fitted = execute_stage(ScaleFitStage(), scale_request, context)
     assert fitted.after.export_weighted_error <= fitted.before.export_weighted_error + 1e-5
     assert (tmp_path / "events.jsonl").read_text(encoding="utf-8").count("stage.completed") == 3
+    events = [json.loads(line) for line in (tmp_path / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    samples = [event for event in events if event["name"] == "factorization.admm_sample"]
+    sampled_iterations = {event["fields"]["iteration"] for event in samples}
+    assert {1, 3, 5} <= sampled_iterations
+    assert len(samples) <= 5
+    attempt = next(event for event in events if event["name"] == "factorization.attempt_completed")
+    assert attempt["fields"]["iterations_completed"] == 5
+    assert {"raw_error", "weighted_error", "wall_seconds", "peak_workspace_bytes"} <= attempt["fields"].keys()
+    scale = next(event for event in events if event["name"] == "scale_fit.completed")
+    assert scale["fields"]["accepted"] == fitted.accepted
+    assert scale["fields"]["after_weighted_error"] <= scale["fields"]["before_weighted_error"] + 1e-5
 
 
 def test_residual_probe_uses_configured_inner_iterations(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

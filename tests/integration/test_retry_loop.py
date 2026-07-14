@@ -1,3 +1,4 @@
+import json
 from dataclasses import replace
 from pathlib import Path
 
@@ -102,6 +103,21 @@ def test_retry_loop_commits_once_and_updates_budget_after_acceptance(tmp_path: P
     assert accepted.budget.accepted_bits == accepted.actual_bit_cost.total
     assert initial == BudgetState(1000, 0, 0)
     assert accepted.result.convergence.iterations_completed <= 2
+    events = [json.loads(line) for line in (tmp_path / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    decisions = [event["fields"] for event in events if event["name"] == "factorization.retry_decision"]
+    assert len(decisions) == 2
+    assert {
+        "rank",
+        "weighted_error",
+        "raw_error",
+        "weighted_threshold",
+        "raw_threshold",
+        "retry_score",
+        "attempt_bits",
+        "available_extra_bits",
+        "retry_bits_spent",
+        "action",
+    } <= decisions[0].keys()
 
 
 def test_failed_accepted_layer_commit_does_not_mutate_budget(tmp_path: Path) -> None:

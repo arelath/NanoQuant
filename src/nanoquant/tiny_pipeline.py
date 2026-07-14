@@ -293,13 +293,14 @@ def _run_tiny_pipeline(
                 container[name] = trainable
             else:
                 setattr(container, name, trainable)
-            tuning = tune_factorized(
-                working_block,
-                path,
-                TuningRequest(compressed_inputs, teacher_outputs, 1, 2, 1e-2),
-                lambda module, value: module(value),
-                micro_recorder,
-            )
+            with recorder.phase("tuning", block=block_index, layer=path):
+                tuning = tune_factorized(
+                    working_block,
+                    path,
+                    TuningRequest(compressed_inputs, teacher_outputs, 1, 2, 1e-2),
+                    lambda module, value: module(value),
+                    micro_recorder,
+                )
             frozen = LayerFreezer().freeze(layer_plan.layer, trainable, tensors)
             BlockEditor().install_frozen_layer(working_block, path, frozen.module)
             frozen_states.append(frozen.state)
@@ -337,8 +338,9 @@ def _run_tiny_pipeline(
                 0,
                 (),
             )
-            committed_layer = commit_layer(layer_result, artifacts, identity)
-            journal.append("layer", block_index, path, committed_layer.reference.artifact_id, identity)
+            with recorder.phase("commit", kind="layer", block=block_index, layer=path):
+                committed_layer = commit_layer(layer_result, artifacts, identity)
+                journal.append("layer", block_index, path, committed_layer.reference.artifact_id, identity)
             layer_results.append(layer_result)
             budget = replace(budget, accepted_bits=budget.accepted_bits + layer_plan.estimated_cost.total)
             loss_recorder.record_after_layer(
@@ -348,33 +350,35 @@ def _run_tiny_pipeline(
             compressed_outputs = working_block(compressed_inputs).detach()
         loss_recorder.record_final_frozen_pre_kd(_mse(compressed_outputs, teacher_outputs))
         frozen_block = FrozenBlockState(block_plan.block, tuple(frozen_states), ())
-        committed = commit_block(
-            block_plan.block,
-            tuple(layer_results),
-            frozen_block,
-            loss_recorder.finalize(),
-            teacher_outputs,
-            compressed_outputs,
-            budget.retry_bits_spent,
-            artifacts,
-            identity,
-        )
-        journal.append("block", block_index, None, committed.reference.artifact_id, identity)
+        with recorder.phase("commit", kind="block", block=block_index):
+            committed = commit_block(
+                block_plan.block,
+                tuple(layer_results),
+                frozen_block,
+                loss_recorder.finalize(),
+                teacher_outputs,
+                compressed_outputs,
+                budget.retry_bits_spent,
+                artifacts,
+                identity,
+            )
+            journal.append("block", block_index, None, committed.reference.artifact_id, identity)
         committed_blocks.append((committed.reference, committed.result))
         teacher_inputs = teacher_outputs
         compressed_inputs = compressed_outputs
-    with torch.no_grad():
-        teacher_logits = teacher.lm_head(teacher.final_norm(teacher_inputs)).detach()
-        compressed_logits = working.lm_head(working.final_norm(compressed_inputs)).detach()
-    frozen_model = assemble_frozen_model(
-        model_identity,
-        persisted_plan.reference,
-        tuple(committed_blocks),
-        (),
-        sum(value.numel() for value in source_values.values()),
-    )
-    report = render_reconstruction_tables(tuple(result for _, result in committed_blocks))
-    (root / "report.md").write_text(report, encoding="utf-8")
+    with recorder.phase("finalize"):
+        with torch.no_grad():
+            teacher_logits = teacher.lm_head(teacher.final_norm(teacher_inputs)).detach()
+            compressed_logits = working.lm_head(working.final_norm(compressed_inputs)).detach()
+        frozen_model = assemble_frozen_model(
+            model_identity,
+            persisted_plan.reference,
+            tuple(committed_blocks),
+            (),
+            sum(value.numel() for value in source_values.values()),
+        )
+        report = render_reconstruction_tables(tuple(result for _, result in committed_blocks))
+        (root / "report.md").write_text(report, encoding="utf-8")
     return TinyPipelineResult(
         frozen_model,
         plan,

@@ -60,6 +60,15 @@ def test_resident_quantization_commits_complete_transformers_model(tmp_path: Pat
     retried_layers = [layer for layer in result.blocks[0].layers if len(layer.attempts) > 1]
     assert retried_layers
     events = [json.loads(line) for line in (output / "events.jsonl").read_text().splitlines()]
+    event_names = [event["name"] for event in events]
+    assert "preprocessing.selected" in event_names
+    assert "resume.discovery_completed" in event_names
+    assert event_names.count("block.started") == 1
+    assert event_names.count("layer.committed") == 7
+    assert event_names.count("block.completed") == 1
+    completed_event = next(event for event in events if event["name"] == "block.completed")
+    assert completed_event["fields"]["journal_sequence"] == 8
+    assert completed_event["fields"]["host_peak_bytes"] > 0
     outlier_attempts = sum(
         event["name"] == "stage.completed" and event["stage"] == "select-outliers"
         for event in events
@@ -227,6 +236,14 @@ def test_resident_tuning_recipe_refits_blocks_and_resumes_exactly(tmp_path: Path
     assert control.blocks[0].losses.after_post_block_refit is not None
     assert all(layer.tuning is not None for layer in control.blocks[0].layers)
     assert control.blocks[0].frozen_state.auxiliary_parameters
+    tuning_events = [
+        json.loads(line) for line in (base.output / "events.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    epoch_summaries = [event for event in tuning_events if event["name"] == "tuning.epoch_completed"]
+    assert {event["fields"]["tuning_kind"] for event in epoch_summaries} == {
+        "nonfactorized",
+        "post_block_refit",
+    }
     loaded = load_frozen_run(
         base.output,
         snapshot,

@@ -541,15 +541,34 @@ def _nonfactorized_epochs(request: ResidentQuantizationRequest, layer_position: 
     return schedule[min(layer_position, len(schedule) - 1)]
 
 
-def _epoch_cooldown_observer(seconds: float) -> Any:
+def _epoch_cooldown_observer(
+    seconds: float,
+    events: EventSink | None = None,
+    *,
+    tuning_kind: str | None = None,
+    block: int | None = None,
+    layer: str | None = None,
+) -> Any:
     """Sleep after completed tuning epochs, never after the initial loss probe."""
 
-    if not seconds:
+    if not seconds and events is None:
         return None
 
-    def observe(epoch: int, _loss: float) -> None:
+    def observe(epoch: int, loss: float) -> None:
         if epoch > 0:
-            time.sleep(seconds)
+            if events is not None:
+                events.emit(
+                    "resident-quantization",
+                    "info",
+                    "tuning.epoch_completed",
+                    tuning_kind=tuning_kind,
+                    block=block,
+                    layer=layer,
+                    epoch=epoch,
+                    loss=loss,
+                )
+            if seconds:
+                time.sleep(seconds)
 
     return observe
 
@@ -1330,6 +1349,17 @@ def _run_resident_quantization_impl(
     else:
         calibration, objectives, persisted_plan = preprocessed
         plan = persisted_plan.plan
+    events.emit(
+        "resident-quantization",
+        "info",
+        "preprocessing.selected",
+        reused=preprocessed is not None,
+        calibration_artifact=calibration.reference.artifact_id,
+        objectives_artifact=objectives.reference.artifact_id,
+        plan_artifact=persisted_plan.reference.artifact_id,
+        blocks=len(plan.blocks),
+        planned_bits=plan.planned_cost.total,
+    )
     config_hash = _resident_config_hash(request)
     identity = CommitIdentity(config_hash, inventory.model.config_hash, persisted_plan.reference.artifact_id)
     journal = ProgressJournal(request.output / "state", run_id, artifacts)
@@ -1337,6 +1367,15 @@ def _run_resident_quantization_impl(
         with recorder.phase("discover"):
             discovery = journal.discover(plan, identity)
     discovered_records = (*discovery.valid_records, *discovery.orphan_records)
+    events.emit(
+        "resident-quantization",
+        "info",
+        "resume.discovery_completed",
+        valid_records=len(discovery.valid_records),
+        orphan_records=len(discovery.orphan_records),
+        first_incomplete_block=(None if discovery.first_incomplete is None else discovery.first_incomplete.block),
+        first_incomplete_layer=(None if discovery.first_incomplete is None else discovery.first_incomplete.layer),
+    )
     block_records = sorted(
         (record for record in discovered_records if record.kind == "block"), key=lambda record: record.block
     )
@@ -1424,7 +1463,12 @@ def _run_resident_quantization_impl(
     new_layer_commits = 0
     new_block_commits = 0
     new_factorized_tuning_epoch_commits = 0
-    factor_stage = FactorizationAttemptStage(request.admm, device=request.device, recorder=micro_recorder)
+    factor_stage = FactorizationAttemptStage(
+        request.admm,
+        device=request.device,
+        recorder=micro_recorder,
+        record_admm_steps=request.observability.record_admm_steps,
+    )
     outlier_stage = OutlierSelectionStage(
         device=request.device,
         residual_probe_iterations=request.outliers.residual_probe.iterations,
@@ -1439,6 +1483,14 @@ def _run_resident_quantization_impl(
         deferred_slice = request.defer_layer_loss_snapshots
         block_index = block_plan.block.index
         metadata = _clone_forward_metadata(captured_metadata)
+        events.emit(
+            "resident-quantization",
+            "info",
+            "block.started",
+            block=block_index,
+            layers=len(block_plan.layers),
+            completed_blocks=len(completed_block_indexes),
+        )
 
         def tuning_forward(
             module: nn.Module,
@@ -1516,7 +1568,11 @@ def _run_resident_quantization_impl(
                             seed=_tuning_seed(request, "nonfactorized-tuning", block_index, layer_plan.layer.path),
                             microbatch_size=request.tuning_microbatch_size,
                             epoch_observer=_epoch_cooldown_observer(
-                                request.nonfactorized_tuning_epoch_cooldown_seconds
+                                request.nonfactorized_tuning_epoch_cooldown_seconds,
+                                events,
+                                tuning_kind="nonfactorized",
+                                block=block_index,
+                                layer=layer_plan.layer.path,
                             ),
                             restore_best_state=request.restore_best_tuning_state,
                         ),
@@ -1545,6 +1601,16 @@ def _run_resident_quantization_impl(
                 BlockEditor().install_frozen_layer(working_block, layer_plan.layer.path, frozen.module)
                 frozen_states.append(prior.frozen_state)
                 layer_results.append(prior)
+                events.emit(
+                    "resident-quantization",
+                    "info",
+                    "layer.reused",
+                    block=block_index,
+                    layer=layer_plan.layer.path,
+                    artifact_id=prior_record.artifact_id,
+                    journal_sequence=prior_record.sequence,
+                    rank=prior.frozen_state.rank,
+                )
                 budget = replace(
                     budget,
                     accepted_bits=budget.accepted_bits + prior.actual_bit_cost.total,
@@ -1669,6 +1735,9 @@ def _run_resident_quantization_impl(
                         layer=checkpoint_layer,
                         completed_epochs=stored.state.completed_epochs,
                         generation=stored.generation,
+                        loss=(stored.state.epoch_losses[-1] if stored.state.epoch_losses else None),
+                        best_epoch=stored.state.best_epoch,
+                        stopped_early=stored.state.stopped_early,
                     )
                     if request.factorized_tuning_epoch_cooldown_seconds:
                         time.sleep(request.factorized_tuning_epoch_cooldown_seconds)
@@ -1751,7 +1820,7 @@ def _run_resident_quantization_impl(
                 )
             with _profile_layer_phase(recorder, block_index, layer_plan.layer.path, "commit"):
                 committed_layer = commit_layer(layer_result, artifacts, identity)
-                journal.append(
+                layer_journal_record = journal.append(
                     "layer",
                     block_index,
                     layer_plan.layer.path,
@@ -1759,6 +1828,21 @@ def _run_resident_quantization_impl(
                     identity,
                 )
                 clear_tuning_checkpoint(request.output)
+                events.emit(
+                    "resident-quantization",
+                    "info",
+                    "layer.committed",
+                    block=block_index,
+                    layer=layer_plan.layer.path,
+                    artifact_id=committed_layer.reference.artifact_id,
+                    journal_sequence=layer_journal_record.sequence,
+                    rank=layer_result.frozen_state.rank,
+                    accepted_attempt=layer_result.accepted_attempt,
+                    actual_bits=layer_result.actual_bit_cost.total,
+                    extra_retry_bits=layer_result.extra_retry_bits,
+                    weighted_error=layer_result.final_reconstruction.export_weighted_normalized_error,
+                    raw_error=layer_result.final_reconstruction.raw_normalized_error,
+                )
             new_layer_commits += 1
             if (
                 request.interrupt_after_layer_commits is not None
@@ -1805,7 +1889,10 @@ def _run_resident_quantization_impl(
                         seed=_tuning_seed(request, "post-block-refit", block_index, None),
                         microbatch_size=request.tuning_microbatch_size,
                         epoch_observer=_epoch_cooldown_observer(
-                            request.post_block_refit_epoch_cooldown_seconds
+                            request.post_block_refit_epoch_cooldown_seconds,
+                            events,
+                            tuning_kind="post_block_refit",
+                            block=block_index,
                         ),
                     ),
                     tuning_forward,
@@ -1895,10 +1982,25 @@ def _run_resident_quantization_impl(
                 if request.factorized_tuning_epochs > 0 and request.scale_fit.enabled
                 else (("tuning_disabled",) if request.scale_fit.enabled else ("scale_fit_disabled", "tuning_disabled")),
             )
-            journal.append("block", block_index, None, committed.reference.artifact_id, identity)
+            block_journal_record = journal.append(
+                "block", block_index, None, committed.reference.artifact_id, identity
+            )
             if request.activation_retention == "rolling" and committed_blocks:
                 retire_block_activations(committed_blocks[-1][1], artifacts)
         committed_blocks.append((committed.reference, committed.result))
+        events.emit(
+            "resident-quantization",
+            "info",
+            "block.completed",
+            block=block_index,
+            artifact_id=committed.reference.artifact_id,
+            journal_sequence=block_journal_record.sequence,
+            entry_loss=committed.result.losses.block_entry_pre_quantization,
+            final_loss=committed.result.losses.final_frozen_pre_kd,
+            wall_seconds=committed.result.wall_seconds,
+            gpu_peak_bytes=committed.result.peak_gpu_bytes,
+            host_peak_bytes=committed.result.peak_host_bytes,
+        )
         new_block_commits += 1
         if (
             request.interrupt_after_block_commits is not None
@@ -2107,7 +2209,11 @@ def _run_resident_factorization_slice_impl(
     if request.device.startswith("cuda"):
         torch.cuda.reset_peak_memory_stats(request.device)
     try:
-        factor_stage = FactorizationAttemptStage(request.admm, device=request.device)
+        factor_stage = FactorizationAttemptStage(
+            request.admm,
+            device=request.device,
+            record_admm_steps=request.observability.record_admm_steps,
+        )
         outlier_stage = OutlierSelectionStage(
             device=request.device,
             residual_probe_iterations=request.outliers.residual_probe.iterations,
@@ -2193,7 +2299,24 @@ def _run_resident_factorization_slice_impl(
             ("tuning_disabled",) if request.scale_fit.enabled else ("scale_fit_disabled", "tuning_disabled"),
         )
         committed = commit_layer(layer_result, artifacts, identity)
-        journal.append("layer", block_index, layer_plan.layer.path, committed.reference.artifact_id, identity)
+        journal_record = journal.append(
+            "layer", block_index, layer_plan.layer.path, committed.reference.artifact_id, identity
+        )
+        events.emit(
+            "resident-factorization-slice",
+            "info",
+            "layer.committed",
+            block=block_index,
+            layer=layer_plan.layer.path,
+            artifact_id=committed.reference.artifact_id,
+            journal_sequence=journal_record.sequence,
+            rank=layer_result.frozen_state.rank,
+            accepted_attempt=layer_result.accepted_attempt,
+            actual_bits=layer_result.actual_bit_cost.total,
+            extra_retry_bits=layer_result.extra_retry_bits,
+            weighted_error=layer_result.final_reconstruction.export_weighted_normalized_error,
+            raw_error=layer_result.final_reconstruction.raw_normalized_error,
+        )
         peak = int(torch.cuda.max_memory_allocated(request.device)) if request.device.startswith("cuda") else 0
         return ResidentFactorizationSliceResult(
             layer_result,

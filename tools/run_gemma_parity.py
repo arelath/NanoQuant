@@ -12,6 +12,7 @@ from nanoquant.config.schema import (
     ADMMConfig,
     AllocationStrategy,
     DType,
+    ObservabilityConfig,
     OutlierConfig,
     OutlierSelector,
     ProfilingConfig,
@@ -90,6 +91,9 @@ def main() -> None:
     parser.add_argument("--profile-cuda-timing", action="store_true")
     parser.add_argument("--profile-cuda-sample-every", type=int, default=16)
     parser.add_argument("--profile-memory-counters", action="store_true")
+    parser.add_argument("--event-level", choices=("debug", "info", "warning", "error"), default="info")
+    parser.add_argument("--console-level", choices=("debug", "info", "warning", "error"), default="info")
+    parser.add_argument("--record-admm-steps", action="store_true")
     args = parser.parse_args()
     nonfactorized_schedule = tuple(
         int(value.strip()) for value in args.nonfactorized_tuning_schedule.split(",") if value.strip()
@@ -188,6 +192,11 @@ def main() -> None:
             emit_span_events=args.profile_span_events,
         ),
         registry_root=args.run_root,
+        observability=ObservabilityConfig(
+            event_level=args.event_level,
+            console_level=args.console_level,
+            record_admm_steps=args.record_admm_steps,
+        ),
     )
     if args.factor_only:
         if args.factor_only_count <= 0:

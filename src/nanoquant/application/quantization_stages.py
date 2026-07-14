@@ -9,7 +9,7 @@ import torch
 
 from nanoquant.application.stages import StageContext
 from nanoquant.config.schema import ADMMConfig, ScaleFitConfig
-from nanoquant.domain.factorization import factorize_admm
+from nanoquant.domain.factorization import ADMMTracePoint, factorize_admm
 from nanoquant.domain.metrics import reconstruction_metrics
 from nanoquant.domain.models import (
     ComponentRef,
@@ -177,10 +177,28 @@ class FactorizationAttemptStage:
         *,
         device: str = "cpu",
         recorder: PhaseRecorder = NULL_RECORDER,
+        record_admm_steps: bool = False,
+        admm_sample_every: int = 4,
     ) -> None:
+        if admm_sample_every <= 0:
+            raise ValueError("ADMM event sample cadence must be positive")
         self.admm = admm or ADMMConfig(outer_iterations=400)
         self.device = device
         self.recorder = recorder
+        self.record_admm_steps = record_admm_steps
+        self.admm_sample_every = admm_sample_every
+
+    def _sampled_trace(self, trace: tuple[ADMMTracePoint, ...]) -> tuple[ADMMTracePoint, ...]:
+        selected: list[ADMMTracePoint] = []
+        for index, point in enumerate(trace):
+            previous = None if index == 0 else trace[index - 1]
+            anomalous = previous is not None and (
+                point.primal_residual > previous.primal_residual * 2
+                or point.dual_residual > previous.dual_residual * 2
+            )
+            if index in {0, len(trace) - 1} or index % self.admm_sample_every == 0 or anomalous:
+                selected.append(point)
+        return tuple(selected)
 
     def estimate(self, request: FactorizationRequest, host: HostInventory) -> ResourceEstimate:
         output, inputs = request.source_weight.spec.shape
@@ -254,6 +272,25 @@ class FactorizationAttemptStage:
             result.trace[-1].dual_residual if result.trace else None,
             None,
         )
+        wall_seconds = time.perf_counter() - started
+        peak_workspace_bytes = (
+            int(torch.cuda.max_memory_allocated(self.device))
+            if self.device.startswith("cuda")
+            else self.estimate(request, HostInventory(0, 0, 0)).peak_cpu_bytes
+        )
+        if self.record_admm_steps:
+            for point in self._sampled_trace(result.trace):
+                context.events.emit(
+                    self.name,
+                    "debug",
+                    "factorization.admm_sample",
+                    layer=str(request.layer),
+                    rank=request.rank,
+                    iteration=point.iteration,
+                    rho=point.rho,
+                    primal_residual=point.primal_residual,
+                    dual_residual=point.dual_residual,
+                )
         context.events.emit(
             self.name,
             "info",
@@ -261,6 +298,13 @@ class FactorizationAttemptStage:
             layer=str(request.layer),
             rank=request.rank,
             weighted_error=metrics.export_weighted_normalized_error,
+            raw_error=metrics.raw_normalized_error,
+            iterations_completed=result.iterations_completed,
+            stopped_early=result.stopped_early,
+            final_primal_residual=convergence.final_primal_residual,
+            final_dual_residual=convergence.final_dual_residual,
+            wall_seconds=wall_seconds,
+            peak_workspace_bytes=peak_workspace_bytes,
         )
         return FactorizationResult(
             1,
@@ -270,10 +314,8 @@ class FactorizationAttemptStage:
             factors,
             metrics,
             convergence,
-            time.perf_counter() - started,
-            int(torch.cuda.max_memory_allocated(self.device))
-            if self.device.startswith("cuda")
-            else self.estimate(request, HostInventory(0, 0, 0)).peak_cpu_bytes,
+            wall_seconds,
+            peak_workspace_bytes,
         )
 
     def validate(self, result: FactorizationResult, context: StageContext) -> ValidationReport:
@@ -349,13 +391,26 @@ class ScaleFitStage:
                 )
                 before = reconstruction_metrics(target, original_prediction, input_importance, output_importance)
                 after = reconstruction_metrics(target, fitted.reconstruction, input_importance, output_importance)
-        return ScaleFitResult(
+        result = ScaleFitResult(
             ScaleState(refs["scale_pre"], refs["scale_mid"], refs["scale_post"]),
             before,
             after,
             fitted.accepted,
             fitted.rollback_reason,
         )
+        context.events.emit(
+            self.name,
+            "info",
+            "scale_fit.completed",
+            layer=str(item.layer),
+            accepted=result.accepted,
+            rollback_reason=result.rollback_reason,
+            before_weighted_error=result.before.export_weighted_normalized_error,
+            after_weighted_error=result.after.export_weighted_normalized_error,
+            before_raw_error=result.before.raw_normalized_error,
+            after_raw_error=result.after.raw_normalized_error,
+        )
+        return result
 
     def validate(self, result: ScaleFitResult, context: StageContext) -> ValidationReport:
         if result.accepted and result.after.export_weighted_error > result.before.export_weighted_error:
