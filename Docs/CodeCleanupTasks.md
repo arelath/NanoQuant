@@ -2,7 +2,10 @@ Based on a static analysis of the codebase you provided, the architecture is rem
 
 However, because the codebase has grown rapidly to achieve 1B parity and implement complex profiling/resume logic, a few "God functions" and leaky abstractions have emerged. Here are the highest-value, behavior-preserving (S0) refactoring and code cleanup tasks you should tackle:
 
-### [x] 1. Decompose the `_run_resident_quantization_impl` God Function
+### 1. Decompose the `_run_resident_quantization_impl` God Function
+
+- [x] Complete
+
 **Location:** `src/nanoquant/resident_quantization.py`
 **Problem:** This function is currently over 450 lines long. It handles model loading, prefix capture, preprocessing, calibration, planning, journal discovery, block restoration, block loops, tuning, freezing, commits, and reporting. It has up to 7 levels of indentation inside nested `recorder.phase()` contexts.
 **Action:** Extract the major phases into private helper functions.
@@ -11,7 +14,10 @@ However, because the codebase has grown rapidly to achieve 1B parity and impleme
 *   Extract the resume logic into `_restore_committed_state(...)`.
 *   *Why:* This will vastly improve readability and make it much easier to introduce the distributed or streaming executor variants later without duplicating massive blocks of orchestration code.
 
-### [x] 2. Unify Device Memory High-Water Accounting
+### 2. Unify Device Memory High-Water Accounting
+
+- [x] Complete
+
 **Location:** Scattered across `quantization_stages.py`, `distillation.py`, `resident_calibration.py`, etc.
 **Problem:** Multiple files do ad-hoc VRAM checks like:
 `peak = int(torch.cuda.max_memory_allocated(request.device)) if request.device.startswith("cuda") else 0`
@@ -21,14 +27,20 @@ However, in `resident_quantization.py` you correctly realized that PyTorch's *re
 *   Replace all inline `max_memory_allocated` calls across the pipeline with this unified function. 
 *   *Why:* Ensures VRAM accounting is exactly consistent across all phases and correctly represents true board-level memory pressure.
 
-### [x] 3. DRY Up Optimizer State Hydration/Dehydration
+### 3. DRY Up Optimizer State Hydration/Dehydration
+
+- [x] Complete
+
 **Location:** `src/nanoquant/application/tuning.py` and `src/nanoquant/application/distillation.py`
 **Problem:** The logic to save and restore the optimizer state (extracting `exp_avg`, `exp_avg_sq`, Kahan compensation, step counts, and `CosineAnnealingLR` state) is nearly identical in both files. It spans ~40 lines of boilerplate in each file.
 **Action:** 
 *   Extract this logic into utility functions within `src/nanoquant/application/parity_adamw.py` (e.g., `capture_optimizer_state(optimizer) -> list[TuningOptimizerState]` and `restore_optimizer_state(optimizer, states)`).
 *   *Why:* Reduces the size of the massive `tune()` and `distill_topk()` functions and centralizes the complex Kahan/BF16 tensor moving.
 
-### [x] 4. Plug Hugging Face Abstraction Leaks using `ModelAdapter`
+### 4. Plug Hugging Face Abstraction Leaks using `ModelAdapter`
+
+- [x] Complete
+
 **Location:** `src/nanoquant/resident_quantization.py` and `src/nanoquant/resident_calibration.py`
 **Problem:** The application layer is meant to be architecture-agnostic via `ModelAdapter`. However, the orchestration code still does manual Hugging Face topology traversals, such as:
 *   `text_model = getattr(model, "model", model)`
@@ -39,7 +51,10 @@ However, in `resident_quantization.py` you correctly realized that PyTorch's *re
 *   Replace the `getattr` hacks in the orchestration files with these clean adapter calls.
 *   *Why:* Keeps Hugging Face's changing internal API architectures securely quarantined inside `infrastructure/model_adapters.py`.
 
-### [x] 5. Type-Safe Validation in `validate_resident_run.py`
+### 5. Type-Safe Validation in `validate_resident_run.py`
+
+- [x] Complete
+
 **Location:** `tools/validate_resident_run.py`
 **Problem:** `_commit_payload` and `_committed_metrics` manually parse dictionaries with deeply nested `.get()` and `isinstance()` checks, spanning ~150 lines.
 **Action:** 
@@ -56,7 +71,10 @@ If you decide to take these on, I recommend doing **#2 (Memory Accounting)** and
 
 Here are four more high-value, behavior-preserving (S0) refactoring opportunities. These target areas where duplicated logic or "magic strings" could eventually cause subtle bugs as the codebase evolves, particularly as you build out the deployment runtime.
 
-### [x] 6. Consolidate Factorized Reconstruction Math
+### 6. Consolidate Factorized Reconstruction Math
+
+- [x] Complete
+
 **Location:** `src/nanoquant/application/layers.py` and `src/nanoquant/domain/scale_fit.py`
 **Problem:** The core NanoQuant math—multiplying `left @ right` with `pre`, `mid`, and `post` scales, plus outlier masking and addition—is currently duplicated across:
 *   `TrainableFactorizedLinear.forward`
@@ -71,7 +89,10 @@ While the trainable modules use the `_SignSTE` wrapper and the frozen ones do no
 *   Refactor the `nn.Module` classes to act as thin state-holding wrappers that just call these pure functions.
 *   *Why:* Guarantees that the training graph, scale-fitting, and inference references are mathematically locked together, preventing divergence bugs.
 
-### [x] 7. Deduplicate Calibration Hook Generators
+### 7. Deduplicate Calibration Hook Generators
+
+- [x] Complete
+
 **Location:** `src/nanoquant/application/calibration.py`
 **Problem:** The logic that registers PyTorch hooks for statistic accumulation is almost entirely duplicated between `calibrate_causal_model()` (full model passes) and `calibrate_block()` (single block passes). Both functions define `forward_hook`, `backward_hook`, `profile_forward`, and `profile_backward` as nested closures, and manage their registration/removal. This accounts for ~100 lines of highly dense, repetitive code.
 **Action:**
@@ -79,7 +100,10 @@ While the trainable modules use the `_SignSTE` wrapper and the frozen ones do no
 *   Use a context manager like `with _apply_calibration_hooks(modules, inputs, outputs, recorder):` to safely guarantee hook removal in a `finally` block.
 *   *Why:* Simplifies the massive calibration entry points and makes it much easier to add new experimental hook types (like Activation-Aware Weight Quantization (AWQ) stats) later.
 
-### [x] 8. Centralize Magic Artifact Type Strings
+### 8. Centralize Magic Artifact Type Strings
+
+- [x] Complete
+
 **Location:** Scattered across `commits.py`, `planning.py`, `artifact_gc.py`, `cleanup_run_activations.py`, and `validate_resident_run.py`.
 **Problem:** Strings like `"layer-result"`, `"block-result"`, `"activation-generation"`, and `"quantization-plan"` are hardcoded throughout the codebase. In a content-addressed storage architecture, a typo in one of these strings doesn't throw a standard Python `AttributeError`—it silently creates an unreferenced artifact, breaks garbage collection, or causes validation to fail.
 **Action:**
@@ -87,7 +111,10 @@ While the trainable modules use the `_SignSTE` wrapper and the frozen ones do no
 *   Replace all raw string literals identifying artifacts with these constants.
 *   *Why:* Enforces type-safety at the Python level for artifact schema identities, preventing invisible data orphaning.
 
-### [x] 9. Centralize I/O and Hashing Boilerplate
+### 9. Centralize I/O and Hashing Boilerplate
+
+- [x] Complete
+
 **Location:** `safetensors_source.py`, `artifacts.py`, `activation_store.py`, `progress.py`
 **Problem:** The exact same `_hash_file` function (reading a file in 1MB chunks to compute a SHA256) is defined independently in three different files. Similarly, the "write to temporary file, sync, then atomically replace" pattern is repeated manually in `RunDirectory.write_manifest`, `LocalArtifactWriter.commit`, `MmapGenerationWriter.commit`, and various checkpoint tools.
 **Action:**
