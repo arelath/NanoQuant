@@ -52,8 +52,10 @@ def main() -> None:
     parser.add_argument("--nonfactorized-tuning-epochs", type=int, default=0)
     parser.add_argument("--nonfactorized-tuning-schedule", default="")
     parser.add_argument("--nonfactorized-tuning-batch-size", type=int, default=8)
+    parser.add_argument("--nonfactorized-tuning-epoch-cooldown-seconds", type=float, default=0.0)
     parser.add_argument("--post-block-refit-epochs", type=int, default=0)
     parser.add_argument("--post-block-refit-batch-size", type=int, default=8)
+    parser.add_argument("--post-block-refit-epoch-cooldown-seconds", type=float, default=0.0)
     parser.add_argument(
         "--tuning-microbatch-size",
         type=int,
@@ -142,9 +144,13 @@ def main() -> None:
         nonfactorized_tuning_epochs_by_layer=nonfactorized_schedule,
         nonfactorized_tuning_batch_size=args.nonfactorized_tuning_batch_size,
         nonfactorized_tuning_learning_rate=1e-4,
+        nonfactorized_tuning_epoch_cooldown_seconds=(
+            args.nonfactorized_tuning_epoch_cooldown_seconds
+        ),
         post_block_refit_epochs=args.post_block_refit_epochs,
         post_block_refit_batch_size=args.post_block_refit_batch_size,
         post_block_refit_learning_rate=1e-5,
+        post_block_refit_epoch_cooldown_seconds=args.post_block_refit_epoch_cooldown_seconds,
         tuning_microbatch_size=args.tuning_microbatch_size,
         legacy_tuning_seed_reset=True,
         seed=args.seed,

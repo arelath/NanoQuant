@@ -192,10 +192,12 @@ class ResidentQuantizationRequest:
     nonfactorized_tuning_epochs_by_layer: tuple[int, ...] = ()
     nonfactorized_tuning_batch_size: int = 8
     nonfactorized_tuning_learning_rate: float = 1e-4
+    nonfactorized_tuning_epoch_cooldown_seconds: float = 0.0
     nonfactorized_tuning_early_stop_relative_tolerance: float | None = None
     post_block_refit_epochs: int = 0
     post_block_refit_batch_size: int = 8
     post_block_refit_learning_rate: float = 1e-5
+    post_block_refit_epoch_cooldown_seconds: float = 0.0
     tuning_microbatch_size: int | None = None
     legacy_tuning_seed_reset: bool = False
     activation_retention: str = "rolling"
@@ -508,6 +510,19 @@ def _nonfactorized_epochs(request: ResidentQuantizationRequest, layer_position: 
     if not schedule:
         return request.nonfactorized_tuning_epochs
     return schedule[min(layer_position, len(schedule) - 1)]
+
+
+def _epoch_cooldown_observer(seconds: float) -> Any:
+    """Sleep after completed tuning epochs, never after the initial loss probe."""
+
+    if not seconds:
+        return None
+
+    def observe(epoch: int, _loss: float) -> None:
+        if epoch > 0:
+            time.sleep(seconds)
+
+    return observe
 
 
 def _tuning_seed(request: ResidentQuantizationRequest, stage: str, block: int, layer: str | None) -> int:
@@ -918,6 +933,10 @@ def _run_resident_quantization_impl(
         raise ValueError("resident quantization block forward batch size must be positive")
     if request.factorized_tuning_epoch_cooldown_seconds < 0:
         raise ValueError("factorized tuning epoch cooldown must be non-negative")
+    if request.nonfactorized_tuning_epoch_cooldown_seconds < 0:
+        raise ValueError("non-factorized tuning epoch cooldown must be non-negative")
+    if request.post_block_refit_epoch_cooldown_seconds < 0:
+        raise ValueError("post-block refit epoch cooldown must be non-negative")
     if request.initial_cooldown_seconds < 0:
         raise ValueError("resident initial cooldown must be non-negative")
     if (
@@ -1360,6 +1379,9 @@ def _run_resident_quantization_impl(
                             output_importance=block_output_importance,
                             seed=_tuning_seed(request, "nonfactorized-tuning", block_index, layer_plan.layer.path),
                             microbatch_size=request.tuning_microbatch_size,
+                            epoch_observer=_epoch_cooldown_observer(
+                                request.nonfactorized_tuning_epoch_cooldown_seconds
+                            ),
                         ),
                         lambda module, value: adapter.run_block(module, value, **metadata),
                         tuning_recorder,
@@ -1644,6 +1666,9 @@ def _run_resident_quantization_impl(
                         output_importance=block_output_importance,
                         seed=_tuning_seed(request, "post-block-refit", block_index, None),
                         microbatch_size=request.tuning_microbatch_size,
+                        epoch_observer=_epoch_cooldown_observer(
+                            request.post_block_refit_epoch_cooldown_seconds
+                        ),
                     ),
                     lambda module, value: adapter.run_block(module, value, **metadata),
                     tuning_recorder,

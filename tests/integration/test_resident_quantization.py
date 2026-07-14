@@ -16,6 +16,7 @@ from nanoquant.infrastructure.frozen_model_loader import load_frozen_run
 from nanoquant.infrastructure.progress import ProgressJournal
 from nanoquant.resident_quantization import (
     ResidentQuantizationRequest,
+    _epoch_cooldown_observer,
     _resident_config_hash,
     run_resident_quantization,
 )
@@ -287,7 +288,29 @@ def test_numerical_batch_shapes_invalidate_resume_identity(tmp_path: Path) -> No
     assert _resident_config_hash(
         replace(request, factorized_tuning_epoch_cooldown_seconds=5.0)
     ) == _resident_config_hash(request)
+    assert _resident_config_hash(
+        replace(request, nonfactorized_tuning_epoch_cooldown_seconds=5.0)
+    ) == _resident_config_hash(request)
+    assert _resident_config_hash(
+        replace(request, post_block_refit_epoch_cooldown_seconds=5.0)
+    ) == _resident_config_hash(request)
     assert _resident_config_hash(replace(request, initial_cooldown_seconds=30.0)) == _resident_config_hash(request)
+
+
+def test_epoch_cooldown_skips_initial_loss_and_sleeps_after_training_epochs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sleeps: list[float] = []
+    monkeypatch.setattr("nanoquant.resident_quantization.time.sleep", sleeps.append)
+
+    observer = _epoch_cooldown_observer(2.5)
+    assert observer is not None
+    observer(0, 10.0)
+    observer(1, 9.0)
+    observer(2, 8.0)
+
+    assert sleeps == [2.5, 2.5]
+    assert _epoch_cooldown_observer(0.0) is None
 
 
 def test_rolling_retention_keeps_only_latest_resume_generation(tmp_path: Path) -> None:

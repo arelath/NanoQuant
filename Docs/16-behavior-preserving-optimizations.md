@@ -648,7 +648,11 @@ must be remeasured rather than inferred from the speedup.
   the numerical configuration hash, and can therefore be adjusted across resumes without invalidating exact
   state. An execution-only initial cooldown likewise acquires the lease before sleeping, preventing another
   worker from consuming the intended thermal-rest window. Cooldown wall time is excluded from performance
-  comparisons.
+  comparisons. Partial-layer resume then showed that replaying the numerically required non-factorized
+  schedules, followed by post-block refit, could still sustain 84--86 C because only factorized epochs were
+  throttled. Both remaining tuning phases now expose their own execution-only epoch cooldowns. Their observers
+  skip the initial loss probe and sleep only after completed epochs; all cooldown values remain outside the
+  resume identity and do not change batches, RNG, arithmetic, optimizer state, or committed results.
 - **Cross-environment CUDA lease splits fixed (2026-07-13):** two workers first used `%TEMP%` roots `Temp`
   and `Temp\\1`, created independent `cuda:0` leases, and together drove WDDM usage to 11–12 GiB. Moving the
   lease under `%LOCALAPPDATA%` closed that split, but a later diagnostic deliberately redirected
