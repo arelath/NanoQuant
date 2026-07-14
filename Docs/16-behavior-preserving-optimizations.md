@@ -835,18 +835,28 @@ must be remeasured rather than inferred from the speedup.
   **578.73 s** versus contemporary legacy **424.87 s** (36.2% slower). The validated block-1 boundary then
   reached **6.0843391418** versus **3.6029** (+68.87%) with all 14 prefix ranks equal, so the run was stopped.
   Its block-0 activation generation is byte-identical to the earlier exact-Fisher replay, ruling out new
-  staging/persistence corruption: the exact objective's factor basin has the wrong accumulating error direction.
-  The replacement bounded v21 replay uses the already parity-approved v17/current-CCE basin. Performance work
-  remains gated on its two retained boundaries; once accurate, profiles must separate checkpoint serialization,
-  gradient synchronization, and the rewrite's full best-state evaluations before changing a hot path.
-- **Current-environment v21 two-block gate passed (2026-07-13):** the replacement CCE-basin run now has a
+  staging/persistence corruption in that run. This result alone did not isolate the objective from the v20
+  execution path: the replacement v21 replay below uses the same exact-Fisher calibration/objective/plan closure,
+  not the original v17 plan, while also including the corrected CUDA gradient handoff, bounded decoder retention,
+  and execution-only cooldowns. Performance work remains gated on the complete retained trajectory; once accurate,
+  profiles must separate checkpoint serialization, gradient synchronization, cooldown time, and the rewrite's full
+  best-state evaluations before changing a hot path.
+- **Current-environment v21 prefix gate passed (2026-07-13):** the replacement exact-Fisher run now has a
   store-validated contiguous two-block/14-layer prefix. Block 0 is **1.3784899712** versus contemporary legacy
   **1.3728** (+0.41%); block 1 is **3.5971968174** versus **3.6029** (-0.16%). Mean absolute boundary delta is
-  **0.29%**, well inside the approved 2.20% realization envelope and, unlike the exact-retained-Fisher replay,
-  the accumulating error direction remains aligned. Validation followed 79 reachable artifacts totaling
+  **0.29%**, well inside the approved 2.20% realization envelope; unlike the rejected v20 execution, the
+  accumulating error direction remains aligned. Validation followed 79 reachable artifacts totaling
   3,153,557,256 bytes. The cooldown-aware block-1 resume peaked at 4,788,224,512 allocated CUDA bytes; live
   board sampling held near 7.6 GiB and 73--80 C. This passes the extension gate. Its wall time includes deliberate
-  execution-only sleeps and must not be used for the post-parity performance comparison.
+  execution-only sleeps and must not be used for the post-parity performance comparison. The first three extension
+  blocks reached **5.7917079926** versus **5.7415** (+0.87%), **43.9182624817** versus **43.693**
+  (+0.52%), and **656.8922119141** versus **667.26** (-1.55%). Across all five boundaries the mean absolute
+  delta is **0.70%**, the maximum is **1.55%**, and all 35 ranks match contemporary legacy exactly. Store-aware
+  validation followed 190 reachable artifacts totaling 4,256,497,831 bytes at 1.020467 effective BPW. The
+  block-4 resume peaked at 4,953,769,984 allocated CUDA bytes; repeated live samples stayed between roughly
+  7.6 and 7.8 GiB board use while host private commit plateaued near 16.3 GiB. This confirms that the earlier
+  26 GB process-private high-water report was not device VRAM and that the corrected resident path does not
+  accumulate CUDA memory across epochs or bounded block resumes.
 - `JsonlEventSink._read_last_sequence` parses the whole event log at construction — only matters for
   resumed runs with large logs; fine today, worth a tail-scan if event volume grows.
 - **Measured, not implemented (2026-07-13):** a fresh process inventories the pinned Gemma snapshot in a
