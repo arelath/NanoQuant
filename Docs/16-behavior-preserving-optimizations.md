@@ -901,6 +901,14 @@ must be remeasured rather than inferred from the speedup.
   BPW. The run's allocated CUDA peak was **4,799,958,528 bytes**; block evidence recorded a 5,815,402,496-byte
   board-level peak. The gate passes and may extend to block 2, the first prefix block where final-epoch retention
   is expected to change serialized tuning state relative to v21.
+- **First final-epoch-retention gate passed at block 2 (2026-07-14):** block-2 entry remained bit-identical to
+  v21 at **11.0071096420**, while final loss improved from v21 **5.7917079926** to **5.7872481346**. This is
+  **+0.80%** versus contemporary legacy **5.7415**, improving on v21's +0.87%. The three-block mean absolute
+  contemporary delta is **0.46%**. Store validation followed all 116 reachable artifacts (3,523,287,732 bytes),
+  found one identity, 24 active journal records, zero inactive records, all 21 expected layers, and 1.021216
+  effective BPW. The one-block resume peaked at **4,857,260,544 allocated CUDA bytes**; block evidence recorded
+  a 5,886,705,664-byte board-level peak. Final-epoch retention is now proven on a layer where v21 selected a
+  nonfinal best epoch, so the run may extend through the prior block-7 failure gate.
 - `JsonlEventSink._read_last_sequence` parses the whole event log at construction — only matters for
   resumed runs with large logs; fine today, worth a tail-scan if event volume grows.
 - **Measured, not implemented (2026-07-13):** a fresh process inventories the pinned Gemma snapshot in a
