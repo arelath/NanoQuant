@@ -137,6 +137,7 @@ def factorize_admm(
     early_stop_tolerance: float | None = None,
     epsilon: float = 1e-12,
     recorder: PhaseRecorder = NULL_RECORDER,
+    transpose_wide: bool = True,
 ) -> ADMMResult:
     if weight.ndim != 2 or rank <= 0 or rank > min(weight.shape):
         raise ValueError("weight must be a matrix and rank within its dimensions")
@@ -148,6 +149,39 @@ def factorize_admm(
         schedule = SCHEDULES[penalty_schedule]
     except KeyError as exc:
         raise ValueError(f"unknown penalty schedule: {penalty_schedule}") from exc
+    # Legacy NanoQuant solves wide matrices in transposed orientation. Besides
+    # reducing the larger solve dimension, this fixes which random values seed
+    # the left and right factors; preserving it is required for factor parity.
+    if transpose_wide and weight.shape[0] < weight.shape[1]:
+        transposed = factorize_admm(
+            weight.mT,
+            output_importance,
+            input_importance,
+            rank,
+            generator,
+            outer_iterations=outer_iterations,
+            inner_iterations=inner_iterations,
+            regularization=regularization,
+            penalty_schedule=penalty_schedule,
+            convergence_check_interval=convergence_check_interval,
+            early_stop_tolerance=early_stop_tolerance,
+            epsilon=epsilon,
+            recorder=recorder,
+            transpose_wide=False,
+        )
+        return ADMMResult(
+            transposed.right_latent.mT.contiguous(),
+            transposed.left_latent.mT.contiguous(),
+            transposed.right_binary.mT.contiguous(),
+            transposed.left_binary.mT.contiguous(),
+            transposed.scale_post.contiguous(),
+            transposed.scale_mid.contiguous(),
+            transposed.scale_pre.contiguous(),
+            transposed.reconstruction.mT.contiguous(),
+            transposed.iterations_completed,
+            transposed.stopped_early,
+            transposed.trace,
+        )
     recorder.add("admm.weight_elements", weight.numel())
     recorder.add("admm.rank", rank)
     with recorder.phase("setup"):

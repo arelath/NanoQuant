@@ -60,6 +60,41 @@ def test_admm_is_deterministic_uses_generator_and_does_not_mutate_inputs() -> No
     assert [point.iteration for point in first.trace] == [1, 2, 4]
 
 
+def test_admm_wide_matrix_matches_legacy_transposed_orientation() -> None:
+    weight = torch.tensor([[1.0, -2.0, 0.5], [-1.0, 0.25, 2.0]])
+    input_importance = torch.tensor([0.5, 2.0, 1.0])
+    output_importance = torch.tensor([1.0, 0.75])
+    legacy_oriented = factorize_admm(
+        weight,
+        input_importance,
+        output_importance,
+        2,
+        torch.Generator().manual_seed(17),
+        outer_iterations=4,
+        inner_iterations=2,
+    )
+    explicit_transpose = factorize_admm(
+        weight.mT,
+        output_importance,
+        input_importance,
+        2,
+        torch.Generator().manual_seed(17),
+        outer_iterations=4,
+        inner_iterations=2,
+        transpose_wide=False,
+    )
+
+    assert torch.equal(legacy_oriented.left_latent, explicit_transpose.right_latent.mT)
+    assert torch.equal(legacy_oriented.right_latent, explicit_transpose.left_latent.mT)
+    assert torch.equal(legacy_oriented.left_binary, explicit_transpose.right_binary.mT)
+    assert torch.equal(legacy_oriented.right_binary, explicit_transpose.left_binary.mT)
+    assert torch.equal(legacy_oriented.scale_pre, explicit_transpose.scale_post)
+    assert torch.equal(legacy_oriented.scale_mid, explicit_transpose.scale_mid)
+    assert torch.equal(legacy_oriented.scale_post, explicit_transpose.scale_pre)
+    assert torch.equal(legacy_oriented.reconstruction, explicit_transpose.reconstruction.mT)
+    assert legacy_oriented.trace == explicit_transpose.trace
+
+
 @pytest.mark.parametrize("early_stop_tolerance", [None, 1e9])
 def test_admm_micro_profiling_preserves_result_and_records_hot_loop_phases(
     early_stop_tolerance: float | None,

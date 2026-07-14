@@ -136,7 +136,7 @@ from nanoquant.infrastructure.tuning_checkpoint import (
 from nanoquant.ports.event_sink import EventSink
 from nanoquant.ports.model_adapter import ModelAdapter
 
-RESIDENT_ALGORITHM_VERSION = 25
+RESIDENT_ALGORITHM_VERSION = 26
 
 
 @contextmanager

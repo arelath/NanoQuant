@@ -102,7 +102,9 @@ Outcome: core NanoQuant mathematics is pure, typed, replayable, and parity-teste
 - [x] **M2.12** Extract residual-probe outlier selection and isolate its factorizer dependency.
 - [x] **M2.13** Extract outlier removal/reconstruction and BF16/FP16/INT8 storage behavior.
 - [x] **M2.14** Extract NanoQuant ADMM solve steps, schedules, convergence metrics, and deterministic generator use.
-- [ ] **M2.15** Extract DBF only if retained by M0.17, with an explicit component/version and parity expectations.
+- [x] **M2.15** Extract DBF only if retained by M0.17, with an explicit component/version and parity expectations.
+  ADR 0006 made DBF research-only and explicitly permits omission from the first release. The rewrite therefore does
+  not identify DBF as NanoQuant ADMM and returns the stable `CAL004` unsupported-mode diagnostic, covered by tests.
 - [x] **M2.16** Extract scale-pre/mid/post fitting, objective comparison, protected outlier columns, and rollback.
 - [x] **M2.17** Implement `MaterializedFactorizationInput/Output` for pure in-stage tensor computation.
 - [x] **M2.18** Implement persisted `FactorizationRequest`, `FactorizationResult`, convergence, scale, outlier, retry, tuning, and layer-result DTOs.
@@ -110,8 +112,16 @@ Outcome: core NanoQuant mathematics is pure, typed, replayable, and parity-teste
 - [x] **M2.20** Ensure domain functions do not print, access files, traverse models, consult global configuration, or mutate caller tensors.
 - [x] **M2.21** Add small deterministic CPU unit tests for every mathematical component and boundary case.
 - [x] **M2.22** Add property tests for pack-independent reconstruction, retry monotonicity, budgets, scaling invariants, and deterministic logical seeds.
-- [ ] **M2.23** Run old/new layer-fixture comparisons and document all numerical tolerances or intentional differences.
-- [ ] **M2.GATE** Verify captured layer fixtures reproduce accepted legacy factors/metrics within approved tolerances using only typed requests, tensor artifacts, and domain components.
+- [x] **M2.23** Run old/new layer-fixture comparisons and document all numerical tolerances or intentional differences.
+  `evidence/m2/gemma-admm-factorization-parity-native-v25.json` first isolated the intentional native-orientation
+  difference: tall MLP factors were exact, while wide attention/down-projection factors differed despite objective
+  deltas of only `1.68e-5` and `4.78e-4`. Version 26 restores the legacy wide-matrix transpose; the replacement
+  `gemma-admm-factorization-parity.json` reports exact old/new equality for every latent factor, binary factor, scale,
+  reconstruction, and final RNG state on all three fixtures, with zero objective delta.
+- [x] **M2.GATE** Verify captured layer fixtures reproduce accepted legacy factors/metrics within approved tolerances using only typed requests, tensor artifacts, and domain components.
+  The source-hashed legacy oracle, typed committed layer results, immutable tensor references, pinned Gemma revision,
+  factorization protocol, environment, per-tensor comparisons, and pre-fix intentional-difference record are retained
+  under `evidence/m2/`. All version-26 factor and metric comparisons are exact.
 
 ## Milestone 3 — Implement model sources, adapters, datasets, and calibration
 

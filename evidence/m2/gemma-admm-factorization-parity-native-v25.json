@@ -1,0 +1,631 @@
+{
+  "layers": [
+    {
+      "block": 0,
+      "fixture_role": "attention",
+      "layer": "self_attn.q_proj",
+      "legacy_transposed_wide_matrix": true,
+      "objective": {
+        "legacy_weighted_normalized_error": 0.23367826640605927,
+        "relative_difference": 1.6834713025215146e-05,
+        "relative_tolerance": 0.022,
+        "rewrite_weighted_normalized_error": 0.2336743324995041
+      },
+      "old_new_tensors": {
+        "left_binary": {
+          "agreement": 0.502593994140625,
+          "exact": false,
+          "maximum_absolute_difference": 2.0,
+          "relative_l2_difference": 1.4105403423309326,
+          "shape_equal": true
+        },
+        "left_latent": {
+          "agreement": 0.0,
+          "exact": false,
+          "maximum_absolute_difference": 0.09869901835918427,
+          "relative_l2_difference": 1.4081703424453735,
+          "shape_equal": true
+        },
+        "reconstruction": {
+          "agreement": 0.0042410958558321,
+          "exact": false,
+          "maximum_absolute_difference": 0.081085205078125,
+          "relative_l2_difference": 0.6315596103668213,
+          "shape_equal": true
+        },
+        "right_binary": {
+          "agreement": 0.5027320981025696,
+          "exact": false,
+          "maximum_absolute_difference": 2.0,
+          "relative_l2_difference": 1.4103446006774902,
+          "shape_equal": true
+        },
+        "right_latent": {
+          "agreement": 0.001178075443021953,
+          "exact": false,
+          "maximum_absolute_difference": 0.05893193930387497,
+          "relative_l2_difference": 1.418655276298523,
+          "shape_equal": true
+        },
+        "scale_mid": {
+          "agreement": 0.0446428582072258,
+          "exact": false,
+          "maximum_absolute_difference": 0.1015625,
+          "relative_l2_difference": 0.03439133241772652,
+          "shape_equal": true
+        },
+        "scale_post": {
+          "agreement": 0.078125,
+          "exact": false,
+          "maximum_absolute_difference": 0.00341796875,
+          "relative_l2_difference": 0.027683058753609657,
+          "shape_equal": true
+        },
+        "scale_pre": {
+          "agreement": 0.0755208358168602,
+          "exact": false,
+          "maximum_absolute_difference": 0.00439453125,
+          "relative_l2_difference": 0.029986029490828514,
+          "shape_equal": true
+        }
+      },
+      "passed": true,
+      "rank": 448,
+      "references": {
+        "identity": {
+          "config_hash": "sha256:9a6647de16f50bc25d6a93d23c35bca49276a3522d8ca2fa6233526925f4c799",
+          "model_hash": "sha256:32d5b5d041e98027bc7415107bc79b580f9cce407535b4e30134e8f8aed3b130",
+          "plan_hash": "sha256-8656b828a48e72f07799726b92c8a70b257f775c77f6c4bd5787686b524e8a9d"
+        },
+        "layer_result": {
+          "artifact_id": "sha256-1738305f1e0d06f0a9d92863a7aa4e3075cde662d299f16996784ec630d3dae1",
+          "artifact_type": "layer-result",
+          "schema_version": 1
+        },
+        "outlier_selection": {
+          "artifact_id": "sha256-43c83917f8ed257a3761e38c69917dd26dfbbc98120579f108e3e277f0699cb8",
+          "artifact_type": "outlier-selection",
+          "schema_version": 1
+        },
+        "output_importance": {
+          "artifact": {
+            "artifact_id": "sha256-7e5d8c36fb669408d33fc4c69f6f169031fd4d0f8b9755de1e2f702c6aea9b32",
+            "artifact_type": "calibration-tensors",
+            "schema_version": 1
+          },
+          "content_hash": "sha256:86d0991e3765ca4eeb14af87813ed53d798eae5779388eeb867be650495de608",
+          "key": "block_0.self_attn.q_proj.output_importance",
+          "spec": {
+            "device_requirement": null,
+            "dtype": "float32",
+            "layout": "contiguous",
+            "shape": [
+              1024
+            ]
+          }
+        },
+        "retained_factorization": {
+          "artifact_id": "sha256-8ad3df6125b86950ede1059699d6055590424b679cdfc319d84bdd3134801e10",
+          "artifact_type": "factorization-attempt",
+          "schema_version": 1
+        },
+        "source_weight": {
+          "content_hash": "sha256:3d4ef8d71c14db7e448a09ebe891cfb6bf32c57a9b44499ae0d1c098e48516b6#model.layers.0.self_attn.q_proj.weight",
+          "id": {
+            "layer": {
+              "block": {
+                "index": 0
+              },
+              "path": "self_attn.q_proj"
+            },
+            "name": "weight"
+          },
+          "shard": "model.safetensors",
+          "source_key": "model.layers.0.self_attn.q_proj.weight",
+          "spec": {
+            "device_requirement": null,
+            "dtype": "bf16",
+            "layout": "contiguous",
+            "shape": [
+              1024,
+              1152
+            ]
+          }
+        }
+      },
+      "retained_rewrite_replay": {
+        "exact": true,
+        "tensors": {
+          "left_binary": {
+            "agreement": 1.0,
+            "exact": true,
+            "maximum_absolute_difference": 0.0,
+            "relative_l2_difference": 0.0,
+            "shape_equal": true
+          },
+          "left_latent": {
+            "agreement": 1.0,
+            "exact": true,
+            "maximum_absolute_difference": 0.0,
+            "relative_l2_difference": 0.0,
+            "shape_equal": true
+          },
+          "right_binary": {
+            "agreement": 1.0,
+            "exact": true,
+            "maximum_absolute_difference": 0.0,
+            "relative_l2_difference": 0.0,
+            "shape_equal": true
+          },
+          "right_latent": {
+            "agreement": 1.0,
+            "exact": true,
+            "maximum_absolute_difference": 0.0,
+            "relative_l2_difference": 0.0,
+            "shape_equal": true
+          },
+          "scale_mid": {
+            "agreement": 1.0,
+            "exact": true,
+            "maximum_absolute_difference": 0.0,
+            "relative_l2_difference": 0.0,
+            "shape_equal": true
+          },
+          "scale_post": {
+            "agreement": 1.0,
+            "exact": true,
+            "maximum_absolute_difference": 0.0,
+            "relative_l2_difference": 0.0,
+            "shape_equal": true
+          },
+          "scale_pre": {
+            "agreement": 1.0,
+            "exact": true,
+            "maximum_absolute_difference": 0.0,
+            "relative_l2_difference": 0.0,
+            "shape_equal": true
+          }
+        }
+      },
+      "rng_final_state": {
+        "agreement": 1.0,
+        "exact": true,
+        "maximum_absolute_difference": 0.0,
+        "relative_l2_difference": 0.0,
+        "shape_equal": true
+      },
+      "shape": [
+        1024,
+        1152
+      ],
+      "wall_seconds": {
+        "legacy": 5.325554999988526,
+        "rewrite": 5.103950900025666
+      }
+    },
+    {
+      "block": 0,
+      "fixture_role": "historically_difficult",
+      "layer": "mlp.down_proj",
+      "legacy_transposed_wide_matrix": true,
+      "objective": {
+        "legacy_weighted_normalized_error": 0.3283124268054962,
+        "relative_difference": 0.00047819887862907606,
+        "relative_tolerance": 0.022,
+        "rewrite_weighted_normalized_error": 0.32815542817115784
+      },
+      "old_new_tensors": {
+        "left_binary": {
+          "agreement": 0.49987539649009705,
+          "exact": false,
+          "maximum_absolute_difference": 2.0,
+          "relative_l2_difference": 1.4143898487091064,
+          "shape_equal": true
+        },
+        "left_latent": {
+          "agreement": 0.0,
+          "exact": false,
+          "maximum_absolute_difference": 0.15344083309173584,
+          "relative_l2_difference": 1.4188534021377563,
+          "shape_equal": true
+        },
+        "reconstruction": {
+          "agreement": 0.003415331244468689,
+          "exact": false,
+          "maximum_absolute_difference": 0.046142578125,
+          "relative_l2_difference": 0.7699910998344421,
+          "shape_equal": true
+        },
+        "right_binary": {
+          "agreement": 0.5008424520492554,
+          "exact": false,
+          "maximum_absolute_difference": 2.0,
+          "relative_l2_difference": 1.4130216836929321,
+          "shape_equal": true
+        },
+        "right_latent": {
+          "agreement": 0.0008189930231310427,
+          "exact": false,
+          "maximum_absolute_difference": 0.06711000204086304,
+          "relative_l2_difference": 1.412062644958496,
+          "shape_equal": true
+        },
+        "scale_mid": {
+          "agreement": 0.21759259700775146,
+          "exact": false,
+          "maximum_absolute_difference": 0.0390625,
+          "relative_l2_difference": 0.01427682675421238,
+          "shape_equal": true
+        },
+        "scale_post": {
+          "agreement": 0.0,
+          "exact": false,
+          "maximum_absolute_difference": 0.1796875,
+          "relative_l2_difference": 1.9999616146087646,
+          "shape_equal": true
+        },
+        "scale_pre": {
+          "agreement": 0.0010127314599230886,
+          "exact": false,
+          "maximum_absolute_difference": 0.04052734375,
+          "relative_l2_difference": 1.9998269081115723,
+          "shape_equal": true
+        }
+      },
+      "passed": true,
+      "rank": 864,
+      "references": {
+        "identity": {
+          "config_hash": "sha256:9a6647de16f50bc25d6a93d23c35bca49276a3522d8ca2fa6233526925f4c799",
+          "model_hash": "sha256:32d5b5d041e98027bc7415107bc79b580f9cce407535b4e30134e8f8aed3b130",
+          "plan_hash": "sha256-8656b828a48e72f07799726b92c8a70b257f775c77f6c4bd5787686b524e8a9d"
+        },
+        "layer_result": {
+          "artifact_id": "sha256-f46d6367037239eca0fa19125099f9576c5e33dbea5163e4bcb0608ae68c8537",
+          "artifact_type": "layer-result",
+          "schema_version": 1
+        },
+        "outlier_selection": {
+          "artifact_id": "sha256-d2d54720d12a62ba6e6976ec97ea35ad4d48b5c02d55265b9c417d04a3f88d2e",
+          "artifact_type": "outlier-selection",
+          "schema_version": 1
+        },
+        "output_importance": {
+          "artifact": {
+            "artifact_id": "sha256-7e5d8c36fb669408d33fc4c69f6f169031fd4d0f8b9755de1e2f702c6aea9b32",
+            "artifact_type": "calibration-tensors",
+            "schema_version": 1
+          },
+          "content_hash": "sha256:5fa14f6eae3632a0322177cacbd3771667433899a2aef4a870fe9a3a2a3c9935",
+          "key": "block_0.mlp.down_proj.output_importance",
+          "spec": {
+            "device_requirement": null,
+            "dtype": "float32",
+            "layout": "contiguous",
+            "shape": [
+              1152
+            ]
+          }
+        },
+        "retained_factorization": {
+          "artifact_id": "sha256-33f08ef9b9bcbe57cf4bd511c196b7151b0a563d0c2f1358fcb5b304202b340b",
+          "artifact_type": "factorization-attempt",
+          "schema_version": 1
+        },
+        "source_weight": {
+          "content_hash": "sha256:3d4ef8d71c14db7e448a09ebe891cfb6bf32c57a9b44499ae0d1c098e48516b6#model.layers.0.mlp.down_proj.weight",
+          "id": {
+            "layer": {
+              "block": {
+                "index": 0
+              },
+              "path": "mlp.down_proj"
+            },
+            "name": "weight"
+          },
+          "shard": "model.safetensors",
+          "source_key": "model.layers.0.mlp.down_proj.weight",
+          "spec": {
+            "device_requirement": null,
+            "dtype": "bf16",
+            "layout": "contiguous",
+            "shape": [
+              1152,
+              6912
+            ]
+          }
+        }
+      },
+      "retained_rewrite_replay": {
+        "exact": true,
+        "tensors": {
+          "left_binary": {
+            "agreement": 0.9999999403953552,
+            "exact": true,
+            "maximum_absolute_difference": 0.0,
+            "relative_l2_difference": 0.0,
+            "shape_equal": true
+          },
+          "left_latent": {
+            "agreement": 0.9999999403953552,
+            "exact": true,
+            "maximum_absolute_difference": 0.0,
+            "relative_l2_difference": 0.0,
+            "shape_equal": true
+          },
+          "right_binary": {
+            "agreement": 1.0,
+            "exact": true,
+            "maximum_absolute_difference": 0.0,
+            "relative_l2_difference": 0.0,
+            "shape_equal": true
+          },
+          "right_latent": {
+            "agreement": 1.0,
+            "exact": true,
+            "maximum_absolute_difference": 0.0,
+            "relative_l2_difference": 0.0,
+            "shape_equal": true
+          },
+          "scale_mid": {
+            "agreement": 1.0,
+            "exact": true,
+            "maximum_absolute_difference": 0.0,
+            "relative_l2_difference": 0.0,
+            "shape_equal": true
+          },
+          "scale_post": {
+            "agreement": 1.0,
+            "exact": true,
+            "maximum_absolute_difference": 0.0,
+            "relative_l2_difference": 0.0,
+            "shape_equal": true
+          },
+          "scale_pre": {
+            "agreement": 1.0,
+            "exact": true,
+            "maximum_absolute_difference": 0.0,
+            "relative_l2_difference": 0.0,
+            "shape_equal": true
+          }
+        }
+      },
+      "rng_final_state": {
+        "agreement": 1.0,
+        "exact": true,
+        "maximum_absolute_difference": 0.0,
+        "relative_l2_difference": 0.0,
+        "shape_equal": true
+      },
+      "shape": [
+        1152,
+        6912
+      ],
+      "wall_seconds": {
+        "legacy": 7.972282100003213,
+        "rewrite": 6.996825300040655
+      }
+    },
+    {
+      "block": 1,
+      "fixture_role": "mlp",
+      "layer": "mlp.gate_proj",
+      "legacy_transposed_wide_matrix": false,
+      "objective": {
+        "legacy_weighted_normalized_error": 0.24449332058429718,
+        "relative_difference": 0.0,
+        "relative_tolerance": 0.022,
+        "rewrite_weighted_normalized_error": 0.24449332058429718
+      },
+      "old_new_tensors": {
+        "left_binary": {
+          "agreement": 1.0,
+          "exact": true,
+          "maximum_absolute_difference": 0.0,
+          "relative_l2_difference": 0.0,
+          "shape_equal": true
+        },
+        "left_latent": {
+          "agreement": 1.0,
+          "exact": true,
+          "maximum_absolute_difference": 0.0,
+          "relative_l2_difference": 0.0,
+          "shape_equal": true
+        },
+        "reconstruction": {
+          "agreement": 0.9999999403953552,
+          "exact": true,
+          "maximum_absolute_difference": 0.0,
+          "relative_l2_difference": 0.0,
+          "shape_equal": true
+        },
+        "right_binary": {
+          "agreement": 1.0,
+          "exact": true,
+          "maximum_absolute_difference": 0.0,
+          "relative_l2_difference": 0.0,
+          "shape_equal": true
+        },
+        "right_latent": {
+          "agreement": 1.0,
+          "exact": true,
+          "maximum_absolute_difference": 0.0,
+          "relative_l2_difference": 0.0,
+          "shape_equal": true
+        },
+        "scale_mid": {
+          "agreement": 1.0,
+          "exact": true,
+          "maximum_absolute_difference": 0.0,
+          "relative_l2_difference": 0.0,
+          "shape_equal": true
+        },
+        "scale_post": {
+          "agreement": 1.0,
+          "exact": true,
+          "maximum_absolute_difference": 0.0,
+          "relative_l2_difference": 0.0,
+          "shape_equal": true
+        },
+        "scale_pre": {
+          "agreement": 1.0,
+          "exact": true,
+          "maximum_absolute_difference": 0.0,
+          "relative_l2_difference": 0.0,
+          "shape_equal": true
+        }
+      },
+      "passed": true,
+      "rank": 1056,
+      "references": {
+        "identity": {
+          "config_hash": "sha256:9a6647de16f50bc25d6a93d23c35bca49276a3522d8ca2fa6233526925f4c799",
+          "model_hash": "sha256:32d5b5d041e98027bc7415107bc79b580f9cce407535b4e30134e8f8aed3b130",
+          "plan_hash": "sha256-8656b828a48e72f07799726b92c8a70b257f775c77f6c4bd5787686b524e8a9d"
+        },
+        "layer_result": {
+          "artifact_id": "sha256-a3aa38ad7291564bffd2a1180ed06fd039ab4964ec88a77fa0db9ca5f7641c67",
+          "artifact_type": "layer-result",
+          "schema_version": 1
+        },
+        "outlier_selection": {
+          "artifact_id": "sha256-28280372a68321ca803dbc84d782f23b3e39c420347c14e7b13079dfbab934d8",
+          "artifact_type": "outlier-selection",
+          "schema_version": 1
+        },
+        "output_importance": {
+          "artifact": {
+            "artifact_id": "sha256-7e5d8c36fb669408d33fc4c69f6f169031fd4d0f8b9755de1e2f702c6aea9b32",
+            "artifact_type": "calibration-tensors",
+            "schema_version": 1
+          },
+          "content_hash": "sha256:86b450592f60a4e2091a9b23db16319e27786e71fb77017836ef5bc1ce970232",
+          "key": "block_1.mlp.gate_proj.output_importance",
+          "spec": {
+            "device_requirement": null,
+            "dtype": "float32",
+            "layout": "contiguous",
+            "shape": [
+              6912
+            ]
+          }
+        },
+        "retained_factorization": {
+          "artifact_id": "sha256-8c829d09075ac43f7b6d812ef95ae867f4f6cdd49f8d211a1809d55e5e0540ef",
+          "artifact_type": "factorization-attempt",
+          "schema_version": 1
+        },
+        "source_weight": {
+          "content_hash": "sha256:3d4ef8d71c14db7e448a09ebe891cfb6bf32c57a9b44499ae0d1c098e48516b6#model.layers.1.mlp.gate_proj.weight",
+          "id": {
+            "layer": {
+              "block": {
+                "index": 1
+              },
+              "path": "mlp.gate_proj"
+            },
+            "name": "weight"
+          },
+          "shard": "model.safetensors",
+          "source_key": "model.layers.1.mlp.gate_proj.weight",
+          "spec": {
+            "device_requirement": null,
+            "dtype": "bf16",
+            "layout": "contiguous",
+            "shape": [
+              6912,
+              1152
+            ]
+          }
+        }
+      },
+      "retained_rewrite_replay": {
+        "exact": true,
+        "tensors": {
+          "left_binary": {
+            "agreement": 1.0,
+            "exact": true,
+            "maximum_absolute_difference": 0.0,
+            "relative_l2_difference": 0.0,
+            "shape_equal": true
+          },
+          "left_latent": {
+            "agreement": 1.0,
+            "exact": true,
+            "maximum_absolute_difference": 0.0,
+            "relative_l2_difference": 0.0,
+            "shape_equal": true
+          },
+          "right_binary": {
+            "agreement": 1.0,
+            "exact": true,
+            "maximum_absolute_difference": 0.0,
+            "relative_l2_difference": 0.0,
+            "shape_equal": true
+          },
+          "right_latent": {
+            "agreement": 1.0,
+            "exact": true,
+            "maximum_absolute_difference": 0.0,
+            "relative_l2_difference": 0.0,
+            "shape_equal": true
+          },
+          "scale_mid": {
+            "agreement": 1.0,
+            "exact": true,
+            "maximum_absolute_difference": 0.0,
+            "relative_l2_difference": 0.0,
+            "shape_equal": true
+          },
+          "scale_post": {
+            "agreement": 1.0,
+            "exact": true,
+            "maximum_absolute_difference": 0.0,
+            "relative_l2_difference": 0.0,
+            "shape_equal": true
+          },
+          "scale_pre": {
+            "agreement": 1.0,
+            "exact": true,
+            "maximum_absolute_difference": 0.0,
+            "relative_l2_difference": 0.0,
+            "shape_equal": true
+          }
+        }
+      },
+      "rng_final_state": {
+        "agreement": 1.0,
+        "exact": true,
+        "maximum_absolute_difference": 0.0,
+        "relative_l2_difference": 0.0,
+        "shape_equal": true
+      },
+      "shape": [
+        6912,
+        1152
+      ],
+      "wall_seconds": {
+        "legacy": 9.624344700016081,
+        "rewrite": 9.74635179998586
+      }
+    }
+  ],
+  "passed": true,
+  "protocol": {
+    "cuda": "13.0",
+    "device": "cuda",
+    "gpu": "NVIDIA RTX 4000 Ada Generation Laptop GPU",
+    "inner_iterations": 5,
+    "legacy_source": "D:\\dev\\research\\NanoQuant-OfficalCode\\src\\nanoquant\\core\\admm_nq.py",
+    "legacy_source_sha256": "daa84f2b1582714f402f4f198d3ce3d2756bf9f22433f06eabc0589812f9b59d",
+    "objective_relative_tolerance": 0.022,
+    "outer_iterations": 800,
+    "regularization": 0.03,
+    "revision": "dcc83ea841ab6100d6b47a070329e1ba4cf78752",
+    "run_output": "D:\\dev\\research\\NanoQuantRewrite\\evidence\\m4\\gemma-canonical-boundary-v23-canary",
+    "snapshot": "C:\\Users\\pdykstra\\.cache\\huggingface\\hub\\models--google--gemma-3-1b-it\\snapshots\\dcc83ea841ab6100d6b47a070329e1ba4cf78752",
+    "source_name": "google/gemma-3-1b-it",
+    "torch": "2.12.1+cu130"
+  },
+  "schema_version": 1
+}
