@@ -6,6 +6,8 @@ from dataclasses import dataclass
 
 import torch
 
+from nanoquant.domain.linear_math import functional_dense_reconstruction
+
 
 @dataclass(frozen=True, slots=True)
 class MaterializedScaleFitResult:
@@ -26,8 +28,12 @@ def reconstruct(
     scale_mid: torch.Tensor,
     scale_post: torch.Tensor,
 ) -> torch.Tensor:
-    return (left_binary.float() * scale_post.float().reshape(-1, 1)) @ (
-        right_binary.float() * scale_mid.float().reshape(-1, 1) * scale_pre.float().reshape(1, -1)
+    return functional_dense_reconstruction(
+        left_binary.float(),
+        right_binary.float(),
+        scale_pre.float(),
+        scale_mid.float(),
+        scale_post.float(),
     )
 
 

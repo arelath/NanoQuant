@@ -8,16 +8,13 @@ from typing import Any, cast
 import torch
 from torch import nn
 
+from nanoquant.domain.linear_math import (
+    functional_dense_reconstruction,
+    functional_factorized_linear,
+    mask_outlier_columns,
+)
 from nanoquant.domain.models import FrozenNanoQuantState, FrozenOutlierState, LayerId, ScaleState, TensorRef
 from nanoquant.ports.tensor_store import TensorStore
-
-
-def _mask_outlier_columns(scale_pre: torch.Tensor, indices: torch.Tensor | None) -> torch.Tensor:
-    if indices is None or indices.numel() == 0:
-        return scale_pre
-    mask = torch.ones_like(scale_pre)
-    mask.index_fill_(0, indices.to(device=scale_pre.device, dtype=torch.long), 0)
-    return scale_pre * mask
 
 
 class _SignSTE(torch.autograd.Function):
@@ -73,21 +70,16 @@ class TrainableFactorizedLinear(nn.Module):
 
     def dense_weight(self) -> torch.Tensor:
         apply_sign = cast(Any, _SignSTE).apply
-        left = cast(torch.Tensor, apply_sign(self.left_latent)) * self.scale_post.reshape(-1, 1)
-        scale_pre = _mask_outlier_columns(self.scale_pre, self.outlier_indices)
-        right = (
-            cast(torch.Tensor, apply_sign(self.right_latent))
-            * self.scale_mid.reshape(-1, 1)
-            * scale_pre.reshape(1, -1)
+        return functional_dense_reconstruction(
+            cast(torch.Tensor, apply_sign(self.left_latent)),
+            cast(torch.Tensor, apply_sign(self.right_latent)),
+            self.scale_pre,
+            self.scale_mid,
+            self.scale_post,
+            self.outlier_indices,
+            self.outlier_values,
+            self.outlier_scales,
         )
-        result = left @ right
-        if self.outlier_indices is not None and self.outlier_values is not None:
-            outlier_values: torch.Tensor = self.outlier_values
-            if self.outlier_scales is not None:
-                outlier_values = outlier_values.float() * self.outlier_scales.float()
-            result = result.clone()
-            result[:, self.outlier_indices.long()] += outlier_values.to(result.dtype)
-        return result
 
     def forward(self, value: torch.Tensor) -> torch.Tensor:
         apply_sign = cast(Any, _SignSTE).apply
@@ -96,30 +88,23 @@ class TrainableFactorizedLinear(nn.Module):
             if self.immutable_binary_factors and not self.right_latent.requires_grad
             else cast(torch.Tensor, apply_sign(self.right_latent))
         ).to(device=value.device, dtype=value.dtype)
-        scale_pre = _mask_outlier_columns(self.scale_pre, self.outlier_indices)
-        latent = torch.nn.functional.linear(
-            value * scale_pre.to(device=value.device, dtype=value.dtype),
-            right,
-        )
-        latent = latent * self.scale_mid.to(device=value.device, dtype=value.dtype)
         left = (
             self.left_latent
             if self.immutable_binary_factors and not self.left_latent.requires_grad
             else cast(torch.Tensor, apply_sign(self.left_latent))
         ).to(device=value.device, dtype=value.dtype)
-        output = torch.nn.functional.linear(latent, left)
-        output = output * self.scale_post.to(device=value.device, dtype=value.dtype)
-        if self.outlier_indices is not None and self.outlier_values is not None:
-            outlier_values: torch.Tensor = self.outlier_values
-            if self.outlier_scales is not None:
-                outlier_values = outlier_values.float() * self.outlier_scales.float()
-            output = output + torch.nn.functional.linear(
-                value.index_select(-1, self.outlier_indices.long()),
-                outlier_values.to(device=value.device, dtype=value.dtype),
-            )
-        if self.bias is not None:
-            output = output + self.bias.to(device=value.device, dtype=value.dtype)
-        return output
+        return functional_factorized_linear(
+            value,
+            left,
+            right,
+            self.scale_pre.to(device=value.device, dtype=value.dtype),
+            self.scale_mid.to(device=value.device, dtype=value.dtype),
+            self.scale_post.to(device=value.device, dtype=value.dtype),
+            None if self.bias is None else self.bias.to(device=value.device, dtype=value.dtype),
+            self.outlier_indices,
+            self.outlier_values,
+            self.outlier_scales,
+        )
 
 
 class FrozenReferenceLinear(nn.Module):
@@ -169,17 +154,16 @@ class FrozenReferenceLinear(nn.Module):
         )
 
     def _materialize_dense_weight(self) -> torch.Tensor:
-        scale_pre = _mask_outlier_columns(self.scale_pre, self.outlier_indices)
-        result = (self.left_binary * self.scale_post.reshape(-1, 1)) @ (
-            self.right_binary * self.scale_mid.reshape(-1, 1) * scale_pre.reshape(1, -1)
+        return functional_dense_reconstruction(
+            self.left_binary,
+            self.right_binary,
+            self.scale_pre,
+            self.scale_mid,
+            self.scale_post,
+            self.outlier_indices,
+            self.outlier_values,
+            self.outlier_scales,
         )
-        if self.outlier_indices is not None and self.outlier_values is not None:
-            values = self.outlier_values
-            if self.outlier_scales is not None:
-                values = values.float() * self.outlier_scales.float()
-            result = result.clone()
-            result[:, self.outlier_indices.long()] += values.to(result.dtype)
-        return result
 
     def dense_weight(self) -> torch.Tensor:
         return self._materialize_dense_weight() if self._cached_dense_weight is None else self._cached_dense_weight
@@ -215,19 +199,19 @@ class FactorizedReferenceLinear(FrozenReferenceLinear):
         )
 
     def forward(self, value: torch.Tensor) -> torch.Tensor:
-        scale_pre = _mask_outlier_columns(self.scale_pre, self.outlier_indices)
-        latent = torch.nn.functional.linear(value * scale_pre, self.right_binary)
-        output = torch.nn.functional.linear(latent * self.scale_mid, self.left_binary * self.scale_post.reshape(-1, 1))
-        if self.outlier_indices is not None and self.outlier_values is not None:
-            outlier_values = self.outlier_values
-            if self.outlier_scales is not None:
-                outlier_values = outlier_values.float() * self.outlier_scales.float()
-            output = output + torch.nn.functional.linear(
-                value.index_select(-1, self.outlier_indices.long()), outlier_values.to(value.dtype)
-            )
-        if self.bias is not None:
-            output = output + self.bias
-        return output
+        return functional_factorized_linear(
+            value,
+            self.left_binary,
+            self.right_binary,
+            self.scale_pre,
+            self.scale_mid,
+            self.scale_post,
+            self.bias,
+            self.outlier_indices,
+            self.outlier_values,
+            self.outlier_scales,
+            scale_left_before_linear=True,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -251,7 +235,7 @@ class LayerFreezer:
         values: dict[str, torch.Tensor] = {
             "left_binary": left,
             "right_binary": right,
-            "scale_pre": _mask_outlier_columns(
+            "scale_pre": mask_outlier_columns(
                 trainable.scale_pre.detach(), trainable.outlier_indices
             ),
             "scale_mid": trainable.scale_mid.detach(),

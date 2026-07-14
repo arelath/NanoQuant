@@ -56,7 +56,7 @@ If you decide to take these on, I recommend doing **#2 (Memory Accounting)** and
 
 Here are four more high-value, behavior-preserving (S0) refactoring opportunities. These target areas where duplicated logic or "magic strings" could eventually cause subtle bugs as the codebase evolves, particularly as you build out the deployment runtime.
 
-### [ ] 6. Consolidate Factorized Reconstruction Math
+### [x] 6. Consolidate Factorized Reconstruction Math
 **Location:** `src/nanoquant/application/layers.py` and `src/nanoquant/domain/scale_fit.py`
 **Problem:** The core NanoQuant math—multiplying `left @ right` with `pre`, `mid`, and `post` scales, plus outlier masking and addition—is currently duplicated across:
 *   `TrainableFactorizedLinear.forward`
