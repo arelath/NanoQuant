@@ -13,7 +13,7 @@ from transformers import AutoModelForCausalLM
 
 from nanoquant.application.layers import BlockEditor, LayerFreezer, restore_block_auxiliary_parameters
 from nanoquant.config.codec import from_dict
-from nanoquant.domain.models import ArtifactRef, BlockResult
+from nanoquant.domain.models import ArtifactRef, ArtifactTypes, BlockResult
 from nanoquant.domain.profiling import NULL_RECORDER, PhaseRecorder
 from nanoquant.infrastructure.artifacts import LocalArtifactStore
 from nanoquant.infrastructure.commits import CommitIdentity, load_committed_block
@@ -108,7 +108,7 @@ def load_frozen_run(
         identity, block_records = _latest_complete_identity(records, expected_blocks)
         committed = tuple(
             load_committed_block(
-                ArtifactRef("block-result", str(block_records[index]["artifact_id"]), 1),
+                ArtifactRef(ArtifactTypes.BLOCK_RESULT, str(block_records[index]["artifact_id"]), 1),
                 artifacts,
                 identity,
             ).result

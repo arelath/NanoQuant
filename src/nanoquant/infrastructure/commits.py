@@ -15,6 +15,7 @@ from nanoquant.config.codec import from_dict, to_dict
 from nanoquant.domain.models import (
     ActivationStreamRef,
     ArtifactRef,
+    ArtifactTypes,
     BlockId,
     BlockLossMetrics,
     BlockResult,
@@ -158,14 +159,14 @@ def commit_layer(
     result: LayerResult, artifacts: LocalArtifactStore, identity: CommitIdentity, inject: FailureInjector = _no_failure
 ) -> CommittedLayer:
     inject("before_layer_commit")
-    with artifacts.begin_write("layer-result") as writer:
+    with artifacts.begin_write(ArtifactTypes.LAYER_RESULT) as writer:
         with artifacts.recorder.phase("serialize"):
             payload = {"identity": to_dict(identity), "result": to_dict(result)}
             encoded = json.dumps(payload, sort_keys=True, indent=2)
         with artifacts.recorder.phase("write"):
             (writer.path / "layer-result.json").write_text(encoded, encoding="utf-8")
         descriptor = writer.commit()
-    reference = ArtifactRef("layer-result", descriptor.artifact_id, 1)
+    reference = ArtifactRef(ArtifactTypes.LAYER_RESULT, descriptor.artifact_id, 1)
     inject("after_layer_commit")
     return CommittedLayer(reference, result)
 
@@ -201,7 +202,7 @@ def commit_block(
             "compressed_dtype": str(compressed_outputs.dtype).removeprefix("torch."),
         }
         encoded_activation_core = json.dumps(activation_core, sort_keys=True, indent=2)
-    with artifacts.begin_write("activation-generation") as writer:
+    with artifacts.begin_write(ArtifactTypes.ACTIVATION_GENERATION) as writer:
         with artifacts.recorder.phase("write"):
             save_file(
                 {"teacher_outputs": teacher_outputs.detach().cpu().contiguous()},
@@ -217,7 +218,7 @@ def commit_block(
         "io.activation_bytes_written",
         sum(item.bytes for item in activation_descriptor.files if item.path.endswith(".safetensors")),
     )
-    activation_reference = ArtifactRef("activation-generation", activation_descriptor.artifact_id, 1)
+    activation_reference = ArtifactRef(ArtifactTypes.ACTIVATION_GENERATION, activation_descriptor.artifact_id, 1)
     inject("after_activation_commit")
     with artifacts.recorder.phase("serialize"):
         core = {
@@ -239,11 +240,11 @@ def commit_block(
             "activation_generation": to_dict(activation_reference),
         }
         encoded_core = json.dumps(core, sort_keys=True, indent=2)
-    with artifacts.begin_write("block-result") as writer:
+    with artifacts.begin_write(ArtifactTypes.BLOCK_RESULT) as writer:
         with artifacts.recorder.phase("write"):
             (writer.path / "block-result.json").write_text(encoded_core, encoding="utf-8")
         descriptor = writer.commit()
-    reference = ArtifactRef("block-result", descriptor.artifact_id, 1)
+    reference = ArtifactRef(ArtifactTypes.BLOCK_RESULT, descriptor.artifact_id, 1)
     teacher_ref = ActivationStreamRef(
         activation_reference,
         tuple(teacher_outputs.shape),
@@ -281,6 +282,11 @@ def retire_block_activations(result: BlockResult, artifacts: LocalArtifactStore)
     references = {result.teacher_outputs.artifact, result.compressed_outputs.artifact}
     retired = 0
     for reference in references:
-        if reference.artifact_type == "activation-generation" and artifacts.path_for(reference.artifact_id).exists():
-            retired += artifacts.remove_artifact(reference.artifact_id, expected_type="activation-generation")
+        if (
+            reference.artifact_type == ArtifactTypes.ACTIVATION_GENERATION
+            and artifacts.path_for(reference.artifact_id).exists()
+        ):
+            retired += artifacts.remove_artifact(
+                reference.artifact_id, expected_type=ArtifactTypes.ACTIVATION_GENERATION
+            )
     return retired

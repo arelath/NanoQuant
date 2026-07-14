@@ -18,7 +18,7 @@ from nanoquant.config.schema import (
     ResidualProbeConfig,
     ScaleFitConfig,
 )
-from nanoquant.domain.models import ArtifactRef
+from nanoquant.domain.models import ArtifactRef, ArtifactTypes
 from nanoquant.infrastructure.hf_calibration_dataset import load_pinned_calibration
 from nanoquant.infrastructure.resource_usage import peak_device_memory_bytes
 from nanoquant.resident_quantization import (
@@ -180,7 +180,9 @@ def main() -> None:
             None if args.objectives_artifact is None else ArtifactRef("objective-specs", args.objectives_artifact, 1)
         ),
         precomputed_plan=(
-            None if args.plan_artifact is None else ArtifactRef("quantization-plan", args.plan_artifact, 1)
+            None
+            if args.plan_artifact is None
+            else ArtifactRef(ArtifactTypes.QUANTIZATION_PLAN, args.plan_artifact, 1)
         ),
         restore_completed_blocks=not args.defer_model_restore,
         evaluate_inline_quality=not args.defer_model_restore,

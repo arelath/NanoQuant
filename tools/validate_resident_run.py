@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from nanoquant.domain.models import ArtifactTypes
 from nanoquant.infrastructure.artifacts import ArtifactCorruptionError, LocalArtifactStore
 
 
@@ -289,7 +290,7 @@ def validate_resident_run(
     )
     plan_hash = identity_value.get("plan_hash")
     if isinstance(plan_hash, str) and plan_hash.startswith("sha256-") and len(plan_hash) == 71:
-        pending.append(ArtifactReference(plan_hash, "quantization-plan"))
+        pending.append(ArtifactReference(plan_hash, ArtifactTypes.QUANTIZATION_PLAN))
     for _record, payload in commit_payloads:
         pending.extend(_references(payload))
     validated: dict[str, tuple[str, int]] = {}
@@ -306,7 +307,7 @@ def validate_resident_run(
         path = store.path_for(reference.artifact_id)
         if not path.exists():
             if (
-                reference.artifact_type == "activation-generation"
+                reference.artifact_type == ArtifactTypes.ACTIVATION_GENERATION
                 and (latest_activation is None or reference.artifact_id != latest_activation.artifact_id)
             ):
                 retired.add(reference.artifact_id)

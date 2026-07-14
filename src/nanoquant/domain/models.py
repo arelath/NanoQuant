@@ -5,6 +5,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
+class ArtifactTypes:
+    """Canonical content-addressed artifact schema identities."""
+
+    LAYER_RESULT = "layer-result"
+    BLOCK_RESULT = "block-result"
+    ACTIVATION_GENERATION = "activation-generation"
+    QUANTIZATION_PLAN = "quantization-plan"
+
+
 @dataclass(frozen=True, slots=True, order=True)
 class BlockId:
     index: int

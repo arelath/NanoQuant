@@ -7,6 +7,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from nanoquant.domain.models import ArtifactTypes
 from nanoquant.infrastructure.artifacts import LocalArtifactStore
 
 
@@ -75,7 +76,7 @@ def plan_activation_cleanup(
         except (OSError, ValueError) as exc:
             warnings.append(f"could not validate activation artifact {artifact_id}: {exc}")
             continue
-        if descriptor.artifact_type != "activation-generation":
+        if descriptor.artifact_type != ArtifactTypes.ACTIVATION_GENERATION:
             warnings.append(
                 f"refusing non-activation artifact {artifact_id}: {descriptor.artifact_type}"
             )
@@ -99,7 +100,9 @@ def apply_activation_cleanup(plan: ActivationCleanupPlan) -> tuple[int, int]:
     for artifact_id in plan.candidates:
         path = artifacts.path_for(artifact_id)
         size = _artifact_bytes(path)
-        removed = artifacts.remove_artifact(artifact_id, expected_type="activation-generation")
+        removed = artifacts.remove_artifact(
+            artifact_id, expected_type=ArtifactTypes.ACTIVATION_GENERATION
+        )
         if removed:
             deleted += 1
             deleted_bytes += size

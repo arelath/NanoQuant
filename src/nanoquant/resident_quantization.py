@@ -70,6 +70,7 @@ from nanoquant.config.schema import (
 from nanoquant.domain.metrics import reconstruction_metrics
 from nanoquant.domain.models import (
     ArtifactRef,
+    ArtifactTypes,
     BlockResult,
     CalibrationStats,
     CheckpointInventory,
@@ -1582,9 +1583,9 @@ def _run_resident_quantization_impl(
             with recorder.phase("load_commits"):
                 committed_blocks = [
                     (
-                        ArtifactRef("block-result", record.artifact_id, 1),
+                        ArtifactRef(ArtifactTypes.BLOCK_RESULT, record.artifact_id, 1),
                         load_committed_block(
-                            ArtifactRef("block-result", record.artifact_id, 1), artifacts, identity
+                            ArtifactRef(ArtifactTypes.BLOCK_RESULT, record.artifact_id, 1), artifacts, identity
                         ).result,
                     )
                     for record in block_records
@@ -1848,7 +1849,7 @@ def _run_resident_quantization_impl(
             prior_record = partial_layer_records.get((block_index, layer_plan.layer.path))
             if prior_record is not None:
                 prior = load_committed_layer(
-                    ArtifactRef("layer-result", prior_record.artifact_id, 1), artifacts, identity
+                    ArtifactRef(ArtifactTypes.LAYER_RESULT, prior_record.artifact_id, 1), artifacts, identity
                 ).result
                 frozen = LayerFreezer().load(
                     prior.frozen_state,
@@ -2551,12 +2552,16 @@ def _run_resident_factorization_slice_impl(
     records = (*discovery.valid_records, *discovery.orphan_records)
     complete_blocks = {record.block for record in records if record.kind == "block"}
     completed_results = [
-        load_committed_block(ArtifactRef("block-result", record.artifact_id, 1), artifacts, identity).result
+        load_committed_block(
+            ArtifactRef(ArtifactTypes.BLOCK_RESULT, record.artifact_id, 1), artifacts, identity
+        ).result
         for record in records
         if record.kind == "block"
     ]
     partial_results = [
-        load_committed_layer(ArtifactRef("layer-result", record.artifact_id, 1), artifacts, identity).result
+        load_committed_layer(
+            ArtifactRef(ArtifactTypes.LAYER_RESULT, record.artifact_id, 1), artifacts, identity
+        ).result
         for record in records
         if record.kind == "layer" and record.block not in complete_blocks
     ]

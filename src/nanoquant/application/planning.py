@@ -10,6 +10,7 @@ from nanoquant.config.codec import to_dict
 from nanoquant.config.schema import OutlierConfig, RankAllocationConfig
 from nanoquant.domain.models import (
     ArtifactRef,
+    ArtifactTypes,
     BitCost,
     BlockPlan,
     CalibrationStats,
@@ -264,7 +265,7 @@ def persist_plan(plan: QuantizationPlan, artifacts: ArtifactStore) -> PersistedP
     layer_ids = [layer.layer for block in plan.blocks for layer in block.layers]
     if len(layer_ids) != len(set(layer_ids)) or any(layer.rank <= 0 for block in plan.blocks for layer in block.layers):
         raise ValueError("quantization plan is structurally invalid")
-    with artifacts.begin_write("quantization-plan") as writer:
+    with artifacts.begin_write(ArtifactTypes.QUANTIZATION_PLAN) as writer:
         (writer.path / "plan.json").write_text(json.dumps(to_dict(plan), sort_keys=True, indent=2), encoding="utf-8")
         descriptor = writer.commit()
-    return PersistedPlan(ArtifactRef("quantization-plan", descriptor.artifact_id, 1), plan)
+    return PersistedPlan(ArtifactRef(ArtifactTypes.QUANTIZATION_PLAN, descriptor.artifact_id, 1), plan)

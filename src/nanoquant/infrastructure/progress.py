@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from nanoquant.config.codec import to_dict
-from nanoquant.domain.models import QuantizationPlan
+from nanoquant.domain.models import ArtifactTypes, QuantizationPlan
 from nanoquant.domain.runs import BudgetState, ProgressCursor, RunState, RunStatus
 
 from .artifacts import ArtifactCorruptionError, LocalArtifactStore
@@ -104,20 +104,27 @@ class ProgressJournal:
             try:
                 descriptor = json.loads(descriptor_path.read_text(encoding="utf-8"))
                 artifact_id = descriptor["artifact_id"]
-                if artifact_id in known or descriptor["artifact_type"] not in {"layer-result", "block-result"}:
+                if artifact_id in known or descriptor["artifact_type"] not in {
+                    ArtifactTypes.LAYER_RESULT,
+                    ArtifactTypes.BLOCK_RESULT,
+                }:
                     continue
                 self.artifacts.validate(artifact_id)
-                filename = "layer-result.json" if descriptor["artifact_type"] == "layer-result" else "block-result.json"
+                filename = (
+                    "layer-result.json"
+                    if descriptor["artifact_type"] == ArtifactTypes.LAYER_RESULT
+                    else "block-result.json"
+                )
                 payload = json.loads((descriptor_path.parent / filename).read_text(encoding="utf-8"))
                 if CommitIdentity(**payload["identity"]) != identity:
                     continue
-                result = payload["result"] if descriptor["artifact_type"] == "layer-result" else payload
+                result = payload["result"] if descriptor["artifact_type"] == ArtifactTypes.LAYER_RESULT else payload
                 block = int(
                     result["layer"]["block"]["index"]
-                    if descriptor["artifact_type"] == "layer-result"
+                    if descriptor["artifact_type"] == ArtifactTypes.LAYER_RESULT
                     else result["block"]["index"]
                 )
-                layer = result["layer"]["path"] if descriptor["artifact_type"] == "layer-result" else None
+                layer = result["layer"]["path"] if descriptor["artifact_type"] == ArtifactTypes.LAYER_RESULT else None
                 found.append(
                     JournalRecord(
                         0,

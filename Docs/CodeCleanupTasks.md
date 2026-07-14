@@ -79,7 +79,7 @@ While the trainable modules use the `_SignSTE` wrapper and the frozen ones do no
 *   Use a context manager like `with _apply_calibration_hooks(modules, inputs, outputs, recorder):` to safely guarantee hook removal in a `finally` block.
 *   *Why:* Simplifies the massive calibration entry points and makes it much easier to add new experimental hook types (like Activation-Aware Weight Quantization (AWQ) stats) later.
 
-### [ ] 8. Centralize Magic Artifact Type Strings
+### [x] 8. Centralize Magic Artifact Type Strings
 **Location:** Scattered across `commits.py`, `planning.py`, `artifact_gc.py`, `cleanup_run_activations.py`, and `validate_resident_run.py`.
 **Problem:** Strings like `"layer-result"`, `"block-result"`, `"activation-generation"`, and `"quantization-plan"` are hardcoded throughout the codebase. In a content-addressed storage architecture, a typo in one of these strings doesn't throw a standard Python `AttributeError`—it silently creates an unreferenced artifact, breaks garbage collection, or causes validation to fail.
 **Action:**

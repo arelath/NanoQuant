@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from nanoquant.domain.models import ArtifactTypes
 from nanoquant.infrastructure.artifacts import LocalArtifactStore
 
 _LEGACY_BLOCK_LOSS = re.compile(
@@ -88,8 +89,11 @@ def load_rewrite_trajectory(run_output: str | Path) -> RewriteTrajectory:
     for block in expected:
         artifact_id = str(by_block[block]["artifact_id"])
         descriptor = artifacts.validate(artifact_id)
-        if descriptor.artifact_type != "block-result":
-            raise ValueError(f"journal block {block} references {descriptor.artifact_type}, not block-result")
+        if descriptor.artifact_type != ArtifactTypes.BLOCK_RESULT:
+            raise ValueError(
+                f"journal block {block} references {descriptor.artifact_type}, "
+                f"not {ArtifactTypes.BLOCK_RESULT}"
+            )
         artifact_root = artifacts.path_for(artifact_id)
         payload: Any = json.loads((artifact_root / "block-result.json").read_text(encoding="utf-8"))
         try:

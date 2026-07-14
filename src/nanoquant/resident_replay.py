@@ -9,7 +9,7 @@ from pathlib import Path
 
 from nanoquant.config.codec import from_dict
 from nanoquant.config.schema import ProfilingConfig, ProfilingLevel
-from nanoquant.domain.models import ArtifactRef
+from nanoquant.domain.models import ArtifactRef, ArtifactTypes
 from nanoquant.domain.profiling import NULL_RECORDER, PhaseRecorder
 from nanoquant.domain.scale_fit import reconstruct
 from nanoquant.domain.seeds import logical_seed
@@ -62,7 +62,7 @@ def _capture_and_replay_resident_layer(
         raise ValueError(f"run has no committed layer {block}:{path}")
     record = matching[-1]
     identity = from_dict(CommitIdentity, record["identity"], path="identity")
-    reference = ArtifactRef("layer-result", str(record["artifact_id"]), 1)
+    reference = ArtifactRef(ArtifactTypes.LAYER_RESULT, str(record["artifact_id"]), 1)
     with recorder.phase("load_commit"):
         layer = load_committed_layer(reference, artifacts, identity).result
     accepted_attempt = layer.attempts[layer.accepted_attempt]
