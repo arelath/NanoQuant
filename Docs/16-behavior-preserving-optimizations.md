@@ -801,6 +801,18 @@ must be remeasured rather than inferred from the speedup.
   eager-attention allocation failed. `_run_block_batched` is now intrinsically no-grad and has a regression
   test; the completed replay peaks at 4.05 GiB during tuning. This was a diagnostic-path lifetime bug, not
   evidence that the 1B model itself requires the full 12 GiB card.
+- **Resident decoder retention and asynchronous tuning corruption fixed (2026-07-13):** the resident
+  pipeline retained the complete 26-block BF16 decoder on CUDA while also streaming a fresh working block
+  from safetensors. Releasing uncompleted decoder shells reduced the clean block-0 canary to **2,600,599,040
+  peak allocated bytes**. The previously observed 26.31 GiB figure was Windows lifetime private commit,
+  not physical VRAM, although stale queued workers separately caused real device contention. The same canary
+  then exposed a correctness failure in the fully asynchronous backward-to-`ParityAdamW` handoff: one epoch
+  became NaN (or produced losses from 291,135 to 569,288 on alternate transfer paths), while synchronizing
+  every diagnostic batch restored the exact **0.6555455327** replay loss. Fresh event generations, delaying
+  slot release through the optimizer, and blocking host copies did not fix it and are therefore rejected as
+  standalone remedies. A narrow CUDA-stream synchronization after each completed backward accumulation and
+  before the optimizer step reproduces **0.6555455327**, completes the bounded canary in 29.9 seconds, and
+  retains the **2.60 GB** peak. Broader per-batch diagnostic synchronization is not retained.
 - `JsonlEventSink._read_last_sequence` parses the whole event log at construction — only matters for
   resumed runs with large logs; fine today, worth a tail-scan if event volume grows.
 - **Measured, not implemented (2026-07-13):** a fresh process inventories the pinned Gemma snapshot in a

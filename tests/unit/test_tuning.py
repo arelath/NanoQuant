@@ -183,6 +183,29 @@ def test_tuning_marks_each_staged_batch_consumed_and_closes_stager(
     assert stager.closed is True
 
 
+def test_tuning_synchronizes_gradient_handoff_before_each_optimizer_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = Hybrid()
+    inputs = torch.randn(8, 3, generator=torch.Generator().manual_seed(43))
+    targets = torch.randn(8, 2, generator=torch.Generator().manual_seed(44))
+    synchronized: list[torch.device] = []
+    monkeypatch.setattr(
+        tuning_module,
+        "_synchronize_gradient_handoff",
+        synchronized.append,
+    )
+
+    tune_factorized(
+        model,
+        "quant",
+        TuningRequest(inputs, targets, 1, 4, 0.01, seed=45, microbatch_size=2),
+        _forward,
+    )
+
+    assert synchronized == [torch.device("cpu"), torch.device("cpu")]
+
+
 def test_nonfactorized_tuning_is_independent_and_restores_best_state() -> None:
     model = Hybrid()
     inputs = torch.randn(16, 3, generator=torch.Generator().manual_seed(1))
