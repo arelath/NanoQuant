@@ -87,7 +87,7 @@ While the trainable modules use the `_SignSTE` wrapper and the frozen ones do no
 *   Replace all raw string literals identifying artifacts with these constants.
 *   *Why:* Enforces type-safety at the Python level for artifact schema identities, preventing invisible data orphaning.
 
-### [ ] 9. Centralize I/O and Hashing Boilerplate
+### [x] 9. Centralize I/O and Hashing Boilerplate
 **Location:** `safetensors_source.py`, `artifacts.py`, `activation_store.py`, `progress.py`
 **Problem:** The exact same `_hash_file` function (reading a file in 1MB chunks to compute a SHA256) is defined independently in three different files. Similarly, the "write to temporary file, sync, then atomically replace" pattern is repeated manually in `RunDirectory.write_manifest`, `LocalArtifactWriter.commit`, `MmapGenerationWriter.commit`, and various checkpoint tools.
 **Action:**

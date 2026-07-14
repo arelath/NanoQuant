@@ -13,18 +13,11 @@ import torch
 from safetensors import safe_open
 
 from nanoquant.domain.models import CheckpointInventory, CheckpointTensorMetadata, SourceTensor, TensorSpec
+from nanoquant.infrastructure.io_utils import hash_file
 
 
 class SourceIntegrityError(IOError):
     pass
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as source:
-        for chunk in iter(lambda: source.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _safe_relative_shard(name: str) -> str:
@@ -77,7 +70,7 @@ class SafetensorsModelSource:
     def _hash(self, shard: str) -> str:
         if shard not in self._shard_hashes:
             path = self.snapshot / shard
-            self._shard_hashes[shard] = _sha256(path)
+            self._shard_hashes[shard] = hash_file(path)
             self._verified_signatures[shard] = self._signature(path)
         return self._shard_hashes[shard]
 
@@ -92,7 +85,7 @@ class SafetensorsModelSource:
         signature = self._signature(path)
         if self._verified_signatures.get(shard) == signature:
             return
-        if _sha256(path) != expected:
+        if hash_file(path) != expected:
             raise SourceIntegrityError(f"source shard changed after inventory: {shard}")
         self._verified_signatures[shard] = signature
 
@@ -134,7 +127,7 @@ class SafetensorsModelSource:
         tokenizer_digest = hashlib.sha256()
         for name in tokenizer_names:
             tokenizer_digest.update(name.encode("utf-8") + b"\0")
-            tokenizer_digest.update(bytes.fromhex(_sha256(self.snapshot / name)))
+            tokenizer_digest.update(bytes.fromhex(hash_file(self.snapshot / name)))
         tensors = self.tensor_metadata()
         shards = {metadata.shard for metadata in tensors}
         self._inventory = CheckpointInventory(

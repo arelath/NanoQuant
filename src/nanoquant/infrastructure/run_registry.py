@@ -13,6 +13,7 @@ from typing import cast
 
 from nanoquant.config.codec import from_dict
 from nanoquant.domain.runs import RunManifest, RunStatus
+from nanoquant.infrastructure.io_utils import safe_replace
 
 
 @dataclass(frozen=True, slots=True)
@@ -342,7 +343,7 @@ def rebuild_registry(run_root: str | Path, include_roots: tuple[Path, ...] = ())
                 for record in sorted(records.values(), key=lambda item: (item.created_at, item.run_id, item.path)):
                     output.write(json.dumps(asdict(record), sort_keys=True, separators=(",", ":")) + "\n")
                 output.flush()
-            os.replace(temporary, path)
+            safe_replace(temporary, path)
         finally:
             if os.path.exists(temporary):
                 os.unlink(temporary)

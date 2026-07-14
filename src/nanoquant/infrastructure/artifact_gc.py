@@ -8,6 +8,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from nanoquant.infrastructure.io_utils import safe_replace
+
 ARTIFACT_ID_PATTERN = re.compile(r"sha256-[0-9a-f]{64}")
 TEXT_SUFFIXES = {".csv", ".json", ".jsonl", ".log", ".md", ".txt", ".yaml", ".yml"}
 
@@ -223,7 +225,7 @@ def apply_artifact_gc(plan: ArtifactGarbageCollectionPlan) -> ArtifactGarbageCol
                     cache.pop(artifact_id, None)
                 temporary = cache_path.with_suffix(".tmp")
                 temporary.write_text(json.dumps(cache, sort_keys=True), encoding="utf-8")
-                os.replace(temporary, cache_path)
+                safe_replace(temporary, cache_path)
         except (OSError, json.JSONDecodeError):
             pass
     return ArtifactGarbageCollectionResult(tuple(deleted), deleted_bytes)

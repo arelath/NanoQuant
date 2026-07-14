@@ -8,7 +8,6 @@ import os
 import re
 import socket
 import subprocess
-import tempfile
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,6 +17,7 @@ from typing import cast
 from nanoquant.config.codec import config_hash, to_dict
 from nanoquant.config.schema import RunConfig
 from nanoquant.domain.runs import LauncherProvenance, RunManifest, RunStatus
+from nanoquant.infrastructure.io_utils import atomic_write_json
 
 
 def _now() -> str:
@@ -162,17 +162,7 @@ class RunDirectory:
         return RunLease(self.root / ".active-lease.json")
 
     def write_manifest(self, manifest: RunManifest) -> None:
-        payload = json.dumps(to_dict(manifest), sort_keys=True, indent=2, ensure_ascii=False, allow_nan=False)
-        descriptor, temporary = tempfile.mkstemp(prefix="manifest-", suffix=".tmp", dir=self.root)
-        try:
-            with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as output:
-                output.write(payload + "\n")
-                output.flush()
-                os.fsync(output.fileno())
-            os.replace(temporary, self.manifest_path)
-        finally:
-            if os.path.exists(temporary):
-                os.unlink(temporary)
+        atomic_write_json(self.manifest_path, to_dict(manifest))
 
     def read_manifest(self) -> dict[str, object]:
         return cast(dict[str, object], json.loads(self.manifest_path.read_text(encoding="utf-8")))

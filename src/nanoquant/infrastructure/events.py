@@ -17,6 +17,7 @@ from typing import Literal, Protocol, TextIO
 from uuid import uuid4
 
 from nanoquant.infrastructure.environment import SECRET_PATTERN
+from nanoquant.infrastructure.io_utils import safe_replace
 from nanoquant.ports.event_sink import Event, Severity
 
 _IDENTIFIER = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,127}$")
@@ -239,7 +240,7 @@ def render_event_log(events_path: str | Path, output_path: str | Path) -> None:
             for event in read_event_prefix(events_path):
                 output.write(render_event_line(event) + "\n")
             output.flush()
-        os.replace(temporary, destination)
+        safe_replace(temporary, destination)
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)

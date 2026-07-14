@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 
 import torch
@@ -15,6 +14,7 @@ from nanoquant.application.calibration import (
     CausalOnlineLayerSnapshot,
     OnlineAccumulatorSnapshot,
 )
+from nanoquant.infrastructure.io_utils import safe_replace
 
 
 def save_causal_calibration_state(path: str | Path, state: CausalOnlineCalibrationState) -> None:
@@ -49,8 +49,8 @@ def save_causal_calibration_state(path: str | Path, state: CausalOnlineCalibrati
     manifest_tmp = root / "manifest.json.tmp"
     save_file(tensors, tensor_tmp)
     manifest_tmp.write_text(json.dumps(manifest, sort_keys=True, indent=2), encoding="utf-8")
-    os.replace(tensor_tmp, root / "state.safetensors")
-    os.replace(manifest_tmp, root / "manifest.json")
+    safe_replace(tensor_tmp, root / "state.safetensors")
+    safe_replace(manifest_tmp, root / "manifest.json")
 
 
 def load_causal_calibration_state(path: str | Path) -> CausalOnlineCalibrationState:

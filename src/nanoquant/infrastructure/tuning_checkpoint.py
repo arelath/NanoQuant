@@ -20,6 +20,7 @@ from nanoquant.application.tuning import (
     TuningResumeState,
 )
 from nanoquant.config.codec import from_dict, to_dict
+from nanoquant.infrastructure.io_utils import safe_replace
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,7 +89,7 @@ def _write_pointer(root: Path, identity: TuningCheckpointIdentity, generation: s
             )
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, root / "active.json")
+        safe_replace(temporary, root / "active.json")
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
@@ -152,7 +153,7 @@ def save_tuning_checkpoint(
             json.dump(manifest, stream, sort_keys=True, indent=2)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, final)
+        safe_replace(temporary, final)
         _write_pointer(root, identity, generation)
         _remove_inactive_generations(root, generation)
     finally:

@@ -12,19 +12,12 @@ from dataclasses import asdict
 from pathlib import Path
 
 from nanoquant.domain.profiling import NULL_RECORDER, PhaseRecorder
+from nanoquant.infrastructure.io_utils import atomic_write_json, hash_file, safe_replace
 from nanoquant.ports.artifact_store import ArtifactDescriptor, ArtifactFile
 
 
 class ArtifactCorruptionError(IOError):
     pass
-
-
-def _hash_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as source:
-        for chunk in iter(lambda: source.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 class LocalArtifactWriter:
@@ -51,7 +44,7 @@ class LocalArtifactWriter:
                 relative = path.relative_to(self.path).as_posix()
                 if relative.startswith("../") or Path(relative).is_absolute():
                     raise ValueError("artifact path traversal is not allowed")
-                files.append(ArtifactFile(relative, path.stat().st_size, _hash_file(path)))
+                files.append(ArtifactFile(relative, path.stat().st_size, hash_file(path)))
             identity_payload = json.dumps(
                 {
                     "type": self.artifact_type,
@@ -81,7 +74,7 @@ class LocalArtifactWriter:
             if destination.exists():
                 shutil.rmtree(self.path)
             else:
-                os.replace(self.path, destination)
+                safe_replace(self.path, destination)
             self.store._remember_validation(descriptor, destination)
         self.store.recorder.add("io.commit_bytes", sum(item.bytes for item in files))
         self.store.recorder.add("io.artifacts", 1, artifact_type=self.artifact_type)
@@ -129,27 +122,13 @@ class LocalArtifactStore:
         # source of truth. Multiple readers and writers can share one artifact
         # store, so never let a transient Windows sharing violation fail an
         # otherwise durable artifact commit.
-        descriptor, temporary = tempfile.mkstemp(
-            prefix=".validation-cache-", suffix=".tmp", dir=self.root
+        atomic_write_json(
+            self._validation_cache_path,
+            self._persistent_validation,
+            indent=None,
+            ensure_ascii=True,
+            suppress_replace_errors=True,
         )
-        try:
-            with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as output:
-                output.write(json.dumps(self._persistent_validation, sort_keys=True))
-            for attempt in range(5):
-                try:
-                    os.replace(temporary, self._validation_cache_path)
-                    return
-                except PermissionError:
-                    if attempt == 4:
-                        return
-                    time.sleep(0.01 * (2**attempt))
-                except OSError:
-                    return
-        finally:
-            try:
-                os.unlink(temporary)
-            except FileNotFoundError:
-                pass
 
     def _remember_validation(self, descriptor: ArtifactDescriptor, root: Path) -> None:
         signatures = tuple(
@@ -237,7 +216,7 @@ class LocalArtifactStore:
             path = (root / item.path).resolve()
             if root.resolve() not in path.parents:
                 raise ArtifactCorruptionError("ART001 descriptor path traversal")
-            if not path.is_file() or path.stat().st_size != item.bytes or _hash_file(path) != item.sha256:
+            if not path.is_file() or path.stat().st_size != item.bytes or hash_file(path) != item.sha256:
                 raise ArtifactCorruptionError(f"ART001 corrupt artifact member: {item.path}")
         self._remember_validation(descriptor, root)
         return descriptor
@@ -258,7 +237,7 @@ class LocalArtifactStore:
         quarantine = self.temporary_root / f"retired-{artifact_id}"
         if quarantine.exists():
             raise FileExistsError(f"artifact retirement quarantine already exists: {artifact_id}")
-        os.replace(root, quarantine)
+        safe_replace(root, quarantine)
         shutil.rmtree(quarantine)
         self._validated.pop(artifact_id, None)
         self._persistent_validation.pop(artifact_id, None)

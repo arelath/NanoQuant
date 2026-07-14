@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import tempfile
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,6 +11,7 @@ from pathlib import Path
 from nanoquant.config.codec import to_dict
 from nanoquant.domain.models import ArtifactTypes, QuantizationPlan
 from nanoquant.domain.runs import BudgetState, ProgressCursor, RunState, RunStatus
+from nanoquant.infrastructure.io_utils import atomic_write_json
 
 from .artifacts import ArtifactCorruptionError, LocalArtifactStore
 from .commits import CommitIdentity
@@ -75,16 +75,7 @@ class ProgressJournal:
         return record
 
     def write_state(self, state: RunState) -> None:
-        descriptor, temporary = tempfile.mkstemp(prefix="run-state-", suffix=".tmp", dir=self.directory)
-        try:
-            with os.fdopen(descriptor, "w", encoding="utf-8") as output:
-                json.dump(to_dict(state), output, sort_keys=True, indent=2)
-                output.flush()
-                os.fsync(output.fileno())
-            os.replace(temporary, self.state_path)
-        finally:
-            if os.path.exists(temporary):
-                os.unlink(temporary)
+        atomic_write_json(self.state_path, to_dict(state))
 
     def _valid_journal_records(self, identity: CommitIdentity) -> list[JournalRecord]:
         valid = []

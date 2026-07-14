@@ -20,6 +20,7 @@ from nanoquant.config.codec import from_dict, to_dict
 from nanoquant.domain.models import ArtifactRef
 
 from .artifacts import LocalArtifactStore
+from .io_utils import safe_replace
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,7 +139,7 @@ def activate_distillation_checkpoint(run_output: str | Path, reference: Artifact
             json.dump(to_dict(reference), stream, sort_keys=True, indent=2)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, output / "global-distillation-training.json")
+        safe_replace(temporary, output / "global-distillation-training.json")
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)

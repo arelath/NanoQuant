@@ -12,6 +12,7 @@ from nanoquant.config.codec import from_dict, to_dict
 from nanoquant.domain.models import ArtifactRef, GlobalTuningResult
 
 from .artifacts import LocalArtifactStore
+from .io_utils import safe_replace
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,7 +56,7 @@ def activate_global_tuning(run_output: str | Path, reference: ArtifactRef) -> No
             json.dump(to_dict(reference), stream, sort_keys=True, indent=2)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, output / "global-tuning.json")
+        safe_replace(temporary, output / "global-tuning.json")
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)

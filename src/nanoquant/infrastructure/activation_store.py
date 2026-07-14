@@ -14,6 +14,7 @@ from typing import Any, cast
 import torch
 
 from nanoquant.domain.resources import ResourcePlan
+from nanoquant.infrastructure.io_utils import atomic_write_json, hash_file, safe_replace
 
 
 class MemoryActivationStore:
@@ -64,14 +65,6 @@ _DTYPES = {
 }
 
 
-def _hash_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as source:
-        for chunk in iter(lambda: source.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return "sha256:" + digest.hexdigest()
-
-
 class MmapGenerationWriter:
     def __init__(self, store: MmapActivationStore, key: str, shape: tuple[int, ...], dtype: torch.dtype) -> None:
         if not key or not shape or any(dimension <= 0 for dimension in shape):
@@ -116,9 +109,9 @@ class MmapGenerationWriter:
             missing = torch.where(~self._written)[0].tolist()
             raise ValueError(f"activation generation has unwritten batches: {missing[:8]}")
         del self._mapping
-        content_hash = _hash_file(self.temporary)
+        content_hash = "sha256:" + hash_file(self.temporary)
         destination = self.store._data(self.key)
-        os.replace(self.temporary, destination)
+        safe_replace(self.temporary, destination)
         metadata = {
             "schema_version": 1,
             "key": self.key,
@@ -127,12 +120,7 @@ class MmapGenerationWriter:
             "bytes": destination.stat().st_size,
             "content_hash": content_hash,
         }
-        descriptor, temporary = tempfile.mkstemp(prefix="descriptor-", suffix=".tmp", dir=self.store.temporary)
-        with os.fdopen(descriptor, "w", encoding="utf-8") as output:
-            json.dump(metadata, output, sort_keys=True, indent=2)
-            output.flush()
-            os.fsync(output.fileno())
-        os.replace(temporary, self.store._descriptor(self.key))
+        atomic_write_json(self.store._descriptor(self.key), metadata)
         self._committed = True
         return content_hash
 
@@ -191,7 +179,7 @@ class MmapActivationStore:
         if (
             not data.is_file()
             or data.stat().st_size != value.get("bytes")
-            or _hash_file(data) != value.get("content_hash")
+            or "sha256:" + hash_file(data) != value.get("content_hash")
         ):
             raise OSError("ACT001 activation generation is corrupt")
         return cast(dict[str, Any], value)
