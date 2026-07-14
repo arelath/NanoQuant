@@ -4,12 +4,29 @@ from torch import nn
 
 from nanoquant.config.schema import ProfilingConfig, ProfilingLevel
 from nanoquant.infrastructure.profiling import Profiler
-from nanoquant.resident_quantization import _block_loss, _peak_device_memory_bytes, _run_block_batched
+from nanoquant.resident_quantization import (
+    _block_loss,
+    _peak_device_memory_bytes,
+    _release_uncompleted_decoder_blocks,
+    _run_block_batched,
+)
 
 
 class _BlockAdapter:
     def run_block(self, block: nn.Module, value: torch.Tensor, **_metadata: object) -> torch.Tensor:
         return block(value)
+
+
+def test_uncompleted_dense_decoder_blocks_are_released_from_model_shell() -> None:
+    completed = nn.Linear(2, 2)
+    layers = nn.ModuleList((nn.Linear(2, 2), completed, nn.Linear(2, 2)))
+
+    released = _release_uncompleted_decoder_blocks(layers, {1})
+
+    assert released == 2
+    assert isinstance(layers[0], nn.Identity)
+    assert layers[1] is completed
+    assert isinstance(layers[2], nn.Identity)
 
 
 def test_block_forward_does_not_retain_autograd_graphs() -> None:

@@ -172,6 +172,23 @@ versus 26.31 GiB before the corrections. The Windows private-commit figures incl
 CUDA reservation and therefore are not physical VRAM; the driver-visible figures are the relevant card-pressure
 measurement.
 
+**Dense decoder residency removed (2026-07-13).** The resident pipeline also kept the entire 1.40 GB BF16
+decoder stack on CUDA after prefix capture and calibration, even though it independently loaded each 53.7 MB
+source block from safetensors as the mutable working block. The duplicate source copy was not needed: before any
+mutation, the checkpoint-backed working block can produce the teacher boundary and then continue directly into
+factorization and tuning. A pinned Gemma block-0 comparison found the original resident block and the freshly
+loaded working block bitwise equal (`max_abs=0`). Replacing all not-yet-processed dense blocks with placeholders
+reduced live model-shell CUDA allocation from **2,144,826,368 to 625,135,616 bytes** (**1.52 GB / 70.8%**),
+while completed frozen blocks remain installed for final inline quality and resume. The exact eight-epoch gate
+oracle still follows the retained trajectory (`0.820059776 -> 0.370996982`) and peaks at 4.05 GB allocated /
+4.60 GB reserved. This is a lifetime-only change and does not advance the resident algorithm version.
+
+The earlier **26.31 GiB** observation was Windows lifetime private commit, not physical VRAM: it includes pinned
+CPU activation streams, artifact tensors, and WDDM/CUDA backing. On the 12 GiB card, the corrected production
+trace showed 2.3--2.6 GB live CUDA tensors and a 7.70 GB stable allocator reservation on the worst full-attention
+tune. Keeping those measurements distinct prevents host/virtual commit from being misdiagnosed as an impossible
+26 GiB device allocation while still treating the real 7.7--8.25 GiB driver footprint as an optimization target.
+
 ### [x] 3.2 Foreach ParityAdamW (S0)
 
 **Where.** [parity_adamw.py:66–93](../src/nanoquant/application/parity_adamw.py) — a Python loop over

@@ -256,6 +256,19 @@ def _decoder_layers(model: nn.Module) -> tuple[nn.Module, ...]:
     return tuple(values)
 
 
+def _release_uncompleted_decoder_blocks(
+    layers: nn.ModuleList,
+    completed_block_indexes: set[int],
+) -> int:
+    """Release dense source blocks that will be streamed from the checkpoint."""
+    released = 0
+    for index in range(len(layers)):
+        if index not in completed_block_indexes:
+            layers[index] = nn.Identity()
+            released += 1
+    return released
+
+
 def _mse(prediction: torch.Tensor, target: torch.Tensor) -> float:
     if prediction.shape != target.shape:
         raise ValueError("MSE prediction and target shapes differ")
@@ -1214,11 +1227,23 @@ def _run_resident_quantization_impl(
                         device=request.device,
                     )
     del decoder_layers
-    if request.device.startswith("cuda") and completed_block_indexes:
-        # Restoring a deep resume prefix replaces many full-precision CUDA weights.
-        # Release those now-unreachable allocator reservations once at the resume
-        # boundary so activation-based tuning has the same workspace as a cold run.
+    released_decoder_blocks = _release_uncompleted_decoder_blocks(
+        layer_container,
+        completed_block_indexes if request.restore_completed_blocks else set(),
+    )
+    if request.device.startswith("cuda"):
+        # The checkpoint-backed working block supplies both the teacher forward
+        # and the mutable quantization block. Not-yet-processed dense model
+        # blocks are therefore duplicates. Return their storage at this coarse
+        # boundary so factorization/tuning starts from the compact model shell.
         torch.cuda.empty_cache()
+    if released_decoder_blocks:
+        events.emit(
+            "resident-quantization",
+            "info",
+            "decoder_blocks_released",
+            released_blocks=released_decoder_blocks,
+        )
     partial_layer_records = {
         (record.block, record.layer): record
         for record in discovered_records
@@ -1242,7 +1267,6 @@ def _run_resident_quantization_impl(
         block_started = time.perf_counter()
         deferred_slice = request.defer_layer_loss_snapshots
         block_index = block_plan.block.index
-        source_block = layer_container[block_index]
         with _profile_block_phase(recorder, block_index, "prepare"):
             working_block = adapter.load_block(source, block_plan.block, request.device)
             working_block.eval()
@@ -1250,7 +1274,7 @@ def _run_resident_quantization_impl(
             with torch.no_grad():
                 teacher_outputs = _run_block_batched(
                     adapter,
-                    source_block,
+                    working_block,
                     teacher_inputs,
                     metadata,
                     request.block_forward_batch_size,

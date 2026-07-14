@@ -418,6 +418,9 @@ def main() -> None:
                         "final_weight": after_weight,
                         "wall_seconds": time.perf_counter() - started,
                         "peak_cuda_allocated_bytes": int(torch.cuda.max_memory_allocated(args.device)),
+                        "peak_cuda_reserved_bytes": int(torch.cuda.max_memory_reserved(args.device)),
+                        "final_cuda_allocated_bytes": int(torch.cuda.memory_allocated(args.device)),
+                        "final_cuda_reserved_bytes": int(torch.cuda.memory_reserved(args.device)),
                     }
                     cast(list[object], payload["runs"]).append(row)
                     args.output.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
