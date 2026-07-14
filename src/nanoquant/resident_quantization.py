@@ -187,6 +187,7 @@ class ResidentQuantizationRequest:
     factorized_tuning_batch_size: int = 8
     factorized_tuning_learning_rate: float = 1e-5
     factorized_tuning_epoch_cooldown_seconds: float = 0.0
+    initial_cooldown_seconds: float = 0.0
     nonfactorized_tuning_epochs: int = 0
     nonfactorized_tuning_epochs_by_layer: tuple[int, ...] = ()
     nonfactorized_tuning_batch_size: int = 8
@@ -917,6 +918,8 @@ def _run_resident_quantization_impl(
         raise ValueError("resident quantization block forward batch size must be positive")
     if request.factorized_tuning_epoch_cooldown_seconds < 0:
         raise ValueError("factorized tuning epoch cooldown must be non-negative")
+    if request.initial_cooldown_seconds < 0:
+        raise ValueError("resident initial cooldown must be non-negative")
     if (
         request.interrupt_after_factorized_tuning_epoch_commits is not None
         and request.interrupt_after_factorized_tuning_epoch_commits <= 0
@@ -2034,5 +2037,7 @@ def run_resident_quantization(request: ResidentQuantizationRequest) -> ResidentQ
     """Run with an exclusive cross-process lease for CUDA resident state."""
     if request.device.startswith("cuda"):
         with acquire_device_lease(request.device), _legacy_cuda_numerics():
+            if request.initial_cooldown_seconds:
+                time.sleep(request.initial_cooldown_seconds)
             return _run_resident_quantization(request)
     return _run_resident_quantization(request)

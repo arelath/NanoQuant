@@ -646,7 +646,9 @@ must be remeasured rather than inferred from the speedup.
   bounded resume again reached 86 C midway through block 3. The resident runner now supports an execution-only
   cooldown after each durable factorized-tuning epoch. It holds the CUDA lease while sleeping, does not enter
   the numerical configuration hash, and can therefore be adjusted across resumes without invalidating exact
-  state. Cooldown wall time is excluded from performance comparisons.
+  state. An execution-only initial cooldown likewise acquires the lease before sleeping, preventing another
+  worker from consuming the intended thermal-rest window. Cooldown wall time is excluded from performance
+  comparisons.
 - **Cross-environment CUDA lease splits fixed (2026-07-13):** two workers first used `%TEMP%` roots `Temp`
   and `Temp\\1`, created independent `cuda:0` leases, and together drove WDDM usage to 11–12 GiB. Moving the
   lease under `%LOCALAPPDATA%` closed that split, but a later diagnostic deliberately redirected

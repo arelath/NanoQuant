@@ -287,6 +287,7 @@ def test_numerical_batch_shapes_invalidate_resume_identity(tmp_path: Path) -> No
     assert _resident_config_hash(
         replace(request, factorized_tuning_epoch_cooldown_seconds=5.0)
     ) == _resident_config_hash(request)
+    assert _resident_config_hash(replace(request, initial_cooldown_seconds=30.0)) == _resident_config_hash(request)
 
 
 def test_rolling_retention_keeps_only_latest_resume_generation(tmp_path: Path) -> None:
