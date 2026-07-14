@@ -63,9 +63,25 @@ def test_resident_quantization_commits_complete_transformers_model(tmp_path: Pat
     event_names = [event["name"] for event in events]
     assert "preprocessing.selected" in event_names
     assert "resume.discovery_completed" in event_names
+    assert event_names.count("inventory.started") == event_names.count("inventory.completed") == 1
+    assert event_names.count("model_load.started") == event_names.count("model_load.completed") == 1
+    assert event_names.count("calibration_block.started") == event_names.count("calibration_block.completed") == 1
+    assert event_names.count("calibration_persist.started") == 1
+    assert event_names.count("calibration_persist.completed") == 1
+    assert event_names.count("rank_planning.started") == event_names.count("rank_planning.completed") == 1
     assert event_names.count("block.started") == 1
+    assert event_names.count("block_teacher_forward.started") == 1
+    assert event_names.count("block_teacher_forward.completed") == 1
+    assert event_names.count("layer.started") == 7
     assert event_names.count("layer.committed") == 7
+    assert event_names.count("layer.completed") == 7
     assert event_names.count("block.completed") == 1
+    assert event_names.count("quality_evaluation.completed") == 1
+    assert event_names.count("report_write.completed") == 1
+    run_started = next(event for event in events if event["name"] == "run.started")
+    assert run_started["fields"]["component"] == "resident-quantization"
+    assert run_started["fields"]["device"] == "cpu"
+    assert run_started["fields"]["calibration_samples"] == 1
     completed_event = next(event for event in events if event["name"] == "block.completed")
     assert completed_event["fields"]["journal_sequence"] == 8
     assert completed_event["fields"]["host_peak_bytes"] > 0

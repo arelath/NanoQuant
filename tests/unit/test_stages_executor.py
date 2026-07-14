@@ -1,3 +1,4 @@
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -58,8 +59,23 @@ def test_stage_registry_semantics_lifecycle_and_validation(tmp_path: Path) -> No
     assert registry.semantic_key("double", Request(2)) == registry.semantic_key("double", Request(2))
     assert registry.semantic_key("double", Request(2)) != registry.semantic_key("double", Request(3))
     assert execute_stage(stage, Request(2), _context(tmp_path)) == 4
+    success_events = [
+        json.loads(line)
+        for line in (tmp_path / "events.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert [event["name"] for event in success_events] == ["stage.started", "stage.completed"]
+    assert success_events[0]["fields"]["request_type"] == "Request"
+    assert success_events[1]["fields"]["wall_seconds"] >= 0
     with pytest.raises(ValueError, match="NEG001"):
         execute_stage(stage, Request(-1), _context(tmp_path / "bad"))
+    failure_events = [
+        json.loads(line)
+        for line in (tmp_path / "bad" / "events.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    failed = next(event for event in failure_events if event["name"] == "stage.failed")
+    assert failed["fields"]["active_phase"] == "validate"
+    assert failed["fields"]["request_type"] == "Request"
+    assert failed["fields"]["wall_seconds"] >= 0
     with pytest.raises(ValueError, match="already"):
         registry.register(stage)  # type: ignore[arg-type]
 

@@ -942,6 +942,21 @@ The higher per-event ratio is accepted because the absolute run-level cost is sm
 redaction, deterministic serialization, required/optional failure isolation, and canonical-superset filtering.
 Per-event `fsync`, writer-maintained `run.log`, and default per-iteration ADMM emission remain rejected.
 
+### Resident lifecycle instrumentation volume (accepted, 2026-07-14)
+
+The post-V3 instrumentation pass adds matched start/completion/failure events only at coarse operations: setup and
+preprocessing, resume recovery, block forwards/loss/commit, layer lifecycle/commit, tuning calls, activation reload,
+quality evaluation, assembly, and report creation. It does not emit inside batches, optimizer steps, tensor loops, or
+ADMM iterations. Generic stage events now carry request type, block/layer/rank, active failure phase, and elapsed time
+without adding another event pair.
+
+The one-block, seven-layer resident Gemma fixture emitted **166 events**, of which **75** are the new lifecycle and
+context events. Applying the measured JSONL+console cost of 51.26 µs/event gives a conservative **3.84 ms** added
+logging cost (about **0.23%** of the fixture's roughly 1.65 s run). A full 26-block Gemma run adds approximately
+1,100 bounded events, or well under 0.1 seconds of writer time across a many-hour workload. The new code performs no
+CUDA meter read, peak reset, synchronization, tensor conversion, or artifact mutation; event filtering still happens
+before optional debug diagnostics are constructed.
+
 ### VRAM meter overhead (accepted, 2026-07-14)
 
 The VRAM diagnostics implementation centralizes the profiler, periodic sampler, lifecycle checkpoints, OOM

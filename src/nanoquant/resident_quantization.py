@@ -136,6 +136,44 @@ RESIDENT_ALGORITHM_VERSION = 24
 
 
 @contextmanager
+def _logged_operation(
+    events: EventSink,
+    operation: str,
+    **fields: object,
+) -> Iterator[None]:
+    """Emit a bounded lifecycle pair and preserve failure location/context."""
+
+    started = time.perf_counter()
+    cast(Any, events).emit(
+        "resident-quantization",
+        "info",
+        f"{operation}.started",
+        **fields,
+    )
+    try:
+        yield
+    except BaseException as exc:
+        cast(Any, events).emit(
+            "resident-quantization",
+            "error",
+            f"{operation}.failed",
+            wall_seconds=time.perf_counter() - started,
+            error_type=type(exc).__name__,
+            error=str(exc),
+            **fields,
+        )
+        raise
+    else:
+        cast(Any, events).emit(
+            "resident-quantization",
+            "info",
+            f"{operation}.completed",
+            wall_seconds=time.perf_counter() - started,
+            **fields,
+        )
+
+
+@contextmanager
 def _legacy_cuda_numerics() -> Iterator[None]:
     matmul_tf32 = torch.backends.cuda.matmul.allow_tf32
     cudnn_tf32 = torch.backends.cudnn.allow_tf32
@@ -297,17 +335,6 @@ def _release_uncompleted_decoder_blocks(
             layers[index] = nn.Identity()
             released += 1
     return released
-
-
-def _mse(prediction: torch.Tensor, target: torch.Tensor) -> float:
-    if prediction.shape != target.shape:
-        raise ValueError("MSE prediction and target shapes differ")
-    if prediction.ndim == 0:
-        return float((prediction.detach().float() - target.detach().float()).square())
-    total = torch.zeros((), device=prediction.device)
-    for index in range(prediction.shape[0]):
-        total += (prediction[index].detach().float() - target[index].detach().float()).square().sum()
-    return float(total / prediction.numel())
 
 
 def _weighted_mse(prediction: torch.Tensor, target: torch.Tensor, importance: torch.Tensor) -> float:
@@ -485,10 +512,80 @@ def _run_prefix_batched(
     return result
 
 
-def _nll(logits: torch.Tensor, tokens: torch.Tensor) -> float:
-    prediction = logits[:, :-1].float().reshape(-1, logits.shape[-1])
-    target = tokens[:, 1:].reshape(-1)
-    return float(torch.nn.functional.cross_entropy(prediction, target))
+_QUALITY_CHUNK_POSITIONS = 256
+
+
+@torch.no_grad()
+def _run_quality_logits_batched(
+    model: nn.Module, tokens: torch.Tensor, storage_device: str | torch.device
+) -> torch.Tensor:
+    """Run the full model one sequence at a time and park the logits off-device.
+
+    Quality logits are (samples, sequence, vocabulary); for small models with
+    large vocabularies they dwarf every other allocation in the run, so they
+    are never materialized in a single forward or kept on the compute device.
+    The result stays pageable: pinning multi-gigabyte logits can destabilize
+    the host, and this tensor is read back exactly once per run.
+    """
+    destination = torch.device(storage_device)
+    result: torch.Tensor | None = None
+    for index in range(tokens.shape[0]):
+        output = cast(
+            torch.Tensor,
+            cast(Any, model)(input_ids=tokens[index : index + 1], use_cache=False).logits,
+        ).detach()
+        if result is None:
+            result = torch.empty((tokens.shape[0], *output.shape[1:]), device=destination, dtype=output.dtype)
+        result[index].copy_(output[0])
+    if result is None:
+        raise ValueError("cannot capture quality logits over empty tokens")
+    return result
+
+
+@torch.no_grad()
+def _streamed_quality_metrics(
+    model: nn.Module, tokens: torch.Tensor, reference_logits: torch.Tensor
+) -> tuple[float, float, float, float]:
+    """Return (reference NLL, compressed NLL, logit MSE, argmax agreement).
+
+    The compressed forward and every float32 comparison run one sequence at a
+    time in bounded position chunks, so peak device memory stays independent
+    of the quality sample count and vocabulary size.
+    """
+    parameter = next(iter(model.parameters()), None)
+    device = tokens.device if parameter is None else parameter.device
+    reference_nll_sum = torch.zeros((), device=device)
+    compressed_nll_sum = torch.zeros((), device=device)
+    squared_error_sum = torch.zeros((), device=device)
+    argmax_matches = torch.zeros((), device=device)
+    for index in range(tokens.shape[0]):
+        compressed = cast(
+            torch.Tensor,
+            cast(Any, model)(input_ids=tokens[index : index + 1], use_cache=False).logits,
+        ).detach()[0]
+        reference = reference_logits[index].to(device)
+        argmax_matches += (compressed.argmax(-1) == reference.argmax(-1)).sum()
+        targets = tokens[index, 1:]
+        positions = compressed.shape[0]
+        for start in range(0, positions, _QUALITY_CHUNK_POSITIONS):
+            end = min(start + _QUALITY_CHUNK_POSITIONS, positions)
+            compressed_chunk = compressed[start:end].float()
+            reference_chunk = reference[start:end].float()
+            squared_error_sum += (compressed_chunk - reference_chunk).square().sum()
+            loss_end = min(end, positions - 1)
+            if start < loss_end:
+                reference_nll_sum += torch.nn.functional.cross_entropy(
+                    reference_chunk[: loss_end - start], targets[start:loss_end], reduction="sum"
+                )
+                compressed_nll_sum += torch.nn.functional.cross_entropy(
+                    compressed_chunk[: loss_end - start], targets[start:loss_end], reduction="sum"
+                )
+    nll_positions = tokens.shape[0] * max(0, tokens.shape[1] - 1)
+    reference_nll = float(reference_nll_sum / nll_positions) if nll_positions else float("nan")
+    compressed_nll = float(compressed_nll_sum / nll_positions) if nll_positions else float("nan")
+    logit_mse = float(squared_error_sum / reference_logits.numel())
+    argmax_agreement = float(argmax_matches / (tokens.shape[0] * tokens.shape[1]))
+    return reference_nll, compressed_nll, logit_mse, argmax_agreement
 
 
 def _artifact_bytes(root: Path) -> int:
@@ -1037,7 +1134,17 @@ def _run_resident_quantization(request: ResidentQuantizationRequest) -> Resident
             stored_config_hash=session.manifest.config_hash,
             current_config_hash=proposed.config_hash,
             previous_run_id=session.previous_run_id,
+            component="resident-quantization",
+            device=request.device,
+            calibration_method=request.calibration_method,
+            calibration_samples=len(request.token_ids),
+            block_forward_batch_size=request.block_forward_batch_size,
+            factorized_tuning_epochs=request.factorized_tuning_epochs,
+            nonfactorized_tuning_epochs=request.nonfactorized_tuning_epochs,
+            post_block_refit_epochs=request.post_block_refit_epochs,
+            activation_retention=request.activation_retention,
         )
+        session_started = time.perf_counter()
         with profiled_run(
             request.profiling,
             request.output,
@@ -1049,7 +1156,16 @@ def _run_resident_quantization(request: ResidentQuantizationRequest) -> Resident
                     with recorder.phase("pipeline"):
                         result = _run_resident_quantization_impl(request, session.events, recorder, session.run_id)
             except (KeyboardInterrupt, InterruptedError) as exc:
-                session.events.emit("run", "warning", "run.interrupted", error_type=type(exc).__name__)
+                session.events.emit(
+                    "run",
+                    "warning",
+                    "run.interrupted",
+                    component="resident-quantization",
+                    device=request.device,
+                    wall_seconds=time.perf_counter() - session_started,
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
                 manifest = transition(manifest, RunStatus.INTERRUPTED)
                 _write_resident_manifest(request.output, manifest)
                 raise
@@ -1058,8 +1174,21 @@ def _run_resident_quantization(request: ResidentQuantizationRequest) -> Resident
                     "run",
                     "error",
                     "run.failed",
+                    component="resident-quantization",
+                    device=request.device,
+                    wall_seconds=time.perf_counter() - session_started,
                     error_type=type(exc).__name__,
                     error=str(exc),
+                    cause_type=(
+                        None
+                        if exc.__cause__ is None and exc.__context__ is None
+                        else type(exc.__cause__ or exc.__context__).__name__
+                    ),
+                    cause=(
+                        None
+                        if exc.__cause__ is None and exc.__context__ is None
+                        else str(exc.__cause__ or exc.__context__)
+                    ),
                 )
                 manifest = transition(
                     manifest,
@@ -1131,17 +1260,24 @@ def _run_resident_quantization_impl(
     tensors = LocalTensorStore(artifacts)
     executor = ResidentExecutor()
     context = StageContext(run_id, executor, artifacts, tensors, events, Cancellation(), recorder)
-    with recorder.phase("setup"):
-        with recorder.phase("inventory"):
-            source = SafetensorsModelSource(
-                request.snapshot,
-                source=request.source,
-                revision=request.revision,
-                verify_hashes=request.verify_hashes,
-            )
-            checkpoint = source.inventory()
-            adapter = adapter_for_config(checkpoint.config)
-            inventory = adapter.model_inventory(source)
+    with _logged_operation(
+        events,
+        "inventory",
+        source=request.source,
+        revision=request.revision,
+        verify_hashes=request.verify_hashes,
+    ):
+        with recorder.phase("setup"):
+            with recorder.phase("inventory"):
+                source = SafetensorsModelSource(
+                    request.snapshot,
+                    source=request.source,
+                    revision=request.revision,
+                    verify_hashes=request.verify_hashes,
+                )
+                checkpoint = source.inventory()
+                adapter = adapter_for_config(checkpoint.config)
+                inventory = adapter.model_inventory(source)
     if request.layer_order:
         reordered_blocks = []
         for inventory_block in inventory.blocks:
@@ -1164,47 +1300,67 @@ def _run_resident_quantization_impl(
             )
     if request.device.startswith("cuda"):
         torch.cuda.reset_peak_memory_stats(request.device)
-    with recorder.phase("setup"):
-        with recorder.phase("model_load"):
-            model = cast(
-                nn.Module,
-                AutoModelForCausalLM.from_pretrained(
-                    request.snapshot,
-                    local_files_only=True,
-                    torch_dtype=_checkpoint_dtype(checkpoint.config),
-                    attn_implementation=adapter.attention_implementation,
-                ),
-            ).to(request.device)
+    with _logged_operation(
+        events,
+        "model_load",
+        device=request.device,
+        dtype=str(_checkpoint_dtype(checkpoint.config)),
+        attention_implementation=adapter.attention_implementation,
+    ):
+        with recorder.phase("setup"):
+            with recorder.phase("model_load"):
+                model = cast(
+                    nn.Module,
+                    AutoModelForCausalLM.from_pretrained(
+                        request.snapshot,
+                        local_files_only=True,
+                        torch_dtype=_checkpoint_dtype(checkpoint.config),
+                        attn_implementation=adapter.attention_implementation,
+                    ),
+                ).to(request.device)
     model.eval()
     decoder_layers = _decoder_layers(model)
     reference_logits = None
     if request.evaluate_inline_quality:
-        with recorder.phase("setup"):
-            with recorder.phase("reference_quality"):
-                with torch.no_grad():
-                    reference_logits = cast(
-                        torch.Tensor,
-                        cast(Any, model)(input_ids=quality_tokens, use_cache=False).logits,
-                    ).detach()
+        with _logged_operation(
+            events,
+            "reference_quality",
+            samples=int(quality_tokens.shape[0]),
+            input_elements=int(quality_tokens.numel()),
+        ):
+            with recorder.phase("setup"):
+                with recorder.phase("reference_quality"):
+                    # Held on CPU for the whole run: on-device reference logits
+                    # would otherwise occupy sample*sequence*vocabulary bytes of
+                    # VRAM through every block's factorization and tuning.
+                    reference_logits = _run_quality_logits_batched(model, quality_tokens, "cpu")
     text_model = getattr(model, "model", model)
-    with recorder.phase("setup"):
-        with recorder.phase("prefix_capture"):
-            capture = capture_prefix_invocations(
-                decoder_layers[0],
-                (lambda: cast(Any, text_model)(input_ids=tokens[:1], use_cache=False),),
-            )[0]
+    with _logged_operation(events, "prefix_metadata_capture", samples=1):
+        with recorder.phase("setup"):
+            with recorder.phase("prefix_capture"):
+                capture = capture_prefix_invocations(
+                    decoder_layers[0],
+                    (lambda: cast(Any, text_model)(input_ids=tokens[:1], use_cache=False),),
+                )[0]
     captured_input = capture.positional[0]
     if not isinstance(captured_input, torch.Tensor):
         raise TypeError("captured first-block hidden state is not a tensor")
-    with recorder.phase("setup"):
-        with recorder.phase("prefix_capture"):
-            initial_inputs = _run_prefix_batched(
-                adapter,
-                model,
-                tokens,
-                request.block_forward_batch_size,
-                "cpu",
-            ).detach()
+    with _logged_operation(
+        events,
+        "prefix_activation_capture",
+        samples=int(tokens.shape[0]),
+        batch_size=request.block_forward_batch_size,
+        destination="cpu",
+    ):
+        with recorder.phase("setup"):
+            with recorder.phase("prefix_capture"):
+                initial_inputs = _run_prefix_batched(
+                    adapter,
+                    model,
+                    tokens,
+                    request.block_forward_batch_size,
+                    "cpu",
+                ).detach()
     if not torch.equal(initial_inputs[:1], captured_input.detach().cpu()):
         raise ValueError("adapter prefix does not match the model's first-block input")
     captured_metadata = capture.keyword
@@ -1212,17 +1368,24 @@ def _run_resident_quantization_impl(
         # Prefix capture traverses the full embedding/prefix path in large
         # no-grad batches. Its workspaces are dead once activations are on CPU.
         torch.cuda.empty_cache()
-    with recorder.phase("setup"):
-        with recorder.phase("preprocessing"):
-            token_bytes = tokens.detach().cpu().contiguous().view(torch.uint8).numpy().tobytes()
-            dataset = DatasetIdentity(
-                "sha256:" + hashlib.sha256(token_bytes).hexdigest(),
-                ("deterministic-token-fixture",),
-                ("1",),
-                checkpoint.tokenizer_hash,
-                "raw-token-ids-v1",
-            )
-            preprocessed = _load_precomputed_preprocessing(request, artifacts, inventory, dataset, tokens.numel())
+    with _logged_operation(events, "preprocessing_lookup"):
+        with recorder.phase("setup"):
+            with recorder.phase("preprocessing"):
+                token_bytes = tokens.detach().cpu().contiguous().view(torch.uint8).numpy().tobytes()
+                dataset = DatasetIdentity(
+                    "sha256:" + hashlib.sha256(token_bytes).hexdigest(),
+                    ("deterministic-token-fixture",),
+                    ("1",),
+                    checkpoint.tokenizer_hash,
+                    "raw-token-ids-v1",
+                )
+                preprocessed = _load_precomputed_preprocessing(
+                    request,
+                    artifacts,
+                    inventory,
+                    dataset,
+                    tokens.numel(),
+                )
 
     calibration_values: list[tuple[LayerId, MaterializedLayerCalibration]] = []
     if preprocessed is not None:
@@ -1239,18 +1402,26 @@ def _run_resident_quantization_impl(
                 key = f"block.{block_inventory.block.index}.{layer.path}"
                 causal_layers.append((key, module))
                 causal_ids[key] = layer
-        with recorder.phase("calibrate", method=request.calibration_method):
-            stats = calibrate_causal_model(
-                model,
-                tuple(
-                    tokens[start : start + request.calibration_batch_size]
-                    for start in range(0, tokens.shape[0], request.calibration_batch_size)
-                ),
-                tuple(causal_layers),
-                method=request.calibration_method,
-                shrinkage=request.calibration_shrinkage,
-                recorder=micro_recorder,
-            )
+        with _logged_operation(
+            events,
+            "calibration",
+            method=request.calibration_method,
+            layers=len(causal_layers),
+            samples=int(tokens.shape[0]),
+            batch_size=request.calibration_batch_size,
+        ):
+            with recorder.phase("calibrate", method=request.calibration_method):
+                stats = calibrate_causal_model(
+                    model,
+                    tuple(
+                        tokens[start : start + request.calibration_batch_size]
+                        for start in range(0, tokens.shape[0], request.calibration_batch_size)
+                    ),
+                    tuple(causal_layers),
+                    method=request.calibration_method,
+                    shrinkage=request.calibration_shrinkage,
+                    recorder=micro_recorder,
+                )
         calibration_values.extend((causal_ids[item.path], item) for item in stats)
     elif request.calibration_method == "forward_only":
         calibration_inputs = initial_inputs
@@ -1267,19 +1438,28 @@ def _run_resident_quantization_impl(
                 device = value.device if parameter is None else parameter.device
                 return adapter.run_block(module, value.to(device, non_blocking=True), **block_metadata)
 
-            with recorder.phase("calibrate", block=block_inventory.block.index, method="forward_only"):
-                stats = calibrate_block(
-                    block,
-                    tuple(
-                        calibration_inputs[start : start + request.block_forward_batch_size]
-                        for start in range(0, calibration_inputs.shape[0], request.block_forward_batch_size)
-                    ),
-                    paths,
-                    calibration_runner,
-                    method="forward_only",
-                    shrinkage=request.calibration_shrinkage,
-                    recorder=micro_recorder,
-                )
+            with _logged_operation(
+                events,
+                "calibration_block",
+                method="forward_only",
+                block=block_inventory.block.index,
+                layers=len(paths),
+                samples=int(calibration_inputs.shape[0]),
+                batch_size=request.block_forward_batch_size,
+            ):
+                with recorder.phase("calibrate", block=block_inventory.block.index, method="forward_only"):
+                    stats = calibrate_block(
+                        block,
+                        tuple(
+                            calibration_inputs[start : start + request.block_forward_batch_size]
+                            for start in range(0, calibration_inputs.shape[0], request.block_forward_batch_size)
+                        ),
+                        paths,
+                        calibration_runner,
+                        method="forward_only",
+                        shrinkage=request.calibration_shrinkage,
+                        recorder=micro_recorder,
+                    )
             calibration_values.extend((LayerId(block_inventory.block, item.path), item) for item in stats)
             with torch.no_grad():
                 calibration_inputs = _run_block_batched(
@@ -1293,35 +1473,48 @@ def _run_resident_quantization_impl(
     else:
         raise ValueError(f"unsupported resident calibration method: {request.calibration_method}")
     if preprocessed is None:
-        with recorder.phase("calibrate"):
-            with recorder.phase("persist"):
-                calibration = persist_calibration(
-                    tuple(calibration_values),
-                    inventory.model,
-                    dataset,
-                    request.calibration_method,
-                    "float32",
-                    artifacts,
-                    tensors,
-                    total_tokens=tokens.numel(),
-                )
-        with recorder.phase("plan"):
-            with recorder.phase("objectives"):
-                objectives = build_objectives(calibration, ObjectiveConfig(), artifacts)
-        with recorder.phase("plan"):
-            with recorder.phase("sensitivity"):
-                sensitivity_profile = (
-                    _legacy_sensitivity_profile(
-                        inventory,
-                        calibration,
-                        source,
+        with _logged_operation(
+            events,
+            "calibration_persist",
+            layers=len(calibration_values),
+            input_elements=int(tokens.numel()),
+        ):
+            with recorder.phase("calibrate"):
+                with recorder.phase("persist"):
+                    calibration = persist_calibration(
+                        tuple(calibration_values),
+                        inventory.model,
+                        dataset,
+                        request.calibration_method,
+                        "float32",
+                        artifacts,
                         tensors,
-                        alpha=request.rank_sensitivity_alpha,
-                        device=request.device,
+                        total_tokens=tokens.numel(),
                     )
-                    if request.allocation_strategy is AllocationStrategy.SENSITIVITY
-                    else ()
-                )
+        with _logged_operation(events, "objective_build", layers=len(calibration_values)):
+            with recorder.phase("plan"):
+                with recorder.phase("objectives"):
+                    objectives = build_objectives(calibration, ObjectiveConfig(), artifacts)
+        with _logged_operation(
+            events,
+            "sensitivity_analysis",
+            enabled=request.allocation_strategy is AllocationStrategy.SENSITIVITY,
+            alpha=request.rank_sensitivity_alpha,
+        ):
+            with recorder.phase("plan"):
+                with recorder.phase("sensitivity"):
+                    sensitivity_profile = (
+                        _legacy_sensitivity_profile(
+                            inventory,
+                            calibration,
+                            source,
+                            tensors,
+                            alpha=request.rank_sensitivity_alpha,
+                            device=request.device,
+                        )
+                        if request.allocation_strategy is AllocationStrategy.SENSITIVITY
+                        else ()
+                    )
         allocation = RankAllocationConfig(
             target_bpw=request.target_bpw,
             strategy=request.allocation_strategy,
@@ -1344,20 +1537,27 @@ def _run_resident_quantization_impl(
                 allow_above_allocator_cap=True,
             ),
         )
-        with recorder.phase("plan"):
-            with recorder.phase("ranks"):
-                plan = build_quantization_plan(
-                    PlanningRequest(
-                        inventory,
-                        calibration.stats,
-                        calibration.reference,
-                        objectives.objectives,
-                        allocation,
-                        request.outliers,
-                        sensitivity_profile,
+        with _logged_operation(
+            events,
+            "rank_planning",
+            strategy=request.allocation_strategy.value,
+            target_bpw=request.target_bpw,
+            rank_multiple=request.rank_multiple,
+        ):
+            with recorder.phase("plan"):
+                with recorder.phase("ranks"):
+                    plan = build_quantization_plan(
+                        PlanningRequest(
+                            inventory,
+                            calibration.stats,
+                            calibration.reference,
+                            objectives.objectives,
+                            allocation,
+                            request.outliers,
+                            sensitivity_profile,
+                        )
                     )
-                )
-                persisted_plan = persist_plan(plan, artifacts)
+                    persisted_plan = persist_plan(plan, artifacts)
     else:
         calibration, objectives, persisted_plan = preprocessed
         plan = persisted_plan.plan
@@ -1375,9 +1575,10 @@ def _run_resident_quantization_impl(
     config_hash = _resident_config_hash(request)
     identity = CommitIdentity(config_hash, inventory.model.config_hash, persisted_plan.reference.artifact_id)
     journal = ProgressJournal(request.output / "state", run_id, artifacts)
-    with recorder.phase("resume"):
-        with recorder.phase("discover"):
-            discovery = journal.discover(plan, identity)
+    with _logged_operation(events, "resume_discovery"):
+        with recorder.phase("resume"):
+            with recorder.phase("discover"):
+                discovery = journal.discover(plan, identity)
     discovered_records = (*discovery.valid_records, *discovery.orphan_records)
     events.emit(
         "resident-quantization",
@@ -1391,62 +1592,72 @@ def _run_resident_quantization_impl(
     block_records = sorted(
         (record for record in discovered_records if record.kind == "block"), key=lambda record: record.block
     )
-    with recorder.phase("resume"):
-        with recorder.phase("load_commits"):
-            committed_blocks = [
-                (
-                    ArtifactRef("block-result", record.artifact_id, 1),
-                    load_committed_block(
-                        ArtifactRef("block-result", record.artifact_id, 1), artifacts, identity
-                    ).result,
-                )
-                for record in block_records
-            ]
+    with _logged_operation(events, "resume_commit_load", blocks=len(block_records)):
+        with recorder.phase("resume"):
+            with recorder.phase("load_commits"):
+                committed_blocks = [
+                    (
+                        ArtifactRef("block-result", record.artifact_id, 1),
+                        load_committed_block(
+                            ArtifactRef("block-result", record.artifact_id, 1), artifacts, identity
+                        ).result,
+                    )
+                    for record in block_records
+                ]
     if request.activation_retention == "rolling":
         for _reference, old_block in committed_blocks[:-1]:
             retire_block_activations(old_block, artifacts)
     accepted_bits = sum(layer.actual_bit_cost.total for _, block in committed_blocks for layer in block.layers)
     retry_bits_spent = sum(layer.extra_retry_bits for _, block in committed_blocks for layer in block.layers)
     budget = BudgetState(plan.planned_cost.total, accepted_bits, retry_bits_spent)
-    with recorder.phase("resume"):
-        with recorder.phase("activations"):
-            if committed_blocks:
-                teacher_inputs, compressed_inputs = load_block_activations(committed_blocks[-1][0], artifacts, "cpu")
-                if request.device.startswith("cuda"):
-                    teacher_inputs = teacher_inputs.pin_memory()
-                    compressed_inputs = compressed_inputs.pin_memory()
-            else:
-                teacher_inputs = initial_inputs
-                compressed_inputs = initial_inputs
+    with _logged_operation(
+        events,
+        "resume_activation_load",
+        resumed=bool(committed_blocks),
+        source_block=(None if not committed_blocks else committed_blocks[-1][1].block.index),
+    ):
+        with recorder.phase("resume"):
+            with recorder.phase("activations"):
+                if committed_blocks:
+                    teacher_inputs, compressed_inputs = load_block_activations(
+                        committed_blocks[-1][0], artifacts, "cpu"
+                    )
+                    if request.device.startswith("cuda"):
+                        teacher_inputs = teacher_inputs.pin_memory()
+                        compressed_inputs = compressed_inputs.pin_memory()
+                else:
+                    teacher_inputs = initial_inputs
+                    compressed_inputs = initial_inputs
     del initial_inputs
     completed_block_indexes = {block.block.index for _, block in committed_blocks}
     layer_container = getattr(getattr(model, "model", None), "layers", None)
     if not isinstance(layer_container, nn.ModuleList):
         raise TypeError("model does not expose a mutable decoder layer stack")
     if request.restore_completed_blocks:
-        with recorder.phase("resume"):
-            with recorder.phase("restore"):
-                for _, completed_block in committed_blocks:
-                    restored_block = layer_container[completed_block.block.index]
-                    for state in completed_block.frozen_state.quantized_layers:
-                        frozen = LayerFreezer().load(
-                            state,
+        with _logged_operation(events, "resume_model_restore", blocks=len(committed_blocks)):
+            with recorder.phase("resume"):
+                with recorder.phase("restore"):
+                    for _, completed_block in committed_blocks:
+                        restored_block = layer_container[completed_block.block.index]
+                        for state in completed_block.frozen_state.quantized_layers:
+                            frozen = LayerFreezer().load(
+                                state,
+                                tensors,
+                                device=request.device,
+                                dtype=compressed_inputs.dtype,
+                                backend="factorized",
+                            )
+                            BlockEditor().install_frozen_layer(
+                                restored_block,
+                                state.layer.path,
+                                frozen.module,
+                            )
+                        restore_block_auxiliary_parameters(
+                            restored_block,
+                            completed_block.frozen_state.auxiliary_parameters,
                             tensors,
                             device=request.device,
-                            dtype=compressed_inputs.dtype,
-                            backend="factorized",
                         )
-                        BlockEditor().install_frozen_layer(
-                            restored_block,
-                            state.layer.path,
-                            frozen.module,
-                        )
-                    restore_block_auxiliary_parameters(
-                        restored_block,
-                        completed_block.frozen_state.auxiliary_parameters,
-                        tensors,
-                        device=request.device,
-                    )
     del decoder_layers
     released_decoder_blocks = _release_uncompleted_decoder_blocks(
         layer_container,
@@ -1513,20 +1724,29 @@ def _run_resident_quantization_impl(
         ) -> torch.Tensor:
             return adapter.run_block(module, value, **block_metadata)
 
-        with _profile_block_phase(recorder, block_index, "prepare"):
-            working_block = adapter.load_block(source, block_plan.block, request.device)
-            working_block.eval()
-        with _profile_block_phase(recorder, block_index, "teacher_forward"):
-            with torch.no_grad():
-                teacher_outputs = _run_block_batched(
-                    adapter,
-                    working_block,
-                    teacher_inputs,
-                    metadata,
-                    request.block_forward_batch_size,
-                    "cpu",
-                    recorder=micro_recorder,
-                ).detach()
+        with _logged_operation(events, "block_prepare", block=block_index, device=request.device):
+            with _profile_block_phase(recorder, block_index, "prepare"):
+                working_block = adapter.load_block(source, block_plan.block, request.device)
+                working_block.eval()
+        with _logged_operation(
+            events,
+            "block_teacher_forward",
+            block=block_index,
+            samples=int(teacher_inputs.shape[0]),
+            batch_size=request.block_forward_batch_size,
+            destination="cpu",
+        ):
+            with _profile_block_phase(recorder, block_index, "teacher_forward"):
+                with torch.no_grad():
+                    teacher_outputs = _run_block_batched(
+                        adapter,
+                        working_block,
+                        teacher_inputs,
+                        metadata,
+                        request.block_forward_batch_size,
+                        "cpu",
+                        recorder=micro_recorder,
+                    ).detach()
         block_output_stats = next(
             (
                 item
@@ -1535,27 +1755,34 @@ def _run_resident_quantization_impl(
             ),
             next(item for item in calibration.stats.layers if item.layer.block.index == block_index),
         )
-        with _profile_block_phase(recorder, block_index, "entry_loss"):
-            with tensors.read(block_output_stats.output_importance, request.device) as value:
-                block_output_importance = value.clone()
-            loss_recorder = BlockLossRecorder()
-            loss_recorder.record_source_reference(
-                _self_reference_weighted_mse(teacher_outputs, block_output_importance)
-            )
-            loss_recorder.record_block_entry(
-                0.0
-                if deferred_slice
-                else _block_loss(
-                    adapter,
-                    working_block,
-                    compressed_inputs,
-                    teacher_outputs,
-                    block_output_importance,
-                    metadata,
-                    request.block_forward_batch_size,
-                    micro_recorder,
+        with _logged_operation(
+            events,
+            "block_entry_loss",
+            block=block_index,
+            deferred=deferred_slice,
+            samples=int(compressed_inputs.shape[0]),
+        ):
+            with _profile_block_phase(recorder, block_index, "entry_loss"):
+                with tensors.read(block_output_stats.output_importance, request.device) as value:
+                    block_output_importance = value.clone()
+                loss_recorder = BlockLossRecorder()
+                loss_recorder.record_source_reference(
+                    _self_reference_weighted_mse(teacher_outputs, block_output_importance)
                 )
-            )
+                loss_recorder.record_block_entry(
+                    0.0
+                    if deferred_slice
+                    else _block_loss(
+                        adapter,
+                        working_block,
+                        compressed_inputs,
+                        teacher_outputs,
+                        block_output_importance,
+                        metadata,
+                        request.block_forward_batch_size,
+                        micro_recorder,
+                    )
+                )
         if request.device.startswith("cuda"):
             # The no-grad source/output probes use the larger forward batch and
             # otherwise leave attention workspaces reserved during backprop.
@@ -1566,33 +1793,68 @@ def _run_resident_quantization_impl(
         tuning_recorder = micro_recorder
 
         for layer_position, layer_plan in enumerate(block_plan.layers):
+            layer_started = time.perf_counter()
             nonfactorized_epochs = _nonfactorized_epochs(request, layer_position)
+            events.emit(
+                "resident-quantization",
+                "info",
+                "layer.started",
+                block=block_index,
+                layer=layer_plan.layer.path,
+                position=layer_position,
+                planned_rank=layer_plan.rank,
+                outlier_columns=layer_plan.outliers.count,
+                nonfactorized_tuning_epochs=nonfactorized_epochs,
+                factorized_tuning_epochs=request.factorized_tuning_epochs,
+            )
             if nonfactorized_epochs > 0:
-                with _profile_layer_phase(recorder, block_index, layer_plan.layer.path, "nonfactorized_tuning"):
-                    tune_non_factorized(
-                        working_block,
-                        TuningRequest(
-                            compressed_inputs,
-                            teacher_outputs,
-                            nonfactorized_epochs,
-                            request.nonfactorized_tuning_batch_size,
-                            request.nonfactorized_tuning_learning_rate,
-                            early_stop_relative_tolerance=(request.nonfactorized_tuning_early_stop_relative_tolerance),
-                            output_importance=block_output_importance,
-                            seed=_tuning_seed(request, "nonfactorized-tuning", block_index, layer_plan.layer.path),
-                            microbatch_size=request.tuning_microbatch_size,
-                            epoch_observer=_epoch_cooldown_observer(
-                                request.nonfactorized_tuning_epoch_cooldown_seconds,
-                                events,
-                                tuning_kind="nonfactorized",
-                                block=block_index,
-                                layer=layer_plan.layer.path,
+                with _logged_operation(
+                    events,
+                    "nonfactorized_tuning",
+                    block=block_index,
+                    layer=layer_plan.layer.path,
+                    epochs=nonfactorized_epochs,
+                    batch_size=request.nonfactorized_tuning_batch_size,
+                    microbatch_size=request.tuning_microbatch_size,
+                    learning_rate=request.nonfactorized_tuning_learning_rate,
+                ):
+                    with _profile_layer_phase(
+                        recorder,
+                        block_index,
+                        layer_plan.layer.path,
+                        "nonfactorized_tuning",
+                    ):
+                        tune_non_factorized(
+                            working_block,
+                            TuningRequest(
+                                compressed_inputs,
+                                teacher_outputs,
+                                nonfactorized_epochs,
+                                request.nonfactorized_tuning_batch_size,
+                                request.nonfactorized_tuning_learning_rate,
+                                early_stop_relative_tolerance=(
+                                    request.nonfactorized_tuning_early_stop_relative_tolerance
+                                ),
+                                output_importance=block_output_importance,
+                                seed=_tuning_seed(
+                                    request,
+                                    "nonfactorized-tuning",
+                                    block_index,
+                                    layer_plan.layer.path,
+                                ),
+                                microbatch_size=request.tuning_microbatch_size,
+                                epoch_observer=_epoch_cooldown_observer(
+                                    request.nonfactorized_tuning_epoch_cooldown_seconds,
+                                    events,
+                                    tuning_kind="nonfactorized",
+                                    block=block_index,
+                                    layer=layer_plan.layer.path,
+                                ),
+                                restore_best_state=request.restore_best_tuning_state,
                             ),
-                            restore_best_state=request.restore_best_tuning_state,
-                        ),
-                        tuning_forward,
-                        tuning_recorder,
-                    )
+                            tuning_forward,
+                            tuning_recorder,
+                        )
             with _profile_layer_phase(recorder, block_index, layer_plan.layer.path, "materialize"):
                 source_linear = _module_at_path(working_block, layer_plan.layer.path)
                 source_weight = getattr(source_linear, "weight", None)
@@ -1645,6 +1907,18 @@ def _run_resident_quantization_impl(
                                 micro_recorder,
                             ),
                         )
+                events.emit(
+                    "resident-quantization",
+                    "info",
+                    "layer.completed",
+                    block=block_index,
+                    layer=layer_plan.layer.path,
+                    status="reused",
+                    rank=prior.frozen_state.rank,
+                    accepted_bits=budget.accepted_bits,
+                    retry_bits_spent=budget.retry_bits_spent,
+                    wall_seconds=time.perf_counter() - layer_started,
+                )
                 continue
             with _profile_layer_phase(recorder, block_index, layer_plan.layer.path, "factorize"):
                 accepted, outliers, fitted = _run_resident_factorization_attempts(
@@ -1765,26 +2039,49 @@ def _run_resident_quantization_impl(
                             f"{new_factorized_tuning_epoch_commits} factorized tuning epoch checkpoint(s)"
                         )
 
-                with _profile_layer_phase(recorder, block_index, layer_plan.layer.path, "factorized_tuning"):
-                    tuning = tune_factorized(
-                        working_block,
+                with _logged_operation(
+                    events,
+                    "factorized_tuning",
+                    block=block_index,
+                    layer=layer_plan.layer.path,
+                    epochs=request.factorized_tuning_epochs,
+                    completed_epochs=(
+                        0 if active_checkpoint is None else active_checkpoint.state.completed_epochs
+                    ),
+                    batch_size=request.factorized_tuning_batch_size,
+                    microbatch_size=request.tuning_microbatch_size,
+                    learning_rate=request.factorized_tuning_learning_rate,
+                ):
+                    with _profile_layer_phase(
+                        recorder,
+                        block_index,
                         layer_plan.layer.path,
-                        TuningRequest(
-                            compressed_inputs,
-                            teacher_outputs,
-                            request.factorized_tuning_epochs,
-                            request.factorized_tuning_batch_size,
-                            request.factorized_tuning_learning_rate,
-                            output_importance=block_output_importance,
-                            seed=_tuning_seed(request, "factorized-tuning", block_index, layer_plan.layer.path),
-                            microbatch_size=request.tuning_microbatch_size,
-                            restore_best_state=request.restore_best_tuning_state,
-                        ),
-                        tuning_forward,
-                        tuning_recorder,
-                        resume=None if active_checkpoint is None else active_checkpoint.state,
-                        checkpoint_sink=checkpoint_sink,
-                    )
+                        "factorized_tuning",
+                    ):
+                        tuning = tune_factorized(
+                            working_block,
+                            layer_plan.layer.path,
+                            TuningRequest(
+                                compressed_inputs,
+                                teacher_outputs,
+                                request.factorized_tuning_epochs,
+                                request.factorized_tuning_batch_size,
+                                request.factorized_tuning_learning_rate,
+                                output_importance=block_output_importance,
+                                seed=_tuning_seed(
+                                    request,
+                                    "factorized-tuning",
+                                    block_index,
+                                    layer_plan.layer.path,
+                                ),
+                                microbatch_size=request.tuning_microbatch_size,
+                                restore_best_state=request.restore_best_tuning_state,
+                            ),
+                            tuning_forward,
+                            tuning_recorder,
+                            resume=None if active_checkpoint is None else active_checkpoint.state,
+                            checkpoint_sink=checkpoint_sink,
+                        )
             with _profile_layer_phase(recorder, block_index, layer_plan.layer.path, "freeze"):
                 frozen_outliers = (
                     None
@@ -1832,31 +2129,38 @@ def _run_resident_quantization_impl(
                         ("tuning_disabled",) if request.scale_fit.enabled else ("scale_fit_disabled", "tuning_disabled")
                     ),
                 )
-            with _profile_layer_phase(recorder, block_index, layer_plan.layer.path, "commit"):
-                committed_layer = commit_layer(layer_result, artifacts, identity)
-                layer_journal_record = journal.append(
-                    "layer",
-                    block_index,
-                    layer_plan.layer.path,
-                    committed_layer.reference.artifact_id,
-                    identity,
-                )
-                clear_tuning_checkpoint(request.output)
-                events.emit(
-                    "resident-quantization",
-                    "info",
-                    "layer.committed",
-                    block=block_index,
-                    layer=layer_plan.layer.path,
-                    artifact_id=committed_layer.reference.artifact_id,
-                    journal_sequence=layer_journal_record.sequence,
-                    rank=layer_result.frozen_state.rank,
-                    accepted_attempt=layer_result.accepted_attempt,
-                    actual_bits=layer_result.actual_bit_cost.total,
-                    extra_retry_bits=layer_result.extra_retry_bits,
-                    weighted_error=layer_result.final_reconstruction.export_weighted_normalized_error,
-                    raw_error=layer_result.final_reconstruction.raw_normalized_error,
-                )
+            with _logged_operation(
+                events,
+                "layer_commit",
+                block=block_index,
+                layer=layer_plan.layer.path,
+                rank=layer_result.frozen_state.rank,
+            ):
+                with _profile_layer_phase(recorder, block_index, layer_plan.layer.path, "commit"):
+                    committed_layer = commit_layer(layer_result, artifacts, identity)
+                    layer_journal_record = journal.append(
+                        "layer",
+                        block_index,
+                        layer_plan.layer.path,
+                        committed_layer.reference.artifact_id,
+                        identity,
+                    )
+                    clear_tuning_checkpoint(request.output)
+                    events.emit(
+                        "resident-quantization",
+                        "info",
+                        "layer.committed",
+                        block=block_index,
+                        layer=layer_plan.layer.path,
+                        artifact_id=committed_layer.reference.artifact_id,
+                        journal_sequence=layer_journal_record.sequence,
+                        rank=layer_result.frozen_state.rank,
+                        accepted_attempt=layer_result.accepted_attempt,
+                        actual_bits=layer_result.actual_bit_cost.total,
+                        extra_retry_bits=layer_result.extra_retry_bits,
+                        weighted_error=layer_result.final_reconstruction.export_weighted_normalized_error,
+                        raw_error=layer_result.final_reconstruction.raw_normalized_error,
+                    )
             new_layer_commits += 1
             if (
                 request.interrupt_after_layer_commits is not None
@@ -1879,6 +2183,20 @@ def _run_resident_quantization_impl(
                         micro_recorder,
                     ),
                 )
+            events.emit(
+                "resident-quantization",
+                "info",
+                "layer.completed",
+                block=block_index,
+                layer=layer_plan.layer.path,
+                status="committed",
+                rank=layer_result.frozen_state.rank,
+                accepted_attempt=layer_result.accepted_attempt,
+                attempts=len(layer_result.attempts),
+                accepted_bits=budget.accepted_bits,
+                retry_bits_spent=budget.retry_bits_spent,
+                wall_seconds=time.perf_counter() - layer_started,
+            )
         if request.post_block_refit_epochs > 0:
             trainable_by_path: dict[str, TrainableFactorizedLinear] = {}
             for state in frozen_states:
@@ -1890,28 +2208,38 @@ def _run_resident_quantization_impl(
                 )
                 BlockEditor().install_trainable_layer(working_block, state.layer.path, trainable)
                 trainable_by_path[state.layer.path] = trainable
-            with _profile_block_phase(recorder, block_index, "refit"):
-                post_block_refit(
-                    working_block,
-                    TuningRequest(
-                        compressed_inputs,
-                        teacher_outputs,
-                        request.post_block_refit_epochs,
-                        request.post_block_refit_batch_size,
-                        request.post_block_refit_learning_rate,
-                        output_importance=block_output_importance,
-                        seed=_tuning_seed(request, "post-block-refit", block_index, None),
-                        microbatch_size=request.tuning_microbatch_size,
-                        epoch_observer=_epoch_cooldown_observer(
-                            request.post_block_refit_epoch_cooldown_seconds,
-                            events,
-                            tuning_kind="post_block_refit",
-                            block=block_index,
+            with _logged_operation(
+                events,
+                "post_block_refit",
+                block=block_index,
+                layers=len(frozen_states),
+                epochs=request.post_block_refit_epochs,
+                batch_size=request.post_block_refit_batch_size,
+                microbatch_size=request.tuning_microbatch_size,
+                learning_rate=request.post_block_refit_learning_rate,
+            ):
+                with _profile_block_phase(recorder, block_index, "refit"):
+                    post_block_refit(
+                        working_block,
+                        TuningRequest(
+                            compressed_inputs,
+                            teacher_outputs,
+                            request.post_block_refit_epochs,
+                            request.post_block_refit_batch_size,
+                            request.post_block_refit_learning_rate,
+                            output_importance=block_output_importance,
+                            seed=_tuning_seed(request, "post-block-refit", block_index, None),
+                            microbatch_size=request.tuning_microbatch_size,
+                            epoch_observer=_epoch_cooldown_observer(
+                                request.post_block_refit_epoch_cooldown_seconds,
+                                events,
+                                tuning_kind="post_block_refit",
+                                block=block_index,
+                            ),
                         ),
-                    ),
-                    tuning_forward,
-                    tuning_recorder,
-                )
+                        tuning_forward,
+                        tuning_recorder,
+                    )
             refitted_states = []
             refitted_results = []
             for layer_result in layer_results:
@@ -1953,17 +2281,25 @@ def _run_resident_quantization_impl(
                     micro_recorder,
                 )
             )
-        with _profile_block_phase(recorder, block_index, "propagate"):
-            with torch.no_grad():
-                compressed_outputs = _run_block_batched(
-                    adapter,
-                    working_block,
-                    compressed_inputs,
-                    metadata,
-                    request.block_forward_batch_size,
-                    "cpu",
-                    recorder=micro_recorder,
-                ).detach()
+        with _logged_operation(
+            events,
+            "block_propagation",
+            block=block_index,
+            samples=int(compressed_inputs.shape[0]),
+            batch_size=request.block_forward_batch_size,
+            destination="cpu",
+        ):
+            with _profile_block_phase(recorder, block_index, "propagate"):
+                with torch.no_grad():
+                    compressed_outputs = _run_block_batched(
+                        adapter,
+                        working_block,
+                        compressed_inputs,
+                        metadata,
+                        request.block_forward_batch_size,
+                        "cpu",
+                        recorder=micro_recorder,
+                    ).detach()
         with _profile_block_phase(recorder, block_index, "finalize"):
             loss_recorder.record_final_frozen_pre_kd(
                 _weighted_mse(compressed_outputs, teacher_outputs, block_output_importance)
@@ -1982,29 +2318,40 @@ def _run_resident_quantization_impl(
             )
             block_peak_host = peak_process_memory_bytes()
             peak_device_bytes = max(peak_device_bytes, block_peak)
-        with _profile_block_phase(recorder, block_index, "commit"):
-            committed = commit_block(
-                block_plan.block,
-                tuple(layer_results),
-                frozen_block,
-                loss_recorder.finalize(),
-                teacher_outputs,
-                compressed_outputs,
-                budget.retry_bits_spent,
-                artifacts,
-                identity,
-                wall_seconds=time.perf_counter() - block_started,
-                peak_gpu_bytes=block_peak,
-                peak_host_bytes=block_peak_host,
-                warnings=()
-                if request.factorized_tuning_epochs > 0 and request.scale_fit.enabled
-                else (("tuning_disabled",) if request.scale_fit.enabled else ("scale_fit_disabled", "tuning_disabled")),
-            )
-            block_journal_record = journal.append(
-                "block", block_index, None, committed.reference.artifact_id, identity
-            )
-            if request.activation_retention == "rolling" and committed_blocks:
-                retire_block_activations(committed_blocks[-1][1], artifacts)
+        with _logged_operation(
+            events,
+            "block_commit",
+            block=block_index,
+            layers=len(layer_results),
+            retention=request.activation_retention,
+        ):
+            with _profile_block_phase(recorder, block_index, "commit"):
+                committed = commit_block(
+                    block_plan.block,
+                    tuple(layer_results),
+                    frozen_block,
+                    loss_recorder.finalize(),
+                    teacher_outputs,
+                    compressed_outputs,
+                    budget.retry_bits_spent,
+                    artifacts,
+                    identity,
+                    wall_seconds=time.perf_counter() - block_started,
+                    peak_gpu_bytes=block_peak,
+                    peak_host_bytes=block_peak_host,
+                    warnings=()
+                    if request.factorized_tuning_epochs > 0 and request.scale_fit.enabled
+                    else (
+                        ("tuning_disabled",)
+                        if request.scale_fit.enabled
+                        else ("scale_fit_disabled", "tuning_disabled")
+                    ),
+                )
+                block_journal_record = journal.append(
+                    "block", block_index, None, committed.reference.artifact_id, identity
+                )
+                if request.activation_retention == "rolling" and committed_blocks:
+                    retire_block_activations(committed_blocks[-1][1], artifacts)
         committed_blocks.append((committed.reference, committed.result))
         cast(Any, events).emit(
             "resident-quantization",
@@ -2038,49 +2385,72 @@ def _run_resident_quantization_impl(
             # canonical activation generation. Reloading the just-committed
             # boundary also makes the artifact round trip part of every
             # multi-block execution rather than a resume-only code path.
-            del teacher_outputs, compressed_outputs
-            teacher_inputs, compressed_inputs = load_block_activations(committed.reference, artifacts, "cpu")
-            if request.device.startswith("cuda"):
-                teacher_inputs = teacher_inputs.pin_memory()
-                compressed_inputs = compressed_inputs.pin_memory()
+            with _logged_operation(
+                events,
+                "block_activation_reload",
+                block=block_index,
+                artifact_id=committed.reference.artifact_id,
+                destination="cpu",
+            ):
+                del teacher_outputs, compressed_outputs
+                teacher_inputs, compressed_inputs = load_block_activations(
+                    committed.reference,
+                    artifacts,
+                    "cpu",
+                )
+                if request.device.startswith("cuda"):
+                    teacher_inputs = teacher_inputs.pin_memory()
+                    compressed_inputs = compressed_inputs.pin_memory()
         else:
             teacher_inputs = teacher_outputs
             compressed_inputs = compressed_outputs
         layer_container[block_index] = working_block
         del working_block
 
-    compressed_logits = None
-    with recorder.phase("finalize"):
-        with recorder.phase("quality"):
-            if request.evaluate_inline_quality:
-                if not request.restore_completed_blocks and completed_block_indexes:
-                    raise ValueError("inline quality evaluation requires completed-block restoration")
-                with torch.no_grad():
-                    compressed_logits = cast(
-                        torch.Tensor,
-                        cast(Any, model)(input_ids=quality_tokens, use_cache=False).logits,
-                    ).detach()
+    quality_metrics: tuple[float, float, float, float] | None = None
+    with _logged_operation(
+        events,
+        "quality_evaluation",
+        enabled=request.evaluate_inline_quality,
+        samples=int(quality_tokens.shape[0]),
+        input_elements=int(quality_tokens.numel()),
+    ):
+        with recorder.phase("finalize"):
+            with recorder.phase("quality"):
+                if request.evaluate_inline_quality:
+                    if not request.restore_completed_blocks and completed_block_indexes:
+                        raise ValueError("inline quality evaluation requires completed-block restoration")
+                    if reference_logits is None:
+                        raise AssertionError("inline quality evaluation requires captured reference logits")
+                    quality_metrics = _streamed_quality_metrics(model, quality_tokens, reference_logits)
     original_elements = sum(
         layer.in_features * layer.out_features for block in inventory.blocks for layer in block.quantizable_layers
     )
-    with recorder.phase("finalize"):
-        with recorder.phase("assemble"):
-            frozen_model = assemble_frozen_model(
-                inventory.model,
-                persisted_plan.reference,
-                tuple(committed_blocks),
-                (),
-                original_elements,
-            )
+    with _logged_operation(events, "model_assembly", blocks=len(committed_blocks)):
+        with recorder.phase("finalize"):
+            with recorder.phase("assemble"):
+                frozen_model = assemble_frozen_model(
+                    inventory.model,
+                    persisted_plan.reference,
+                    tuple(committed_blocks),
+                    (),
+                    original_elements,
+                )
     with recorder.phase("finalize"):
         with recorder.phase("metrics"):
-            if reference_logits is None or compressed_logits is None:
+            if quality_metrics is None:
                 reference_nll = compressed_nll = logit_mse = argmax_agreement = float("nan")
             else:
-                reference_nll = _nll(reference_logits, quality_tokens)
-                compressed_nll = _nll(compressed_logits, quality_tokens)
-                logit_mse = _mse(compressed_logits, reference_logits)
-                argmax_agreement = float((compressed_logits.argmax(-1) == reference_logits.argmax(-1)).float().mean())
+                reference_nll, compressed_nll, logit_mse, argmax_agreement = quality_metrics
+    events.emit(
+        "resident-quantization",
+        "info",
+        "quality.metrics_computed",
+        reference_nll=reference_nll,
+        compressed_nll=compressed_nll,
+        logit_mse=logit_mse,
+        argmax_agreement=argmax_agreement,
+    )
     with recorder.phase("finalize"):
         with recorder.phase("report_prepare"):
             elapsed = time.perf_counter() - started
@@ -2120,16 +2490,22 @@ def _run_resident_quantization_impl(
                 ],
                 "reused_commit_count": len(discovered_records),
             }
-    with recorder.phase("finalize"):
-        with recorder.phase("report"):
-            with artifacts.begin_write("resident-quantization-report") as writer:
-                (writer.path / "report.json").write_text(
-                    json.dumps(report_payload, sort_keys=True, indent=2), encoding="utf-8"
-                )
-                (writer.path / "reconstruction.md").write_text(
-                    render_reconstruction_tables(tuple(block for _, block in committed_blocks)), encoding="utf-8"
-                )
-                descriptor = writer.commit()
+    with _logged_operation(
+        events,
+        "report_write",
+        blocks=len(committed_blocks),
+        layers=sum(len(block.layers) for _, block in committed_blocks),
+    ):
+        with recorder.phase("finalize"):
+            with recorder.phase("report"):
+                with artifacts.begin_write("resident-quantization-report") as writer:
+                    (writer.path / "report.json").write_text(
+                        json.dumps(report_payload, sort_keys=True, indent=2), encoding="utf-8"
+                    )
+                    (writer.path / "reconstruction.md").write_text(
+                        render_reconstruction_tables(tuple(block for _, block in committed_blocks)), encoding="utf-8"
+                    )
+                    descriptor = writer.commit()
     with recorder.phase("finalize"):
         with recorder.phase("resource_summary"):
             report = ArtifactRef("resident-quantization-report", descriptor.artifact_id, descriptor.schema_version)
@@ -2372,11 +2748,24 @@ def _run_resident_factorization_slice(request: ResidentQuantizationRequest) -> R
             current_config_hash=proposed.config_hash,
             previous_run_id=session.previous_run_id,
             component="resident-factorization-slice",
+            device=request.device,
+            calibration_method=request.calibration_method,
+            calibration_samples=len(request.token_ids),
         )
+        session_started = time.perf_counter()
         try:
             result = _run_resident_factorization_slice_impl(request, session.events, session.run_id)
         except (KeyboardInterrupt, InterruptedError) as exc:
-            session.events.emit("run", "warning", "run.interrupted", error_type=type(exc).__name__)
+            session.events.emit(
+                "run",
+                "warning",
+                "run.interrupted",
+                component="resident-factorization-slice",
+                device=request.device,
+                wall_seconds=time.perf_counter() - session_started,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
             manifest = transition(manifest, RunStatus.INTERRUPTED)
             _write_resident_manifest(request.output, manifest)
             raise
@@ -2385,8 +2774,21 @@ def _run_resident_factorization_slice(request: ResidentQuantizationRequest) -> R
                 "run",
                 "error",
                 "run.failed",
+                component="resident-factorization-slice",
+                device=request.device,
+                wall_seconds=time.perf_counter() - session_started,
                 error_type=type(exc).__name__,
                 error=str(exc),
+                cause_type=(
+                    None
+                    if exc.__cause__ is None and exc.__context__ is None
+                    else type(exc.__cause__ or exc.__context__).__name__
+                ),
+                cause=(
+                    None
+                    if exc.__cause__ is None and exc.__context__ is None
+                    else str(exc.__cause__ or exc.__context__)
+                ),
             )
             manifest = transition(
                 manifest,

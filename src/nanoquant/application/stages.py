@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import time
 from dataclasses import dataclass
-from typing import Generic, Protocol, TypeVar
+from typing import Any, Generic, Protocol, TypeVar, cast
 
 from nanoquant.config.codec import canonical_json
 from nanoquant.domain.profiling import NULL_RECORDER, PhaseRecorder
@@ -66,14 +67,35 @@ class StageRegistry:
 
 
 def execute_stage(stage: Stage[RequestT, ResultT], request: RequestT, context: StageContext) -> ResultT:
+    request_context: dict[str, object] = {"request_type": type(request).__name__}
+    diagnostic_request = getattr(request, "request", request)
+    layer = getattr(diagnostic_request, "layer", None)
+    if layer is not None:
+        path = getattr(layer, "path", None)
+        request_context["layer"] = path if isinstance(path, str) else str(layer)
+        block = getattr(getattr(layer, "block", None), "index", None)
+        if isinstance(block, int):
+            request_context["block"] = block
+    rank = getattr(diagnostic_request, "rank", getattr(diagnostic_request, "probe_rank", None))
+    if isinstance(rank, int):
+        request_context["rank"] = rank
+    started = time.perf_counter()
     with context.recorder.phase("stage", stage=stage.name, version=stage.version):
         with context.recorder.phase("cancellation"):
             context.cancellation.raise_if_cancelled()
         with context.recorder.phase("event"):
-            context.events.emit(stage.name, "info", "stage.started", version=stage.version)
+            cast(Any, context.events).emit(
+                stage.name,
+                "info",
+                "stage.started",
+                version=stage.version,
+                **request_context,
+            )
+        active_phase = "execute"
         try:
             with context.recorder.phase("execute"):
                 result = stage.execute(request, context)
+            active_phase = "validate"
             with context.recorder.phase("validate"):
                 report = stage.validate(result, context)
                 if not report.valid:
@@ -81,15 +103,25 @@ def execute_stage(stage: Stage[RequestT, ResultT], request: RequestT, context: S
                     raise ValueError(f"stage output validation failed: {details}")
         except BaseException as error:
             with context.recorder.phase("event"):
-                context.events.emit(
+                cast(Any, context.events).emit(
                     stage.name,
                     "error",
                     "stage.failed",
                     version=stage.version,
+                    active_phase=active_phase,
+                    wall_seconds=time.perf_counter() - started,
                     error_type=type(error).__name__,
                     error=str(error),
+                    **request_context,
                 )
             raise
         with context.recorder.phase("event"):
-            context.events.emit(stage.name, "info", "stage.completed", version=stage.version)
+            cast(Any, context.events).emit(
+                stage.name,
+                "info",
+                "stage.completed",
+                version=stage.version,
+                wall_seconds=time.perf_counter() - started,
+                **request_context,
+            )
         return result
