@@ -29,6 +29,7 @@ from nanoquant.infrastructure.artifacts import LocalArtifactStore
 from nanoquant.infrastructure.device_lease import acquire_device_lease
 from nanoquant.infrastructure.model_adapters import adapter_for_config
 from nanoquant.infrastructure.profiling import profiled_run
+from nanoquant.infrastructure.resource_usage import peak_device_memory_bytes
 from nanoquant.infrastructure.safetensors_source import SafetensorsModelSource
 from nanoquant.infrastructure.tensor_store import LocalTensorStore
 
@@ -201,7 +202,7 @@ def _run_resident_calibration(
         )
     with recorder.phase("build_objectives"):
         objectives = build_objectives(calibration, ObjectiveConfig(), artifacts)
-    peak_device_bytes = int(torch.cuda.max_memory_allocated(request.device)) if request.device.startswith("cuda") else 0
+    peak_device_bytes = peak_device_memory_bytes(request.device)
     elapsed = time.perf_counter() - started
     report_payload = {
         "schema_version": 1,

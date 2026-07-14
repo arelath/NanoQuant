@@ -114,7 +114,7 @@ from nanoquant.infrastructure.model_adapters import adapter_for_config
 from nanoquant.infrastructure.profiling import profiled_run
 from nanoquant.infrastructure.progress import ProgressJournal
 from nanoquant.infrastructure.resident_executor import Cancellation, ResidentExecutor
-from nanoquant.infrastructure.resource_usage import peak_process_memory_bytes
+from nanoquant.infrastructure.resource_usage import peak_device_memory_bytes, peak_process_memory_bytes
 from nanoquant.infrastructure.run_session import open_run_session
 from nanoquant.infrastructure.runs import (
     RunDirectory,
@@ -598,19 +598,6 @@ def _artifact_bytes(root: Path) -> int:
     return sum(path.stat().st_size for path in root.rglob("*") if path.is_file())
 
 
-def _peak_device_memory_bytes(device: str) -> int:
-    if not device.startswith("cuda"):
-        return 0
-    # Reserved allocator memory, not only live tensor allocations, determines
-    # whether another CUDA operation can fit and matches the VRAM pressure seen
-    # by device-level monitoring. Keep allocated as a defensive lower bound for
-    # mocked/alternative allocators.
-    return max(
-        int(torch.cuda.max_memory_allocated(device)),
-        int(torch.cuda.max_memory_reserved(device)),
-    )
-
-
 def _token_tensor(value: torch.Tensor | tuple[tuple[int, ...], ...], device: str) -> torch.Tensor:
     result = value.detach().clone() if isinstance(value, torch.Tensor) else torch.tensor(value, dtype=torch.long)
     if result.ndim != 2 or result.shape[0] == 0 or result.shape[1] == 0:
@@ -762,7 +749,7 @@ def _run_resident_factorization_attempts(
                 ),
                 context,
             )
-        probe_peak = int(torch.cuda.max_memory_allocated(request.device)) if request.device.startswith("cuda") else 0
+        probe_peak = peak_device_memory_bytes(request.device)
         context.events.emit(
             "resident-quantization",
             "debug",
@@ -772,7 +759,7 @@ def _run_resident_factorization_attempts(
             layer=layer_plan.layer.path,
             rank=rank,
             attempt=attempt,
-            peak_allocated_bytes=probe_peak,
+            peak_device_bytes=probe_peak,
         )
         objective = replace(
             layer_plan.objective,

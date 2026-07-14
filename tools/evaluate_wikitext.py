@@ -21,7 +21,7 @@ from nanoquant.domain.profiling import NULL_RECORDER, PhaseRecorder
 from nanoquant.infrastructure.device_lease import acquire_device_lease
 from nanoquant.infrastructure.frozen_model_loader import load_frozen_run
 from nanoquant.infrastructure.profiling import profiled_run
-from nanoquant.infrastructure.resource_usage import peak_process_memory_bytes
+from nanoquant.infrastructure.resource_usage import peak_device_memory_bytes, peak_process_memory_bytes
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -130,7 +130,7 @@ def _evaluate(
         "token_count": result.token_count,
         "window_count": result.window_count,
         "elapsed_seconds": time.perf_counter() - started,
-        "peak_device_bytes": int(torch.cuda.max_memory_allocated(device)) if device.startswith("cuda") else 0,
+        "peak_device_bytes": peak_device_memory_bytes(device),
         "peak_host_bytes": peak_process_memory_bytes(),
     }
 

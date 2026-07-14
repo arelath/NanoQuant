@@ -6,8 +6,6 @@ import argparse
 import json
 from pathlib import Path
 
-import torch
-
 from nanoquant.config.schema import (
     ADMMConfig,
     AllocationStrategy,
@@ -22,6 +20,7 @@ from nanoquant.config.schema import (
 )
 from nanoquant.domain.models import ArtifactRef
 from nanoquant.infrastructure.hf_calibration_dataset import load_pinned_calibration
+from nanoquant.infrastructure.resource_usage import peak_device_memory_bytes
 from nanoquant.resident_quantization import (
     ResidentQuantizationRequest,
     run_resident_factorization_slice,
@@ -235,7 +234,7 @@ def main() -> None:
     try:
         result = run_resident_quantization(request)
     except InterruptedError as exc:
-        peak = torch.cuda.max_memory_allocated(args.device) if args.device.startswith("cuda") else 0
+        peak = peak_device_memory_bytes(args.device)
         print(json.dumps({"status": "interrupted", "reason": str(exc), "peak_device_bytes": peak}, indent=2))
         return
     print(

@@ -8,7 +8,6 @@ from nanoquant.config.schema import ProfilingConfig, ProfilingLevel
 from nanoquant.infrastructure.profiling import Profiler
 from nanoquant.resident_quantization import (
     _block_loss,
-    _peak_device_memory_bytes,
     _release_uncompleted_decoder_blocks,
     _run_block_batched,
     _run_quality_logits_batched,
@@ -141,16 +140,6 @@ def test_block_loss_micro_profile_preserves_accumulation_and_attributes_work() -
     counters = {counter["name"]: counter for counter in payload["counters"]}
     assert counters["forward.batches"]["total"] == 3
     assert counters["forward.elements"]["total"] == targets.numel()
-
-
-def test_peak_device_memory_uses_reserved_allocator_high_water(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(torch.cuda, "max_memory_allocated", lambda _device: 6_000)
-    monkeypatch.setattr(torch.cuda, "max_memory_reserved", lambda _device: 9_000)
-
-    assert _peak_device_memory_bytes("cuda:0") == 9_000
-    monkeypatch.setattr(torch.cuda, "max_memory_reserved", lambda _device: 4_000)
-    assert _peak_device_memory_bytes("cuda:0") == 6_000
-    assert _peak_device_memory_bytes("cpu") == 0
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="pinned CUDA transfer requires a GPU")

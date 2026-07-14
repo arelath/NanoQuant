@@ -44,7 +44,7 @@ from nanoquant.infrastructure.distillation_checkpoint import (
 from nanoquant.infrastructure.frozen_model_loader import LoadedFrozenModel, load_frozen_run
 from nanoquant.infrastructure.global_tuning import activate_global_tuning, commit_global_tuning
 from nanoquant.infrastructure.profiling import profiled_run
-from nanoquant.infrastructure.resource_usage import peak_process_memory_bytes
+from nanoquant.infrastructure.resource_usage import peak_device_memory_bytes, peak_process_memory_bytes
 from nanoquant.infrastructure.tensor_store import LocalTensorStore
 
 
@@ -403,7 +403,7 @@ def _run_global_topk_distillation(
             # held until this cleanup attempt returns.
             pass
         raise
-    peak_gpu = int(torch.cuda.max_memory_allocated(request.device)) if request.device.startswith("cuda") else 0
+    peak_gpu = peak_device_memory_bytes(request.device)
     with recorder.phase("offload"):
         _offload_student(student, request.device)
 

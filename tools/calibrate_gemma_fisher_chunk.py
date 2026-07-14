@@ -19,7 +19,7 @@ from nanoquant.infrastructure.calibration_checkpoint import (
 )
 from nanoquant.infrastructure.device_lease import acquire_device_lease
 from nanoquant.infrastructure.hf_calibration_dataset import load_pinned_calibration
-from nanoquant.infrastructure.resource_usage import peak_process_memory_bytes
+from nanoquant.infrastructure.resource_usage import peak_device_memory_bytes, peak_process_memory_bytes
 
 CALIBRATION_ARTIFACT = "sha256-ad1f609729f86db7598eed5c703c55aacbb9cb024cab816ca7b300d574b7a4c8"
 
@@ -74,7 +74,7 @@ def main() -> None:
             state_sink=updated.append,
         )
         save_causal_calibration_state(args.state, updated[-1])
-        peak_device = torch.cuda.max_memory_allocated(args.device) if args.device.startswith("cuda") else 0
+        peak_device = peak_device_memory_bytes(args.device)
     print(
         json.dumps(
             {
