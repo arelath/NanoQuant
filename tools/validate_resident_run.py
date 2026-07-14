@@ -10,14 +10,97 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from nanoquant.domain.models import ArtifactTypes
+from nanoquant.config.codec import ConfigDecodeError, from_dict
+from nanoquant.domain.models import ArtifactRef, ArtifactTypes, BlockId, LayerId
 from nanoquant.infrastructure.artifacts import ArtifactCorruptionError, LocalArtifactStore
+from nanoquant.infrastructure.commits import CommitIdentity
 
 
 @dataclass(frozen=True, slots=True)
 class ArtifactReference:
     artifact_id: str
     artifact_type: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class _LayerCommitPosition:
+    identity: CommitIdentity
+    layer: LayerId
+
+
+@dataclass(frozen=True, slots=True)
+class _TensorShape:
+    shape: tuple[int, ...]
+
+    def __post_init__(self) -> None:
+        if not self.shape or any(value <= 0 for value in self.shape):
+            raise ValueError("tensor shape dimensions must be positive")
+
+
+@dataclass(frozen=True, slots=True)
+class _SourceWeight:
+    spec: _TensorShape
+
+
+@dataclass(frozen=True, slots=True)
+class _LayerPlanMetrics:
+    source_weight: _SourceWeight
+
+
+@dataclass(frozen=True, slots=True)
+class _FrozenLayerMetrics:
+    rank: int
+
+    def __post_init__(self) -> None:
+        if self.rank <= 0:
+            raise ValueError("frozen rank must be positive")
+
+
+@dataclass(frozen=True, slots=True)
+class _LayerMetrics:
+    actual_bit_cost: dict[str, int]
+    frozen_state: _FrozenLayerMetrics
+    layer: LayerId
+    plan: _LayerPlanMetrics
+
+    def __post_init__(self) -> None:
+        if not self.actual_bit_cost or any(
+            not isinstance(name, str)
+            or not name
+            or type(value) is not int
+            or value < 0
+            for name, value in self.actual_bit_cost.items()
+        ):
+            raise ValueError("actual bit costs must be named non-negative integers")
+
+
+@dataclass(frozen=True, slots=True)
+class _BlockLossMetrics:
+    final_frozen_pre_kd: float
+
+    def __post_init__(self) -> None:
+        if not math.isfinite(self.final_frozen_pre_kd):
+            raise ValueError("final frozen loss must be finite")
+
+
+@dataclass(frozen=True, slots=True)
+class _BlockMetrics:
+    identity: CommitIdentity
+    block: BlockId
+    layers: tuple[_LayerMetrics, ...]
+    losses: _BlockLossMetrics
+    wall_seconds: float
+    peak_gpu_bytes: int
+    peak_host_bytes: int
+    activation_generation: ArtifactRef | None = None
+
+    def __post_init__(self) -> None:
+        if not self.layers:
+            raise ValueError("committed block must contain layers")
+        if not math.isfinite(self.wall_seconds) or self.wall_seconds < 0:
+            raise ValueError("block wall time must be finite and non-negative")
+        if self.peak_gpu_bytes < 0 or self.peak_host_bytes < 0:
+            raise ValueError("block memory peaks must be non-negative")
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +161,62 @@ def _read_json(path: Path) -> object:
         raise ValueError(f"invalid JSON artifact member: {path}") from exc
 
 
+def _project_layer_metrics(value: object) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ConfigDecodeError("block.layers", "expected an object")
+    frozen = value["frozen_state"]
+    plan = value["plan"]
+    if not isinstance(frozen, dict) or not isinstance(plan, dict):
+        raise ConfigDecodeError("block.layers", "expected nested metric objects")
+    source = plan["source_weight"]
+    if not isinstance(source, dict):
+        raise ConfigDecodeError("block.layers.plan.source_weight", "expected an object")
+    spec = source["spec"]
+    if not isinstance(spec, dict):
+        raise ConfigDecodeError("block.layers.plan.source_weight.spec", "expected an object")
+    return {
+        "actual_bit_cost": value["actual_bit_cost"],
+        "frozen_state": {"rank": frozen["rank"]},
+        "layer": value["layer"],
+        "plan": {"source_weight": {"spec": {"shape": spec["shape"]}}},
+    }
+
+
+def _decode_block_metrics(payload: dict[str, Any], artifact_id: str) -> _BlockMetrics:
+    try:
+        losses = payload["losses"]
+        if not isinstance(losses, dict):
+            raise ConfigDecodeError("block.losses", "expected an object")
+        projected = {
+            "identity": payload["identity"],
+            "block": payload["block"],
+            "layers": [_project_layer_metrics(value) for value in payload["layers"]],
+            "losses": {"final_frozen_pre_kd": losses["final_frozen_pre_kd"]},
+            "wall_seconds": payload["wall_seconds"],
+            "peak_gpu_bytes": payload["peak_gpu_bytes"],
+            "peak_host_bytes": payload["peak_host_bytes"],
+        }
+        if payload.get("activation_generation") is not None:
+            projected["activation_generation"] = payload["activation_generation"]
+        return from_dict(_BlockMetrics, projected, path="block")
+    except (ConfigDecodeError, KeyError, TypeError) as exc:
+        raise ValueError(f"committed block metrics are malformed: {artifact_id}") from exc
+
+
+def _decode_layer_position(payload: dict[str, Any], artifact_id: str) -> _LayerCommitPosition:
+    try:
+        result = payload["result"]
+        if not isinstance(result, dict):
+            raise ConfigDecodeError("layer.result", "expected an object")
+        return from_dict(
+            _LayerCommitPosition,
+            {"identity": payload["identity"], "layer": result["layer"]},
+            path="layer",
+        )
+    except (ConfigDecodeError, KeyError, TypeError) as exc:
+        raise ValueError(f"committed layer identity is malformed: {artifact_id}") from exc
+
+
 def _journal_records(path: Path) -> list[dict[str, Any]]:
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
@@ -102,7 +241,7 @@ def _journal_records(path: Path) -> list[dict[str, Any]]:
 def _commit_payload(
     record: dict[str, Any],
     store: LocalArtifactStore,
-) -> tuple[object, ArtifactReference | None]:
+) -> tuple[dict[str, Any], ArtifactReference | None, _BlockMetrics | None]:
     artifact_id = str(record["artifact_id"])
     kind = str(record["kind"])
     expected_type = f"{kind}-result"
@@ -115,36 +254,29 @@ def _commit_payload(
     payload = _read_json(store.path_for(artifact_id) / filename)
     if not isinstance(payload, dict):
         raise ValueError(f"committed {kind} payload is not an object: {artifact_id}")
-    if payload.get("identity") != record.get("identity"):
-        raise ValueError(f"journal identity does not match committed {kind}: {artifact_id}")
-    result = payload.get("result") if kind == "layer" else payload
-    if not isinstance(result, dict):
-        raise ValueError(f"committed {kind} result is not an object: {artifact_id}")
     if kind == "layer":
-        layer = result.get("layer")
-        if not isinstance(layer, dict):
-            raise ValueError(f"committed layer identity is missing: {artifact_id}")
-        block_value = layer.get("block")
-        block = block_value.get("index") if isinstance(block_value, dict) else None
-        if block != record.get("block") or layer.get("path") != record.get("layer"):
+        position = _decode_layer_position(payload, artifact_id)
+        if position.identity != from_dict(CommitIdentity, record["identity"], path="journal.identity"):
+            raise ValueError(f"journal identity does not match committed layer: {artifact_id}")
+        if position.layer.block.index != record.get("block") or position.layer.path != record.get("layer"):
             raise ValueError(f"journal position does not match committed layer: {artifact_id}")
-        return payload, None
-    block_value = payload.get("block")
-    block = block_value.get("index") if isinstance(block_value, dict) else None
-    if block != record.get("block") or record.get("layer") is not None:
+        return payload, None, None
+    metrics = _decode_block_metrics(payload, artifact_id)
+    if metrics.identity != from_dict(CommitIdentity, record["identity"], path="journal.identity"):
+        raise ValueError(f"journal identity does not match committed block: {artifact_id}")
+    if metrics.block.index != record.get("block") or record.get("layer") is not None:
         raise ValueError(f"journal position does not match committed block: {artifact_id}")
-    activation = payload.get("activation_generation")
     activation_reference = None
-    if isinstance(activation, dict) and isinstance(activation.get("artifact_id"), str):
+    if metrics.activation_generation is not None:
         activation_reference = ArtifactReference(
-            activation["artifact_id"],
-            activation.get("artifact_type") if isinstance(activation.get("artifact_type"), str) else None,
+            metrics.activation_generation.artifact_id,
+            metrics.activation_generation.artifact_type,
         )
-    return payload, activation_reference
+    return payload, activation_reference, metrics
 
 
 def _committed_metrics(
-    commit_payloads: list[tuple[dict[str, Any], object]],
+    commit_payloads: list[tuple[dict[str, Any], dict[str, Any], _BlockMetrics | None]],
 ) -> tuple[int, int, int, dict[str, int], float, float, int, int, tuple[float, ...]]:
     ranks = 0
     parameters = 0
@@ -154,70 +286,24 @@ def _committed_metrics(
     peak_host_bytes = 0
     losses: list[float] = []
     seen_layers: set[tuple[int, str]] = set()
-    for record, payload_value in commit_payloads:
-        if record["kind"] != "block":
+    for record, _payload, metrics in commit_payloads:
+        if metrics is None:
             continue
-        if not isinstance(payload_value, dict):
-            raise ValueError(f"committed block payload is not an object: {record['artifact_id']}")
         block = int(record["block"])
-        try:
-            layers = payload_value["layers"]
-            loss = float(payload_value["losses"]["final_frozen_pre_kd"])
-            block_wall = float(payload_value["wall_seconds"])
-            block_peak_gpu = int(payload_value["peak_gpu_bytes"])
-            block_peak_host = int(payload_value["peak_host_bytes"])
-        except (KeyError, TypeError, ValueError) as exc:
-            raise ValueError(f"committed block metrics are malformed: {record['artifact_id']}") from exc
-        if (
-            not isinstance(layers, list)
-            or not layers
-            or not math.isfinite(loss)
-            or not math.isfinite(block_wall)
-            or block_wall < 0
-            or block_peak_gpu < 0
-            or block_peak_host < 0
-        ):
-            raise ValueError(f"committed block metrics are invalid: {record['artifact_id']}")
-        for layer_value in layers:
-            try:
-                layer_block = int(layer_value["layer"]["block"]["index"])
-                layer = layer_value["layer"]["path"]
-                rank = layer_value["frozen_state"]["rank"]
-                shape = layer_value["plan"]["source_weight"]["spec"]["shape"]
-                layer_bit_cost = layer_value["actual_bit_cost"]
-            except (KeyError, TypeError, ValueError) as exc:
-                raise ValueError(f"committed layer metrics are malformed: {record['artifact_id']}") from exc
-            if (
-                layer_block != block
-                or not isinstance(layer, str)
-                or not layer
-                or not isinstance(rank, int)
-                or isinstance(rank, bool)
-                or rank <= 0
-                or not isinstance(shape, list)
-                or not shape
-                or not all(isinstance(item, int) and not isinstance(item, bool) and item > 0 for item in shape)
-                or not isinstance(layer_bit_cost, dict)
-                or not layer_bit_cost
-                or not all(
-                    isinstance(name, str)
-                    and name
-                    and isinstance(value, int)
-                    and not isinstance(value, bool)
-                    and value >= 0
-                    for name, value in layer_bit_cost.items()
-                )
-                or (layer_block, layer) in seen_layers
-            ):
+        for layer_metrics in metrics.layers:
+            layer_block = layer_metrics.layer.block.index
+            layer = layer_metrics.layer.path
+            key = (layer_block, layer)
+            if layer_block != block or key in seen_layers:
                 raise ValueError(f"committed layer metrics are invalid: {record['artifact_id']}")
-            seen_layers.add((layer_block, layer))
-            ranks += rank
-            parameters += math.prod(shape)
-            bit_costs.update(layer_bit_cost)
-        losses.append(loss)
-        wall_seconds += block_wall
-        peak_gpu_bytes = max(peak_gpu_bytes, block_peak_gpu)
-        peak_host_bytes = max(peak_host_bytes, block_peak_host)
+            seen_layers.add(key)
+            ranks += layer_metrics.frozen_state.rank
+            parameters += math.prod(layer_metrics.plan.source_weight.spec.shape)
+            bit_costs.update(layer_metrics.actual_bit_cost)
+        losses.append(metrics.losses.final_frozen_pre_kd)
+        wall_seconds += metrics.wall_seconds
+        peak_gpu_bytes = max(peak_gpu_bytes, metrics.peak_gpu_bytes)
+        peak_host_bytes = max(peak_host_bytes, metrics.peak_host_bytes)
     total_bits = sum(bit_costs.values())
     return (
         len(seen_layers),
@@ -263,11 +349,11 @@ def validate_resident_run(
         if json.dumps(record.get("identity"), sort_keys=True) == active_identity
     ]
 
-    commit_payloads: list[tuple[dict[str, Any], object]] = []
+    commit_payloads: list[tuple[dict[str, Any], dict[str, Any], _BlockMetrics | None]] = []
     activation_by_block: dict[int, ArtifactReference] = {}
     for record in records:
-        payload, activation = _commit_payload(record, store)
-        commit_payloads.append((record, payload))
+        payload, activation, metrics = _commit_payload(record, store)
+        commit_payloads.append((record, payload, metrics))
         if activation is not None:
             activation_by_block[int(record["block"])] = activation
 
@@ -291,7 +377,7 @@ def validate_resident_run(
     plan_hash = identity_value.get("plan_hash")
     if isinstance(plan_hash, str) and plan_hash.startswith("sha256-") and len(plan_hash) == 71:
         pending.append(ArtifactReference(plan_hash, ArtifactTypes.QUANTIZATION_PLAN))
-    for _record, payload in commit_payloads:
+    for _record, payload, _metrics in commit_payloads:
         pending.extend(_references(payload))
     validated: dict[str, tuple[str, int]] = {}
     expected_types: dict[str, str] = {}

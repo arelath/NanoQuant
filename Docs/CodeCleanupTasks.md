@@ -39,7 +39,7 @@ However, in `resident_quantization.py` you correctly realized that PyTorch's *re
 *   Replace the `getattr` hacks in the orchestration files with these clean adapter calls.
 *   *Why:* Keeps Hugging Face's changing internal API architectures securely quarantined inside `infrastructure/model_adapters.py`.
 
-### [ ] 5. Type-Safe Validation in `validate_resident_run.py`
+### [x] 5. Type-Safe Validation in `validate_resident_run.py`
 **Location:** `tools/validate_resident_run.py`
 **Problem:** `_commit_payload` and `_committed_metrics` manually parse dictionaries with deeply nested `.get()` and `isinstance()` checks, spanning ~150 lines.
 **Action:** 
