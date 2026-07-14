@@ -2,16 +2,21 @@
 
 from __future__ import annotations
 
-import math
 import random
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import cast
+from typing import TypeAlias
 
 import torch
 from torch import nn
 
-from nanoquant.application.parity_adamw import ParityAdamW
+from nanoquant.application.parity_adamw import (
+    ParityAdamW,
+    ParityAdamWState,
+    capture_optimizer_state,
+    restore_cosine_annealing_state,
+    restore_optimizer_state,
+)
 from nanoquant.domain.profiling import NULL_RECORDER, PhaseRecorder
 
 HiddenStatesFunction = Callable[[nn.Module, torch.Tensor], torch.Tensor]
@@ -87,13 +92,7 @@ class DistillationMetrics:
     teacher_cache_bytes: int
 
 
-@dataclass(frozen=True, slots=True)
-class DistillationOptimizerState:
-    parameter_name: str
-    step: torch.Tensor
-    exponential_average: torch.Tensor
-    exponential_average_squared: torch.Tensor
-    kahan_compensation: torch.Tensor | None = None
+DistillationOptimizerState: TypeAlias = ParityAdamWState
 
 
 @dataclass(frozen=True, slots=True)
@@ -401,44 +400,24 @@ def distill_topk(
     if starting_steps < 0 or starting_steps > total_steps:
         raise ValueError("distillation resume step is out of range")
     if resume is not None:
-        optimizer_by_name = {state.parameter_name: state for state in resume.optimizer_states}
-        if set(optimizer_by_name) != set(selected_by_name):
-            raise ValueError("distillation resume optimizer states do not match the selector")
-        for name, parameter in selected_parameters:
-            state = optimizer_by_name[name]
-            if state.exponential_average.shape != parameter.shape:
-                raise ValueError(f"distillation resume optimizer shape differs: {name}")
-            if parameter.dtype in {torch.float16, torch.bfloat16} and state.kahan_compensation is None:
-                raise ValueError(f"distillation resume Kahan state is missing: {name}")
-            optimizer.state[parameter] = {
-                "exp_avg": state.exponential_average.to(device=parameter.device, dtype=parameter.dtype),
-                "exp_avg_sq": state.exponential_average_squared.to(
-                    device=parameter.device,
-                    dtype=parameter.dtype,
-                ),
-                "kahan_comp": None
-                if state.kahan_compensation is None
-                else state.kahan_compensation.to(device=parameter.device, dtype=parameter.dtype),
-                "denominator": torch.empty_like(parameter),
-            }
-        saved_steps = {int(state.step.item()) for state in resume.optimizer_states}
-        if saved_steps != {starting_steps}:
-            raise ValueError("distillation resume optimizer steps differ from completed steps")
-        for group in optimizer.param_groups:
-            group["step"] = starting_steps
+        restore_optimizer_state(
+            optimizer,
+            selected_parameters,
+            resume.optimizer_states,
+            starting_steps,
+            operation="distillation",
+        )
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
         T_max=max(1, total_steps),
     )
-    if starting_steps:
-        current_lr = config.learning_rate * (1 + math.cos(math.pi * starting_steps / max(1, total_steps))) / 2
-        for group in optimizer.param_groups:
-            group["lr"] = current_lr
-        scheduler_state = scheduler.state_dict()
-        scheduler_state["last_epoch"] = starting_steps
-        scheduler_state["_step_count"] = starting_steps + 1
-        scheduler_state["_last_lr"] = [current_lr] * len(optimizer.param_groups)
-        scheduler.load_state_dict(scheduler_state)
+    restore_cosine_annealing_state(
+        optimizer,
+        scheduler,
+        starting_steps,
+        total_steps,
+        config.learning_rate,
+    )
     cpu_tokens = token_ids.detach().cpu()
     epoch_losses = [] if resume is None else list(resume.epoch_losses)
     steps = starting_steps
@@ -502,24 +481,7 @@ def distill_topk(
                 epoch_losses.append(total_loss / max(1, len(epoch)))
                 if checkpoint_sink is not None:
                     with recorder.phase("checkpoint_snapshot"):
-                        optimizer_states = []
-                        optimizer_step = torch.tensor(
-                            int(optimizer.param_groups[0].get("step", 0)),
-                            dtype=torch.int64,
-                        )
-                        for name, parameter in selected_parameters:
-                            state = optimizer.state[parameter]
-                            optimizer_states.append(
-                                DistillationOptimizerState(
-                                    name,
-                                    optimizer_step.clone(),
-                                    cast(torch.Tensor, state["exp_avg"]).detach().cpu().clone(),
-                                    cast(torch.Tensor, state["exp_avg_sq"]).detach().cpu().clone(),
-                                    None
-                                    if state.get("kahan_comp") is None
-                                    else cast(torch.Tensor, state["kahan_comp"]).detach().cpu().clone(),
-                                )
-                            )
+                        optimizer_states = capture_optimizer_state(optimizer, selected_parameters)
                         checkpoint_sink(
                             DistillationResumeState(
                                 epoch_index + 1,
@@ -529,7 +491,7 @@ def distill_topk(
                                     (name, parameter.detach().cpu().clone())
                                     for name, parameter in selected_parameters
                                 ),
-                                tuple(optimizer_states),
+                                optimizer_states,
                             )
                         )
     finally:

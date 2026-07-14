@@ -7,12 +7,25 @@ avoids making the auditable pipeline depend on an optimizer's optional kernels.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from typing import Any, overload
 
 import torch
 from torch import Tensor
 from torch.optim import Optimizer
+
+
+@dataclass(frozen=True, slots=True)
+class ParityAdamWState:
+    """Portable state for one named parameter in :class:`ParityAdamW`."""
+
+    parameter_name: str
+    step: Tensor
+    exponential_average: Tensor
+    exponential_average_squared: Tensor
+    kahan_compensation: Tensor | None = None
 
 
 def _debiased_beta(beta: float, step: int) -> float:
@@ -146,3 +159,92 @@ class ParityAdamW(Optimizer):
                     weight_decay=weight_decay,
                 )
         return loss
+
+
+def restore_optimizer_state(
+    optimizer: ParityAdamW,
+    named_parameters: Iterable[tuple[str, Tensor]],
+    states: Iterable[ParityAdamWState],
+    completed_steps: int,
+    *,
+    operation: str,
+) -> None:
+    """Hydrate portable optimizer state onto each parameter's device."""
+
+    parameters = tuple(named_parameters)
+    state_by_name = {state.parameter_name: state for state in states}
+    if set(state_by_name) != {name for name, _parameter in parameters}:
+        raise ValueError(f"{operation} resume optimizer states do not match the selector")
+    saved_steps = {int(state.step.item()) for state in state_by_name.values()}
+    if saved_steps != {completed_steps}:
+        raise ValueError(f"{operation} resume optimizer steps differ from completed steps")
+    for name, parameter in parameters:
+        state = state_by_name[name]
+        if state.exponential_average.shape != parameter.shape:
+            raise ValueError(f"{operation} resume optimizer shape differs: {name}")
+        if parameter.dtype in {torch.float16, torch.bfloat16} and state.kahan_compensation is None:
+            raise ValueError(f"{operation} resume Kahan state is missing: {name}")
+        optimizer.state[parameter] = {
+            "exp_avg": state.exponential_average.to(device=parameter.device, dtype=parameter.dtype),
+            "exp_avg_sq": state.exponential_average_squared.to(
+                device=parameter.device, dtype=parameter.dtype
+            ),
+            "kahan_comp": None
+            if state.kahan_compensation is None
+            else state.kahan_compensation.to(device=parameter.device, dtype=parameter.dtype),
+            "denominator": torch.empty_like(parameter),
+        }
+    for group in optimizer.param_groups:
+        group["step"] = completed_steps
+
+
+def capture_optimizer_state(
+    optimizer: ParityAdamW,
+    named_parameters: Iterable[tuple[str, Tensor]],
+) -> tuple[ParityAdamWState, ...]:
+    """Clone optimizer state to CPU for a durable training checkpoint."""
+
+    step = torch.tensor(int(optimizer.param_groups[0].get("step", 0)), dtype=torch.int64)
+    captured = []
+    for name, parameter in named_parameters:
+        state = optimizer.state[parameter]
+        exponential_average = state.get("exp_avg")
+        exponential_average_squared = state.get("exp_avg_sq")
+        compensation = state.get("kahan_comp")
+        if not isinstance(exponential_average, Tensor) or not isinstance(exponential_average_squared, Tensor):
+            raise ValueError(f"optimizer state is incomplete: {name}")
+        captured.append(
+            ParityAdamWState(
+                name,
+                step.clone(),
+                exponential_average.detach().cpu().clone(),
+                exponential_average_squared.detach().cpu().clone(),
+                None if compensation is None else compensation.detach().cpu().clone(),
+            )
+        )
+    return tuple(captured)
+
+
+def restore_cosine_annealing_state(
+    optimizer: ParityAdamW,
+    scheduler: torch.optim.lr_scheduler.CosineAnnealingLR,
+    completed_steps: int,
+    total_steps: int,
+    initial_learning_rate: float,
+    *,
+    eta_min: float = 0.0,
+) -> None:
+    """Restore the closed-form scheduler position without replaying steps."""
+
+    if completed_steps == 0:
+        return
+    current_lr = eta_min + (initial_learning_rate - eta_min) * (
+        1 + math.cos(math.pi * completed_steps / max(1, total_steps))
+    ) / 2
+    for group in optimizer.param_groups:
+        group["lr"] = current_lr
+    scheduler_state = scheduler.state_dict()
+    scheduler_state["last_epoch"] = completed_steps
+    scheduler_state["_step_count"] = completed_steps + 1
+    scheduler_state["_last_lr"] = [current_lr] * len(optimizer.param_groups)
+    scheduler.load_state_dict(scheduler_state)

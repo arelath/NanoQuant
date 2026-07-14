@@ -2,16 +2,21 @@
 
 from __future__ import annotations
 
-import math
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
-from typing import cast
+from typing import TypeAlias
 
 import torch
 from torch import nn
 
 from nanoquant.application.device_batches import iter_device_batches
-from nanoquant.application.parity_adamw import ParityAdamW
+from nanoquant.application.parity_adamw import (
+    ParityAdamW,
+    ParityAdamWState,
+    capture_optimizer_state,
+    restore_cosine_annealing_state,
+    restore_optimizer_state,
+)
 from nanoquant.domain.models import LossMetrics, TuningMetrics
 from nanoquant.domain.profiling import NULL_RECORDER, PhaseRecorder
 
@@ -38,13 +43,7 @@ class TuningRequest:
     restore_best_state: bool = True
 
 
-@dataclass(frozen=True, slots=True)
-class TuningOptimizerState:
-    parameter_name: str
-    step: torch.Tensor
-    exponential_average: torch.Tensor
-    exponential_average_squared: torch.Tensor
-    kahan_compensation: torch.Tensor | None = None
+TuningOptimizerState: TypeAlias = ParityAdamWState
 
 
 @dataclass(frozen=True, slots=True)
@@ -404,45 +403,18 @@ def tune(
     if starting_steps != (0 if resume is None else resume.completed_epochs * steps_per_epoch):
         raise ValueError("tuning resume step count disagrees with completed epochs")
     if resume is not None:
-        optimizer_by_name = {state.parameter_name: state for state in resume.optimizer_states}
-        if set(optimizer_by_name) != set(selected_by_name):
-            raise ValueError("tuning resume optimizer states do not match the selector")
-        saved_steps = {int(state.step.item()) for state in resume.optimizer_states}
-        if saved_steps != {starting_steps}:
-            raise ValueError("tuning resume optimizer steps differ from completed steps")
-        for name, parameter in selected:
-            state = optimizer_by_name[name]
-            if state.exponential_average.shape != parameter.shape:
-                raise ValueError(f"tuning resume optimizer shape differs: {name}")
-            if parameter.dtype in {torch.float16, torch.bfloat16} and state.kahan_compensation is None:
-                raise ValueError(f"tuning resume Kahan state is missing: {name}")
-            optimizer.state[parameter] = {
-                "exp_avg": state.exponential_average.to(device=parameter.device, dtype=parameter.dtype),
-                "exp_avg_sq": state.exponential_average_squared.to(
-                    device=parameter.device, dtype=parameter.dtype
-                ),
-                "kahan_comp": None
-                if state.kahan_compensation is None
-                else state.kahan_compensation.to(device=parameter.device, dtype=parameter.dtype),
-                "denominator": torch.empty_like(parameter),
-            }
-        for group in optimizer.param_groups:
-            group["step"] = starting_steps
+        restore_optimizer_state(optimizer, selected, resume.optimizer_states, starting_steps, operation="tuning")
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=total_steps, eta_min=request.learning_rate * 1e-4
     )
-    if starting_steps:
-        eta_min = request.learning_rate * 1e-4
-        current_lr = eta_min + (request.learning_rate - eta_min) * (
-            1 + math.cos(math.pi * starting_steps / total_steps)
-        ) / 2
-        for group in optimizer.param_groups:
-            group["lr"] = current_lr
-        scheduler_state = scheduler.state_dict()
-        scheduler_state["last_epoch"] = starting_steps
-        scheduler_state["_step_count"] = starting_steps + 1
-        scheduler_state["_last_lr"] = [current_lr] * len(optimizer.param_groups)
-        scheduler.load_state_dict(scheduler_state)
+    restore_cosine_annealing_state(
+        optimizer,
+        scheduler,
+        starting_steps,
+        total_steps,
+        request.learning_rate,
+        eta_min=request.learning_rate * 1e-4,
+    )
     generator = torch.Generator(device="cpu").manual_seed(request.seed)
     starting_epoch = 0 if resume is None else resume.completed_epochs
     for _epoch in range(starting_epoch):
@@ -550,31 +522,15 @@ def tune(
                         stopped_early = True
                 if checkpoint_sink is not None:
                     with recorder.phase("checkpoint_snapshot"):
-                        optimizer_step = torch.tensor(
-                            int(optimizer.param_groups[0].get("step", 0)), dtype=torch.int64
-                        )
-                        optimizer_states = []
-                        for name, parameter in selected:
-                            state = optimizer.state[parameter]
-                            optimizer_states.append(
-                                TuningOptimizerState(
-                                    name,
-                                    optimizer_step.clone(),
-                                    cast(torch.Tensor, state["exp_avg"]).detach().cpu().clone(),
-                                    cast(torch.Tensor, state["exp_avg_sq"]).detach().cpu().clone(),
-                                    None
-                                    if state.get("kahan_comp") is None
-                                    else cast(torch.Tensor, state["kahan_comp"]).detach().cpu().clone(),
-                                )
-                            )
+                        optimizer_states = capture_optimizer_state(optimizer, selected)
                         checkpoint_sink(
                             TuningResumeState(
                                 epoch + 1,
                                 tuple(epoch_losses),
-                                int(optimizer_step.item()),
+                                int(optimizer_states[0].step.item()),
                                 tuple((name, parameter.detach().cpu().clone()) for name, parameter in selected),
                                 tuple((name, value.detach().cpu().clone()) for name, value in best_state.items()),
-                                tuple(optimizer_states),
+                                optimizer_states,
                                 best_epoch,
                                 stopped_early,
                             )

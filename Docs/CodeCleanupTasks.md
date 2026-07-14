@@ -21,7 +21,7 @@ However, in `resident_quantization.py` you correctly realized that PyTorch's *re
 *   Replace all inline `max_memory_allocated` calls across the pipeline with this unified function. 
 *   *Why:* Ensures VRAM accounting is exactly consistent across all phases and correctly represents true board-level memory pressure.
 
-### [ ] 3. DRY Up Optimizer State Hydration/Dehydration
+### [x] 3. DRY Up Optimizer State Hydration/Dehydration
 **Location:** `src/nanoquant/application/tuning.py` and `src/nanoquant/application/distillation.py`
 **Problem:** The logic to save and restore the optimizer state (extracting `exp_avg`, `exp_avg_sq`, Kahan compensation, step counts, and `CosineAnnealingLR` state) is nearly identical in both files. It spans ~40 lines of boilerplate in each file.
 **Action:** 
