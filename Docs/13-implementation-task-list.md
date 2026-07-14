@@ -159,7 +159,7 @@ Outcome: a complete 1B-class run uses the new pipeline and survives interruption
 - [x] **M4.18** Implement logical seed derivation from run seed, stage, block, layer, and attempt.
 - [x] **M4.19** Implement resume validation, latest-valid-commit discovery, and restart of the first incomplete unit.
 - [x] **M4.20** Implement fork semantics and a visible upstream-reuse/downstream-invalidation plan.
-- [x] **M4.21** Inject failure before/after every layer/block commit operation and verify equivalence with uninterrupted controls.
+- [x] **M4.21** Inject failure before/after every layer/block commit operation and verify equivalence with uninterrupted controls. Factorized tuning now also commits a bounded, safe safetensors resume generation after every epoch; a fresh-process tiny integration test interrupts at that boundary and reproduces the uninterrupted frozen states exactly.
 - [x] **M4.22** Implement `capture-layer`, `replay-layer`, `capture-block`, and `replay-block` using canonical fixture artifacts.
 - [x] **M4.23** Implement `FrozenModelResult` assembly from block artifacts without requiring a mutable full model object.
 - [x] **M4.24** Render the Experiment 019-style per-layer reconstruction and final-block-pre-KD tables from structured results.
@@ -198,8 +198,10 @@ Outcome: the same pipeline operates from GPU-resident 1B models through disk-str
 - [ ] **M5.19** Compare planned versus actual peak GPU, host, temporary disk, and I/O use and set estimator error thresholds.
   Actual block commits now retain host high-water and CUDA reserved high-water instead of zero/allocated-only
   values, and opt-in profiles separate host working/private memory, CUDA allocated/reserved memory, device-wide
-  pressure, allocator churn, and I/O bytes. Protocol-matched planned/actual comparisons and acceptance thresholds
-  remain required before closing this item.
+  pressure, allocator churn, and I/O bytes. `tools/validate_resident_run.py` now aggregates validated committed
+  ranks, bit-cost categories/effective BPW, source parameter count, block losses/wall time, memory high-water, and
+  artifact bytes for the final planned/actual report. Protocol-matched comparisons and acceptance thresholds remain
+  required before closing this item.
 - [ ] **M5.20** Implement the distributed-executor port and decide which distributed calibration/tuning operations are required for the first release.
 - [ ] **M5.21** Run a 70B metadata-only plan and validate source/output/storage estimates before weight execution.
 - [ ] **M5.22** Run a real large-model selected-block canary using disk-backed state and resume it after intentional interruption.
@@ -285,8 +287,11 @@ Outcome: runs produce cheap-to-expensive decision evidence and actionable report
 - [ ] **M8.17** Implement candidate-versus-baseline reports with semantic config diff, artifact reuse, per-layer/block alignment, uncertainty, warnings, and Pareto dimensions.
   `tools/compare_block_trajectories.py` now provides the block-alignment slice: it selects the latest journal
   identity, rejects stale/noncontiguous prefixes, resolves committed block artifacts, and compares any number of
-  named legacy post-refit trajectories with JSON/Markdown deltas. Config/artifact reuse, uncertainty, warnings,
-  and Pareto reporting remain open.
+  named legacy post-refit trajectories with JSON/Markdown deltas. Optional legacy rank-utility CSVs add exact
+  prefix rank-sum/mismatch checks and scoped BPW. Rewrite BPW includes every committed bit-cost category; the
+  legacy CSV's rank-dependent BPW includes binary factors and middle scales but excludes pre/post scales and
+  outliers, so it is explicitly not presented as like-for-like total BPW. Config/artifact reuse, uncertainty,
+  warnings, and Pareto reporting remain open.
 - [ ] **M8.18** Include experiment number, zero-argument runfile path/hash, purpose, hypothesis, baseline, environment, cost, conclusion, and recommended next action.
 - [ ] **M8.19** Implement evaluator and task-result caching using complete semantic identities.
 - [ ] **M8.20** Add golden report tests using Experiment 019 data and synthetic near-zero denominators.

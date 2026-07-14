@@ -7,7 +7,9 @@ import pytest
 
 from nanoquant.infrastructure.artifacts import ArtifactCorruptionError, LocalArtifactStore
 from tools.compare_block_trajectories import (
+    compare_rank_allocations,
     compare_trajectories,
+    load_legacy_rank_csv,
     load_legacy_trajectory,
     load_rewrite_trajectory,
     render_markdown,
@@ -22,6 +24,14 @@ def _commit_block(root: Path, block: int, loss: float, identity: dict[str, str])
                 {
                     "block": {"index": block},
                     "identity": identity,
+                    "layers": [
+                        {
+                            "actual_bit_cost": {"binary_factor_bits": 10 + block, "scale_bits": 2},
+                            "frozen_state": {"rank": block + 1},
+                            "layer": {"block": {"index": block}, "path": "mlp.gate_proj"},
+                            "plan": {"source_weight": {"spec": {"shape": [2, 3]}}},
+                        }
+                    ],
                     "losses": {"final_frozen_pre_kd": loss},
                 }
             ),
@@ -64,6 +74,10 @@ def test_trajectory_comparison_uses_latest_identity_and_aligns_multiple_baseline
 
     assert rewrite.identity == active
     assert rewrite.losses == (1.0, 2.0)
+    assert [(value.block, value.rank, value.actual_bits) for value in rewrite.layer_budgets] == [
+        (0, 1, 12),
+        (1, 2, 13),
+    ]
     assert result["rewrite_block_count"] == 2
     baselines = {value["name"]: value for value in result["baselines"]}
     assert baselines["contemporary"]["rewrite_lower_count"] == 2
@@ -74,6 +88,56 @@ def test_trajectory_comparison_uses_latest_identity_and_aligns_multiple_baseline
     rendered = render_markdown(result)
     assert "rewrite lower at 2/2" in rendered
     assert "-20.00%" in rendered
+
+
+def test_rank_comparison_aligns_committed_prefix_and_distinguishes_total_bits(tmp_path: Path) -> None:
+    identity = {"config_hash": "new", "model_hash": "model", "plan_hash": "plan"}
+    records = [_commit_block(tmp_path, 0, 1.0, identity), _commit_block(tmp_path, 1, 2.0, identity)]
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "journal.jsonl").write_text(
+        "".join(json.dumps(record) + "\n" for record in records), encoding="utf-8"
+    )
+    ranks = tmp_path / "rank-utility.csv"
+    ranks.write_text(
+        "block,layer,rank,binary_bits\n"
+        "1,mlp.gate_proj,1,10\n"
+        "2,mlp.gate_proj,3,11\n"
+        "3,mlp.gate_proj,99,999\n",
+        encoding="utf-8",
+    )
+
+    rewrite = load_rewrite_trajectory(tmp_path)
+    result = compare_rank_allocations(
+        rewrite,
+        (("legacy", ranks, load_legacy_rank_csv(ranks)),),
+    )[0]
+
+    assert result["paired_layer_count"] == 2
+    assert result["rank_mismatch_count"] == 1
+    assert result["rewrite_rank_sum"] == 3
+    assert result["legacy_rank_sum"] == 4
+    assert result["rewrite_source_parameters"] == 12
+    assert result["paired_source_parameters"] == 12
+    assert result["rewrite_actual_bits"] == 25
+    assert result["rewrite_effective_bpw"] == pytest.approx(25 / 12)
+    assert result["legacy_rank_dependent_bits"] == 21
+    assert result["legacy_rank_dependent_bpw"] == pytest.approx(21 / 12)
+    assert result["rank_mismatches"] == [
+        {"block": 1, "layer": "mlp.gate_proj", "rewrite_rank": 2, "legacy_rank": 3, "rank_delta": -1}
+    ]
+    comparison = compare_trajectories(rewrite, (("legacy", tmp_path / "legacy.log", (1.0, 2.0)),))
+    comparison["rank_baselines"] = [result]
+    assert "1 rank mismatches" in render_markdown(comparison)
+
+    with pytest.raises(ValueError, match="unique"):
+        compare_rank_allocations(
+            rewrite,
+            (
+                ("legacy", ranks, load_legacy_rank_csv(ranks)),
+                ("legacy", ranks, load_legacy_rank_csv(ranks)),
+            ),
+        )
 
 
 def test_rewrite_trajectory_rejects_noncontiguous_active_prefix(tmp_path: Path) -> None:

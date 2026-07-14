@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from collections import Counter, deque
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -23,6 +24,9 @@ class RunValidationResult:
     run_output: str
     identity: dict[str, str]
     journal_records: int
+    active_journal_records: int
+    inactive_journal_records: int
+    journal_identity_count: int
     layer_records: int
     block_records: int
     completed_blocks: tuple[int, ...]
@@ -31,6 +35,15 @@ class RunValidationResult:
     artifact_bytes: int
     artifacts_by_type: dict[str, int]
     retired_activation_generations: tuple[str, ...]
+    committed_layer_count: int
+    rank_sum: int
+    quantized_parameters: int
+    bit_cost_by_category: dict[str, int]
+    effective_bpw: float
+    block_wall_seconds: float
+    peak_gpu_bytes: int
+    peak_host_bytes: int
+    final_frozen_pre_kd_losses: tuple[float, ...]
 
 
 def _references(value: object) -> tuple[ArtifactReference, ...]:
@@ -129,6 +142,95 @@ def _commit_payload(
     return payload, activation_reference
 
 
+def _committed_metrics(
+    commit_payloads: list[tuple[dict[str, Any], object]],
+) -> tuple[int, int, int, dict[str, int], float, float, int, int, tuple[float, ...]]:
+    ranks = 0
+    parameters = 0
+    bit_costs: Counter[str] = Counter()
+    wall_seconds = 0.0
+    peak_gpu_bytes = 0
+    peak_host_bytes = 0
+    losses: list[float] = []
+    seen_layers: set[tuple[int, str]] = set()
+    for record, payload_value in commit_payloads:
+        if record["kind"] != "block":
+            continue
+        if not isinstance(payload_value, dict):
+            raise ValueError(f"committed block payload is not an object: {record['artifact_id']}")
+        block = int(record["block"])
+        try:
+            layers = payload_value["layers"]
+            loss = float(payload_value["losses"]["final_frozen_pre_kd"])
+            block_wall = float(payload_value["wall_seconds"])
+            block_peak_gpu = int(payload_value["peak_gpu_bytes"])
+            block_peak_host = int(payload_value["peak_host_bytes"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"committed block metrics are malformed: {record['artifact_id']}") from exc
+        if (
+            not isinstance(layers, list)
+            or not layers
+            or not math.isfinite(loss)
+            or not math.isfinite(block_wall)
+            or block_wall < 0
+            or block_peak_gpu < 0
+            or block_peak_host < 0
+        ):
+            raise ValueError(f"committed block metrics are invalid: {record['artifact_id']}")
+        for layer_value in layers:
+            try:
+                layer_block = int(layer_value["layer"]["block"]["index"])
+                layer = layer_value["layer"]["path"]
+                rank = layer_value["frozen_state"]["rank"]
+                shape = layer_value["plan"]["source_weight"]["spec"]["shape"]
+                layer_bit_cost = layer_value["actual_bit_cost"]
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError(f"committed layer metrics are malformed: {record['artifact_id']}") from exc
+            if (
+                layer_block != block
+                or not isinstance(layer, str)
+                or not layer
+                or not isinstance(rank, int)
+                or isinstance(rank, bool)
+                or rank <= 0
+                or not isinstance(shape, list)
+                or not shape
+                or not all(isinstance(item, int) and not isinstance(item, bool) and item > 0 for item in shape)
+                or not isinstance(layer_bit_cost, dict)
+                or not layer_bit_cost
+                or not all(
+                    isinstance(name, str)
+                    and name
+                    and isinstance(value, int)
+                    and not isinstance(value, bool)
+                    and value >= 0
+                    for name, value in layer_bit_cost.items()
+                )
+                or (layer_block, layer) in seen_layers
+            ):
+                raise ValueError(f"committed layer metrics are invalid: {record['artifact_id']}")
+            seen_layers.add((layer_block, layer))
+            ranks += rank
+            parameters += math.prod(shape)
+            bit_costs.update(layer_bit_cost)
+        losses.append(loss)
+        wall_seconds += block_wall
+        peak_gpu_bytes = max(peak_gpu_bytes, block_peak_gpu)
+        peak_host_bytes = max(peak_host_bytes, block_peak_host)
+    total_bits = sum(bit_costs.values())
+    return (
+        len(seen_layers),
+        ranks,
+        parameters,
+        dict(sorted(bit_costs.items())),
+        total_bits / parameters if parameters else 0.0,
+        wall_seconds,
+        peak_gpu_bytes,
+        peak_host_bytes,
+        tuple(losses),
+    )
+
+
 def validate_resident_run(
     run_output: str | Path,
     *,
@@ -146,15 +248,19 @@ def validate_resident_run(
         temporary_root=artifact_root,
         use_persistent_validation_cache=False,
     )
-    records = _journal_records(root / "state" / "journal.jsonl")
-    identities = {json.dumps(record.get("identity"), sort_keys=True) for record in records}
-    if len(identities) != 1:
-        raise ValueError("resident journal contains more than one commit identity")
-    identity_value = records[0].get("identity")
+    all_records = _journal_records(root / "state" / "journal.jsonl")
+    identities = {json.dumps(record.get("identity"), sort_keys=True) for record in all_records}
+    identity_value = all_records[-1].get("identity")
     if not isinstance(identity_value, dict) or not all(
         isinstance(key, str) and isinstance(value, str) for key, value in identity_value.items()
     ):
         raise ValueError("resident journal identity is invalid")
+    active_identity = json.dumps(identity_value, sort_keys=True)
+    records = [
+        record
+        for record in all_records
+        if json.dumps(record.get("identity"), sort_keys=True) == active_identity
+    ]
 
     commit_payloads: list[tuple[dict[str, Any], object]] = []
     activation_by_block: dict[int, ArtifactReference] = {}
@@ -221,10 +327,24 @@ def validate_resident_run(
                 pending.extend(_references(_read_json(artifact_root / member.path)))
 
     by_type = Counter(value[0] for value in validated.values())
+    (
+        committed_layer_count,
+        rank_sum,
+        quantized_parameters,
+        bit_cost_by_category,
+        effective_bpw,
+        block_wall_seconds,
+        peak_gpu_bytes,
+        peak_host_bytes,
+        final_frozen_pre_kd_losses,
+    ) = _committed_metrics(commit_payloads)
     return RunValidationResult(
         str(root.resolve()),
         {str(key): str(value) for key, value in identity_value.items()},
+        len(all_records),
         len(records),
+        len(all_records) - len(records),
+        len(identities),
         sum(record["kind"] == "layer" for record in records),
         len(block_records),
         completed_blocks,
@@ -233,6 +353,15 @@ def validate_resident_run(
         sum(value[1] for value in validated.values()),
         dict(sorted(by_type.items())),
         tuple(sorted(retired)),
+        committed_layer_count,
+        rank_sum,
+        quantized_parameters,
+        bit_cost_by_category,
+        effective_bpw,
+        block_wall_seconds,
+        peak_gpu_bytes,
+        peak_host_bytes,
+        final_frozen_pre_kd_losses,
     )
 
 

@@ -57,6 +57,18 @@ def test_validate_resident_run_follows_artifact_graph_and_allows_retired_activat
         {
             "identity": IDENTITY,
             "block": {"index": 0},
+            "layers": [
+                {
+                    "actual_bit_cost": {"binary_factor_bits": 10, "scale_bits": 2},
+                    "frozen_state": {"rank": 2},
+                    "layer": {"block": {"index": 0}, "path": "mlp.gate_proj"},
+                    "plan": {"source_weight": {"spec": {"shape": [2, 3]}}},
+                }
+            ],
+            "losses": {"final_frozen_pre_kd": 1.5},
+            "peak_gpu_bytes": 100,
+            "peak_host_bytes": 200,
+            "wall_seconds": 3.0,
             "activation_generation": _reference(old_activation, "activation-generation"),
             "frozen": _reference(frozen, "frozen-layer"),
         },
@@ -68,6 +80,18 @@ def test_validate_resident_run_follows_artifact_graph_and_allows_retired_activat
         {
             "identity": IDENTITY,
             "block": {"index": 1},
+            "layers": [
+                {
+                    "actual_bit_cost": {"binary_factor_bits": 20, "scale_bits": 4},
+                    "frozen_state": {"rank": 3},
+                    "layer": {"block": {"index": 1}, "path": "mlp.gate_proj"},
+                    "plan": {"source_weight": {"spec": {"shape": [3, 4]}}},
+                }
+            ],
+            "losses": {"final_frozen_pre_kd": 2.5},
+            "peak_gpu_bytes": 150,
+            "peak_host_bytes": 180,
+            "wall_seconds": 4.0,
             "activation_generation": _reference(active_activation, "activation-generation"),
             "frozen": _reference(frozen, "frozen-layer"),
         },
@@ -110,6 +134,9 @@ def test_validate_resident_run_follows_artifact_graph_and_allows_retired_activat
     assert result.complete is True
     assert result.completed_blocks == (0, 1)
     assert result.journal_records == 3
+    assert result.active_journal_records == 3
+    assert result.inactive_journal_records == 0
+    assert result.journal_identity_count == 1
     assert result.layer_records == 1
     assert result.block_records == 2
     assert result.artifacts_validated == 5
@@ -120,6 +147,15 @@ def test_validate_resident_run_follows_artifact_graph_and_allows_retired_activat
         "layer-result": 1,
     }
     assert result.retired_activation_generations == (old_activation,)
+    assert result.committed_layer_count == 2
+    assert result.rank_sum == 5
+    assert result.quantized_parameters == 18
+    assert result.bit_cost_by_category == {"binary_factor_bits": 30, "scale_bits": 6}
+    assert result.effective_bpw == 2.0
+    assert result.block_wall_seconds == 7.0
+    assert result.peak_gpu_bytes == 150
+    assert result.peak_host_bytes == 200
+    assert result.final_frozen_pre_kd_losses == (1.5, 2.5)
     assert cache.read_bytes() == cache_before
 
 
@@ -134,6 +170,18 @@ def test_validate_resident_run_rejects_missing_durable_reference_and_incomplete_
         {
             "identity": IDENTITY,
             "block": {"index": 0},
+            "layers": [
+                {
+                    "actual_bit_cost": {"binary_factor_bits": 10},
+                    "frozen_state": {"rank": 2},
+                    "layer": {"block": {"index": 0}, "path": "mlp.gate_proj"},
+                    "plan": {"source_weight": {"spec": {"shape": [2, 3]}}},
+                }
+            ],
+            "losses": {"final_frozen_pre_kd": 1.0},
+            "peak_gpu_bytes": 100,
+            "peak_host_bytes": 200,
+            "wall_seconds": 3.0,
             "frozen": _reference(missing, "frozen-layer"),
         },
     )
@@ -155,3 +203,66 @@ def test_validate_resident_run_rejects_missing_durable_reference_and_incomplete_
         validate_resident_run(output, expected_blocks=2, require_complete=True)
     with pytest.raises(ArtifactCorruptionError, match="unavailable"):
         validate_resident_run(output, expected_blocks=1, require_complete=True)
+
+
+def test_validate_resident_run_selects_latest_identity_and_retains_history_count(tmp_path: Path) -> None:
+    output = tmp_path / "run"
+    store = LocalArtifactStore(output / "artifacts")
+    old_identity = {**IDENTITY, "config_hash": "sha256:old"}
+    active_identity = {**IDENTITY, "config_hash": "sha256:new"}
+
+    def block(identity: dict[str, str], loss: float) -> str:
+        return _artifact(
+            store,
+            "block-result",
+            "block-result.json",
+            {
+                "identity": identity,
+                "block": {"index": 0},
+                "layers": [
+                    {
+                        "actual_bit_cost": {"binary_factor_bits": 10},
+                        "frozen_state": {"rank": 2},
+                        "layer": {"block": {"index": 0}, "path": "mlp.gate_proj"},
+                        "plan": {"source_weight": {"spec": {"shape": [2, 3]}}},
+                    }
+                ],
+                "losses": {"final_frozen_pre_kd": loss},
+                "peak_gpu_bytes": 100,
+                "peak_host_bytes": 200,
+                "wall_seconds": 3.0,
+            },
+        )
+
+    old_block = block(old_identity, 9.0)
+    active_block = block(active_identity, 1.0)
+    _write_journal(
+        output,
+        [
+            {
+                "kind": "block",
+                "block": 0,
+                "layer": None,
+                "artifact_id": old_block,
+                "identity": old_identity,
+                "timestamp": "1",
+            },
+            {
+                "kind": "block",
+                "block": 0,
+                "layer": None,
+                "artifact_id": active_block,
+                "identity": active_identity,
+                "timestamp": "2",
+            },
+        ],
+    )
+
+    result = validate_resident_run(output, expected_blocks=1, require_complete=True)
+
+    assert result.identity == active_identity
+    assert result.journal_records == 2
+    assert result.active_journal_records == 1
+    assert result.inactive_journal_records == 1
+    assert result.journal_identity_count == 2
+    assert result.final_frozen_pre_kd_losses == (1.0,)

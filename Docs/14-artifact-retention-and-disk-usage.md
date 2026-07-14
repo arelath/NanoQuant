@@ -266,6 +266,14 @@ steady_state_resume_bytes    = 2 streams * activation_generation_bytes
 commit_peak_resume_bytes     = 4 streams * activation_generation_bytes
 ```
 
+Long factorized tuning uses a separate bounded resume generation under `state/tuning-checkpoint/`. It contains the
+current and best parameter values, Adam moments/Kahan state, scheduler step, losses, and epoch cursor in safetensors
+plus JSON. The active pointer changes atomically only after the successor generation is complete; the predecessor is
+then removed, and the whole checkpoint is removed only after the corresponding layer journal commit. Steady state
+therefore retains one tuning generation and atomic replacement briefly requires two, independent of epoch or layer
+count. These mutable resume generations are not content-addressed evidence objects and are never rooted as durable
+results after their layer commit.
+
 For the pinned Gemma workload, steady state is approximately 2.416 GB and commit peak is approximately 4.832 GB,
 independent of 26-block depth. Disk admission includes a safety margin and refuses to start when the store cannot
 accommodate commit peak, scratch, quarantine, and the durable result estimate.

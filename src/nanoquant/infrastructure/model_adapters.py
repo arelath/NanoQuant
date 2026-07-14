@@ -151,11 +151,25 @@ DEFINITIONS = (
 
 
 class TransformersModelAdapter:
-    version = "3"
-
     def __init__(self, definition: AdapterDefinition) -> None:
         self.definition = definition
         self.family = definition.family
+
+    def _contract_version(self, config: dict[str, object]) -> str:
+        """Return the persisted contract version for this model variant.
+
+        Adapter v3 completed replay behavior for OPT, Gemma/Gemma2, and
+        Gemma3 checkpoints that use final-logit softcapping.  Llama, Qwen,
+        and Gemma3 checkpoints without softcapping retained their exact v2
+        prefix/block/suffix behavior, so their existing preprocessing remains
+        compatible and must not be invalidated by an unrelated global bump.
+        """
+        model_type = config.get("model_type")
+        if model_type in {"opt", "gemma", "gemma2"}:
+            return "3"
+        if model_type == "gemma3_text" and config.get("final_logit_softcapping") is not None:
+            return "3"
+        return "2"
 
     def _checkpoint(self, source: ModelSource) -> CheckpointInventory:
         inventory = source.inventory()
@@ -254,7 +268,7 @@ class TransformersModelAdapter:
             f"sha256:{config_hash}",
             checkpoint.source,
             checkpoint.revision,
-            ComponentRef(self.family, self.version),
+            ComponentRef(self.family, self._contract_version(checkpoint.config)),
         )
         return ModelInventory(1, identity, blocks, shared, checkpoint.total_shard_bytes)
 

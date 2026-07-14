@@ -169,6 +169,34 @@ def test_gemma3_text_stack_capture_preserves_position_and_attention_metadata() -
     )
 
 
+@pytest.mark.parametrize(
+    ("model_type", "softcap", "expected_version"),
+    (
+        ("llama", None, "2"),
+        ("qwen3", None, "2"),
+        ("opt", None, "3"),
+        ("gemma", None, "3"),
+        ("gemma2", None, "3"),
+        ("gemma3_text", None, "2"),
+        ("gemma3_text", 30.0, "3"),
+    ),
+)
+def test_adapter_identity_versions_only_changed_replay_contracts(
+    tmp_path: Path,
+    model_type: str,
+    softcap: float | None,
+    expected_version: str,
+) -> None:
+    base_config = next(config for config in CONFIGS if config.model_type == model_type)
+    values = base_config.to_dict()
+    if model_type == "gemma3_text":
+        values["final_logit_softcapping"] = softcap
+    adapter = adapter_for_config(values)
+    source, _state = _source(tmp_path, adapter.definition.config_factory(values))
+
+    assert adapter.model_inventory(source).model.adapter.version == expected_version
+
+
 @pytest.mark.parametrize("base_config", CONFIGS, ids=lambda config: config.model_type)
 def test_adapter_full_replay_tied_inventory_and_streamed_loading(tmp_path: Path, base_config: object) -> None:
     values = base_config.to_dict()  # type: ignore[attr-defined]
