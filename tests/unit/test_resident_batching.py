@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import pytest
 import torch
 from torch import nn
@@ -9,12 +11,73 @@ from nanoquant.resident_quantization import (
     _peak_device_memory_bytes,
     _release_uncompleted_decoder_blocks,
     _run_block_batched,
+    _run_quality_logits_batched,
+    _streamed_quality_metrics,
 )
 
 
 class _BlockAdapter:
     def run_block(self, block: nn.Module, value: torch.Tensor, **_metadata: object) -> torch.Tensor:
         return block(value)
+
+
+class _QualityModel(nn.Module):
+    def __init__(self, logits_by_token: torch.Tensor) -> None:
+        super().__init__()
+        self.logits_by_token = nn.Parameter(logits_by_token)
+        self.batch_sizes: list[int] = []
+
+    def forward(self, input_ids: torch.Tensor, *, use_cache: bool) -> SimpleNamespace:
+        assert use_cache is False
+        self.batch_sizes.append(input_ids.shape[0])
+        return SimpleNamespace(logits=self.logits_by_token[input_ids])
+
+
+def test_quality_evaluation_streams_sequences_to_pageable_cpu_and_matches_full_metrics() -> None:
+    sample_count = 3
+    sequence_length = 300
+    vocabulary_size = 11
+    tokens = torch.arange(sample_count * sequence_length).reshape(sample_count, sequence_length) % vocabulary_size
+    base_logits = torch.randn(
+        vocabulary_size,
+        vocabulary_size,
+        generator=torch.Generator().manual_seed(47),
+    )
+    perturbation = torch.linspace(-0.2, 0.3, vocabulary_size).outer(
+        torch.linspace(0.1, 0.9, vocabulary_size)
+    )
+    reference_model = _QualityModel(base_logits)
+    compressed_model = _QualityModel(base_logits + perturbation)
+
+    reference_logits = _run_quality_logits_batched(reference_model, tokens, "cpu")
+
+    assert reference_model.batch_sizes == [1] * sample_count
+    assert reference_logits.device.type == "cpu"
+    assert not reference_logits.is_pinned()
+    with torch.no_grad():
+        compressed_logits = compressed_model(input_ids=tokens, use_cache=False).logits
+    expected = (
+        float(
+            torch.nn.functional.cross_entropy(
+                reference_logits[:, :-1].reshape(-1, vocabulary_size),
+                tokens[:, 1:].reshape(-1),
+            )
+        ),
+        float(
+            torch.nn.functional.cross_entropy(
+                compressed_logits[:, :-1].reshape(-1, vocabulary_size),
+                tokens[:, 1:].reshape(-1),
+            )
+        ),
+        float((compressed_logits - reference_logits).square().mean()),
+        float((compressed_logits.argmax(-1) == reference_logits.argmax(-1)).float().mean()),
+    )
+    compressed_model.batch_sizes.clear()
+
+    actual = _streamed_quality_metrics(compressed_model, tokens, reference_logits)
+
+    assert compressed_model.batch_sizes == [1] * sample_count
+    assert actual == pytest.approx(expected, rel=1e-6, abs=1e-7)
 
 
 def test_uncompleted_dense_decoder_blocks_are_released_from_model_shell() -> None:

@@ -537,6 +537,10 @@ def _run_quality_logits_batched(
         if result is None:
             result = torch.empty((tokens.shape[0], *output.shape[1:]), device=destination, dtype=output.dtype)
         result[index].copy_(output[0])
+        # Drop the device allocation before Python evaluates the next forward;
+        # rebinding ``output`` alone would otherwise keep the previous logits
+        # alive until the following forward has already completed.
+        del output
     if result is None:
         raise ValueError("cannot capture quality logits over empty tokens")
     return result
@@ -563,14 +567,13 @@ def _streamed_quality_metrics(
             torch.Tensor,
             cast(Any, model)(input_ids=tokens[index : index + 1], use_cache=False).logits,
         ).detach()[0]
-        reference = reference_logits[index].to(device)
-        argmax_matches += (compressed.argmax(-1) == reference.argmax(-1)).sum()
         targets = tokens[index, 1:]
         positions = compressed.shape[0]
         for start in range(0, positions, _QUALITY_CHUNK_POSITIONS):
             end = min(start + _QUALITY_CHUNK_POSITIONS, positions)
             compressed_chunk = compressed[start:end].float()
-            reference_chunk = reference[start:end].float()
+            reference_chunk = reference_logits[index, start:end].to(device=device, dtype=torch.float32)
+            argmax_matches += (compressed_chunk.argmax(-1) == reference_chunk.argmax(-1)).sum()
             squared_error_sum += (compressed_chunk - reference_chunk).square().sum()
             loss_end = min(end, positions - 1)
             if start < loss_end:
@@ -580,6 +583,9 @@ def _streamed_quality_metrics(
                 compressed_nll_sum += torch.nn.functional.cross_entropy(
                     compressed_chunk[: loss_end - start], targets[start:loss_end], reduction="sum"
                 )
+            del compressed_chunk, reference_chunk
+        # Ensure the next forward cannot overlap this sequence's full logits.
+        del compressed
     nll_positions = tokens.shape[0] * max(0, tokens.shape[1] - 1)
     reference_nll = float(reference_nll_sum / nll_positions) if nll_positions else float("nan")
     compressed_nll = float(compressed_nll_sum / nll_positions) if nll_positions else float("nan")
