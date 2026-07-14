@@ -11,6 +11,7 @@ from nanoquant.config.schema import (
     DType,
     ModelConfig,
     ObjectiveKind,
+    ObservabilityConfig,
     ProfilingConfig,
     ProfilingLevel,
     RunConfig,
@@ -68,6 +69,29 @@ def test_validation_phases_have_stable_codes() -> None:
         profiling=ProfilingConfig(cuda_sample_every=0, raw_samples_per_phase=0),
     )
     assert {issue.code for issue in validate(invalid)} == {"CFG015", "CFG016"}
+
+
+def test_observability_levels_are_validated_without_changing_schema() -> None:
+    invalid_name = RunConfig(ModelConfig("x"), observability=ObservabilityConfig(event_level="trace"))
+    assert {issue.code for issue in validate(invalid_name)} == {"OBS001"}
+
+    console_more_verbose = RunConfig(
+        ModelConfig("x"),
+        observability=ObservabilityConfig(event_level="info", console_level="debug"),
+    )
+    assert {issue.code for issue in validate(console_more_verbose)} == {"OBS002"}
+
+    silent_admm = RunConfig(
+        ModelConfig("x"),
+        observability=ObservabilityConfig(event_level="info", record_admm_steps=True),
+    )
+    assert {issue.code for issue in validate(silent_admm)} == {"OBS003"}
+
+    debug_admm = RunConfig(
+        ModelConfig("x"),
+        observability=ObservabilityConfig(event_level="debug", record_admm_steps=True),
+    )
+    assert validate(debug_admm) == ()
 
 
 def test_legacy_migration_is_total_and_rejects_uninventoried_fields() -> None:

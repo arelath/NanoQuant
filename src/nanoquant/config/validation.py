@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
+from nanoquant.ports.event_sink import Severity
+
 from .schema import ObjectiveKind, OutlierSelector, RunConfig
 
 
@@ -65,6 +67,30 @@ def validate(config: RunConfig, phase: ValidationPhase = ValidationPhase.PRE_RES
         "profiling.raw_samples_per_phase",
         "must be positive",
     )
+    levels: dict[str, Severity] = {}
+    for path, value in (
+        ("observability.console_level", config.observability.console_level),
+        ("observability.event_level", config.observability.event_level),
+    ):
+        try:
+            levels[path] = Severity.parse(value)
+        except ValueError:
+            require(False, "OBS001", path, "must be one of debug, info, warning, error")
+    console_level = levels.get("observability.console_level")
+    event_level = levels.get("observability.event_level")
+    if console_level is not None and event_level is not None:
+        require(
+            event_level.rank <= console_level.rank,
+            "OBS002",
+            "observability.event_level",
+            "must be at least as verbose as observability.console_level",
+        )
+        require(
+            not config.observability.record_admm_steps or event_level is Severity.DEBUG,
+            "OBS003",
+            "observability.record_admm_steps",
+            "requires observability.event_level=debug",
+        )
     if config.calibration.objective.kind is ObjectiveKind.BLOCK_DIAGONAL:
         require(
             bool(config.calibration.objective.block_size and config.calibration.objective.block_size > 0),

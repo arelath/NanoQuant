@@ -1,7 +1,23 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 from typing import Protocol
+
+
+class Severity(str, Enum):
+    DEBUG = "debug"
+    INFO = "info"
+    WARNING = "warning"
+    ERROR = "error"
+
+    @property
+    def rank(self) -> int:
+        return tuple(Severity).index(self)
+
+    @classmethod
+    def parse(cls, value: str | Severity) -> Severity:
+        return value if isinstance(value, cls) else cls(value)
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,4 +44,4 @@ class EventSink(Protocol):
         span_id: str | None = None,
         parent_span_id: str | None = None,
         **fields: object,
-    ) -> Event: ...
+    ) -> Event | None: ...
