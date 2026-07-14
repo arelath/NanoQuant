@@ -122,7 +122,7 @@ from nanoquant.infrastructure.tuning_checkpoint import (
     save_tuning_checkpoint,
 )
 
-RESIDENT_ALGORITHM_VERSION = 23
+RESIDENT_ALGORITHM_VERSION = 24
 
 
 @contextmanager
@@ -315,6 +315,23 @@ def _self_reference_weighted_mse(value: torch.Tensor, importance: torch.Tensor) 
     if bool(torch.isfinite(value).all()):
         return 0.0
     return _weighted_mse(value, value, importance)
+
+
+def _clone_forward_metadata(metadata: dict[str, object]) -> dict[str, object]:
+    """Clone captured forward metadata so one decoder block cannot mutate the next block's inputs."""
+
+    def clone(value: object) -> object:
+        if isinstance(value, torch.Tensor):
+            return value.clone()
+        if isinstance(value, tuple):
+            return tuple(clone(item) for item in value)
+        if isinstance(value, list):
+            return [clone(item) for item in value]
+        if isinstance(value, dict):
+            return {key: clone(item) for key, item in value.items()}
+        return value
+
+    return {key: clone(value) for key, value in metadata.items()}
 
 
 def _block_loss(
@@ -1056,7 +1073,7 @@ def _run_resident_quantization_impl(
             ).detach()
     if not torch.equal(initial_inputs[:1], captured_input.detach().cpu()):
         raise ValueError("adapter prefix does not match the model's first-block input")
-    metadata = capture.keyword
+    captured_metadata = capture.keyword
     if request.device.startswith("cuda"):
         # Prefix capture traverses the full embedding/prefix path in large
         # no-grad batches. Its workspaces are dead once activations are on CPU.
@@ -1104,12 +1121,17 @@ def _run_resident_quantization_impl(
     elif request.calibration_method == "forward_only":
         calibration_inputs = initial_inputs
         for block_inventory, block in zip(inventory.blocks, decoder_layers, strict=True):
+            metadata = _clone_forward_metadata(captured_metadata)
             paths = tuple(layer.path for layer in adapter.quantizable_layers(block, block_inventory.block))
 
-            def calibration_runner(module: nn.Module, value: torch.Tensor) -> torch.Tensor:
+            def calibration_runner(
+                module: nn.Module,
+                value: torch.Tensor,
+                block_metadata: dict[str, object] = metadata,
+            ) -> torch.Tensor:
                 parameter = next(iter(module.parameters()), None)
                 device = value.device if parameter is None else parameter.device
-                return adapter.run_block(module, value.to(device, non_blocking=True), **metadata)
+                return adapter.run_block(module, value.to(device, non_blocking=True), **block_metadata)
 
             with recorder.phase("calibrate", block=block_inventory.block.index, method="forward_only"):
                 stats = calibrate_block(
@@ -1313,6 +1335,15 @@ def _run_resident_quantization_impl(
         block_started = time.perf_counter()
         deferred_slice = request.defer_layer_loss_snapshots
         block_index = block_plan.block.index
+        metadata = _clone_forward_metadata(captured_metadata)
+
+        def tuning_forward(
+            module: nn.Module,
+            value: torch.Tensor,
+            block_metadata: dict[str, object] = metadata,
+        ) -> torch.Tensor:
+            return adapter.run_block(module, value, **block_metadata)
+
         with _profile_block_phase(recorder, block_index, "prepare"):
             working_block = adapter.load_block(source, block_plan.block, request.device)
             working_block.eval()
@@ -1386,7 +1417,7 @@ def _run_resident_quantization_impl(
                             ),
                             restore_best_state=request.restore_best_tuning_state,
                         ),
-                        lambda module, value: adapter.run_block(module, value, **metadata),
+                        tuning_forward,
                         tuning_recorder,
                     )
             with _profile_layer_phase(recorder, block_index, layer_plan.layer.path, "materialize"):
@@ -1563,7 +1594,7 @@ def _run_resident_quantization_impl(
                             microbatch_size=request.tuning_microbatch_size,
                             restore_best_state=request.restore_best_tuning_state,
                         ),
-                        lambda module, value: adapter.run_block(module, value, **metadata),
+                        tuning_forward,
                         tuning_recorder,
                         resume=None if active_checkpoint is None else active_checkpoint.state,
                         checkpoint_sink=checkpoint_sink,
@@ -1674,7 +1705,7 @@ def _run_resident_quantization_impl(
                             request.post_block_refit_epoch_cooldown_seconds
                         ),
                     ),
-                    lambda module, value: adapter.run_block(module, value, **metadata),
+                    tuning_forward,
                     tuning_recorder,
                 )
             refitted_states = []

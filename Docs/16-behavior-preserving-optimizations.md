@@ -882,6 +882,17 @@ must be remeasured rather than inferred from the speedup.
   semantic correction successful. The
   run's authoritative PyTorch CUDA peak was **4,789,194,240 bytes**; block evidence recorded a 6,232,735,744-byte
   board-level peak, independently ruling out the earlier 26 GB process-private figure as live VRAM.
+- **Activation reload alone rejected; captured metadata is the mutable boundary (2026-07-14):** version 23
+  reloaded both committed activation streams between blocks, yet block 1 still entered at **6.1009154319** and
+  finished at **5.4481825829** versus contemporary legacy **3.6029**. Store validation passed all 79 reachable
+  artifacts and all 14 ranks matched. A fresh-process diagnostic then ran the retained block-0 activation
+  generation through a freshly loaded source block 1 and reproduced the v21 entry exactly at
+  **5.0029702187**. A separately finalized partial-layer replay produced **5.0053129196**, while the same
+  activation tensor in the continuous process had entered near 6.1. The activation files and checkpoint-backed
+  source block are therefore not the divergent state. The remaining process-local input is the prefix-captured
+  attention/position metadata, which was reused after thousands of block-0 forwards. Resident algorithm version
+  24 preserves that capture as a pristine template and recursively clones every tensor/container for each
+  calibration and quantization block. A fresh two-block replay is required before extension.
 - `JsonlEventSink._read_last_sequence` parses the whole event log at construction — only matters for
   resumed runs with large logs; fine today, worth a tail-scan if event volume grows.
 - **Measured, not implemented (2026-07-13):** a fresh process inventories the pinned Gemma snapshot in a

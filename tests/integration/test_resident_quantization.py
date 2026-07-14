@@ -16,6 +16,7 @@ from nanoquant.infrastructure.frozen_model_loader import load_frozen_run
 from nanoquant.infrastructure.progress import ProgressJournal
 from nanoquant.resident_quantization import (
     ResidentQuantizationRequest,
+    _clone_forward_metadata,
     _epoch_cooldown_observer,
     _resident_config_hash,
     run_resident_quantization,
@@ -372,12 +373,19 @@ def test_continuous_multiblock_run_reloads_committed_activation_boundary(
     )
     Gemma3ForCausalLM(config).save_pretrained(snapshot, safe_serialization=True)
     loaded_boundaries: list[str] = []
+    cloned_metadata: list[dict[str, object]] = []
 
     def recording_load(reference: Any, artifacts: Any, device: str = "cpu") -> tuple[torch.Tensor, torch.Tensor]:
         loaded_boundaries.append(reference.artifact_id)
         return load_block_activations(reference, artifacts, device)
 
+    def recording_clone(metadata: dict[str, object]) -> dict[str, object]:
+        cloned = _clone_forward_metadata(metadata)
+        cloned_metadata.append(cloned)
+        return cloned
+
     monkeypatch.setattr("nanoquant.resident_quantization.load_block_activations", recording_load)
+    monkeypatch.setattr("nanoquant.resident_quantization._clone_forward_metadata", recording_clone)
     result = run_resident_quantization(
         ResidentQuantizationRequest(
             snapshot,
@@ -393,4 +401,25 @@ def test_continuous_multiblock_run_reloads_committed_activation_boundary(
     )
 
     assert loaded_boundaries == [result.frozen_model.blocks[0].artifact_id]
+    assert len(cloned_metadata) == 4
+    assert len({id(metadata) for metadata in cloned_metadata}) == 4
     assert len(result.blocks) == 2
+
+
+def test_forward_metadata_clone_isolates_nested_tensor_mutation() -> None:
+    source = {
+        "attention_mask": torch.tensor([[1.0, 2.0]]),
+        "position_embeddings": (torch.tensor([3.0]), {"sin": torch.tensor([4.0])}),
+        "flag": True,
+    }
+
+    cloned = _clone_forward_metadata(source)
+    cast(torch.Tensor, cloned["attention_mask"]).zero_()
+    position_embeddings = cast(tuple[torch.Tensor, dict[str, torch.Tensor]], cloned["position_embeddings"])
+    position_embeddings[0].add_(10)
+    position_embeddings[1]["sin"].mul_(0)
+
+    assert torch.equal(cast(torch.Tensor, source["attention_mask"]), torch.tensor([[1.0, 2.0]]))
+    source_positions = cast(tuple[torch.Tensor, dict[str, torch.Tensor]], source["position_embeddings"])
+    assert torch.equal(source_positions[0], torch.tensor([3.0]))
+    assert torch.equal(source_positions[1]["sin"], torch.tensor([4.0]))
