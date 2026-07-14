@@ -868,8 +868,20 @@ must be remeasured rather than inferred from the speedup.
   prefix layers selected a nonfinal best epoch, including block 7 `self_attn.k_proj` at epoch 6 of 8. The tuning
   request now makes best-state restoration explicit; the Gemma parity recipe disables it for nonfactorized and
   factorized phases while retaining it for post-block refit. This changes numerical identity and requires a fresh
-  real-model replay rather than resuming v21. Training longer was not selected: v21 was already lower than the
-  contemporary oracle at every block-7 layer boundary, so extra optimization would move in the wrong direction.
+  version-22 real-model replay rather than resuming v21. Training longer was not selected: v21 was already lower than
+  the contemporary oracle at every block-7 layer boundary, so extra optimization would move in the wrong direction.
+- **Continuous v22 replay stopped at the process-boundary gate (2026-07-13):** a fresh two-block run reproduced
+  block 0 exactly at **1.3784899712**, but its uninterrupted block-1 entry loss was **6.0788297653** and its final
+  loss was **5.4466819763**, versus resume-based v21 at **5.0029702187** entry / **3.5971968174** final and
+  contemporary legacy at **3.6029** final. All block-0 frozen factors, scales, outliers, ranks, and final loss were
+  byte-identical between v21 and v22; the only execution distinction was that v21 reloaded its committed activation
+  generation after a bounded process restart while v22 carried the in-memory boundary directly. Extension was
+  rejected at block 1 (+51.17% versus contemporary). Multi-block execution now canonicalizes every inter-block
+  handoff by reloading the just-committed activation artifact, making continuous and crash-resumed execution use the
+  same durable boundary. This is resident algorithm version 23; a fresh replay is required before calling the tuning
+  semantic correction successful. The
+  run's authoritative PyTorch CUDA peak was **4,789,194,240 bytes**; block evidence recorded a 6,232,735,744-byte
+  board-level peak, independently ruling out the earlier 26 GB process-private figure as live VRAM.
 - `JsonlEventSink._read_last_sequence` parses the whole event log at construction — only matters for
   resumed runs with large logs; fine today, worth a tail-scan if event volume grows.
 - **Measured, not implemented (2026-07-13):** a fresh process inventories the pinned Gemma snapshot in a
@@ -910,14 +922,14 @@ Do not reach for these while parity is the gate; each changes floating-point res
   harness;
 - replacing SHA-256 with a faster hash (artifact identity is schema surface);
 - reducing probe iterations, ADMM iterations, epochs, or early-stop thresholds (quality/behavior);
-- removing the rewrite's full-dataset tuning evaluations or best-epoch restore. For `E` epochs the rewrite
-  intentionally performs `E` training passes plus an initial evaluation, `E` epoch evaluations, and a final
-  restored-state evaluation (`2E + 2` dataset passes; 18 at the parity setting of 8 epochs). Contemporary
-  legacy non-factorized and factorized tuning use the accumulated pre-update training loss and do not restore
-  the best epoch, so they normally execute only `E` dataset passes. That structural difference is a credible
-  part of the measured wall-time gap, but deleting the extra passes would change the selected weights and
-  tuning metrics. The micro profile must measure these phases separately; any semantic alignment belongs in
-  an explicitly behavior-changing parity decision, not this optimization list;
+- removing the rewrite's full-dataset tuning evaluations. For `E` epochs the rewrite still performs `E` training
+  passes plus an initial evaluation, `E` epoch evaluations, and a final evaluation (`2E + 2` dataset passes; 18 at
+  the parity setting of 8 epochs). Contemporary legacy non-factorized and factorized tuning use the accumulated
+  pre-update training loss and normally execute only `E` dataset passes. The parity recipe now retains the final
+  epoch for those two phases, matching legacy state semantics, while post-block refit still restores its best epoch.
+  Deleting the extra evaluation passes could change recorded metrics and early-stop behavior. The micro profile must
+  measure these phases separately; any further semantic alignment belongs in an explicitly behavior-changing parity
+  decision, not this optimization list;
 - batching exact causal-evaluation windows: measured batch 8 at 1.092 s versus serial at 4.857 s
   (**4.45x**), but total NLL changed from 49,559.943115 to 49,554.102051 and peak GPU memory rose from
   2.30 GB to 4.63 GB. It is useful only as an explicitly approximate evaluation mode, not for the pinned

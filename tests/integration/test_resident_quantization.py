@@ -355,3 +355,42 @@ def test_rolling_retention_keeps_only_latest_resume_generation(tmp_path: Path) -
         load_block_activations(result.frozen_model.blocks[0], artifacts)
     teacher, compressed = load_block_activations(result.frozen_model.blocks[1], artifacts)
     assert teacher.shape == compressed.shape == (1, 4, 16)
+
+
+def test_continuous_multiblock_run_reloads_committed_activation_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    snapshot = tmp_path / "snapshot"
+    config = Gemma3TextConfig(
+        vocab_size=32,
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=4,
+    )
+    Gemma3ForCausalLM(config).save_pretrained(snapshot, safe_serialization=True)
+    loaded_boundaries: list[str] = []
+
+    def recording_load(reference: Any, artifacts: Any, device: str = "cpu") -> tuple[torch.Tensor, torch.Tensor]:
+        loaded_boundaries.append(reference.artifact_id)
+        return load_block_activations(reference, artifacts, device)
+
+    monkeypatch.setattr("nanoquant.resident_quantization.load_block_activations", recording_load)
+    result = run_resident_quantization(
+        ResidentQuantizationRequest(
+            snapshot,
+            tmp_path / "continuous",
+            "fixture/gemma3",
+            "pinned-test-revision",
+            ((1, 2, 3, 4),),
+            device="cpu",
+            target_bpw=8.0,
+            rank_multiple=1,
+            admm=ADMMConfig(outer_iterations=1, inner_iterations=1),
+        )
+    )
+
+    assert loaded_boundaries == [result.frozen_model.blocks[0].artifact_id]
+    assert len(result.blocks) == 2

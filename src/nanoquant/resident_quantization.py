@@ -122,7 +122,7 @@ from nanoquant.infrastructure.tuning_checkpoint import (
     save_tuning_checkpoint,
 )
 
-RESIDENT_ALGORITHM_VERSION = 21
+RESIDENT_ALGORITHM_VERSION = 23
 
 
 @contextmanager
@@ -1771,8 +1771,23 @@ def _run_resident_quantization_impl(
             and new_block_commits >= request.interrupt_after_block_commits
         ):
             raise InterruptedError(f"injected interruption after {new_block_commits} new block commits")
-        teacher_inputs = teacher_outputs
-        compressed_inputs = compressed_outputs
+        has_pending_block = any(
+            candidate.block.index not in completed_block_indexes and candidate.block.index > block_index
+            for candidate in plan.blocks
+        )
+        if has_pending_block:
+            # A continued run and a crash-resumed run must consume the same
+            # canonical activation generation. Reloading the just-committed
+            # boundary also makes the artifact round trip part of every
+            # multi-block execution rather than a resume-only code path.
+            del teacher_outputs, compressed_outputs
+            teacher_inputs, compressed_inputs = load_block_activations(committed.reference, artifacts, "cpu")
+            if request.device.startswith("cuda"):
+                teacher_inputs = teacher_inputs.pin_memory()
+                compressed_inputs = compressed_inputs.pin_memory()
+        else:
+            teacher_inputs = teacher_outputs
+            compressed_inputs = compressed_outputs
         layer_container[block_index] = working_block
         del working_block
 
