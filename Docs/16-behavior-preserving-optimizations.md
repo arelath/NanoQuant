@@ -857,6 +857,19 @@ must be remeasured rather than inferred from the speedup.
   7.6 and 7.8 GiB board use while host private commit plateaued near 16.3 GiB. This confirms that the earlier
   26 GB process-private high-water report was not device VRAM and that the corrected resident path does not
   accumulate CUDA memory across epochs or bounded block resumes.
+- **Eight-block v21 extension stopped and final-epoch mismatch corrected (2026-07-13):** blocks 5 and 6 reached
+  **34.1128807068** versus contemporary **34.3** (-0.55%) and **41.2283020020** versus **42.129** (-2.14%).
+  Block 7 then reached **247.3277435303** versus **256.14** (-3.44%), outside the approved 2.20% realization
+  envelope, so no block-8 worker was launched. Store validation followed 302 reachable artifacts and found one
+  identity, 64 active journal records, and zero inactive records. The ranks, salient residual probe, LS scale
+  fit, tuning schedules, and boundary loss definition all match legacy. The first actionable semantic mismatch
+  is tuning rollback: the rewrite restored the lowest-loss epoch after every nonfactorized and factorized phase,
+  whereas legacy leaves the final epoch installed and only rolls post-block refit back to its best state. Eight
+  prefix layers selected a nonfinal best epoch, including block 7 `self_attn.k_proj` at epoch 6 of 8. The tuning
+  request now makes best-state restoration explicit; the Gemma parity recipe disables it for nonfactorized and
+  factorized phases while retaining it for post-block refit. This changes numerical identity and requires a fresh
+  real-model replay rather than resuming v21. Training longer was not selected: v21 was already lower than the
+  contemporary oracle at every block-7 layer boundary, so extra optimization would move in the wrong direction.
 - `JsonlEventSink._read_last_sequence` parses the whole event log at construction — only matters for
   resumed runs with large logs; fine today, worth a tail-scan if event volume grows.
 - **Measured, not implemented (2026-07-13):** a fresh process inventories the pinned Gemma snapshot in a

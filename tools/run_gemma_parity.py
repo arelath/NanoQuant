@@ -153,6 +153,7 @@ def main() -> None:
         post_block_refit_epoch_cooldown_seconds=args.post_block_refit_epoch_cooldown_seconds,
         tuning_microbatch_size=args.tuning_microbatch_size,
         legacy_tuning_seed_reset=True,
+        restore_best_tuning_state=False,
         seed=args.seed,
         activation_retention=args.activation_retention,
         calibration_method="online_fisher",

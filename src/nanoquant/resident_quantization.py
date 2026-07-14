@@ -200,6 +200,7 @@ class ResidentQuantizationRequest:
     post_block_refit_epoch_cooldown_seconds: float = 0.0
     tuning_microbatch_size: int | None = None
     legacy_tuning_seed_reset: bool = False
+    restore_best_tuning_state: bool = True
     activation_retention: str = "rolling"
     seed: int = 0
     verify_hashes: bool = True
@@ -755,6 +756,7 @@ def _resident_config_hash(request: ResidentQuantizationRequest) -> str:
                     "tuning_microbatch_size": request.tuning_microbatch_size,
                     "block_forward_batch_size": request.block_forward_batch_size,
                     "legacy_tuning_seed_reset": request.legacy_tuning_seed_reset,
+                    "restore_best_tuning_state": request.restore_best_tuning_state,
                     "activation_retention": request.activation_retention,
                     "calibration_method": request.calibration_method,
                     "calibration_shrinkage": request.calibration_shrinkage,
@@ -1382,6 +1384,7 @@ def _run_resident_quantization_impl(
                             epoch_observer=_epoch_cooldown_observer(
                                 request.nonfactorized_tuning_epoch_cooldown_seconds
                             ),
+                            restore_best_state=request.restore_best_tuning_state,
                         ),
                         lambda module, value: adapter.run_block(module, value, **metadata),
                         tuning_recorder,
@@ -1558,6 +1561,7 @@ def _run_resident_quantization_impl(
                             output_importance=block_output_importance,
                             seed=_tuning_seed(request, "factorized-tuning", block_index, layer_plan.layer.path),
                             microbatch_size=request.tuning_microbatch_size,
+                            restore_best_state=request.restore_best_tuning_state,
                         ),
                         lambda module, value: adapter.run_block(module, value, **metadata),
                         tuning_recorder,

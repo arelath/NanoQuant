@@ -227,6 +227,31 @@ def test_factorized_tuning_changes_only_selected_module_and_restores_best() -> N
     assert torch.equal(model.base.weight, base_before)
 
 
+def test_factorized_tuning_can_keep_final_epoch_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    model = Hybrid()
+    inputs = torch.randn(8, 3, generator=torch.Generator().manual_seed(70))
+    targets = torch.randn(8, 2, generator=torch.Generator().manual_seed(71))
+    observed: list[torch.Tensor] = []
+    losses = iter((10.0, 1.0, 5.0, 5.0))
+
+    def evaluate(*_args: object, **_kwargs: object) -> float:
+        observed.append(model.quant.left_latent.detach().clone())
+        return next(losses)
+
+    monkeypatch.setattr(tuning_module, "_evaluate_loss", evaluate)
+    metrics = tune_factorized(
+        model,
+        "quant",
+        TuningRequest(inputs, targets, 2, 4, 0.02, restore_best_state=False),
+        _forward,
+    )
+
+    assert metrics.best.loss == 1.0
+    assert metrics.final.loss == 5.0
+    assert torch.equal(observed[-1], observed[2])
+    assert not torch.equal(observed[-1], observed[1])
+
+
 def test_tuning_epoch_observer_receives_full_evaluation_trajectory() -> None:
     model = Hybrid()
     inputs = torch.randn(8, 3, generator=torch.Generator().manual_seed(20))

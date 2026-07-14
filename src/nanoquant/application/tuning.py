@@ -35,6 +35,7 @@ class TuningRequest:
     seed: int = 0
     microbatch_size: int | None = None
     epoch_observer: Callable[[int, float], None] | None = None
+    restore_best_state: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -580,16 +581,17 @@ def tune(
                         )
                 if stopped_early:
                     break
-        parameter_map = dict(model.named_parameters())
-        if recorder is NULL_RECORDER:
-            with torch.no_grad():
-                for name, value in best_state.items():
-                    parameter_map[name].copy_(value)
-        else:
-            with recorder.phase("restore_best"):
+        if request.restore_best_state:
+            parameter_map = dict(model.named_parameters())
+            if recorder is NULL_RECORDER:
                 with torch.no_grad():
                     for name, value in best_state.items():
                         parameter_map[name].copy_(value)
+            else:
+                with recorder.phase("restore_best"):
+                    with torch.no_grad():
+                        for name, value in best_state.items():
+                            parameter_map[name].copy_(value)
         if recorder is NULL_RECORDER:
             final_value = _evaluate_loss(model, request, forward)
         else:

@@ -286,6 +286,9 @@ def test_numerical_batch_shapes_invalidate_resume_identity(tmp_path: Path) -> No
     assert _resident_config_hash(replace(request, tuning_microbatch_size=2)) != _resident_config_hash(request)
     assert _resident_config_hash(replace(request, block_forward_batch_size=2)) != _resident_config_hash(request)
     assert _resident_config_hash(
+        replace(request, restore_best_tuning_state=False)
+    ) != _resident_config_hash(request)
+    assert _resident_config_hash(
         replace(request, factorized_tuning_epoch_cooldown_seconds=5.0)
     ) == _resident_config_hash(request)
     assert _resident_config_hash(
