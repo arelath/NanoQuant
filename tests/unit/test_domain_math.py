@@ -4,13 +4,14 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from nanoquant.domain.metrics import (
+    LEGACY_IMPORTANCE_FLOOR,
     per_element_squared_error,
     raw_squared_error,
     reconstruction_metrics,
     weighted_squared_error,
 )
 from nanoquant.domain.models import ArtifactRef, AttemptSummary, BitCost
-from nanoquant.domain.objectives import regularize_covariance, regularized_cholesky, unwhiten, whiten
+from nanoquant.domain.objectives import DiagonalObjective, regularize_covariance, regularized_cholesky, unwhiten, whiten
 from nanoquant.domain.outliers import quantize_int8_columns, reconstruct_with_outliers, remove_columns
 from nanoquant.domain.planning import decide_retry, effective_bpw, factor_bit_cost, uniform_rank
 from nanoquant.domain.seeds import logical_seed
@@ -27,6 +28,26 @@ def test_reconstruction_metrics_known_values() -> None:
     metrics = reconstruction_metrics(target, prediction, inputs, outputs)
     assert metrics.export_weighted_error == 21
     assert metrics.raw_normalized_error == pytest.approx(4 / 30)
+
+
+def test_diagonal_objective_matches_legacy_importance_floors() -> None:
+    target = torch.zeros((2, 2))
+    prediction = torch.ones((2, 2))
+    inputs = torch.tensor([0.0, 2.0])
+    outputs = torch.tensor([0.0, 3.0])
+    expected = (LEGACY_IMPORTANCE_FLOOR + 2.0) * (LEGACY_IMPORTANCE_FLOOR + 3.0)
+    objective = DiagonalObjective(inputs, outputs)
+
+    assert objective.weighted_error(target, prediction).item() == pytest.approx(expected)
+    transformed = objective.transform_for_factorizer(torch.ones_like(target))
+    assert transformed[0, 0].item() == pytest.approx(objective.epsilon**2)
+    assert transformed[1, 1].item() == pytest.approx((2.0 * 3.0) ** 0.5)
+
+
+def test_diagonal_objective_rejects_mismatched_importance_shapes() -> None:
+    objective = DiagonalObjective(torch.ones(3), torch.ones(2))
+    with pytest.raises(ValueError, match="importance vector lengths"):
+        objective.transform_for_factorizer(torch.ones((2, 2)))
 
 
 def test_whitening_round_trip_and_regularization() -> None:

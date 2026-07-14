@@ -24,10 +24,12 @@ class DiagonalObjective:
         return self.weighted_error(target, prediction) / norm.clamp_min(self.epsilon)
 
     def transform_for_factorizer(self, weight: torch.Tensor) -> torch.Tensor:
+        if self.input_importance.numel() != weight.shape[1] or self.output_importance.numel() != weight.shape[0]:
+            raise ValueError("importance vector lengths do not match weight dimensions")
         return (
             weight
-            * self.output_importance.detach().sqrt().reshape(-1, 1)
-            * self.input_importance.detach().sqrt().reshape(1, -1)
+            * self.output_importance.detach().float().sqrt().clamp_min(self.epsilon).reshape(-1, 1)
+            * self.input_importance.detach().float().sqrt().clamp_min(self.epsilon).reshape(1, -1)
         )
 
 

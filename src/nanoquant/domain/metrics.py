@@ -6,6 +6,8 @@ import torch
 
 from .models import ReconstructionMetrics
 
+LEGACY_IMPORTANCE_FLOOR = 1e-12
+
 
 def raw_squared_error(target: torch.Tensor, prediction: torch.Tensor) -> torch.Tensor:
     _same_shape(target, prediction)
@@ -29,7 +31,9 @@ def weighted_squared_error(
     _same_shape(target, prediction)
     _importance_shapes(target, input_importance, output_importance)
     delta = prediction.float() - target.float()
-    weights = output_importance.detach().float().reshape(-1, 1) * input_importance.detach().float().reshape(1, -1)
+    output_weight = output_importance.detach().float().reshape(-1, 1).clamp_min(LEGACY_IMPORTANCE_FLOOR)
+    input_weight = input_importance.detach().float().reshape(1, -1).clamp_min(LEGACY_IMPORTANCE_FLOOR)
+    weights = output_weight * input_weight
     return (delta.square() * weights).sum()
 
 

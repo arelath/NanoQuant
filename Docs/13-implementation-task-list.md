@@ -23,7 +23,11 @@ Outcome: the rewrite has trustworthy parity, quality, and performance baselines.
 - [ ] **M0.3** Select and document the reference development GPU, large-model host, stable performance host, and expected power/clock configuration.
 - [x] **M0.4** Freeze the exact current configuration for Experiment 019, including every effective default that is currently spread across config representations.
 - [x] **M0.5** Preserve `outputs/019-phase1-weight-errors.md` and its CSV as golden reporting inputs.
-- [ ] **M0.6** Capture at least three layer fixtures: attention, MLP, and one historically difficult reconstruction layer.
+- [x] **M0.6** Capture at least three layer fixtures: attention, MLP, and one historically difficult reconstruction layer.
+  The immutable references and old/new objective results for block-0 `self_attn.q_proj`, block-1 `mlp.gate_proj`,
+  and the difficult block-0 `mlp.down_proj` are retained in
+  `evidence/m2/gemma-diagonal-objective-parity.json`; the capture reuses content-addressed tensors instead of
+  duplicating the large matrices.
 - [ ] **M0.7** Capture at least two block fixtures from different model depths, including inputs, teacher targets, statistics, weights, and accepted results.
 - [ ] **M0.8** Capture one deterministic tiny-model end-to-end legacy run.
 - [ ] **M0.9** Capture one representative 1B legacy quantization run with stage timings, peak GPU/host memory, temporary storage, final artifact size, and evaluation results.
@@ -84,7 +88,11 @@ Outcome: core NanoQuant mathematics is pure, typed, replayable, and parity-teste
 - [x] **M2.2** Implement canonical model/dataset identities and model inventory domain objects.
 - [x] **M2.3** Implement `BitCost`, exact logical/storage accounting helpers, and reconciliation tests.
 - [x] **M2.4** Extract raw, per-element, objective-weighted, normalized, and staged export reconstruction metrics into pure functions.
-- [ ] **M2.5** Extract diagonal reconstruction objective and verify legacy parity on captured layers.
+- [x] **M2.5** Extract diagonal reconstruction objective and verify legacy parity on captured layers.
+  `tools/compare_diagonal_objective.py` extracts the exact legacy `_weighted_weight_error` function from the
+  source AST and compares it with the pure typed objective. On the three pinned Gemma fixtures, all weighted error,
+  target-norm, and normalized-error values pass `atol=1e-6, rtol=2e-6`; the maximum observed relative difference
+  is `9.87e-8`. Unit coverage also locks the legacy `1e-12` importance floor for zero-valued statistics.
 - [x] **M2.6** Extract dense-Hessian objective, whitening/unwhitening, regularization, and triangular-solve behavior.
 - [x] **M2.7** Define the block-diagonal and low-rank-plus-diagonal objective contracts, even if optimized implementations arrive in Milestone 5.
 - [x] **M2.8** Extract uniform rank allocation and exact BPW budgeting.
