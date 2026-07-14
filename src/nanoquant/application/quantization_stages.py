@@ -34,9 +34,9 @@ from nanoquant.domain.outliers import (
 )
 from nanoquant.domain.planning import outlier_bit_cost
 from nanoquant.domain.profiling import NULL_RECORDER, PhaseRecorder
+from nanoquant.domain.resources import peak_device_memory_bytes
 from nanoquant.domain.scale_fit import fit_scales, reconstruct
 from nanoquant.domain.stages import HostInventory, ResourceEstimate, ValidationFinding, ValidationReport
-from nanoquant.infrastructure.resource_usage import peak_device_memory_bytes
 
 
 def _summary(value: torch.Tensor) -> StatisticSummary:

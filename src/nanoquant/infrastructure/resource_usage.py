@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
-import torch
+from nanoquant.domain.resources import peak_device_memory_bytes as peak_device_memory_bytes
 
 
 class _ProcessMemoryCounters(ctypes.Structure):
@@ -77,14 +77,3 @@ def process_memory_snapshot() -> ProcessMemorySnapshot:
 def peak_process_memory_bytes() -> int:
     """Return peak resident/working-set bytes for the current process."""
     return process_memory_snapshot().peak_working_set_bytes
-
-
-def peak_device_memory_bytes(device: str | torch.device) -> int:
-    """Return the CUDA allocator high-water mark that governs future capacity."""
-    resolved = str(device)
-    if not resolved.startswith("cuda"):
-        return 0
-    return max(
-        int(torch.cuda.max_memory_allocated(resolved)),
-        int(torch.cuda.max_memory_reserved(resolved)),
-    )

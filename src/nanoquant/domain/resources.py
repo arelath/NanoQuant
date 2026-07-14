@@ -4,6 +4,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import torch
+
+
+def peak_device_memory_bytes(device: str | torch.device) -> int:
+    """Return the CUDA allocator high-water mark that governs future capacity."""
+    resolved = str(device)
+    if not resolved.startswith("cuda"):
+        return 0
+    return max(
+        int(torch.cuda.max_memory_allocated(resolved)),
+        int(torch.cuda.max_memory_reserved(resolved)),
+    )
+
 
 @dataclass(frozen=True, slots=True)
 class ResourceComponents:
