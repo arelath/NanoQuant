@@ -115,13 +115,14 @@ Outcome: core NanoQuant mathematics is pure, typed, replayable, and parity-teste
 - [x] **M2.23** Run old/new layer-fixture comparisons and document all numerical tolerances or intentional differences.
   `evidence/m2/gemma-admm-factorization-parity-native-v25.json` first isolated the intentional native-orientation
   difference: tall MLP factors were exact, while wide attention/down-projection factors differed despite objective
-  deltas of only `1.68e-5` and `4.78e-4`. Version 26 restores the legacy wide-matrix transpose; the replacement
-  `gemma-admm-factorization-parity.json` reports exact old/new equality for every latent factor, binary factor, scale,
-  reconstruction, and final RNG state on all three fixtures, with zero objective delta.
+  deltas of only `1.68e-5` and `4.78e-4`. The explicit transposed replay policy restores the legacy wide-matrix
+  solve; `gemma-admm-factorization-parity.json` reports exact old/new equality for every latent factor, binary factor,
+  scale, reconstruction, and final RNG state on all three fixtures, with zero objective delta. The native policy
+  remains the production default because it is the one validated by the full system trajectory.
 - [x] **M2.GATE** Verify captured layer fixtures reproduce accepted legacy factors/metrics within approved tolerances using only typed requests, tensor artifacts, and domain components.
   The source-hashed legacy oracle, typed committed layer results, immutable tensor references, pinned Gemma revision,
   factorization protocol, environment, per-tensor comparisons, and pre-fix intentional-difference record are retained
-  under `evidence/m2/`. All version-26 factor and metric comparisons are exact.
+  under `evidence/m2/`. All explicit transposed-replay factor and metric comparisons are exact.
 
 ## Milestone 3 — Implement model sources, adapters, datasets, and calibration
 

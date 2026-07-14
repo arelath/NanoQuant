@@ -72,6 +72,7 @@ def test_admm_wide_matrix_matches_legacy_transposed_orientation() -> None:
         torch.Generator().manual_seed(17),
         outer_iterations=4,
         inner_iterations=2,
+        transpose_wide=True,
     )
     explicit_transpose = factorize_admm(
         weight.mT,
@@ -93,6 +94,35 @@ def test_admm_wide_matrix_matches_legacy_transposed_orientation() -> None:
     assert torch.equal(legacy_oriented.scale_post, explicit_transpose.scale_pre)
     assert torch.equal(legacy_oriented.reconstruction, explicit_transpose.reconstruction.mT)
     assert legacy_oriented.trace == explicit_transpose.trace
+
+
+def test_admm_wide_matrix_defaults_to_native_orientation() -> None:
+    weight = torch.tensor([[1.0, -2.0, 0.5], [-1.0, 0.25, 2.0]])
+    input_importance = torch.tensor([0.5, 2.0, 1.0])
+    output_importance = torch.tensor([1.0, 0.75])
+    default = factorize_admm(
+        weight,
+        input_importance,
+        output_importance,
+        2,
+        torch.Generator().manual_seed(17),
+        outer_iterations=4,
+        inner_iterations=2,
+    )
+    explicit = factorize_admm(
+        weight,
+        input_importance,
+        output_importance,
+        2,
+        torch.Generator().manual_seed(17),
+        outer_iterations=4,
+        inner_iterations=2,
+        transpose_wide=False,
+    )
+
+    assert torch.equal(default.left_latent, explicit.left_latent)
+    assert torch.equal(default.right_latent, explicit.right_latent)
+    assert torch.equal(default.reconstruction, explicit.reconstruction)
 
 
 @pytest.mark.parametrize("early_stop_tolerance", [None, 1e9])

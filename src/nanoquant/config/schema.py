@@ -212,6 +212,7 @@ class ADMMConfig:
     penalty_schedule: str = "cubic"
     convergence_check_interval: int = 100
     early_stop_tolerance: float | None = None
+    transpose_wide: bool = False
 
 
 @dataclass(frozen=True, slots=True)

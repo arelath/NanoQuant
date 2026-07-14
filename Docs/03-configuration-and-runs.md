@@ -87,6 +87,7 @@ factorization:
     outer_iterations: 800
     inner_iterations: 5
     penalty_schedule: cubic
+    transpose_wide: false
 
 outliers:
   selector: residual

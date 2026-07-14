@@ -275,6 +275,7 @@ def compare_layer(
         inner_iterations=inner_iterations,
         regularization=regularization,
         penalty_schedule="cubic",
+        transpose_wide=True,
     )
     torch.cuda.synchronize(device)
     rewrite_seconds = time.perf_counter() - rewrite_started

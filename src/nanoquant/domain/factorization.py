@@ -137,7 +137,7 @@ def factorize_admm(
     early_stop_tolerance: float | None = None,
     epsilon: float = 1e-12,
     recorder: PhaseRecorder = NULL_RECORDER,
-    transpose_wide: bool = True,
+    transpose_wide: bool = False,
 ) -> ADMMResult:
     if weight.ndim != 2 or rank <= 0 or rank > min(weight.shape):
         raise ValueError("weight must be a matrix and rank within its dimensions")

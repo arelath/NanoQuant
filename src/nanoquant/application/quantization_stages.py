@@ -59,12 +59,14 @@ class OutlierSelectionStage:
         device: str = "cpu",
         residual_probe_iterations: int = 20,
         residual_probe_inner_iterations: int = 3,
+        transpose_wide: bool = False,
     ) -> None:
         if residual_probe_iterations <= 0 or residual_probe_inner_iterations <= 0:
             raise ValueError("residual probe iteration counts must be positive")
         self.device = device
         self.residual_probe_iterations = residual_probe_iterations
         self.residual_probe_inner_iterations = residual_probe_inner_iterations
+        self.transpose_wide = transpose_wide
 
     def estimate(self, request: OutlierSelectionRequest, host: HostInventory) -> ResourceEstimate:
         elements = 1
@@ -103,6 +105,7 @@ class OutlierSelectionStage:
                             generator,
                             outer_iterations=self.residual_probe_iterations,
                             inner_iterations=self.residual_probe_inner_iterations,
+                            transpose_wide=self.transpose_wide,
                         ).reconstruction
 
                     scores = residual_probe_scores(
@@ -241,6 +244,7 @@ class FactorizationAttemptStage:
                     convergence_check_interval=self.admm.convergence_check_interval,
                     early_stop_tolerance=self.admm.early_stop_tolerance,
                     recorder=self.recorder,
+                    transpose_wide=self.admm.transpose_wide,
                 )
                 metrics = reconstruction_metrics(
                     residual,

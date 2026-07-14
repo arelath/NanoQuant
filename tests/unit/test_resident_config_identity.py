@@ -5,7 +5,7 @@ import pytest
 import torch
 
 import nanoquant.resident_quantization as resident
-from nanoquant.config.schema import ObservabilityConfig, ProfilingConfig, ProfilingLevel
+from nanoquant.config.schema import ADMMConfig, ObservabilityConfig, ProfilingConfig, ProfilingLevel
 from nanoquant.resident_quantization import ResidentQuantizationRequest
 
 
@@ -62,6 +62,16 @@ def test_tuning_epoch_loss_mode_invalidates_commit_identity() -> None:
 
     assert resident._resident_config_hash(request) != resident._resident_config_hash(
         replace(request, restore_best_tuning_state=False, tuning_epoch_loss_mode="legacy_training")
+    )
+
+
+def test_admm_orientation_invalidates_commit_identity() -> None:
+    request = ResidentQuantizationRequest(
+        Path("snapshot"), Path("output"), "fixture/model", "revision", ((1, 2, 3),), device="cpu"
+    )
+
+    assert resident._resident_config_hash(request) != resident._resident_config_hash(
+        replace(request, admm=ADMMConfig(outer_iterations=1, inner_iterations=1, transpose_wide=True))
     )
 
 

@@ -70,6 +70,11 @@ def main() -> None:
     parser.add_argument("--samples", type=int, default=256)
     parser.add_argument("--admm-outer-iterations", type=int, default=800)
     parser.add_argument("--admm-inner-iterations", type=int, default=5)
+    parser.add_argument(
+        "--transpose-wide",
+        action="store_true",
+        help="Use legacy source's transposed wide-matrix ADMM orientation instead of the validated native policy.",
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--block-forward-batch-size", type=int, default=8)
@@ -124,6 +129,7 @@ def main() -> None:
         admm=ADMMConfig(
             outer_iterations=args.admm_outer_iterations,
             inner_iterations=args.admm_inner_iterations,
+            transpose_wide=args.transpose_wide,
         ),
         outliers=OutlierConfig(
             selector=OutlierSelector.RESIDUAL,

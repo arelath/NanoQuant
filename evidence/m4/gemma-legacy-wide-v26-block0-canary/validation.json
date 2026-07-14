@@ -1,38 +1,42 @@
 {
-  "active_journal_records": 16,
-  "artifact_bytes": 3153557242,
+  "active_journal_records": 33,
+  "artifact_bytes": 3971063612,
   "artifacts_by_type": {
     "activation-generation": 1,
-    "block-result": 2,
+    "block-result": 4,
     "calibration-stats": 1,
     "calibration-tensors": 1,
-    "factorization-attempt": 15,
-    "frozen-block-auxiliary": 2,
-    "frozen-layer": 28,
-    "layer-result": 14,
+    "factorization-attempt": 30,
+    "frozen-block-auxiliary": 4,
+    "frozen-layer": 57,
+    "layer-result": 29,
     "quantization-plan": 1,
-    "scale-fit": 14
+    "scale-fit": 29
   },
-  "artifacts_validated": 79,
+  "artifacts_validated": 157,
   "bit_cost_by_category": {
-    "binary_factor_bits": 52187136,
-    "outlier_index_bits": 406,
-    "outlier_value_bits": 1314816,
+    "binary_factor_bits": 104378368,
+    "outlier_index_bits": 812,
+    "outlier_value_bits": 2629632,
     "padding_bits": 0,
-    "scale_bits": 1137152
+    "scale_bits": 2272768
   },
-  "block_records": 2,
-  "block_wall_seconds": 806.6032358999946,
-  "committed_layer_count": 14,
+  "block_records": 4,
+  "block_wall_seconds": 1671.217017500021,
+  "committed_layer_count": 28,
   "complete": false,
   "completed_blocks": [
     0,
-    1
+    1,
+    2,
+    3
   ],
-  "effective_bpw": 1.0179887149796818,
+  "effective_bpw": 1.0180125626597794,
   "final_frozen_pre_kd_losses": [
     1.367361068725586,
-    3.5729382038116455
+    3.5729382038116455,
+    5.766419887542725,
+    125.49991607666016
   ],
   "identity": {
     "config_hash": "sha256:763eeb4289f2c10590f8a784b9fe432526e567e90838ab7b7bf96ca427ebeef1",
@@ -41,14 +45,16 @@
   },
   "inactive_journal_records": 0,
   "journal_identity_count": 1,
-  "journal_records": 16,
-  "layer_records": 14,
-  "peak_gpu_bytes": 6295650304,
-  "peak_host_bytes": 11129999360,
-  "quantized_parameters": 53673984,
-  "rank_sum": 8352,
+  "journal_records": 33,
+  "layer_records": 29,
+  "peak_gpu_bytes": 6534725632,
+  "peak_host_bytes": 18408185856,
+  "quantized_parameters": 107347968,
+  "rank_sum": 16608,
   "retired_activation_generations": [
-    "sha256-1d205d82e716e9cd0daa2e635cf8c99b25586e620c182d603384f1813b28130b"
+    "sha256-1d205d82e716e9cd0daa2e635cf8c99b25586e620c182d603384f1813b28130b",
+    "sha256-4e902400dc5329c33998c485a1c19dd1eb9908ac04a3f43642278e6713c729c1",
+    "sha256-ca017bde461b6a4182344997d5327fd685f813fb06516fcc5518aff630a20438"
   ],
   "run_output": "D:\\dev\\research\\NanoQuantRewrite\\evidence\\m4\\gemma-legacy-wide-v26-block0-canary"
 }

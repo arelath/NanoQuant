@@ -119,10 +119,10 @@ def test_outlier_factorization_and_scale_fit_stages_commit_typed_results(tmp_pat
 
 
 def test_residual_probe_uses_configured_inner_iterations(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    observed = []
+    observed: list[tuple[int, bool]] = []
 
     def factorize(weight: torch.Tensor, *_args: object, **kwargs: object) -> SimpleNamespace:
-        observed.append(kwargs["inner_iterations"])
+        observed.append((kwargs["inner_iterations"], kwargs["transpose_wide"]))
         return SimpleNamespace(reconstruction=torch.zeros_like(weight))
 
     monkeypatch.setattr("nanoquant.application.quantization_stages.factorize_admm", factorize)
@@ -150,7 +150,11 @@ def test_residual_probe_uses_configured_inner_iterations(tmp_path: Path, monkeyp
     )
 
     execute_stage(
-        OutlierSelectionStage(residual_probe_iterations=11, residual_probe_inner_iterations=7),
+        OutlierSelectionStage(
+            residual_probe_iterations=11,
+            residual_probe_inner_iterations=7,
+            transpose_wide=True,
+        ),
         OutlierSelectionRequest(
             layer,
             refs["weight"],
@@ -162,7 +166,7 @@ def test_residual_probe_uses_configured_inner_iterations(tmp_path: Path, monkeyp
         context,
     )
 
-    assert observed == [7]
+    assert observed == [(7, True)]
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA resident stage requires a GPU")

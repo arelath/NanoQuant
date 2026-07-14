@@ -279,6 +279,7 @@ class ADMMConfig:
     penalty_schedule: str = "cubic"
     convergence_check_interval: int = 100
     early_stop_tolerance: Optional[float] = None
+    transpose_wide: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -299,7 +300,10 @@ class FactorizationConfig:
     scale_fit: ScaleFitConfig = field(default_factory=ScaleFitConfig)
 ```
 
-Diagnostic verbosity is intentionally absent. ADMM iteration events are controlled by observability settings, not by mathematical configuration.
+`transpose_wide` preserves an exact replay mode for the legacy source's wide-matrix solve. It is disabled by
+default because the native orientation is the policy validated by the full Gemma trajectory; changing it
+invalidates resident factorization commits. Diagnostic verbosity is intentionally absent. ADMM iteration events
+are controlled by observability settings, not by mathematical configuration.
 
 ## 7. Salient outliers
 
@@ -669,6 +673,7 @@ factorization:
     inner_iterations: 5
     regularization: 0.03
     penalty_schedule: cubic
+    transpose_wide: false
   scale_fit:
     enabled: true
     alternating_passes: 2

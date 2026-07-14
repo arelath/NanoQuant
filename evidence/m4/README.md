@@ -577,5 +577,23 @@ Store-aware validation followed 79 reachable artifacts (3,153,557,242 bytes), fo
 two-block prefix, and reported 1.017989 effective BPW, 6,295,650,304 peak allocated CUDA bytes, and
 11,129,999,360 peak host bytes. Block 0 took 399.22 seconds, 6.0% faster than contemporary legacy's 424.87 seconds
 and 31.0% faster than the older 578.73-second rewrite gate; performance remains provisional until a complete run.
-`validation.json` and `legacy-comparison.{json,md}` retain the compact validation and comparison evidence. This
-prefix clears the accumulating-state gate for extension through the remaining blocks.
+`validation.json` and `legacy-comparison.{json,md}` retain the compact validation and comparison evidence. At two
+blocks this prefix appeared to clear the accumulating-state gate, so it was extended. The longer prefix rejected
+that conclusion. Block 2 remained close at `5.7664198875` versus contemporary legacy `5.7415` (**+0.43%**), but
+block 3 finished at `125.4999160767` versus `43.693` (**+187.23%**). All 28 ranks still matched exactly (rank sum
+16,608), the artifact graph remained valid, peak allocated CUDA memory stayed bounded at 6,534,725,632 bytes, and
+effective BPW was 1.018013. This isolates a numerical-trajectory regression rather than rank, storage, resume, or
+memory corruption.
+
+The divergence was already visible at the block-3 gate boundary: the transposed run recovered only from `143.69`
+to `82.91`, while contemporary legacy recovered from `62.986` to `28.467`. Its down-projection also reported a
+much lower local weighted reconstruction error than either legacy or the accepted native-orientation rewrite while
+producing a substantially worse downstream boundary. Exact component replay therefore does not imply a better
+composed trajectory; the orientation changes the factor error geometry that later tuning must absorb.
+
+The v26 worker was intentionally stopped after four complete blocks and two partial block-4 layer commits. The
+updated `validation.json` and `legacy-comparison.{json,md}` preserve the rejected four-block evidence. Version 27
+makes `ADMMConfig.transpose_wide` explicit: `false` is the system-validated production default, while `true`
+remains available to `tools/compare_admm_factorization.py` and `--transpose-wide` for exact legacy-source replay.
+A fresh native-orientation v27 prefix is required before extending the run or superseding accepted v19/v21
+end-to-end evidence.

@@ -2,10 +2,10 @@
   "baselines": [
     {
       "block_count": 26,
-      "maximum_absolute_percent_delta": 0.831602214559235,
-      "mean_absolute_percent_delta": 0.6138973803861913,
+      "maximum_absolute_percent_delta": 187.2311722167399,
+      "mean_absolute_percent_delta": 47.223249484266276,
       "name": "contemporary-legacy",
-      "paired_block_count": 2,
+      "paired_block_count": 4,
       "path": "D:\\dev\\research\\NanoQuantRewrite\\evidence\\m4\\gemma-legacy018-contemporary-pinned-v3\\legacy018-contemporary.log",
       "rewrite_lower_count": 2
     }
@@ -32,30 +32,52 @@
       },
       "block": 1,
       "rewrite_loss": 3.5729382038116455
+    },
+    {
+      "baselines": {
+        "contemporary-legacy": {
+          "absolute_delta": 0.02491988754272434,
+          "loss": 5.7415,
+          "percent_delta": 0.43403095955281135
+        }
+      },
+      "block": 2,
+      "rewrite_loss": 5.766419887542725
+    },
+    {
+      "baselines": {
+        "contemporary-legacy": {
+          "absolute_delta": 81.80691607666016,
+          "loss": 43.693,
+          "percent_delta": 187.2311722167399
+        }
+      },
+      "block": 3,
+      "rewrite_loss": 125.49991607666016
     }
   ],
   "rank_baselines": [
     {
-      "legacy_prefix_layer_count": 14,
-      "legacy_rank_dependent_bits": 52320768,
-      "legacy_rank_dependent_bpw": 0.9747882326007326,
-      "legacy_rank_sum": 8352,
+      "legacy_prefix_layer_count": 28,
+      "legacy_rank_dependent_bits": 104644096,
+      "legacy_rank_dependent_bpw": 0.9748120802808303,
+      "legacy_rank_sum": 16608,
       "missing_in_legacy": [],
       "missing_in_rewrite": [],
       "name": "contemporary-legacy",
-      "paired_layer_count": 14,
-      "paired_source_parameters": 53673984,
+      "paired_layer_count": 28,
+      "paired_source_parameters": 107347968,
       "path": "D:\\dev\\research\\NanoQuantRewrite\\evidence\\m4\\gemma-legacy018-contemporary-pinned-v3\\rank-utility.csv",
       "rank_mismatch_count": 0,
       "rank_mismatches": [],
-      "rewrite_actual_bits": 54639510,
-      "rewrite_effective_bpw": 1.0179887149796818,
-      "rewrite_layer_count": 14,
-      "rewrite_rank_sum": 8352,
-      "rewrite_source_parameters": 53673984
+      "rewrite_actual_bits": 109281580,
+      "rewrite_effective_bpw": 1.0180125626597794,
+      "rewrite_layer_count": 28,
+      "rewrite_rank_sum": 16608,
+      "rewrite_source_parameters": 107347968
     }
   ],
-  "rewrite_block_count": 2,
+  "rewrite_block_count": 4,
   "rewrite_identity": {
     "config_hash": "sha256:763eeb4289f2c10590f8a784b9fe432526e567e90838ab7b7bf96ca427ebeef1",
     "model_hash": "sha256:32d5b5d041e98027bc7415107bc79b580f9cce407535b4e30134e8f8aed3b130",

@@ -136,7 +136,7 @@ from nanoquant.infrastructure.tuning_checkpoint import (
 from nanoquant.ports.event_sink import EventSink
 from nanoquant.ports.model_adapter import ModelAdapter
 
-RESIDENT_ALGORITHM_VERSION = 26
+RESIDENT_ALGORITHM_VERSION = 27
 
 
 @contextmanager
@@ -1926,6 +1926,7 @@ def _run_resident_quantization_impl(
         device=request.device,
         residual_probe_iterations=request.outliers.residual_probe.iterations,
         residual_probe_inner_iterations=request.admm.inner_iterations,
+        transpose_wide=request.admm.transpose_wide,
     )
     scale_stage = ScaleFitStage(request.scale_fit, device=request.device)
 
@@ -2791,6 +2792,7 @@ def _run_resident_factorization_slice_impl(
             device=request.device,
             residual_probe_iterations=request.outliers.residual_probe.iterations,
             residual_probe_inner_iterations=request.admm.inner_iterations,
+            transpose_wide=request.admm.transpose_wide,
         )
         scale_stage = ScaleFitStage(request.scale_fit, device=request.device)
         with source.read_tensor(layer_plan.source_weight, device="cpu") as source_weight:
