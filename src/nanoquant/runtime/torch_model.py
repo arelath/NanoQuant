@@ -226,7 +226,7 @@ class PreparedGemma3Attention(nn.Module):
     attn_logit_softcapping: float | None
     sliding_window: int | None
 
-    def __init__(self, source: nn.Module) -> None:
+    def __init__(self, source: nn.Module, *, fuse_decode_attention: bool = False) -> None:
         super().__init__()
         required_modules = ("q_proj", "k_proj", "v_proj", "o_proj", "q_norm", "k_norm")
         for name in required_modules:
@@ -251,6 +251,7 @@ class PreparedGemma3Attention(nn.Module):
             setattr(self, name, getattr(source, name))
         if getattr(self.config, "_attn_implementation", None) != "eager":
             raise ValueError("Gemma3 decode RoPE requires eager attention")
+        self.fuse_decode_attention = fuse_decode_attention
         self.train(source.training)
 
     def forward(
@@ -309,24 +310,65 @@ class PreparedGemma3Attention(nn.Module):
             )
         if attention_mask is not None:
             attention_mask = attention_mask.to(query_states)
-        from transformers.models.gemma3.modeling_gemma3 import eager_attention_forward
+        if (
+            self.fuse_decode_attention
+            and not self.training
+            and not kwargs.get("output_attentions", False)
+            and self.attn_logit_softcapping is None
+            and tuple(query_states.shape) == (1, 4, 1, 256)
+            and key_states.ndim == 4
+            and key_states.shape[:2] == (1, 1)
+            and key_states.shape[3] == 256
+            and value_states.shape == key_states.shape
+            and key_states.shape[2] <= 64
+            and query_states.dtype == torch.float32
+            and key_states.dtype == torch.float32
+            and value_states.dtype == torch.float32
+            and query_states.device.type == "cuda"
+            and query_states.is_contiguous()
+            and key_states.is_contiguous()
+            and value_states.is_contiguous()
+            and (
+                attention_mask is None
+                or (
+                    tuple(attention_mask.shape) == (1, 1, 1, key_states.shape[2])
+                    and attention_mask.is_contiguous()
+                )
+            )
+        ):
+            from nanoquant.runtime.cuda_kernels import launch_decode_attention
 
-        attention_output, attention_weights = eager_attention_forward(
-            self,
-            query_states,
-            key_states,
-            value_states,
-            attention_mask,
-            dropout=self.attention_dropout if self.training else 0.0,
-            scaling=self.scaling,
-            sliding_window=self.sliding_window,
-            **kwargs,
-        )
+            attention_output = launch_decode_attention(
+                query_states,
+                key_states,
+                value_states,
+                attention_mask,
+                self.scaling,
+            )
+            attention_weights = None
+        else:
+            from transformers.models.gemma3.modeling_gemma3 import eager_attention_forward
+
+            attention_output, attention_weights = eager_attention_forward(
+                self,
+                query_states,
+                key_states,
+                value_states,
+                attention_mask,
+                dropout=self.attention_dropout if self.training else 0.0,
+                scaling=self.scaling,
+                sliding_window=self.sliding_window,
+                **kwargs,
+            )
         attention_output = attention_output.reshape(*input_shape, -1).contiguous()
         return self.o_proj(attention_output), attention_weights
 
 
-def bind_fused_decode_rope(model: nn.Module) -> int:
+def bind_fused_decode_rope(
+    model: nn.Module,
+    *,
+    fuse_decode_attention: bool = False,
+) -> int:
     """Bind the pinned decode-only RoPE without changing eager prefill."""
 
     replacements: list[tuple[nn.Module, str, PreparedGemma3Attention]] = []
@@ -344,7 +386,14 @@ def bind_fused_decode_rope(model: nn.Module) -> int:
         if not separator or not parent_path or not attribute:
             raise ValueError(f"Gemma3 attention module path must be dotted: {path!r}")
         replacements.append(
-            (model.get_submodule(parent_path), attribute, PreparedGemma3Attention(module))
+            (
+                model.get_submodule(parent_path),
+                attribute,
+                PreparedGemma3Attention(
+                    module,
+                    fuse_decode_attention=fuse_decode_attention,
+                ),
+            )
         )
     for parent, attribute, replacement in replacements:
         setattr(parent, attribute, replacement)

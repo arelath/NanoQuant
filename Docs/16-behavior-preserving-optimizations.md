@@ -1236,3 +1236,13 @@ only their *measurement* waits for the Docs/15 P1 baseline if we want clean befo
   production bundle load/generation peak falls from 2.504 to 1.296 GB. The specialization is default only for CUDA
   F32 runtime loading; unsupported targets/dtypes keep the unchanged representation, and
   `--no-native-bfloat16-tied-projection` remains the control.
+- **Short-context decode attention fusion accepted:** the pinned batch-one decode issued separate grouped-query score
+  matmul, scale/mask/softmax, and value matmul operations in all 26 layers. A guarded Triton kernel computes the same
+  four-query/one-KV-head F32 operation in one launch while cache length is at most 64. Training, attention-weight
+  output, softcapping, longer caches, and every unsupported geometry/device/layout retain eager attention. Direct
+  16- and 48-position CUDA tests match eager within 2e-5, and the complete pinned output hash is exact. The trace
+  reduces kernels from 833 to 729, launch APIs from 830 to 726, and ATen calls from 3,581 to 2,411; the 26 attention
+  kernels total 0.104 ms and device self time falls from 5.35 to 5.27 ms. Candidate/control/candidate isolated-decode
+  medians are 31.90, 38.78, and 33.11 ms. Complete-generation medians are 1.067, 1.198, and 1.229 s: the candidate
+  average is 4.1% lower, but the second candidate regresses 2.6% versus control and is retained as WDDM variance.
+  The guarded specialization is default for CUDA/F32 runtime loading; `--no-fused-decode-attention` is the control.

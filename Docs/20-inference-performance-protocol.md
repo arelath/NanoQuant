@@ -307,3 +307,28 @@ Candidate/control/candidate SHA-256 values are
 from 1.215/1.218 GB to 0.653/0.655 GB. The production bundle validator also replays all 32 exact tokens with zero
 fallback while cutting its prior 2.504 GB load/generation peak to 1.296 GB. The guarded specialization is default;
 `--no-native-bfloat16-tied-projection` retains the control.
+
+## Seventh promoted optimization: fixed short-context decode attention
+
+After RoPE and cache update, eager attention still launched grouped-query score matmul, scaling, causal-mask add,
+softmax, and value matmul independently in every layer. The promoted Triton kernel computes the pinned batch-one,
+four-query/one-KV-head, width-256 F32 operation in one launch while physical cache length is at most 64. It reads the
+existing F32 causal mask, returns the already transposed contiguous output, and does not expose attention weights.
+Training, requested attention weights, softcapping, non-contiguous/other geometries, and longer caches execute the
+unchanged eager path. Direct 16- and 48-position CUDA tests match eager within 2e-5.
+
+All 26 real layers bind, token 236764 remains exact in every pass, and complete generation retains hash
+`d91549bc797d2ff5a31e3b1e224347fac211fd34aa2077e01e521a888d24de3f`. Kernels fall from 833 to 729, launch APIs
+from 830 to 726, and ATen calls from 3,581 to 2,411. The 26 fused attention kernels total 0.104 ms/token and total
+non-nested device kernel self time falls from 5.35 to 5.27 ms. The 572,184-byte profile has SHA-256
+`2fe3efedee59cb089de644c12cf6c8f37ca416ac09010e32a528f1fdeb817601`.
+
+Candidate/control/candidate isolated-decode medians are 31.90, 38.78, and 33.11 ms, a 16.2% candidate-average
+reduction. Complete-generation medians are 1.067, 1.198, and 1.229 s; their candidate average is 4.1% lower, although
+the second candidate is 2.6% slower than control and is retained as measured WDDM variance rather than omitted.
+Peak allocation and hashes are identical. Candidate/control/candidate SHA-256 values are
+`c18b40b9536c2f4fc66ed75c8495296cf5c33a668d4ab1744311a70424fc87d0`,
+`f980ad14bfb072c4112d66d33c71ae22ccfb77f6bdb740f801e8740105616a96`, and
+`a03a287b17c746d9da1d743aba13efa42e852ea5bed6f475125f8b47817eaa84`. Production bundle validation binds all 26
+fused attentions and exactly replays 32 tokens with zero packed fallback. The guarded specialization is default;
+`--no-fused-decode-attention` retains the eager control.

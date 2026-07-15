@@ -323,6 +323,7 @@ def _profile(args: argparse.Namespace) -> dict[str, object]:
             prefill_tokens=prompt_width,
             fuse_rms_norm=args.fused_rms_norm,
             fuse_decode_rope=args.fused_decode_rope,
+            fuse_decode_attention=args.fused_decode_attention,
             optimize_short_sliding_masks=args.short_sliding_masks,
             native_bfloat16_tied_projection=args.native_bfloat16_tied_projection,
         )
@@ -576,6 +577,7 @@ def _profile(args: argparse.Namespace) -> dict[str, object]:
             "replaced_linear_count": runtime.replaced_linear_count,
             "fused_rms_norm_count": runtime.fused_rms_norm_count,
             "fused_decode_rope_count": runtime.fused_decode_rope_count,
+            "fused_decode_attention_count": runtime.fused_decode_attention_count,
             "short_sliding_mask_count": runtime.short_sliding_mask_count,
             "native_bfloat16_tied_projection_count": (
                 runtime.native_bfloat16_tied_projection_count
@@ -618,6 +620,7 @@ def _profile(args: argparse.Namespace) -> dict[str, object]:
             "cache_dtype": args.cache_dtype,
             "fused_rms_norm": args.fused_rms_norm,
             "fused_decode_rope": args.fused_decode_rope,
+            "fused_decode_attention": args.fused_decode_attention,
             "short_sliding_masks": args.short_sliding_masks,
             "fast_sliding_cache": args.fast_sliding_cache,
             "fused_cache_prefix": args.fused_cache_prefix,
@@ -687,6 +690,12 @@ def main() -> None:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="replace pinned one-token Gemma3 RoPE with one Triton launch",
+    )
+    parser.add_argument(
+        "--fused-decode-attention",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="fuse pinned short-context eager decode attention",
     )
     parser.add_argument(
         "--short-sliding-masks",

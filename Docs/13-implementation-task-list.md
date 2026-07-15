@@ -429,6 +429,11 @@ Outcome: runtime performance is measured, explained, and competitive with the mo
   from 2.945 to 1.481 ms, total device self time from 6.82 to 5.35 ms, and matched peak allocation from 1.218 to
   0.655 GB. Candidate/control/candidate isolated decode medians are 28.60, 36.92, and 29.18 ms. Eager attention and
   sampling remain, so the broader task stays open.
+  A further fixed-geometry kernel fuses grouped-query score matmul, scale/mask/softmax, and value matmul for the
+  pinned batch-one decode while cache length is at most 64. It falls back for longer/unsupported cases. The real
+  trace preserves every token while reducing kernels from 833 to 729 and ATen calls from 3,581 to 2,411. Both
+  candidate isolated-decode medians beat control (31.90, 38.78, and 33.11 ms); end-to-end candidates straddle control
+  but average 4.1% lower. Sampling and broader/long-context attention work remain.
 - [ ] **M7.15** Compare eager and compiled/static decode-step execution with stable shape/correctness coverage.
   Direct whole-model and decode-only `torch.compile` feasibility probes preserved the exact token but are rejected
   in their current form. Whole-model compilation produced 58 graphs and 47 workload-`ContextVar` breaks. Restricting

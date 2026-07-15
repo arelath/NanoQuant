@@ -180,6 +180,104 @@ def _nanoquant_decode_rope(
 
 
 @triton.jit
+def _nanoquant_decode_attention(
+    query,
+    key,
+    value,
+    attention_mask,
+    output,
+    scaling,
+    CACHE_LENGTH: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    BLOCK_CACHE: tl.constexpr,
+    BLOCK_DIM: tl.constexpr,
+    HAS_MASK: tl.constexpr,
+):
+    head = tl.program_id(0)
+    positions = tl.arange(0, BLOCK_CACHE)
+    dimensions = tl.arange(0, BLOCK_DIM)
+    position_mask = positions < CACHE_LENGTH
+    dimension_mask = dimensions < HEAD_DIM
+    queries = tl.load(
+        query + head * HEAD_DIM + dimensions,
+        mask=dimension_mask,
+        other=0.0,
+    ).to(tl.float32)
+    keys = tl.load(
+        key + positions[:, None] * HEAD_DIM + dimensions[None, :],
+        mask=position_mask[:, None] & dimension_mask[None, :],
+        other=0.0,
+    ).to(tl.float32)
+    scores = tl.sum(keys * queries[None, :], axis=1) * scaling
+    scores = tl.where(position_mask, scores, -float("inf"))
+    if HAS_MASK:
+        scores += tl.load(attention_mask + positions, mask=position_mask, other=-float("inf"))
+    scores -= tl.max(scores, axis=0)
+    probabilities = tl.exp(scores)
+    probabilities /= tl.sum(probabilities, axis=0)
+    values = tl.load(
+        value + positions[:, None] * HEAD_DIM + dimensions[None, :],
+        mask=position_mask[:, None] & dimension_mask[None, :],
+        other=0.0,
+    ).to(tl.float32)
+    attended = tl.sum(probabilities[:, None] * values, axis=0)
+    tl.store(output + head * HEAD_DIM + dimensions, attended, mask=dimension_mask)
+
+
+def launch_decode_attention(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    attention_mask: torch.Tensor | None,
+    scaling: float,
+) -> torch.Tensor:
+    """Fuse pinned batch-one grouped-query eager decode attention."""
+
+    if tuple(query.shape) != (1, 4, 1, 256):
+        raise ValueError("decode attention requires the pinned query geometry")
+    if key.ndim != 4 or key.shape[:2] != (1, 1) or key.shape[3] != 256:
+        raise ValueError("decode attention requires one KV head with width 256")
+    if value.shape != key.shape:
+        raise ValueError("decode attention requires matching key and value geometry")
+    if query.dtype != torch.float32 or key.dtype != torch.float32 or value.dtype != torch.float32:
+        raise ValueError("decode attention requires F32 tensors")
+    if query.device.type != "cuda" or key.device != query.device or value.device != query.device:
+        raise ValueError("decode attention requires tensors on one CUDA device")
+    if not query.is_contiguous() or not key.is_contiguous() or not value.is_contiguous():
+        raise ValueError("decode attention requires contiguous tensors")
+    cache_length = key.shape[2]
+    if cache_length <= 0 or cache_length > 64:
+        raise ValueError("decode attention cache length must be between 1 and 64")
+    if not scaling > 0.0:
+        raise ValueError("decode attention scaling must be positive")
+    if attention_mask is not None:
+        if (
+            attention_mask.dtype != torch.float32
+            or attention_mask.device != query.device
+            or tuple(attention_mask.shape) != (1, 1, 1, cache_length)
+            or not attention_mask.is_contiguous()
+        ):
+            raise ValueError("decode attention mask is incompatible")
+    output = torch.empty((1, 1, 4, 256), dtype=torch.float32, device=query.device)
+    dummy = query if attention_mask is None else attention_mask
+    _nanoquant_decode_attention[(4,)](
+        query,
+        key,
+        value,
+        dummy,
+        output,
+        scaling,
+        CACHE_LENGTH=cache_length,
+        HEAD_DIM=256,
+        BLOCK_CACHE=64,
+        BLOCK_DIM=256,
+        HAS_MASK=attention_mask is not None,
+        num_warps=8,
+    )
+    return output
+
+
+@triton.jit
 def _nanoquant_cache_prefix_update(
     key_states,
     value_states,

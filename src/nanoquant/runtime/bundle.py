@@ -195,6 +195,7 @@ class LoadedTransformersRuntime:
     replaced_linear_count: int
     fused_rms_norm_count: int = 0
     fused_decode_rope_count: int = 0
+    fused_decode_attention_count: int = 0
     short_sliding_mask_count: int = 0
     native_bfloat16_tied_projection_count: int = 0
 
@@ -566,6 +567,7 @@ def load_transformers_runtime(
     prefill_tokens: int,
     fuse_rms_norm: bool = True,
     fuse_decode_rope: bool = True,
+    fuse_decode_attention: bool = True,
     optimize_short_sliding_masks: bool = True,
     native_bfloat16_tied_projection: bool = True,
 ) -> LoadedTransformersRuntime:
@@ -583,6 +585,9 @@ def load_transformers_runtime(
         native_bfloat16_tied_projection
         and target.type == "cuda"
         and input_dtype == "float32"
+    )
+    use_fused_decode_attention = (
+        fuse_decode_attention and target.type == "cuda" and input_dtype == "float32"
     )
     entries = tuple(
         layer for block in opened.packed.manifest.blocks for layer in block.layers
@@ -687,7 +692,17 @@ def load_transformers_runtime(
     if any(parameter.is_meta for parameter in model.parameters()):
         raise RuntimeBundleError("runtime model retained meta parameters after shell loading")
     fused_rms_norm_count = bind_prepared_rms_norms(model) if fuse_rms_norm else 0
-    fused_decode_rope_count = bind_fused_decode_rope(model) if fuse_decode_rope else 0
+    fused_decode_rope_count = (
+        bind_fused_decode_rope(
+            model,
+            fuse_decode_attention=use_fused_decode_attention,
+        )
+        if fuse_decode_rope
+        else 0
+    )
+    fused_decode_attention_count = (
+        fused_decode_rope_count if use_fused_decode_attention else 0
+    )
     short_sliding_mask_count = (
         bind_short_sliding_masks(model) if optimize_short_sliding_masks else 0
     )
@@ -699,6 +714,7 @@ def load_transformers_runtime(
         replaced,
         fused_rms_norm_count,
         fused_decode_rope_count,
+        fused_decode_attention_count,
         short_sliding_mask_count,
         native_bfloat16_tied_projection_count,
     )

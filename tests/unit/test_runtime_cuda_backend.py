@@ -28,6 +28,7 @@ from nanoquant.runtime.cuda_kernels import (
     launch_bfloat16_embedding,
     launch_bfloat16_output_projection,
     launch_cache_prefix_update,
+    launch_decode_attention,
     launch_decode_rope,
 )
 
@@ -246,6 +247,26 @@ def test_bfloat16_embedding_matches_promoted_f32_lookup_exactly() -> None:
     expected = torch.nn.functional.embedding(input_ids, weight).float() * scale
 
     assert torch.equal(actual, expected)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+@pytest.mark.parametrize("cache_length", [16, 48])
+def test_decode_attention_matches_eager_grouped_query_operation(cache_length: int) -> None:
+    generator = torch.Generator().manual_seed(20260715)
+    query = torch.randn(1, 4, 1, 256, generator=generator).cuda()
+    key = torch.randn(1, 1, cache_length, 256, generator=generator).cuda()
+    value = torch.randn(1, 1, cache_length, 256, generator=generator).cuda()
+    attention_mask = torch.zeros(1, 1, 1, cache_length).cuda()
+    attention_mask[..., -3:] = -torch.inf
+    repeated_key = key.repeat_interleave(4, dim=1)
+    repeated_value = value.repeat_interleave(4, dim=1)
+    scores = torch.matmul(query, repeated_key.transpose(2, 3)) * 0.0625
+    probabilities = torch.softmax(scores + attention_mask, dim=-1, dtype=torch.float32)
+    expected = torch.matmul(probabilities, repeated_value).transpose(1, 2).contiguous()
+
+    actual = launch_decode_attention(query, key, value, attention_mask, 0.0625)
+
+    torch.testing.assert_close(actual, expected, rtol=2e-5, atol=2e-5)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
