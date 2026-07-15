@@ -63,6 +63,9 @@ class PreparedLinear(nn.Module):
         output = plan.linear_at(self._layer_index, value)
         return output.to(dtype=value.dtype) if self._output_dtype == "input" else output
 
+    def _decode_prepared_layer(self) -> Any:
+        return self._plans.decode.dispatches[self._layer_index].layer
+
 
 class PreparedTiedEmbedding(nn.Module):
     """Store the tied BF16 table while preserving the F32 lookup boundary."""
@@ -226,7 +229,13 @@ class PreparedGemma3Attention(nn.Module):
     attn_logit_softcapping: float | None
     sliding_window: int | None
 
-    def __init__(self, source: nn.Module, *, fuse_decode_attention: bool = False) -> None:
+    def __init__(
+        self,
+        source: nn.Module,
+        *,
+        fuse_decode_attention: bool = False,
+        group_decode_qkv: bool = False,
+    ) -> None:
         super().__init__()
         required_modules = ("q_proj", "k_proj", "v_proj", "o_proj", "q_norm", "k_norm")
         for name in required_modules:
@@ -252,6 +261,20 @@ class PreparedGemma3Attention(nn.Module):
         if getattr(self.config, "_attn_implementation", None) != "eager":
             raise ValueError("Gemma3 decode RoPE requires eager attention")
         self.fuse_decode_attention = fuse_decode_attention
+        self._qkv_group = None
+        if group_decode_qkv and all(
+            isinstance(module, PreparedLinear)
+            for module in (self.q_proj, self.k_proj, self.v_proj)
+        ):
+            from nanoquant.runtime.cuda_backend import prepare_cuda_projection_group
+
+            projections = cast(
+                tuple[PreparedLinear, PreparedLinear, PreparedLinear],
+                (self.q_proj, self.k_proj, self.v_proj),
+            )
+            self._qkv_group = prepare_cuda_projection_group(
+                tuple(module._decode_prepared_layer() for module in projections)
+            )
         self.train(source.training)
 
     def forward(
@@ -265,9 +288,26 @@ class PreparedGemma3Attention(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
-        query_states = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-        key_states = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-        value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        if (
+            self._qkv_group is not None
+            and _ACTIVE_WORKLOAD.get() == "decode"
+            and hidden_states.device.type == "cuda"
+            and hidden_states.dtype == torch.float32
+            and hidden_states.is_contiguous()
+        ):
+            from nanoquant.runtime.cuda_backend import grouped_cuda_projection
+
+            query_projection, key_projection, value_projection = grouped_cuda_projection(
+                hidden_states,
+                self._qkv_group,
+            )
+        else:
+            query_projection = self.q_proj(hidden_states)
+            key_projection = self.k_proj(hidden_states)
+            value_projection = self.v_proj(hidden_states)
+        query_states = query_projection.view(hidden_shape).transpose(1, 2)
+        key_states = key_projection.view(hidden_shape).transpose(1, 2)
+        value_states = value_projection.view(hidden_shape).transpose(1, 2)
         query_states = self.q_norm(query_states)
         key_states = self.k_norm(key_states)
         cosine, sine = position_embeddings
@@ -368,6 +408,7 @@ def bind_fused_decode_rope(
     model: nn.Module,
     *,
     fuse_decode_attention: bool = False,
+    group_decode_qkv: bool = False,
 ) -> int:
     """Bind the pinned decode-only RoPE without changing eager prefill."""
 
@@ -392,12 +433,22 @@ def bind_fused_decode_rope(
                 PreparedGemma3Attention(
                     module,
                     fuse_decode_attention=fuse_decode_attention,
+                    group_decode_qkv=group_decode_qkv,
                 ),
             )
         )
     for parent, attribute, replacement in replacements:
         setattr(parent, attribute, replacement)
     return len(replacements)
+
+
+def grouped_decode_qkv_count(model: nn.Module) -> int:
+    """Count attention modules with an actually prepared grouped Q/K/V payload."""
+
+    return sum(
+        isinstance(module, PreparedGemma3Attention) and module._qkv_group is not None
+        for module in model.modules()
+    )
 
 
 class PreparedGemma3DecoderLayer(nn.Module):

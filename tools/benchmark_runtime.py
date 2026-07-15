@@ -38,6 +38,7 @@ from nanoquant.runtime import (
     bind_short_sliding_masks,
     execution_workload,
     generate,
+    grouped_decode_qkv_count,
     hybrid_cache_factory,
     open_packed_artifact,
     plan_execution_workloads,
@@ -336,10 +337,17 @@ def _benchmark(args: argparse.Namespace) -> dict[str, Any]:
             and device.type == "cuda"
             and dtype == torch.float32
         )
+        use_group_decode_qkv = (
+            args.group_decode_qkv
+            and args.fused_decode_rope
+            and device.type == "cuda"
+            and dtype == torch.float32
+        )
         fused_decode_rope_count = (
             bind_fused_decode_rope(
                 model,
                 fuse_decode_attention=use_fused_decode_attention,
+                group_decode_qkv=use_group_decode_qkv,
             )
             if args.fused_decode_rope
             else 0
@@ -347,6 +355,7 @@ def _benchmark(args: argparse.Namespace) -> dict[str, Any]:
         fused_decode_attention_count = (
             fused_decode_rope_count if use_fused_decode_attention else 0
         )
+        grouped_qkv_count = grouped_decode_qkv_count(model)
         short_sliding_mask_count = (
             bind_short_sliding_masks(model) if args.short_sliding_masks else 0
         )
@@ -713,6 +722,7 @@ def _benchmark(args: argparse.Namespace) -> dict[str, Any]:
             "fused_rms_norm": args.fused_rms_norm,
             "fused_decode_rope": args.fused_decode_rope,
             "fused_decode_attention": args.fused_decode_attention,
+            "group_decode_qkv": args.group_decode_qkv,
             "short_sliding_masks": args.short_sliding_masks,
             "fast_sliding_cache": args.fast_sliding_cache,
             "fused_cache_prefix": args.fused_cache_prefix,
@@ -735,6 +745,7 @@ def _benchmark(args: argparse.Namespace) -> dict[str, Any]:
             "fused_rms_norm_count": fused_rms_norm_count,
             "fused_decode_rope_count": fused_decode_rope_count,
             "fused_decode_attention_count": fused_decode_attention_count,
+            "grouped_decode_qkv_count": grouped_qkv_count,
             "short_sliding_mask_count": short_sliding_mask_count,
             "fused_cache_update_count": getattr(
                 last_cache[0], "nanoquant_fused_cache_update_count", 0
@@ -789,6 +800,12 @@ def main() -> None:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="fuse pinned short-context eager decode attention",
+    )
+    parser.add_argument(
+        "--group-decode-qkv",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="execute compatible decode Q/K/V projections in two grouped launches",
     )
     parser.add_argument(
         "--short-sliding-masks",

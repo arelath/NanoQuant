@@ -6,6 +6,7 @@ import importlib.util
 from dataclasses import dataclass
 
 import torch
+from torch.nn import functional as F
 
 from nanoquant.runtime.backend import (
     BackendCapabilities,
@@ -37,6 +38,97 @@ class _CudaPackedPayload:
     outlier_indices: torch.Tensor | None
     outlier_values: torch.Tensor | None
     outlier_scales: torch.Tensor | None
+
+
+@dataclass(frozen=True, slots=True)
+class CudaProjectionGroup:
+    device: torch.device
+    right_words: torch.Tensor
+    left_words: torch.Tensor
+    scale_pre: torch.Tensor
+    scale_mid: torch.Tensor
+    scale_post: torch.Tensor
+    salient_indices: torch.Tensor
+    salient_values: torch.Tensor
+    ranks: tuple[int, ...]
+    output_features: tuple[int, ...]
+
+
+def prepare_cuda_projection_group(
+    layers: tuple[PreparedLayer, ...],
+) -> CudaProjectionGroup | None:
+    """Prepack compatible CUDA payloads for grouped decode projection."""
+
+    if len(layers) not in (2, 3):
+        return None
+    payloads = tuple(layer.payload for layer in layers)
+    if not all(isinstance(payload, _CudaPackedPayload) for payload in payloads):
+        return None
+    packed = tuple(payload for payload in payloads if isinstance(payload, _CudaPackedPayload))
+    first = packed[0]
+    n_in = layers[0].spec.in_features
+    n_salient = layers[0].spec.outlier_count
+    if (
+        any(payload.device != first.device for payload in packed)
+        or any(layer.spec.in_features != n_in for layer in layers)
+        or any(layer.spec.rank % 8 or layer.spec.out_features % 8 for layer in layers)
+        or any(layer.spec.outlier_count != n_salient for layer in layers)
+        or any(payload.right_words.shape[1] != first.right_words.shape[1] for payload in packed)
+        or any(payload.bias is not None or payload.outlier_scales is not None for payload in packed)
+        or any(
+            payload.outlier_indices is None or payload.outlier_values is None
+            for payload in packed
+        )
+    ):
+        return None
+    indices = tuple(payload.outlier_indices for payload in packed)
+    values = tuple(payload.outlier_values for payload in packed)
+    if not all(isinstance(item, torch.Tensor) for item in (*indices, *values)):
+        return None
+    max_left_words = max(payload.left_words.shape[1] for payload in packed)
+    left_words = torch.cat(
+        tuple(
+            F.pad(payload.left_words, (0, max_left_words - payload.left_words.shape[1]))
+            for payload in packed
+        ),
+        dim=0,
+    ).contiguous()
+    return CudaProjectionGroup(
+        first.device,
+        torch.cat(tuple(payload.right_words for payload in packed), dim=0).contiguous(),
+        left_words,
+        torch.stack(tuple(payload.scale_pre for payload in packed)).contiguous(),
+        torch.cat(tuple(payload.scale_mid for payload in packed)).contiguous(),
+        torch.cat(tuple(payload.scale_post for payload in packed)).contiguous(),
+        torch.stack(tuple(item for item in indices if item is not None)).contiguous(),
+        torch.cat(tuple(item for item in values if item is not None), dim=0).contiguous(),
+        tuple(layer.spec.rank for layer in layers),
+        tuple(layer.spec.out_features for layer in layers),
+    )
+
+
+def grouped_cuda_projection(
+    value: torch.Tensor,
+    group: CudaProjectionGroup,
+) -> tuple[torch.Tensor, ...]:
+    """Execute one prevalidated grouped CUDA projection payload."""
+
+    if value.device != group.device:
+        raise ValueError("grouped CUDA projection input uses a different device")
+    from nanoquant.runtime.cuda_kernels import launch_grouped_packed_linears
+
+    return launch_grouped_packed_linears(
+        value,
+        group.right_words,
+        group.left_words,
+        group.scale_pre,
+        group.scale_mid,
+        group.scale_post,
+        group.salient_indices,
+        group.salient_values,
+        group.ranks,
+        group.output_features,
+    )
 
 
 def _copy_optional(value: torch.Tensor | None, device: torch.device) -> torch.Tensor | None:

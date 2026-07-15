@@ -1081,8 +1081,9 @@ For future readers: these were inspected and are *not* wasteful under the parity
 
 Do not reach for these while parity is the gate; each changes floating-point results or decisions:
 
-- fusing/batching GEMMs (e.g. concatenating `system` and `rhs` solves) — different cuBLAS tiling, different
-  bits;
+- fusing/batching research-pipeline GEMMs (e.g. concatenating `system` and `rhs` solves) — different cuBLAS tiling,
+  different bits. Runtime-only fusion may be evaluated separately only with an explicit numerical bound and exact
+  end-to-end generation/quality gates, as recorded for grouped decode Q/K/V below;
 - `torch.compile`, `cudnn.benchmark`, TF32 policy changes (TF32 is already pinned by
   `_legacy_cuda_numerics` for parity);
 - fused/`foreach` *RNG* (batching the per-iteration `randn` draws in `_power_iteration`): philox offset
@@ -1246,3 +1247,14 @@ only their *measurement* waits for the Docs/15 P1 baseline if we want clean befo
   medians are 31.90, 38.78, and 33.11 ms. Complete-generation medians are 1.067, 1.198, and 1.229 s: the candidate
   average is 4.1% lower, but the second candidate regresses 2.6% versus control and is retained as WDDM variance.
   The guarded specialization is default for CUDA/F32 runtime loading; `--no-fused-decode-attention` is the control.
+- **Grouped decode Q/K/V projections accepted:** all 26 pinned attention blocks have compatible shared input width,
+  eight-aligned ranks/output widths, two salient columns, and no bias or outlier scales. Binding concatenates their
+  immutable right factors/scales, pads and concatenates left factors, and executes three first-stage projections in
+  one Triton launch followed by three reconstruction/salient stages in one launch. Decode alone uses the group;
+  prefill and unsupported backends, dtypes, shapes, or payload contracts retain the existing individual path. The
+  changed reduction mapping differs from separate launches by at most 3.05e-5 in the direct fixture and is guarded
+  by a 5e-5 regression bound; every real 32-token output hash is nevertheless exact. The profile reduces kernels
+  from 729 to 625, launch APIs from 726 to 622, ATen calls from 2,411 to 2,255, and device self time from 5.269 to
+  4.887 ms. Candidate/control/candidate decode medians are 45.28, 49.98, and 43.75 ms; full-generation medians are
+  1.220, 1.440, and 1.360 s, making the candidate averages 10.9% and 10.4% lower. The guarded path is default for
+  CUDA/F32 loading; `--no-group-decode-qkv` retains the individual-projection control.

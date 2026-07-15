@@ -24,6 +24,10 @@ from nanoquant.runtime import (
     plan_execution_workloads,
     prepare_execution_workloads,
 )
+from nanoquant.runtime.cuda_backend import (
+    grouped_cuda_projection,
+    prepare_cuda_projection_group,
+)
 from nanoquant.runtime.cuda_kernels import (
     launch_bfloat16_embedding,
     launch_bfloat16_output_projection,
@@ -131,6 +135,50 @@ def _expected(value: torch.Tensor, state: LogicalLayerState) -> torch.Tensor:
     return output
 
 
+def _group_logical(index: int, rank: int, out_features: int) -> LogicalLayerState:
+    generator = torch.Generator().manual_seed(700 + index)
+    in_features = 64
+    outlier_count = 2
+    spec = QuantizedLinearSpec(
+        f"blocks.0.self_attn.group_{index}",
+        "nanoquant-v1",
+        in_features,
+        out_features,
+        rank,
+        "float32",
+        "bfloat16",
+        outlier_count=outlier_count,
+        outlier_value_dtype="bfloat16",
+    )
+    left = torch.where(
+        torch.rand(out_features, rank, generator=generator) > 0.5,
+        1.0,
+        -1.0,
+    )
+    right = torch.where(
+        torch.rand(rank, in_features, generator=generator) > 0.5,
+        1.0,
+        -1.0,
+    )
+    scale_pre = torch.randn(in_features, generator=generator).bfloat16()
+    outlier_indices = torch.tensor((1, 7), dtype=torch.int64)
+    scale_pre[outlier_indices] = 0
+    return LogicalLayerState(
+        spec,
+        left,
+        right,
+        scale_pre,
+        torch.randn(rank, generator=generator).bfloat16(),
+        torch.randn(out_features, generator=generator).bfloat16(),
+        outlier_indices=outlier_indices,
+        outlier_values=torch.randn(
+            out_features,
+            outlier_count,
+            generator=generator,
+        ).bfloat16(),
+    )
+
+
 def test_cuda_packed_backend_declares_pinned_layout_and_capabilities() -> None:
     backend = CudaPackedBackend()
     capabilities = backend.capabilities()
@@ -141,6 +189,32 @@ def test_cuda_packed_backend_declares_pinned_layout_and_capabilities() -> None:
     assert capabilities.supports_outliers
     assert capabilities.supports_bias
     assert capabilities.supports_deterministic
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_grouped_cuda_projection_closely_matches_individual_linears() -> None:
+    backend = CudaPackedBackend()
+    logical = (
+        _group_logical(0, 32, 24),
+        _group_logical(1, 40, 16),
+        _group_logical(2, 48, 32),
+    )
+    prepared = tuple(backend.prepare(pack_logical_layer(state), "cuda") for state in logical)
+    group = prepare_cuda_projection_group(prepared)
+    assert group is not None
+    value = torch.randn(1, 1, 64, generator=torch.Generator().manual_seed(99)).cuda()
+
+    actual = grouped_cuda_projection(value, group)
+    expected = tuple(backend.linear(value, layer) for layer in prepared)
+
+    assert len(actual) == 3
+    maximum_errors = tuple(
+        float((candidate - reference).abs().max().item())
+        for candidate, reference in zip(actual, expected, strict=True)
+    )
+    assert max(maximum_errors) <= 5e-5
+    for candidate, reference in zip(actual, expected, strict=True):
+        torch.testing.assert_close(candidate, reference, rtol=2e-5, atol=5e-5)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")

@@ -34,6 +34,7 @@ from nanoquant.runtime.torch_model import (
     bind_prepared_linears,
     bind_prepared_rms_norms,
     bind_short_sliding_masks,
+    grouped_decode_qkv_count,
     transformers_decoder_module_paths,
 )
 
@@ -196,6 +197,7 @@ class LoadedTransformersRuntime:
     fused_rms_norm_count: int = 0
     fused_decode_rope_count: int = 0
     fused_decode_attention_count: int = 0
+    grouped_decode_qkv_count: int = 0
     short_sliding_mask_count: int = 0
     native_bfloat16_tied_projection_count: int = 0
 
@@ -568,6 +570,7 @@ def load_transformers_runtime(
     fuse_rms_norm: bool = True,
     fuse_decode_rope: bool = True,
     fuse_decode_attention: bool = True,
+    group_decode_qkv: bool = True,
     optimize_short_sliding_masks: bool = True,
     native_bfloat16_tied_projection: bool = True,
 ) -> LoadedTransformersRuntime:
@@ -588,6 +591,9 @@ def load_transformers_runtime(
     )
     use_fused_decode_attention = (
         fuse_decode_attention and target.type == "cuda" and input_dtype == "float32"
+    )
+    use_group_decode_qkv = (
+        group_decode_qkv and target.type == "cuda" and input_dtype == "float32"
     )
     entries = tuple(
         layer for block in opened.packed.manifest.blocks for layer in block.layers
@@ -696,6 +702,7 @@ def load_transformers_runtime(
         bind_fused_decode_rope(
             model,
             fuse_decode_attention=use_fused_decode_attention,
+            group_decode_qkv=use_group_decode_qkv,
         )
         if fuse_decode_rope
         else 0
@@ -703,6 +710,7 @@ def load_transformers_runtime(
     fused_decode_attention_count = (
         fused_decode_rope_count if use_fused_decode_attention else 0
     )
+    grouped_qkv_count = grouped_decode_qkv_count(model)
     short_sliding_mask_count = (
         bind_short_sliding_masks(model) if optimize_short_sliding_masks else 0
     )
@@ -715,6 +723,7 @@ def load_transformers_runtime(
         fused_rms_norm_count,
         fused_decode_rope_count,
         fused_decode_attention_count,
+        grouped_qkv_count,
         short_sliding_mask_count,
         native_bfloat16_tied_projection_count,
     )

@@ -332,3 +332,29 @@ Peak allocation and hashes are identical. Candidate/control/candidate SHA-256 va
 `a03a287b17c746d9da1d743aba13efa42e852ea5bed6f475125f8b47817eaa84`. Production bundle validation binds all 26
 fused attentions and exactly replays 32 tokens with zero packed fallback. The guarded specialization is default;
 `--no-fused-decode-attention` retains the eager control.
+
+## Eighth promoted optimization: grouped decode Q/K/V projections
+
+Each pinned attention block previously invoked the NanoQuant first-stage and reconstruction/outlier kernels
+separately for Q, K, and V. All 26 blocks share the same input width and salient-column count, use eight-aligned
+ranks and output widths, and have no bias or outlier scales. The promoted binding concatenates immutable right
+factors/scales, pads and concatenates left factors, and executes the three first stages in one Triton launch followed
+by the three second stages in one launch. It is decode-only. Prefill and any unsupported device, dtype, shape, or
+payload contract execute the original prepared linears independently.
+
+Changing the program mapping changes F32 reduction order: the direct CUDA fixture observed maximum per-projection
+errors of 3.05e-5, 1.19e-5, and 2.29e-5. A 5e-5 regression ceiling records that intentional numerical surface. The
+real Gemma profile and all candidate/control/candidate runs nevertheless preserve complete hash
+`d91549bc797d2ff5a31e3b1e224347fac211fd34aa2077e01e521a888d24de3f`. All 26 groups bind with zero packed fallback;
+kernels fall from 729 to 625, launch APIs from 726 to 622, ATen calls from 2,411 to 2,255, and non-nested device
+kernel self time from 5.269 to 4.887 ms. The 473,645-byte profile is
+`evidence/m7/gemma-pageable-v28-rewrite-grouped-qkv-probe.json`, SHA-256
+`5449e368da942af2dd4f88fa9453a846003fd4e187a02458d3533356340284e4`.
+
+Candidate/control/candidate isolated-decode medians are 45.279, 49.984, and 43.754 ms; their candidate average is
+10.9% lower. Complete 32-token medians are 1.220, 1.440, and 1.360 s; their candidate average is 10.4% lower. The
+records' SHA-256 values are respectively
+`6851c6512a613d862ee755f4c90472e554b6c4c6c730814687a4569fcfe3c063`,
+`73fca99108da50551f0d8a2a62e8fa1ad143013a1a9fb3c385f03bac17824972`, and
+`467a5044aaab21af6bb0d78c9af721746fb98d8694b368aaf65fc81175cc2d95`. The supported specialization is now the
+CUDA/F32 default; `--no-group-decode-qkv` retains the separate-launch control.

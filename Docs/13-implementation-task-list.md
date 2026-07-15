@@ -388,7 +388,14 @@ Outcome: runtime performance is measured, explained, and competitive with the mo
   end-to-end promotion run; the broader task remains open for a mapping that fits Triton's execution model.
 - [ ] **M7.7** Port/evaluate sign-aware FMA and multiple-accumulator decode loops from `nanoquant.cu`.
 - [ ] **M7.8** Implement and tune dtype-specialized contiguous fast paths for the actual runtime input/scale dtypes.
-- [ ] **M7.9** Evaluate fused first-stage Q/K/V or other shared-input projections using real block profiles.
+- [x] **M7.9** Evaluate fused first-stage Q/K/V or other shared-input projections using real block profiles.
+  The accepted CUDA/F32 decode specialization prepackages each block's compatible Q/K/V factors and executes all
+  three first stages in one launch and all three reconstruction/outlier stages in a second launch. Prefill and
+  unsupported backends, dtypes, shapes, bias, or outlier-scale layouts retain the individual prepared-linears. A
+  direct CUDA comparison bounds reduction-order differences below 5e-5 (3.05e-5 observed); the complete real-model
+  hash remains exact. All 26 groups bind, reducing kernels from 729 to 625, launch APIs from 726 to 622, ATen calls
+  from 2,411 to 2,255, and device self time from 5.269 to 4.887 ms. Candidate/control/candidate decode medians are
+  45.28, 49.98, and 43.75 ms; 32-token medians are 1.220, 1.440, and 1.360 s.
 - [ ] **M7.10** Tune decode kernels across real rank/shape/alignment cases and report achieved memory bandwidth/occupancy.
 - [ ] **M7.11** Tune prefill kernels independently across representative token and batch sizes.
 - [ ] **M7.12** Fuse scale, bias, and salient-outlier operations only where end-to-end profiles show a net benefit.

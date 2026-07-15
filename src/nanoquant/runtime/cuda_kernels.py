@@ -109,6 +109,218 @@ def _nanoquant_stage2(
 
 
 @triton.jit
+def _nanoquant_grouped_stage1(
+    value,
+    right_words,
+    scale_pre,
+    scale_mid,
+    latent,
+    N_IN: tl.constexpr,
+    RANK_0: tl.constexpr,
+    RANK_1: tl.constexpr,
+    RANK_2: tl.constexpr,
+    GROUP_COUNT: tl.constexpr,
+    WORDS_PER_ROW: tl.constexpr,
+    BLOCK_IN: tl.constexpr,
+    BLOCK_RANK: tl.constexpr,
+):
+    rank_block = tl.program_id(0)
+    token = tl.program_id(1)
+    ranks = rank_block * BLOCK_RANK + tl.arange(0, BLOCK_RANK)
+    total_rank = RANK_0 + RANK_1 + RANK_2
+    rank_mask = ranks < total_rank
+    if GROUP_COUNT == 2:
+        projection = tl.where(ranks < RANK_0, 0, 1)
+    else:
+        projection = tl.where(ranks < RANK_0, 0, tl.where(ranks < RANK_0 + RANK_1, 1, 2))
+    accumulator = tl.zeros((BLOCK_RANK,), dtype=tl.float32)
+    for start in range(0, N_IN, BLOCK_IN):
+        columns = start + tl.arange(0, BLOCK_IN)
+        column_mask = columns < N_IN
+        words = tl.load(
+            right_words + ranks[:, None] * WORDS_PER_ROW + (columns[None, :] // 32),
+            mask=rank_mask[:, None] & column_mask[None, :],
+            other=0,
+        )
+        bits = (words >> (columns[None, :] & 31)) & 1
+        signs = 1.0 - 2.0 * bits.to(tl.float32)
+        inputs = tl.load(value + token * N_IN + columns, mask=column_mask, other=0.0).to(
+            tl.float32
+        )
+        pre = tl.load(
+            scale_pre + projection[:, None] * N_IN + columns[None, :],
+            mask=rank_mask[:, None] & column_mask[None, :],
+            other=0.0,
+        ).to(tl.float32)
+        accumulator += tl.sum(signs * (inputs[None, :] * pre), axis=1)
+    mid = tl.load(scale_mid + ranks, mask=rank_mask, other=0.0).to(tl.float32)
+    tl.store(latent + token * total_rank + ranks, accumulator * mid, mask=rank_mask)
+
+
+@triton.jit
+def _nanoquant_grouped_stage2(
+    value,
+    latent,
+    left_words,
+    scale_post,
+    salient_indices,
+    salient_values,
+    output,
+    N_IN: tl.constexpr,
+    RANK_0: tl.constexpr,
+    RANK_1: tl.constexpr,
+    RANK_2: tl.constexpr,
+    OUT_0: tl.constexpr,
+    OUT_1: tl.constexpr,
+    OUT_2: tl.constexpr,
+    GROUP_COUNT: tl.constexpr,
+    N_SALIENT: tl.constexpr,
+    MAX_RANK: tl.constexpr,
+    MAX_WORDS_PER_ROW: tl.constexpr,
+    BLOCK_OUT: tl.constexpr,
+    BLOCK_RANK: tl.constexpr,
+    BLOCK_SALIENT: tl.constexpr,
+):
+    output_block = tl.program_id(0)
+    token = tl.program_id(1)
+    outputs = output_block * BLOCK_OUT + tl.arange(0, BLOCK_OUT)
+    total_output = OUT_0 + OUT_1 + OUT_2
+    output_mask = outputs < total_output
+    if GROUP_COUNT == 2:
+        projection = tl.where(outputs < OUT_0, 0, 1)
+        rank_count = tl.where(outputs < OUT_0, RANK_0, RANK_1)
+        rank_offset = tl.where(outputs < OUT_0, 0, RANK_0)
+    else:
+        first = outputs < OUT_0
+        second = outputs < OUT_0 + OUT_1
+        projection = tl.where(first, 0, tl.where(second, 1, 2))
+        rank_count = tl.where(first, RANK_0, tl.where(second, RANK_1, RANK_2))
+        rank_offset = tl.where(first, 0, tl.where(second, RANK_0, RANK_0 + RANK_1))
+    accumulator = tl.zeros((BLOCK_OUT,), dtype=tl.float32)
+    for start in range(0, MAX_RANK, BLOCK_RANK):
+        ranks = start + tl.arange(0, BLOCK_RANK)
+        rank_mask = ranks[None, :] < rank_count[:, None]
+        words = tl.load(
+            left_words
+            + outputs[:, None] * MAX_WORDS_PER_ROW
+            + (ranks[None, :] // 32),
+            mask=output_mask[:, None] & rank_mask,
+            other=0,
+        )
+        bits = (words >> (ranks[None, :] & 31)) & 1
+        signs = 1.0 - 2.0 * bits.to(tl.float32)
+        hidden = tl.load(
+            latent + token * (RANK_0 + RANK_1 + RANK_2) + rank_offset[:, None] + ranks,
+            mask=output_mask[:, None] & rank_mask,
+            other=0.0,
+        )
+        accumulator += tl.sum(signs * hidden, axis=1)
+    post = tl.load(scale_post + outputs, mask=output_mask, other=0.0).to(tl.float32)
+    accumulator *= post
+    if N_SALIENT > 0:
+        for start in range(0, N_SALIENT, BLOCK_SALIENT):
+            salient = start + tl.arange(0, BLOCK_SALIENT)
+            salient_mask = salient < N_SALIENT
+            indices = tl.load(
+                salient_indices + projection[:, None] * N_SALIENT + salient[None, :],
+                mask=output_mask[:, None] & salient_mask[None, :],
+                other=0,
+            )
+            selected = tl.load(
+                value + token * N_IN + indices,
+                mask=output_mask[:, None] & salient_mask[None, :],
+                other=0.0,
+            ).to(tl.float32)
+            weights = tl.load(
+                salient_values + outputs[:, None] * N_SALIENT + salient[None, :],
+                mask=output_mask[:, None] & salient_mask[None, :],
+                other=0.0,
+            ).to(tl.float32)
+            accumulator += tl.sum(weights * selected, axis=1)
+    tl.store(
+        output + token * total_output + outputs,
+        accumulator,
+        mask=output_mask,
+    )
+
+
+def launch_grouped_packed_linears(
+    value: torch.Tensor,
+    right_words: torch.Tensor,
+    left_words: torch.Tensor,
+    scale_pre: torch.Tensor,
+    scale_mid: torch.Tensor,
+    scale_post: torch.Tensor,
+    salient_indices: torch.Tensor,
+    salient_values: torch.Tensor,
+    ranks: tuple[int, ...],
+    output_features: tuple[int, ...],
+) -> tuple[torch.Tensor, ...]:
+    """Execute two or three compatible packed projections in two launches."""
+
+    if len(ranks) not in (2, 3) or len(output_features) != len(ranks):
+        raise ValueError("grouped packed linear requires two or three projections")
+    if value.dtype != torch.float32 or value.device.type != "cuda" or not value.is_contiguous():
+        raise ValueError("grouped packed linear requires contiguous CUDA F32 input")
+    if any(rank <= 0 or rank % 8 for rank in ranks):
+        raise ValueError("grouped packed ranks must be positive and 8-aligned")
+    if any(size <= 0 or size % 8 for size in output_features):
+        raise ValueError("grouped packed output widths must be positive and 8-aligned")
+    group_count = len(ranks)
+    rank_values = (*ranks, 0)[:3]
+    output_values = (*output_features, 0)[:3]
+    n_in = value.shape[-1]
+    token_count = value.numel() // n_in
+    total_rank = sum(ranks)
+    total_output = sum(output_features)
+    n_salient = salient_indices.shape[1]
+    latent = torch.empty((token_count, total_rank), dtype=torch.float32, device=value.device)
+    output = torch.empty((token_count, total_output), dtype=torch.float32, device=value.device)
+    _nanoquant_grouped_stage1[(triton.cdiv(total_rank, 8), token_count)](
+        value.view(token_count, n_in),
+        right_words,
+        scale_pre,
+        scale_mid,
+        latent,
+        N_IN=n_in,
+        RANK_0=rank_values[0],
+        RANK_1=rank_values[1],
+        RANK_2=rank_values[2],
+        GROUP_COUNT=group_count,
+        WORDS_PER_ROW=right_words.shape[1],
+        BLOCK_IN=256,
+        BLOCK_RANK=8,
+        num_warps=4,
+    )
+    _nanoquant_grouped_stage2[(triton.cdiv(total_output, 8), token_count)](
+        value.view(token_count, n_in),
+        latent,
+        left_words,
+        scale_post,
+        salient_indices,
+        salient_values,
+        output,
+        N_IN=n_in,
+        RANK_0=rank_values[0],
+        RANK_1=rank_values[1],
+        RANK_2=rank_values[2],
+        OUT_0=output_values[0],
+        OUT_1=output_values[1],
+        OUT_2=output_values[2],
+        GROUP_COUNT=group_count,
+        N_SALIENT=n_salient,
+        MAX_RANK=max(ranks),
+        MAX_WORDS_PER_ROW=left_words.shape[1],
+        BLOCK_OUT=8,
+        BLOCK_RANK=32,
+        BLOCK_SALIENT=32,
+        num_warps=4,
+    )
+    shaped = output.view(*value.shape[:-1], total_output)
+    return tuple(shaped.split(output_features, dim=-1))
+
+
+@triton.jit
 def _mul_rn_f32(left, right):
     return tl.inline_asm_elementwise(
         asm="mul.rn.f32 $0, $1, $2;",

@@ -136,6 +136,7 @@ from nanoquant.runtime.torch_model import (
     bind_prepared_rms_norms,
     bind_short_sliding_masks,
     execution_workload,
+    grouped_decode_qkv_count,
     transformers_decoder_module_paths,
 )
 from nanoquant.runtime.transformers_generation import (
@@ -236,6 +237,7 @@ __all__ = [
     "gemma_gguf_tensor_prefix",
     "gemma_hf_checkpoint_prefix",
     "generate",
+    "grouped_decode_qkv_count",
     "execution_workload",
     "hybrid_cache_factory",
     "plan_backends",
