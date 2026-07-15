@@ -164,7 +164,8 @@ optional bias; arbitrary valid positive dimensions/ranks; deterministic executio
 shapes. Preparation validates `PackedLayerState` and transfers each immutable word/sidecar tensor to one CUDA device.
 The launch path performs no packing, factor unpacking, capability discovery, device transfer, allocator cleanup, or
 host synchronization. It currently allocates F32 latent and output tensors per call; static workload-owned workspace
-and independently tuned prefill/decode plans remain M6.13/M6.16 work.
+remains M6.16 work. M6.13 paired planning shares this prepared packed payload across explicit prefill and decode plans
+when both select the CUDA backend.
 
 Leased unit tests cover bit-tail dimensions, every declared input/scale/salient dtype, no-salient and scaled-I8
 paths, bias, exact deterministic replay, prefill/decode shapes, and salient counts spanning multiple 32-column
@@ -191,4 +192,4 @@ names, one shard per transformer block. On the accepted Gemma artifact, the exac
 groups and emitted a 699,863,936-byte GGUF whose 1,274 NanoQuant tensors and 22,719,854 normalized elements matched
 the packed source exactly. The GGUF also contained 158 ordinary model-shell tensors and loaded through the pinned CPU
 llama.cpp build. This completes conversion compatibility (M6.11); it is not a CUDA backend in the rewrite, a
-runtime-owned model shell/tokenizer package, or clean runtime-only generation proof. Those remain M6.13-M6.22 work.
+runtime-owned model shell/tokenizer package, or clean runtime-only generation proof. Those remain M6.14-M6.22 work.

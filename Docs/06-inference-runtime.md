@@ -149,8 +149,21 @@ shape/rank combinations with the F32 mathematical operation. One-token decode co
 absolute error `1.9073486328125e-06` and 1,177,088 peak incremental allocated CUDA bytes. Four-token prefill compared
 1,837,056 outputs with maximum absolute error `3.814697265625e-06` and 1,370,112 peak incremental allocated CUDA
 bytes. Both passes required bit-exact deterministic replay. These results establish the initial packed CUDA
-operation (M6.12); separate prefill/decode plans, static workspace reuse, the model shell, generation/KV cache, and
-performance parity remain open.
+operation (M6.12); static workspace reuse, the model shell, generation/KV cache, and performance parity remain open.
+
+Prefill and decode now use an explicit paired planning contract. Each workload carries its own ordered backend
+priority and resolves independently, so strict mode can select genuinely specialized prefill-only and decode-only
+backends without treating the other workload's backend as a fallback. The pair requires one ordered layer inventory,
+one device type, and exactly one token per decode batch item. Preparation validates the state inventory once and
+caches each unique `(layer, backend, version)` payload; when both plans choose the same backend, they share the same
+prepared GPU tensors instead of transferring weights twice. A prepared plan's indexed hot dispatch validates device,
+dtype, feature width, and exact `batch_size * token_count` geometry before calling the already selected backend.
+Capability discovery and backend lookup remain outside `linear_at()`. CPU planner tests cover divergent selection,
+strict mode, shared preparation, and misuse rejection; a leased CUDA test executes both plans against one shared
+packed layer. A complete Gemma validator then prepared all 182 layers into 87,087,616 incremental CUDA bytes, proved
+all 182 prefill/decode dispatches shared those exact prepared payloads with zero fallback, and executed 1,837,056
+prefill plus 459,264 decode outputs with only 342,528 peak incremental execution bytes. This closes M6.13, not
+attention/KV-cache planning or model-level generation.
 
 `SupportResult` includes a reason code when false. Capability matching covers:
 

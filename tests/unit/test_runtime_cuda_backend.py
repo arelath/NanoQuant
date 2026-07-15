@@ -13,6 +13,8 @@ from nanoquant.runtime import (
     QuantizedLinearSpec,
     WorkloadSpec,
     pack_logical_layer,
+    plan_execution_workloads,
+    prepare_execution_workloads,
 )
 
 
@@ -217,3 +219,33 @@ def test_cuda_packed_backend_streams_more_than_one_salient_tile() -> None:
     actual = backend.linear(value, prepared)
 
     torch.testing.assert_close(actual.cpu(), _expected(value.cpu(), logical), rtol=2e-5, atol=2e-4)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_cuda_packed_backend_shares_weights_across_prefill_and_decode_plans() -> None:
+    logical = _logical()
+    packed = pack_logical_layer(logical)
+    backend = CudaPackedBackend()
+    plans = plan_execution_workloads(
+        (packed.spec,),
+        prefill=WorkloadSpec("prefill", "cuda", "bfloat16", 1, 4, deterministic=True),
+        decode=WorkloadSpec("decode", "cuda", "bfloat16", 1, 1, deterministic=True),
+        prefill_backends=(backend,),
+        decode_backends=(backend,),
+        strict=True,
+    )
+    prepared = prepare_execution_workloads(
+        plans,
+        {packed.spec.name: packed},
+        (backend,),
+        "cuda",
+    )
+    prefill = torch.linspace(-1, 1, 140, dtype=torch.bfloat16).reshape(1, 4, 35).cuda()
+    decode = prefill[:, -1, :].contiguous()
+
+    prefill_output = prepared.prefill.linear_at(0, prefill)
+    decode_output = prepared.decode.linear_at(0, decode)
+
+    assert prepared.prefill.dispatches[0].layer is prepared.decode.dispatches[0].layer
+    torch.testing.assert_close(prefill_output.cpu(), _expected(prefill.cpu(), logical), rtol=2e-5, atol=2e-4)
+    torch.testing.assert_close(decode_output.cpu(), _expected(decode.cpu(), logical), rtol=2e-5, atol=2e-4)

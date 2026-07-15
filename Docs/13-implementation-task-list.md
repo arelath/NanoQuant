@@ -276,8 +276,16 @@ Outcome: packed artifacts load and generate correctly without research dependenc
   passed all 182 layers and 18 real shape/rank combinations for one-token decode (459,264 outputs, maximum absolute
   error `1.9073486328125e-06`, 1,177,088 peak incremental allocated bytes) and four-token prefill (1,837,056
   outputs, maximum absolute error `3.814697265625e-06`, 1,370,112 peak incremental allocated bytes). Separate
-  workload plans, model-shell generation, static workspace ownership, and performance tuning remain later gates.
-- [ ] **M6.13** Implement separate prefill and decode execution plans.
+  Model-shell generation, static workspace ownership, and performance tuning remain later gates.
+- [x] **M6.13** Implement separate prefill and decode execution plans. `ExecutionPlans` resolves one ordered layer
+  inventory against independent prefill/decode backend priorities, preserves each workload's fallback report, requires
+  a shared device type and one token per decode batch item, and supports strict specialized backends. Paired
+  preparation caches unique layer/backend payloads so identical selections share device weights while divergent
+  selections prepare separately. `linear_at()` enforces planned device, dtype, feature width, and batch×token geometry
+  without repeating capability discovery or backend lookup. On the complete Gemma artifact, both plans selected CUDA
+  with zero fallback, all 182 dispatches shared the same prepared layers (87,087,616 incremental bytes), and execution
+  produced 1,837,056 prefill plus 459,264 decode outputs with 342,528 peak incremental bytes. Evidence is
+  `evidence/m6/gemma-pageable-v28-execution-plans-validation.json`.
 - [ ] **M6.14** Implement generation-engine prompt batching, positions, attention metadata, stopping, and deterministic mode.
 - [ ] **M6.15** Implement bounded/static or paged KV-cache management and verify positions/padding across batches.
 - [ ] **M6.16** Keep packing, capability discovery, device transfers, and allocator cleanup outside the token hot loop.

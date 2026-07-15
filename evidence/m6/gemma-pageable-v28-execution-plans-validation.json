@@ -1,0 +1,37 @@
+{
+  "backend_name": "cuda-packed-triton",
+  "backend_version": "1",
+  "batch_size": 1,
+  "block_count": 26,
+  "compute_capability": [
+    8,
+    9
+  ],
+  "decode_backend_inventory": [
+    "cuda-packed-triton"
+  ],
+  "decode_checksum": 162.54493017302593,
+  "decode_fallback_count": 0,
+  "decode_output_elements": 459264,
+  "decode_tokens": 1,
+  "device": "NVIDIA RTX 4000 Ada Generation Laptop GPU",
+  "execution_peak_allocated_increment_bytes": 342528,
+  "input_dtype": "bfloat16",
+  "layer_count": 182,
+  "packed_artifact": "D:\\dev\\research\\NanoQuantRewrite\\evidence\\m6\\gemma-pageable-v28-packed-runtime",
+  "packed_descriptor_sha256": "b4f0c6270c4b59f8293c909ddeb21042ad1a2d7ee18601c77e4c57563c900487",
+  "passed": true,
+  "prefill_backend_inventory": [
+    "cuda-packed-triton"
+  ],
+  "prefill_checksum": -4946.386439374684,
+  "prefill_fallback_count": 0,
+  "prefill_output_elements": 1837056,
+  "prefill_tokens": 4,
+  "preparation_allocated_increment_bytes": 87087616,
+  "prepared_layer_count": 182,
+  "shared_prepared_layer_count": 182,
+  "torch_cuda_version": "13.0",
+  "torch_version": "2.12.1+cu130",
+  "wall_seconds": 7.035799900011625
+}

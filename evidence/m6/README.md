@@ -137,8 +137,9 @@ counts 2 and 7. Decode compared 459,264 outputs with maximum absolute error `1.9
 peak incremental allocated CUDA bytes. Four-token prefill compared 1,837,056 outputs with maximum absolute error
 `3.814697265625e-06` and 1,370,112 peak incremental allocated CUDA bytes. Both deterministic replays were bit-exact.
 Fixture coverage additionally exercises all declared input/scale/floating-salient dtypes, scaled-I8 salient values,
-optional bias, tail words, and more than one salient tile. This completes M6.12 only; it does not establish separate
-prefill/decode plans, model-shell generation, KV-cache correctness, or performance parity.
+optional bias, tail words, and more than one salient tile. This completes M6.12 only; it does not establish
+model-shell generation, KV-cache correctness, or performance parity. M6.13 subsequently added independently selected
+prefill/decode plans that share identical prepared packed weights and validate workload geometry before dispatch.
 
 The modified llama.cpp CUDA target was then rebuilt from the exact tracked dirty source in the Visual Studio x64
 developer environment. Its `ggml-cuda.dll` therefore contains kernel SHA-256
@@ -159,3 +160,24 @@ prompt/decode rates were 1.4/1.2 tokens/s; CUDA rates were 243.4/150.2 tokens/s.
 smoke, not the still-open stable reference benchmark. The separately configured CPU-only target compiled from the
 same current source but aborts during model loading at `ggml-backend.cpp:1242`; it was not used for current-source
 parity. `gemma-pageable-v28-llamacpp-cuda-smoke.json` records the exact binary and source hashes.
+
+## Pinned Gemma v28 paired execution plans
+
+The M6.13 validator prepares the complete packed artifact under one CUDA lease, plans prefill and decode separately,
+and executes both regimes for every layer:
+
+```powershell
+.\.venv\Scripts\python.exe tools\validate_runtime_execution_plans.py `
+  --packed-artifact evidence\m6\gemma-pageable-v28-packed-runtime `
+  --device cuda:0 --input-dtype bfloat16 `
+  --batch-size 1 --prefill-tokens 4 `
+  --triton-cache $env:TEMP\nanoquant-triton-cache-m613 `
+  --output evidence\m6\gemma-pageable-v28-execution-plans-validation.json
+```
+
+Both plans selected `cuda-packed-triton` for all 182 layers with zero fallback. Every prefill dispatch shared the
+same `PreparedLayer` object as its decode counterpart, so all packed weights occupied 87,087,616 incremental CUDA
+bytes rather than being duplicated. The pass produced 1,837,056 prefill and 459,264 decode outputs across all 26
+blocks; transient execution peaked only 342,528 bytes above prepared weight memory. This proves workload-plan
+selection, shared preparation, geometry enforcement, and both dispatch paths. It does not prove attention metadata,
+KV-cache behavior, sampling, or generation-engine correctness.
