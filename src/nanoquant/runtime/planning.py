@@ -158,7 +158,7 @@ class PreparedBackendPlan:
                 raise ValueError("prepared runtime dispatch order differs from its plan")
 
     def linear_at(self, layer_index: int, value: torch.Tensor) -> torch.Tensor:
-        """Execute one planned layer after enforcing this workload's token geometry."""
+        """Execute one planned layer within this workload's batch/token geometry."""
 
         if layer_index < 0 or layer_index >= len(self.dispatches):
             raise IndexError(f"runtime plan layer index is outside the inventory: {layer_index}")
@@ -175,16 +175,27 @@ class PreparedBackendPlan:
                 f"{workload.input_dtype!r}"
             )
         expected_slots = workload.batch_size * workload.token_count
-        if value.ndim == 0 or value.shape[-1] != dispatch.layer.spec.in_features:
+        if value.ndim < 2 or value.shape[-1] != dispatch.layer.spec.in_features:
             raise ValueError(
                 f"runtime {workload.kind} input feature dimension differs for "
                 f"{dispatch.plan.layer_name}"
             )
+        if value.shape[0] != workload.batch_size:
+            raise ValueError(
+                f"runtime {workload.kind} input batch size {value.shape[0]} differs from "
+                f"planned batch size {workload.batch_size}"
+            )
         actual_slots = prod(value.shape[:-1])
-        if actual_slots != expected_slots:
+        invalid_slots = (
+            actual_slots <= 0
+            or actual_slots > expected_slots
+            or (workload.kind == "decode" and actual_slots != expected_slots)
+        )
+        if invalid_slots:
+            expectation = "at most" if workload.kind == "prefill" else "exactly"
             raise ValueError(
                 f"runtime {workload.kind} input has {actual_slots} token slots, "
-                f"expected {expected_slots}"
+                f"expected {expectation} {expected_slots}"
             )
         return dispatch.linear(value)
 

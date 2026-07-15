@@ -570,27 +570,39 @@ class PreparedGemma3DecoderLayer(nn.Module):
             return None
         if cache_position is None:
             raise ValueError("Gemma3 sliding attention requires cache_position")
-        effective_seq_len = max(cache_position.shape[0], self.sliding_window)
+        token_count = cache_position.shape[0]
+        position_start = last_cache_position - token_count
+        if position_start < 0:
+            raise ValueError("Gemma3 sliding attention cache position is invalid")
+        previous_count = min(position_start, self.sliding_window - 1)
+        effective_seq_len = previous_count + token_count
         if self.config._attn_implementation == "flash_attention_2":
             return attention_mask[:, -effective_seq_len:]
         # torch.tril(ones, diagonal=-window) is entirely false while both
         # matrix dimensions fit inside the window. The subsequent where and
         # offset slice therefore return this exact tensor unchanged.
-        if (
-            attention_mask.ndim == 4
-            and attention_mask.shape[-2] <= self.sliding_window
-            and attention_mask.shape[-1] <= self.sliding_window
-            and last_cache_position <= self.sliding_window
-        ):
-            return attention_mask
+        if token_count <= self.sliding_window and last_cache_position <= self.sliding_window:
+            return (
+                attention_mask
+                if attention_mask.shape[-1] <= self.sliding_window
+                else attention_mask[..., : self.sliding_window]
+            )
         minimum = torch.finfo(attention_mask.dtype).min
-        sliding_window_mask = torch.tril(
-            torch.ones_like(attention_mask, dtype=torch.bool),
-            diagonal=-self.sliding_window,
+        offset = position_start - previous_count
+        result = attention_mask[..., offset : offset + effective_seq_len]
+        query_positions = torch.arange(
+            previous_count,
+            previous_count + token_count,
+            device=result.device,
+        ).unsqueeze(1)
+        key_positions = torch.arange(effective_seq_len, device=result.device).unsqueeze(0)
+        sliding_window_mask = key_positions <= query_positions - self.sliding_window
+        result = torch.where(
+            sliding_window_mask.view(1, 1, token_count, effective_seq_len),
+            minimum,
+            result,
         )
-        result = torch.where(sliding_window_mask, minimum, attention_mask)
-        offset = max(0, last_cache_position - effective_seq_len)
-        return result[:, :, :, offset : offset + effective_seq_len]
+        return result
 
     def forward(
         self,

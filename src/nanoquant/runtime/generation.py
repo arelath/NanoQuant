@@ -93,6 +93,7 @@ class GenerationRequest:
     stop_token_sequences: tuple[tuple[int, ...], ...] = ()
     sampling: SamplingConfig = SamplingConfig()
     stopping_check_interval: int = 1
+    prefill_chunk_size: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,6 +179,10 @@ def _validate_request(request: GenerationRequest) -> torch.Tensor:
         )
     if request.stopping_check_interval <= 0:
         raise GenerationError("NQ-GEN-SYNC stopping_check_interval must be positive")
+    if request.prefill_chunk_size is not None and (
+        type(request.prefill_chunk_size) is not int or request.prefill_chunk_size <= 0
+    ):
+        raise GenerationError("NQ-GEN-PREFILL prefill_chunk_size must be positive when configured")
 
     bool_mask = mask.bool()
     if not bool(torch.all(mask == bool_mask)):
@@ -302,17 +307,26 @@ def generate(request: GenerationRequest, model: GenerationModel) -> GenerationRe
         sampling_generator.manual_seed(request.sampling.seed)
 
     with torch.inference_mode():
-        step = model.forward_step(
-            input_ids=tokens,
-            attention_mask=full_attention_mask[:, :prompt_width],
-            position_ids=prompt_positions,
-            cache_position=prompt_cache_positions,
-            cache=None,
-            max_cache_length=maximum_cache_length,
-            workload="prefill",
-            deterministic=request.deterministic,
-        )
-        _validate_step(step, batch_size, "prefill", tokens.device)
+        prefill_chunk_size = request.prefill_chunk_size or prompt_width
+        cache: object | None = None
+        step: GenerationStep | None = None
+        prefill_forward_count = 0
+        for start in range(0, prompt_width, prefill_chunk_size):
+            end = min(start + prefill_chunk_size, prompt_width)
+            step = model.forward_step(
+                input_ids=tokens[:, start:end],
+                attention_mask=full_attention_mask[:, :end],
+                position_ids=prompt_positions[:, start:end],
+                cache_position=prompt_cache_positions[start:end],
+                cache=cache,
+                max_cache_length=maximum_cache_length,
+                workload="prefill",
+                deterministic=request.deterministic,
+            )
+            _validate_step(step, batch_size, "prefill", tokens.device)
+            cache = step.cache
+            prefill_forward_count += 1
+        assert step is not None
 
         generated = torch.full(
             (batch_size, request.max_new_tokens),
@@ -403,7 +417,7 @@ def generate(request: GenerationRequest, model: GenerationModel) -> GenerationRe
             "eos" if eos else "stop_sequence" if stop else "max_new_tokens"
             for eos, stop in zip(host_eos, host_stop_sequence, strict=True)
         ),
-        1,
+        prefill_forward_count,
         decode_forward_count,
         maximum_cache_length,
         stopping_sync_count,

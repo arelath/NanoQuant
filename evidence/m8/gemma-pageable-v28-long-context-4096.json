@@ -1,0 +1,81 @@
+{
+  "bundle": "D:\\dev\\research\\NanoQuantRewrite\\evidence\\m6\\gemma-pageable-v28-runtime-bundle",
+  "bundle_descriptor_sha256": "e5cef7236e2846a49129e991f8fc5efb660a9a8b8c71d9531590bed71739cc42",
+  "candidate_seconds": 8.552167800000461,
+  "decode_fallback_count": 0,
+  "device": "NVIDIA RTX 4000 Ada Generation Laptop GPU",
+  "evaluation": {
+    "case_count": 1,
+    "cases": [
+      {
+        "case_key": "sha256:401a71514a7886ee5379969c31ade83a27ba9ce6c4378a9caef2f338f93a1779",
+        "case_name": "packed-gemma-sliding-window-rollover",
+        "crossed_sliding_window": true,
+        "exact_tokens": true,
+        "expected_cache_length": 4101,
+        "expected_prefill_forward_count": 9,
+        "expected_token_count": 4,
+        "first_mismatch_index": null,
+        "observed_cache_length": 4101,
+        "observed_decode_forward_count": 3,
+        "observed_prefill_forward_count": 9,
+        "passed": true,
+        "peak_device_bytes": 899101696,
+        "prompt_token_count": 4097,
+        "stop_reason_match": true,
+        "unexpected_fallback_count": 0
+      }
+    ],
+    "exact_case_count": 1,
+    "maximum_prompt_tokens": 4097,
+    "maximum_total_tokens": 4101,
+    "passed": true,
+    "passed_case_count": 1,
+    "peak_device_bytes": 899101696,
+    "protocol_key": "sha256:e978ebabcdf765d3ecb3685ee308d1c76fb04229e09464dd4c8520c62a593140",
+    "total_unexpected_fallbacks": 0
+  },
+  "expected_stop_reason": "max_new_tokens",
+  "expected_text": "Okay, let’",
+  "expected_token_ids": [
+    19058,
+    236764,
+    1531,
+    236858
+  ],
+  "expected_token_sha256": "c5c8c70f5018cbc7dad5db259e0b3b5e3683abbdf9141c6d076d13c5150e16a1",
+  "fused_decode_attention_count": 26,
+  "fused_decode_rope_count": 26,
+  "fused_rms_norm_count": 157,
+  "grouped_decode_mlp_count": 26,
+  "grouped_decode_qkv_count": 26,
+  "input_dtype": "float32",
+  "native_bfloat16_tied_projection_count": 1,
+  "passed": true,
+  "prefill_fallback_count": 0,
+  "prompt_token_count": 4097,
+  "prompt_token_sha256": "48b2279e87297c4c470632faba311c0cdd8217a2509b6257da5688770d5b05a8",
+  "prompt_unit": "Explain one practical benefit of model compression.",
+  "protocol": {
+    "global_attention_interval": 6,
+    "maximum_context_length": 32768,
+    "maximum_unexpected_fallbacks": 0,
+    "name": "gemma3-hybrid-cache",
+    "prefill_chunk_size": 512,
+    "sliding_window": 512,
+    "version": "1"
+  },
+  "reference": {
+    "decode_forward_count": 3,
+    "maximum_cache_length": 4101,
+    "peak_device_bytes": 1737259008,
+    "prefill_forward_count": 1,
+    "seconds": 9.621021299997665
+  },
+  "replaced_linear_count": 182,
+  "schema_version": 1,
+  "short_sliding_mask_count": 22,
+  "torch_version": "2.12.1+cu130",
+  "transformers_version": "4.51.3",
+  "wall_seconds": 23.961710700001277
+}

@@ -160,6 +160,35 @@ accumulation in FP32, records both accuracy variants, ties, per-example scores, 
 the task's pinned primary metric. Tests cover known logits, serial/batched equality, limiting, exact window edges,
 cache invalidation, and all six real cached dataset/tokenizer row-zero hashes against the retained legacy samples.
 
+### 6.2 Gemma long-context protocol
+
+The full-tier `gemma3-hybrid-cache` evaluator binds the model's declared 32,768-token context limit, 512-token
+sliding window, six-layer global-attention interval, prefill chunk size, and zero-fallback policy into one semantic
+identity. Each case pins prompt and expected token IDs plus its stop reason, must cross both a chunk and the sliding
+window, and reports exact tokens, first mismatch, prefill/decode call counts, cache bound, fallback count, and peak
+device allocation. Requests beyond the model limit fail with `NQ-GEN-CONTEXT` before a forward.
+
+Runtime prefill now streams a prompt through one HybridCache. Prepared prefill dispatch accepts any positive token
+geometry up to its planned prompt bound while decode remains fixed at one token per batch item. Gemma local layers
+retain the previous window in chronological order across multi-token cache updates and construct the causal sliding
+mask from absolute query/key positions. This avoids materializing a full 32K attention operation while preserving
+global-layer history.
+
+The retained packed Gemma runtime-bundle gate uses F32 shell execution and four forced greedy tokens. A monolithic
+oracle and 512-token candidate agree exactly at 1,025 and 4,097 prompt tokens; the 4K candidate uses nine prefill
+forwards and peaks at 899,101,696 allocated bytes versus 1,737,259,008 for the monolithic oracle. The near-ceiling
+case uses an independently bounded 256-token oracle and 512-token candidate: 32,761 prompt plus four generated
+tokens, 128 versus 64 prefill forwards, exact token/stop/cache parity, zero dispatch fallbacks, and a candidate peak
+of 1,592,178,176 bytes on the 12 GB designated GPU. The model's exact configured ceiling is also exercised against
+Transformers generation by a tiny deterministic Gemma fixture.
+
+Evidence is retained under `evidence/m8`: `gemma-pageable-v28-long-context-1024.json` (SHA-256
+`75d5141123d7b8416a5e427874cc012e24f32ef1dab2245e5cddab616000b688`),
+`gemma-pageable-v28-long-context-4096.json` (SHA-256
+`f63fc2025b4b10356a8a6a77b19e4c3593285b984475e234d5447dc5912ec581`), and
+`gemma-pageable-v28-long-context-ceiling.json` (SHA-256
+`c17f2cf200fcd151d880c4389ae191a4c6dfb296628047abc950803b06db3cf4`).
+
 ## 7. Baselines
 
 A candidate can be compared with several named baselines:

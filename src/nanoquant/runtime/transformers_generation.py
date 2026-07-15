@@ -270,6 +270,9 @@ def hybrid_cache_factory(
 
     if dtype_override is not None and not dtype_override.is_floating_point:
         raise ValueError("runtime HybridCache dtype override must be floating point")
+    maximum_positions = getattr(config, "max_position_embeddings", None)
+    if type(maximum_positions) is not int or maximum_positions <= 0:
+        raise ValueError("runtime HybridCache requires a positive max_position_embeddings")
 
     def create(
         batch_size: int,
@@ -277,6 +280,11 @@ def hybrid_cache_factory(
         device: torch.device,
         dtype: torch.dtype,
     ) -> object:
+        if maximum_cache_length > maximum_positions:
+            raise GenerationError(
+                "NQ-GEN-CONTEXT requested cache length "
+                f"{maximum_cache_length} exceeds model limit {maximum_positions}"
+            )
         from transformers import HybridCache
 
         cache_type = cast(Any, HybridCache)
@@ -286,6 +294,7 @@ def hybrid_cache_factory(
             _nanoquant_token_count: int | None = None
             nanoquant_fast_sliding_update_count: int = 0
             nanoquant_fused_cache_update_count: int = 0
+            nanoquant_chunked_sliding_update_count: int = 0
 
             def _nanoquant_prepare_for_forward(
                 self,
@@ -321,6 +330,37 @@ def hybrid_cache_factory(
                     and k_out.device == key_states.device
                     and v_out.device == value_states.device
                 )
+                if (
+                    sliding_window
+                    and token_count > 1
+                    and position_start is not None
+                    and position_start > 0
+                    and prepared_token_count == token_count
+                ):
+                    window = k_out.shape[2]
+                    previous_count = min(position_start, window - 1)
+                    if position_start < window:
+                        previous_keys = k_out[:, :, :previous_count]
+                        previous_values = v_out[:, :, :previous_count]
+                    else:
+                        previous_keys = k_out[:, :, -previous_count:]
+                        previous_values = v_out[:, :, -previous_count:]
+                    combined_keys = torch.cat(
+                        (previous_keys.to(key_states.dtype), key_states),
+                        dim=2,
+                    )
+                    combined_values = torch.cat(
+                        (previous_values.to(value_states.dtype), value_states),
+                        dim=2,
+                    )
+                    stored_keys = combined_keys[:, :, -window:].to(k_out.dtype)
+                    stored_values = combined_values[:, :, -window:].to(v_out.dtype)
+                    k_out.zero_()
+                    v_out.zero_()
+                    k_out[:, :, : stored_keys.shape[2]].copy_(stored_keys)
+                    v_out[:, :, : stored_values.shape[2]].copy_(stored_values)
+                    self.nanoquant_chunked_sliding_update_count += 1
+                    return combined_keys, combined_values
                 if (
                     fused_cache_prefix
                     and prefix_is_pre_rollover
@@ -365,14 +405,9 @@ def hybrid_cache_factory(
                 )
                 return keys.to(key_states.dtype), values.to(value_states.dtype)
 
-        selected_type = (
-            cache_type
-            if not fast_sliding_prefix
-            and not fused_cache_prefix
-            and (dtype_override is None or dtype_override == dtype)
-            else PreparedHybridCache
-        )
-        return selected_type(
+        # Multi-token sliding updates require the chronological correction even
+        # when optional prefix fast paths and dtype promotion are disabled.
+        return PreparedHybridCache(
             cast(Any, config),
             max_batch_size=batch_size,
             max_cache_len=maximum_cache_length,

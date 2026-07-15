@@ -128,7 +128,7 @@ def test_execution_plan_preparation_reuses_identical_backend_payloads() -> None:
         assert prefill_dispatch.layer is decode_dispatch.layer
 
 
-def test_prepared_workload_plan_rejects_wrong_token_geometry() -> None:
+def test_prepared_workload_plan_bounds_prefill_and_fixes_decode_geometry() -> None:
     state = _state("blocks.0.proj")
     prefill, decode = _workloads()
     backend = _KindBackend("both", ("prefill", "decode"))
@@ -142,9 +142,13 @@ def test_prepared_workload_plan_rejects_wrong_token_geometry() -> None:
     )
     prepared = prepare_execution_workloads(plans, {state.spec.name: state}, (backend,), "cpu")
 
-    with pytest.raises(ValueError, match="prefill input has 2 token slots, expected 6"):
-        prepared.prefill.linear_at(0, torch.ones(2, 4))
-    with pytest.raises(ValueError, match="decode input has 6 token slots, expected 2"):
+    assert prepared.prefill.linear_at(0, torch.ones(2, 4)).shape == (2, 3)
+    assert prepared.prefill.linear_at(0, torch.ones(2, 1, 4)).shape == (2, 1, 3)
+    with pytest.raises(ValueError, match="prefill input has 8 token slots, expected at most 6"):
+        prepared.prefill.linear_at(0, torch.ones(2, 4, 4))
+    with pytest.raises(ValueError, match="prefill input batch size 1 differs from planned batch size 2"):
+        prepared.prefill.linear_at(0, torch.ones(1, 2, 4))
+    with pytest.raises(ValueError, match="decode input has 6 token slots, expected exactly 2"):
         prepared.decode.linear_at(0, torch.ones(2, 3, 4))
     with pytest.raises(ValueError, match="prefill input dtype differs"):
         prepared.prefill.linear_at(0, torch.ones(2, 3, 4, dtype=torch.float16))

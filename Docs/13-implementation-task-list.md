@@ -281,7 +281,8 @@ Outcome: packed artifacts load and generate correctly without research dependenc
   inventory against independent prefill/decode backend priorities, preserves each workload's fallback report, requires
   a shared device type and one token per decode batch item, and supports strict specialized backends. Paired
   preparation caches unique layer/backend payloads so identical selections share device weights while divergent
-  selections prepare separately. `linear_at()` enforces planned device, dtype, feature width, and batch×token geometry
+  selections prepare separately. `linear_at()` enforces planned device, dtype, feature width, and batch geometry;
+  decode token geometry remains exact while prefill accepts a positive chunk no larger than its planned prompt bound,
   without repeating capability discovery or backend lookup. On the complete Gemma artifact, both plans selected CUDA
   with zero fallback, all 182 dispatches shared the same prepared layers (87,087,616 incremental bytes), and execution
   produced 1,837,056 prefill plus 459,264 decode outputs with 342,528 peak incremental bytes. Evidence is
@@ -525,7 +526,17 @@ Outcome: runs produce cheap-to-expensive decision evidence and actionable report
   stop reasons, repeat determinism, minimum output length, and bounded repetition. Tests cover registry dispatch,
   exact repeatable output, stable case identity across observations, mismatch/nondeterminism/stop/repetition/empty
   diagnostics, and malformed cases.
-- [ ] **M8.7** Implement long-context evaluation where supported by the model/runtime plan.
+- [x] **M8.7** Implement long-context evaluation where supported by the model/runtime plan.
+  The versioned full-tier Gemma3 HybridCache protocol binds the declared 32,768-token limit, 512-token local window,
+  six-layer global interval, prefill chunk size, and zero-fallback policy. The evaluator requires cases to cross both
+  the window and a chunk and checks exact tokens/stopping, cache length, prefill/decode calls, fallbacks, and peak
+  device bytes. Generation streams prompt chunks through one cache; prepared prefill plans accept bounded variable
+  chunks; local cache updates and masks preserve chronological sliding-window semantics after rollover; and requests
+  beyond the model limit fail before execution. The production packed Gemma bundle agrees exactly with a monolithic
+  oracle at 1,025 and 4,097 prompt tokens. A near-ceiling 32,761+4-token case agrees between independent 256- and
+  512-token chunkings with zero fallbacks and 1,592,178,176 peak allocated bytes on the 12 GB GPU. A deterministic
+  tiny Gemma fixture also reaches its exact configured ceiling with Transformers token parity. Protocol and retained
+  evidence identities are recorded in `Docs/08-evaluation.md`.
 - [x] **M8.8** Implement smoke, quick, standard, and full evaluation tiers from the registry.
 - [x] **M8.9** Implement predefined promotion, rejection, and inconclusive decisions with immutable gate policy.
 - [x] **M8.10** Implement paired comparisons, bootstrap/appropriate confidence intervals, repeated-run variability, and minimum meaningful deltas.

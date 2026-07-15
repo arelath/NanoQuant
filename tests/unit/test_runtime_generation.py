@@ -17,6 +17,7 @@ from nanoquant.runtime.generation import (
     batch_prompts,
     generate,
 )
+from nanoquant.runtime.torch_model import bind_short_sliding_masks
 from nanoquant.runtime.transformers_generation import (
     TransformersGenerationModel,
     hybrid_cache_factory,
@@ -105,6 +106,30 @@ def test_generation_passes_explicit_prefill_and_decode_metadata() -> None:
         second_decode["attention_mask"],
         torch.tensor([[0, 1, 1, 1, 1], [1, 1, 1, 1, 0]], dtype=torch.bool),
     )
+
+
+def test_chunked_prefill_reuses_one_cache_and_preserves_final_prompt_logits() -> None:
+    model = ScheduledModel(((9, 9), (4, 5), (6, 7)))
+    request = replace(_request(max_new_tokens=2), prefill_chunk_size=2, eos_token_ids=(99,))
+
+    result = generate(request, model)
+
+    assert torch.equal(result.token_ids, torch.tensor([[4, 6], [5, 7]]))
+    assert result.prefill_forward_count == 2
+    assert result.decode_forward_count == 1
+    first_prefill, second_prefill, decode = model.calls
+    assert torch.equal(first_prefill["input_ids"], torch.tensor([[0, 11], [21, 22]]))
+    assert torch.equal(first_prefill["attention_mask"], torch.tensor([[0, 1], [1, 1]], dtype=torch.bool))
+    assert torch.equal(first_prefill["cache_position"], torch.tensor([0, 1]))
+    assert first_prefill["cache"] is None
+    assert torch.equal(second_prefill["input_ids"], torch.tensor([[12], [23]]))
+    assert torch.equal(
+        second_prefill["attention_mask"],
+        torch.tensor([[0, 1, 1], [1, 1, 1]], dtype=torch.bool),
+    )
+    assert torch.equal(second_prefill["cache_position"], torch.tensor([2]))
+    assert second_prefill["cache"] == ("cache", 0)
+    assert decode["cache"] == ("cache", 1)
 
 
 def test_generation_stops_at_limit_and_is_repeatable() -> None:
@@ -221,6 +246,17 @@ def test_stopping_checks_have_an_explicit_batching_interval() -> None:
             ),
             "NQ-GEN-MODE",
         ),
+        (
+            GenerationRequest(
+                torch.tensor([[1]]),
+                torch.tensor([[1]]),
+                1,
+                (2,),
+                0,
+                prefill_chunk_size=0,
+            ),
+            "NQ-GEN-PREFILL",
+        ),
     ],
 )
 def test_generation_rejects_invalid_requests(
@@ -333,6 +369,8 @@ def test_hybrid_cache_factory_can_store_lower_precision_and_promote_attention_vi
     assert result.lengths == (3,)
     with pytest.raises(ValueError, match="floating point"):
         hybrid_cache_factory(config, torch.int64)
+    with pytest.raises(GenerationError, match="NQ-GEN-CONTEXT"):
+        hybrid_cache_factory(config)(1, 65, torch.device("cpu"), torch.float32)
 
 
 def test_generation_runs_against_transformers_gemma3_hybrid_cache() -> None:
@@ -354,11 +392,24 @@ def test_generation_runs_against_transformers_gemma3_hybrid_cache() -> None:
     )
     model = Gemma3ForCausalLM(config).eval()
     tokens, mask = batch_prompts(((2, 4), (2, 5, 6)), pad_token_id=0)
-    adapter = TransformersGenerationModel(
-        model,
-        hybrid_cache_factory(config),
-        lambda kind: nullcontext(),
+    created_caches: list[object] = []
+    factory = hybrid_cache_factory(
+        config,
+        fast_sliding_prefix=False,
+        fused_cache_prefix=False,
     )
+
+    def capture_cache(
+        batch_size: int,
+        maximum_cache_length: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> object:
+        cache = factory(batch_size, maximum_cache_length, device, dtype)
+        created_caches.append(cache)
+        return cache
+
+    adapter = TransformersGenerationModel(model, capture_cache, lambda kind: nullcontext())
 
     result = generate(GenerationRequest(tokens, mask, 3, (1000,), 0), adapter)
 
@@ -443,3 +494,77 @@ def test_long_cached_gemma_generation_matches_transformers_reference() -> None:
     assert [tuple(value.shape) for value in cache.value_cache] == [
         tuple(value.shape) for value in cache.key_cache
     ]
+
+
+def test_chunked_prefill_reaches_model_context_ceiling_with_reference_parity() -> None:
+    torch.manual_seed(20260715)
+    config = Gemma3TextConfig(
+        vocab_size=64,
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=8,
+        max_position_embeddings=128,
+        sliding_window=16,
+        sliding_window_pattern=2,
+        pad_token_id=0,
+        eos_token_id=1,
+        bos_token_id=2,
+        tie_word_embeddings=False,
+    )
+    config._attn_implementation = "eager"
+    model = Gemma3ForCausalLM(config).eval()
+    assert bind_short_sliding_masks(model) == 1
+    prompt = (2, *(3 + index % 60 for index in range(95)))
+    tokens, mask = batch_prompts((prompt,), pad_token_id=0)
+    max_new_tokens = 32
+    created_caches: list[object] = []
+    factory = hybrid_cache_factory(
+        config,
+        fast_sliding_prefix=False,
+        fused_cache_prefix=False,
+    )
+
+    def capture_cache(
+        batch_size: int,
+        maximum_cache_length: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> object:
+        cache = factory(batch_size, maximum_cache_length, device, dtype)
+        created_caches.append(cache)
+        return cache
+
+    adapter = TransformersGenerationModel(model, capture_cache, lambda kind: nullcontext())
+
+    chunked = generate(
+        GenerationRequest(
+            tokens,
+            mask,
+            max_new_tokens,
+            (1000,),
+            0,
+            prefill_chunk_size=16,
+        ),
+        adapter,
+    )
+    with torch.inference_mode():
+        reference = model.generate(
+            input_ids=tokens,
+            attention_mask=mask,
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+            pad_token_id=0,
+            eos_token_id=1000,
+            use_cache=True,
+            cache_implementation="hybrid",
+        )[:, tokens.shape[1] :]
+
+    assert torch.equal(chunked.token_ids, reference)
+    assert chunked.maximum_cache_length == config.max_position_embeddings
+    assert chunked.prefill_forward_count == 6
+    assert chunked.decode_forward_count == max_new_tokens - 1
+    assert len(created_caches) == 1
+    assert created_caches[0].nanoquant_chunked_sliding_update_count > 0
