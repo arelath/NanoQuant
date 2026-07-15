@@ -30,7 +30,7 @@ recipe/archive disposition so their chronology and intent remain discoverable.
 | 008 | 1B free residual-outlier recipe; BF16, all layers, 0.1%, no budget charge | Residual probe/outlier path, canonical recipe, and zero-argument runfile | Validated and migrated | Keep the exact 0.80/1.15 rank bounds, 1e-3 non-factorized early stop, and `charge_to_bit_budget=false` recipe-delta test green. |
 | 009 | Budgeted residual outliers; selective attention/down projections, rowwise int8 values | Residual selector, layer patterns, charged bit cost, int8 outlier values/scales, packed runtime | Implemented, needs recipe validation | Run exact selective/int8 recipe and compare BPW/quality before promoting its runfile. |
 | 010 | Gemma 3 270M free residual-outlier compression | Gemma3 adapter and size-independent resident pipeline | Implemented, needs recipe validation | Pin/download the 270M revision and run adapter, compression, quality, packing, and runtime canaries before claiming model support. |
-| 011 | Standalone generation TPS benchmark with prompt, warmup, latency, memory, and JSON | Protocol-matched `benchmark_runtime.py`, production bundle validation, M7 llama.cpp comparison | Validated replacement | Add numbered wrapper over the shared benchmark service; preserve workload identity rather than the legacy checkpoint default. |
+| 011 | Standalone generation TPS benchmark with prompt, warmup, latency, memory, and JSON | Typed shared benchmark service, canonical recipe, production packed runtime, and zero-argument runfile | Validated and migrated | Keep the exact raw 12-token prompt, BF16 input/cache, one warmup, three 128-token repetitions, forced length, and generation-only timing test green. |
 | 012 | Gemma 3 4B residual-outlier compression using CPU activations, small batches, cleanup, and top-k KD | Resource planner, pageable/mmap activation stores, block streaming/resume, top-k global distillation | Partial replacement | Complete a pinned 4B bounded-memory canary and verify quality/runtime; current 1B evidence cannot satisfy this model-size gate. |
 | 013 | Improved 1B free-residual recipe with 0.90/1.10 rank bounds, MLP-first tuning, full batches, and no early stop | Complete resident parity mechanisms/evidence, canonical recipe, and zero-argument runfile | Validated and migrated | Keep its exact pre-Phase-1 tuning recipe and its documented delta from 008 under test. |
 | 014 | Phase-1 tapered non-factorized tuning, post-block scale refit, 4K dense-Hessian sample | Per-position epoch schedule, post-block refit, dense-Hessian objective/workspace planning | Implemented, needs recipe validation | Execute the exact 4K-Hessian ablation against the diagonal v28 baseline and retain the structured weight/rank tables. |
@@ -41,8 +41,16 @@ recipe/archive disposition so their chronology and intent remain discoverable.
 | 019 | Despite its filename, Gemma 3 **4B** phase-1 diagonal recipe with pageable CPU activations, bounded pinning, small batches, retry, reports, and KD | Streaming/resource architecture, activation retention/GC, phase-1 math/report contracts | Partial replacement | This is the critical 4B migration canary: pin the model/datasets, run interruption/resume and bounded-memory compression, evaluate, pack, and compare before adding a supported runfile. |
 
 There are no unnumbered gaps between 001 and 019. Native rewrite runfiles now exist for validated Experiments 008,
-013, and 018. The `000_experiment_template.py` and frozen copies under `evidence/m0` are not migrations; every other
-inventory row still needs either a tested runfile or an explicit unsupported/deprecated diagnostic.
+011, 013, and 018. The `000_experiment_template.py` and frozen copies under `evidence/m0` are not migrations; every
+other inventory row still needs either a tested runfile or an explicit unsupported/deprecated diagnostic.
+
+The retained Experiment 011 migration result is `evidence/m9/011-generation-tps.json` (SHA-256
+`e7933acba9014ae9adb9e2d456b9dd1c60a1e3bcd9ecf815192ce9c1327fe981`). It resolves the pinned Gemma revision,
+loads the v28 production packed artifact, prepares all 182 linears with zero prefill/decode fallback, and reproduces
+the historical 12-token prompt plus one-warmup/three-iteration/128-token BF16 protocol. Median complete-generation
+throughput is 116.90 tokens/s and mean throughput is 110.18 tokens/s, versus the retained legacy GEMV mean of 22.50
+tokens/s on the same named workload. This is a 4.90x mean-throughput improvement; it is a historical-workload
+migration result, while M8's F32/F16 32-token campaign remains the release runtime comparison protocol.
 
 ## Cross-cutting disposition
 
@@ -81,8 +89,7 @@ inventory row still needs either a tested runfile or an explicit unsupported/dep
 
 ## Migration order
 
-1. Continue after the completed 008/013/018 compression lineage: add the 011 benchmark runfile using shared services
-   and make 001 an explicitly historical baseline recipe.
+1. Continue after the completed 008/011/013/018 migrations by making 001 an explicitly historical baseline recipe.
 2. Compose 003/007 evaluation and 002 comparison/benchmark workflows from the M8 campaign/evaluator surfaces.
 3. Add the 005 sweep and 004 chat front ends without moving business logic into runfiles.
 4. Validate and migrate the unproven 006/009 and 014–017 ablations only when their comparison is useful.

@@ -662,10 +662,13 @@ Outcome: supported users no longer need legacy orchestration.
   its 4B model), cross-cutting mechanism dispositions, and a migration order. No native numbered rewrite runfile is
   counted prematurely; M9.2 remains open.
 - [ ] **M9.2** Convert supported historical experiments into thin numbered zero-argument runfiles while preserving numbers, names, purpose, and lineage.
-  Experiments 008, 013, and 018 are completed migrations: each zero-argument runfile imports one canonical typed
-  recipe and calls the shared resident workflow, which resolves the pinned model/calibration and composes compression
-  followed by the legacy-default model KD stage. Exact recipe-delta tests distinguish the pre-Phase-1 008/013 lineage
-  from 018's tapered tuning/refit recipe. M9.2 remains open for the other supported inventory rows.
+  Experiments 008, 011, 013, and 018 are completed migrations. The compression runfiles import canonical typed
+  recipes and call the shared resident workflow, which resolves pinned model/calibration inputs and composes
+  compression followed by the legacy-default model KD stage. Experiment 011 calls the typed shared packed-runtime
+  benchmark and preserves its historical 12-token prompt, BF16 input/cache, one warmup, three 128-token timed
+  generations, and forced-length behavior. Its retained real-Gemma result prepares all 182 linears with zero
+  prefill/decode fallback and reaches 110.18 mean tokens/s versus the retained legacy GEMV result's 22.50 tokens/s.
+  M9.2 remains open for the other supported inventory rows.
 - [ ] **M9.3** Move copied dotenv, tee logging, output-directory, model-loading, save, and evaluation mechanics into shared infrastructure/application services.
 - [ ] **M9.4** Provide generated YAML/resolved-recipe views for numbered runfiles where useful without making YAML mandatory.
 - [ ] **M9.5** Implement or document migration/import for supported legacy `.pt` checkpoints.

@@ -1,0 +1,465 @@
+{
+  "allocated_after_bytes": 779352576,
+  "artifact": {
+    "descriptor_sha256": "b4f0c6270c4b59f8293c909ddeb21042ad1a2d7ee18601c77e4c57563c900487",
+    "layer_count": 182,
+    "path": "D:\\dev\\research\\NanoQuantRewrite\\evidence\\m6\\gemma-pageable-v28-runtime-bundle\\packed",
+    "weight_bytes": 87072592
+  },
+  "auxiliary_parameter_count": 157,
+  "cases": [
+    {
+      "baseline_allocated_bytes": 691611136,
+      "batch_size": 1,
+      "incremental_peak_allocated_bytes": 9669120,
+      "max_new_tokens": 1,
+      "name": "time-to-first-token",
+      "peak_allocated_bytes": 701280256,
+      "prompt_width": 12,
+      "repetitions": 3,
+      "suite": "end-to-end",
+      "timing": {
+        "latency_seconds": {
+          "max": 0.10400549999758368,
+          "mean": 0.09688666666746333,
+          "min": 0.09196810000139521,
+          "p10": 0.0925117600017984,
+          "p50": 0.09468640000341111,
+          "p90": 0.10214167999874917,
+          "p99": 0.10381911799770023
+        },
+        "samples_seconds": [
+          0.10400549999758368,
+          0.09468640000341111,
+          0.09196810000139521
+        ],
+        "throughput_per_second": {
+          "max": 10.87333542809767,
+          "mean": 10.349796786943768,
+          "min": 9.614876136581552,
+          "p10": 9.804136668495659,
+          "p50": 10.561178796152085,
+          "p90": 10.810904101708552,
+          "p99": 10.867092295458757
+        },
+        "unit_name": "generated_tokens",
+        "units_per_sample": 1
+      },
+      "token_output_sha256": "4e41dea9f02dacb693ff0de11e3d112b7e1d0d376bbbbf8aeef662c87120c0f3",
+      "warmups": 1
+    },
+    {
+      "baseline_allocated_bytes": 700476928,
+      "batch_size": 1,
+      "incremental_peak_allocated_bytes": 83664384,
+      "max_new_tokens": 128,
+      "name": "complete-generation",
+      "peak_allocated_bytes": 784141312,
+      "prompt_width": 12,
+      "repetitions": 3,
+      "suite": "end-to-end",
+      "timing": {
+        "latency_seconds": {
+          "max": 1.3762415000019246,
+          "mean": 1.17743923333425,
+          "min": 1.061095999997633,
+          "p10": 1.067872839998745,
+          "p50": 1.0949802000031923,
+          "p90": 1.319989240002178,
+          "p99": 1.3706162740019499
+        },
+        "samples_seconds": [
+          1.3762415000019246,
+          1.061095999997633,
+          1.0949802000031923
+        ],
+        "throughput_per_second": {
+          "max": 120.62999012368864,
+          "mean": 110.17800444467152,
+          "min": 93.00693228610022,
+          "p10": 97.78496401372531,
+          "p50": 116.8970909242257,
+          "p90": 119.88341028379605,
+          "p99": 120.55533213969937
+        },
+        "unit_name": "generated_tokens",
+        "units_per_sample": 128
+      },
+      "token_output_sha256": "06e2b19ec33bcd0c3822f82928b1bf5aa9e3f4af7e77f43561796f2cfc8aa955",
+      "warmups": 1
+    }
+  ],
+  "configuration": {
+    "batch_size": 1,
+    "block_index": 0,
+    "cache_dtype": "bfloat16",
+    "chat_template": false,
+    "cuda_graph_decode": true,
+    "fast_sliding_cache": true,
+    "fused_cache_prefix": true,
+    "fused_decode_attention": true,
+    "fused_decode_rope": true,
+    "fused_rms_norm": true,
+    "group_decode_mlp": true,
+    "group_decode_qkv": true,
+    "ignore_eos": true,
+    "input_dtype": "bfloat16",
+    "layer": "blocks.0.mlp.gate_proj",
+    "max_new_tokens": 128,
+    "native_bfloat16_tied_projection": true,
+    "prompt": [
+      "Explain why compact language models are useful for local inference."
+    ],
+    "prompt_lengths": [
+      12
+    ],
+    "prompt_width": 12,
+    "repetitions": 3,
+    "short_sliding_masks": true,
+    "stopping_check_interval": 8,
+    "suites": [
+      "end-to-end"
+    ],
+    "warmups": 1
+  },
+  "dispatch": {
+    "cuda_graph_capture_count": 127,
+    "cuda_graph_fallback_count": 0,
+    "cuda_graph_replay_count": 381,
+    "decode_backend": "cuda-packed-triton",
+    "decode_fallback_count": 0,
+    "fused_cache_update_count": 0,
+    "fused_decode_attention_count": 0,
+    "fused_decode_rope_count": 26,
+    "fused_rms_norm_count": 157,
+    "grouped_decode_mlp_count": 0,
+    "grouped_decode_qkv_count": 0,
+    "native_bfloat16_tied_projection_count": 0,
+    "prefill_backend": "cuda-packed-triton",
+    "prefill_fallback_count": 0,
+    "replaced_linear_count": 182,
+    "short_sliding_mask_count": 22
+  },
+  "environment": {
+    "cpu_count": 32,
+    "cuda_runtime": "13.0",
+    "device": "NVIDIA RTX 4000 Ada Generation Laptop GPU",
+    "device_total_memory_bytes": 12878086144,
+    "multiprocessor_count": 58,
+    "platform": "Windows-11-10.0.26200-SP0",
+    "python": "3.12.1",
+    "torch": "2.12.1+cu130",
+    "transformers": "4.51.3",
+    "triton_cache": null
+  },
+  "experiment": {
+    "config_hash": "sha256:dea176cc520a1ae54c7bf52f5a8ebca5bcb0dc5aaf2086554b2e2cd15abab728",
+    "launcher": {
+      "arguments": [],
+      "content_hash": "sha256:e322cb680d82fc1f8ae1975cb634a39c8f773326cf8bf3c8d10d853cb2419b16",
+      "experiment_number": 11,
+      "kind": "numbered_runfile",
+      "repository_relative_path": "experiments/011-benchmark-generation-tps.py",
+      "revision": "bdb724a10e888cfba05e1e9baf8072fcbe913b4e"
+    },
+    "resolved_config": {
+      "allocation": {
+        "bounds": {
+          "ceiling_fraction_of_uniform": 1.15,
+          "edge_block_boost": 0.15,
+          "floor_fraction_of_uniform": 0.8,
+          "multiple": 32
+        },
+        "retry": {
+          "allow_above_allocator_cap": false,
+          "enabled": true,
+          "extra_bit_budget_fraction": 0.02,
+          "maximum_attempts": 2,
+          "rank_increase_fraction": 0.25,
+          "thresholds": {
+            "raw_normalized_error": null,
+            "weighted_normalized_error": 0.5
+          }
+        },
+        "sensitivity_alpha": 0.5,
+        "strategy": "uniform",
+        "target_bpw": 1.0,
+        "utility_profile_artifact": null
+      },
+      "block_tuning": {
+        "epoch_loss_mode": "full_evaluation",
+        "factorized": {
+          "learning_rates": {
+            "bias": 1e-05,
+            "binary": 1e-05,
+            "outlier": null,
+            "scale": 1e-05
+          },
+          "loop": {
+            "batch_size": 8,
+            "early_stop_relative_tolerance": null,
+            "enabled": true,
+            "epochs": 8
+          },
+          "skip_if_relative_loss_jump_below": null
+        },
+        "layer_order": [],
+        "microbatch_size": null,
+        "non_factorized": {
+          "epochs_by_layer_position": [],
+          "loop": {
+            "batch_size": 8,
+            "early_stop_relative_tolerance": null,
+            "enabled": true,
+            "epochs": 8
+          },
+          "optimizer": {
+            "learning_rate": 0.0001,
+            "name": "adamw",
+            "weight_decay": 0.0
+          }
+        },
+        "post_block_refit": {
+          "batch_size": null,
+          "bias_learning_rate": null,
+          "enabled": false,
+          "epochs": 0,
+          "outlier_learning_rate": null,
+          "scale_learning_rate": null
+        },
+        "reset_seed_each_stage": false,
+        "restore_best_state": true
+      },
+      "calibration": {
+        "accumulation_dtype": "float32",
+        "batch_size": 1,
+        "fallback": {
+          "on_cuda_oom": [
+            "cpu_offload",
+            "forward_only",
+            "fail"
+          ]
+        },
+        "method": "online_fisher",
+        "objective": {
+          "block_size": null,
+          "kind": "diagonal",
+          "low_rank": null,
+          "regularization": {
+            "diagonal_blend": 0.0,
+            "diagonal_damp_fraction": 0.01,
+            "identity_shrinkage": 0.0,
+            "jitter_attempts": 5
+          },
+          "sampling": {
+            "batch_size": 1,
+            "max_sequences": null,
+            "max_tokens_per_layer": 4096,
+            "reuse_sibling_inputs": false
+          }
+        },
+        "sample_count": 128,
+        "shrinkage": 0.4
+      },
+      "dataset": {
+        "cache_tokenized": true,
+        "formatting": "model_default",
+        "prepared_artifact": null,
+        "prepared_root": null,
+        "selection_seed": 0,
+        "shuffle": true,
+        "sources": [
+          {
+            "name": "wikitext2",
+            "revision": null,
+            "split": "train",
+            "subset": null,
+            "weight": 1.0
+          }
+        ]
+      },
+      "distillation": {
+        "batch_size": 1,
+        "enabled": false,
+        "epochs": 8,
+        "gradient_checkpointing": true,
+        "learning_rate": 1e-05,
+        "loss": "top_k",
+        "maximum_tokens_per_batch": 512,
+        "optimizer_version": "legacy-optimi-adamw-v1",
+        "sampling_version": "legacy-python-device-rng-v1",
+        "teacher_targets_artifact": null,
+        "temperature": 1.0,
+        "token_chunk_size": 128,
+        "top_k": 64,
+        "vocabulary_chunk_size": 8192,
+        "weight_decay": 0.0
+      },
+      "evaluation": {
+        "baseline_run": null,
+        "default_tier": "quick",
+        "few_shot": 0,
+        "gates": [],
+        "inline_quality": true,
+        "inline_quality_samples": 1,
+        "inline_quality_tokens": 8,
+        "sample_limit": null,
+        "suites": [
+          "runtime-generation-v1"
+        ]
+      },
+      "factorization": {
+        "admm": {
+          "convergence_check_interval": 100,
+          "early_stop_tolerance": null,
+          "inner_iterations": 5,
+          "outer_iterations": 800,
+          "penalty_schedule": "cubic",
+          "regularization": 0.03,
+          "transpose_wide": false
+        },
+        "compute_dtype": "bfloat16",
+        "implementation": "nanoquant_admm",
+        "scale_fit": {
+          "alternating_passes": 2,
+          "chunk_rows": 512,
+          "enabled": true,
+          "epsilon": 1e-08,
+          "rollback_on_regression": true
+        },
+        "solve_dtype": "float32"
+      },
+      "intent": {
+        "baseline_run": "legacy-experiment-011",
+        "experiment_number": 11,
+        "hypothesis": "The production packed runtime replaces the legacy mutable GEMV path at the same workload.",
+        "name": "011-benchmark-generation-tps",
+        "owner": null,
+        "purpose": "Measure generation-only throughput after load, preparation, tokenization, and warmup.",
+        "tags": [
+          "gemma-3-1b-it",
+          "runtime",
+          "generation",
+          "throughput"
+        ]
+      },
+      "model": {
+        "load_dtype": "bfloat16",
+        "revision": "dcc83ea841ab6100d6b47a070329e1ba4cf78752",
+        "sequence_length": 512,
+        "source": "google/gemma-3-1b-it",
+        "tokenizer_revision": "dcc83ea841ab6100d6b47a070329e1ba4cf78752",
+        "tokenizer_source": null,
+        "trust_remote_code": false
+      },
+      "observability": {
+        "block_snapshot_samples": 4,
+        "block_snapshot_tokens": 512,
+        "capture_cuda_trace": false,
+        "console_level": "info",
+        "diagnostic_fixture_policy": "on_failure",
+        "event_level": "info",
+        "loss_denominator_floor": 1e-08,
+        "record_admm_steps": false,
+        "record_block_loss_snapshots": true,
+        "record_resource_interval_seconds": 5.0,
+        "record_weight_reconstruction_table": true
+      },
+      "outliers": {
+        "charge_to_bit_budget": true,
+        "count_multiple": 1,
+        "fraction": 0.0,
+        "layer_patterns": [
+          "*"
+        ],
+        "removed_column_importance": "zero",
+        "residual_probe": {
+          "chunk_rows": 512,
+          "iterations": 80
+        },
+        "selector": "none",
+        "storage_dtype": "bfloat16"
+      },
+      "output": {
+        "artifact_root": ".nanoquant/artifacts",
+        "report_formats": [
+          "markdown",
+          "json"
+        ],
+        "retain_temporary_artifacts": false,
+        "run_root": "runs",
+        "temporary_root": null
+      },
+      "packing": {
+        "align_blocks_to_shards": true,
+        "backend_layouts": [
+          "cuda-binary-v1"
+        ],
+        "embeddings": {
+          "bits": 8,
+          "group_size": null
+        },
+        "logical_format": "nanoquant-v1",
+        "shard_size_gib": 2.0
+      },
+      "profiling": {
+        "cuda_sample_every": 16,
+        "cuda_timing": false,
+        "emit_span_events": false,
+        "level": "macro",
+        "memory_counters": false,
+        "raw_samples_per_phase": 64,
+        "trace_blocks": [],
+        "trace_layers": []
+      },
+      "reproducibility": {
+        "allow_nondeterministic_kernels": false,
+        "deterministic": true,
+        "seed": 0
+      },
+      "runtime": {
+        "activations": {
+          "batch_size": 8,
+          "directory": null,
+          "kind": "auto",
+          "prefetch_batches": 1
+        },
+        "block_forward_batch_size": 8,
+        "checkpoints": {
+          "activation_retention": "rolling",
+          "commit_granularity": "layer",
+          "enabled": true,
+          "keep_attempt_artifacts": false,
+          "verify_on_resume": true
+        },
+        "compute_device": "cuda:0",
+        "executor": "auto",
+        "on_cuda_oom": [
+          "reduce_batch_size",
+          "move_activations_down_one_tier",
+          "fail"
+        ],
+        "resources": {
+          "cpu_memory_gib": null,
+          "gpu_memory_gib": null,
+          "pinned_memory_gib": 1.0,
+          "temporary_disk_gib": null,
+          "workspace_memory_gib": null
+        },
+        "source_streaming": {
+          "prefer_memory_mapping": true,
+          "prefetch_blocks": 0,
+          "verify_tensor_hashes": true
+        }
+      },
+      "schema_version": 1
+    }
+  },
+  "global_tuning_artifact": "sha256-edef5622c5b03e24b75d77ee05f389e064e24d73a3ff7087282d6c3761629669",
+  "model": "C:\\Users\\pdykstra\\.cache\\huggingface\\hub\\models--google--gemma-3-1b-it\\snapshots\\dcc83ea841ab6100d6b47a070329e1ba4cf78752",
+  "passed": true,
+  "peak_host_bytes": 3761164288,
+  "run_output": "D:\\dev\\research\\NanoQuantRewrite\\evidence\\m4\\gemma-pageable-v28-four-block-canary",
+  "schema_version": 1,
+  "wall_seconds": 34.97615339999902
+}
