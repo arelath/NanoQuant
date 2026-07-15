@@ -40,7 +40,7 @@ LAYER_ORDER = (
 )
 
 
-def main() -> None:
+def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--run-root", type=Path, default=Path("runs"))
@@ -60,8 +60,11 @@ def main() -> None:
     parser.add_argument(
         "--tuning-microbatch-size",
         type=int,
-        default=1,
-        help="activation microbatch used to accumulate each tuning optimizer batch (default: 1)",
+        default=None,
+        help=(
+            "activation microbatch used to accumulate each tuning optimizer batch "
+            "(default: inherit the logical batch size; use 1 explicitly as a memory fallback)"
+        ),
     )
     parser.add_argument("--activation-retention", choices=("rolling", "all"), default="rolling")
     parser.add_argument("--interrupt-after-layer-commits", type=int)
@@ -100,7 +103,11 @@ def main() -> None:
     parser.add_argument("--record-admm-steps", action="store_true")
     parser.add_argument("--resource-interval-seconds", type=float, default=5.0)
     parser.add_argument("--capture-cuda-trace", action="store_true")
-    args = parser.parse_args()
+    return parser
+
+
+def main() -> None:
+    args = _parser().parse_args()
     nonfactorized_schedule = tuple(
         int(value.strip()) for value in args.nonfactorized_tuning_schedule.split(",") if value.strip()
     )
