@@ -102,6 +102,16 @@ class RuntimeBackend(Protocol):
     def linear(self, x: torch.Tensor, layer: PreparedLayer) -> torch.Tensor: ...
 ```
 
+Implementation status (2026-07-15): `nanoquant.runtime` now owns this protocol without importing the research
+application, infrastructure, configuration, or domain packages. `QuantizedLinearSpec`, `WorkloadSpec`, and
+`BackendCapabilities` cover the declared format, device, dtype, shape/rank alignment, workload regime,
+outlier/bias, deterministic, and workload-bound axes. Capability failures use stable `NQ-INF-*` codes.
+`plan_backends()` resolves every layer before inference, records each rejected backend and reason, reports named
+fallbacks, and rejects the first fallback in strict mode. `prepare_plan()` requires an exact layer inventory and
+returns prepared dispatches whose hot `linear()` call does not repeat capability discovery. Self-contained dense
+and factorized PyTorch reference backends provide the first deployment consumers. Packed layouts, artifact loading,
+and generation remain separate open M6 items.
+
 `SupportResult` includes a reason code when false. Capability matching covers:
 
 - GPU architecture;

@@ -239,8 +239,14 @@ Outcome: packed artifacts load and generate correctly without research dependenc
 - [ ] **M6.5** Implement packed artifact inspection and validation without loading all tensors.
 - [x] **M6.6** Implement the logical dense-reconstruction reference backend.
 - [x] **M6.7** Implement the factorized PyTorch reference backend.
-- [ ] **M6.8** Implement the `RuntimeBackend` capability/support/prepare/linear contract.
-- [ ] **M6.9** Implement backend planning for every layer before inference and strict-mode failure on unexpected fallback.
+- [x] **M6.8** Implement the `RuntimeBackend` capability/support/prepare/linear contract. The deployment-only
+  contract declares logical/device/input/factor/scale/outlier/workload support, deterministic capability,
+  shape alignments, workload bounds, stable rejection codes, prepared-layer ownership, and self-contained
+  dense/factorized PyTorch reference implementations.
+- [x] **M6.9** Implement backend planning for every layer before inference and strict-mode failure on unexpected fallback.
+  Planning resolves the complete unique layer inventory once, preserves every rejected backend and reason in a
+  structured dispatch report, counts named fallbacks, refuses the first unexpected fallback in strict mode, and
+  prepares only the exact planned state/backend inventory without repeating capability discovery in `linear()`.
 - [ ] **M6.10** Map the modified llama.cpp GGUF/NanoQuant logical and packed representation to the rewrite's format documentation.
 - [ ] **M6.11** Implement conversion/parity tests between rewrite frozen state, packed runtime state, and modified llama.cpp/GGUF state where semantically compatible.
 - [ ] **M6.12** Integrate or port the initial NanoQuant CUDA backend with explicit version/capabilities.
