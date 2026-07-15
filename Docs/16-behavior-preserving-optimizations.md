@@ -211,6 +211,12 @@ block time was 1,548.79 seconds versus 1,607.61 seconds for v27, so the bounded 
 measurable performance regression. The resulting four-block loss trajectory is also within 0.80% of contemporary
 legacy at every boundary.
 
+The full 26-block continuation confirms the memory behavior scales through the entire model: shared memory remained
+at a 0.580 GiB lifetime peak and returned to 80 MiB after every block. Excluding the recorded machine-suspension
+gap, interrupt/resume quantization plus the matching eight-epoch KD took 16,186.01 seconds versus 14,267.90 seconds
+for contemporary legacy (+13.44%, including rewrite restart overhead). This improves the original roughly 30%
+runtime deficit, but the remaining spread still warrants the post-parity profiling work below.
+
 ### [x] 3.2 Foreach ParityAdamW (S0)
 
 **Where.** [parity_adamw.py:66–93](../src/nanoquant/application/parity_adamw.py) — a Python loop over

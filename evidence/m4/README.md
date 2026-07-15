@@ -629,3 +629,25 @@ of contemporary legacy, a 0.35% mean absolute delta. One block includes a 5,081.
 or stage events, consistent with machine suspension; excluding that gap gives 1,548.79 seconds of observed active
 block time versus 1,607.61 seconds for v27. Compact validation, comparison, and memory measurements are retained in
 `validation.json`, `legacy-comparison.{json,md}`, and `memory-validation.json`.
+
+### Complete v28 current-environment parity result
+
+The same v28 run directory was resumed from its four-block interruption and completed all 26 blocks and 182 layers.
+Strict post-cleanup validation re-hashed 979 reachable artifacts (11,742,170,282 bytes), accepted the 25 intentionally
+retired predecessor activation generations, and found one identity with a contiguous 208-record journal. All 182
+ranks match contemporary legacy exactly (rank sum 105,856); effective BPW is 0.996318. Across all block boundaries,
+mean absolute loss delta is 0.75%, with a 4.22% maximum at block 9 and 16/26 rewrite boundaries lower than legacy.
+
+The exact retained WikiText-2 evaluator used the pinned 64x128 serial protocol, 8,128 scored targets, and token hash
+`sha256:ef19dc950344a837a1fd6e087c451ed9b26234408e85d0b0e3da4f6c7045ff27`. Immutable pre-KD PPL is
+`415.163367`, 6.56% lower than contemporary legacy's tuned `444.332773`. The matching eight-epoch, 2,048-step,
+top-k-64 model KD selected the same 885 parameters and ended at objective `2.148416` versus legacy `2.1430`
+(+0.25%). Its activated artifact `sha256-5dca6b9c38e6194799857014459d679674b992aa70cdf75b0a1cf7e153487120`
+scores PPL `453.570986`, +2.08% from contemporary legacy and inside the accepted +2.27% environment-matched band.
+
+Full-run WDDM shared memory remained bounded at a 622,854,144-byte peak and returned to 83,886,080 bytes after all
+26 block commits. Peak CUDA reservation was 7,631,536,128 bytes and peak host working set was 12,786,270,208 bytes.
+After subtracting the single 5,081.84-second machine-suspension gap, interrupt/resume quantization plus KD took
+16,186.01 seconds versus 14,267.90 seconds for contemporary legacy (+13.44%, including rewrite restart overhead).
+The compact authoritative result is `full-parity-summary.json`; exact raw outputs are
+`wikitext2-v28-{pre-kd,kd}-factorized-exact.json`, `validation.json`, and `legacy-comparison.{json,md}`.

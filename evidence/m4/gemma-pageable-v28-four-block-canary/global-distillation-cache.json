@@ -1,0 +1,49 @@
+{
+  "epochs": [
+    {
+      "artifact_id": "sha256-3dd79dfd6da633cb4564718ac5e84666d7479a9cc3c57009c1c3231a33ea01bb",
+      "artifact_type": "topk-teacher-epoch",
+      "schema_version": 1
+    },
+    {
+      "artifact_id": "sha256-2b237b49a8483699075801704751819ec7434357f8f61bb4c58a47379783ff77",
+      "artifact_type": "topk-teacher-epoch",
+      "schema_version": 1
+    },
+    {
+      "artifact_id": "sha256-6d784e64c2dba041bd7ef166503ac628e82f909e7eac2dbb312e218b441d4f1f",
+      "artifact_type": "topk-teacher-epoch",
+      "schema_version": 1
+    },
+    {
+      "artifact_id": "sha256-f9d2caf69e9d94e95ec0f129b83b2eb227561003da18a4c743c4957fd4f09cdc",
+      "artifact_type": "topk-teacher-epoch",
+      "schema_version": 1
+    },
+    {
+      "artifact_id": "sha256-0772a476eb706be2d5ea02a0801cdec34a2b8216cd2434259be5e31df3b19790",
+      "artifact_type": "topk-teacher-epoch",
+      "schema_version": 1
+    },
+    {
+      "artifact_id": "sha256-4167753ccf6c00d29d5228cbe1e8c2b5f80db5cf5c3ce2dfa4ccb10388af7623",
+      "artifact_type": "topk-teacher-epoch",
+      "schema_version": 1
+    },
+    {
+      "artifact_id": "sha256-45b08f9fe9e9734b3791a18d03d756ec776e9820f1d65690d029fe550061d14e",
+      "artifact_type": "topk-teacher-epoch",
+      "schema_version": 1
+    },
+    {
+      "artifact_id": "sha256-f56a8902418f823445509465ffd27d69ec81c5745f8e39bf8984c6c849849353",
+      "artifact_type": "topk-teacher-epoch",
+      "schema_version": 1
+    }
+  ],
+  "identity": {
+    "protocol_hash": "sha256:ae8056a5d4eb6e8b699160133932ecb3af2eaf1e1b407bf109b972122d106701",
+    "token_hash": "sha256:e16a03e8c42a8e487725b7db507a8322d13cfb6a224fa3934d7cf974a9fa3c1c"
+  },
+  "schema_version": 1
+}

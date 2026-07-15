@@ -1,0 +1,68 @@
+{
+  "artifact_validation": {
+    "artifact_bytes": 11742170282,
+    "artifacts_validated": 979,
+    "committed_blocks": 26,
+    "committed_layers": 182,
+    "complete": true
+  },
+  "identity": {
+    "config_hash": "sha256:ebe7e831e9a1f4bec5df3bb783359cafd0ddb316856e5f71df5e3b3d379f63db",
+    "model_hash": "sha256:32d5b5d041e98027bc7415107bc79b580f9cce407535b4e30134e8f8aed3b130",
+    "plan_hash": "sha256-8656b828a48e72f07799726b92c8a70b257f775c77f6c4bd5787686b524e8a9d"
+  },
+  "m4_current_environment_parity": true,
+  "memory": {
+    "block_boundary_release_count": 26,
+    "block_boundary_shared_bytes": 83886080,
+    "peak_cuda_reserved_bytes": 7631536128,
+    "peak_host_working_set_bytes": 12786270208,
+    "peak_wddm_dedicated_bytes": 7914934272,
+    "peak_wddm_shared_bytes": 622854144
+  },
+  "model_level_distillation": {
+    "artifact_id": "sha256-5dca6b9c38e6194799857014459d679674b992aa70cdf75b0a1cf7e153487120",
+    "contemporary_legacy_final_loss": 2.143,
+    "epochs": 8,
+    "final_loss": 2.1484156316146255,
+    "final_loss_percent_delta": 0.252712627840675,
+    "peak_gpu_bytes": 2992635904,
+    "peak_host_bytes": 5004468224,
+    "selected_parameter_count": 885,
+    "steps_completed": 2048,
+    "teacher_cache_bytes": 411041792,
+    "wall_seconds": 1567.0230684000417
+  },
+  "quantization": {
+    "effective_bpw": 0.9963181446312268,
+    "legacy_rank_sum": 105856,
+    "rank_mismatch_count": 0,
+    "rank_sum": 105856,
+    "source_parameters": 697761792
+  },
+  "runtime": {
+    "active_end_to_end_plus_kd_seconds": 16186.0054732001,
+    "contemporary_legacy_compression_plus_kd_seconds": 14267.9,
+    "largest_machine_suspension_gap_seconds": 5081.839661,
+    "percent_delta": 13.4435023598432,
+    "rewrite_includes_interrupt_resume_overhead": true
+  },
+  "schema_version": 1,
+  "trajectory": {
+    "maximum_absolute_percent_delta": 4.218750167013708,
+    "mean_absolute_percent_delta": 0.7506892648615255,
+    "paired_blocks": 26,
+    "rewrite_lower_blocks": 16
+  },
+  "wikitext2_exact": {
+    "batch_size": 1,
+    "contemporary_legacy_tuned_perplexity": 444.3327726144831,
+    "pre_kd_perplexity": 415.16336699351945,
+    "samples": 64,
+    "scored_tokens": 8128,
+    "sequence_length": 128,
+    "token_hash": "sha256:ef19dc950344a837a1fd6e087c451ed9b26234408e85d0b0e3da4f6c7045ff27",
+    "tuned_perplexity": 453.5709857733353,
+    "tuned_percent_delta": 2.07912036388717
+  }
+}

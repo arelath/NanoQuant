@@ -1,0 +1,29 @@
+{
+  "backend": "factorized",
+  "batch_size": 1,
+  "bos_token_id": 2,
+  "dataset": "Salesforce/wikitext:wikitext-2-raw-v1:test",
+  "dataset_arrow": "C:\\Users\\pdykstra\\.cache\\huggingface\\datasets\\Salesforce___wikitext\\wikitext-2-raw-v1\\0.0.0\\b08601e04326c79dfdd32d625aee71d232d685c3\\wikitext-test.arrow",
+  "dataset_fingerprint": "a29ea8a573703a32",
+  "global_tuning_artifact": null,
+  "model": "google/gemma-3-1b-it",
+  "results": {
+    "frozen": {
+      "elapsed_seconds": 6.614613600017037,
+      "mean_negative_log_likelihood": 6.028672098174808,
+      "peak_device_bytes": 2805989376,
+      "peak_host_bytes": 2855108608,
+      "perplexity": 415.16336699351945,
+      "token_count": 8128,
+      "total_negative_log_likelihood": 49001.046813964844,
+      "window_count": 64
+    }
+  },
+  "revision": "dcc83ea841ab6100d6b47a070329e1ba4cf78752",
+  "run_output": "D:\\dev\\research\\NanoQuantRewrite\\evidence\\m4\\gemma-pageable-v28-four-block-canary",
+  "samples": 64,
+  "schema_version": 1,
+  "sequence_length": 128,
+  "snapshot": "C:\\Users\\pdykstra\\.cache\\huggingface\\hub\\models--google--gemma-3-1b-it\\snapshots\\dcc83ea841ab6100d6b47a070329e1ba4cf78752",
+  "token_hash": "sha256:ef19dc950344a837a1fd6e087c451ed9b26234408e85d0b0e3da4f6c7045ff27"
+}

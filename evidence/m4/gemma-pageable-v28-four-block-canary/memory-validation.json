@@ -1,29 +1,17 @@
 {
   "algorithm_version": 28,
-  "block_boundary_shared_bytes": [
-    83886080,
-    83886080,
-    83886080,
+  "block_boundary_release_count": 26,
+  "block_boundary_shared_bytes_unique": [
     83886080
   ],
-  "block_wall_seconds": [
-    380.0504789999686,
-    385.83858329994837,
-    5477.214421299985,
-    387.53133520000847
-  ],
-  "largest_no_event_gap_seconds": 5081.84,
-  "observed_active_block_wall_seconds": 1548.79481879991,
-  "peak_cuda_reserved_bytes": 6236930048,
-  "peak_host_working_set_bytes": 11439714304,
-  "peak_wddm_dedicated_bytes": 6520320000,
+  "completed_blocks": 26,
+  "largest_no_event_gap_seconds": 5081.839661,
+  "observed_active_block_wall_seconds": 14407.73459109973,
+  "peak_cuda_reserved_bytes": 7631536128,
+  "peak_host_working_set_bytes": 12786270208,
+  "peak_wddm_dedicated_bytes": 7914934272,
   "peak_wddm_shared_bytes": 622854144,
-  "release_supported_by_block": [
-    true,
-    true,
-    true,
-    true
-  ],
+  "release_supported_for_all_blocks": true,
   "schema_version": 1,
   "v27_peak_cuda_reserved_bytes": 6236930048,
   "v27_peak_host_working_set_bytes": 16270696448,

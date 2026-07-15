@@ -6,11 +6,33 @@
 | 1 | 3.5972 | 3.6029 | -0.16% |
 | 2 | 5.78725 | 5.7415 | +0.80% |
 | 3 | 43.6727 | 43.693 | -0.05% |
+| 4 | 664.692 | 667.26 | -0.38% |
+| 5 | 34.3499 | 34.3 | +0.15% |
+| 6 | 42.1589 | 42.129 | +0.07% |
+| 7 | 249.546 | 256.14 | -2.57% |
+| 8 | 500.207 | 503.58 | -0.67% |
+| 9 | 210.02 | 219.27 | -4.22% |
+| 10 | 1454.2 | 1459.1 | -0.34% |
+| 11 | 334.549 | 331.6 | +0.89% |
+| 12 | 1901.96 | 1874.6 | +1.46% |
+| 13 | 2699.49 | 2657.2 | +1.59% |
+| 14 | 3719.6 | 3672.4 | +1.29% |
+| 15 | 3741.5 | 3720.9 | +0.55% |
+| 16 | 8230.23 | 8178.9 | +0.63% |
+| 17 | 2944.82 | 2959.1 | -0.48% |
+| 18 | 16914.2 | 17001 | -0.51% |
+| 19 | 19593.8 | 19690 | -0.49% |
+| 20 | 19948.4 | 19981 | -0.16% |
+| 21 | 31348.4 | 31439 | -0.29% |
+| 22 | 25295 | 25409 | -0.45% |
+| 23 | 3096.71 | 3105.9 | -0.30% |
+| 24 | 3765.68 | 3770.8 | -0.14% |
+| 25 | 1611.21 | 1619 | -0.48% |
 
 ## Summary
 
-- `contemporary-legacy`: rewrite lower at 2/4 paired boundaries; mean absolute delta 0.35%.
+- `contemporary-legacy`: rewrite lower at 16/26 paired boundaries; mean absolute delta 0.75%.
 
 ## Rank allocation
 
-- `contemporary-legacy`: 28 paired layers; 0 rank mismatches; rewrite/legacy rank sums 16608/16608. Rewrite effective BPW 1.018013; legacy rank-dependent BPW 0.974812; missing in legacy/rewrite 0/0.
+- `contemporary-legacy`: 182 paired layers; 0 rank mismatches; rewrite/legacy rank sums 105856/105856. Rewrite effective BPW 0.996318; legacy rank-dependent BPW 0.953118; missing in legacy/rewrite 0/0.

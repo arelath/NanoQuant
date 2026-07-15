@@ -56,3 +56,8 @@ four block losses were within 0.80% of contemporary legacy at every boundary.
 This is now guarded at three levels: unit tests exercise the pinned-host cache release and WDDM counters, a CUDA
 integration test requires multi-block resident activation sources to remain pageable and emits one release event
 per block, and real runs retain current/peak WDDM dedicated/shared bytes in their resource events.
+
+The subsequent full 26-block continuation preserved the same bound: shared memory still peaked at 0.580 GiB and
+all 26 cache-release events returned it to 80 MiB. Peak CUDA reservation rose normally with later, larger blocks to
+7.107 GiB, while peak host working set remained 11.908 GiB. The complete 979-artifact graph passed strict validation
+after unreachable training scratch was collected.
