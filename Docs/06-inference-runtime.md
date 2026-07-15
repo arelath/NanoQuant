@@ -109,8 +109,10 @@ outlier/bias, deterministic, and workload-bound axes. Capability failures use st
 `plan_backends()` resolves every layer before inference, records each rejected backend and reason, reports named
 fallbacks, and rejects the first fallback in strict mode. `prepare_plan()` requires an exact layer inventory and
 returns prepared dispatches whose hot `linear()` call does not repeat capability discovery. Self-contained dense
-and factorized PyTorch reference backends provide the first deployment consumers. Packed layouts, artifact loading,
-and generation remain separate open M6 items.
+and factorized PyTorch reference backends provide the first deployment consumers. The versioned `nanoquant-v1`
+logical artifact is also implemented as a bounded descriptor plus block-aligned safetensors shards, with hash/header
+validation and per-layer lazy loading. Packed layouts, complete model conversion, and generation remain separate
+open M6 items.
 
 `SupportResult` includes a reason code when false. Capability matching covers:
 

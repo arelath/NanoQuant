@@ -172,6 +172,16 @@ blocks.12.self_attn.v_proj.outlier_values
 
 Backend-packed names include a declared layout namespace and never masquerade as logical tensors. Padding and original shape are metadata, not encoded only in tensor shape conventions.
 
+Implementation status (2026-07-15): the deployment runtime now defines logical artifact descriptor schema 1 and
+logical format `nanoquant-v1`. `nanoquant-model.json` records pinned model identity, runtime compatibility, the
+complete quantized-layer specification and tensor inventory, contiguous block indexes, shard paths, sizes, and
+SHA-256 hashes. Logical tensor roles are `factor_left`, `factor_right`, `scale_pre`, `scale_mid`, `scale_post`, and
+optional `bias`, `outlier_indices`, `outlier_values`, and `outlier_scales`; tensor keys remain canonical dotted
+layer names plus those role suffixes. Each block is one safetensors shard. Creation is atomic and refuses overwrite;
+inspection bounds descriptor size, rejects path traversal/future schemas, verifies file hashes and safetensors
+headers without loading payloads, and loading opens only the shard containing the requested layer. This is the
+backend-independent logical artifact, not the still-open packed CUDA layout or complete deployable model export.
+
 ## 9. Exact size and BPW accounting
 
 Reports distinguish:

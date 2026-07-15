@@ -233,7 +233,12 @@ Dependencies: Milestone 2 frozen logical state; Milestone 4 artifacts
 Outcome: packed artifacts load and generate correctly without research dependencies.
 
 - [ ] **M6.1** Split the deployment runtime into a separately installable/importable surface without datasets, calibration, ADMM, optimizers, or experiment orchestration.
-- [ ] **M6.2** Finalize and version the backend-independent frozen logical NanoQuant format.
+- [x] **M6.2** Finalize and version the backend-independent frozen logical NanoQuant format. `nanoquant-v1`
+  now has a deployment-owned operation specification and validator covering factor shapes/rank/signs/dtypes,
+  pre/mid/post scales, bias, paired salient indices/values, optional quantized-outlier scales, finite values,
+  canonical names, and exact tensor inventories. Schema-v1 logical artifacts use a bounded JSON descriptor,
+  one immutable safetensors shard per block, file hashes/sizes, header-only inspection, atomic creation, and
+  per-layer lazy loading. Full packed-model/shared/tokenizer export remains M6.3–M6.5 rather than being implied here.
 - [ ] **M6.3** Finalize and version the first CUDA packed layout, including padding, alignment, scale, outlier, bias, and tensor-name metadata.
 - [ ] **M6.4** Implement offline frozen-to-packed conversion and block-aligned artifact sharding.
 - [ ] **M6.5** Implement packed artifact inspection and validation without loading all tensors.
