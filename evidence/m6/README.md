@@ -107,5 +107,55 @@ All sign words and F32-normalized scales were exact. Its required BF16-to-F16 sa
 elements with a maximum absolute change of `2.9802322387695312e-08`; every final normalized value was exact. Direct
 GGUF inspection then matched all 22,719,854 NanoQuant elements and found the expected 158 non-quantized model-shell
 tensors. The pinned CPU llama.cpp build loaded the GGUF, generated `Okay` for prompt `Hello`, and exited cleanly in
-single-turn mode. This proves M6.11 conversion compatibility, not the native rewrite backend or a clean runtime-only
-generation package.
+single-turn mode. This proves M6.11 conversion compatibility; native rewrite execution is validated separately
+below, while a clean runtime-only generation package remains open.
+
+## Pinned Gemma v28 native CUDA packed execution
+
+The version-1 `cuda-packed-triton` backend was validated directly against the complete packed artifact under the
+cross-process CUDA lease. The validator hashes and inspects the packed descriptor/shards, runs the backend twice for
+exact deterministic replay, compares every output with the F32 mathematical operation, records all real
+shape/rank/outlier inventories, and measures incremental PyTorch CUDA allocation. Triton's compiler cache was placed
+in a temporary directory outside the evidence tree.
+
+```powershell
+.\.venv\Scripts\python.exe tools\validate_cuda_packed_runtime.py `
+  --packed-artifact evidence\m6\gemma-pageable-v28-packed-runtime `
+  --device cuda:0 --input-dtype bfloat16 --tokens 1 `
+  --triton-cache $env:TEMP\nanoquant-triton-cache-m612 `
+  --output evidence\m6\gemma-pageable-v28-cuda-packed-validation.json
+
+.\.venv\Scripts\python.exe tools\validate_cuda_packed_runtime.py `
+  --packed-artifact evidence\m6\gemma-pageable-v28-packed-runtime `
+  --device cuda:0 --input-dtype bfloat16 --tokens 4 `
+  --triton-cache $env:TEMP\nanoquant-triton-cache-m612 `
+  --output evidence\m6\gemma-pageable-v28-cuda-packed-prefill-validation.json
+```
+
+Both passes covered 26 blocks, 182 layers, all 18 real shape/rank combinations, BF16 scales, and the real salient
+counts 2 and 7. Decode compared 459,264 outputs with maximum absolute error `1.9073486328125e-06` and 1,177,088
+peak incremental allocated CUDA bytes. Four-token prefill compared 1,837,056 outputs with maximum absolute error
+`3.814697265625e-06` and 1,370,112 peak incremental allocated CUDA bytes. Both deterministic replays were bit-exact.
+Fixture coverage additionally exercises all declared input/scale/floating-salient dtypes, scaled-I8 salient values,
+optional bias, tail words, and more than one salient tile. This completes M6.12 only; it does not establish separate
+prefill/decode plans, model-shell generation, KV-cache correctness, or performance parity.
+
+The modified llama.cpp CUDA target was then rebuilt from the exact tracked dirty source in the Visual Studio x64
+developer environment. Its `ggml-cuda.dll` therefore contains kernel SHA-256
+`5c87336c2b6b8fb33805c6ee6a8752d4bd364beed63fd4cca03c2b36be966619`. The same fresh
+`b9916-5c6ae7981` CUDA-enabled executable generated 16 tokens once with `-ngl 0` and once with `-ngl 99`:
+
+```powershell
+D:\dev\research\llama.cpp\build-local-cuda-ninja\bin\llama-cli.exe `
+  -m evidence\m6\gemma-pageable-v28-nanoquant.gguf `
+  -p "Write a short paragraph about quantization." `
+  -n 16 --temp 0 --seed 1 -c 256 -b 64 -ub 64 `
+  --single-turn --simple-io --no-display-prompt --no-warmup `
+  -ngl 99
+```
+
+Both paths produced `Okay, here’s a draft of a short paragraph about quantum physics, and` exactly. CPU-forced
+prompt/decode rates were 1.4/1.2 tokens/s; CUDA rates were 243.4/150.2 tokens/s. This short sample is a correctness
+smoke, not the still-open stable reference benchmark. The separately configured CPU-only target compiled from the
+same current source but aborts during model loading at `ggml-backend.cpp:1242`; it was not used for current-source
+parity. `gemma-pageable-v28-llamacpp-cuda-smoke.json` records the exact binary and source hashes.

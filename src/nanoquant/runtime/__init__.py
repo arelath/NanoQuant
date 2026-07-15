@@ -23,6 +23,11 @@ from nanoquant.runtime.backend import (
     SupportResult,
     WorkloadSpec,
 )
+from nanoquant.runtime.cuda_backend import (
+    CUDA_PACKED_BACKEND_VERSION,
+    CUDA_PACKED_REFERENCE_SHA256,
+    CudaPackedBackend,
+)
 from nanoquant.runtime.llamacpp import (
     LLAMACPP_CHECKPOINT_FORMAT,
     LLAMACPP_CHECKPOINT_SCHEMA_VERSION,
@@ -95,6 +100,9 @@ __all__ = [
     "BackendCapabilities",
     "BackendPlan",
     "BackendPlanningError",
+    "CUDA_PACKED_BACKEND_VERSION",
+    "CUDA_PACKED_REFERENCE_SHA256",
+    "CudaPackedBackend",
     "DenseReferenceBackend",
     "FactorizedReferenceBackend",
     "LayerDispatch",

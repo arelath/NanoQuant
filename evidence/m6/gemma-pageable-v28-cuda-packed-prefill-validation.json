@@ -1,0 +1,132 @@
+{
+  "absolute_tolerance": 0.03125,
+  "backend_name": "cuda-packed-triton",
+  "backend_version": "1",
+  "block_count": 26,
+  "compared_elements": 1837056,
+  "compute_capability": [
+    8,
+    9
+  ],
+  "deterministic_replay": true,
+  "device": "NVIDIA RTX 4000 Ada Generation Laptop GPU",
+  "input_dtype": "bfloat16",
+  "layer_count": 182,
+  "maximum_absolute_error": 3.814697265625e-06,
+  "maximum_error_layer": "blocks.25.self_attn.q_proj",
+  "maximum_normalized_error": 0.00012168326793471351,
+  "maximum_relative_error": 0.19948378205299377,
+  "outlier_counts": [
+    2,
+    7
+  ],
+  "outlier_value_dtypes": [
+    "bfloat16"
+  ],
+  "packed_artifact": "D:\\dev\\research\\NanoQuantRewrite\\evidence\\m6\\gemma-pageable-v28-packed-runtime",
+  "packed_descriptor_sha256": "b4f0c6270c4b59f8293c909ddeb21042ad1a2d7ee18601c77e4c57563c900487",
+  "packed_layout": "llama.cpp-i32-lsb-v1",
+  "passed": true,
+  "peak_cuda_allocated_increment_bytes": 1370112,
+  "reference_cuda_sha256": "5c87336c2b6b8fb33805c6ee6a8752d4bd364beed63fd4cca03c2b36be966619",
+  "relative_tolerance": 1e-05,
+  "scale_dtypes": [
+    "bfloat16"
+  ],
+  "shape_inventory": [
+    {
+      "in_features": 1024,
+      "out_features": 1152,
+      "rank": 448
+    },
+    {
+      "in_features": 1024,
+      "out_features": 1152,
+      "rank": 480
+    },
+    {
+      "in_features": 1024,
+      "out_features": 1152,
+      "rank": 544
+    },
+    {
+      "in_features": 1152,
+      "out_features": 256,
+      "rank": 128
+    },
+    {
+      "in_features": 1152,
+      "out_features": 256,
+      "rank": 160
+    },
+    {
+      "in_features": 1152,
+      "out_features": 256,
+      "rank": 224
+    },
+    {
+      "in_features": 1152,
+      "out_features": 1024,
+      "rank": 448
+    },
+    {
+      "in_features": 1152,
+      "out_features": 1024,
+      "rank": 512
+    },
+    {
+      "in_features": 1152,
+      "out_features": 6912,
+      "rank": 864
+    },
+    {
+      "in_features": 1152,
+      "out_features": 6912,
+      "rank": 896
+    },
+    {
+      "in_features": 1152,
+      "out_features": 6912,
+      "rank": 928
+    },
+    {
+      "in_features": 1152,
+      "out_features": 6912,
+      "rank": 960
+    },
+    {
+      "in_features": 1152,
+      "out_features": 6912,
+      "rank": 992
+    },
+    {
+      "in_features": 1152,
+      "out_features": 6912,
+      "rank": 1024
+    },
+    {
+      "in_features": 1152,
+      "out_features": 6912,
+      "rank": 1056
+    },
+    {
+      "in_features": 6912,
+      "out_features": 1152,
+      "rank": 864
+    },
+    {
+      "in_features": 6912,
+      "out_features": 1152,
+      "rank": 896
+    },
+    {
+      "in_features": 6912,
+      "out_features": 1152,
+      "rank": 1056
+    }
+  ],
+  "tokens": 4,
+  "torch_cuda_version": "13.0",
+  "torch_version": "2.12.1+cu130",
+  "wall_seconds": 3.974914899969008
+}

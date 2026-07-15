@@ -151,6 +151,35 @@ converter normalizes scales to F32 and floating salient values to F16. On Gemma,
 512 source BF16 values with maximum absolute difference `2.9802322387695312e-08`; all converter and GGUF values were
 exact after that declared normalization.
 
+## Native rewrite CUDA backend
+
+`cuda-packed-triton` version 1 is the initial native rewrite consumer of this layout. It ports the reference
+operation as two kernels: stage one reads packed `V` signs and applies `scale_pre` and `scale_mid`; stage two reads
+packed `U` signs, applies `scale_post`, and adds tiled salient columns plus optional bias. Both stages accumulate in
+F32 and the operation returns F32, matching the modified llama.cpp operation boundary. Tail bits remain masked by
+the original dimensions rather than being treated as logical signs.
+
+The backend declares F16, BF16, and F32 inputs and scales; floating F16/BF16/F32 or scaled-I8 salient weights;
+optional bias; arbitrary valid positive dimensions/ranks; deterministic execution; and CUDA prefill/decode tensor
+shapes. Preparation validates `PackedLayerState` and transfers each immutable word/sidecar tensor to one CUDA device.
+The launch path performs no packing, factor unpacking, capability discovery, device transfer, allocator cleanup, or
+host synchronization. It currently allocates F32 latent and output tensors per call; static workload-owned workspace
+and independently tuned prefill/decode plans remain M6.13/M6.16 work.
+
+Leased unit tests cover bit-tail dimensions, every declared input/scale/salient dtype, no-salient and scaled-I8
+paths, bias, exact deterministic replay, prefill/decode shapes, and salient counts spanning multiple 32-column
+tiles. Complete pinned Gemma validation covered all 182 linears and 18 shape/rank combinations. Decode compared
+459,264 F32 outputs with maximum absolute error `1.9073486328125e-06`; four-token prefill compared 1,837,056 with
+maximum absolute error `3.814697265625e-06`. The respective peak incremental allocated CUDA bytes were 1,177,088
+and 1,370,112. This proves the packed linear backend, not model-shell loading, KV-cache/generation behavior, or
+runtime performance parity.
+
+The exact-source modified llama.cpp CUDA build independently loaded the complete GGUF. The same freshly rebuilt
+`b9916-5c6ae7981` binary, run with all layers forced to CPU and then with all layers offloaded to CUDA, produced the
+same deterministic 16-token text. The CUDA path measured 243.4 prompt and 150.2 decode tokens/s on the RTX 4000 Ada
+Laptop GPU for this short sample. This is a model-level reference smoke, not rewrite model-shell integration or a
+stable performance benchmark.
+
 ## Verification and compatibility boundary
 
 Unit coverage includes bit-boundary widths, exact LSB ordering, tail padding, aligned and unaligned row strides,
@@ -162,4 +191,4 @@ names, one shard per transformer block. On the accepted Gemma artifact, the exac
 groups and emitted a 699,863,936-byte GGUF whose 1,274 NanoQuant tensors and 22,719,854 normalized elements matched
 the packed source exactly. The GGUF also contained 158 ordinary model-shell tensors and loaded through the pinned CPU
 llama.cpp build. This completes conversion compatibility (M6.11); it is not a CUDA backend in the rewrite, a
-runtime-owned model shell/tokenizer package, or clean runtime-only generation proof. Those remain M6.12-M6.22 work.
+runtime-owned model shell/tokenizer package, or clean runtime-only generation proof. Those remain M6.13-M6.22 work.

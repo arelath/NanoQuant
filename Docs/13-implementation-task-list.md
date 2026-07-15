@@ -266,8 +266,17 @@ Outcome: packed artifacts load and generate correctly without research dependenc
   llama.cpp/GGUF state where semantically compatible. The pinned Gemma bridge exported 26 source-bound checkpoint
   shards; the exact pinned converter accepted 182 groups and mapped 1,274 tensors. Direct GGUF inspection matched all
   22,719,854 normalized NanoQuant elements exactly, retained 158 model-shell tensors, and the pinned CPU build loaded
-  the resulting 699,863,936-byte GGUF and generated one token. Native rewrite execution remains M6.12+.
-- [ ] **M6.12** Integrate or port the initial NanoQuant CUDA backend with explicit version/capabilities.
+  the resulting 699,863,936-byte GGUF and generated one token. Native rewrite execution is covered by M6.12.
+- [x] **M6.12** Integrate or port the initial NanoQuant CUDA backend with explicit version/capabilities. Version 1
+  (`cuda-packed-triton`) ports the pinned two-stage packed-sign operation to Triton, accumulates and returns F32,
+  and declares CUDA architecture, input/factor/scale/outlier dtype, bias, deterministic, prefill, and decode support.
+  Preparation transfers immutable packed tensors once; execution consumes sign words directly and fuses pre/mid/post
+  scales, floating or scaled-I8 salient columns, and optional bias. Leased CUDA tests cover all declared dtypes,
+  tail words, bias/outlier branches, deterministic replay, and multi-tile salient input. Full pinned Gemma validation
+  passed all 182 layers and 18 real shape/rank combinations for one-token decode (459,264 outputs, maximum absolute
+  error `1.9073486328125e-06`, 1,177,088 peak incremental allocated bytes) and four-token prefill (1,837,056
+  outputs, maximum absolute error `3.814697265625e-06`, 1,370,112 peak incremental allocated bytes). Separate
+  workload plans, model-shell generation, static workspace ownership, and performance tuning remain later gates.
 - [ ] **M6.13** Implement separate prefill and decode execution plans.
 - [ ] **M6.14** Implement generation-engine prompt batching, positions, attention metadata, stopping, and deterministic mode.
 - [ ] **M6.15** Implement bounded/static or paged KV-cache management and verify positions/padding across batches.

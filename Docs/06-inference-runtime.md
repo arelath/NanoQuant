@@ -127,14 +127,30 @@ logical reference execution matched exactly across 459,264 output elements. Pack
 3.2764% of the logical shard bytes.
 The exact mapping, padding/alignment rules, salient constraints, bias boundary, and modified llama.cpp provenance are
 defined in [19-nanoquant-packed-layout-v1.md](19-nanoquant-packed-layout-v1.md). Shared/model-shell conversion,
-tokenizer/config packaging, native CUDA execution, and generation remain separate open M6 items.
+tokenizer/config packaging, and generation remain separate open M6 items.
 
 The modified llama.cpp bridge exports one legacy-compatible checkpoint shard per packed block and binds its manifest
 to the packed descriptor and exact converter provenance. On pinned Gemma, the reference converter accepted all 182
 groups; the resulting GGUF matched all 1,274 NanoQuant tensors (22,719,854 elements) after its declared F32 scale and
 F16 salient normalization. The 699,863,936-byte GGUF also retained 158 non-quantized model-shell tensors and loaded
-and generated one token through the pinned CPU llama.cpp build. This establishes conversion compatibility, not a
-native rewrite CUDA backend or the clean runtime-only generation gate.
+and generated one token through the pinned CPU llama.cpp build. This establishes conversion compatibility, not the
+clean runtime-only generation gate.
+
+The initial native rewrite backend is `cuda-packed-triton`, version 1. It lazily imports Triton, consumes
+`llama.cpp-i32-lsb-v1` sign words without unpacking, and runs a two-stage operation with F32 accumulation and F32
+output. Its capability record covers CUDA, F16/BF16/F32 inputs and scales, floating or scaled-I8 salient values,
+optional bias, deterministic execution, and both prefill and decode tensor shapes. `prepare()` transfers immutable
+packed sidecars once; `linear()` rejects implicit device moves, non-contiguous inputs, and autograd rather than
+hiding those costs. The generic salient path tiles columns, so its declared support is not limited to the 2- and
+7-column cases in the pinned Gemma artifact.
+
+On the complete pinned Gemma packed artifact, a leased validator compared every one of 182 layers and all 18 real
+shape/rank combinations with the F32 mathematical operation. One-token decode compared 459,264 outputs with maximum
+absolute error `1.9073486328125e-06` and 1,177,088 peak incremental allocated CUDA bytes. Four-token prefill compared
+1,837,056 outputs with maximum absolute error `3.814697265625e-06` and 1,370,112 peak incremental allocated CUDA
+bytes. Both passes required bit-exact deterministic replay. These results establish the initial packed CUDA
+operation (M6.12); separate prefill/decode plans, static workspace reuse, the model shell, generation/KV cache, and
+performance parity remain open.
 
 `SupportResult` includes a reason code when false. Capability matching covers:
 

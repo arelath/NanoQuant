@@ -1,0 +1,43 @@
+{
+  "build": "b9916-5c6ae7981",
+  "cpu_forced": {
+    "decode_tokens_per_second": 1.2,
+    "gpu_layers": 0,
+    "prompt_tokens_per_second": 1.4
+  },
+  "cuda_build_binaries": {
+    "ggml-cpu.dll": "69a17001e0659b80ee2a52f9066fb25e82ac52e252a4b32e74d407e03db97f7f",
+    "ggml-cuda.dll": "ad1e210bcddce892172c645a5c43b38634418cc8d9eded87f284bc8765d05190",
+    "llama-cli-impl.dll": "f3532e47bdb8a6cd22e53baa4323cf31d439e4efee8d23dcdacc1952cecbc037",
+    "llama-cli.exe": "c091ac0bfe757eb1b6e534924d23c0de4b4f31d38841ae709d33ba7741499a4c",
+    "llama.dll": "d35c1424bc5c22b5799a8d533a9f8d20ad6577b259be5651067b39d25250594c"
+  },
+  "cuda_offloaded": {
+    "decode_tokens_per_second": 150.2,
+    "gpu_layers": 99,
+    "prompt_tokens_per_second": 243.4
+  },
+  "exact_cpu_cuda_text": true,
+  "generated": "Okay, here\u2019s a draft of a short paragraph about quantum physics, and",
+  "generated_token_count": 16,
+  "gguf": {
+    "bytes": 699863936,
+    "sha256": "4b3131f65f3c7d73afdb2c5809f87b860356418dae6c78873a3b2e95aa2daad3"
+  },
+  "model": {
+    "revision": "dcc83ea841ab6100d6b47a070329e1ba4cf78752",
+    "source": "google/gemma-3-1b-it"
+  },
+  "prompt": "Write a short paragraph about quantization.",
+  "reference_source": {
+    "commit": "5c6ae79816ee0f2b3d4bb8ec9061c294185d320b",
+    "cuda_sha256": "5c87336c2b6b8fb33805c6ee6a8752d4bd364beed63fd4cca03c2b36be966619",
+    "dirty_diff_git_object": "cf463b9266db4e1f162ad8970e8ddcc1abfb5fbd"
+  },
+  "standalone_cpu_build": {
+    "built_from_current_source": true,
+    "load_error": "ggml-backend.cpp:1242: GGML_ASSERT(*cur_backend_id != -1) failed",
+    "loaded": false,
+    "used_for_parity": false
+  }
+}
