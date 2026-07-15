@@ -204,6 +204,13 @@ dataset size. Periodic resource events also record per-process WDDM dedicated/sh
 supersedes the earlier full-stream-pinning disposition while retaining the fixed-device-slot and copy/compute
 overlap work.
 
+The pinned-Gemma v28 four-block canary validated the retained design: WDDM shared memory peaked at 0.580 GiB and
+returned to 80 MiB after every block, peak host working set dropped from 15.153 GiB to 10.654 GiB, and peak CUDA
+reservation stayed unchanged at 5.809 GiB. Excluding a 5,081.84-second machine-suspension gap, observed active
+block time was 1,548.79 seconds versus 1,607.61 seconds for v27, so the bounded host copy did not introduce a
+measurable performance regression. The resulting four-block loss trajectory is also within 0.80% of contemporary
+legacy at every boundary.
+
 ### [x] 3.2 Foreach ParityAdamW (S0)
 
 **Where.** [parity_adamw.py:66–93](../src/nanoquant/application/parity_adamw.py) — a Python loop over

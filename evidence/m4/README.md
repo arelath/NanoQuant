@@ -617,5 +617,15 @@ Resident algorithm version 28 keeps complete activation generations pageable, st
 host slots, releases unused pinned-host cache after every durable block commit, and records per-process WDDM
 dedicated/shared current and peak bytes. Two full Gemma-sized pageable streams (2.25 GiB) exercised the bounded
 transfer path at 0.326 GiB WDDM shared and returned to 0.074 GiB after release. The v27 compact evidence remains in
-`validation.json` and `legacy-comparison.{json,md}`; a v28 canary must confirm both bounded shared memory and the
-unchanged numerical trajectory before the next algorithmic diagnosis.
+`validation.json` and `legacy-comparison.{json,md}`.
+
+The four-block v28 canary under `gemma-pageable-v28-four-block-canary` confirms the correction on the pinned Gemma
+workload. Per-process WDDM shared memory peaked at 622,854,144 bytes (0.580 GiB), and every block-boundary cache
+release returned it to 83,886,080 bytes (80 MiB). Peak host working set fell from 15.153 GiB in v27 to 10.654 GiB,
+while peak CUDA reservation remained exactly 6,236,930,048 bytes in both runs. The run validates 153 reachable
+artifacts and reproduces all 28 legacy ranks (rank sum 16,608, effective BPW 1.018013). Its losses
+`[1.3784899712, 3.5971968174, 5.7872481346, 43.6726608276]` are within `+0.41%`, `-0.16%`, `+0.80%`, and `-0.05%`
+of contemporary legacy, a 0.35% mean absolute delta. One block includes a 5,081.84-second interval with no resource
+or stage events, consistent with machine suspension; excluding that gap gives 1,548.79 seconds of observed active
+block time versus 1,607.61 seconds for v27. Compact validation, comparison, and memory measurements are retained in
+`validation.json`, `legacy-comparison.{json,md}`, and `memory-validation.json`.

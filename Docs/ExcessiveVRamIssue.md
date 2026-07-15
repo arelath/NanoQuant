@@ -44,3 +44,15 @@ A controlled 512 MiB pinned allocation stayed at 0.57 GiB WDDM shared after its 
 0.07 GiB after the new cache release. With two full Gemma-sized pageable streams (2.25 GiB total), the bounded
 batch path used 0.326 GiB WDDM shared before release and 0.074 GiB after release. CUDA bitwise tests cover block
 forward, block loss, ordered device batching, and factorized tuning under the new policy.
+
+## Real-model regression result
+
+The v28 four-block pinned-Gemma canary confirmed the fix under the production workload. Per-process WDDM shared
+memory peaked at 622,854,144 bytes (0.580 GiB), and the explicit release after each of blocks 0--3 returned it to
+83,886,080 bytes (80 MiB). Peak host working set fell from 15.153 GiB in v27 to 10.654 GiB; peak CUDA reservation
+was unchanged at 6,236,930,048 bytes. The artifact/journal validator passed all 153 reachable artifacts, and the
+four block losses were within 0.80% of contemporary legacy at every boundary.
+
+This is now guarded at three levels: unit tests exercise the pinned-host cache release and WDDM counters, a CUDA
+integration test requires multi-block resident activation sources to remain pageable and emits one release event
+per block, and real runs retain current/peak WDDM dedicated/shared bytes in their resource events.
