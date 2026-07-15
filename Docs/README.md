@@ -74,6 +74,7 @@ Read these in order for a full rewrite plan:
 16. [Performance profiling and micro-profiling](15-performance-profiling.md)
 17. [Behavior-preserving optimization catalog](16-behavior-preserving-optimizations.md)
 18. [Glossary](glossary.md)
+19. [Legacy numbered experiment migration inventory](22-legacy-experiment-migration-inventory.md)
 
 The [architecture decision record directory](adr/README.md) records decisions that future contributors may otherwise be tempted to reverse without understanding their context.
 

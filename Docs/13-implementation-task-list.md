@@ -654,7 +654,13 @@ Outcome: runs produce cheap-to-expensive decision evidence and actionable report
 Dependencies: Milestones 4–8 required for their respective workflows  
 Outcome: supported users no longer need legacy orchestration.
 
-- [ ] **M9.1** Create a migration inventory for every numbered legacy experiment and its replacement status.
+- [x] **M9.1** Create a migration inventory for every numbered legacy experiment and its replacement status.
+  `Docs/22-legacy-experiment-migration-inventory.md` freezes all 19 top-level legacy sources by byte count and SHA-256,
+  records purpose/config distinctions, maps each to concrete rewrite services/evidence, and assigns validated,
+  implemented-but-unvalidated, or partial status with an explicit remaining gate. It also captures legacy provenance
+  defects (016's ` copy`, 017's 016 output names, 018's stale printed title, and 019's misleading 1B filename despite
+  its 4B model), cross-cutting mechanism dispositions, and a migration order. No native numbered rewrite runfile is
+  counted prematurely; M9.2 remains open.
 - [ ] **M9.2** Convert supported historical experiments into thin numbered zero-argument runfiles while preserving numbers, names, purpose, and lineage.
 - [ ] **M9.3** Move copied dotenv, tee logging, output-directory, model-loading, save, and evaluation mechanics into shared infrastructure/application services.
 - [ ] **M9.4** Provide generated YAML/resolved-recipe views for numbered runfiles where useful without making YAML mandatory.
