@@ -30,6 +30,7 @@ from nanoquant.runtime.planning import (
 )
 from nanoquant.runtime.torch_model import (
     bind_fused_decode_rope,
+    bind_grouped_decode_mlp,
     bind_native_bfloat16_tied_projection,
     bind_prepared_linears,
     bind_prepared_rms_norms,
@@ -198,6 +199,7 @@ class LoadedTransformersRuntime:
     fused_decode_rope_count: int = 0
     fused_decode_attention_count: int = 0
     grouped_decode_qkv_count: int = 0
+    grouped_decode_mlp_count: int = 0
     short_sliding_mask_count: int = 0
     native_bfloat16_tied_projection_count: int = 0
 
@@ -571,6 +573,7 @@ def load_transformers_runtime(
     fuse_decode_rope: bool = True,
     fuse_decode_attention: bool = True,
     group_decode_qkv: bool = True,
+    group_decode_mlp: bool = True,
     optimize_short_sliding_masks: bool = True,
     native_bfloat16_tied_projection: bool = True,
 ) -> LoadedTransformersRuntime:
@@ -594,6 +597,9 @@ def load_transformers_runtime(
     )
     use_group_decode_qkv = (
         group_decode_qkv and target.type == "cuda" and input_dtype == "float32"
+    )
+    use_group_decode_mlp = (
+        group_decode_mlp and target.type == "cuda" and input_dtype == "float32"
     )
     entries = tuple(
         layer for block in opened.packed.manifest.blocks for layer in block.layers
@@ -698,6 +704,7 @@ def load_transformers_runtime(
     if any(parameter.is_meta for parameter in model.parameters()):
         raise RuntimeBundleError("runtime model retained meta parameters after shell loading")
     fused_rms_norm_count = bind_prepared_rms_norms(model) if fuse_rms_norm else 0
+    grouped_mlp_count = bind_grouped_decode_mlp(model) if use_group_decode_mlp else 0
     fused_decode_rope_count = (
         bind_fused_decode_rope(
             model,
@@ -724,6 +731,7 @@ def load_transformers_runtime(
         fused_decode_rope_count,
         fused_decode_attention_count,
         grouped_qkv_count,
+        grouped_mlp_count,
         short_sliding_mask_count,
         native_bfloat16_tied_projection_count,
     )

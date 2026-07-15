@@ -192,14 +192,19 @@ def test_cuda_packed_backend_declares_pinned_layout_and_capabilities() -> None:
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
-def test_grouped_cuda_projection_closely_matches_individual_linears() -> None:
+@pytest.mark.parametrize("group_count", [2, 3])
+def test_grouped_cuda_projection_closely_matches_individual_linears(
+    group_count: int,
+) -> None:
     backend = CudaPackedBackend()
     logical = (
         _group_logical(0, 32, 24),
         _group_logical(1, 40, 16),
         _group_logical(2, 48, 32),
     )
-    prepared = tuple(backend.prepare(pack_logical_layer(state), "cuda") for state in logical)
+    prepared = tuple(
+        backend.prepare(pack_logical_layer(state), "cuda") for state in logical[:group_count]
+    )
     group = prepare_cuda_projection_group(prepared)
     assert group is not None
     value = torch.randn(1, 1, 64, generator=torch.Generator().manual_seed(99)).cuda()
@@ -207,7 +212,7 @@ def test_grouped_cuda_projection_closely_matches_individual_linears() -> None:
     actual = grouped_cuda_projection(value, group)
     expected = tuple(backend.linear(value, layer) for layer in prepared)
 
-    assert len(actual) == 3
+    assert len(actual) == group_count
     maximum_errors = tuple(
         float((candidate - reference).abs().max().item())
         for candidate, reference in zip(actual, expected, strict=True)

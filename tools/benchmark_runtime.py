@@ -32,6 +32,7 @@ from nanoquant.runtime import (
     batch_prompts,
     benchmark_wall,
     bind_fused_decode_rope,
+    bind_grouped_decode_mlp,
     bind_native_bfloat16_tied_projection,
     bind_prepared_linears,
     bind_prepared_rms_norms,
@@ -331,6 +332,10 @@ def _benchmark(args: argparse.Namespace) -> dict[str, Any]:
             transformers_decoder_module_paths(layer_names),
         )
         fused_rms_norm_count = bind_prepared_rms_norms(model) if args.fused_rms_norm else 0
+        use_group_decode_mlp = (
+            args.group_decode_mlp and device.type == "cuda" and dtype == torch.float32
+        )
+        grouped_mlp_count = bind_grouped_decode_mlp(model) if use_group_decode_mlp else 0
         use_fused_decode_attention = (
             args.fused_decode_attention
             and args.fused_decode_rope
@@ -723,6 +728,7 @@ def _benchmark(args: argparse.Namespace) -> dict[str, Any]:
             "fused_decode_rope": args.fused_decode_rope,
             "fused_decode_attention": args.fused_decode_attention,
             "group_decode_qkv": args.group_decode_qkv,
+            "group_decode_mlp": args.group_decode_mlp,
             "short_sliding_masks": args.short_sliding_masks,
             "fast_sliding_cache": args.fast_sliding_cache,
             "fused_cache_prefix": args.fused_cache_prefix,
@@ -746,6 +752,7 @@ def _benchmark(args: argparse.Namespace) -> dict[str, Any]:
             "fused_decode_rope_count": fused_decode_rope_count,
             "fused_decode_attention_count": fused_decode_attention_count,
             "grouped_decode_qkv_count": grouped_qkv_count,
+            "grouped_decode_mlp_count": grouped_mlp_count,
             "short_sliding_mask_count": short_sliding_mask_count,
             "fused_cache_update_count": getattr(
                 last_cache[0], "nanoquant_fused_cache_update_count", 0
@@ -806,6 +813,12 @@ def main() -> None:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="execute compatible decode Q/K/V projections in two grouped launches",
+    )
+    parser.add_argument(
+        "--group-decode-mlp",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="execute compatible decode gate/up projections in two grouped launches",
     )
     parser.add_argument(
         "--short-sliding-masks",

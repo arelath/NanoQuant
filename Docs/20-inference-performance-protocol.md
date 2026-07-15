@@ -358,3 +358,30 @@ records' SHA-256 values are respectively
 `73fca99108da50551f0d8a2a62e8fa1ad143013a1a9fb3c385f03bac17824972`, and
 `467a5044aaab21af6bb0d78c9af721746fb98d8694b368aaf65fc81175cc2d95`. The supported specialization is now the
 CUDA/F32 default; `--no-group-decode-qkv` retains the separate-launch control.
+
+## Ninth promoted optimization: grouped decode MLP gate/up projections
+
+Gemma's gate and up projections share the same MLP input and the same compatible packed contract. The grouped
+primitive now executes both first stages together and both reconstruction/salient stages together before the
+unchanged GELU, multiply, and down projection. It remains decode-only and guarded to CUDA/F32 contiguous input;
+prefill and unsupported payloads execute the original prepared linears. The direct two-projection CUDA test enforces
+the same 5e-5 reduction-order ceiling used for Q/K/V, and all real complete-generation hashes remain exact.
+
+All 26 MLP groups bind with zero packed fallback. The profile reduces kernels from 625 to 573, launch APIs from 622
+to 570, ATen calls from 2,255 to 2,203, and non-nested device kernel self time from 4.887 to 4.267 ms. Top-level
+synchronized decode p50 is 22.055 ms. The 407,617-byte profile is
+`evidence/m7/gemma-pageable-v28-rewrite-grouped-mlp-probe.json`, SHA-256
+`795942f4198606308c15f0820f9c0eeaa1ffacd849e587d5f1d8194893993de6`.
+
+Candidate/control/candidate isolated-decode medians are 26.480, 42.945, and 22.844 ms, a 42.6% candidate-average
+reduction. Complete 32-token medians are 0.995, 0.993, and 0.934 s; the first candidate is 0.1% slower than control
+and is retained, while the candidate average is 2.9% lower. Every run preserves hash
+`d91549bc797d2ff5a31e3b1e224347fac211fd34aa2077e01e521a888d24de3f`. Record SHA-256 values are
+`3990b6f1d74e57bcaa38bcb3df27c4e91196c17a1973f2ac7fe941a51aed1182`,
+`5693458f6a740cd9d0f09bd8c7bbc42bdbc2e190556df337d0e5ad9574aeeedf`, and
+`28df0faacc054f0e0a88a936889968b90dc00abf7b8afb098023b8de974cabdc`.
+
+The concatenated immutable MLP prepack raises steady benchmark allocation from 709,062,144 to 764,002,816 bytes,
+54,940,672 bytes (7.8%). The production bundle's shell-load peak remains unchanged at 1,295,585,792 bytes; its
+second-pass retained allocation rises to 761,495,552 bytes. This bounded memory cost is accepted for the measured
+launch reduction. The specialization is default; `--no-group-decode-mlp` retains the separate-projection control.

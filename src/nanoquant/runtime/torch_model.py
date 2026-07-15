@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any, Literal, cast
@@ -449,6 +449,73 @@ def grouped_decode_qkv_count(model: nn.Module) -> int:
         isinstance(module, PreparedGemma3Attention) and module._qkv_group is not None
         for module in model.modules()
     )
+
+
+class PreparedGemma3MLP(nn.Module):
+    """Pinned Gemma3 MLP with a grouped decode gate/up projection."""
+
+    gate_proj: nn.Module
+    up_proj: nn.Module
+    down_proj: nn.Module
+    act_fn: Callable[[torch.Tensor], torch.Tensor]
+
+    def __init__(self, source: nn.Module, group: Any) -> None:
+        super().__init__()
+        for name in ("gate_proj", "up_proj", "down_proj"):
+            child = getattr(source, name, None)
+            if not isinstance(child, nn.Module):
+                raise ValueError(f"Gemma3 MLP module is missing {name}")
+            setattr(self, name, child)
+        activation = getattr(source, "act_fn", None)
+        if not callable(activation):
+            raise ValueError("Gemma3 MLP module is missing its activation")
+        self.act_fn = cast(Callable[[torch.Tensor], torch.Tensor], activation)
+        self._gate_up_group = group
+        self.train(source.training)
+
+    def forward(self, value: torch.Tensor) -> torch.Tensor:
+        if (
+            _ACTIVE_WORKLOAD.get() == "decode"
+            and value.device.type == "cuda"
+            and value.dtype == torch.float32
+            and value.is_contiguous()
+        ):
+            from nanoquant.runtime.cuda_backend import grouped_cuda_projection
+
+            gate, up = grouped_cuda_projection(value, self._gate_up_group)
+        else:
+            gate = cast(torch.Tensor, self.gate_proj(value))
+            up = cast(torch.Tensor, self.up_proj(value))
+        return cast(torch.Tensor, self.down_proj(self.act_fn(gate) * up))
+
+
+def bind_grouped_decode_mlp(model: nn.Module) -> int:
+    """Bind compatible Gemma3 gate/up projections to grouped CUDA decode."""
+
+    from nanoquant.runtime.cuda_backend import prepare_cuda_projection_group
+
+    replacements: list[tuple[nn.Module, str, PreparedGemma3MLP]] = []
+    for path, module in tuple(model.named_modules()):
+        if module.__class__.__name__ != "Gemma3MLP":
+            continue
+        gate = getattr(module, "gate_proj", None)
+        up = getattr(module, "up_proj", None)
+        if not isinstance(gate, PreparedLinear) or not isinstance(up, PreparedLinear):
+            continue
+        group = prepare_cuda_projection_group(
+            (gate._decode_prepared_layer(), up._decode_prepared_layer())
+        )
+        if group is None:
+            continue
+        parent_path, separator, attribute = path.rpartition(".")
+        if not separator or not parent_path or not attribute:
+            raise ValueError(f"Gemma3 MLP module path must be dotted: {path!r}")
+        replacements.append(
+            (model.get_submodule(parent_path), attribute, PreparedGemma3MLP(module, group))
+        )
+    for parent, attribute, replacement in replacements:
+        setattr(parent, attribute, replacement)
+    return len(replacements)
 
 
 class PreparedGemma3DecoderLayer(nn.Module):

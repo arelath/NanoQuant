@@ -325,6 +325,7 @@ def _profile(args: argparse.Namespace) -> dict[str, object]:
             fuse_decode_rope=args.fused_decode_rope,
             fuse_decode_attention=args.fused_decode_attention,
             group_decode_qkv=args.group_decode_qkv,
+            group_decode_mlp=args.group_decode_mlp,
             optimize_short_sliding_masks=args.short_sliding_masks,
             native_bfloat16_tied_projection=args.native_bfloat16_tied_projection,
         )
@@ -451,6 +452,11 @@ def _profile(args: argparse.Namespace) -> dict[str, object]:
             grouped_suffixes = (".self_attn.q_proj", ".self_attn.k_proj", ".self_attn.v_proj")
             groups["linears"] = tuple(
                 name for name in groups["linears"] if not name.endswith(grouped_suffixes)
+            )
+        if args.group_decode_mlp:
+            grouped_mlp_suffixes = (".mlp.gate_proj", ".mlp.up_proj")
+            groups["linears"] = tuple(
+                name for name in groups["linears"] if not name.endswith(grouped_mlp_suffixes)
             )
         baseline_allocated = torch.cuda.memory_allocated(device)
         baseline_reserved = torch.cuda.memory_reserved(device)
@@ -585,6 +591,7 @@ def _profile(args: argparse.Namespace) -> dict[str, object]:
             "fused_decode_rope_count": runtime.fused_decode_rope_count,
             "fused_decode_attention_count": runtime.fused_decode_attention_count,
             "grouped_decode_qkv_count": runtime.grouped_decode_qkv_count,
+            "grouped_decode_mlp_count": runtime.grouped_decode_mlp_count,
             "short_sliding_mask_count": runtime.short_sliding_mask_count,
             "native_bfloat16_tied_projection_count": (
                 runtime.native_bfloat16_tied_projection_count
@@ -629,6 +636,7 @@ def _profile(args: argparse.Namespace) -> dict[str, object]:
             "fused_decode_rope": args.fused_decode_rope,
             "fused_decode_attention": args.fused_decode_attention,
             "group_decode_qkv": args.group_decode_qkv,
+            "group_decode_mlp": args.group_decode_mlp,
             "short_sliding_masks": args.short_sliding_masks,
             "fast_sliding_cache": args.fast_sliding_cache,
             "fused_cache_prefix": args.fused_cache_prefix,
@@ -710,6 +718,12 @@ def main() -> None:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="execute compatible decode Q/K/V projections in two grouped launches",
+    )
+    parser.add_argument(
+        "--group-decode-mlp",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="execute compatible decode gate/up projections in two grouped launches",
     )
     parser.add_argument(
         "--short-sliding-masks",

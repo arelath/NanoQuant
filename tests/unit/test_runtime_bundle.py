@@ -187,12 +187,14 @@ def test_runtime_bundle_loads_shell_and_generates_without_source_checkpoint(
     assert loaded.fused_decode_rope_count == 0
     assert loaded.fused_decode_attention_count == 0
     assert loaded.grouped_decode_qkv_count == 0
+    assert loaded.grouped_decode_mlp_count == 0
     assert loaded.short_sliding_mask_count == 1
     assert loaded.native_bfloat16_tied_projection_count == 0
     assert control.fused_rms_norm_count == 0
     assert control.fused_decode_rope_count == 0
     assert control.fused_decode_attention_count == 0
     assert control.grouped_decode_qkv_count == 0
+    assert control.grouped_decode_mlp_count == 0
     assert control.short_sliding_mask_count == 1
     assert control.native_bfloat16_tied_projection_count == 0
     assert torch.equal(result.token_ids, control_result.token_ids)

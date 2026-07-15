@@ -1258,3 +1258,12 @@ only their *measurement* waits for the Docs/15 P1 baseline if we want clean befo
   4.887 ms. Candidate/control/candidate decode medians are 45.28, 49.98, and 43.75 ms; full-generation medians are
   1.220, 1.440, and 1.360 s, making the candidate averages 10.9% and 10.4% lower. The guarded path is default for
   CUDA/F32 loading; `--no-group-decode-qkv` retains the individual-projection control.
+- **Grouped decode MLP gate/up projections accepted:** the same two-launch primitive now handles each compatible
+  gate/up pair before the unchanged GELU, multiply, and down projection. Decode-only CUDA/F32 inputs use it; prefill
+  and unsupported inputs retain the individual prepared linears. The direct two-projection CUDA test enforces the
+  same 5e-5 numerical ceiling, and every real full-generation hash is exact. All 26 groups bind; kernels fall from
+  625 to 573, launch APIs from 622 to 570, ATen calls from 2,255 to 2,203, and device self time from 4.887 to 4.267
+  ms. Candidate/control/candidate decode medians are 26.48, 42.95, and 22.84 ms; generation medians are 0.995,
+  0.993, and 0.934 s. Candidate averages improve by 42.6% and 2.9%. Concatenating the larger MLP payloads adds
+  54.94 MB (7.8%) to steady benchmark allocation; the production load/generation peak remains 1.296 GB. The guarded
+  path is default and `--no-group-decode-mlp` retains the control.

@@ -396,6 +396,11 @@ Outcome: runtime performance is measured, explained, and competitive with the mo
   hash remains exact. All 26 groups bind, reducing kernels from 729 to 625, launch APIs from 726 to 622, ATen calls
   from 2,411 to 2,255, and device self time from 5.269 to 4.887 ms. Candidate/control/candidate decode medians are
   45.28, 49.98, and 43.75 ms; 32-token medians are 1.220, 1.440, and 1.360 s.
+  The same guarded primitive groups each block's compatible MLP gate/up pair. All 26 pairs bind and preserve the
+  exact full hash, reducing kernels from 625 to 573, launch APIs from 622 to 570, ATen calls from 2,255 to 2,203,
+  and device self time from 4.887 to 4.267 ms. Candidate/control/candidate decode medians are 26.48, 42.95, and
+  22.84 ms; 32-token medians are 0.995, 0.993, and 0.934 s. The combined immutable prepack costs 55 MB of steady
+  allocation (7.8%), while production peak remains unchanged at 1.296 GB.
 - [ ] **M7.10** Tune decode kernels across real rank/shape/alignment cases and report achieved memory bandwidth/occupancy.
 - [ ] **M7.11** Tune prefill kernels independently across representative token and batch sizes.
 - [ ] **M7.12** Fuse scale, bias, and salient-outlier operations only where end-to-end profiles show a net benefit.

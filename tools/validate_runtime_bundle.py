@@ -172,6 +172,7 @@ def _validate(args: argparse.Namespace) -> dict[str, Any]:
         "fused_decode_rope_count": loaded.fused_decode_rope_count,
         "fused_decode_attention_count": loaded.fused_decode_attention_count,
         "grouped_decode_qkv_count": loaded.grouped_decode_qkv_count,
+        "grouped_decode_mlp_count": loaded.grouped_decode_mlp_count,
         "short_sliding_mask_count": loaded.short_sliding_mask_count,
         "native_bfloat16_tied_projection_count": (
             loaded.native_bfloat16_tied_projection_count
