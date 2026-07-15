@@ -12,11 +12,10 @@ from torch import nn
 from transformers import AutoModelForCausalLM
 
 from nanoquant.application.layers import BlockEditor, LayerFreezer, restore_block_auxiliary_parameters
-from nanoquant.config.codec import from_dict
 from nanoquant.domain.models import ArtifactRef, ArtifactTypes, BlockResult
 from nanoquant.domain.profiling import NULL_RECORDER, PhaseRecorder
 from nanoquant.infrastructure.artifacts import LocalArtifactStore
-from nanoquant.infrastructure.commits import CommitIdentity, load_committed_block
+from nanoquant.infrastructure.commits import CommitIdentity, latest_complete_identity, load_committed_block
 from nanoquant.infrastructure.global_tuning import active_global_tuning, load_global_tuning
 from nanoquant.infrastructure.model_adapters import adapter_for_config
 from nanoquant.infrastructure.safetensors_source import SafetensorsModelSource
@@ -52,29 +51,6 @@ def _decoder_layers(model: nn.Module) -> tuple[nn.Module, ...]:
     return tuple(values)
 
 
-def _latest_complete_identity(
-    records: list[dict[str, Any]], expected_blocks: int
-) -> tuple[CommitIdentity, dict[int, dict[str, Any]]]:
-    """Select the newest journal identity with one complete contiguous block set."""
-    seen: set[str] = set()
-    for candidate in reversed(records):
-        payload = candidate.get("identity")
-        if not isinstance(payload, dict):
-            continue
-        key = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-        if key in seen:
-            continue
-        seen.add(key)
-        block_records = {
-            int(record["block"]): record
-            for record in records
-            if record.get("kind") == "block" and record.get("identity") == payload
-        }
-        if sorted(block_records) == list(range(expected_blocks)):
-            return from_dict(CommitIdentity, payload, path="identity"), block_records
-    raise ValueError("frozen run does not contain a complete contiguous block identity")
-
-
 def load_frozen_run(
     run_output: str | Path,
     snapshot: str | Path,
@@ -105,7 +81,7 @@ def load_frozen_run(
         raise ValueError("frozen run journal is empty")
     expected_blocks = adapter.decoder_block_count(source)
     with recorder.phase("commits"):
-        identity, block_records = _latest_complete_identity(records, expected_blocks)
+        identity, block_records = latest_complete_identity(records, expected_blocks)
         committed = tuple(
             load_committed_block(
                 ArtifactRef(ArtifactTypes.BLOCK_RESULT, str(block_records[index]["artifact_id"]), 1),

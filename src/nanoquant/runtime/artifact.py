@@ -7,7 +7,7 @@ import json
 import os
 import shutil
 import tempfile
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, cast
@@ -250,58 +250,95 @@ def _state_tensors(state: LogicalLayerState) -> tuple[tuple[str, torch.Tensor], 
     return tuple(values)
 
 
+def _write_block_shard(
+    temporary: Path,
+    index: int,
+    states: Sequence[LogicalLayerState],
+) -> LogicalBlockEntry:
+    tensors: dict[str, torch.Tensor] = {}
+    layer_entries: list[LogicalLayerEntry] = []
+    for state in states:
+        entries: list[LogicalTensorEntry] = []
+        for role, value in _state_tensors(state):
+            key = f"{state.spec.name}.{role}"
+            if key in tensors:
+                raise ValueError(f"logical artifact tensor key is duplicated: {key}")
+            copied = value.detach().cpu().contiguous()
+            tensors[key] = copied
+            entries.append(
+                LogicalTensorEntry(role, key, tuple(copied.shape), canonical_torch_dtype(copied.dtype))
+            )
+        layer_entries.append(LogicalLayerEntry(state.spec, tuple(entries)))
+    relative = f"weights/block-{index:05d}.safetensors"
+    shard = temporary / relative
+    save_file(tensors, shard)
+    return LogicalBlockEntry(
+        index,
+        relative,
+        shard.stat().st_size,
+        _hash_file(shard),
+        tuple(layer_entries),
+    )
+
+
 def write_logical_artifact(
     output: str | Path,
     model: RuntimeModelMetadata,
     blocks: Mapping[int, Sequence[LogicalLayerState]],
 ) -> OpenLogicalArtifact:
-    """Atomically write one immutable safetensors shard per logical model block."""
+    """Atomically write a complete in-memory block mapping."""
+
+    indexes = sorted(blocks)
+    if indexes != list(range(len(indexes))) or not indexes:
+        raise ValueError(f"logical artifact blocks must be complete and contiguous: {indexes}")
+    return write_logical_artifact_stream(
+        output,
+        model,
+        ((index, list(blocks[index])) for index in indexes),
+    )
+
+
+def write_logical_artifact_stream(
+    output: str | Path,
+    model: RuntimeModelMetadata,
+    blocks: Iterable[tuple[int, Sequence[LogicalLayerState]]],
+) -> OpenLogicalArtifact:
+    """Atomically consume state sequences while retaining at most one logical block."""
 
     destination = Path(output)
     if destination.exists():
         raise FileExistsError(f"logical artifact output already exists: {destination}")
-    indexes = sorted(blocks)
-    if indexes != list(range(len(indexes))) or not indexes:
-        raise ValueError(f"logical artifact blocks must be complete and contiguous: {indexes}")
-    names = [state.spec.name for index in indexes for state in blocks[index]]
-    if not names or len(names) != len(set(names)):
-        raise ValueError("logical artifact layers must be non-empty and uniquely named")
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = Path(tempfile.mkdtemp(prefix=".nanoquant-logical-", dir=destination.parent))
     try:
         weights = temporary / "weights"
         weights.mkdir()
-        block_entries = []
-        for index in indexes:
-            states = tuple(blocks[index])
+        block_entries: list[LogicalBlockEntry] = []
+        names: set[str] = set()
+        iterator = iter(blocks)
+        expected_index = 0
+        while True:
+            try:
+                item = next(iterator)
+            except StopIteration:
+                break
+            index, states = item
+            if index != expected_index:
+                raise ValueError(
+                    "logical artifact blocks must be complete and contiguous: "
+                    f"expected {expected_index}, received {index}"
+                )
             if not states:
                 raise ValueError(f"logical artifact block {index} contains no layers")
-            tensors: dict[str, torch.Tensor] = {}
-            layer_entries = []
             for state in states:
-                entries = []
-                for role, value in _state_tensors(state):
-                    key = f"{state.spec.name}.{role}"
-                    if key in tensors:
-                        raise ValueError(f"logical artifact tensor key is duplicated: {key}")
-                    copied = value.detach().cpu().contiguous()
-                    tensors[key] = copied
-                    entries.append(
-                        LogicalTensorEntry(role, key, tuple(copied.shape), canonical_torch_dtype(copied.dtype))
-                    )
-                layer_entries.append(LogicalLayerEntry(state.spec, tuple(entries)))
-            relative = f"weights/block-{index:05d}.safetensors"
-            shard = temporary / relative
-            save_file(tensors, shard)
-            block_entries.append(
-                LogicalBlockEntry(
-                    index,
-                    relative,
-                    shard.stat().st_size,
-                    _hash_file(shard),
-                    tuple(layer_entries),
-                )
-            )
+                if state.spec.name in names:
+                    raise ValueError(f"logical artifact layer name is duplicated: {state.spec.name}")
+                names.add(state.spec.name)
+            block_entries.append(_write_block_shard(temporary, index, states))
+            del item, state, states
+            expected_index += 1
+        if not block_entries:
+            raise ValueError("logical artifact must contain at least one block")
         block_tuple = tuple(block_entries)
         manifest = LogicalModelManifest(
             DESCRIPTOR_SCHEMA_VERSION,

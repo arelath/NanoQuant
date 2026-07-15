@@ -241,6 +241,10 @@ Outcome: packed artifacts load and generate correctly without research dependenc
   per-layer lazy loading. Full packed-model/shared/tokenizer export remains M6.3–M6.5 rather than being implied here.
 - [ ] **M6.3** Finalize and version the first CUDA packed layout, including padding, alignment, scale, outlier, bias, and tensor-name metadata.
 - [ ] **M6.4** Implement offline frozen-to-packed conversion and block-aligned artifact sharding.
+  The frozen-to-logical prerequisite is complete: conversion selects the latest complete commit identity and active
+  tuned state, validates source identity, streams one block per immutable shard, and exactly matched all 1,274
+  tensors in the retained 26-block Gemma export. Both logical reference backends also passed all 182 real layer
+  shapes at a maximum absolute difference of 0.015625. Binary CUDA packing and complete model-shell conversion remain open.
 - [ ] **M6.5** Implement packed artifact inspection and validation without loading all tensors.
 - [x] **M6.6** Implement the logical dense-reconstruction reference backend.
 - [x] **M6.7** Implement the factorized PyTorch reference backend.

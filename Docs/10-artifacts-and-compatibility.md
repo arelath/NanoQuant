@@ -182,6 +182,18 @@ inspection bounds descriptor size, rejects path traversal/future schemas, verifi
 headers without loading payloads, and loading opens only the shard containing the requested layer. This is the
 backend-independent logical artifact, not the still-open packed CUDA layout or complete deployable model export.
 
+Committed-run conversion is also incremental. `tools/export_logical_runtime.py` resolves the newest complete block
+identity, rejects a mismatched declared model source/revision/config hash, validates the selected commit artifacts,
+uses the atomically active global-tuning result unless explicitly disabled, and holds at most one logical block while
+writing. `tools/validate_logical_runtime.py` reopens and hashes every output shard, resolves the same source state,
+and compares every logical specification and tensor role exactly. The pinned Gemma v28 export evidence under
+`evidence/m6` covers 26 shards, 182 layers, 1,274 exact tensors, and all-layer dense-versus-factorized reference
+execution with maximum absolute error 0.015625. This establishes frozen-to-logical conversion;
+it does not pack binary signs into the future CUDA layout or supply the non-quantized model shell.
+Generated logical artifacts are outside the content-addressed research store. Their dedicated
+`tools/cleanup_logical_artifact.py` command is dry-run by default, validates every shard, and requires the exact
+descriptor SHA-256 before apply mode can remove the directory.
+
 ## 9. Exact size and BPW accounting
 
 Reports distinguish:

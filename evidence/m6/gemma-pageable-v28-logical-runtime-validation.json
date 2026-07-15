@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "created_at": "2026-07-15T07:31:25.1866103Z",
+  "source_run": "evidence/m4/gemma-pageable-v28-four-block-canary",
+  "logical_artifact": "evidence/m6/gemma-pageable-v28-logical-runtime",
+  "model": {
+    "source": "google/gemma-3-1b-it",
+    "revision": "dcc83ea841ab6100d6b47a070329e1ba4cf78752",
+    "family": "gemma3",
+    "config_hash": "sha256:32d5b5d041e98027bc7415107bc79b580f9cce407535b4e30134e8f8aed3b130",
+    "tokenizer_hash": "sha256:b0f4e47731cc0550b068931303374ba73754d1086ab993d8ea528f7fffeb4611"
+  },
+  "commit_identity": {
+    "config_hash": "sha256:ebe7e831e9a1f4bec5df3bb783359cafd0ddb316856e5f71df5e3b3d379f63db",
+    "model_hash": "sha256:32d5b5d041e98027bc7415107bc79b580f9cce407535b4e30134e8f8aed3b130",
+    "plan_hash": "sha256-8656b828a48e72f07799726b92c8a70b257f775c77f6c4bd5787686b524e8a9d"
+  },
+  "global_tuning_artifact": "sha256-5dca6b9c38e6194799857014459d679674b992aa70cdf75b0a1cf7e153487120",
+  "artifact": {
+    "descriptor_sha256": "1f8a47d7016876b86cc46106c17f0e36ba18cc4b4408e872fec788b25886995e",
+    "descriptor_bytes": 393421,
+    "block_count": 26,
+    "layer_count": 182,
+    "tensor_count": 1274,
+    "tensor_bytes": 2657404528,
+    "weight_bytes": 2657539888,
+    "minimum_shard_bytes": 93186080,
+    "maximum_shard_bytes": 112307688
+  },
+  "export": {
+    "wall_seconds": 20.9,
+    "fresh_source_validation": true,
+    "block_streaming": true,
+    "previous_block_released_before_next": true,
+    "deterministic_rerun_descriptor_equal": true
+  },
+  "exact_source_validation": {
+    "wall_seconds": 18.4,
+    "hashes_verified": true,
+    "tensor_specs_equal": true,
+    "tensor_values_equal": true,
+    "exact": true
+  },
+  "reference_backend_validation": {
+    "layer_count": 182,
+    "output_elements": 459264,
+    "absolute_tolerance": 0.03125,
+    "maximum_absolute_error": 0.015625,
+    "maximum_error_layer": "blocks.10.mlp.gate_proj",
+    "passed": true
+  },
+  "scope": "Frozen quantized logical layers only; CUDA sign packing, non-quantized model shell, tokenizer/config packaging, and generation remain open M6 work."
+}

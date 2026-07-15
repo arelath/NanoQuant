@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import gc
 import json
+import weakref
 from pathlib import Path
 
 import pytest
@@ -16,7 +18,9 @@ from nanoquant.runtime import (
     open_logical_artifact,
     plan_backends,
     prepare_plan,
+    validate_logical_reference_parity,
     write_logical_artifact,
+    write_logical_artifact_stream,
 )
 
 
@@ -96,6 +100,10 @@ def test_logical_artifact_roundtrip_is_block_sharded_and_runtime_executable(tmp_
         "cpu",
     )
     assert [item.linear(torch.ones(1, 4)).shape for item in prepared] == [(1, 3), (1, 3)]
+    parity = validate_logical_reference_parity(artifact.root, absolute_tolerance=1e-6)
+    assert parity.layer_count == 2
+    assert parity.output_elements == 6
+    assert parity.maximum_absolute_error <= 1e-6
 
 
 def test_logical_artifact_open_validates_headers_without_eager_layer_loading(tmp_path: Path) -> None:
@@ -148,4 +156,49 @@ def test_logical_artifact_write_is_atomic_and_refuses_overwrite(tmp_path: Path) 
 
     with pytest.raises(FileExistsError, match="already exists"):
         write_logical_artifact(artifact.root, _metadata(), {0: (first,)})
+    assert not list(tmp_path.glob(".nanoquant-logical-*"))
+
+
+def test_logical_artifact_stream_consumes_contiguous_blocks_once(tmp_path: Path) -> None:
+    observed: list[str] = []
+
+    def blocks():  # type: ignore[no-untyped-def]
+        first = _state("blocks.0.self_attn.q_proj", outliers=True)
+        first_tensor = weakref.ref(first.left_binary)
+        observed.append("block-0")
+        yield 0, [first]
+        del first
+        gc.collect()
+        assert first_tensor() is None
+        temporary = next(tmp_path.glob(".nanoquant-logical-*"))
+        assert (temporary / "weights" / "block-00000.safetensors").is_file()
+        observed.append("block-1")
+        yield 1, [_state("blocks.1.mlp.down_proj", outliers=False)]
+
+    artifact = write_logical_artifact_stream(tmp_path / "logical-model", _metadata(), blocks())
+
+    assert observed == ["block-0", "block-1"]
+    assert artifact.manifest.layer_count == 2
+
+
+@pytest.mark.parametrize(
+    ("blocks", "message"),
+    (
+        (((1, [_state("blocks.1.linear", outliers=False)]),), "expected 0, received 1"),
+        (
+            (
+                (0, [_state("blocks.0.linear", outliers=False)]),
+                (1, [_state("blocks.0.linear", outliers=False)]),
+            ),
+            "layer name is duplicated",
+        ),
+    ),
+)
+def test_logical_artifact_stream_rejects_incomplete_or_duplicate_inventory(
+    tmp_path: Path,
+    blocks: object,
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        write_logical_artifact_stream(tmp_path / "logical-model", _metadata(), blocks)  # type: ignore[arg-type]
     assert not list(tmp_path.glob(".nanoquant-logical-*"))

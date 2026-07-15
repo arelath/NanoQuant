@@ -111,8 +111,14 @@ fallbacks, and rejects the first fallback in strict mode. `prepare_plan()` requi
 returns prepared dispatches whose hot `linear()` call does not repeat capability discovery. Self-contained dense
 and factorized PyTorch reference backends provide the first deployment consumers. The versioned `nanoquant-v1`
 logical artifact is also implemented as a bounded descriptor plus block-aligned safetensors shards, with hash/header
-validation and per-layer lazy loading. Packed layouts, complete model conversion, and generation remain separate
-open M6 items.
+validation and per-layer lazy loading. A CPU-only offline exporter now selects the latest complete committed run
+identity, validates its source/config identity, selects the active global-tuning state by default, and streams one
+frozen block at a time into that artifact. Its companion validator freshly checks the source artifact graph and
+compares every exported tensor with the selected frozen state. The accepted 26-block Gemma run exported 182 layers
+and passed exact comparison across 1,274 tensors (2,657,404,528 tensor bytes). Dense-reconstruction and factorized
+reference execution also agreed across all 182 real layer shapes with maximum absolute error 0.015625 under the
+declared 0.03125 BF16 tolerance. Packed layouts, shared/model-shell
+conversion, tokenizer/config packaging, and generation remain separate open M6 items.
 
 `SupportResult` includes a reason code when false. Capability matching covers:
 
