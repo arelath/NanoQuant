@@ -1,0 +1,329 @@
+{
+  "baselines": [
+    {
+      "block_count": 26,
+      "maximum_absolute_percent_delta": 4.218750167013708,
+      "mean_absolute_percent_delta": 0.7506892648615255,
+      "name": "contemporary-legacy",
+      "paired_block_count": 26,
+      "path": "D:\\dev\\research\\NanoQuantRewrite\\evidence\\m4\\gemma-legacy018-contemporary-pinned-v3\\legacy018-contemporary.log",
+      "rewrite_lower_count": 16
+    }
+  ],
+  "blocks": [
+    {
+      "baselines": {
+        "contemporary-legacy": {
+          "absolute_delta": 0.005689971160888652,
+          "loss": 1.3728,
+          "percent_delta": 0.41447925123023754
+        }
+      },
+      "block": 0,
+      "rewrite_loss": 1.3784899711608887
+    },
+    {
+      "baselines": {
+        "contemporary-legacy": {
+          "absolute_delta": -0.005703182601928702,
+          "loss": 3.6029,
+          "percent_delta": -0.15829422415079009
+        }
+      },
+      "block": 1,
+      "rewrite_loss": 3.5971968173980713
+    },
+    {
+      "baselines": {
+        "contemporary-legacy": {
+          "absolute_delta": 0.04574813461303684,
+          "loss": 5.7415,
+          "percent_delta": 0.7967976071242111
+        }
+      },
+      "block": 2,
+      "rewrite_loss": 5.787248134613037
+    },
+    {
+      "baselines": {
+        "contemporary-legacy": {
+          "absolute_delta": -0.02033917236327909,
+          "loss": 43.693,
+          "percent_delta": -0.04655018507147002
+        }
+      },
+      "block": 3,
+      "rewrite_loss": 43.67266082763672
+    },
+    {
+      "baselines": {
+        "contemporary-legacy": {
+          "absolute_delta": -2.568166503906241,
+          "loss": 667.26,
+          "percent_delta": -0.3848824302230325
+        }
+      },
+      "block": 4,
+      "rewrite_loss": 664.6918334960938
+    },
+    {
+      "baselines": {
+        "contemporary-legacy": {
+          "absolute_delta": 0.04993362426758097,
+          "loss": 34.3,
+          "percent_delta": 0.14557907949732662
+        }
+      },
+      "block": 5,
+      "rewrite_loss": 34.34993362426758
+    },
+    {
+      "baselines": {
+        "contemporary-legacy": {
+          "absolute_delta": 0.029885955810549092,
+          "loss": 42.129,
+          "percent_delta": 0.07093915310250054
+        }
+      },
+      "block": 6,
+      "rewrite_loss": 42.15888595581055
+    },
+    {
+      "baselines": {
+        "contemporary-legacy": {
+          "absolute_delta": -6.593964233398424,
+          "loss": 256.14,
+          "percent_delta": -2.57435942586024
+        }
+      },
+      "block": 7,
+      "rewrite_loss": 249.54603576660156
+    },
+    {
+      "baselines": {
+        "contemporary-legacy": {
+          "absolute_delta": -3.372602539062484,
+          "loss": 503.58,
+          "percent_delta": -0.6697252748446125
+        }
+      },
+      "block": 8,
+      "rewrite_loss": 500.2073974609375
+    },
+    {
+      "baselines": {
+        "contemporary-legacy": {
+          "absolute_delta": -9.250453491210948,
+          "loss": 219.27,
+          "percent_delta": -4.218750167013708
+        }
+      },
+      "block": 9,
+      "rewrite_loss": 210.01954650878906
+    },
+    {
+      "baselines": {
+        "contemporary-legacy": {
+          "absolute_delta": -4.899194335937409,
+          "loss": 1459.1,
+          "percent_delta": -0.3357682363057668
+        }
+      },
+      "block": 10,
+      "rewrite_loss": 1454.2008056640625
+    },
+    {
+      "baselines": {
+        "contemporary-legacy": {
+          "absolute_delta": 2.9493164062499773,
+          "loss": 331.6,
+          "percent_delta": 0.8894199053829821
+        }
+      },
+      "block": 11,
+      "rewrite_loss": 334.54931640625
+    },
+    {
+      "baselines": {
+        "contemporary-legacy": {
+          "absolute_delta": 27.36337890625009,
+          "loss": 1874.6,
+          "percent_delta": 1.4596916092099788
+        }
+      },
+      "block": 12,
+      "rewrite_loss": 1901.96337890625
+    },
+    {
+      "baselines": {
+        "contemporary-legacy": {
+          "absolute_delta": 42.28535156250018,
+          "loss": 2657.2,
+          "percent_delta": 1.5913499760085825
+        }
+      },
+      "block": 13,
+      "rewrite_loss": 2699.4853515625
+    },
+    {
+      "baselines": {
+        "contemporary-legacy": {
+          "absolute_delta": 47.20205078124991,
+          "loss": 3672.4,
+          "percent_delta": 1.2853188863209297
+        }
+      },
+      "block": 14,
+      "rewrite_loss": 3719.60205078125
+    },
+    {
+      "baselines": {
+        "contemporary-legacy": {
+          "absolute_delta": 20.59902343749991,
+          "loss": 3720.9,
+          "percent_delta": 0.5536032529092294
+        }
+      },
+      "block": 15,
+      "rewrite_loss": 3741.4990234375
+    },
+    {
+      "baselines": {
+        "contemporary-legacy": {
+          "absolute_delta": 51.327539062500364,
+          "loss": 8178.9,
+          "percent_delta": 0.6275604184242445
+        }
+      },
+      "block": 16,
+      "rewrite_loss": 8230.2275390625
+    },
+    {
+      "baselines": {
+        "contemporary-legacy": {
+          "absolute_delta": -14.284814453124909,
+          "loss": 2959.1,
+          "percent_delta": -0.48274186249619433
+        }
+      },
+      "block": 17,
+      "rewrite_loss": 2944.815185546875
+    },
+    {
+      "baselines": {
+        "contemporary-legacy": {
+          "absolute_delta": -86.833984375,
+          "loss": 17001.0,
+          "percent_delta": -0.5107580987883109
+        }
+      },
+      "block": 18,
+      "rewrite_loss": 16914.166015625
+    },
+    {
+      "baselines": {
+        "contemporary-legacy": {
+          "absolute_delta": -96.2265625,
+          "loss": 19690.0,
+          "percent_delta": -0.48870778313865326
+        }
+      },
+      "block": 19,
+      "rewrite_loss": 19593.7734375
+    },
+    {
+      "baselines": {
+        "contemporary-legacy": {
+          "absolute_delta": -32.564453125,
+          "loss": 19981.0,
+          "percent_delta": -0.16297709386416948
+        }
+      },
+      "block": 20,
+      "rewrite_loss": 19948.435546875
+    },
+    {
+      "baselines": {
+        "contemporary-legacy": {
+          "absolute_delta": -90.56640625,
+          "loss": 31439.0,
+          "percent_delta": -0.28807025112121964
+        }
+      },
+      "block": 21,
+      "rewrite_loss": 31348.43359375
+    },
+    {
+      "baselines": {
+        "contemporary-legacy": {
+          "absolute_delta": -114.037109375,
+          "loss": 25409.0,
+          "percent_delta": -0.44880597180132487
+        }
+      },
+      "block": 22,
+      "rewrite_loss": 25294.962890625
+    },
+    {
+      "baselines": {
+        "contemporary-legacy": {
+          "absolute_delta": -9.191503906250091,
+          "loss": 3105.9,
+          "percent_delta": -0.2959368912795024
+        }
+      },
+      "block": 23,
+      "rewrite_loss": 3096.70849609375
+    },
+    {
+      "baselines": {
+        "contemporary-legacy": {
+          "absolute_delta": -5.115185546875182,
+          "loss": 3770.8,
+          "percent_delta": -0.13565252855827215
+        }
+      },
+      "block": 24,
+      "rewrite_loss": 3765.684814453125
+    },
+    {
+      "baselines": {
+        "contemporary-legacy": {
+          "absolute_delta": -7.7906494140625,
+          "loss": 1619.0,
+          "percent_delta": -0.48120132267217564
+        }
+      },
+      "block": 25,
+      "rewrite_loss": 1611.2093505859375
+    }
+  ],
+  "rank_baselines": [
+    {
+      "legacy_prefix_layer_count": 182,
+      "legacy_rank_dependent_bits": 665049088,
+      "legacy_rank_dependent_bpw": 0.9531176622522777,
+      "legacy_rank_sum": 105856,
+      "missing_in_legacy": [],
+      "missing_in_rewrite": [],
+      "name": "contemporary-legacy",
+      "paired_layer_count": 182,
+      "paired_source_parameters": 697761792,
+      "path": "D:\\dev\\research\\NanoQuantRewrite\\evidence\\m4\\gemma-legacy018-contemporary-pinned-v3\\rank-utility.csv",
+      "rank_mismatch_count": 0,
+      "rank_mismatches": [],
+      "rewrite_actual_bits": 695192734,
+      "rewrite_effective_bpw": 0.9963181446312268,
+      "rewrite_layer_count": 182,
+      "rewrite_rank_sum": 105856,
+      "rewrite_source_parameters": 697761792
+    }
+  ],
+  "rewrite_block_count": 26,
+  "rewrite_identity": {
+    "config_hash": "sha256:ebe7e831e9a1f4bec5df3bb783359cafd0ddb316856e5f71df5e3b3d379f63db",
+    "model_hash": "sha256:32d5b5d041e98027bc7415107bc79b580f9cce407535b4e30134e8f8aed3b130",
+    "plan_hash": "sha256-8656b828a48e72f07799726b92c8a70b257f775c77f6c4bd5787686b524e8a9d"
+  },
+  "schema_version": 1
+}

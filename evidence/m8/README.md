@@ -16,3 +16,16 @@ The near-ceiling case totals 32,765 tokens against the model's declared 32,768-t
 and 64 candidate prefill forwards, three decode forwards, the exact 32,765 cache bound, identical generated tokens
 and stop reason, and zero execution-plan or generation fallbacks. The independently chunked oracle avoids recreating
 the monolithic eager-attention VRAM hazard that bounded prefill is intended to prevent.
+
+## Replay-to-full campaign gate
+
+`gemma-pageable-v28-evaluation-campaign-v2` is the self-contained M8.GATE directory. It retains seven copied inputs,
+their hashes, one canonical campaign result, lifecycle/promotion events, the full resolved intent and environment,
+resource/cost observations, and generated summary/comparison reports. All three tier policies promote and the report
+contains no consistency warning or warning/error event.
+
+- Campaign JSON: SHA-256 `ccacea00ee1b4e7678ae9f662827fd45cf5ec28071918c88ef67f799a0f35cc8`.
+- Manifest: SHA-256 `31c71cdb5a501daffd54954a75f17149f7e9e09f9704a0c4647d0b3b4defb1b5`.
+- Event stream: SHA-256 `f9ee74a2b9d8ebaae1db35132bf0fec87ecabbb948375c8a9707938e0e9a9adb`.
+- Summary: SHA-256 `4dc6d6a259dd277d28ad0e9d6003f7f06e29209ee168b763ca5f6611c03e79f0`.
+- Comparison: SHA-256 `e4132daf9240cddadbb2a6c9320c7f9c0f7cd5cabd32df6c2fd772f650a8454d`.

@@ -1,0 +1,222 @@
+{
+  "allocated_after_bytes": 802975744,
+  "artifact": {
+    "descriptor_sha256": "b4f0c6270c4b59f8293c909ddeb21042ad1a2d7ee18601c77e4c57563c900487",
+    "layer_count": 182,
+    "path": "D:\\dev\\research\\NanoQuantRewrite\\evidence\\m6\\gemma-pageable-v28-packed-runtime",
+    "weight_bytes": 87072592
+  },
+  "auxiliary_parameter_count": 0,
+  "cases": [
+    {
+      "baseline_allocated_bytes": 752057344,
+      "batch_size": 1,
+      "cache_length": 16,
+      "incremental_peak_allocated_bytes": 21702144,
+      "name": "model-single-token-decode",
+      "peak_allocated_bytes": 773759488,
+      "repetitions": 10,
+      "suite": "decode",
+      "timing": {
+        "latency_seconds": {
+          "max": 0.004584127902984619,
+          "mean": 0.0044036607742309565,
+          "min": 0.0043089919090271,
+          "p10": 0.004320051193237305,
+          "p50": 0.004376575946807862,
+          "p90": 0.004530963087081909,
+          "p99": 0.004578811421394349
+        },
+        "samples_seconds": [
+          0.004414463996887207,
+          0.004321280002593994,
+          0.00435097599029541,
+          0.004388864040374756,
+          0.004321280002593994,
+          0.004457280158996582,
+          0.0043089919090271,
+          0.004584127902984619,
+          0.004364287853240967,
+          0.004525055885314941
+        ],
+        "throughput_per_second": {
+          "max": 232.072842352072,
+          "mean": 227.17298882590617,
+          "min": 218.14400059582178,
+          "p10": 220.70697129185115,
+          "p50": 228.49092426850078,
+          "p90": 231.47890733293394,
+          "p99": 232.0134488501582
+        },
+        "unit_name": "decoded_tokens",
+        "units_per_sample": 1
+      },
+      "warmups": 3
+    },
+    {
+      "baseline_allocated_bytes": 771426304,
+      "batch_size": 1,
+      "incremental_peak_allocated_bytes": 2560,
+      "max_new_tokens": 1,
+      "name": "time-to-first-token",
+      "peak_allocated_bytes": 771428864,
+      "prompt_width": 16,
+      "repetitions": 10,
+      "suite": "end-to-end",
+      "timing": {
+        "latency_seconds": {
+          "max": 0.07922490000055404,
+          "mean": 0.052394999999523864,
+          "min": 0.0382670999988477,
+          "p10": 0.03971033999860083,
+          "p50": 0.044561699999576376,
+          "p90": 0.07858337999914511,
+          "p99": 0.07916074800041314
+        },
+        "samples_seconds": [
+          0.0435087999994721,
+          0.04052699999920151,
+          0.07922490000055404,
+          0.0398706999985734,
+          0.07851209999898856,
+          0.0382670999988477,
+          0.04009099999893806,
+          0.04561459999968065,
+          0.07222180000098888,
+          0.046111999999993714
+        ],
+        "throughput_per_second": {
+          "max": 26.13210826088499,
+          "mean": 20.662975479907708,
+          "min": 12.622294253359824,
+          "p10": 12.725430639054562,
+          "p50": 22.453330778721835,
+          "p90": 25.186177943099302,
+          "p99": 26.037515229106422
+        },
+        "unit_name": "generated_tokens",
+        "units_per_sample": 1
+      },
+      "token_output_sha256": "78f15e366018b21704bbec9d056c5c81cea617af3123a13debb3277d3bf6b4d0",
+      "warmups": 3
+    },
+    {
+      "baseline_allocated_bytes": 761029632,
+      "batch_size": 1,
+      "incremental_peak_allocated_bytes": 45335040,
+      "max_new_tokens": 32,
+      "name": "complete-generation",
+      "peak_allocated_bytes": 806364672,
+      "prompt_width": 16,
+      "repetitions": 10,
+      "suite": "end-to-end",
+      "timing": {
+        "latency_seconds": {
+          "max": 0.21715519999997923,
+          "mean": 0.1988982399998349,
+          "min": 0.18375550000018848,
+          "p10": 0.18549078999894844,
+          "p50": 0.1990755500000887,
+          "p90": 0.21546004999909202,
+          "p99": 0.21698568499989052
+        },
+        "samples_seconds": [
+          0.21715519999997923,
+          0.20207740000114427,
+          0.18375550000018848,
+          0.18568359999881068,
+          0.21527169999899343,
+          0.19778860000042187,
+          0.1994009999998525,
+          0.18830499999967287,
+          0.20079429999896092,
+          0.1987501000003249
+        ],
+        "throughput_per_second": {
+          "max": 174.1444473769067,
+          "mean": 161.3425074146208,
+          "min": 147.3600447974677,
+          "p10": 148.52042667799515,
+          "p50": 160.74342390698354,
+          "p90": 172.51699552938402,
+          "p99": 173.98170219215442
+        },
+        "unit_name": "generated_tokens",
+        "units_per_sample": 32
+      },
+      "token_output_sha256": "d91549bc797d2ff5a31e3b1e224347fac211fd34aa2077e01e521a888d24de3f",
+      "warmups": 3
+    }
+  ],
+  "configuration": {
+    "batch_size": 1,
+    "block_index": 0,
+    "cache_dtype": "float16",
+    "chat_template": true,
+    "cuda_graph_decode": true,
+    "fast_sliding_cache": true,
+    "fused_cache_prefix": true,
+    "fused_decode_attention": true,
+    "fused_decode_rope": true,
+    "fused_rms_norm": true,
+    "group_decode_mlp": true,
+    "group_decode_qkv": true,
+    "ignore_eos": true,
+    "input_dtype": "float32",
+    "layer": "blocks.0.mlp.gate_proj",
+    "max_new_tokens": 32,
+    "native_bfloat16_tied_projection": true,
+    "prompt": [
+      "Write a short paragraph about quantization."
+    ],
+    "prompt_lengths": [
+      16
+    ],
+    "prompt_width": 16,
+    "repetitions": 10,
+    "short_sliding_masks": true,
+    "stopping_check_interval": 8,
+    "suites": [
+      "decode",
+      "end-to-end"
+    ],
+    "warmups": 3
+  },
+  "dispatch": {
+    "cuda_graph_capture_count": 32,
+    "cuda_graph_fallback_count": 0,
+    "cuda_graph_replay_count": 384,
+    "decode_backend": "cuda-packed-triton",
+    "decode_fallback_count": 0,
+    "fused_cache_update_count": 1924,
+    "fused_decode_attention_count": 26,
+    "fused_decode_rope_count": 26,
+    "fused_rms_norm_count": 157,
+    "grouped_decode_mlp_count": 26,
+    "grouped_decode_qkv_count": 26,
+    "native_bfloat16_tied_projection_count": 1,
+    "prefill_backend": "cuda-packed-triton",
+    "prefill_fallback_count": 0,
+    "replaced_linear_count": 182,
+    "short_sliding_mask_count": 22
+  },
+  "environment": {
+    "cpu_count": 32,
+    "cuda_runtime": "13.0",
+    "device": "NVIDIA RTX 4000 Ada Generation Laptop GPU",
+    "device_total_memory_bytes": 12878086144,
+    "multiprocessor_count": 58,
+    "platform": "Windows-11-10.0.26200-SP0",
+    "python": "3.12.1",
+    "torch": "2.12.1+cu130",
+    "transformers": "4.51.3",
+    "triton_cache": "D:\\dev\\research\\NanoQuantRewrite\\.tmp\\triton-cache"
+  },
+  "global_tuning_artifact": null,
+  "model": "C:\\Users\\pdykstra\\.cache\\huggingface\\hub\\models--google--gemma-3-1b-it\\snapshots\\dcc83ea841ab6100d6b47a070329e1ba4cf78752",
+  "passed": true,
+  "peak_host_bytes": 6772129792,
+  "run_output": null,
+  "schema_version": 1,
+  "wall_seconds": 9.746620500000063
+}

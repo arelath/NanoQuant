@@ -189,6 +189,31 @@ Evidence is retained under `evidence/m8`: `gemma-pageable-v28-long-context-1024.
 `gemma-pageable-v28-long-context-ceiling.json` (SHA-256
 `c17f2cf200fcd151d880c4389ae191a4c6dfb296628047abc950803b06db3cf4`).
 
+### 6.3 Ordered evaluation campaigns
+
+`run_evaluation_campaign` is the shared promotion boundary from a captured layer replay through exact tier-local
+quick, standard, and full evaluator sets. A campaign requires those three plans in order, binds every evaluator
+specification/result and gate policy by semantic hash, rejects missing or unexpected tier requests, and stops before
+later work on rejection or inconclusive evidence. Its result preserves the last completed tier, every metric and
+decision, the terminal outcome, and a deterministic next action.
+
+The retained Gemma v28 campaign at `evidence/m8/gemma-pageable-v28-evaluation-campaign-v2` copies all seven compact
+inputs into its own directory and derives its manifest, event stream, canonical campaign JSON, summary, comparison,
+environment, resource observations, conclusion, and recommendation exclusively from those files. It promotes:
+
+- layer replay at 0.3540% mean absolute loss delta over the first four blocks;
+- quick validation with all 979 artifacts valid, 182 layers, identical ranks, 0.996318 BPW, and a 4.2188% maximum
+  block delta;
+- standard exact WikiText-2 with 8,128 scored targets and 453.571 PPL, +2.079% from contemporary legacy within the
+  frozen +2.27% environment-matched band;
+- full deployment evaluation with exact 32,765-token context behavior, zero fallbacks, 1,592,178,176 peak device
+  bytes, and 160.743 versus 184.5 tokens/s (87.12%, above the predefined 70% gate).
+
+The canonical campaign result is SHA-256
+`ccacea00ee1b4e7678ae9f662827fd45cf5ec28071918c88ef67f799a0f35cc8`; the generated summary has no consistency,
+warning, or error findings. This workflow demonstration closes M8.GATE, not the broader release-candidate task suite
+in M10.14.
+
 ## 7. Baselines
 
 A candidate can be compared with several named baselines:

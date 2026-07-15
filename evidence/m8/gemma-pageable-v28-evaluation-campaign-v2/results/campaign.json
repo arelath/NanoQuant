@@ -1,0 +1,161 @@
+{
+  "baseline": "contemporary-legacy-018-and-compatible-llama.cpp",
+  "candidate": "gemma-pageable-v28",
+  "completed_tier": "full",
+  "layer_replay": {
+    "artifact_id": "sha256:6cb0e8ec4df90a50eadc7d9bdd80ad03a5d6f2e00d5649a7fe1606c1f4c9dc70",
+    "metrics": [
+      [
+        "mean_absolute_block_loss_percent_delta",
+        0.3540303168941772
+      ]
+    ],
+    "name": "gemma-v28-first-four-blocks",
+    "passed": true,
+    "version": "1"
+  },
+  "outcome": "full-promotion",
+  "recommended_next_action": "Candidate passed the complete evaluation campaign; proceed to migration/release qualification.",
+  "tiers": [
+    {
+      "decision": {
+        "outcome": "promotion",
+        "policy_key": "sha256:cd7e42beb9fd8cec9ce730ea8679d84ac0e68d4e3966e57c1d2b22563fad3be4",
+        "reasons": []
+      },
+      "evaluators": [
+        {
+          "name": "gemma-artifact-and-trajectory",
+          "result": {
+            "committed_layers": 182,
+            "metrics": {
+              "artifact_complete": 1.0,
+              "effective_bpw": 0.9963181446312268,
+              "maximum_block_loss_percent_delta": 4.218750167013708,
+              "rank_mismatch_count": 0.0
+            },
+            "source_sha256": {
+              "full-parity-summary": "e5d41f15860dbfa4dd65e9aa49bee86012b0cc7b95265b271da46412fd89855d",
+              "validation": "a4dc8f2bdaf92808a5c2a2c8c983a3b1949ec5313f108a5a7be2f8f9979307f1"
+            },
+            "tier": "quick",
+            "validated_artifacts": 979
+          },
+          "result_key": "sha256:7afea77d8af56dba1751f48726503e3b1ca743465333662540978e81f4241383",
+          "specification_key": "sha256:e887b972401f016fcc66845f92536d17957bf2f7a6569243ddce286be9dc627d",
+          "tier": "quick",
+          "version": "1"
+        }
+      ],
+      "metrics": [
+        [
+          "artifact_complete",
+          1.0
+        ],
+        [
+          "effective_bpw",
+          0.9963181446312268
+        ],
+        [
+          "maximum_block_loss_percent_delta",
+          4.218750167013708
+        ],
+        [
+          "rank_mismatch_count",
+          0.0
+        ]
+      ],
+      "tier": "quick"
+    },
+    {
+      "decision": {
+        "outcome": "promotion",
+        "policy_key": "sha256:6e12ea2c682ab1ef44befec4883dad522c6deb492fa97fd8cfafff1007911ef9",
+        "reasons": []
+      },
+      "evaluators": [
+        {
+          "name": "gemma-wikitext2-exact",
+          "result": {
+            "legacy_perplexity": 444.3327726144831,
+            "metrics": {
+              "wikitext2_percent_delta": 2.07912036388717,
+              "wikitext2_scored_target_count": 8128.0
+            },
+            "perplexity": 453.5709857733353,
+            "source_sha256": "b0a1b22bd6208bfc437429aad8c2ea3e7c545d97d1ce2105167924dd58af1fae",
+            "tier": "standard",
+            "token_hash": "sha256:ef19dc950344a837a1fd6e087c451ed9b26234408e85d0b0e3da4f6c7045ff27"
+          },
+          "result_key": "sha256:ee0488a9661cbd3d23c708c466f2b178b091bc69a7cdf79c7a05d49e590b6bd3",
+          "specification_key": "sha256:e8ecfe02c9f34f4ca33ae4f77f1ef61ae11f9a885340b2c64f0d0e9e752847df",
+          "tier": "standard",
+          "version": "1"
+        }
+      ],
+      "metrics": [
+        [
+          "wikitext2_percent_delta",
+          2.07912036388717
+        ],
+        [
+          "wikitext2_scored_target_count",
+          8128.0
+        ]
+      ],
+      "tier": "standard"
+    },
+    {
+      "decision": {
+        "outcome": "promotion",
+        "policy_key": "sha256:da65f4d2a9142c79e3c9e61128d93dfcd671023fa6adda11a0734db1f4878f54",
+        "reasons": []
+      },
+      "evaluators": [
+        {
+          "name": "gemma-deployment-full",
+          "result": {
+            "candidate_tokens_per_second": 160.74342390698354,
+            "long_context_total_tokens": 32765,
+            "metrics": {
+              "long_context_exact": 1.0,
+              "long_context_peak_device_bytes": 1592178176.0,
+              "runtime_reference_ratio": 0.8712380699565503,
+              "unexpected_fallback_count": 0.0
+            },
+            "reference_tokens_per_second": 184.5,
+            "source_sha256": {
+              "llamacpp-runtime": "39f8eca06a140893ba6db8ae8bb4ddbb0b19548b5dd18d992dc1d50c05059b24",
+              "long-context": "c17f2cf200fcd151d880c4389ae191a4c6dfb296628047abc950803b06db3cf4",
+              "rewrite-runtime": "95d464e1a0bf90c2afa85973ff910358198243a2e9302b20b67a2844fa264892"
+            },
+            "tier": "full"
+          },
+          "result_key": "sha256:744376e53bd0b6df444bfbc9e985cac56574464a33c385f2e29d95f74cf801fb",
+          "specification_key": "sha256:4866f1934671e4f80bd09525ea9177d05fcd5b51aadbaa8478f80e13a91d708c",
+          "tier": "full",
+          "version": "1"
+        }
+      ],
+      "metrics": [
+        [
+          "long_context_exact",
+          1.0
+        ],
+        [
+          "long_context_peak_device_bytes",
+          1592178176.0
+        ],
+        [
+          "runtime_reference_ratio",
+          0.8712380699565503
+        ],
+        [
+          "unexpected_fallback_count",
+          0.0
+        ]
+      ],
+      "tier": "full"
+    }
+  ]
+}

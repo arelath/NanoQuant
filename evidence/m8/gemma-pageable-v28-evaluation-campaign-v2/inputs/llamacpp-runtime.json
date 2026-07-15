@@ -1,0 +1,202 @@
+{
+  "binary": "D:\\dev\\research\\llama.cpp\\build-local-cuda-ninja\\bin\\llama-cli.exe",
+  "binary_sha256": "c091ac0bfe757eb1b6e534924d23c0de4b4f31d38841ae709d33ba7741499a4c",
+  "command": [
+    "D:\\dev\\research\\llama.cpp\\build-local-cuda-ninja\\bin\\llama-cli.exe",
+    "-m",
+    "D:\\dev\\research\\NanoQuantRewrite\\evidence\\m6\\gemma-pageable-v28-nanoquant.gguf",
+    "-p",
+    "Write a short paragraph about quantization.",
+    "-n",
+    "32",
+    "--temp",
+    "0",
+    "--seed",
+    "1",
+    "-c",
+    "64",
+    "-b",
+    "64",
+    "-ub",
+    "64",
+    "-t",
+    "24",
+    "-ngl",
+    "99",
+    "-ctk",
+    "f16",
+    "-ctv",
+    "f16",
+    "-fa",
+    "off",
+    "--single-turn",
+    "--simple-io",
+    "--no-display-prompt"
+  ],
+  "configuration": {
+    "batch_size": 64,
+    "cache_type_k": "f16",
+    "cache_type_v": "f16",
+    "context_size": 64,
+    "flash_attention": "off",
+    "generated_tokens": 32,
+    "gpu_layers": 99,
+    "prompt": "Write a short paragraph about quantization.",
+    "prompt_tokens": 16,
+    "repetitions": 10,
+    "seed": 1,
+    "temperature": 0,
+    "threads": 24,
+    "ubatch_size": 64,
+    "warmup": true
+  },
+  "decode_latency_seconds": {
+    "max": 0.20317460317460317,
+    "mean": 0.17674462697803803,
+    "min": 0.16753926701570682,
+    "p10": 0.16889338787431235,
+    "p50": 0.17344356870718441,
+    "p90": 0.18592988124903015,
+    "p99": 0.20145013098204587
+  },
+  "decode_throughput_tokens_per_second": {
+    "max": 191.0,
+    "mean": 181.57,
+    "min": 157.5,
+    "p10": 172.26000000000002,
+    "p50": 184.5,
+    "p90": 189.47000000000003,
+    "p99": 190.847
+  },
+  "generated_text": "Okay, here’s a draft of a short paragraph about quantum physics, and how it’s about how it’s *decoded* – a physicist,",
+  "model": "D:\\dev\\research\\NanoQuantRewrite\\evidence\\m6\\gemma-pageable-v28-nanoquant.gguf",
+  "model_bytes": 699863936,
+  "model_sha256": "4b3131f65f3c7d73afdb2c5809f87b860356418dae6c78873a3b2e95aa2daad3",
+  "passed": true,
+  "process_wall_seconds": {
+    "max": 2.197329599992372,
+    "mean": 1.7936109200003556,
+    "min": 1.6585264000459574,
+    "p10": 1.665951040002983,
+    "p50": 1.7661649500078056,
+    "p90": 1.9080571799888273,
+    "p99": 2.1684023579920177
+  },
+  "prompt_latency_seconds": {
+    "max": 0.13029315960912052,
+    "mean": 0.11177732301895756,
+    "min": 0.09163802978235969,
+    "p10": 0.10440189821633121,
+    "p50": 0.11096234052049186,
+    "p90": 0.12170856124393091,
+    "p99": 0.12943469977260155
+  },
+  "prompt_throughput_tokens_per_second": {
+    "max": 174.6,
+    "mean": 144.22,
+    "min": 122.8,
+    "p10": 131.53,
+    "p50": 144.2,
+    "p90": 153.53999999999996,
+    "p99": 172.494
+  },
+  "raw": [
+    {
+      "decode_runs": 32,
+      "decode_seconds": 0.20317460317460317,
+      "decode_tokens_per_second": 157.5,
+      "process_seconds": 1.7804284000303596,
+      "prompt_seconds": 0.13029315960912052,
+      "prompt_tokens": 16,
+      "prompt_tokens_per_second": 122.8
+    },
+    {
+      "decode_runs": 32,
+      "decode_seconds": 0.17400761283306143,
+      "decode_tokens_per_second": 183.9,
+      "process_seconds": 1.699816300009843,
+      "prompt_seconds": 0.108991825613079,
+      "prompt_tokens": 16,
+      "prompt_tokens_per_second": 146.8
+    },
+    {
+      "decode_runs": 32,
+      "decode_seconds": 0.1763085399449036,
+      "decode_tokens_per_second": 181.5,
+      "process_seconds": 1.7911738999537192,
+      "prompt_seconds": 0.11019283746556474,
+      "prompt_tokens": 16,
+      "prompt_tokens_per_second": 145.2
+    },
+    {
+      "decode_runs": 32,
+      "decode_seconds": 0.17048481619605754,
+      "decode_tokens_per_second": 187.7,
+      "process_seconds": 1.7688583999988623,
+      "prompt_seconds": 0.1149425287356322,
+      "prompt_tokens": 16,
+      "prompt_tokens_per_second": 139.2
+    },
+    {
+      "decode_runs": 32,
+      "decode_seconds": 0.1724137931034483,
+      "decode_tokens_per_second": 185.6,
+      "process_seconds": 2.197329599992372,
+      "prompt_seconds": 0.111731843575419,
+      "prompt_tokens": 16,
+      "prompt_tokens_per_second": 143.2
+    },
+    {
+      "decode_runs": 32,
+      "decode_seconds": 0.1840138010350776,
+      "decode_tokens_per_second": 173.9,
+      "process_seconds": 1.7338128999690525,
+      "prompt_seconds": 0.11486001435750179,
+      "prompt_tokens": 16,
+      "prompt_tokens_per_second": 139.3
+    },
+    {
+      "decode_runs": 32,
+      "decode_seconds": 0.1728795245813074,
+      "decode_tokens_per_second": 185.1,
+      "process_seconds": 1.6667759999982081,
+      "prompt_seconds": 0.12075471698113208,
+      "prompt_tokens": 16,
+      "prompt_tokens_per_second": 132.5
+    },
+    {
+      "decode_runs": 32,
+      "decode_seconds": 0.16904384574749073,
+      "decode_tokens_per_second": 189.3,
+      "process_seconds": 1.8759157999884337,
+      "prompt_seconds": 0.10582010582010583,
+      "prompt_tokens": 16,
+      "prompt_tokens_per_second": 151.2
+    },
+    {
+      "decode_runs": 32,
+      "decode_seconds": 0.17758046614872366,
+      "decode_tokens_per_second": 180.2,
+      "process_seconds": 1.763471500016749,
+      "prompt_seconds": 0.10854816824966078,
+      "prompt_tokens": 16,
+      "prompt_tokens_per_second": 147.4
+    },
+    {
+      "decode_runs": 32,
+      "decode_seconds": 0.16753926701570682,
+      "decode_tokens_per_second": 191.0,
+      "process_seconds": 1.6585264000459574,
+      "prompt_seconds": 0.09163802978235969,
+      "prompt_tokens": 16,
+      "prompt_tokens_per_second": 174.6
+    }
+  ],
+  "reference": {
+    "exact_prefix": true,
+    "path": "D:\\dev\\research\\NanoQuantRewrite\\evidence\\m6\\gemma-pageable-v28-llamacpp-cuda-smoke.json",
+    "text": "Okay, here’s a draft of a short paragraph about quantum physics, and"
+  },
+  "schema_version": 1,
+  "wall_seconds": 18.642277600010857
+}

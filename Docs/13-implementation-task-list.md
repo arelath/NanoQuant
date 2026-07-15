@@ -638,7 +638,16 @@ Outcome: runs produce cheap-to-expensive decision evidence and actionable report
   different loss distributions, ruling out mean-of-means or mean-perplexity reductions. M8.19 tests additionally
   prove cached typed results equal uncached results, skip re-execution, survive reopen, and invalidate on every
   semantic boundary.
-- [ ] **M8.GATE** Demonstrate that a candidate can progress from layer replay through quick/standard/full evaluation and that its run directory alone explains intent, execution, issues, cost, results, and comparison.
+- [x] **M8.GATE** Demonstrate that a candidate can progress from layer replay through quick/standard/full evaluation and that its run directory alone explains intent, execution, issues, cost, results, and comparison.
+  The reusable campaign service requires ordered exact tier-local plans, executes registered evaluators, binds
+  specification/result/policy identities, and stops before later tiers on rejection or inconclusive evidence. The
+  retained Gemma v28 campaign promotes a 0.3540% four-block replay through complete-artifact/rank/BPW/trajectory
+  quick checks, exact 8,128-target WikiText-2 standard evaluation, and full long-context/runtime/memory/fallback
+  checks. Its directory copies all seven compact source results and contains a resolved intent/environment manifest,
+  structured lifecycle and promotion events, canonical evaluator outputs, immutable gate decisions, resource/cost
+  observations, a comparison, conclusion, and next action. The generated summary has no consistency warnings or
+  warning/error events. Evidence and identities are documented in `Docs/08-evaluation.md`; this workflow gate does
+  not substitute for the broader M10.14 release-candidate suite.
 
 ## Milestone 9 — Migrate supported workflows and cut over
 
