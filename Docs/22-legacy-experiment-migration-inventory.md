@@ -20,7 +20,7 @@ recipe/archive disposition so their chronology and intent remain discoverable.
 
 | No. | Legacy purpose and distinguishing behavior | Rewrite replacement | Status | Remaining migration work |
 | ---: | --- | --- | --- | --- |
-| 001 | Baseline Gemma 3 1B compression; 256-sample UltraChat/WikiText online calibration and CUDA resident activations | Resident quantization, canonical calibration/allocation/factorization/tuning, logical/packed export | Validated replacement | Add `001-...` thin runfile selecting the historical baseline recipe; decide whether to preserve its obsolete pickle output as conversion-only. |
+| 001 | Baseline Gemma 3 1B compression; 256-sample UltraChat/WikiText online calibration and CUDA resident activations | Canonical historical recipe and zero-argument resident runfile over native immutable artifacts | Validated and migrated | Keep its original q/v/o/k/MLP order, 0.80/1.15 bounds, no-outlier path, and 1e-3 early-stop delta test green; the legacy executable pickle is deliberately not an output format. |
 | 002 | Paired original-versus-NanoQuant short decode benchmark with CSV output | Runtime-bundle loader, `benchmark_runtime.py`, typed runtime metrics and comparison reports | Partial replacement | Add one paired benchmark application/CLI command and numbered runfile; current tools separately measure source, packed runtime, and llama.cpp. |
 | 003 | Original-versus-quantized WikiText-2 plus small lm-eval smoke suite | Exact causal evaluator, pinned six-task suite, evaluation cache/campaign/reporting | Partial replacement | Compose the existing evaluators into the migrated zero-argument recipe and retain one candidate/base comparison directory. |
 | 004 | Interactive Gemma chat over the custom GEMV path, chat-template history trimming, EOS/end-of-turn handling | Packed runtime generation, chat-template tokenizer assets, exact stopping and long-context cache | Partial replacement | Implement the interactive `chat` front end and history/context trimming policy; do not revive mutable train/runtime `NanoQuantLinear` mode switching. |
@@ -40,8 +40,8 @@ recipe/archive disposition so their chronology and intent remain discoverable.
 | 018 | 1B phase-1 diagonal/no-Hessian recipe; closest retained quality/performance baseline | Complete v28 resident run, exact contemporary-legacy rank/trajectory/KD/PPL comparison, packed/runtime evidence; canonical recipe and zero-argument runfile | Validated and migrated | Keep the import-only recipe/request parity tests and shared resident/KD composition green. |
 | 019 | Despite its filename, Gemma 3 **4B** phase-1 diagonal recipe with pageable CPU activations, bounded pinning, small batches, retry, reports, and KD | Streaming/resource architecture, activation retention/GC, phase-1 math/report contracts | Partial replacement | This is the critical 4B migration canary: pin the model/datasets, run interruption/resume and bounded-memory compression, evaluate, pack, and compare before adding a supported runfile. |
 
-There are no unnumbered gaps between 001 and 019. Native rewrite runfiles now exist for validated Experiments 008,
-011, 013, and 018. The `000_experiment_template.py` and frozen copies under `evidence/m0` are not migrations; every
+There are no unnumbered gaps between 001 and 019. Native rewrite runfiles now exist for validated Experiments 001,
+008, 011, 013, and 018. The `000_experiment_template.py` and frozen copies under `evidence/m0` are not migrations; every
 other inventory row still needs either a tested runfile or an explicit unsupported/deprecated diagnostic.
 
 The retained Experiment 011 migration result is `evidence/m9/011-generation-tps.json` (SHA-256
@@ -89,11 +89,10 @@ migration result, while M8's F32/F16 32-token campaign remains the release runti
 
 ## Migration order
 
-1. Continue after the completed 008/011/013/018 migrations by making 001 an explicitly historical baseline recipe.
-2. Compose 003/007 evaluation and 002 comparison/benchmark workflows from the M8 campaign/evaluator surfaces.
-3. Add the 005 sweep and 004 chat front ends without moving business logic into runfiles.
-4. Validate and migrate the unproven 006/009 and 014–017 ablations only when their comparison is useful.
-5. Run 010 (270M) and then the critical 012/019 4B bounded-memory canaries before declaring those model workflows
+1. Compose 003/007 evaluation and 002 comparison/benchmark workflows from the M8 campaign/evaluator surfaces.
+2. Add the 005 sweep and 004 chat front ends without moving business logic into runfiles.
+3. Validate and migrate the unproven 006/009 and 014–017 ablations only when their comparison is useful.
+4. Run 010 (270M) and then the critical 012/019 4B bounded-memory canaries before declaring those model workflows
    supported.
 
 The inventory is complete when every row either has a tested thin replacement or an explicit unsupported/deprecated
