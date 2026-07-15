@@ -27,12 +27,12 @@ recipe/archive disposition so their chronology and intent remain discoverable.
 | 005 | Four-sample/128-token calibration-shrinkage proxy sweep | Canonical calibration statistics, shrinkage policies, cached calibration artifacts | Partial replacement | Add the reusable sweep driver and structured comparison output; no quantization rerun should be required per shrinkage point. |
 | 006 | 1B compression with 0.1% BF16 Fisher-salient outliers outside the bit budget | Fisher outlier selector, typed outlier storage/cost, resident composition | Implemented, needs recipe validation | Add exact recipe/runfile and a real Fisher-outlier comparison; retained v28 evidence uses residual selection instead. |
 | 007 | Cached WikiText-2 and six-task quality sweep across Gemma 1B/4B checkpoint families | Pinned PIQA/ARC/HellaSwag/WinoGrande/BoolQ evaluators, exact PPL, semantic caches, campaign reporting | Partial replacement | Add full multi-model evaluation command/runfile and complete real 4B evaluation; M8.5 proves task inputs/evaluator behavior, not all release-candidate task scores. |
-| 008 | 1B free residual-outlier recipe; BF16, all layers, 0.1%, no budget charge | Residual probe/outlier path and v28 resident recipe | Validated replacement | Add numbered recipe/runfile; explicitly preserve `charge_to_bit_budget=false` as an ablation rather than a default. |
+| 008 | 1B free residual-outlier recipe; BF16, all layers, 0.1%, no budget charge | Residual probe/outlier path, canonical recipe, and zero-argument runfile | Validated and migrated | Keep the exact 0.80/1.15 rank bounds, 1e-3 non-factorized early stop, and `charge_to_bit_budget=false` recipe-delta test green. |
 | 009 | Budgeted residual outliers; selective attention/down projections, rowwise int8 values | Residual selector, layer patterns, charged bit cost, int8 outlier values/scales, packed runtime | Implemented, needs recipe validation | Run exact selective/int8 recipe and compare BPW/quality before promoting its runfile. |
 | 010 | Gemma 3 270M free residual-outlier compression | Gemma3 adapter and size-independent resident pipeline | Implemented, needs recipe validation | Pin/download the 270M revision and run adapter, compression, quality, packing, and runtime canaries before claiming model support. |
 | 011 | Standalone generation TPS benchmark with prompt, warmup, latency, memory, and JSON | Protocol-matched `benchmark_runtime.py`, production bundle validation, M7 llama.cpp comparison | Validated replacement | Add numbered wrapper over the shared benchmark service; preserve workload identity rather than the legacy checkpoint default. |
 | 012 | Gemma 3 4B residual-outlier compression using CPU activations, small batches, cleanup, and top-k KD | Resource planner, pageable/mmap activation stores, block streaming/resume, top-k global distillation | Partial replacement | Complete a pinned 4B bounded-memory canary and verify quality/runtime; current 1B evidence cannot satisfy this model-size gate. |
-| 013 | Improved 1B free-residual recipe with 0.90/1.10 rank bounds, MLP-first tuning, full batches, and no early stop | Complete v28 resident parity recipe and evidence | Validated replacement | Add exact numbered recipe/runfile and point it at canonical config rather than duplicated constants. |
+| 013 | Improved 1B free-residual recipe with 0.90/1.10 rank bounds, MLP-first tuning, full batches, and no early stop | Complete resident parity mechanisms/evidence, canonical recipe, and zero-argument runfile | Validated and migrated | Keep its exact pre-Phase-1 tuning recipe and its documented delta from 008 under test. |
 | 014 | Phase-1 tapered non-factorized tuning, post-block scale refit, 4K dense-Hessian sample | Per-position epoch schedule, post-block refit, dense-Hessian objective/workspace planning | Implemented, needs recipe validation | Execute the exact 4K-Hessian ablation against the diagonal v28 baseline and retain the structured weight/rank tables. |
 | 015 | Phase-1 65K dense Hessian with sibling-input reuse | Dense-Hessian sampling/regularization, reuse policy, workspace rejection | Implemented, needs recipe validation | Validate exact 65,536-token recipe and memory plan; never silently fall back to a diagonal objective. |
 | 016 | 65K Hessian safety correction: no sibling reuse, 20% diagonal blend, raw-error retry above cap | Hessian blend, independent sampling, retry thresholds/cap policy, diagnostics | Implemented, needs recipe validation | Migrate the recipe and run its safety comparison. Normalize the legacy filename containing ` copy` while preserving experiment number 016. |
@@ -40,8 +40,9 @@ recipe/archive disposition so their chronology and intent remain discoverable.
 | 018 | 1B phase-1 diagonal/no-Hessian recipe; closest retained quality/performance baseline | Complete v28 resident run, exact contemporary-legacy rank/trajectory/KD/PPL comparison, packed/runtime evidence; canonical recipe and zero-argument runfile | Validated and migrated | Keep the import-only recipe/request parity tests and shared resident/KD composition green. |
 | 019 | Despite its filename, Gemma 3 **4B** phase-1 diagonal recipe with pageable CPU activations, bounded pinning, small batches, retry, reports, and KD | Streaming/resource architecture, activation retention/GC, phase-1 math/report contracts | Partial replacement | This is the critical 4B migration canary: pin the model/datasets, run interruption/resume and bounded-memory compression, evaluate, pack, and compare before adding a supported runfile. |
 
-There are no unnumbered gaps between 001 and 019. There is also no current native rewrite experiment runfile for any
-of these numbers; the rewrite's `000_experiment_template.py` and frozen copies under `evidence/m0` are not migrations.
+There are no unnumbered gaps between 001 and 019. Native rewrite runfiles now exist for validated Experiments 008,
+013, and 018. The `000_experiment_template.py` and frozen copies under `evidence/m0` are not migrations; every other
+inventory row still needs either a tested runfile or an explicit unsupported/deprecated diagnostic.
 
 ## Cross-cutting disposition
 
@@ -80,8 +81,8 @@ of these numbers; the rewrite's `000_experiment_template.py` and frozen copies u
 
 ## Migration order
 
-1. Continue the validated compression-lineage migration after completed Experiment 018: add thin runfiles for 013/008
-   and the 011 benchmark using shared services; make 001 an explicitly historical baseline recipe.
+1. Continue after the completed 008/013/018 compression lineage: add the 011 benchmark runfile using shared services
+   and make 001 an explicitly historical baseline recipe.
 2. Compose 003/007 evaluation and 002 comparison/benchmark workflows from the M8 campaign/evaluator surfaces.
 3. Add the 005 sweep and 004 chat front ends without moving business logic into runfiles.
 4. Validate and migrate the unproven 006/009 and 014–017 ablations only when their comparison is useful.
