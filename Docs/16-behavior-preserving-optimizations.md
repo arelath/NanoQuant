@@ -1329,3 +1329,14 @@ WikiText-2 protocol reproduces PPL 453.5709857733353 over 8,128 scored tokens. T
 `b4f0c6270c4b59f8293c909ddeb21042ad1a2d7ee18601c77e4c57563c900487` with 87,072,592 weight bytes and
 87,507,442 physical bytes. Production graph validation retains the exact generation hash, zero fallback, and the
 unchanged 1,295,585,792-byte peak allocation.
+
+## Retained BF16 short-decode gap
+
+The migrated historical Experiment 002 provides a deliberately different BF16, 32-prompt/32-output workload from
+the F32/F16 production release campaign above. With one warmup and three retained repetitions, source Transformers
+measures 14.325 aggregate decode tokens/s, the logical factorized reference 7.938, and immutable packed production
+12.444. Packed production therefore remains 13.1% slower than the current BF16 source model on this workload even
+though it reduces peak allocation from 2,081,723,392 to 720,707,072 bytes and prepares all 182 linears with zero
+fallback. The accepted F32-specific fused/grouped/graph specializations are intentionally not enabled for BF16, so
+the release-campaign result must not be generalized to this protocol. No change is accepted from this observation
+alone; it is retained as the next measured BF16 optimization target after migration/correctness gates.

@@ -1,0 +1,529 @@
+{
+  "candidate": {
+    "run_output": "D:\\dev\\research\\NanoQuantRewrite\\evidence\\m4\\gemma-pageable-v28-four-block-canary",
+    "runtime_bundle": "D:\\dev\\research\\NanoQuantRewrite\\evidence\\m6\\gemma-pageable-v28-runtime-bundle",
+    "runtime_bundle_descriptor_sha256": "e5cef7236e2846a49129e991f8fc5efb660a9a8b8c71d9531590bed71739cc42"
+  },
+  "cases": [
+    {
+      "aggregate_throughput_per_second": 14.325401589532428,
+      "baseline_allocated_bytes": 2062845952,
+      "implementation": {
+        "attention": "eager",
+        "kind": "source"
+      },
+      "incremental_peak_allocated_bytes": 18877440,
+      "name": "base-transformers",
+      "output_token_sha256": [
+        "2c8c810b8e787106d9c1a829a53d6754d4f21b5c1263d409dc8254be763db202",
+        "d880a3b5e1ebe5b8f62c214da565919c235148063ed65a9ce3b84be7d841e58b",
+        "1fff00846d822b1982f81d29fac24f69a0fcbb726a4695e52139f4d3b5a3f630"
+      ],
+      "peak_allocated_bytes": 2081723392,
+      "peak_reserved_bytes": 2099249152,
+      "timing": {
+        "latency_seconds": {
+          "max": 2.2460395000016433,
+          "mean": 2.1639881999993427,
+          "min": 2.102795699996932,
+          "p10": 2.1108624399974363,
+          "p50": 2.1431293999994523,
+          "p90": 2.225457480001205,
+          "p99": 2.2439812980015996
+        },
+        "samples_seconds": [
+          2.102795699996932,
+          2.2460395000016433,
+          2.1431293999994523
+        ],
+        "throughput_per_second": {
+          "max": 14.742278577060638,
+          "mean": 14.336393310496561,
+          "min": 13.802072492481686,
+          "p10": 13.934623766374822,
+          "p50": 14.464828861947357,
+          "p90": 14.686788634037981,
+          "p99": 14.736729582758372
+        },
+        "unit_name": "decode_tokens",
+        "units_per_sample": 31
+      }
+    },
+    {
+      "aggregate_throughput_per_second": 7.938065539686629,
+      "baseline_allocated_bytes": 1961943552,
+      "implementation": {
+        "backend": "factorized",
+        "commit_identity": {
+          "config_hash": "sha256:ebe7e831e9a1f4bec5df3bb783359cafd0ddb316856e5f71df5e3b3d379f63db",
+          "model_hash": "sha256:32d5b5d041e98027bc7415107bc79b580f9cce407535b4e30134e8f8aed3b130",
+          "plan_hash": "sha256-8656b828a48e72f07799726b92c8a70b257f775c77f6c4bd5787686b524e8a9d"
+        },
+        "kind": "logical-frozen-reference"
+      },
+      "incremental_peak_allocated_bytes": 31428096,
+      "name": "frozen-factorized-reference",
+      "output_token_sha256": [
+        "b89002a1a11149ed2b039866101b04524fd4036b83b20dc6d10316493419d9e9",
+        "4b0e9bfc6837d660c69c900afdde9d1fe946010c6e7a761ae52b759d7ebde89c",
+        "c9402f9d19ae5d8d4da8cf02dfcd3df34ddbb2ea2f6113ee8575bf5f41917419"
+      ],
+      "peak_allocated_bytes": 1993371648,
+      "peak_reserved_bytes": 2287992832,
+      "timing": {
+        "latency_seconds": {
+          "max": 3.9490422000017134,
+          "mean": 3.905233566668661,
+          "min": 3.8573172000033082,
+          "p10": 3.867722020002839,
+          "p50": 3.9093413000009605,
+          "p90": 3.9411020200015625,
+          "p99": 3.948248182001698
+        },
+        "samples_seconds": [
+          3.8573172000033082,
+          3.9093413000009605,
+          3.9490422000017134
+        ],
+        "throughput_per_second": {
+          "max": 8.036673779375317,
+          "mean": 7.93880105130241,
+          "min": 7.850004742918815,
+          "p10": 7.865948720657672,
+          "p50": 7.929724631613102,
+          "p90": 8.015283949822873,
+          "p99": 8.034534796420072
+        },
+        "unit_name": "decode_tokens",
+        "units_per_sample": 31
+      }
+    },
+    {
+      "aggregate_throughput_per_second": 12.444013480159981,
+      "baseline_allocated_bytes": 701829632,
+      "implementation": {
+        "decode_backend": "cuda-packed-triton",
+        "decode_fallback_count": 0,
+        "kind": "immutable-packed-runtime",
+        "prefill_backend": "cuda-packed-triton",
+        "prefill_fallback_count": 0,
+        "replaced_linear_count": 182
+      },
+      "incremental_peak_allocated_bytes": 18877440,
+      "name": "packed-production",
+      "output_token_sha256": [
+        "80d5acf7b6ae20b80d8e1bb54fcaaa60c36aeaf84e443c6f02de73dc58fa65ac",
+        "4b0e9bfc6837d660c69c900afdde9d1fe946010c6e7a761ae52b759d7ebde89c",
+        "e150fb2af7ce89fa133f5f7cb25c3f159cc3af36b2bfdc8d6d1b45190e772840"
+      ],
+      "peak_allocated_bytes": 720707072,
+      "peak_reserved_bytes": 1321205760,
+      "timing": {
+        "latency_seconds": {
+          "max": 2.5162463999986358,
+          "mean": 2.491157699999652,
+          "min": 2.449121000001469,
+          "p10": 2.4609179400009453,
+          "p50": 2.5081056999988505,
+          "p90": 2.5146182599986786,
+          "p99": 2.51608358599864
+        },
+        "samples_seconds": [
+          2.5081056999988505,
+          2.5162463999986358,
+          2.449121000001469
+        ],
+        "throughput_per_second": {
+          "max": 12.657602462263567,
+          "mean": 12.445822088429699,
+          "min": 12.319938142789518,
+          "p10": 12.327935646278819,
+          "p50": 12.359925660236014,
+          "p90": 12.598067101858057,
+          "p99": 12.651648926223016
+        },
+        "unit_name": "decode_tokens",
+        "units_per_sample": 31
+      }
+    }
+  ],
+  "comparison": [
+    {
+      "name": "base-transformers",
+      "peak_allocated_ratio_vs_base": 1.0,
+      "speedup_vs_base": 1.0
+    },
+    {
+      "name": "frozen-factorized-reference",
+      "peak_allocated_ratio_vs_base": 0.9575583651797673,
+      "speedup_vs_base": 0.5541251664097832
+    },
+    {
+      "name": "packed-production",
+      "peak_allocated_ratio_vs_base": 0.34620693352904397,
+      "speedup_vs_base": 0.868667688119321
+    }
+  ],
+  "environment": {
+    "cuda_runtime": "13.0",
+    "device": "NVIDIA RTX 4000 Ada Generation Laptop GPU",
+    "device_total_memory_bytes": 12878086144,
+    "platform": "Windows-11-10.0.26200-SP0",
+    "python": "3.12.1",
+    "torch": "2.12.1+cu130",
+    "transformers": "4.51.3"
+  },
+  "experiment": {
+    "config_hash": "sha256:683ca10c5a2f3541ee3dfa44f7f5e753423597a09085fb6716ba371fd2cee3fc",
+    "launcher": {
+      "arguments": [],
+      "content_hash": "sha256:d3c0a2c12ff6bc7fea4cc3cce01281e2932c181076e7e7b9fd84f818bd44a6ef",
+      "experiment_number": 2,
+      "kind": "numbered_runfile",
+      "repository_relative_path": "experiments/002-benchmark-gemma-3-1b-it.py",
+      "revision": "da3a2bfbcbccb0a3fd007633788628969a9b42bf"
+    },
+    "resolved_config": {
+      "allocation": {
+        "bounds": {
+          "ceiling_fraction_of_uniform": 1.15,
+          "edge_block_boost": 0.15,
+          "floor_fraction_of_uniform": 0.8,
+          "multiple": 32
+        },
+        "retry": {
+          "allow_above_allocator_cap": false,
+          "enabled": true,
+          "extra_bit_budget_fraction": 0.02,
+          "maximum_attempts": 2,
+          "rank_increase_fraction": 0.25,
+          "thresholds": {
+            "raw_normalized_error": null,
+            "weighted_normalized_error": 0.5
+          }
+        },
+        "sensitivity_alpha": 0.5,
+        "strategy": "uniform",
+        "target_bpw": 1.0,
+        "utility_profile_artifact": null
+      },
+      "block_tuning": {
+        "epoch_loss_mode": "full_evaluation",
+        "factorized": {
+          "learning_rates": {
+            "bias": 1e-05,
+            "binary": 1e-05,
+            "outlier": null,
+            "scale": 1e-05
+          },
+          "loop": {
+            "batch_size": 8,
+            "early_stop_relative_tolerance": null,
+            "enabled": true,
+            "epochs": 8
+          },
+          "skip_if_relative_loss_jump_below": null
+        },
+        "layer_order": [],
+        "microbatch_size": null,
+        "non_factorized": {
+          "epochs_by_layer_position": [],
+          "loop": {
+            "batch_size": 8,
+            "early_stop_relative_tolerance": null,
+            "enabled": true,
+            "epochs": 8
+          },
+          "optimizer": {
+            "learning_rate": 0.0001,
+            "name": "adamw",
+            "weight_decay": 0.0
+          }
+        },
+        "post_block_refit": {
+          "batch_size": null,
+          "bias_learning_rate": null,
+          "enabled": false,
+          "epochs": 0,
+          "outlier_learning_rate": null,
+          "scale_learning_rate": null
+        },
+        "reset_seed_each_stage": false,
+        "restore_best_state": true
+      },
+      "calibration": {
+        "accumulation_dtype": "float32",
+        "batch_size": 1,
+        "fallback": {
+          "on_cuda_oom": [
+            "cpu_offload",
+            "forward_only",
+            "fail"
+          ]
+        },
+        "method": "online_fisher",
+        "objective": {
+          "block_size": null,
+          "kind": "diagonal",
+          "low_rank": null,
+          "regularization": {
+            "diagonal_blend": 0.0,
+            "diagonal_damp_fraction": 0.01,
+            "identity_shrinkage": 0.0,
+            "jitter_attempts": 5
+          },
+          "sampling": {
+            "batch_size": 1,
+            "max_sequences": null,
+            "max_tokens_per_layer": 4096,
+            "reuse_sibling_inputs": false
+          }
+        },
+        "sample_count": 128,
+        "shrinkage": 0.4
+      },
+      "dataset": {
+        "cache_tokenized": true,
+        "formatting": "model_default",
+        "prepared_artifact": null,
+        "prepared_root": null,
+        "selection_seed": 0,
+        "shuffle": true,
+        "sources": [
+          {
+            "name": "wikitext2",
+            "revision": null,
+            "split": "train",
+            "subset": null,
+            "weight": 1.0
+          }
+        ]
+      },
+      "distillation": {
+        "batch_size": 1,
+        "enabled": false,
+        "epochs": 8,
+        "gradient_checkpointing": true,
+        "learning_rate": 1e-05,
+        "loss": "top_k",
+        "maximum_tokens_per_batch": 512,
+        "optimizer_version": "legacy-optimi-adamw-v1",
+        "sampling_version": "legacy-python-device-rng-v1",
+        "teacher_targets_artifact": null,
+        "temperature": 1.0,
+        "token_chunk_size": 128,
+        "top_k": 64,
+        "vocabulary_chunk_size": 8192,
+        "weight_decay": 0.0
+      },
+      "evaluation": {
+        "baseline_run": null,
+        "default_tier": "quick",
+        "few_shot": 0,
+        "gates": [],
+        "inline_quality": true,
+        "inline_quality_samples": 1,
+        "inline_quality_tokens": 8,
+        "sample_limit": null,
+        "suites": [
+          "runtime-short-decode-v1"
+        ]
+      },
+      "factorization": {
+        "admm": {
+          "convergence_check_interval": 100,
+          "early_stop_tolerance": null,
+          "inner_iterations": 5,
+          "outer_iterations": 800,
+          "penalty_schedule": "cubic",
+          "regularization": 0.03,
+          "transpose_wide": false
+        },
+        "compute_dtype": "bfloat16",
+        "implementation": "nanoquant_admm",
+        "scale_fit": {
+          "alternating_passes": 2,
+          "chunk_rows": 512,
+          "enabled": true,
+          "epsilon": 1e-08,
+          "rollback_on_regression": true
+        },
+        "solve_dtype": "float32"
+      },
+      "intent": {
+        "baseline_run": "legacy-experiment-002",
+        "experiment_number": 2,
+        "hypothesis": "The immutable packed runtime replaces the legacy mutable GEMV case.",
+        "name": "002-benchmark-gemma-3-1b-it",
+        "owner": null,
+        "purpose": "Compare source, logical frozen, and production packed short-decode behavior.",
+        "tags": [
+          "gemma-3-1b-it",
+          "runtime",
+          "decode",
+          "paired",
+          "memory"
+        ]
+      },
+      "model": {
+        "load_dtype": "bfloat16",
+        "revision": "dcc83ea841ab6100d6b47a070329e1ba4cf78752",
+        "sequence_length": 128,
+        "source": "google/gemma-3-1b-it",
+        "tokenizer_revision": "dcc83ea841ab6100d6b47a070329e1ba4cf78752",
+        "tokenizer_source": null,
+        "trust_remote_code": false
+      },
+      "observability": {
+        "block_snapshot_samples": 4,
+        "block_snapshot_tokens": 512,
+        "capture_cuda_trace": false,
+        "console_level": "info",
+        "diagnostic_fixture_policy": "on_failure",
+        "event_level": "info",
+        "loss_denominator_floor": 1e-08,
+        "record_admm_steps": false,
+        "record_block_loss_snapshots": true,
+        "record_resource_interval_seconds": 5.0,
+        "record_weight_reconstruction_table": true
+      },
+      "outliers": {
+        "charge_to_bit_budget": true,
+        "count_multiple": 1,
+        "fraction": 0.0,
+        "layer_patterns": [
+          "*"
+        ],
+        "removed_column_importance": "zero",
+        "residual_probe": {
+          "chunk_rows": 512,
+          "iterations": 80
+        },
+        "selector": "none",
+        "storage_dtype": "bfloat16"
+      },
+      "output": {
+        "artifact_root": ".nanoquant/artifacts",
+        "report_formats": [
+          "markdown",
+          "json"
+        ],
+        "retain_temporary_artifacts": false,
+        "run_root": "runs",
+        "temporary_root": null
+      },
+      "packing": {
+        "align_blocks_to_shards": true,
+        "backend_layouts": [
+          "cuda-binary-v1"
+        ],
+        "embeddings": {
+          "bits": 8,
+          "group_size": null
+        },
+        "logical_format": "nanoquant-v1",
+        "shard_size_gib": 2.0
+      },
+      "profiling": {
+        "cuda_sample_every": 16,
+        "cuda_timing": false,
+        "emit_span_events": false,
+        "level": "macro",
+        "memory_counters": false,
+        "raw_samples_per_phase": 64,
+        "trace_blocks": [],
+        "trace_layers": []
+      },
+      "reproducibility": {
+        "allow_nondeterministic_kernels": false,
+        "deterministic": true,
+        "seed": 0
+      },
+      "runtime": {
+        "activations": {
+          "batch_size": 8,
+          "directory": null,
+          "kind": "auto",
+          "prefetch_batches": 1
+        },
+        "block_forward_batch_size": 8,
+        "checkpoints": {
+          "activation_retention": "rolling",
+          "commit_granularity": "layer",
+          "enabled": true,
+          "keep_attempt_artifacts": false,
+          "verify_on_resume": true
+        },
+        "compute_device": "cuda:0",
+        "executor": "auto",
+        "on_cuda_oom": [
+          "reduce_batch_size",
+          "move_activations_down_one_tier",
+          "fail"
+        ],
+        "resources": {
+          "cpu_memory_gib": null,
+          "gpu_memory_gib": null,
+          "pinned_memory_gib": 1.0,
+          "temporary_disk_gib": null,
+          "workspace_memory_gib": null
+        },
+        "source_streaming": {
+          "prefer_memory_mapping": true,
+          "prefetch_blocks": 0,
+          "verify_tensor_hashes": true
+        }
+      },
+      "schema_version": 1
+    }
+  },
+  "legacy_reference": {
+    "cases": [
+      {
+        "aggregate_throughput_per_second": 8.094968,
+        "name": "fp_original",
+        "peak_allocated_bytes": 2081724928,
+        "peak_reserved_bytes": 2099249152
+      },
+      {
+        "aggregate_throughput_per_second": 8.297656,
+        "name": "nq_eager",
+        "peak_allocated_bytes": 1999090176,
+        "peak_reserved_bytes": 2040528896
+      },
+      {
+        "aggregate_throughput_per_second": 7.127174,
+        "name": "nq_gemv_kernel",
+        "peak_allocated_bytes": 719535616,
+        "peak_reserved_bytes": 734003200
+      }
+    ],
+    "disposition": "historical results use the legacy smoke checkpoint and mutable eager/GEMV paths; current cases use the validated v28 candidate and immutable packed runtime",
+    "summary_sha256": "fb54cfd9f8244b8a6dec30dbd8450b8a8cda729c728ab4959ddc9112954dfaa8"
+  },
+  "model": {
+    "revision": "dcc83ea841ab6100d6b47a070329e1ba4cf78752",
+    "snapshot": "C:\\Users\\pdykstra\\.cache\\huggingface\\hub\\models--google--gemma-3-1b-it\\snapshots\\dcc83ea841ab6100d6b47a070329e1ba4cf78752",
+    "source": "google/gemma-3-1b-it"
+  },
+  "passed": true,
+  "peak_host_bytes": 3662835712,
+  "protocol": {
+    "case_lifetime": "sequential-load-measure-release; no model overlap",
+    "dtype": "bfloat16",
+    "fill_token_id": 29104,
+    "max_new_tokens": 32,
+    "prompt": "Explain why compact language models are useful for local inference.",
+    "prompt_token_sha256": "7e9b0b63034b39a74fdaabdb7cdea52cc8a8c5f597a026df59c4a10bb6943063",
+    "prompt_tokens": 32,
+    "repetitions": 3,
+    "seed": 0,
+    "temperature": 0.8,
+    "timed_decode_tokens": 31,
+    "timing_boundary": "legacy-compatible wall timer after unsynchronized prefill; includes token-2-through-token-N forward and sampling work",
+    "top_k": 32,
+    "warmups": 1
+  },
+  "schema_version": 1,
+  "wall_seconds": 51.80847729999732
+}

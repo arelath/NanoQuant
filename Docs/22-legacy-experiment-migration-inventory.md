@@ -21,7 +21,7 @@ recipe/archive disposition so their chronology and intent remain discoverable.
 | No. | Legacy purpose and distinguishing behavior | Rewrite replacement | Status | Remaining migration work |
 | ---: | --- | --- | --- | --- |
 | 001 | Baseline Gemma 3 1B compression; 256-sample UltraChat/WikiText online calibration and CUDA resident activations | Canonical historical recipe and zero-argument resident runfile over native immutable artifacts | Validated and migrated | Keep its original q/v/o/k/MLP order, 0.80/1.15 bounds, no-outlier path, and 1e-3 early-stop delta test green; the legacy executable pickle is deliberately not an output format. |
-| 002 | Paired original-versus-NanoQuant short decode benchmark with CSV output | Runtime-bundle loader, `benchmark_runtime.py`, typed runtime metrics and comparison reports | Partial replacement | Add one paired benchmark application/CLI command and numbered runfile; current tools separately measure source, packed runtime, and llama.cpp. |
+| 002 | Paired original-versus-NanoQuant short decode benchmark with CSV output | Typed three-case benchmark/application CLI, canonical recipe, zero-argument runfile, and retained real comparison | Validated and migrated | Keep the exact 32-token prompt/output, top-k/temperature, one-warmup/three-repetition timing boundary, sequential model lifetime, raw samples, and memory regression tests green. |
 | 003 | Original-versus-quantized WikiText-2 plus small lm-eval smoke suite | Shared typed base/frozen evaluator, pinned task inputs, canonical recipe, zero-argument runfile, and retained real comparison | Validated and migrated | Keep the legacy eager-attention/BF16 scoring and choice-character `acc_norm` regression tests green; candidate quality is reported independently of evaluator parity. |
 | 004 | Interactive Gemma chat over the custom GEMV path, chat-template history trimming, EOS/end-of-turn handling | Packed runtime generation, chat-template tokenizer assets, exact stopping and long-context cache | Partial replacement | Implement the interactive `chat` front end and history/context trimming policy; do not revive mutable train/runtime `NanoQuantLinear` mode switching. |
 | 005 | Four-sample/128-token calibration-shrinkage proxy sweep | Canonical calibration statistics, shrinkage policies, cached calibration artifacts | Partial replacement | Add the reusable sweep driver and structured comparison output; no quantization rerun should be required per shrinkage point. |
@@ -41,8 +41,18 @@ recipe/archive disposition so their chronology and intent remain discoverable.
 | 019 | Despite its filename, Gemma 3 **4B** phase-1 diagonal recipe with pageable CPU activations, bounded pinning, small batches, retry, reports, and KD | Streaming/resource architecture, activation retention/GC, phase-1 math/report contracts | Partial replacement | This is the critical 4B migration canary: pin the model/datasets, run interruption/resume and bounded-memory compression, evaluate, pack, and compare before adding a supported runfile. |
 
 There are no unnumbered gaps between 001 and 019. Native rewrite runfiles now exist for validated Experiments 001,
-003, 008, 011, 013, and 018. The `000_experiment_template.py` and frozen copies under `evidence/m0` are not migrations; every
+002, 003, 008, 011, 013, and 018. The `000_experiment_template.py` and frozen copies under `evidence/m0` are not migrations; every
 other inventory row still needs either a tested runfile or an explicit unsupported/deprecated diagnostic.
+
+The retained Experiment 002 migration result is `evidence/m9/002-gemma-3-1b-it-short-decode.json` (SHA-256
+`a32f0ffc092d426842e50c97b61245f561fae60aa3884e79bfe4c5979d7feb7c`). It reproduces the historical raw prompt,
+non-special-token extension to exactly 32 prompt tokens, 32 generated tokens, top-k 32, temperature 0.8, seed zero,
+one warmup, three measurements, and the legacy unsynchronized-prefill decode boundary. Models never overlap in
+device memory. Current aggregate throughput is 14.33 tokens/s for source Transformers, 7.94 for the logical
+factorized reference, and 12.44 for immutable packed production. Packed production prepares all 182 linears with
+zero fallback and peaks at 720,707,072 allocated bytes: 65.4% below the current base and within 0.2% of the retained
+legacy GEMV allocation. Its throughput is nevertheless 13.1% below the current BF16 base, so this migration closes
+the workflow gap while retaining a real BF16 performance gap for later optimization.
 
 The retained Experiment 011 migration result is `evidence/m9/011-generation-tps.json` (SHA-256
 `e7933acba9014ae9adb9e2d456b9dd1c60a1e3bcd9ecf815192ce9c1327fe981`). It resolves the pinned Gemma revision,
@@ -97,7 +107,7 @@ different legacy outlier checkpoint used by historical 003.
 
 ## Migration order
 
-1. Compose the 002 paired benchmark and finish 007 only with its required cached 1B/4B sweep.
+1. Finish 007 only with its required cached 1B/4B sweep.
 2. Add the 005 sweep and 004 chat front ends without moving business logic into runfiles.
 3. Validate and migrate the unproven 006/009 and 014–017 ablations only when their comparison is useful.
 4. Run 010 (270M) and then the critical 012/019 4B bounded-memory canaries before declaring those model workflows

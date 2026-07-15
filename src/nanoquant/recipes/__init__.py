@@ -1,6 +1,7 @@
 """Canonical promoted experiment recipes."""
 
 from .experiment001 import EXPERIMENT_001_CONFIG
+from .experiment002 import EXPERIMENT_002_BENCHMARK, EXPERIMENT_002_CONFIG
 from .experiment003 import EXPERIMENT_003_CONFIG, EXPERIMENT_003_EVALUATION
 from .experiment008 import EXPERIMENT_008_CONFIG
 from .experiment011 import EXPERIMENT_011_BENCHMARK, EXPERIMENT_011_CONFIG
@@ -9,6 +10,8 @@ from .experiment018 import EXPERIMENT_018_CONFIG
 
 __all__ = [
     "EXPERIMENT_001_CONFIG",
+    "EXPERIMENT_002_BENCHMARK",
+    "EXPERIMENT_002_CONFIG",
     "EXPERIMENT_003_CONFIG",
     "EXPERIMENT_003_EVALUATION",
     "EXPERIMENT_008_CONFIG",

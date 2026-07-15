@@ -1,5 +1,28 @@
 # Milestone 9 migration evidence
 
+## Experiment 002 paired short-decode migration
+
+`002-gemma-3-1b-it-short-decode.json` is the canonical three-case migration of the historical original/eager/GEMV
+benchmark. It preserves the raw prompt, legacy non-special-token fill to 32 prompt tokens, 32 generated tokens,
+top-k 32, temperature 0.8, seed zero, one warmup, three measurements, and the historical timer boundary after an
+unsynchronized prefill. Each model is loaded, measured, and released before the next model, so source, logical, and
+packed representations never overlap in VRAM.
+
+| Current case | Aggregate decode tokens/s | Peak allocated bytes | Ratio vs current base |
+| --- | ---: | ---: | ---: |
+| Source Transformers | 14.325 | 2,081,723,392 | 1.000x throughput / 1.000x memory |
+| Logical factorized reference | 7.938 | 1,993,371,648 | 0.554x / 0.958x |
+| Immutable packed production | 12.444 | 720,707,072 | 0.869x / 0.346x |
+
+Packed production prepares all 182 linears on the CUDA packed backend with zero prefill or decode fallback. Its peak
+allocation is 65.4% below the current base and within 0.2% of legacy GEMV's retained 719,535,616 bytes. The packed
+case is still 13.1% slower than the current BF16 base on this short context; this is retained as a performance gap,
+not turned into a false parity claim. The legacy eager/GEMV rows used a different smoke checkpoint and mutable
+runtime modes, so their values remain historical references rather than paired numerical-checkpoint evidence.
+
+The result is 16,878 bytes with SHA-256
+`a32f0ffc092d426842e50c97b61245f561fae60aa3884e79bfe4c5979d7feb7c`.
+
 ## Experiment 011 generation-throughput migration
 
 `011-generation-tps.json` is the canonical zero-argument migration result for legacy Experiment 011. It uses:
