@@ -81,6 +81,12 @@ A daemon thread owned by the V3 run session emits one `resource.sample` info eve
 2026-07-14T18:40:12.031Z 0000412 INFO    resource resource.sample cuda.allocated_bytes=18734252032 cuda.device_free_bytes=2147483648 cuda.device_total_bytes=25757220864 cuda.device_used_bytes=23609737216 cuda.reserved_bytes=21474836480 host.working_set_bytes=41875931136
 ```
 
+On Windows, the standard sample also includes `wddm.dedicated_bytes`, `wddm.shared_bytes`, and their process-lifetime
+peaks. These counters are not interchangeable with PyTorch allocator bytes: pinned CPU allocations remain
+GPU-addressable and are charged as WDDM shared GPU memory even after their tensors die if PyTorch retains the blocks
+in its pinned-host cache. Recording both vocabularies prevents a bounded CUDA allocator from hiding system-memory
+paging pressure.
+
 - **Cadence:** the existing `ObservabilityConfig.record_resource_interval_seconds` (default 5.0) finally becomes effective. Values ≤ 0 disable the sampler; validation (`OBS004`) rejects non-finite values and warns below 1.0 s to keep volume bounded. At the default, a 40-hour resident run adds ~29k events ≈ 10 MB of JSONL — negligible next to the evidence already retained.
 - **Threading:** the V3 `EventRouter` is thread-safe under its per-process lock, so a sampler thread may emit directly. The sampler must never touch the `Profiler`, which is thread-confined by design.
 - **Failure policy:** mirrors V3's optional-destination quarantine. The first sampling exception stops the thread and emits one `observability.sampler_disabled` warning with `error_type`; the run is untouched. Sampler emit failures are already covered by router policy.

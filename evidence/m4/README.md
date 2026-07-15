@@ -597,3 +597,25 @@ makes `ADMMConfig.transpose_wide` explicit: `false` is the system-validated prod
 remains available to `tools/compare_admm_factorization.py` and `--transpose-wide` for exact legacy-source replay.
 A fresh native-orientation v27 prefix is required before extending the run or superseding accepted v19/v21
 end-to-end evidence.
+
+### Native orientation and WDDM shared-memory correction (v27/v28)
+
+The native-orientation v27 canary under `gemma-native-v27-four-block-canary` completed four durable blocks with
+losses `[1.3784899712, 3.5971968174, 4.8458909988, 77.5942077637]`. Blocks 0 and 1 reproduced the accepted
+native prefix, but blocks 2 and 3 were `-15.60%` and `+77.59%` from contemporary legacy, respectively. All 28
+ranks still match (rank sum 16,608), effective BPW is 1.018013, 153 reachable artifacts validate, and the four
+blocks took 1,607.61 seconds. This is better than the rejected transposed block-3 boundary but still fails the
+trajectory gate, so v27 is not eligible for a full extension.
+
+The run also exposed a separate Windows memory regression that CUDA allocator counters could not see. Its CUDA
+reservation stayed at 5.5--5.8 GiB, while Windows reported roughly 10 GiB of shared GPU memory and host working
+set reached 15.15 GiB. Full resident activation streams had been pinned for transfer overlap, and PyTorch retained
+freed stream-sized blocks in its pinned-host cache. A controlled 512 MiB probe held 0.57 GiB WDDM shared after the
+tensor was deleted and fell to 0.07 GiB only after the host cache was emptied.
+
+Resident algorithm version 28 keeps complete activation generations pageable, stages only two batches in pinned
+host slots, releases unused pinned-host cache after every durable block commit, and records per-process WDDM
+dedicated/shared current and peak bytes. Two full Gemma-sized pageable streams (2.25 GiB) exercised the bounded
+transfer path at 0.326 GiB WDDM shared and returned to 0.074 GiB after release. The v27 compact evidence remains in
+`validation.json` and `legacy-comparison.{json,md}`; a v28 canary must confirm both bounded shared memory and the
+unchanged numerical trajectory before the next algorithmic diagnosis.

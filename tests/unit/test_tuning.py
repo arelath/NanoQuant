@@ -446,8 +446,8 @@ def test_micro_profiling_preserves_tuning_result_and_records_hot_loop_phases() -
     assert counters["tuning.best_state_clones"]["total"] >= 1
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="pinned tuning staging requires a GPU")
-def test_pinned_shuffle_staging_matches_pageable_tuning_bitwise() -> None:
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="bounded tuning staging requires a GPU")
+def test_bounded_shuffle_staging_accepts_pageable_and_pinned_sources_bitwise() -> None:
     pageable_model = Hybrid().cuda().to(torch.bfloat16)
     pinned_model = deepcopy(pageable_model)
     inputs = torch.randn(8, 3, dtype=torch.bfloat16, generator=torch.Generator().manual_seed(17))
@@ -473,3 +473,4 @@ def test_pinned_shuffle_staging_matches_pageable_tuning_bitwise() -> None:
         assert torch.equal(pageable_parameter, pinned_parameter)
     del pageable_model, pinned_model
     torch.cuda.empty_cache()
+    torch._C._accelerator_emptyHostCache()

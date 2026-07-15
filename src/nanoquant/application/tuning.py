@@ -198,8 +198,6 @@ def _pinned_batch_stager(
         device.type != "cuda"
         or request.inputs.device.type != "cpu"
         or request.targets.device.type != "cpu"
-        or not request.inputs.is_pinned()
-        or not request.targets.is_pinned()
     ):
         return None
     return _PinnedBatchStager(request.inputs, request.targets, maximum_batch_size, device)

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import gc
+import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -15,9 +17,10 @@ from nanoquant.infrastructure.device_memory import (
     ResourceEventSink,
     ResourceSampler,
     capture_oom_forensics,
+    release_cached_host_memory,
     sample_device_memory,
 )
-from nanoquant.infrastructure.resource_usage import ProcessMemorySnapshot
+from nanoquant.infrastructure.resource_usage import GpuProcessMemorySnapshot, ProcessMemorySnapshot
 from nanoquant.ports.event_sink import Event, Severity
 
 
@@ -55,6 +58,60 @@ def test_memory_sample_does_not_initialize_cuda(monkeypatch: pytest.MonkeyPatch)
         "host.private_bytes": 30,
         "host.peak_private_bytes": 40,
     }
+
+
+def test_memory_sample_includes_wddm_dedicated_and_shared_usage(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        device_memory_module,
+        "process_memory_snapshot",
+        lambda: ProcessMemorySnapshot(10, 20, 30, 40),
+    )
+    monkeypatch.setattr(
+        device_memory_module,
+        "gpu_process_memory_snapshot",
+        lambda: GpuProcessMemorySnapshot(50, 60, 70, 80),
+    )
+    monkeypatch.setattr(torch.cuda, "_initialized", True)
+    monkeypatch.setattr(torch.cuda, "memory_stats", lambda: {})
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda: (90, 100))
+
+    sample = sample_device_memory()
+
+    assert sample["wddm.dedicated_bytes"] == 50
+    assert sample["wddm.shared_bytes"] == 60
+    assert sample["wddm.peak_dedicated_bytes"] == 70
+    assert sample["wddm.peak_shared_bytes"] == 80
+
+
+def test_release_cached_host_memory_uses_accelerator_cache_api(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = 0
+
+    def release() -> None:
+        nonlocal calls
+        calls += 1
+
+    monkeypatch.setattr(torch._C, "_accelerator_emptyHostCache", release)
+
+    assert release_cached_host_memory()
+    assert calls == 1
+
+
+@pytest.mark.skipif(os.name != "nt" or not torch.cuda.is_available(), reason="WDDM CUDA counters require Windows")
+def test_wddm_shared_usage_exposes_and_releases_pinned_host_cache() -> None:
+    torch.zeros(1, device="cuda")
+    release_cached_host_memory()
+    value = torch.empty(128 * 2**20, dtype=torch.uint8, pin_memory=True)
+    value.fill_(1)
+    live = sample_device_memory()
+    del value
+    gc.collect()
+    cached = sample_device_memory()
+    release_cached_host_memory()
+    released = sample_device_memory()
+
+    assert {"wddm.dedicated_bytes", "wddm.shared_bytes"} <= live.keys()
+    assert cached["wddm.shared_bytes"] >= live["wddm.shared_bytes"] - 2**20
+    assert released["wddm.shared_bytes"] <= cached["wddm.shared_bytes"] - 64 * 2**20
 
 
 def test_nested_peak_windows_fold_inner_resets_into_parent() -> None:

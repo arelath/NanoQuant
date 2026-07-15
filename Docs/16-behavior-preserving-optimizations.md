@@ -189,6 +189,21 @@ trace showed 2.3--2.6 GB live CUDA tensors and a 7.70 GB stable allocator reserv
 tune. Keeping those measurements distinct prevents host/virtual commit from being misdiagnosed as an impossible
 26 GiB device allocation while still treating the real 7.7--8.25 GiB driver footprint as an optimization target.
 
+**Full-stream pinning rejected; bounded staging retained (2026-07-14).** Windows Task Manager later exposed a
+meter this analysis did not record: the resident process reached roughly 10 GiB of WDDM shared GPU memory and
+degraded desktop performance even though CUDA reservation stayed at 5.5--5.8 GiB. A controlled 512 MiB probe
+reported 0.57 GiB shared while the pinned tensor was live, remained at 0.57 GiB after the tensor was deleted, and
+fell to 0.07 GiB only after PyTorch's accelerator host cache was emptied. Full 256x2048x1152 activation streams
+must therefore not be pinned on WDDM.
+
+The retained design keeps complete teacher/compressed activation streams in pageable CPU memory and copies only
+the next two batches into fixed pinned host slots before H2D. Shuffled tuning uses the same bounded rule. A
+two-stream Gemma-sized transfer held 2.25 GiB of pageable source data while WDDM shared use was only 0.326 GiB
+(0.074 GiB after the block-boundary host-cache release), so shared use now scales with batch size rather than
+dataset size. Periodic resource events also record per-process WDDM dedicated/shared current and peak bytes. This
+supersedes the earlier full-stream-pinning disposition while retaining the fixed-device-slot and copy/compute
+overlap work.
+
 ### [x] 3.2 Foreach ParityAdamW (S0)
 
 **Where.** [parity_adamw.py:66–93](../src/nanoquant/application/parity_adamw.py) — a Python loop over

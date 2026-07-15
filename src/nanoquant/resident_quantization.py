@@ -111,7 +111,7 @@ from nanoquant.infrastructure.commits import (
     retire_block_activations,
 )
 from nanoquant.infrastructure.device_lease import acquire_device_lease
-from nanoquant.infrastructure.device_memory import PeakWindow
+from nanoquant.infrastructure.device_memory import PeakWindow, release_cached_host_memory
 from nanoquant.infrastructure.environment import capture_environment
 from nanoquant.infrastructure.model_adapters import TransformersModelAdapter, adapter_for_config
 from nanoquant.infrastructure.profiling import profiled_run
@@ -136,7 +136,7 @@ from nanoquant.infrastructure.tuning_checkpoint import (
 from nanoquant.ports.event_sink import EventSink
 from nanoquant.ports.model_adapter import ModelAdapter
 
-RESIDENT_ALGORITHM_VERSION = 27
+RESIDENT_ALGORITHM_VERSION = 28
 
 
 @contextmanager
@@ -447,11 +447,7 @@ def _run_block_batched(
                 output = adapter.run_block(block, input_batch, **metadata)
             if result is None:
                 shape = (inputs.shape[0], *output.shape[1:])
-                result = (
-                    torch.empty(shape, device=destination, dtype=output.dtype, pin_memory=True)
-                    if destination.type == "cpu" and compute_device.type == "cuda"
-                    else torch.empty(shape, device=destination, dtype=output.dtype)
-                )
+                result = torch.empty(shape, device=destination, dtype=output.dtype)
             with recorder.phase("d2h" if destination.type == "cpu" and output.device.type == "cuda" else "store"):
                 result[start:end].copy_(output)
                 if destination.type == "cpu" and output.device.type == "cuda":
@@ -470,11 +466,7 @@ def _run_block_batched(
         output = adapter.run_block(block, input_batch, **metadata)
         if result is None:
             shape = (inputs.shape[0], *output.shape[1:])
-            result = (
-                torch.empty(shape, device=destination, dtype=output.dtype, pin_memory=True)
-                if destination.type == "cpu" and compute_device.type == "cuda"
-                else torch.empty(shape, device=destination, dtype=output.dtype)
-            )
+            result = torch.empty(shape, device=destination, dtype=output.dtype)
         result[start:end].copy_(output)
     if result is None:
         raise ValueError("cannot run a block over empty inputs")
@@ -498,11 +490,7 @@ def _run_prefix_batched(
             output = adapter.run_prefix(model, tokens[start:end])
             if result is None:
                 shape = (tokens.shape[0], *output.shape[1:])
-                result = (
-                    torch.empty(shape, device=destination, dtype=output.dtype, pin_memory=True)
-                    if destination.type == "cpu" and output.device.type == "cuda"
-                    else torch.empty(shape, device=destination, dtype=output.dtype)
-                )
+                result = torch.empty(shape, device=destination, dtype=output.dtype)
             result[start:end].copy_(output)
     if result is None:
         raise ValueError("cannot run a prefix over empty tokens")
@@ -1435,9 +1423,6 @@ def _restore_committed_state(
                     teacher_inputs, compressed_inputs = load_block_activations(
                         committed_blocks[-1][0], artifacts, "cpu"
                     )
-                    if request.device.startswith("cuda"):
-                        teacher_inputs = teacher_inputs.pin_memory()
-                        compressed_inputs = compressed_inputs.pin_memory()
                 else:
                     teacher_inputs = initial_inputs
                     compressed_inputs = initial_inputs
@@ -2543,6 +2528,15 @@ def _run_resident_quantization_impl(
             },
         )
         new_block_commits += 1
+        if request.device.startswith("cuda"):
+            released = release_cached_host_memory()
+            cast(Any, events).emit(
+                "resource",
+                "info",
+                "host_pinned_cache.released",
+                block=block_index,
+                supported=released,
+            )
         if (
             request.interrupt_after_block_commits is not None
             and new_block_commits >= request.interrupt_after_block_commits
@@ -2570,9 +2564,6 @@ def _run_resident_quantization_impl(
                     artifacts,
                     "cpu",
                 )
-                if request.device.startswith("cuda"):
-                    teacher_inputs = teacher_inputs.pin_memory()
-                    compressed_inputs = compressed_inputs.pin_memory()
         else:
             teacher_inputs = teacher_outputs
             compressed_inputs = compressed_outputs

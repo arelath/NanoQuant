@@ -150,8 +150,8 @@ def test_block_loss_micro_profile_preserves_accumulation_and_attributes_work() -
     assert counters["forward.elements"]["total"] == targets.numel()
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="pinned CUDA transfer requires a GPU")
-def test_cuda_block_forward_produces_bitwise_equal_pinned_host_activations() -> None:
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA resident transfer requires a GPU")
+def test_cuda_block_forward_produces_bitwise_equal_pageable_host_activations() -> None:
     inputs = torch.randn(5, 4, dtype=torch.bfloat16, generator=torch.Generator().manual_seed(41))
     block = nn.Linear(4, 3, bias=False, dtype=torch.bfloat16, device="cuda")
     with torch.no_grad():
@@ -160,10 +160,11 @@ def test_cuda_block_forward_produces_bitwise_equal_pinned_host_activations() -> 
             [block(inputs[start : start + 2].cuda()).cpu() for start in range(0, inputs.shape[0], 2)]
         )
 
-    assert actual.is_pinned()
+    assert not actual.is_pinned()
     assert torch.equal(actual, expected)
     del block
     torch.cuda.empty_cache()
+    torch._C._accelerator_emptyHostCache()
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="pinned CUDA transfer requires a GPU")
@@ -181,3 +182,4 @@ def test_prefetched_block_loss_matches_pageable_accumulation_bitwise() -> None:
     assert prefetched == pageable
     del block
     torch.cuda.empty_cache()
+    torch._C._accelerator_emptyHostCache()

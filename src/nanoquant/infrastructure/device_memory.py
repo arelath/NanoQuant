@@ -15,7 +15,7 @@ from typing import Any, cast
 
 import torch
 
-from nanoquant.infrastructure.resource_usage import process_memory_snapshot
+from nanoquant.infrastructure.resource_usage import gpu_process_memory_snapshot, process_memory_snapshot
 from nanoquant.ports.event_sink import Event, EventSink, Severity
 
 MemorySampler = Callable[[], Mapping[str, int]]
@@ -34,6 +34,7 @@ _BOUNDARY_EVENTS = frozenset(
         "tuning.epoch_completed",
         "factorized_tuning.epoch_checkpoint_committed",
         "probe.completed",
+        "host_pinned_cache.released",
     }
 )
 _REQUESTED_BYTES = re.compile(
@@ -80,7 +81,34 @@ def sample_device_memory() -> dict[str, int]:
             "cuda.free_count": int(stats.get("allocation.all.freed", 0)),
         }
     )
+    gpu_process = gpu_process_memory_snapshot()
+    if gpu_process is not None:
+        sample.update(
+            {
+                "wddm.dedicated_bytes": gpu_process.dedicated_bytes,
+                "wddm.shared_bytes": gpu_process.shared_bytes,
+                "wddm.peak_dedicated_bytes": gpu_process.peak_dedicated_bytes,
+                "wddm.peak_shared_bytes": gpu_process.peak_shared_bytes,
+            }
+        )
     return sample
+
+
+def release_cached_host_memory() -> bool:
+    """Release unoccupied accelerator-pinned host allocations when supported.
+
+    The pinned-host allocator is independent of the CUDA device allocator. On
+    WDDM, its cached blocks remain GPU-addressable and appear as shared GPU
+    memory, so ``torch.cuda.empty_cache()`` does not release them.
+    """
+
+    release = getattr(torch._C, "_accelerator_emptyHostCache", None)
+    if not callable(release):
+        release = getattr(torch._C, "_host_emptyCache", None)
+    if not callable(release):
+        return False
+    release()
+    return True
 
 
 @dataclass(frozen=True, slots=True)

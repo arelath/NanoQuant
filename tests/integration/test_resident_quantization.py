@@ -1,5 +1,6 @@
 import json
 import math
+import os
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
@@ -9,6 +10,7 @@ import torch
 from transformers.models.gemma3.configuration_gemma3 import Gemma3TextConfig
 from transformers.models.gemma3.modeling_gemma3 import Gemma3ForCausalLM
 
+import nanoquant.resident_quantization as resident
 from nanoquant.config.schema import ADMMConfig, ProfilingConfig, ProfilingLevel
 from nanoquant.infrastructure.artifacts import ArtifactCorruptionError, LocalArtifactStore
 from nanoquant.infrastructure.commits import load_block_activations
@@ -451,6 +453,61 @@ def test_continuous_multiblock_run_reloads_committed_activation_boundary(
     assert len(cloned_metadata) == 4
     assert len({id(metadata) for metadata in cloned_metadata}) == 4
     assert len(result.blocks) == 2
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA resident transfer requires a GPU")
+def test_cuda_multiblock_run_keeps_complete_activation_streams_pageable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    snapshot = tmp_path / "snapshot"
+    config = Gemma3TextConfig(
+        vocab_size=32,
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=4,
+    )
+    Gemma3ForCausalLM(config).save_pretrained(snapshot, safe_serialization=True)
+    observed_source_pinning: list[bool] = []
+    original = resident.iter_device_batches
+
+    def recording_batches(
+        values: tuple[torch.Tensor, ...], batch_size: int, device: torch.device
+    ):  # type: ignore[no-untyped-def]
+        if device.type == "cuda" and all(value.device.type == "cpu" for value in values):
+            observed_source_pinning.extend(value.is_pinned() for value in values)
+        yield from original(values, batch_size, device)
+
+    monkeypatch.setattr(resident, "iter_device_batches", recording_batches)
+    output = tmp_path / "cuda-pageable"
+    result = run_resident_quantization(
+        ResidentQuantizationRequest(
+            snapshot,
+            output,
+            "fixture/gemma3",
+            "pinned-test-revision",
+            ((1, 2, 3, 4),),
+            device="cuda",
+            target_bpw=8.0,
+            rank_multiple=1,
+            admm=ADMMConfig(outer_iterations=1, inner_iterations=1),
+            block_forward_batch_size=1,
+            evaluate_inline_quality=False,
+            profiling=ProfilingConfig(level=ProfilingLevel.OFF),
+            registry_root=tmp_path / "runs",
+        )
+    )
+    events = [json.loads(line) for line in (output / "events.jsonl").read_text().splitlines()]
+
+    assert len(result.blocks) == 2
+    assert observed_source_pinning
+    assert not any(observed_source_pinning)
+    cache_events = [event for event in events if event["name"] == "host_pinned_cache.released"]
+    assert len(cache_events) == 2
+    if os.name == "nt":
+        assert all("wddm.shared_bytes" in event["fields"] for event in cache_events)
 
 
 def test_forward_metadata_clone_isolates_nested_tensor_mutation() -> None:

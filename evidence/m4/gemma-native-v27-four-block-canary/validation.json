@@ -1,0 +1,60 @@
+{
+  "active_journal_records": 32,
+  "artifact_bytes": 3885792038,
+  "artifacts_by_type": {
+    "activation-generation": 1,
+    "block-result": 4,
+    "calibration-stats": 1,
+    "calibration-tensors": 1,
+    "factorization-attempt": 29,
+    "frozen-block-auxiliary": 4,
+    "frozen-layer": 56,
+    "layer-result": 28,
+    "quantization-plan": 1,
+    "scale-fit": 28
+  },
+  "artifacts_validated": 153,
+  "bit_cost_by_category": {
+    "binary_factor_bits": 104378368,
+    "outlier_index_bits": 812,
+    "outlier_value_bits": 2629632,
+    "padding_bits": 0,
+    "scale_bits": 2272768
+  },
+  "block_records": 4,
+  "block_wall_seconds": 1607.6087674000883,
+  "committed_layer_count": 28,
+  "complete": false,
+  "completed_blocks": [
+    0,
+    1,
+    2,
+    3
+  ],
+  "effective_bpw": 1.0180125626597794,
+  "final_frozen_pre_kd_losses": [
+    1.3784899711608887,
+    3.5971968173980713,
+    4.845890998840332,
+    77.59420776367188
+  ],
+  "identity": {
+    "config_hash": "sha256:ca54eeb302f706d9e5afc72460b75eb61a46e27bac4801915ba3a6fb8fc83bca",
+    "model_hash": "sha256:32d5b5d041e98027bc7415107bc79b580f9cce407535b4e30134e8f8aed3b130",
+    "plan_hash": "sha256-8656b828a48e72f07799726b92c8a70b257f775c77f6c4bd5787686b524e8a9d"
+  },
+  "inactive_journal_records": 0,
+  "journal_identity_count": 1,
+  "journal_records": 32,
+  "layer_records": 28,
+  "peak_gpu_bytes": 6236930048,
+  "peak_host_bytes": 16270696448,
+  "quantized_parameters": 107347968,
+  "rank_sum": 16608,
+  "retired_activation_generations": [
+    "sha256-1b30c9fc4b27de4410d5de7e92530755aac6aed53ff5af5dcbe39510ac99ab88",
+    "sha256-40fcc738bb47ed0d3bee78533636d63a4125e577353cc9dcdd419bcd0d2f9b6e",
+    "sha256-d5f940fe1eb1be350568cf0f27a95f7c8dbcb9cbb7f0f2de4eb51d17a85c844b"
+  ],
+  "run_output": "D:\\dev\\research\\NanoQuantRewrite\\evidence\\m4\\gemma-native-v27-four-block-canary"
+}

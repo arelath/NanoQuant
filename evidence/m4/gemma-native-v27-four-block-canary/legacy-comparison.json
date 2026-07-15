@@ -1,0 +1,87 @@
+{
+  "baselines": [
+    {
+      "block_count": 26,
+      "maximum_absolute_percent_delta": 77.58956300476478,
+      "mean_absolute_percent_delta": 23.44030109800244,
+      "name": "contemporary-legacy",
+      "paired_block_count": 4,
+      "path": "D:\\dev\\research\\NanoQuantRewrite\\evidence\\m4\\gemma-legacy018-contemporary-pinned-v3\\legacy018-contemporary.log",
+      "rewrite_lower_count": 2
+    }
+  ],
+  "blocks": [
+    {
+      "baselines": {
+        "contemporary-legacy": {
+          "absolute_delta": 0.005689971160888652,
+          "loss": 1.3728,
+          "percent_delta": 0.41447925123023754
+        }
+      },
+      "block": 0,
+      "rewrite_loss": 1.3784899711608887
+    },
+    {
+      "baselines": {
+        "contemporary-legacy": {
+          "absolute_delta": -0.005703182601928702,
+          "loss": 3.6029,
+          "percent_delta": -0.15829422415079009
+        }
+      },
+      "block": 1,
+      "rewrite_loss": 3.5971968173980713
+    },
+    {
+      "baselines": {
+        "contemporary-legacy": {
+          "absolute_delta": -0.8956090011596682,
+          "loss": 5.7415,
+          "percent_delta": -15.598867911863945
+        }
+      },
+      "block": 2,
+      "rewrite_loss": 4.845890998840332
+    },
+    {
+      "baselines": {
+        "contemporary-legacy": {
+          "absolute_delta": 33.90120776367188,
+          "loss": 43.693,
+          "percent_delta": 77.58956300476478
+        }
+      },
+      "block": 3,
+      "rewrite_loss": 77.59420776367188
+    }
+  ],
+  "rank_baselines": [
+    {
+      "legacy_prefix_layer_count": 28,
+      "legacy_rank_dependent_bits": 104644096,
+      "legacy_rank_dependent_bpw": 0.9748120802808303,
+      "legacy_rank_sum": 16608,
+      "missing_in_legacy": [],
+      "missing_in_rewrite": [],
+      "name": "contemporary-legacy",
+      "paired_layer_count": 28,
+      "paired_source_parameters": 107347968,
+      "path": "D:\\dev\\research\\NanoQuantRewrite\\evidence\\m4\\gemma-legacy018-contemporary-pinned-v3\\rank-utility.csv",
+      "rank_mismatch_count": 0,
+      "rank_mismatches": [],
+      "rewrite_actual_bits": 109281580,
+      "rewrite_effective_bpw": 1.0180125626597794,
+      "rewrite_layer_count": 28,
+      "rewrite_rank_sum": 16608,
+      "rewrite_source_parameters": 107347968
+    }
+  ],
+  "rewrite_block_count": 4,
+  "rewrite_identity": {
+    "config_hash": "sha256:ca54eeb302f706d9e5afc72460b75eb61a46e27bac4801915ba3a6fb8fc83bca",
+    "model_hash": "sha256:32d5b5d041e98027bc7415107bc79b580f9cce407535b4e30134e8f8aed3b130",
+    "plan_hash": "sha256-8656b828a48e72f07799726b92c8a70b257f775c77f6c4bd5787686b524e8a9d"
+  },
+  "schema_version": 1
+}

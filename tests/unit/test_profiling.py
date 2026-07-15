@@ -294,6 +294,7 @@ def test_runtime_memory_sample_separates_live_reserved_and_device_visible_cuda_b
         },
     )
     monkeypatch.setattr(device_memory_module.torch.cuda, "mem_get_info", lambda: (250, 1_000))
+    monkeypatch.setattr(device_memory_module, "gpu_process_memory_snapshot", lambda: None)
 
     assert profiling_module._runtime_memory_sample() == {
         "host.working_set_bytes": 10,

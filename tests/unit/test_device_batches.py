@@ -20,13 +20,13 @@ def test_device_batches_reject_an_empty_tensor_set() -> None:
         tuple(iter_device_batches((), 2, torch.device("cpu")))
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="pinned CUDA transfer requires a GPU")
-def test_cuda_device_batches_preserve_values_with_bounded_fixed_slots(vram_budget) -> None:
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="bounded CUDA transfer requires a GPU")
+def test_cuda_device_batches_stage_pageable_sources_with_bounded_fixed_slots(vram_budget) -> None:
     device = torch.device("cuda")
     rows, sequence, width, batch_size = 64, 1024, 512, 8
     row_ids = torch.arange(rows, dtype=torch.bfloat16).reshape(rows, 1, 1)
-    first = row_ids.expand(rows, sequence, width).contiguous().pin_memory()
-    second = (first + 100).pin_memory()
+    first = row_ids.expand(rows, sequence, width).contiguous()
+    second = first + 100
     pair_bytes = 2 * batch_size * sequence * width * first.element_size()
     observed_first = []
     observed_second = []
@@ -39,5 +39,8 @@ def test_cuda_device_batches_preserve_values_with_bounded_fixed_slots(vram_budge
 
     assert torch.equal(torch.cat(observed_first).cpu(), torch.arange(rows, dtype=torch.bfloat16))
     assert torch.equal(torch.cat(observed_second).cpu(), torch.arange(rows, dtype=torch.bfloat16) + 100)
+    assert not first.is_pinned()
+    assert not second.is_pinned()
     del first, second, observed_first, observed_second
     torch.cuda.empty_cache()
+    torch._C._accelerator_emptyHostCache()
