@@ -127,11 +127,13 @@ from nanoquant.runtime.reference import (
 )
 from nanoquant.runtime.torch_model import (
     PreparedGemma3Attention,
+    PreparedGemma3DecoderLayer,
     PreparedLinear,
     PreparedRMSNorm,
     bind_fused_decode_rope,
     bind_prepared_linears,
     bind_prepared_rms_norms,
+    bind_short_sliding_masks,
     execution_workload,
     transformers_decoder_module_paths,
 )
@@ -204,6 +206,7 @@ __all__ = [
     "PreparedLayer",
     "PreparedLinear",
     "PreparedGemma3Attention",
+    "PreparedGemma3DecoderLayer",
     "PreparedRMSNorm",
     "QuantizedLinearSpec",
     "ReferenceParityError",
@@ -225,6 +228,7 @@ __all__ = [
     "bind_fused_decode_rope",
     "bind_prepared_linears",
     "bind_prepared_rms_norms",
+    "bind_short_sliding_masks",
     "convert_logical_to_packed",
     "export_llamacpp_checkpoint",
     "gemma_gguf_tensor_prefix",

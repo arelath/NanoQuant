@@ -10,6 +10,9 @@ from transformers.models.gemma3.configuration_gemma3 import Gemma3TextConfig
 from transformers.models.gemma3.modeling_gemma3 import (
     Gemma3Attention as TransformersGemma3Attention,
 )
+from transformers.models.gemma3.modeling_gemma3 import (
+    Gemma3DecoderLayer as TransformersGemma3DecoderLayer,
+)
 
 from nanoquant.runtime.backend import (
     BackendCapabilities,
@@ -24,10 +27,12 @@ from nanoquant.runtime.planning import (
 )
 from nanoquant.runtime.torch_model import (
     PreparedGemma3Attention,
+    PreparedGemma3DecoderLayer,
     PreparedRMSNorm,
     bind_fused_decode_rope,
     bind_prepared_linears,
     bind_prepared_rms_norms,
+    bind_short_sliding_masks,
     execution_workload,
     transformers_decoder_module_paths,
 )
@@ -236,3 +241,74 @@ def test_prepared_attention_preserves_cpu_prefill_fallback() -> None:
 
     assert torch.equal(actual[0], expected[0])
     assert torch.equal(actual[1], expected[1])
+
+
+def test_short_sliding_mask_binding_preserves_layer_output() -> None:
+    config = Gemma3TextConfig(
+        vocab_size=32,
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=1,
+        head_dim=4,
+        sliding_window=8,
+    )
+    source = TransformersGemma3DecoderLayer(config, layer_idx=0).eval()
+    shell = nn.Module()
+    shell.model = nn.Module()
+    shell.model.layers = nn.ModuleList([source])
+    generator = torch.Generator().manual_seed(20260716)
+    hidden_states = torch.randn(1, 3, 16, generator=generator)
+    cosine = torch.randn(1, 3, 4, generator=generator)
+    sine = torch.randn(1, 3, 4, generator=generator)
+    attention_mask = torch.zeros(1, 1, 3, 8)
+    cache_position = torch.arange(3)
+    expected = source(
+        hidden_states,
+        (cosine, sine),
+        (cosine, sine),
+        attention_mask,
+        cache_position=cache_position,
+        last_cache_position=3,
+    )
+
+    assert bind_short_sliding_masks(shell) == 1
+    prepared = shell.model.layers[0]
+    assert isinstance(prepared, PreparedGemma3DecoderLayer)
+    actual = prepared(
+        hidden_states,
+        (cosine, sine),
+        (cosine, sine),
+        attention_mask,
+        cache_position=cache_position,
+        last_cache_position=3,
+    )
+
+    assert torch.equal(actual[0], expected[0])
+
+
+def test_short_sliding_mask_only_elides_identity_region() -> None:
+    config = Gemma3TextConfig(
+        vocab_size=32,
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=1,
+        head_dim=4,
+        sliding_window=8,
+    )
+    prepared = PreparedGemma3DecoderLayer(
+        TransformersGemma3DecoderLayer(config, layer_idx=0)
+    )
+    short = torch.zeros(1, 1, 3, 8)
+    assert prepared._prepare_attention_mask(short, torch.arange(3), 3) is short
+
+    long = torch.zeros(1, 1, 1, 12)
+    expected_mask = torch.tril(torch.ones_like(long, dtype=torch.bool), diagonal=-8)
+    expected = torch.where(expected_mask, torch.finfo(long.dtype).min, long)[..., 4:12]
+    actual = prepared._prepare_attention_mask(long, torch.tensor([11]), 12)
+
+    assert actual is not None
+    assert torch.equal(actual, expected)

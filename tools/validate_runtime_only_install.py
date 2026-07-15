@@ -92,10 +92,13 @@ with torch.inference_mode(), torch.cuda.device(target):
         sampling=SamplingConfig(mode="greedy"),
         stopping_check_interval=8,
     )
-    shell = TransformersGenerationModel(
-        loaded.model,
-        hybrid_cache_factory(loaded.model.config),
-    )
+    created_caches = []
+    cache_factory = hybrid_cache_factory(loaded.model.config)
+    def capture_cache(*args):
+        cache = cache_factory(*args)
+        created_caches.append(cache)
+        return cache
+    shell = TransformersGenerationModel(loaded.model, capture_cache)
     result = generate(request, shell)
     torch.cuda.synchronize(target)
     allocated = torch.cuda.memory_allocated(target)
@@ -125,6 +128,10 @@ print(json.dumps({
     "replaced_linear_count": loaded.replaced_linear_count,
     "fused_rms_norm_count": loaded.fused_rms_norm_count,
     "fused_decode_rope_count": loaded.fused_decode_rope_count,
+    "short_sliding_mask_count": loaded.short_sliding_mask_count,
+    "fast_sliding_update_count": sum(
+        getattr(cache, "nanoquant_fast_sliding_update_count", 0) for cache in created_caches
+    ),
     "prefill_fallback_count": loaded.plans.prefill.plan.fallback_count,
     "decode_fallback_count": loaded.plans.decode.plan.fallback_count,
     "prompt_tokens": len(prompt_ids),

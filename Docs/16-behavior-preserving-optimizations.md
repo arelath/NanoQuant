@@ -1191,3 +1191,26 @@ only their *measurement* waits for the Docs/15 P1 baseline if we want clean befo
   2.719, and 1.281 s. A subsequent adjacent control/candidate pair under the faster device state measured 1.391 and
   1.208 s (13.1% lower), with exact hashes and unchanged allocation. The specialization is now default;
   `--no-fused-decode-rope` retains the control.
+- **Short-context sliding-mask elision accepted:** each of Gemma's 22 sliding layers rebuilt the same mask with
+  `ones_like`, `tril`, and `where`, even though the frozen 48-token cache is entirely inside the 512-token window.
+  The runtime now returns the incoming mask unchanged only when its query/key dimensions and last cache position all
+  fit inside the window; the original Transformers construction and offset slice remain for longer contexts. The
+  exact real-model trace bound all 22 layers, preserved every token with zero fallback, and reduced launches from
+  1,382 to 1,294. Candidate/control/candidate single-token medians were 73.23, 82.49, and 77.20 ms, an 8.8% average
+  candidate reduction. End-to-end medians were noisier at 2.317, 2.429, and 2.452 s, but the candidate average still
+  improved 1.8%; token hashes and allocation bounds were identical. The guarded path is the default and
+  `--no-short-sliding-masks` remains available for controls.
+- **Pre-rollover HybridCache identity update removed:** Transformers' sliding update constructs identity rotation
+  indices, gathers the complete K/V cache, writes the new token, zeroes the backing tensors, and adds the gathered
+  copy back even before rollover. The generation adapter now supplies host-known position/length metadata to a
+  prepared HybridCache, which performs the same indexed prefix write without a CUDA scalar read. It delegates to the
+  original algorithm at the exact rollover boundary; a tiny 32-token test crosses that boundary and matches standard
+  HybridCache generation exactly. Combined with short-mask elision, the real trace reduces kernels from 1,382 to
+  964, ATen calls from 5,261 to 4,271, launch APIs from 1,379 to 961, and device kernel self time from 7.58 to 7.11
+  ms with exact output. The first A/B/A timing was contaminated and is retained; the stable adjacent control/candidate
+  pair measured 1.141 versus 1.000 s for 32 tokens (12.4% lower) and 37.80 versus 32.95 ms isolated decode (12.8%
+  lower). Direct prefix updates are default, `--no-fast-sliding-cache` is the control, and rollover fallback remains.
+- **Direct mixed-dtype indexed cache write rejected:** assigning an F32 key/value tensor directly into the F16
+  backing cache does not fuse conversion with `index_put_`; PyTorch rejects the operation because source and
+  destination dtypes differ. The explicit 52 F32-to-F16 casts/token therefore remain. Removing them requires a
+  custom fused cache-update kernel or a representation change with its own exactness and memory gate.

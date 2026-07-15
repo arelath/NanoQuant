@@ -259,6 +259,152 @@ def bind_fused_decode_rope(model: nn.Module) -> int:
     return len(replacements)
 
 
+class PreparedGemma3DecoderLayer(nn.Module):
+    """Pinned Gemma3 layer that elides an identity short-context mask."""
+
+    self_attn: nn.Module
+    mlp: nn.Module
+    input_layernorm: nn.Module
+    post_attention_layernorm: nn.Module
+    pre_feedforward_layernorm: nn.Module
+    post_feedforward_layernorm: nn.Module
+    config: Any
+    hidden_size: int
+    layer_idx: int
+    is_sliding: bool
+    sliding_window: int
+
+    def __init__(self, source: nn.Module) -> None:
+        super().__init__()
+        required_modules = (
+            "self_attn",
+            "mlp",
+            "input_layernorm",
+            "post_attention_layernorm",
+            "pre_feedforward_layernorm",
+            "post_feedforward_layernorm",
+        )
+        for name in required_modules:
+            child = getattr(source, name, None)
+            if not isinstance(child, nn.Module):
+                raise ValueError(f"Gemma3 decoder layer is missing {name}")
+            setattr(self, name, child)
+        for name in ("config", "hidden_size", "layer_idx", "is_sliding", "sliding_window"):
+            if not hasattr(source, name):
+                raise ValueError(f"Gemma3 decoder layer contract is missing {name}")
+            setattr(self, name, getattr(source, name))
+        if not self.is_sliding:
+            raise ValueError("short sliding-mask optimization requires a sliding layer")
+        if getattr(self.config, "_attn_implementation", None) != "eager":
+            raise ValueError("short sliding-mask optimization requires eager attention")
+        if self.sliding_window <= 0:
+            raise ValueError("Gemma3 sliding window must be positive")
+        self.train(source.training)
+
+    def _prepare_attention_mask(
+        self,
+        attention_mask: torch.Tensor | None,
+        cache_position: torch.Tensor | None,
+        last_cache_position: int,
+    ) -> torch.Tensor | None:
+        if attention_mask is None:
+            return None
+        if cache_position is None:
+            raise ValueError("Gemma3 sliding attention requires cache_position")
+        effective_seq_len = max(cache_position.shape[0], self.sliding_window)
+        if self.config._attn_implementation == "flash_attention_2":
+            return attention_mask[:, -effective_seq_len:]
+        # torch.tril(ones, diagonal=-window) is entirely false while both
+        # matrix dimensions fit inside the window. The subsequent where and
+        # offset slice therefore return this exact tensor unchanged.
+        if (
+            attention_mask.ndim == 4
+            and attention_mask.shape[-2] <= self.sliding_window
+            and attention_mask.shape[-1] <= self.sliding_window
+            and last_cache_position <= self.sliding_window
+        ):
+            return attention_mask
+        minimum = torch.finfo(attention_mask.dtype).min
+        sliding_window_mask = torch.tril(
+            torch.ones_like(attention_mask, dtype=torch.bool),
+            diagonal=-self.sliding_window,
+        )
+        result = torch.where(sliding_window_mask, minimum, attention_mask)
+        offset = max(0, last_cache_position - effective_seq_len)
+        return result[:, :, :, offset : offset + effective_seq_len]
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        position_embeddings_global: tuple[torch.Tensor, torch.Tensor],
+        position_embeddings_local: tuple[torch.Tensor, torch.Tensor],
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.Tensor | None = None,
+        past_key_value: Any | None = None,
+        output_attentions: bool | None = False,
+        use_cache: bool | None = False,
+        cache_position: torch.Tensor | None = None,
+        last_cache_position: int = 0,
+        **kwargs: Any,
+    ) -> tuple[torch.Tensor, ...]:
+        attention_mask = self._prepare_attention_mask(
+            attention_mask,
+            cache_position,
+            last_cache_position,
+        )
+        residual = hidden_states
+        hidden_states = self.input_layernorm(hidden_states)
+        position_embeddings = (
+            position_embeddings_local if self.self_attn.is_sliding else position_embeddings_global
+        )
+        hidden_states, self_attn_weights = self.self_attn(
+            hidden_states=hidden_states,
+            position_embeddings=position_embeddings,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_value=past_key_value,
+            output_attentions=output_attentions,
+            use_cache=use_cache,
+            cache_position=cache_position,
+            **kwargs,
+        )
+        hidden_states = self.post_attention_layernorm(hidden_states)
+        hidden_states = residual + hidden_states
+        residual = hidden_states
+        hidden_states = self.pre_feedforward_layernorm(hidden_states)
+        hidden_states = self.mlp(hidden_states)
+        hidden_states = self.post_feedforward_layernorm(hidden_states)
+        hidden_states = residual + hidden_states
+        outputs: tuple[Any, ...] = (hidden_states,)
+        if output_attentions:
+            outputs += (self_attn_weights,)
+        return outputs
+
+
+def bind_short_sliding_masks(model: nn.Module) -> int:
+    """Elide identity Gemma3 masks only for contexts inside the window."""
+
+    replacements: list[tuple[nn.Module, str, PreparedGemma3DecoderLayer]] = []
+    for path, module in tuple(model.named_modules()):
+        if module.__class__.__name__ != "Gemma3DecoderLayer":
+            continue
+        config = getattr(module, "config", None)
+        if (
+            not getattr(module, "is_sliding", False)
+            or getattr(config, "_attn_implementation", None) != "eager"
+        ):
+            continue
+        parent_path, separator, attribute = path.rpartition(".")
+        if not separator or not parent_path or not attribute:
+            raise ValueError(f"Gemma3 decoder layer path must be dotted: {path!r}")
+        replacements.append(
+            (model.get_submodule(parent_path), attribute, PreparedGemma3DecoderLayer(module))
+        )
+    for parent, attribute, replacement in replacements:
+        setattr(parent, attribute, replacement)
+    return len(replacements)
+
+
 def bind_prepared_linears(
     model: nn.Module,
     plans: PreparedExecutionPlans,

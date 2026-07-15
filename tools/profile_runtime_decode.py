@@ -323,11 +323,16 @@ def _profile(args: argparse.Namespace) -> dict[str, object]:
             prefill_tokens=prompt_width,
             fuse_rms_norm=args.fused_rms_norm,
             fuse_decode_rope=args.fused_decode_rope,
+            optimize_short_sliding_masks=args.short_sliding_masks,
         )
         model = runtime.model
         shell = TransformersGenerationModel(
             model,
-            hybrid_cache_factory(model.config, _DTYPES[args.cache_dtype]),
+            hybrid_cache_factory(
+                model.config,
+                _DTYPES[args.cache_dtype],
+                fast_sliding_prefix=args.fast_sliding_cache,
+            ),
         )
         tokens = input_ids.to(device)
         prompt_mask = attention_mask.to(device)
@@ -506,6 +511,7 @@ def _profile(args: argparse.Namespace) -> dict[str, object]:
             "replaced_linear_count": runtime.replaced_linear_count,
             "fused_rms_norm_count": runtime.fused_rms_norm_count,
             "fused_decode_rope_count": runtime.fused_decode_rope_count,
+            "short_sliding_mask_count": runtime.short_sliding_mask_count,
             "prefill_fallback_count": runtime.plans.prefill.plan.fallback_count,
             "decode_fallback_count": runtime.plans.decode.plan.fallback_count,
         }
@@ -541,6 +547,8 @@ def _profile(args: argparse.Namespace) -> dict[str, object]:
             "cache_dtype": args.cache_dtype,
             "fused_rms_norm": args.fused_rms_norm,
             "fused_decode_rope": args.fused_decode_rope,
+            "short_sliding_masks": args.short_sliding_masks,
+            "fast_sliding_cache": args.fast_sliding_cache,
             "attention": "eager",
             "warmups": args.warmups,
             "repetitions": args.repetitions,
@@ -605,6 +613,18 @@ def main() -> None:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="replace pinned one-token Gemma3 RoPE with one Triton launch",
+    )
+    parser.add_argument(
+        "--short-sliding-masks",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="elide identity Gemma3 sliding masks while the context fits the window",
+    )
+    parser.add_argument(
+        "--fast-sliding-cache",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="use direct prefix updates until a sliding KV cache reaches rollover",
     )
     parser.add_argument(
         "--kernel-profile",

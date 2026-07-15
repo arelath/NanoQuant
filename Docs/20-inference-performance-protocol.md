@@ -212,3 +212,45 @@ and a subsequent adjacent control/candidate pair under the faster device state m
 and cache bounds matched. The accepted path is about 26.48 tokens/s in the final retained candidate, still only
 **14.35%** of the 184.50 tokens/s llama.cpp result. The remaining mask/cache, attention, vocabulary projection, and
 host-launch gap remains the dominant M7 work.
+
+## Third promoted optimization: short-context sliding masks
+
+Gemma3's eager decoder independently constructs a sliding-window mask in every sliding layer. Under this protocol,
+the 48-token maximum cache is smaller than the 512-token window, so `tril(ones, diagonal=-512)` is entirely false,
+`where` returns the existing causal mask, and the offset slice starts at zero. A pinned decoder-layer binding now
+elides that identity transformation only while both mask dimensions and the last cache position fit inside the
+window. It executes the original Transformers construction for longer contexts.
+
+The full exact-kernel trace bound all 22 sliding layers, retained token 236764 in every pass with zero packed-linear
+fallback, and reduced the census from 1,382 to 1,294 launches/token. The 586,020-byte record is
+`evidence/m7/gemma-pageable-v28-rewrite-short-sliding-mask-profile.json`, SHA-256
+`3c9ec4a7e960deba1728b5b5b70cf424ba9e05b9c478fe276d7fd5bbc10a2fce`.
+
+Candidate/control/candidate single-token model medians were 73.23, 82.49, and 77.20 ms, so both candidates beat the
+control and their average is 8.8% lower. Exact 32-token generation medians were 2.317, 2.429, and 2.452 s; WDDM noise
+reversed the second pair, but the candidate average remains 1.8% lower. TTFT and complete-generation hashes, peak
+allocation, all 182 CUDA linears, and zero fallback were unchanged. The records' SHA-256 values are respectively
+`68b6cce4146c7f855f4f18c0bc7bba0e9ff53387090191ca5ba4b6b72ee7975f`,
+`30f1ce1f4c06abaa503c58742561af8440122f1345359b3b120503d0f175851a`, and
+`3c943db45ecf4189871b4308fce68d4dbff5140ee70d6959b867b73b999aaf7d`.
+
+## Fourth promoted optimization: pre-rollover sliding-cache updates
+
+Before the cache rolls over, Transformers still constructs identity rotation indices, gathers the complete local K/V
+cache, writes the new token, zeroes the backing tensors, and adds the gathered copy back. The generation engine
+already knows the position start and token count as host integers. It now passes that metadata to a prepared
+HybridCache, which performs the identical indexed F16 prefix write without a device scalar read. When the next write
+would reach rollover, the prepared cache calls the original Transformers implementation unchanged. A 32-token tiny
+Gemma test crosses that boundary and matches standard HybridCache generation exactly.
+
+With the already accepted short-mask path enabled, the pinned real-model profile preserves token 236764 in all event
+and Kineto passes while reducing kernels from 1,382 to 964, ATen calls from 5,261 to 4,271, launch APIs from 1,379 to
+961, and non-nested device kernel self time from 7.58 to 7.11 ms. Top-level synchronized decode p50 falls from 42.04
+to 34.98 ms. The 577,512-byte record has SHA-256
+`ffed6f6a52910cb40a2fda6842da476c54fa465958bdb5c6439346834008b752`.
+
+The first candidate/control/candidate generation sequence is retained but not averaged because its first candidate
+contains large WDDM stalls: 1.517, 1.281, and 0.975 s. A subsequent stable adjacent control/candidate pair measures
+1.141 versus 1.000 s for 32 exact tokens (12.4% lower) and 37.80 versus 32.95 ms for isolated decode (12.8% lower).
+The final candidate produces 32.01 tokens/s, **17.35%** of the 184.50 tokens/s llama.cpp reference and 3.27x the
+frozen 9.79 tokens/s rewrite baseline. Exact hashes, allocation, 182 CUDA linears, and zero fallback are unchanged.

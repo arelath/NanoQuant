@@ -32,6 +32,7 @@ from nanoquant.runtime.torch_model import (
     bind_fused_decode_rope,
     bind_prepared_linears,
     bind_prepared_rms_norms,
+    bind_short_sliding_masks,
     transformers_decoder_module_paths,
 )
 
@@ -193,6 +194,7 @@ class LoadedTransformersRuntime:
     replaced_linear_count: int
     fused_rms_norm_count: int = 0
     fused_decode_rope_count: int = 0
+    short_sliding_mask_count: int = 0
 
 
 def _mapping(value: object, path: str) -> dict[str, object]:
@@ -562,6 +564,7 @@ def load_transformers_runtime(
     prefill_tokens: int,
     fuse_rms_norm: bool = True,
     fuse_decode_rope: bool = True,
+    optimize_short_sliding_masks: bool = True,
 ) -> LoadedTransformersRuntime:
     """Build a prepared model shell without loading source dense linear weights."""
 
@@ -672,6 +675,9 @@ def load_transformers_runtime(
         raise RuntimeBundleError("runtime model retained meta parameters after shell loading")
     fused_rms_norm_count = bind_prepared_rms_norms(model) if fuse_rms_norm else 0
     fused_decode_rope_count = bind_fused_decode_rope(model) if fuse_decode_rope else 0
+    short_sliding_mask_count = (
+        bind_short_sliding_masks(model) if optimize_short_sliding_masks else 0
+    )
     model.eval()
     return LoadedTransformersRuntime(
         opened,
@@ -680,4 +686,5 @@ def load_transformers_runtime(
         replaced,
         fused_rms_norm_count,
         fused_decode_rope_count,
+        short_sliding_mask_count,
     )

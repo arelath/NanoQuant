@@ -93,7 +93,20 @@ def _validate(args: argparse.Namespace) -> dict[str, Any]:
             sampling=SamplingConfig(mode="greedy"),
             stopping_check_interval=args.stopping_check_interval,
         )
-        shell = TransformersGenerationModel(model, hybrid_cache_factory(model.config))
+        created_caches: list[object] = []
+        cache_factory = hybrid_cache_factory(model.config)
+
+        def capture_cache(
+            batch: int,
+            length: int,
+            target: torch.device,
+            dtype: torch.dtype,
+        ) -> object:
+            cache = cache_factory(batch, length, target, dtype)
+            created_caches.append(cache)
+            return cache
+
+        shell = TransformersGenerationModel(model, capture_cache)
         torch.cuda.synchronize(device)
         generation_started = time.perf_counter()
         first = generate(request, shell)
@@ -157,6 +170,11 @@ def _validate(args: argparse.Namespace) -> dict[str, Any]:
         "replaced_linear_count": loaded.replaced_linear_count,
         "fused_rms_norm_count": loaded.fused_rms_norm_count,
         "fused_decode_rope_count": loaded.fused_decode_rope_count,
+        "short_sliding_mask_count": loaded.short_sliding_mask_count,
+        "fast_sliding_update_count": sum(
+            int(getattr(cache, "nanoquant_fast_sliding_update_count", 0))
+            for cache in created_caches
+        ),
         "prefill_fallback_count": loaded.plans.prefill.plan.fallback_count,
         "decode_fallback_count": loaded.plans.decode.plan.fallback_count,
         "generated_token_ids": generated_ids,

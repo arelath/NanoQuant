@@ -56,6 +56,12 @@ class TransformersGenerationModel:
                 input_ids.device,
                 _model_dtype(self.model),
             )
+        prepare_cache = getattr(cache, "_nanoquant_prepare_for_forward", None)
+        if callable(prepare_cache):
+            prepare_cache(
+                attention_mask.shape[-1] - input_ids.shape[-1],
+                input_ids.shape[-1],
+            )
         context = self.workload_context(workload)
         with context:
             output = cast(Any, self.model)(
@@ -78,6 +84,8 @@ class TransformersGenerationModel:
 def hybrid_cache_factory(
     config: object,
     dtype_override: torch.dtype | None = None,
+    *,
+    fast_sliding_prefix: bool = True,
 ) -> CacheFactory:
     """Create a total-length-bounded Transformers HybridCache factory."""
 
@@ -94,7 +102,21 @@ def hybrid_cache_factory(
 
         cache_type = cast(Any, HybridCache)
 
-        class PromotingHybridCache(cache_type):  # type: ignore[misc, valid-type]
+        class PreparedHybridCache(cache_type):  # type: ignore[misc, valid-type]
+            _nanoquant_position_start: int | None = None
+            _nanoquant_token_count: int | None = None
+            nanoquant_fast_sliding_update_count: int = 0
+
+            def _nanoquant_prepare_for_forward(
+                self,
+                position_start: int,
+                token_count: int,
+            ) -> None:
+                if position_start < 0 or token_count <= 0:
+                    raise ValueError("runtime cache position contract is invalid")
+                self._nanoquant_position_start = position_start
+                self._nanoquant_token_count = token_count
+
             def update(
                 self,
                 key_states: torch.Tensor,
@@ -102,15 +124,44 @@ def hybrid_cache_factory(
                 layer_idx: int,
                 cache_kwargs: dict[str, Any] | None = None,
             ) -> tuple[torch.Tensor, torch.Tensor]:
+                kwargs = {} if cache_kwargs is None else cache_kwargs
+                cache_position = kwargs.get("cache_position")
+                sliding_window = kwargs.get("sliding_window")
+                token_count = key_states.shape[-2]
+                position_start = self._nanoquant_position_start
+                prepared_token_count = self._nanoquant_token_count
+                k_out = self.key_cache[layer_idx]
+                v_out = self.value_cache[layer_idx]
+                if (
+                    fast_sliding_prefix
+                    and sliding_window
+                    and isinstance(cache_position, torch.Tensor)
+                    and cache_position.numel() == token_count
+                    and prepared_token_count == token_count
+                    and position_start is not None
+                    and position_start + token_count < k_out.shape[2]
+                    and k_out.device == key_states.device
+                    and v_out.device == value_states.device
+                ):
+                    stored_keys = key_states.to(k_out.dtype)
+                    stored_values = value_states.to(v_out.dtype)
+                    k_out[:, :, cache_position] = stored_keys
+                    v_out[:, :, cache_position] = stored_values
+                    self.nanoquant_fast_sliding_update_count += 1
+                    return k_out.to(key_states.dtype), v_out.to(value_states.dtype)
                 keys, values = super().update(
                     key_states,
                     value_states,
                     layer_idx,
-                    cache_kwargs,
+                    kwargs,
                 )
                 return keys.to(key_states.dtype), values.to(value_states.dtype)
 
-        selected_type = cache_type if dtype_override is None or dtype_override == dtype else PromotingHybridCache
+        selected_type = (
+            cache_type
+            if not fast_sliding_prefix and (dtype_override is None or dtype_override == dtype)
+            else PreparedHybridCache
+        )
         return selected_type(
             cast(Any, config),
             max_batch_size=batch_size,

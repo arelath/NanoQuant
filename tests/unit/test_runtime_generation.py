@@ -386,7 +386,7 @@ def test_long_cached_gemma_generation_matches_transformers_reference() -> None:
     model = Gemma3ForCausalLM(config).eval()
     tokens, mask = batch_prompts(((2, 4), (2, 5, 6)), pad_token_id=0)
     created_caches: list[object] = []
-    factory = hybrid_cache_factory(config)
+    factory = hybrid_cache_factory(config, fast_sliding_prefix=True)
 
     def capture_cache(
         batch_size: int,
@@ -430,6 +430,7 @@ def test_long_cached_gemma_generation_matches_transformers_reference() -> None:
     assert len(created_caches) == 1
     cache = created_caches[0]
     assert isinstance(cache, HybridCache)
+    assert cache.nanoquant_fast_sliding_update_count > 0
     assert cache.get_max_cache_shape() == tokens.shape[1] + max_new_tokens
     assert {tuple(value.shape) for value in cache.key_cache} == {
         (2, 2, 16, 8),

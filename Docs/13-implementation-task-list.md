@@ -332,10 +332,11 @@ Outcome: packed artifacts load and generate correctly without research dependenc
 - [x] **M6.22** Verify a clean runtime-only installation can load a packed artifact and generate text. The atomic
   runtime bundle contains the complete packed artifact, config/tokenizer assets, 158 ordinary checkpoint tensors,
   and three explicitly derived non-persistent buffers while excluding all 182 dense source linears. The current
-  55,050-byte `nanoquant-runtime` wheel contains exactly 23 deployment members and no research packages. Installed
+  56,582-byte `nanoquant-runtime` wheel contains exactly 23 deployment members and no research packages. Installed
   into an isolated target, it loaded the 731,007,650-byte bundle without a source-model argument, replaced all 182
-  linears, selected CUDA with zero fallback, bound all 157 fused RMSNorms and 26 decode-only RoPE sites, and generated
-  the exact retained 16-token llama.cpp text.
+  linears, selected CUDA with zero fallback, bound all 157 fused RMSNorms, 26 decode-only RoPE sites, and 22 guarded
+  short-context sliding layers, executed 330 prepared sliding-prefix updates, and generated the exact retained
+  16-token llama.cpp text.
 - [x] **M6.GATE** Load and run a packed NanoQuant artifact through reference and CUDA backends with complete numerical
   parity coverage and no research-package dependency. Full-artifact logical/packed reference validation covers all
   182 Gemma layers; the native CUDA path covers every real shape plus the 540-case declared capability matrix; long
@@ -397,6 +398,20 @@ Outcome: runtime performance is measured, explained, and competitive with the mo
   7.58 ms. WDDM timing varied materially, but both candidates bracketed around the first control were faster and the
   final adjacent control/candidate pair improved exact 32-token latency from 1.391 to 1.208 s (13.1%). Cache
   promotion, eager attention proper, the vocabulary projection, and sampling remain.
+  The next accepted attention-side change recognizes that the pinned 48-token protocol is wholly inside Gemma's
+  512-token sliding window. A guarded decoder-layer binding returns the existing causal mask unchanged only while
+  both mask dimensions and the cache position remain inside that window; longer contexts execute the original
+  `ones_like`/`tril`/`where` path. All 22 sliding layers bound, tokens remained exact, and the kernel census fell by
+  another 88 launches/token (1,382 to 1,294). Candidate/control/candidate model-decode medians were 73.23, 82.49,
+  and 77.20 ms; the candidates average 8.8% below control. Exact 32-token medians averaged 2.384 s versus 2.429 s
+  control (1.8% lower) with unchanged allocation and zero fallback.
+  The prepared HybridCache now removes the larger identity update before rollover: instead of constructing rotation
+  indices, gathering the full K/V cache, zeroing its backing tensors, and adding the gathered copy back, it uses the
+  generation adapter's host-known position/length to perform the identical indexed prefix write without a CUDA
+  scalar read. At the exact rollover boundary it delegates to Transformers. A tiny 32-token test crosses rollover and
+  matches exactly. Combined with mask elision, the pinned trace falls from 1,382 to 964 launches/token and 5,261 to
+  4,271 ATen calls/token with every token exact. The stable adjacent control/candidate pair improves exact 32-token
+  latency from 1.141 to 1.000 s (12.4%) and isolated decode from 37.80 to 32.95 ms (12.8%).
 - [ ] **M7.15** Compare eager and compiled/static decode-step execution with stable shape/correctness coverage.
   Direct whole-model and decode-only `torch.compile` feasibility probes preserved the exact token but are rejected
   in their current form. Whole-model compilation produced 58 graphs and 47 workload-`ContextVar` breaks. Restricting

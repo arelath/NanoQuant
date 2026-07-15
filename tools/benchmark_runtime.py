@@ -34,6 +34,7 @@ from nanoquant.runtime import (
     bind_fused_decode_rope,
     bind_prepared_linears,
     bind_prepared_rms_norms,
+    bind_short_sliding_masks,
     execution_workload,
     generate,
     hybrid_cache_factory,
@@ -322,6 +323,9 @@ def _benchmark(args: argparse.Namespace) -> dict[str, Any]:
         )
         fused_rms_norm_count = bind_prepared_rms_norms(model) if args.fused_rms_norm else 0
         fused_decode_rope_count = bind_fused_decode_rope(model) if args.fused_decode_rope else 0
+        short_sliding_mask_count = (
+            bind_short_sliding_masks(model) if args.short_sliding_masks else 0
+        )
         del states
         gc.collect()
         torch.cuda.empty_cache()
@@ -340,6 +344,7 @@ def _benchmark(args: argparse.Namespace) -> dict[str, Any]:
             hybrid_cache_factory(
                 model.config,
                 None if args.cache_dtype is None else _DTYPES[args.cache_dtype],
+                fast_sliding_prefix=args.fast_sliding_cache,
             ),
         )
 
@@ -667,6 +672,8 @@ def _benchmark(args: argparse.Namespace) -> dict[str, Any]:
             "cache_dtype": args.cache_dtype or args.input_dtype,
             "fused_rms_norm": args.fused_rms_norm,
             "fused_decode_rope": args.fused_decode_rope,
+            "short_sliding_masks": args.short_sliding_masks,
+            "fast_sliding_cache": args.fast_sliding_cache,
             "warmups": args.warmups,
             "repetitions": args.repetitions,
             "prompt": args.prompt,
@@ -684,6 +691,7 @@ def _benchmark(args: argparse.Namespace) -> dict[str, Any]:
             "replaced_linear_count": replaced,
             "fused_rms_norm_count": fused_rms_norm_count,
             "fused_decode_rope_count": fused_decode_rope_count,
+            "short_sliding_mask_count": short_sliding_mask_count,
             "prefill_fallback_count": plans.prefill.fallback_count,
             "decode_fallback_count": plans.decode.fallback_count,
             "prefill_backend": plans.prefill.layers[0].backend_name,
@@ -725,6 +733,18 @@ def main() -> None:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="replace pinned one-token Gemma3 RoPE with one Triton launch",
+    )
+    parser.add_argument(
+        "--short-sliding-masks",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="elide identity Gemma3 sliding masks while the context fits the window",
+    )
+    parser.add_argument(
+        "--fast-sliding-cache",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="use direct prefix updates until a sliding KV cache reaches rollover",
     )
     parser.add_argument("--max-new-tokens", type=int, default=32)
     parser.add_argument("--stopping-check-interval", type=int, default=8)
