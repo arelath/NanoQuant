@@ -355,7 +355,12 @@ Outcome: runtime performance is measured, explained, and competitive with the mo
   generated tokens, batch one, F16 KV storage, F32 operation/shell boundary, non-flash attention, greedy sampling,
   three rewrite warm-ups, and ten samples. Exact-prompt prefill is 96.61% of llama CLI, while decode is only 5.53%,
   so the protocol is frozen but the throughput gate decisively fails.
-- [ ] **M7.2** Record warm-up, repetitions, median/p10/p90, TTFT, prefill throughput, inter-token latency, decode throughput, memory, and fallback count.
+- [x] **M7.2** Record warm-up, repetitions, median/p10/p90, TTFT, prefill throughput, inter-token latency, decode throughput, memory, and fallback count.
+  The protocol-matched F16-KV CUDA Graph record retains all ten raw samples after three warm-ups. It reports
+  16-token prefill p50 41.945 ms / 381.67 tokens/s, isolated inter-token model-decode p50 4.567 ms / 218.97
+  tokens/s, TTFT p50 42.226 ms, and complete 32-token p10/p50/p90 183.185/201.963/228.256 ms. Peak allocation is
+  806,364,672 bytes; all 182 linears use CUDA and graph, prefill, and decode fallback counts are zero. The bracketing
+  F16 candidate/control/candidate records preserve the exact output hash and environment/configuration identity.
 - [x] **M7.3** Capture a new end-to-end profile and account for at least 90% of wall time before choosing optimizations.
   The protocol-matched, three-pass CUDA-event profile uses separate sparse top-level, block-component, and
   prepared-linear passes to avoid cross-level event inflation. Its top-level pass accounts for 97.77% of synchronized
@@ -446,7 +451,7 @@ Outcome: runtime performance is measured, explained, and competitive with the mo
   trace preserves every token while reducing kernels from 833 to 729 and ATen calls from 3,581 to 2,411. Both
   candidate isolated-decode medians beat control (31.90, 38.78, and 33.11 ms); end-to-end candidates straddle control
   but average 4.1% lower. Sampling and broader/long-context attention work remain.
-- [ ] **M7.15** Compare eager and compiled/static decode-step execution with stable shape/correctness coverage.
+- [x] **M7.15** Compare eager and compiled/static decode-step execution with stable shape/correctness coverage.
   Direct whole-model and decode-only `torch.compile` feasibility probes preserved the exact token but are rejected
   in their current form. Whole-model compilation produced 58 graphs and 47 workload-`ContextVar` breaks. Restricting
   compilation to decode after eager prefill still produced 49 graphs and 40 such breaks; its stabilized last-five
@@ -455,13 +460,38 @@ Outcome: runtime performance is measured, explained, and competitive with the mo
   A bounded fixed-shape `torch.compile(mode="reduce-overhead")` probe preserved the exact token but generated 49
   graphs, hit 40 `ContextVar.get` graph breaks, exceeded per-layer recompilation limits, and skipped CUDA graphs for
   mutating HybridCache updates. After a 32.98 s first call, compiled p50 was 890.47 ms versus 80.85 ms eager (11.0x
-  slower). Broad model compilation is rejected; this task remains open for an explicitly compileable static step or
-  smaller pure-function fusions.
+  slower). Broad model compilation is rejected.
+  The accepted alternative captures one batch-one, one-token CUDA graph per pre-rollover decode position after an
+  eager shape warm-up, restores the cache snapshot after capture, and replays later requests with the same static
+  geometry. Unsupported devices, batches, token counts, cache objects, or rollover positions use eager execution.
+  A tiny CUDA regression is exact across eager, capture, and replay. On the pinned Gemma workload, the production
+  validator exactly reproduces all 32 tokens and the retained llama.cpp prefix with 31 captures, 31 replays, and
+  zero graph or packed fallback. Candidate/control/candidate complete-generation medians are 186.80, 848.19, and
+  192.03 ms; the graph-aware profile records one `cudaGraphLaunch`, four dynamic-input copies, and about 4.40 ms
+  model-device time rather than the eager path's 570 ordinary launch APIs.
 - [ ] **M7.16** Establish designated-host performance CI with raw sample retention and environment health checks.
 - [ ] **M7.17** Add no-more-than-10% regression gates against the accepted NanoQuant runtime baseline.
-- [ ] **M7.18** Reach at least 70% of the fastest compatible modified llama.cpp reference throughput on the agreed workload, or produce an accepted profile-backed gap analysis and follow-up plan.
-- [ ] **M7.19** Re-run numerical, artifact-size, VRAM, and quality gates after every accepted layout/kernel change.
-- [ ] **M7.GATE** Publish a reproducible NanoQuant-versus-llama.cpp report with source/kernel/artifact hashes, workload, profiles, parity, quality/BPW, and explained end-to-end performance.
+- [x] **M7.18** Reach at least 70% of the fastest compatible modified llama.cpp reference throughput on the agreed workload, or produce an accepted profile-backed gap analysis and follow-up plan.
+  Protocol-matched F16-KV static CUDA Graph decode averages 200.52 ms for the exact 32-token workload across the two
+  bracketing candidate records, or 159.59 tokens/s. That is 86.50% of the compatible 184.50 tokens/s modified
+  llama.cpp decode result and
+  exceeds the 70% acceptance threshold while retaining the exact output hash, zero fallback, and unchanged
+  1,295,585,792-byte production peak allocation.
+- [x] **M7.19** Re-run numerical, artifact-size, VRAM, and quality gates after every accepted layout/kernel change.
+  The final accepted runtime preserves packed descriptor
+  `b4f0c6270c4b59f8293c909ddeb21042ad1a2d7ee18601c77e4c57563c900487`, 87,072,592 weight bytes,
+  87,507,442 physical bytes, and the source run's 0.996318 effective BPW. A fresh all-layer CUDA comparison checks
+  7,348,224 outputs across all 182 linears with 4.77e-6 maximum absolute error and deterministic replay. A fresh
+  serial 64x128 WikiText-2 run reproduces PPL 453.5709857733353 exactly over 8,128 tokens. Production graph
+  validation preserves the exact 32-token hash and llama.cpp prefix with zero fallback and unchanged
+  1,295,585,792-byte peak allocation.
+- [x] **M7.GATE** Publish a reproducible NanoQuant-versus-llama.cpp report with source/kernel/artifact hashes, workload, profiles, parity, quality/BPW, and explained end-to-end performance.
+  `Docs/20-inference-performance-protocol.md` binds the pinned model, rewrite/llama sources, CUDA kernel, packed
+  artifact, converted GGUF, prompt/cache/sampling protocol, raw profiles, A/B/A samples, and post-optimization gates.
+  The final F16-KV rewrite averages 159.59 tokens/s versus 184.50 tokens/s for compatible llama.cpp (86.50%), with
+  exact retained output behavior, zero fallback, 1.296 GB production peak, 0.996318 effective BPW, and exact serial
+  PPL 453.571 versus contemporary legacy 444.333 (+2.08%). Remaining M7 CI and broader/general-path tuning tasks
+  stay explicitly open; they do not invalidate the published designated-host parity result.
 
 ## Milestone 8 — Complete evaluation, diagnostics, and self-documenting reports
 
@@ -470,32 +500,124 @@ Outcome: runs produce cheap-to-expensive decision evidence and actionable report
 
 - [x] **M8.1** Implement the versioned evaluator registry and immutable evaluator specifications.
 - [x] **M8.2** Implement calibration, quick-decision, and final-evaluation partitions with content hashes and overlap detection.
-- [ ] **M8.3** Implement artifact-structure and packed-reference parity smoke evaluators.
+- [x] **M8.3** Implement artifact-structure and packed-reference parity smoke evaluators.
+  Versioned smoke-tier adapters now reuse the strict packed artifact opener and packed reference validator through
+  `EvaluatorRegistry`. The structure result records descriptor identity, blocks/layers/tensors, logical weight and
+  physical bytes, and successful hash/header verification. The parity result executes every requested logical/packed
+  layer pair with an explicit tolerance and records output count, maximum error/layer, and pass state. A fixture runs
+  both evaluators cumulatively through the smoke tier, while corruption/reference behavior remains covered by the
+  underlying validator suite and the architecture contract keeps deployment runtime independent of application code.
 - [x] **M8.4** Implement token-accurate negative-log-likelihood/perplexity evaluation with BOS/EOS, causal shift, padding, stride, and partial-window tests.
 - [ ] **M8.5** Implement the selected zero/few-shot task evaluators with pinned dataset/task/prompt revisions.
-- [ ] **M8.6** Implement deterministic generation sanity/regression cases.
+- [x] **M8.6** Implement deterministic generation sanity/regression cases.
+  A versioned smoke evaluator binds case name/version, prompt tokens, expected generated tokens, expected stop reason,
+  and sanity thresholds into one immutable case identity. It compares multiple observed runs, preserves expected and
+  per-run token hashes, reports the first mismatch and longest repeated-token run, and requires exact tokens, exact
+  stop reasons, repeat determinism, minimum output length, and bounded repetition. Tests cover registry dispatch,
+  exact repeatable output, stable case identity across observations, mismatch/nondeterminism/stop/repetition/empty
+  diagnostics, and malformed cases.
 - [ ] **M8.7** Implement long-context evaluation where supported by the model/runtime plan.
 - [x] **M8.8** Implement smoke, quick, standard, and full evaluation tiers from the registry.
 - [x] **M8.9** Implement predefined promotion, rejection, and inconclusive decisions with immutable gate policy.
-- [ ] **M8.10** Implement paired comparisons, bootstrap/appropriate confidence intervals, repeated-run variability, and minimum meaningful deltas.
-- [ ] **M8.11** Implement exact effective core/artifact BPW, bytes, memory, quantization cost, and runtime metrics as separate dimensions.
+- [x] **M8.10** Implement paired comparisons, bootstrap/appropriate confidence intervals, repeated-run variability, and minimum meaningful deltas.
+  `compare_paired` validates finite equal-length observations, normalizes deltas so positive always means improvement,
+  and uses a seeded paired bootstrap to produce a requested confidence interval. Results preserve raw and
+  direction-normalized means, candidate/baseline/paired sample standard deviations, sample count, bootstrap identity,
+  and the predefined minimum meaningful delta. Interval placement yields explicit meaningful-improvement,
+  meaningful-regression, no-meaningful-difference, or inconclusive outcomes. Tests cover both metric directions,
+  deterministic replay, variability, every outcome, and invalid/non-finite requests.
+- [x] **M8.11** Implement exact effective core/artifact BPW, bytes, memory, quantization cost, and runtime metrics as separate dimensions.
+  Immutable evaluation dimensions now preserve exact source-parameter/core-bit numerators, logical and complete
+  deployable byte counts, and separately derived effective-core and artifact BPW. Quantization device/host/temp-disk
+  memory is distinct from runtime device/host memory; six named compression/evaluation stage durations retain their
+  accounted total; TTFT, prefill throughput, inter-token latency, decode throughput, and fallback count remain a
+  separate runtime dimension. Constructors reject negative, non-integral, and non-finite values. Tests demonstrate
+  that core BPW, artifact BPW, bytes, the two memory phases, cost, and runtime values cannot be substituted silently.
 - [x] **M8.12** Preserve per-layer objective-weighted reconstruction tables for every run.
 - [x] **M8.13** Preserve the Experiment 019-style final-block-versus-block-entry table with positive, negative, and `n/a` semantics.
-- [ ] **M8.14** Preserve source/base-model, block-entry, final-pre-KD, and final-post-KD snapshots and named comparisons.
-- [ ] **M8.15** Implement diagnostic rules for calibration instability, Hessian conditioning, ADMM plateau, export gaps, ineffective retry/outliers, poor tuning recovery, and runtime fallback.
-- [ ] **M8.16** Implement complete summary reports for completed, failed, interrupted, resumed, and forked runs.
-- [ ] **M8.17** Implement candidate-versus-baseline reports with semantic config diff, artifact reuse, per-layer/block alignment, uncertainty, warnings, and Pareto dimensions.
+- [x] **M8.14** Preserve source/base-model, block-entry, final-pre-KD, and final-post-KD snapshots and named comparisons.
+  Immutable block results continue to retain the objective-weighted source reference, block entry, each accepted
+  layer boundary, optional post-block refit, and final frozen pre-KD value with named denominator-safe comparisons.
+  Global-tuning schema version 2 adds an ordered per-block pre/post-KD table measured against the same deterministic
+  base-model hidden-state reference. Its protocol identity binds token content and limits, padding, BF16 reference
+  storage, FP32 accumulation, unweighted MSE, denominator floor, and version; legacy schema-version-1 artifacts load
+  with an explicitly absent table. The probe streams one sequence and keeps only bounded pageable host references.
+  Reports preserve the local pre-KD table and label local versus probe metrics so unlike objectives are not silently
+  compared. Unit/integration tests cover exact and changed models, padding identity, near-zero `n/a`, alignment,
+  legacy loading, and end-to-end KD persistence. The complete pinned Gemma run was backfilled without changing any
+  tuned tensors or epoch results: active artifact
+  `sha256-edef5622c5b03e24b75d77ee05f389e064e24d73a3ff7087282d6c3761629669` contains all 26 blocks under protocol
+  `sha256:cf208a4f3632f640e2ec4e1ac12e8cafbcf4bbbff03d17839ec29ad8ae79098c`.
+- [x] **M8.15** Implement diagnostic rules for calibration instability, Hessian conditioning, ADMM plateau, export gaps, ineffective retry/outliers, poor tuning recovery, and runtime fallback.
+  A versioned immutable `DiagnosticPolicy` now owns every threshold and has a semantic identity. `diagnose` derives
+  stable, location-aware findings from structured observations for non-finite or cross-partition calibration,
+  excessive Hessian condition/jitter, ADMM tail plateau/divergence, latent-to-export error amplification, retry
+  improvement per added bit, outlier block-loss utility, tuning recovery fraction, and unexpected runtime fallback.
+  Findings retain code, severity, evidence, artifact validity, and a recommended next diagnostic. All new codes are
+  registered with documentation/remediation metadata. Tests exercise every required family, a healthy observation,
+  invalid-artifact handling, configurable/versioned thresholds, and invalid policy/observation inputs.
+- [x] **M8.16** Implement complete summary reports for completed, failed, interrupted, resumed, and forked runs.
+  Reports now derive a typed `RunSummary` from the manifest and canonical event stream rather than console text. They
+  retain event/stage counts, warnings/errors with codes and fields, attempts/resume count, complete lifecycle and
+  terminal context, failure metadata, artifacts, parent/fork stage, and manifest/event consistency warnings. Markdown
+  renders execution, lineage, issues, failure/interruption context, and artifacts for every outcome. Tests cover
+  completed, failed, interrupted, resumed-to-completion, and forked histories plus sequence, foreign-run, and
+  terminal-status inconsistencies; the existing foundation run still generates its self-contained summary.
+- [x] **M8.17** Implement candidate-versus-baseline reports with semantic config diff, artifact reuse, per-layer/block alignment, uncertainty, warnings, and Pareto dimensions.
   `tools/compare_block_trajectories.py` now provides the block-alignment slice: it selects the latest journal
   identity, rejects stale/noncontiguous prefixes, resolves committed block artifacts, and compares any number of
   named legacy post-refit trajectories with JSON/Markdown deltas. Optional legacy rank-utility CSVs add exact
   prefix rank-sum/mismatch checks and scoped BPW. Rewrite BPW includes every committed bit-cost category; the
   legacy CSV's rank-dependent BPW includes binary factors and middle scales but excludes pre/post scales and
-  outliers, so it is explicitly not presented as like-for-like total BPW. Config/artifact reuse, uncertainty,
-  warnings, and Pareto reporting remain open.
-- [ ] **M8.18** Include experiment number, zero-argument runfile path/hash, purpose, hypothesis, baseline, environment, cost, conclusion, and recommended next action.
-- [ ] **M8.19** Implement evaluator and task-result caching using complete semantic identities.
-- [ ] **M8.20** Add golden report tests using Experiment 019 data and synthetic near-zero denominators.
-- [ ] **M8.21** Validate evaluator batching, caching, sample limiting, distributed reduction, and known-logit results.
+  outliers, so it is explicitly not presented as like-for-like total BPW. The application comparison report now
+  adds canonical semantic config diffs with explicit missing values; source/dataset/evaluator/environment
+  comparability; stage-aware artifact reuse; exact aligned layer/block absolute and denominator-safe relative deltas;
+  seeded paired-bootstrap uncertainty; new/resolved/shared warning codes; and a typed promotion-gate conclusion.
+  Its Pareto view keeps quality, core/artifact storage, every quantization-cost stage, quantization/runtime memory,
+  prefill, decode, and fallback coverage separate, retaining integer byte deltas exactly. Required identity mismatch
+  produces a `not-comparable` conclusion and suppresses metric-delta rendering instead of implying parity. Tests
+  cover semantic exclusions/additions/removals, cross-stage reuse, missing and near-zero alignments, exact large-byte
+  deltas, uncertainty, Pareto tradeoffs, warning transitions, invalid ambiguity, and non-comparable reports.
+- [x] **M8.18** Include experiment number, zero-argument runfile path/hash, purpose, hypothesis, baseline, environment, cost, conclusion, and recommended next action.
+  Typed run summaries now retain intent fields; launcher kind, experiment, repository-relative path, content hash,
+  code revision, and arguments; the full redacted environment; manifest elapsed time; structured event timing and
+  memory observations; exact observed device/host/temporary-disk peaks; conclusion; and recommended next action.
+  The report explicitly identifies a zero-argument numbered runfile and flags experiment mismatch, unexpected
+  runfile arguments, missing repository-relative provenance, invalid timestamps, and malformed cost observations.
+  Explicit structured conclusion/action fields win; deterministic status-aware defaults keep completed, failed,
+  interrupted, running, and created legacy manifests self-documenting. Markdown renders dedicated outcome, launcher,
+  environment, and cost sections. Unit tests cover exact provenance/environment/cost, explicit and default outcomes,
+  failures, interruption, resume, forks, mismatch warnings, and structured cost observations; the numbered foundation
+  integration run verifies that its generated report contains the complete envelope.
+- [x] **M8.19** Implement evaluator and task-result caching using complete semantic identities.
+  Separate immutable `evaluation-task-inputs` and `evaluation-result` artifacts allow tokenized/formatted task data
+  to be reused across models without ever reusing a model result across packed artifacts. Task identities bind the
+  evaluator, task/dataset revisions and content, split, ordered sample selection, partition revision, tokenizer
+  revision/content/behavior, prompt revision/content, exact few-shot demonstrations, selection seed, and
+  preprocessing version. Result identities add the exact model artifact, runtime backend/version/mode and numerical
+  parameters, optional environment identity, and seed. The run-local sorted index is published atomically under a
+  cross-process lock; hits validate the artifact and embedded identity, misses state that no complete identity
+  matches, and conflicting payloads under one identity fail instead of overwriting evidence. Typed cached execution
+  returns the same result contract on hit and miss. Tests cover every invalidation boundary, order-normalized named
+  parameters, model-independent task reuse, changed-model misses, durable reopen, conflict/corruption rejection,
+  typed no-reexecution behavior, and concurrent publication without lost entries.
+- [x] **M8.20** Add golden report tests using Experiment 019 data and synthetic near-zero denominators.
+  Golden Markdown now covers an actual seven-layer block from the frozen Experiment 019 weight-error and
+  rank-utility CSVs. The test first verifies both complete source files against their M0 manifest hashes, then maps
+  the retained ranks, bit counts, raw/weighted reconstruction errors, and tuned block boundary into current typed
+  contracts and compares the whole rendered report byte-for-byte. A second golden uses non-zero source and block
+  entry losses below a configured denominator floor, preserving absolute deltas while requiring both relative
+  values to render as `n/a`. The fixtures therefore catch numerical-column, sign/baseline, precision, ordering, and
+  Markdown drift without normalizing away meaningful report changes.
+- [x] **M8.21** Validate evaluator batching, caching, sample limiting, distributed reduction, and known-logit results.
+  The causal evaluator supports a positive deterministic sample limit applied before windowing and batching and now
+  records selected samples in addition to windows and valid targets. Serial and multi-window batched runs agree;
+  constructed next-token logits verify causal shift and overlap exactly; BOS/EOS, padding, partial final windows,
+  and invalid/empty cases retain exact denominators. The distributed reducer sums per-shard total NLL with `fsum`,
+  divides once by the global token count, and sums sample/window counts. Its unequal shards deliberately have
+  different loss distributions, ruling out mean-of-means or mean-perplexity reductions. M8.19 tests additionally
+  prove cached typed results equal uncached results, skip re-execution, survive reopen, and invalidate on every
+  semantic boundary.
 - [ ] **M8.GATE** Demonstrate that a candidate can progress from layer replay through quick/standard/full evaluation and that its run directory alone explains intent, execution, issues, cost, results, and comparison.
 
 ## Milestone 9 — Migrate supported workflows and cut over

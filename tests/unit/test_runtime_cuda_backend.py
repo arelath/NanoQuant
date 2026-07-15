@@ -411,6 +411,50 @@ def test_fused_cache_prefix_generation_matches_control_across_sliding_rollover()
     assert fused_cache.nanoquant_fused_cache_update_count > 0
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_cuda_graph_decode_capture_and_replay_match_eager_generation() -> None:
+    torch.manual_seed(20260715)
+    config = Gemma3TextConfig(
+        vocab_size=64,
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=8,
+        max_position_embeddings=64,
+        sliding_window=16,
+        sliding_window_pattern=2,
+        pad_token_id=0,
+        eos_token_id=1,
+        bos_token_id=2,
+        tie_word_embeddings=False,
+    )
+    model = Gemma3ForCausalLM(config).eval().cuda()
+    tokens, mask = batch_prompts(((2, 4, 5),), pad_token_id=0)
+    request = GenerationRequest(tokens.cuda(), mask.cuda(), 4, (1000,), 0)
+    factory = hybrid_cache_factory(config, torch.float16, fused_cache_prefix=True)
+    control = generate(
+        request,
+        TransformersGenerationModel(model, factory, lambda kind: nullcontext()),
+    )
+    adapter = TransformersGenerationModel(
+        model,
+        factory,
+        lambda kind: nullcontext(),
+        cuda_graph_decode=True,
+    )
+
+    captured = generate(request, adapter)
+    replayed = generate(request, adapter)
+
+    assert torch.equal(captured.token_ids, control.token_ids)
+    assert torch.equal(replayed.token_ids, control.token_ids)
+    assert adapter.cuda_graph_capture_count == 3
+    assert adapter.cuda_graph_replay_count == 3
+    assert adapter.cuda_graph_fallback_count == 0
+
+
 def test_cuda_packed_backend_reports_missing_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
     backend = CudaPackedBackend()
     state = _logical()

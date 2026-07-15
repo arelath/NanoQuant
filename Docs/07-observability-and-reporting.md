@@ -127,11 +127,15 @@ Warnings have stable identifiers:
 ```text
 NQ-CAL-001  Calibration statistic contains non-finite values
 NQ-CAL-002  Calibration clipping rate exceeds configured diagnostic threshold
+NQ-CAL-003  Calibration statistics are unstable across sample partitions
 NQ-HES-001  Hessian regularization required repeated jitter escalation
 NQ-FAC-001  Factorizer failed to converge within configured iterations
 NQ-FAC-002  Export error materially exceeds latent/objective error
 NQ-RNK-001  Retry requested but global bit budget rejected it
+NQ-RNK-002  Retry added bits without sufficient reconstruction improvement
+NQ-RNK-003  Outlier allocation added bits without sufficient block-loss benefit
 NQ-TUN-001  Tuning restored an earlier best state after regression
+NQ-TUN-002  Tuning recovered too little of the quantization loss jump
 NQ-RUN-001  Resource fallback changed the execution plan
 NQ-INF-001  Optimized backend unavailable; reference fallback selected
 NQ-INF-002  Runtime output exceeded reference tolerance
@@ -236,6 +240,14 @@ Every completed, failed, or interrupted run renders `reports/summary.md` with:
 
 The report generator reads only the manifest, events, and result artifacts. It never scrapes console logs.
 
+Implementation note (2026-07-15): the typed run summary and Markdown renderer preserve experiment intent and the
+complete `LauncherProvenance` envelope, explicitly identifying zero-argument numbered runfiles. They render the
+allowlisted/redacted environment, elapsed manifest time, and every structured event timing or peak-memory cost
+observation without summing nested timings. Explicit structured conclusion/recommended-action fields take priority;
+status-aware defaults ensure older completed, failed, interrupted, running, and created runs still explain their
+outcome and next step. Provenance mismatches, runfile arguments, timestamp problems, and malformed cost observations
+remain visible as summary consistency warnings.
+
 ## 11. Comparison report
 
 Candidate-versus-baseline reports include:
@@ -250,6 +262,15 @@ Candidate-versus-baseline reports include:
 - conclusion against predefined promotion gates.
 
 When two runs are not directly comparable, the report says why rather than producing a misleading delta.
+
+Implementation note (2026-07-15): `nanoquant.application.comparison_report` provides the immutable comparison
+request/result contracts and deterministic Markdown renderer. Comparability is explicit rather than inferred;
+required identity mismatches suppress metric-delta sections. Semantic config comparison ignores intent,
+observability, and output-location roots by default while retaining numerical/runtime behavior changes. Artifact
+reuse is grouped by producing stage, sampled metrics use the seeded paired-bootstrap evaluator, warning codes are
+classified as new/resolved/shared, and the Pareto view keeps quality, representation, cost, quantization/runtime
+memory, prefill, decode, and fallback dimensions separate. Promotion conclusions consume the versioned
+`GateDecision` contract rather than accepting an unstructured label.
 
 ## 12. Event sinks and retention
 

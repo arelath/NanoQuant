@@ -353,7 +353,11 @@ def _profile(args: argparse.Namespace) -> dict[str, object]:
             last_cache[0] = cache
             return cache
 
-        shell = TransformersGenerationModel(model, tracked_cache_factory)
+        shell = TransformersGenerationModel(
+            model,
+            tracked_cache_factory,
+            cuda_graph_decode=args.cuda_graph_decode,
+        )
         tokens = input_ids.to(device)
         prompt_mask = attention_mask.to(device)
         full_mask = torch.zeros((1, maximum_cache_length), dtype=torch.bool, device=device)
@@ -467,6 +471,8 @@ def _profile(args: argparse.Namespace) -> dict[str, object]:
         ]:
             selected = {name: modules[name] for name in dict.fromkeys(region_names)}
             capture = _CudaModuleCapture(selected, args.repetitions)
+            model_starts = [torch.cuda.Event(enable_timing=True) for _ in range(args.repetitions)]
+            model_ends = [torch.cuda.Event(enable_timing=True) for _ in range(args.repetitions)]
             wall_samples = []
             output_tokens = []
             try:
@@ -476,7 +482,9 @@ def _profile(args: argparse.Namespace) -> dict[str, object]:
                     sample_started = time.perf_counter()
                     capture.begin(sample)
                     try:
+                        model_starts[sample].record()
                         step = decode(cache, next_token)
+                        model_ends[sample].record()
                     finally:
                         capture.end()
                     torch.cuda.synchronize(device)
@@ -486,7 +494,13 @@ def _profile(args: argparse.Namespace) -> dict[str, object]:
                     )
             finally:
                 capture.close()
-            return capture.samples(), tuple(wall_samples), tuple(output_tokens)
+            samples = capture.samples()
+            if "model-forward" not in samples:
+                samples["model-forward"] = tuple(
+                    start.elapsed_time(end) / 1_000.0
+                    for start, end in zip(model_starts, model_ends, strict=True)
+                )
+            return samples, tuple(wall_samples), tuple(output_tokens)
 
         pass_regions = {
             "top_level": ("model-forward", *groups["top_level"]),
@@ -546,21 +560,27 @@ def _profile(args: argparse.Namespace) -> dict[str, object]:
         component_groups = grouped_passes["components"]
         linear_groups = grouped_passes["linears"]
         ratios = {
-            "top_level_over_model": profile_ratio_samples(
-                top_groups["top_level"], top_regions["model-forward"]
-            ),
-            "top_level_over_wall": profile_ratio_samples(top_groups["top_level"], top_wall),
-            "model_over_wall": profile_ratio_samples(top_regions["model-forward"], top_wall),
-            "components_over_blocks": profile_ratio_samples(
-                component_groups["components"], component_groups["blocks"]
-            ),
-            "linears_over_blocks": profile_ratio_samples(
-                linear_groups["linears"], linear_groups["blocks"]
-            ),
-            "linears_over_model": profile_ratio_samples(
-                linear_groups["linears"], linear_regions["model-forward"]
-            ),
+            "model_over_wall": profile_ratio_samples(top_regions["model-forward"], top_wall)
         }
+        if "top_level" in top_groups:
+            ratios["top_level_over_model"] = profile_ratio_samples(
+                top_groups["top_level"], top_regions["model-forward"]
+            )
+            ratios["top_level_over_wall"] = profile_ratio_samples(
+                top_groups["top_level"], top_wall
+            )
+        if "components" in component_groups and "blocks" in component_groups:
+            ratios["components_over_blocks"] = profile_ratio_samples(
+                component_groups["components"], component_groups["blocks"]
+            )
+        if "linears" in linear_groups and "blocks" in linear_groups:
+            ratios["linears_over_blocks"] = profile_ratio_samples(
+                linear_groups["linears"], linear_groups["blocks"]
+            )
+        if "linears" in linear_groups:
+            ratios["linears_over_model"] = profile_ratio_samples(
+                linear_groups["linears"], linear_regions["model-forward"]
+            )
         profile_passes = {
             name: {
                 "wall": _timing(wall),
@@ -596,6 +616,9 @@ def _profile(args: argparse.Namespace) -> dict[str, object]:
             "native_bfloat16_tied_projection_count": (
                 runtime.native_bfloat16_tied_projection_count
             ),
+            "cuda_graph_capture_count": shell.cuda_graph_capture_count,
+            "cuda_graph_replay_count": shell.cuda_graph_replay_count,
+            "cuda_graph_fallback_count": shell.cuda_graph_fallback_count,
             "fused_cache_update_count": getattr(
                 last_cache[0], "nanoquant_fused_cache_update_count", 0
             ),
@@ -641,6 +664,7 @@ def _profile(args: argparse.Namespace) -> dict[str, object]:
             "fast_sliding_cache": args.fast_sliding_cache,
             "fused_cache_prefix": args.fused_cache_prefix,
             "native_bfloat16_tied_projection": args.native_bfloat16_tied_projection,
+            "cuda_graph_decode": args.cuda_graph_decode,
             "attention": "eager",
             "warmups": args.warmups,
             "repetitions": args.repetitions,
@@ -754,6 +778,12 @@ def main() -> None:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="retain the tied Gemma embedding/output table in bundle-native BF16",
+    )
+    parser.add_argument(
+        "--cuda-graph-decode",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="capture and replay batch-one pre-rollover decode positions with CUDA Graphs",
     )
     parser.add_argument("--wait-for-device-seconds", type=float, default=0.0)
     parser.add_argument("--output", type=Path)

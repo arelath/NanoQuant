@@ -129,6 +129,7 @@ def _evaluate(
         "perplexity": result.perplexity,
         "token_count": result.token_count,
         "window_count": result.window_count,
+        "sample_count": result.sample_count,
         "elapsed_seconds": time.perf_counter() - started,
         "peak_device_bytes": peak_device_memory_bytes(device),
         "peak_host_bytes": peak_process_memory_bytes(),

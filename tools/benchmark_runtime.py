@@ -400,7 +400,11 @@ def _benchmark(args: argparse.Namespace) -> dict[str, Any]:
             last_cache[0] = cache
             return cache
 
-        shell = TransformersGenerationModel(model, tracked_cache_factory)
+        shell = TransformersGenerationModel(
+            model,
+            tracked_cache_factory,
+            cuda_graph_decode=args.cuda_graph_decode,
+        )
 
         selected_spec = entries[layer_index].spec
         for workload, plan, token_count in (
@@ -733,6 +737,7 @@ def _benchmark(args: argparse.Namespace) -> dict[str, Any]:
             "fast_sliding_cache": args.fast_sliding_cache,
             "fused_cache_prefix": args.fused_cache_prefix,
             "native_bfloat16_tied_projection": args.native_bfloat16_tied_projection,
+            "cuda_graph_decode": args.cuda_graph_decode,
             "warmups": args.warmups,
             "repetitions": args.repetitions,
             "prompt": args.prompt,
@@ -760,6 +765,9 @@ def _benchmark(args: argparse.Namespace) -> dict[str, Any]:
             "native_bfloat16_tied_projection_count": (
                 native_bfloat16_tied_projection_count
             ),
+            "cuda_graph_capture_count": shell.cuda_graph_capture_count,
+            "cuda_graph_replay_count": shell.cuda_graph_replay_count,
+            "cuda_graph_fallback_count": shell.cuda_graph_fallback_count,
             "prefill_fallback_count": plans.prefill.fallback_count,
             "decode_fallback_count": plans.decode.fallback_count,
             "prefill_backend": plans.prefill.layers[0].backend_name,
@@ -843,6 +851,12 @@ def main() -> None:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="retain the tied Gemma embedding/output table in native BF16",
+    )
+    parser.add_argument(
+        "--cuda-graph-decode",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="capture and replay batch-one pre-rollover decode positions with CUDA Graphs",
     )
     parser.add_argument("--max-new-tokens", type=int, default=32)
     parser.add_argument("--stopping-check-interval", type=int, default=8)

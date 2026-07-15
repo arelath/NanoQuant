@@ -128,17 +128,10 @@ def test_complete_frozen_run_can_be_distilled_committed_and_reloaded(
     distilled = run_global_topk_distillation(request)
     assert cooldowns == [1.5, 1.5, 3.25]
     assert offloads == ["cpu", "cpu"]
-    profiles = [
-        json.loads(path.read_text(encoding="utf-8"))
-        for path in sorted(output.glob("profile*.json"))
-    ]
+    profiles = [json.loads(path.read_text(encoding="utf-8")) for path in sorted(output.glob("profile*.json"))]
     distillation_profiles = [profile for profile in profiles if profile["run_id"] == "global-distillation"]
     assert len(distillation_profiles) == 2
-    phase_paths = {
-        str(phase["path"])
-        for profile in distillation_profiles
-        for phase in profile["phases"]
-    }
+    phase_paths = {str(phase["path"]) for profile in distillation_profiles for phase in profile["phases"]}
     assert {
         "run/load_frozen",
         "run/load_frozen/inventory",
@@ -168,6 +161,15 @@ def test_complete_frozen_run_can_be_distilled_committed_and_reloaded(
     assert distilled.result.source_blocks == tuple(block.teacher_outputs.artifact for block in before.blocks)
     assert len(distilled.result.tuned_blocks) == 1
     assert distilled.result.auxiliary_parameters
+    assert distilled.result.schema_version == 2
+    assert distilled.result.block_snapshot_protocol_hash is not None
+    assert len(distilled.result.block_metrics) == 1
+    block_metrics = distilled.result.block_metrics[0]
+    assert block_metrics.block.index == 0
+    assert block_metrics.final_frozen_pre_kd >= 0
+    assert block_metrics.final_post_kd >= 0
+    assert block_metrics.post_kd_vs_pre_kd.baseline_name == "final_frozen_pre_kd"
+    assert block_metrics.post_kd_vs_pre_kd.candidate_name == "final_post_kd"
     training_checkpoint = active_distillation_checkpoint(
         output,
         DistillationCheckpointIdentity(
@@ -181,9 +183,7 @@ def test_complete_frozen_run_can_be_distilled_committed_and_reloaded(
     assert training_checkpoint.state.completed_epochs == 3
     assert training_checkpoint.state.steps_completed == 6
     parameter_values = dict(training_checkpoint.state.parameter_values)
-    optimizer_states = {
-        state.parameter_name: state for state in training_checkpoint.state.optimizer_states
-    }
+    optimizer_states = {state.parameter_name: state for state in training_checkpoint.state.optimizer_states}
     scale_names = tuple(name for name in parameter_values if ".scale_" in name)
     assert scale_names
     assert all(parameter_values[name].dtype is torch.bfloat16 for name in scale_names)

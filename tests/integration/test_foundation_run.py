@@ -34,3 +34,11 @@ def test_numbered_application_run_produces_self_contained_audit_envelope(tmp_pat
     assert "run.completed" in (directories[0] / "run.log").read_text(encoding="utf-8")
     report = (directories[0] / "reports" / "summary.md").read_text(encoding="utf-8")
     assert "foundation-smoke" in report and "Status: `completed`" in report
+    assert "## Outcome" in report
+    assert "Conclusion: Run completed successfully." in report
+    assert "Recommended next action:" in report
+    assert "## Launcher" in report
+    assert "Zero-argument numbered runfile: **yes**" in report
+    assert manifest["launcher"]["content_hash"] in report
+    assert "## Environment" in report
+    assert "## Cost" in report

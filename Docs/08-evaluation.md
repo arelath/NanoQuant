@@ -226,6 +226,25 @@ Evaluation cache identity includes the complete model artifact, evaluator/task r
 
 Preprocessed task inputs may be cached independently from model results. Cached results are never reused across a changed packed artifact merely because the source recipe is similar.
 
+The implementation uses two immutable artifact types and a run-local atomic index:
+
+- `evaluation-task-inputs` binds the evaluator semantic key; task and pinned dataset revisions/content; split;
+  partition name, version, content hash, and ordered sample hashes; tokenizer revision/content and all behavioral
+  parameters; prompt revision/content; exact few-shot demonstration hashes; selection seed; and preprocessing
+  implementation version. It intentionally excludes the model artifact so identical preprocessed inputs can be
+  reused across candidate and baseline models.
+- `evaluation-result` binds the exact model `ArtifactRef`, evaluator key, task-input key, runtime backend/version/mode
+  and numerical parameters, optional environment hash, and evaluation seed. Consequently a changed packed model,
+  runtime numerical mode, evaluator implementation, or selected example is a miss even when the recipe name is the
+  same.
+
+Every cache hit first validates the content-addressed artifact and then compares its embedded identity with the
+requested identity and index key. Publication is serialized across processes and atomically replaces the sorted
+index. A second payload under the same semantic identity is an error, not an overwrite; interrupted publication can
+leave only an unreferenced immutable object that ordinary artifact garbage collection can reclaim. Lookup results
+carry an explicit hit/miss status and reuse/invalidation reason. Report formatting and console verbosity are absent
+from both identities.
+
 ## 13. Evaluator validation
 
 Before an evaluator can gate research decisions, tests establish:
@@ -238,6 +257,14 @@ Before an evaluator can gate research decisions, tests establish:
 - sample limits select deterministic examples;
 - distributed reduction agrees with single-process execution;
 - evaluator version changes produce an explicit new identity.
+
+The causal evaluator now exposes `maximum_samples` as part of its request and applies the deterministic leading
+selection before window construction or batching. Results retain selected-sample, window, and valid-token counts.
+Distributed workers return the same sufficient statistics as a local run; reduction uses an accurate sum of total
+negative log likelihood and divides once by the global valid-token count, then sums windows and selected samples.
+It never averages shard means or perplexities. Validation uses unequal shards with different loss distributions so
+an unweighted mean-of-means implementation would fail, alongside serial/batched, exact next-token-logit,
+cached/no-reexecution, deterministic sample-limit, padding, stride, and partial-window cases.
 
 ## 14. Reporting an inconclusive result
 

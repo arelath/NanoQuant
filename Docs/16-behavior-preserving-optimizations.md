@@ -1267,3 +1267,65 @@ only their *measurement* waits for the Docs/15 P1 baseline if we want clean befo
   0.993, and 0.934 s. Candidate averages improve by 42.6% and 2.9%. Concatenating the larger MLP payloads adds
   54.94 MB (7.8%) to steady benchmark allocation; the production load/generation peak remains 1.296 GB. The guarded
   path is default and `--no-group-decode-mlp` retains the control.
+- **Fused post-RMSNorm plus residual addition rejected:** a decode-only Triton kernel was bit-exact against native
+  F32 RMSNorm followed by residual addition on single- and multi-token fixtures. It bound both post-norm sites in
+  all 26 Gemma blocks, preserved every real token/hash, and reduced kernels from 573 to 521, launch APIs from 570 to
+  518, and ATen calls from 2,203 to 1,995. The uninstrumented candidate/control/candidate isolated-decode medians
+  were 32.72, 41.46, and 45.16 ms, but complete-generation medians were 1.195, 0.998, and 0.946 s. Candidate-average
+  generation therefore regressed 7.2%, and the first candidate regressed 19.7%. The implementation was reverted;
+  the 52-launch reduction alone does not justify carrying a non-repeating end-to-end path.
+- **Further BF16 vocabulary-projection changes rejected:** a real-shape sweep of 40 Triton launch configurations
+  over `BLOCK_IN={64,128,256,512,1024}`, `BLOCK_OUT={8,16,32,64}`, and four/eight warps found the best
+  `1024x8` launch at 1.477 ms versus 1.483 ms for the shipped `256x32` launch. The 0.4% difference is below a
+  credible promotion threshold and changes the F32 reduction by up to 4.77e-7. Native cuBLAS BF16 GEMV was
+  faster in adjacent trials, but rounding the input and/or output raised maximum logit error to 7.67e-3 for
+  BF16-input/F32-output and 1.25e-2 for BF16 output, compared with the accepted mixed kernel's established
+  3.70e-6 error against the expanded-table reference. The BF16-output path was about 10% faster and the F32-output
+  path only about 1.6% faster than the current kernel in the repeating trial. Both retained the sampled probe's
+  argmax, but neither is accepted because the error increase is disproportionate to the measured benefit and would
+  alter the runtime's sampling distribution. The native BF16 table plus F32-input/F32-accumulation Triton kernel
+  remains the default.
+- **Shape-specialized grouped-kernel tiles rejected:** block-0 isolated sweeps suggested `128x16`/eight-warp stage
+  one tiles plus separate QKV `4x32`/eight-warp and MLP `16x32`/four-warp stage two tiles. A continuous 104-kernel
+  sequence across all 26 real blocks stayed within 2.39e-6 of the existing grouped output, but its WDDM timings were
+  bimodal. The authoritative full model profile showed the candidate grouped stage one regressing from 0.238 to
+  0.279 ms (+17.2%), grouped stage two improving only from 0.807 to 0.799 ms (-0.9%), total kernel self time rising
+  from 4.267 to 4.307 ms (+0.9%), and synchronized decode p50 rising from 22.055 to 22.643 ms (+2.7%). The candidate
+  was reverted. Future grouped-kernel tuning must be evaluated in the full warmed model profile; per-kernel event
+  synchronization is not a trustworthy promotion signal for these small kernels under WDDM.
+
+## Accepted static CUDA Graph decode
+
+The remaining eager decode executed only about 4.27 ms of device work but paid hundreds of Python/ATen dispatches
+and 570 ordinary CUDA launch APIs per token. Broad `torch.compile` could not form a stable graph, so the accepted
+path instead captures the already-specialized batch-one, one-token model forward directly with
+`torch.cuda.CUDAGraph`. It keeps one compatible `HybridCache`, resets it before prefill, warms each static decode
+geometry eagerly, snapshots the post-warm-up K/V tensors, captures the second execution, then restores the snapshot
+so capture cannot advance the logical cache twice. Replay copies only input ids, attention mask, position ids, and
+cache position into static buffers. Non-CUDA, non-batch-one, multi-token, incompatible-cache, and rollover calls
+retain eager execution.
+
+A tiny Gemma CUDA regression produces exactly the same four generated tokens for eager, capture, and replay. The
+pinned production validator also reproduces all 32 tokens, output hash
+`d91549bc797d2ff5a31e3b1e224347fac211fd34aa2077e01e521a888d24de3f`, and the retained llama.cpp prefix with 31
+captures, 31 replays, zero graph fallback, and zero packed fallback. Its 1,295,585,792-byte peak allocation is
+unchanged because model-shell loading remains the production peak. The graph pool raises warmed retained allocation
+by 41,120,768 bytes in the isolated benchmark.
+
+The first A/B/A diagnostic used F32 KV storage and produced complete-generation p50 values of 186.795, 848.190, and
+192.034 ms. The authoritative protocol-matched F16-KV rerun records 201.963, 1,175.660, and 199.076 ms. Its two
+candidates average 200.519 ms, or 159.59 tokens/s and 86.50% of the compatible 184.50 tokens/s modified llama.cpp
+reference. F16 isolated decode p50 values are 4.567 and 4.377 ms for the candidates versus 40.887 ms for eager
+control. The full-metric candidate additionally records 16-token prefill p50 41.945 ms / 381.67 tokens/s, TTFT p50
+42.226 ms, and zero graph, prefill, or decode fallback after three warm-ups and across ten retained samples.
+The graph-aware profile reports one `cudaGraphLaunch`, four dynamic-input copies, about 4.40 ms whole-model CUDA
+time, and no ordinary per-kernel launch APIs at the CPU boundary. This closes the M7.15 static-execution comparison
+and the M7.18 70%-of-reference throughput gate without changing the packed artifact or its numerical content.
+
+The post-promotion M7.19 audit reruns rather than infers the quality and numerical gates. The exact retained
+WikiText-2 protocol reproduces PPL 453.5709857733353 over 8,128 scored tokens. The CUDA packed validator compares
+7,348,224 outputs from all 182 linears against reconstructed FP32 semantics, passes deterministically, and observes
+4.77e-6 maximum absolute error. The packed descriptor remains
+`b4f0c6270c4b59f8293c909ddeb21042ad1a2d7ee18601c77e4c57563c900487` with 87,072,592 weight bytes and
+87,507,442 physical bytes. Production graph validation retains the exact generation hash, zero fallback, and the
+unchanged 1,295,585,792-byte peak allocation.

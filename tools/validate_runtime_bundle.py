@@ -106,7 +106,11 @@ def _validate(args: argparse.Namespace) -> dict[str, Any]:
             created_caches.append(cache)
             return cache
 
-        shell = TransformersGenerationModel(model, capture_cache)
+        shell = TransformersGenerationModel(
+            model,
+            capture_cache,
+            cuda_graph_decode=args.cuda_graph_decode,
+        )
         torch.cuda.synchronize(device)
         generation_started = time.perf_counter()
         first = generate(request, shell)
@@ -177,6 +181,10 @@ def _validate(args: argparse.Namespace) -> dict[str, Any]:
         "native_bfloat16_tied_projection_count": (
             loaded.native_bfloat16_tied_projection_count
         ),
+        "cuda_graph_decode": args.cuda_graph_decode,
+        "cuda_graph_capture_count": shell.cuda_graph_capture_count,
+        "cuda_graph_replay_count": shell.cuda_graph_replay_count,
+        "cuda_graph_fallback_count": shell.cuda_graph_fallback_count,
         "fast_sliding_update_count": sum(
             int(getattr(cache, "nanoquant_fast_sliding_update_count", 0))
             for cache in created_caches
@@ -207,6 +215,12 @@ def main() -> None:
     parser.add_argument("--max-new-tokens", type=int, default=32)
     parser.add_argument("--ignore-eos", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--stopping-check-interval", type=int, default=8)
+    parser.add_argument(
+        "--cuda-graph-decode",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="capture and replay batch-one pre-rollover decode positions with CUDA Graphs",
+    )
     parser.add_argument("--prompt", action="append", default=[])
     parser.add_argument("--reference-output", type=Path)
     parser.add_argument("--wait-for-device-seconds", type=float, default=0.0)

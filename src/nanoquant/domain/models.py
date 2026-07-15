@@ -12,6 +12,8 @@ class ArtifactTypes:
     BLOCK_RESULT = "block-result"
     ACTIVATION_GENERATION = "activation-generation"
     QUANTIZATION_PLAN = "quantization-plan"
+    EVALUATION_TASK_INPUTS = "evaluation-task-inputs"
+    EVALUATION_RESULT = "evaluation-result"
 
 
 @dataclass(frozen=True, slots=True, order=True)
@@ -557,6 +559,14 @@ class BlockResult:
 
 
 @dataclass(frozen=True, slots=True)
+class GlobalTuningBlockMetrics:
+    block: BlockId
+    final_frozen_pre_kd: float
+    final_post_kd: float
+    post_kd_vs_pre_kd: LossComparison
+
+
+@dataclass(frozen=True, slots=True)
 class GlobalTuningResult:
     schema_version: int
     source_blocks: tuple[ArtifactRef, ...]
@@ -571,6 +581,8 @@ class GlobalTuningResult:
     wall_seconds: float
     peak_gpu_bytes: int
     peak_host_bytes: int
+    block_snapshot_protocol_hash: str | None = None
+    block_metrics: tuple[GlobalTuningBlockMetrics, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

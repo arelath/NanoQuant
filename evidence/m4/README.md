@@ -642,8 +642,19 @@ The exact retained WikiText-2 evaluator used the pinned 64x128 serial protocol, 
 `sha256:ef19dc950344a837a1fd6e087c451ed9b26234408e85d0b0e3da4f6c7045ff27`. Immutable pre-KD PPL is
 `415.163367`, 6.56% lower than contemporary legacy's tuned `444.332773`. The matching eight-epoch, 2,048-step,
 top-k-64 model KD selected the same 885 parameters and ended at objective `2.148416` versus legacy `2.1430`
-(+0.25%). Its activated artifact `sha256-5dca6b9c38e6194799857014459d679674b992aa70cdf75b0a1cf7e153487120`
+(+0.25%). The original tuning artifact `sha256-5dca6b9c38e6194799857014459d679674b992aa70cdf75b0a1cf7e153487120`
 scores PPL `453.570986`, +2.08% from contemporary legacy and inside the accepted +2.27% environment-matched band.
+
+The active tuning descriptor now points to schema-version-2 artifact
+`sha256-edef5622c5b03e24b75d77ee05f389e064e24d73a3ff7087282d6c3761629669`. It preserves the original source-block
+references, tuned tensors, auxiliary parameters, epoch losses, and steps byte-for-byte, while adding all 26 named
+pre/post-KD block snapshots. Protocol
+`sha256:cf208a4f3632f640e2ec4e1ac12e8cafbcf4bbbff03d17839ec29ad8ae79098c` uses the first 4 pinned calibration
+sequences up to 512 tokens, pad ID 0, BF16 pageable-CPU reference storage, and FP32 unweighted hidden-state MSE
+accumulation. Post-KD probe MSE is higher at every boundary: +5.94% at block 0, +22.23% at block 8, +98.43% at
+block 10, and +708.06% at block 25. This does not contradict the retained PPL result: KD optimizes output logits,
+and hidden representations can change scale or basis while language quality improves. The result is diagnostic
+evidence, not a replacement for either the local objective-weighted pre-KD table or the held-out quality gate.
 
 Full-run WDDM shared memory remained bounded at a 622,854,144-byte peak and returned to 83,886,080 bytes after all
 26 block commits. Peak CUDA reservation was 7,631,536,128 bytes and peak host working set was 12,786,270,208 bytes.

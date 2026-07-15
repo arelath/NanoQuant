@@ -306,6 +306,9 @@ def test_export_rejects_global_tuning_from_different_committed_blocks(tmp_path: 
     reference = active_global_tuning(run)
     assert reference is not None
     result = load_global_tuning(reference, artifacts).result
+    assert result.schema_version == 1
+    assert result.block_snapshot_protocol_hash is None
+    assert result.block_metrics == ()
     mismatched = replace(result, source_blocks=tuple(reversed(result.source_blocks)))
     activate_global_tuning(run, commit_global_tuning(mismatched, artifacts).reference)
 

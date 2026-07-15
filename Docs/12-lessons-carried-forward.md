@@ -143,6 +143,14 @@ When the denominator is below the configured floor, the relative value is `n/a`;
 
 The pre-KD table is retained even after KD completes. Otherwise a global improvement can hide which blocks were weak at the end of block quantization.
 
+The implementation retains the local objective-weighted snapshots in every immutable `BlockResult`. Model-level KD
+adds a separate, versioned block-output probe to `GlobalTuningResult`: a bounded deterministic calibration slice is
+run through the base model, the final frozen pre-KD model, and the final post-KD model, with each student compared to
+the same base-model hidden outputs. The probe stores BF16 references in pageable host memory one sequence at a time
+and accumulates MSE in FP32, so it does not reintroduce full-logit or full-model-overlap VRAM growth. Reports label
+the local pre-KD value and the probe pre/post-KD values separately; only the two probe values form the named
+`final_post_kd - final_frozen_pre_kd` comparison.
+
 ### Why this matters
 
 Per-weight reconstruction error can look acceptable while the block's behavior is poor, and later blocks can sometimes compensate for earlier error. The final block comparison shows whether the complete local procedure—allocation, ADMM, outliers, scale fitting, layer tuning, and post-block refit—actually preserved the teacher behavior at that boundary.

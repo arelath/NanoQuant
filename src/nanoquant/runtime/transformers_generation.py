@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from contextlib import AbstractContextManager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, cast
 
 import torch
@@ -16,6 +16,16 @@ from nanoquant.runtime.torch_model import execution_workload
 
 WorkloadContext = Callable[[WorkloadKind], AbstractContextManager[None]]
 CacheFactory = Callable[[int, int, torch.device, torch.dtype], object]
+
+
+@dataclass(slots=True)
+class _CapturedDecodeGraph:
+    graph: torch.cuda.CUDAGraph
+    input_ids: torch.Tensor
+    attention_mask: torch.Tensor
+    position_ids: torch.Tensor
+    cache_position: torch.Tensor
+    logits: torch.Tensor
 
 
 def _model_dtype(model: nn.Module) -> torch.dtype:
@@ -32,30 +42,55 @@ class TransformersGenerationModel:
     model: nn.Module
     cache_factory: CacheFactory
     workload_context: WorkloadContext = execution_workload
+    cuda_graph_decode: bool = False
+    cuda_graph_capture_count: int = field(default=0, init=False)
+    cuda_graph_replay_count: int = field(default=0, init=False)
+    cuda_graph_fallback_count: int = field(default=0, init=False)
+    _cuda_graph_cache: object | None = field(default=None, init=False, repr=False)
+    _cuda_graph_cache_key: tuple[int, int, torch.device, torch.dtype] | None = field(
+        default=None,
+        init=False,
+        repr=False,
+    )
+    _cuda_graph_pool: Any = field(default=None, init=False, repr=False)
+    _cuda_graphs: dict[tuple[int, ...], _CapturedDecodeGraph] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+    )
 
-    def forward_step(
+    def _cache_for_prefill(
+        self,
+        batch_size: int,
+        max_cache_length: int,
+        device: torch.device,
+    ) -> object:
+        dtype = _model_dtype(self.model)
+        key = (batch_size, max_cache_length, device, dtype)
+        if self.cuda_graph_decode and device.type == "cuda" and self._cuda_graph_cache_key == key:
+            reset = getattr(self._cuda_graph_cache, "reset", None)
+            if callable(reset):
+                reset()
+                assert self._cuda_graph_cache is not None
+                return self._cuda_graph_cache
+        cache = self.cache_factory(batch_size, max_cache_length, device, dtype)
+        if self.cuda_graph_decode and device.type == "cuda":
+            self._cuda_graph_cache = cache
+            self._cuda_graph_cache_key = key
+            self._cuda_graph_pool = None
+            self._cuda_graphs.clear()
+        return cache
+
+    def _run_model(
         self,
         *,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
         position_ids: torch.Tensor,
         cache_position: torch.Tensor,
-        cache: object | None,
-        max_cache_length: int,
+        cache: object,
         workload: WorkloadKind,
-        deterministic: bool,
     ) -> GenerationStep:
-        if not deterministic:
-            raise GenerationError("NQ-GEN-MODE deterministic Transformers execution was not requested")
-        if cache is None:
-            if workload != "prefill":
-                raise GenerationError("NQ-GEN-CACHE decode cannot initialize a new cache")
-            cache = self.cache_factory(
-                input_ids.shape[0],
-                max_cache_length,
-                input_ids.device,
-                _model_dtype(self.model),
-            )
         prepare_cache = getattr(cache, "_nanoquant_prepare_for_forward", None)
         if callable(prepare_cache):
             prepare_cache(
@@ -79,6 +114,149 @@ class TransformersGenerationModel:
             raise GenerationError("NQ-GEN-LOGITS Transformers model returned no logits tensor")
         returned_cache = getattr(output, "past_key_values", None)
         return GenerationStep(logits, returned_cache if returned_cache is not None else cache)
+
+    def _supports_cuda_graph_decode(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        position_ids: torch.Tensor,
+        cache_position: torch.Tensor,
+        cache: object,
+    ) -> bool:
+        key_cache = getattr(cache, "key_cache", None)
+        value_cache = getattr(cache, "value_cache", None)
+        position_start = attention_mask.shape[-1] - input_ids.shape[-1]
+        return (
+            self.cuda_graph_decode
+            and input_ids.device.type == "cuda"
+            and input_ids.shape == (1, 1)
+            and attention_mask.shape[0] == 1
+            and position_ids.shape == (1, 1)
+            and cache_position.shape == (1,)
+            and cache is self._cuda_graph_cache
+            and isinstance(key_cache, list)
+            and isinstance(value_cache, list)
+            and bool(key_cache)
+            and len(value_cache) == len(key_cache)
+            and all(position_start + 1 < item.shape[2] for item in key_cache)
+        )
+
+    def _cuda_graph_forward(
+        self,
+        *,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        position_ids: torch.Tensor,
+        cache_position: torch.Tensor,
+        cache: object,
+    ) -> GenerationStep:
+        key = (
+            *input_ids.shape,
+            *attention_mask.shape,
+            *position_ids.shape,
+            *cache_position.shape,
+        )
+        captured = self._cuda_graphs.get(key)
+        if captured is not None:
+            captured.input_ids.copy_(input_ids)
+            captured.attention_mask.copy_(attention_mask)
+            captured.position_ids.copy_(position_ids)
+            captured.cache_position.copy_(cache_position)
+            captured.graph.replay()
+            self.cuda_graph_replay_count += 1
+            return GenerationStep(captured.logits, cache)
+
+        static_input_ids = input_ids.clone()
+        static_attention_mask = attention_mask.clone()
+        static_position_ids = position_ids.clone()
+        static_cache_position = cache_position.clone()
+        # The eager pass compiles every shape-specialized Triton kernel before
+        # capture. Repeating a pre-rollover prefix write is idempotent.
+        warm_step = self._run_model(
+            input_ids=static_input_ids,
+            attention_mask=static_attention_mask,
+            position_ids=static_position_ids,
+            cache_position=static_cache_position,
+            cache=cache,
+            workload="decode",
+        )
+        typed_cache = cast(Any, cache)
+        cache_tensors = (*typed_cache.key_cache, *typed_cache.value_cache)
+        cache_snapshot = tuple(item.clone() for item in cache_tensors)
+        torch.cuda.synchronize(input_ids.device)
+        if self._cuda_graph_pool is None:
+            self._cuda_graph_pool = torch.cuda.graph_pool_handle()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, pool=self._cuda_graph_pool):
+            step = self._run_model(
+                input_ids=static_input_ids,
+                attention_mask=static_attention_mask,
+                position_ids=static_position_ids,
+                cache_position=static_cache_position,
+                cache=cache,
+                workload="decode",
+            )
+        captured = _CapturedDecodeGraph(
+            graph,
+            static_input_ids,
+            static_attention_mask,
+            static_position_ids,
+            static_cache_position,
+            step.logits,
+        )
+        self._cuda_graphs[key] = captured
+        for destination, source in zip(cache_tensors, cache_snapshot, strict=True):
+            destination.copy_(source)
+        self.cuda_graph_capture_count += 1
+        return GenerationStep(warm_step.logits, cache)
+
+    def forward_step(
+        self,
+        *,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        position_ids: torch.Tensor,
+        cache_position: torch.Tensor,
+        cache: object | None,
+        max_cache_length: int,
+        workload: WorkloadKind,
+        deterministic: bool,
+    ) -> GenerationStep:
+        if not deterministic:
+            raise GenerationError("NQ-GEN-MODE deterministic Transformers execution was not requested")
+        if cache is None:
+            if workload != "prefill":
+                raise GenerationError("NQ-GEN-CACHE decode cannot initialize a new cache")
+            cache = self._cache_for_prefill(
+                input_ids.shape[0],
+                max_cache_length,
+                input_ids.device,
+            )
+        if workload == "decode":
+            if self._supports_cuda_graph_decode(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                cache_position=cache_position,
+                cache=cache,
+            ):
+                return self._cuda_graph_forward(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
+                    cache_position=cache_position,
+                    cache=cache,
+                )
+            if self.cuda_graph_decode:
+                self.cuda_graph_fallback_count += 1
+        return self._run_model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            cache_position=cache_position,
+            cache=cache,
+            workload=workload,
+        )
 
 
 def hybrid_cache_factory(

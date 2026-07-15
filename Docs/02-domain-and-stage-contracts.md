@@ -604,6 +604,14 @@ class BlockResult:
 
 This is the concrete form of the outline's `BlockResult`. It includes both next-block activation generations because they are required to resume sequential reconstruction without replaying prior blocks.
 
+`GlobalTuningResult` schema version 2 carries a `block_snapshot_protocol_hash` and one ordered
+`GlobalTuningBlockMetrics` record per source block. The protocol identity binds the exact bounded token content,
+sample and sequence limits, padding policy, BF16 reference storage, FP32 accumulation, unweighted hidden-state MSE,
+relative-denominator floor, and protocol version. Pre-KD and post-KD values must be measured against the same
+base-model block-output reference under that protocol; they must not be compared to the objective-weighted local
+block loss as though the scales were interchangeable. Schema-version-1 global-tuning results remain readable with
+no post-KD block metrics so existing immutable runs do not need to be rewritten.
+
 ## 12. Model, packing, and evaluation objects
 
 ```python

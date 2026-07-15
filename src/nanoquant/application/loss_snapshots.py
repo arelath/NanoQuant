@@ -4,7 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from nanoquant.domain.models import BlockLossMetrics, LayerId, LossComparison
+from nanoquant.domain.models import (
+    BlockId,
+    BlockLossMetrics,
+    GlobalTuningBlockMetrics,
+    LayerId,
+    LossComparison,
+)
 
 
 def compare_losses(
@@ -13,6 +19,26 @@ def compare_losses(
     delta = candidate - baseline
     relative = None if abs(baseline) < denominator_floor else delta / abs(baseline)
     return LossComparison(baseline_name, candidate_name, baseline, candidate, delta, relative, denominator_floor)
+
+
+def compare_global_tuning_losses(
+    block: BlockId,
+    final_frozen_pre_kd: float,
+    final_post_kd: float,
+    denominator_floor: float,
+) -> GlobalTuningBlockMetrics:
+    return GlobalTuningBlockMetrics(
+        block,
+        final_frozen_pre_kd,
+        final_post_kd,
+        compare_losses(
+            "final_frozen_pre_kd",
+            "final_post_kd",
+            final_frozen_pre_kd,
+            final_post_kd,
+            denominator_floor,
+        ),
+    )
 
 
 @dataclass(slots=True)

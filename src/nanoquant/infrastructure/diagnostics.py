@@ -75,5 +75,59 @@ for _definition in (
         "Inspect the device state and increase the deferred timing buffer.",
         "Docs/15-performance-profiling.md",
     ),
+    DiagnosticDefinition(
+        "NQ-CAL-001",
+        "Non-finite calibration statistic",
+        "Replay calibration with per-partition statistic and input-range capture.",
+        "Docs/07-observability-and-reporting.md",
+    ),
+    DiagnosticDefinition(
+        "NQ-CAL-003",
+        "Calibration partition instability",
+        "Compare partition token diversity, clipping, and sample-order sensitivity.",
+        "Docs/07-observability-and-reporting.md",
+    ),
+    DiagnosticDefinition(
+        "NQ-HES-001",
+        "Poor Hessian conditioning",
+        "Inspect eigenvalue range and objective fallback choices.",
+        "Docs/07-observability-and-reporting.md",
+    ),
+    DiagnosticDefinition(
+        "NQ-FAC-001",
+        "ADMM residual plateau",
+        "Inspect primal/dual residual traces and rho/iteration sensitivity.",
+        "Docs/07-observability-and-reporting.md",
+    ),
+    DiagnosticDefinition(
+        "NQ-FAC-002",
+        "Latent-to-export error gap",
+        "Compare latent, sign-export, scale-fit, and packed-reference errors.",
+        "Docs/07-observability-and-reporting.md",
+    ),
+    DiagnosticDefinition(
+        "NQ-RNK-002",
+        "Ineffective rank retry",
+        "Compare added-bit utility with neighboring layers and the global budget.",
+        "Docs/07-observability-and-reporting.md",
+    ),
+    DiagnosticDefinition(
+        "NQ-RNK-003",
+        "Ineffective outlier allocation",
+        "Compare block loss with outliers disabled and reallocate their bit cost.",
+        "Docs/07-observability-and-reporting.md",
+    ),
+    DiagnosticDefinition(
+        "NQ-TUN-002",
+        "Poor tuning recovery",
+        "Inspect the tuning trajectory, best-state restore, and block targets.",
+        "Docs/07-observability-and-reporting.md",
+    ),
+    DiagnosticDefinition(
+        "NQ-INF-001",
+        "Unexpected runtime fallback",
+        "Inspect capability rejection codes and packed layout compatibility.",
+        "Docs/07-observability-and-reporting.md",
+    ),
 ):
     register(_definition)

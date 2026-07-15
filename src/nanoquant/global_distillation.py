@@ -14,6 +14,10 @@ import torch
 from torch import nn
 from transformers import AutoModelForCausalLM
 
+from nanoquant.application.block_snapshots import (
+    compare_block_snapshots,
+    select_block_snapshot_tokens,
+)
 from nanoquant.application.distillation import (
     DistillationMetrics,
     DistillationResumeState,
@@ -27,6 +31,10 @@ from nanoquant.config.schema import ProfilingConfig, ProfilingLevel
 from nanoquant.domain.models import ArtifactRef, FrozenBlockState, FrozenNanoQuantState, GlobalTuningResult
 from nanoquant.domain.profiling import NULL_RECORDER, PhaseRecorder
 from nanoquant.infrastructure.artifacts import LocalArtifactStore
+from nanoquant.infrastructure.block_snapshot_probe import (
+    capture_block_output_reference,
+    measure_block_output_mse,
+)
 from nanoquant.infrastructure.device_lease import acquire_device_lease
 from nanoquant.infrastructure.distillation_cache import (
     TeacherCacheIdentity,
@@ -64,6 +72,9 @@ class GlobalDistillationRequest:
     initial_cooldown_seconds: float = 0.0
     epoch_cooldown_seconds: float = 0.0
     profiling: ProfilingConfig = ProfilingConfig()
+    block_snapshot_samples: int = 4
+    block_snapshot_tokens: int = 512
+    block_snapshot_denominator_floor: float = 1e-12
 
 
 @dataclass(frozen=True, slots=True)
@@ -258,6 +269,13 @@ def _run_global_topk_distillation(
     if request.initial_cooldown_seconds:
         time.sleep(request.initial_cooldown_seconds)
     tokens = _tokens(request.token_ids)
+    snapshot_selection = select_block_snapshot_tokens(
+        tokens,
+        maximum_samples=request.block_snapshot_samples,
+        maximum_tokens=request.block_snapshot_tokens,
+        pad_token_id=request.pad_token_id,
+        denominator_floor=request.block_snapshot_denominator_floor,
+    )
     token_bytes = tokens.contiguous().view(torch.uint8).numpy().tobytes()
     protocol_hash = "sha256:" + hashlib.sha256(canonical_json(request.config).encode()).hexdigest()
     teacher_protocol = to_dict(request.config)
@@ -300,47 +318,57 @@ def _run_global_topk_distillation(
         request.config.epochs,
         replace_mismatched=request.replace_existing_global_tuning,
     )
-    if any(reference is None for reference in cache_journal.epochs):
-        with recorder.phase("teacher_load"):
-            teacher = cast(
-                nn.Module,
-                AutoModelForCausalLM.from_pretrained(
-                    request.snapshot,
-                    local_files_only=True,
-                    torch_dtype=_checkpoint_dtype(request.snapshot),
-                    attn_implementation=cast(Any, loaded.model).config._attn_implementation,
-                ),
-            ).to(request.device)
-        cast(Any, teacher).config.use_cache = False
-        teacher_head = _lm_head(teacher)
-        for epoch_index, reference in enumerate(cache_journal.epochs):
-            if reference is not None:
-                continue
-            with recorder.phase("teacher_cache_epoch", epoch=epoch_index):
-                batches, _cache_bytes = cache_topk_teacher_epoch(
-                    teacher,
-                    tokens,
-                    teacher_head,
-                    _hidden_states,
-                    request.config,
-                    epoch_index=epoch_index,
-                    device=request.device,
-                    pad_token_id=request.pad_token_id,
-                    recorder=micro_recorder,
+    # The teacher is required even when its top-k cache is complete because
+    # block snapshots compare pre- and post-KD states against the same hidden
+    # outputs. Only the bounded snapshot selection is retained in host memory.
+    with recorder.phase("teacher_load"):
+        teacher = cast(
+            nn.Module,
+            AutoModelForCausalLM.from_pretrained(
+                request.snapshot,
+                local_files_only=True,
+                torch_dtype=_checkpoint_dtype(request.snapshot),
+                attn_implementation=cast(Any, loaded.model).config._attn_implementation,
+            ),
+        ).to(request.device)
+    cast(Any, teacher).config.use_cache = False
+    teacher_head = _lm_head(teacher)
+    with recorder.phase("block_snapshot_teacher"):
+        teacher_reference = capture_block_output_reference(
+            teacher,
+            _decoder_layers(teacher),
+            snapshot_selection.token_ids,
+            _hidden_states,
+            device=request.device,
+        )
+    for epoch_index, reference in enumerate(cache_journal.epochs):
+        if reference is not None:
+            continue
+        with recorder.phase("teacher_cache_epoch", epoch=epoch_index):
+            batches, _cache_bytes = cache_topk_teacher_epoch(
+                teacher,
+                tokens,
+                teacher_head,
+                _hidden_states,
+                request.config,
+                epoch_index=epoch_index,
+                device=request.device,
+                pad_token_id=request.pad_token_id,
+                recorder=micro_recorder,
+            )
+            with recorder.phase("commit"):
+                committed_epoch = commit_teacher_epoch(epoch_index, batches, cache_identity, artifacts)
+                cache_journal = record_teacher_epoch(
+                    request.run_output,
+                    cache_journal,
+                    epoch_index,
+                    committed_epoch.reference,
                 )
-                with recorder.phase("commit"):
-                    committed_epoch = commit_teacher_epoch(epoch_index, batches, cache_identity, artifacts)
-                    cache_journal = record_teacher_epoch(
-                        request.run_output,
-                        cache_journal,
-                        epoch_index,
-                        committed_epoch.reference,
-                    )
-        teacher.cpu()
-        del teacher_head, teacher
-        gc.collect()
-        if request.device.startswith("cuda"):
-            torch.cuda.empty_cache()
+    teacher.cpu()
+    del teacher_head, teacher
+    gc.collect()
+    if request.device.startswith("cuda"):
+        torch.cuda.empty_cache()
     with recorder.phase("teacher_cache_load"):
         teacher_cache = materialize_teacher_cache(cache_journal, artifacts)
 
@@ -355,6 +383,16 @@ def _run_global_topk_distillation(
             if callable(enable_input_gradients):
                 enable_input_gradients()
         student.to(request.device)
+    with recorder.phase("block_snapshot_pre_kd"):
+        pre_kd_block_losses = measure_block_output_mse(
+            student,
+            _decoder_layers(student),
+            snapshot_selection.token_ids,
+            teacher_reference,
+            _hidden_states,
+            device=request.device,
+            pad_token_id=request.pad_token_id,
+        )
     checkpoint_identity = DistillationCheckpointIdentity(
         tuple(block.teacher_outputs.artifact for block in loaded.blocks),
         protocol_hash,
@@ -370,13 +408,8 @@ def _run_global_topk_distillation(
             committed_checkpoint = commit_distillation_checkpoint(state, checkpoint_identity, artifacts)
             activate_distillation_checkpoint(request.run_output, committed_checkpoint.reference)
         epoch_commits += 1
-        if (
-            request.interrupt_after_epoch_commits is not None
-            and epoch_commits >= request.interrupt_after_epoch_commits
-        ):
-            raise InterruptedError(
-                f"requested interruption after {epoch_commits} distillation epoch checkpoint(s)"
-            )
+        if request.interrupt_after_epoch_commits is not None and epoch_commits >= request.interrupt_after_epoch_commits:
+            raise InterruptedError(f"requested interruption after {epoch_commits} distillation epoch checkpoint(s)")
         if state.completed_epochs < request.config.epochs and request.epoch_cooldown_seconds:
             time.sleep(request.epoch_cooldown_seconds)
 
@@ -403,6 +436,22 @@ def _run_global_topk_distillation(
             # held until this cleanup attempt returns.
             pass
         raise
+    with recorder.phase("block_snapshot_post_kd"):
+        post_kd_block_losses = measure_block_output_mse(
+            student,
+            _decoder_layers(student),
+            snapshot_selection.token_ids,
+            teacher_reference,
+            _hidden_states,
+            device=request.device,
+            pad_token_id=request.pad_token_id,
+        )
+    block_metrics = compare_block_snapshots(
+        tuple(block.block for block in loaded.blocks),
+        pre_kd_block_losses,
+        post_kd_block_losses,
+        snapshot_selection.protocol,
+    )
     peak_gpu = peak_device_memory_bytes(request.device)
     with recorder.phase("offload"):
         _offload_student(student, request.device)
@@ -415,7 +464,7 @@ def _run_global_topk_distillation(
             {name: parameter_map[name].detach().cpu() for name in auxiliary_names},
         )
     result = GlobalTuningResult(
-        1,
+        2,
         tuple(block.teacher_outputs.artifact for block in loaded.blocks),
         tuned_blocks,
         tuple((name, auxiliary_refs[name]) for name in auxiliary_names),
@@ -428,6 +477,8 @@ def _run_global_topk_distillation(
         time.perf_counter() - started,
         peak_gpu,
         peak_process_memory_bytes(),
+        snapshot_selection.protocol.semantic_key,
+        block_metrics,
     )
     with recorder.phase("commit"):
         committed = commit_global_tuning(result, artifacts)

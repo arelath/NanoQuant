@@ -385,3 +385,142 @@ The concatenated immutable MLP prepack raises steady benchmark allocation from 7
 54,940,672 bytes (7.8%). The production bundle's shell-load peak remains unchanged at 1,295,585,792 bytes; its
 second-pass retained allocation rises to 761,495,552 bytes. This bounded memory cost is accepted for the measured
 launch reduction. The specialization is default; `--no-group-decode-mlp` retains the separate-projection control.
+
+## Rejected fused post-RMSNorm/residual addition
+
+A guarded decode-only Triton probe combined each prepared post-attention or post-feedforward F32 RMSNorm with its
+immediately following residual addition. Direct single-token and multi-token width-1152 CUDA fixtures were bit-exact
+against `residual + rms_norm(value)`. The real trace bound both sites in all 26 blocks, retained token 236764 and
+zero packed fallback, and reduced kernels from 573 to 521, launch APIs from 570 to 518, and ATen calls from 2,203 to
+1,995. Its 52 fused kernels totaled 0.086 ms. The 340,638-byte diagnostic is
+`evidence/m7/gemma-pageable-v28-rewrite-fused-residual-norm-probe.json`, SHA-256
+`6132e0a36a121ebf072a6af1dc9c1c60f3aa5b473d5368b06470e50b0ebb3db8`.
+
+The uninstrumented candidate/control/candidate runs all preserved complete hash
+`d91549bc797d2ff5a31e3b1e224347fac211fd34aa2077e01e521a888d24de3f` and identical peak allocation. Isolated
+decode medians were 32.723, 41.458, and 45.160 ms, a noisy 6.1% candidate-average reduction. Complete 32-token
+medians were 1.195, 0.998, and 0.946 s: although the second candidate improved, the first regressed 19.7% and the
+candidate average regressed 7.2%. Record SHA-256 values are
+`43a623cfcc6958eddf7acb47d3697cbe7ad9995034577408f4da81f505a07d4a`,
+`0f57d192421955272f3fafbc1899d8ee5db72a1130b0d23ff61e3d2dbc6da2be`, and
+`c4b20ca95cc9215119337899758f73bcf97dc6ba60db269f985b1a342bc42b3f`. The candidate was reverted rather than
+promoted. Future residual fusion must cover a larger static boundary or demonstrate repeating full-generation
+benefit; removing these 52 tiny launches in isolation is not sufficient under current WDDM variance.
+
+## Rejected vocabulary-projection follow-ups
+
+The tied output projection remains the largest individual device kernel, so its shipped mixed BF16-weight/F32-input
+kernel was swept across 40 real-shape Triton configurations. The best `BLOCK_IN=1024`, `BLOCK_OUT=8`, eight-warp
+case measured 1.477 ms versus 1.483 ms for the current `256x32`, eight-warp case; that 0.4% gap is noise-sized and
+the alternative changes reduction order by up to 4.77e-7. It is not promoted.
+
+Native cuBLAS alternatives were also measured against the current kernel on the exact 262144x1152 table. Pure BF16
+GEMV was roughly 10% faster in the repeating comparison but increased maximum logit error to 1.25e-2. BF16 input
+with F32 output reduced that error to 7.67e-3 but was only 1.6% faster. Both preserved the one-state argmax, but the
+error is orders of magnitude above the accepted mixed kernel's 3.70e-6 maximum error against the expanded F32
+table and would perturb sampled-generation probabilities. These paths remain rejected; subsequent work should
+target the two-stage packed kernels, which collectively account for more device time than any safe projection
+configuration change found here.
+
+## Rejected grouped-kernel tile specialization
+
+An exact-shape sweep on block-0 Q/K/V and gate/up groups initially favored a `BLOCK_IN=128`, `BLOCK_RANK=16`,
+eight-warp stage one, a QKV `BLOCK_OUT=4`, `BLOCK_RANK=32`, eight-warp stage two, and an MLP `BLOCK_OUT=16`,
+`BLOCK_RANK=32`, four-warp stage two. The same configuration was exercised as a continuous 104-kernel sequence over
+all 26 production groups. Every group retained its argmax; maximum absolute error versus the current grouped kernels
+was 2.39e-6. Sequence timing was strongly bimodal under WDDM, so it was treated only as a screening result.
+
+The complete warmed model profile rejected the candidate. Grouped stage one rose from 0.238 to 0.279 ms (+17.2%)
+and grouped stage two fell only from 0.807 to 0.799 ms (-0.9%). Total non-nested device kernel self time rose from
+4.267 to 4.307 ms (+0.9%), while synchronized top-level decode p50 rose from 22.055 to 22.643 ms (+2.7%). Kernel,
+launch-API, and ATen counts remained 573, 570, and 2,203; all 26 QKV and MLP groups bound, zero fallback was recorded,
+and token 236764 remained exact. The 407,584-byte rejected profile is
+`evidence/m7/gemma-pageable-v28-rewrite-tuned-grouped-kernels-probe.json`, SHA-256
+`0319dec1c17c2b0e75c771dd5b9a6dc4753ca1056fd0d15155c27edf94dcc6ae`. The implementation was reverted.
+
+## Tenth promoted optimization: static CUDA Graph decode
+
+After the grouped Q/K/V and MLP promotions, the pinned eager path performs about 4.27 ms of device work but still
+crosses Python/ATen dispatch and 570 ordinary CUDA launch APIs per token. The accepted static path captures the
+already-specialized batch-one, one-token CUDA forward directly. One graph is retained per pre-rollover attention-mask
+width in a shared CUDA graph pool. Before capture, an eager call compiles shape-specialized Triton kernels; the K/V
+cache is then snapshotted, capture runs, and the snapshot is restored so the first logical step is not applied twice.
+Later compatible requests reuse and reset the same cache, copy four dynamic inputs into static buffers, and replay.
+Unsupported device, batch, token geometry, cache identity, or rollover positions execute the eager fallback.
+
+The initial A/B/A diagnostic used F32 KV storage and established the static-replay speedup, but it is not used for
+the cross-implementation ratio. The authoritative A/B/A records explicitly use the exact M7.1 prompt and artifact,
+three warm-ups, ten repetitions, greedy 32-token generation, and the frozen F16-KV/F32-shell protocol:
+
+| Record | graph | isolated decode p50 | complete generation p50 | graph fallback | output hash |
+|---|---:|---:|---:|---:|---|
+| candidate | yes | 4.567 ms | 201.963 ms | 0 | `d91549...` |
+| control | no | 40.887 ms | 1,175.660 ms | n/a | `d91549...` |
+| candidate 2 | yes | 4.377 ms | 199.076 ms | 0 | `d91549...` |
+
+The candidate-average complete latency is 200.519 ms, or 159.59 tokens/s. This is 86.50% of the compatible modified
+llama.cpp `llama-cli` result of 184.50 tokens/s and exceeds M7.18's 70% threshold. The complete-metric first candidate
+records 16-token prefill p50 41.945 ms / 381.67 tokens/s, TTFT p50 42.226 ms, complete-generation p10/p50/p90
+183.185/201.963/228.256 ms, and peak allocation 806,364,672 bytes. It performs 32 captures and 384 replays across
+the benchmark with zero graph, prefill, or decode fallback. Raw samples, p10/p50/p90, three warm-ups, ten
+repetitions, memory, dispatch counts, environment, and exact hashes are retained in the JSON record, completing M7.2.
+
+The graph-aware profile preserves token 236764 and counts the 573 captured model kernels plus four input-copy
+kernels. The CPU boundary contains one `cudaGraphLaunch` rather than 570 ordinary launch APIs, while explicit
+whole-model CUDA events report roughly 4.40 ms p50. Module hooks intentionally do not fire during graph replay, so
+graph profiles report the explicit model boundary and omit unavailable nested ratios instead of presenting zeros.
+The production bundle validator exactly replays all 32 tokens and the retained llama.cpp prefix with 31 captures,
+31 replays, and zero fallback. Its peak allocation remains exactly 1,295,585,792 bytes; the graph pool adds
+41,120,768 bytes only to warmed retained allocation, below the unchanged shell-load peak.
+
+Protocol-matched F16-KV evidence hashes:
+
+- candidate/full metrics: `2464c33b0cd762b45e9a5bf4bbffdb99bee56a89ef6f7866fb1eba8aaf882083`
+- eager control: `67ed7703ccfd28ac26d8a5994eef4bf5182e9ee8430e23dd0f1b5eb7a1e8515d`
+- candidate 2: `95d464e1a0bf90c2afa85973ff910358198243a2e9302b20b67a2844fa264892`
+
+Initial F32-KV diagnostic and invariant evidence hashes:
+
+- candidate: `f1c7ea73250986566f0548f1702863daa6c1be5cbcbccd01c8cc514ce7a210b4`
+- eager control: `be50420bcf9439cb26a6f2e93a2bce0b7bc7137362275f6b3dc08b5d68328a4d`
+- candidate 2: `a0d127507df514e69eea356fb350e1b7feb059e3dacdc2ded4d07ab8743cc770`
+- graph-aware profile: `bbf6b83fa4f1694997819bf36444af87cb0220455b0f40e91d9dfbef2ed37985`
+- production validation: `d2ebb7caf3d533594dc7b19a86a7b744e5ef1ec28ed6fedb0c1fb1479cb044a9`
+
+## Post-optimization numerical, size, memory, and quality gate
+
+The accepted runtime changes do not alter packed weights, but M7.19 was rerun explicitly after the final graph
+promotion. The packed descriptor remains
+`b4f0c6270c4b59f8293c909ddeb21042ad1a2d7ee18601c77e4c57563c900487`: 182 layers, 87,072,592 weight bytes,
+87,507,442 physical bytes, and the source run's 0.996318 effective BPW. The fresh CUDA packed validation compares
+7,348,224 outputs across all 182 layers with deterministic replay and 4.76837158203125e-6 maximum absolute error.
+Its record SHA-256 is `1721cda7582a17fc1d97858deb6058d224b113cd28f694056f201ff76497c915`.
+
+The exact serial 64-window, 128-token WikiText-2 protocol then reproduces total NLL 49,720.209716796875 and PPL
+453.5709857733353 over 8,128 scored tokens, exactly matching the retained post-KD quality result. Its record SHA-256
+is `b0a1b22bd6208bfc437429aad8c2ea3e7c545d97d1ce2105167924dd58af1fae`. The production graph validator preserves
+the exact 32-token hash and llama.cpp prefix with zero graph/packed fallback and an unchanged 1,295,585,792-byte
+peak allocation. Together these records close the numerical, artifact-size, VRAM, and quality rerun required by
+M7.19.
+
+## M7 gate result
+
+The designated-host performance-parity gate passes for the frozen workload. This document binds the pinned Gemma
+revision, rewrite and modified-llama.cpp sources, reference CUDA kernel, logical/packed/GGUF artifact hashes, exact
+prompt and cache protocol, raw A/B/A samples, graph-aware profile, production validation, and the final numerical,
+size, VRAM, and quality reruns.
+
+| Dimension | Rewrite | Compatible reference / baseline | Result |
+|---|---:|---:|---|
+| 32-token F16-KV throughput | 159.59 tokens/s candidate average | llama.cpp 184.50 tokens/s | 86.50%; passes 70% target |
+| Complete-generation p50 | 201.963 / 199.076 ms | eager rewrite 1,175.660 ms | static replay promoted |
+| Numerical execution | 4.77e-6 max absolute error over 7,348,224 values | reconstructed FP32 semantics | passes |
+| Generation behavior | exact rewrite hash; exact retained llama.cpp prefix | frozen references | passes |
+| Packed size | 87,072,592 weight / 87,507,442 physical bytes | descriptor `b4f0c627...` | unchanged |
+| Effective BPW | 0.996318 | contemporary legacy identical rank sum 105,856 | parity |
+| Exact WikiText-2 PPL | 453.570986 | contemporary legacy 444.332773 | +2.08%; accepted M4 band |
+| Production peak allocation | 1,295,585,792 bytes | pre-graph production validator | unchanged |
+| Runtime fallback | 0 graph / prefill / decode / packed | required 0 | passes |
+
+This closes the reproducible M7 comparison, not every future runtime task. Designated-host CI, automated regression
+thresholding, long-context/general-shape tuning, and additional kernel exploration remain visible checklist work.

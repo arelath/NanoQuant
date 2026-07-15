@@ -31,6 +31,8 @@ def main() -> None:
     parser.add_argument("--maximum-tokens-per-batch", type=int, default=512)
     parser.add_argument("--vocabulary-chunk-size", type=int, default=8192)
     parser.add_argument("--token-chunk-size", type=int, default=128)
+    parser.add_argument("--block-snapshot-samples", type=int, default=4)
+    parser.add_argument("--block-snapshot-tokens", type=int, default=512)
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--device", default="cuda")
     parser.add_argument(
@@ -106,6 +108,8 @@ def main() -> None:
             memory_counters=args.profile_memory_counters,
             emit_span_events=False,
         ),
+        block_snapshot_samples=args.block_snapshot_samples,
+        block_snapshot_tokens=args.block_snapshot_tokens,
     )
     try:
         result = run_global_topk_distillation(request)
@@ -123,6 +127,17 @@ def main() -> None:
                 "wall_seconds": result.result.wall_seconds,
                 "peak_gpu_bytes": result.result.peak_gpu_bytes,
                 "peak_host_bytes": result.result.peak_host_bytes,
+                "block_snapshot_protocol_hash": result.result.block_snapshot_protocol_hash,
+                "block_metrics": [
+                    {
+                        "block": item.block.index,
+                        "final_frozen_pre_kd": item.final_frozen_pre_kd,
+                        "final_post_kd": item.final_post_kd,
+                        "absolute_delta": item.post_kd_vs_pre_kd.absolute_delta,
+                        "relative_delta": item.post_kd_vs_pre_kd.relative_delta,
+                    }
+                    for item in result.result.block_metrics
+                ],
             },
             indent=2,
         )

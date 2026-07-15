@@ -28,6 +28,7 @@ A Python pickle or a full-model `torch.save` file is not the primary interchange
 | `LayerResult` | factorization/tuning | block commit/replay/reporting |
 | `FrozenBlock` | block workflow | next-block propagation/packer |
 | `PackedModelArtifact` | packer/exporter | runtime/evaluation |
+| `EvaluationTaskInputs` | evaluator preprocessing | evaluator result cache |
 | `EvaluationResult` | evaluator | comparison/reporting |
 | `RunManifest` | application services | resume/audit/reporting |
 

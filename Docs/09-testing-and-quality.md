@@ -223,6 +223,13 @@ Golden fixtures are used sparingly for stable, high-value outputs:
 
 Goldens store tolerances and producer versions. Updating a golden requires a review that explains the semantic change; `--update-goldens` is not an acceptable unexplained fix.
 
+The reconstruction-report goldens are anchored to the frozen Experiment 019 capture manifest. The test re-hashes
+the complete retained weight-error and rank-utility CSVs before selecting the first seven-layer block, maps their
+actual ranks, bit counts, raw errors, weighted export errors, and tuned boundary losses into the rewrite contracts,
+and compares the complete Markdown byte-for-byte. A separate synthetic fixture places non-zero baselines below the
+configured relative-denominator floor and locks the required absolute-delta plus `n/a` rendering. This distinguishes
+an intentional report-schema change from accidental formatting or denominator-semantics drift.
+
 ## 11. Performance tests
 
 Performance tests do not run on noisy generic CI workers. Designated hosts record:
