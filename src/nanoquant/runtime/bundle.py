@@ -30,6 +30,7 @@ from nanoquant.runtime.planning import (
 )
 from nanoquant.runtime.torch_model import (
     bind_fused_decode_rope,
+    bind_native_bfloat16_tied_projection,
     bind_prepared_linears,
     bind_prepared_rms_norms,
     bind_short_sliding_masks,
@@ -195,6 +196,7 @@ class LoadedTransformersRuntime:
     fused_rms_norm_count: int = 0
     fused_decode_rope_count: int = 0
     short_sliding_mask_count: int = 0
+    native_bfloat16_tied_projection_count: int = 0
 
 
 def _mapping(value: object, path: str) -> dict[str, object]:
@@ -565,6 +567,7 @@ def load_transformers_runtime(
     fuse_rms_norm: bool = True,
     fuse_decode_rope: bool = True,
     optimize_short_sliding_masks: bool = True,
+    native_bfloat16_tied_projection: bool = True,
 ) -> LoadedTransformersRuntime:
     """Build a prepared model shell without loading source dense linear weights."""
 
@@ -576,6 +579,11 @@ def load_transformers_runtime(
         else open_runtime_bundle(bundle, verify_hashes=True)
     )
     target = torch.device(device)
+    use_native_bfloat16_tied_projection = (
+        native_bfloat16_tied_projection
+        and target.type == "cuda"
+        and input_dtype == "float32"
+    )
     entries = tuple(
         layer for block in opened.packed.manifest.blocks for layer in block.layers
     )
@@ -611,6 +619,11 @@ def load_transformers_runtime(
         model,
         prepared,
         transformers_decoder_module_paths(tuple(entry.spec.name for entry in entries)),
+    )
+    native_bfloat16_tied_projection_count = (
+        bind_native_bfloat16_tied_projection(model)
+        if use_native_bfloat16_tied_projection
+        else 0
     )
     model.to_empty(device=target)
     model.tie_weights()
@@ -687,4 +700,5 @@ def load_transformers_runtime(
         fused_rms_norm_count,
         fused_decode_rope_count,
         short_sliding_mask_count,
+        native_bfloat16_tied_projection_count,
     )

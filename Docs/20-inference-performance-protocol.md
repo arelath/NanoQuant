@@ -281,3 +281,29 @@ and identical peak allocation. Their SHA-256 values are respectively
 `2aad1333ccc7de1c8a3a1ac9249db945aff9471e63913247a80ca8eb2cbab5ff`. The final candidate reaches 35.82 tokens/s,
 **19.42%** of the 184.50 tokens/s reference and 3.66x the frozen rewrite baseline. The specialization is default for
 supported inputs; `--no-fused-cache-prefix` retains the matched control.
+
+## Sixth promoted optimization: native BF16 tied embedding/output table
+
+The runtime bundle and converted GGUF both retain Gemma's shared 262144x1152 embedding/output tensor in its source
+BF16 representation. The rewrite loader nevertheless expanded that tensor to F32, retaining roughly 1.21 GB and
+reading it through a 2.95 ms full-vocabulary F32 GEMV on every token. The guarded CUDA/F32 runtime path now keeps one
+shared BF16 parameter. A fused embedding kernel combines lookup, BF16-to-F32 promotion, and the existing F32 scale,
+and is bit-identical to the prior embedding output. A mixed BF16-weight/F32-input output kernel accumulates in F32.
+Unsupported devices or runtime input dtypes retain the original shell modules.
+
+For the pinned prompt, comparing the mixed output kernel with the same BF16 table expanded to F32 measures maximum
+absolute logit error 3.70e-6, RMSE 4.80e-7, and a 4.65 reference top-1 margin. Argmax, token 236764, and the complete
+generation hash remain exact. Output-head kernel time falls from 2.945 to 1.481 ms, total non-nested device kernel
+self time from 6.82 to 5.35 ms, and the census from 834 to 833 kernels/token. The 574,552-byte profile has SHA-256
+`7642783948258de14823d38f7839c83c0ae68523246fa5082d6dad5a36e5e2d2`.
+
+Candidate/control/candidate isolated-decode medians are 28.60, 36.92, and 29.18 ms; complete-generation medians are
+0.999, 1.045, and 1.010 s. The candidate average is 21.7% lower for isolated decode and 3.8% lower end to end. All
+runs preserve hash `d91549bc797d2ff5a31e3b1e224347fac211fd34aa2077e01e521a888d24de3f`.
+Candidate/control/candidate SHA-256 values are
+`ba32cb59c42f231b503ff35b81ee5ea1eee4d3839d5016d2acd2dff9c6d50686`,
+`0cf739d601001a2ec21e497785d2674cee1f7914209ee7335273aeface8be99b`, and
+`53f2f4f61b1c90b7b36110b37146146e6b5621057168f004f06e21e53e30ebff`. Matched retained/peak allocation drops
+from 1.215/1.218 GB to 0.653/0.655 GB. The production bundle validator also replays all 32 exact tokens with zero
+fallback while cutting its prior 2.504 GB load/generation peak to 1.296 GB. The guarded specialization is default;
+`--no-native-bfloat16-tied-projection` retains the control.

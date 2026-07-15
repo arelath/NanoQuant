@@ -13,6 +13,7 @@ from transformers.models.gemma3.modeling_gemma3 import (
 from transformers.models.gemma3.modeling_gemma3 import (
     Gemma3DecoderLayer as TransformersGemma3DecoderLayer,
 )
+from transformers.models.gemma3.modeling_gemma3 import Gemma3ForCausalLM
 
 from nanoquant.runtime.backend import (
     BackendCapabilities,
@@ -29,7 +30,10 @@ from nanoquant.runtime.torch_model import (
     PreparedGemma3Attention,
     PreparedGemma3DecoderLayer,
     PreparedRMSNorm,
+    PreparedTiedEmbedding,
+    PreparedTiedOutputProjection,
     bind_fused_decode_rope,
+    bind_native_bfloat16_tied_projection,
     bind_prepared_linears,
     bind_prepared_rms_norms,
     bind_short_sliding_masks,
@@ -166,6 +170,37 @@ def test_transformers_path_mapping_is_exact() -> None:
     }
     with pytest.raises(ValueError, match="block-scoped"):
         transformers_decoder_module_paths(("layers.0.proj",))
+
+
+def test_native_bfloat16_tied_binding_preserves_embedding_values_and_alias() -> None:
+    config = Gemma3TextConfig(
+        vocab_size=64,
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=8,
+        max_position_embeddings=64,
+        sliding_window=8,
+        sliding_window_pattern=2,
+        tie_word_embeddings=True,
+    )
+    model = Gemma3ForCausalLM(config).eval()
+    with torch.no_grad():
+        model.model.embed_tokens.weight.copy_(
+            model.model.embed_tokens.weight.bfloat16().float()
+        )
+    input_ids = torch.tensor(((2, 4, 5),), dtype=torch.int64)
+    expected = model.model.embed_tokens(input_ids)
+
+    assert bind_native_bfloat16_tied_projection(model) == 1
+
+    assert isinstance(model.model.embed_tokens, PreparedTiedEmbedding)
+    assert isinstance(model.lm_head, PreparedTiedOutputProjection)
+    assert model.model.embed_tokens.weight is model.lm_head.weight
+    assert model.model.embed_tokens.weight.dtype == torch.bfloat16
+    assert torch.equal(model.model.embed_tokens(input_ids), expected)
 
 
 @pytest.mark.parametrize("dtype", (torch.float32, torch.bfloat16))

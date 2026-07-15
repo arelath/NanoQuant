@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import torch
 from torch import nn
@@ -62,6 +62,98 @@ class PreparedLinear(nn.Module):
         plan = self._plans.prefill if kind == "prefill" else self._plans.decode
         output = plan.linear_at(self._layer_index, value)
         return output.to(dtype=value.dtype) if self._output_dtype == "input" else output
+
+
+class PreparedTiedEmbedding(nn.Module):
+    """Store the tied BF16 table while preserving the F32 lookup boundary."""
+
+    weight: nn.Parameter
+    embed_scale: torch.Tensor
+
+    def __init__(
+        self,
+        weight: nn.Parameter,
+        *,
+        padding_idx: int | None,
+        embed_scale: torch.Tensor,
+    ) -> None:
+        super().__init__()
+        if weight.ndim != 2 or weight.dtype != torch.bfloat16:
+            raise ValueError("prepared tied embedding requires a BF16 matrix")
+        self.weight = weight
+        self.num_embeddings = weight.shape[0]
+        self.embedding_dim = weight.shape[1]
+        self.padding_idx = padding_idx
+        self.register_buffer("embed_scale", embed_scale.detach().float(), persistent=False)
+
+    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+        if input_ids.device.type == "cuda":
+            from nanoquant.runtime.cuda_kernels import launch_bfloat16_embedding
+
+            return launch_bfloat16_embedding(input_ids, self.weight, self.embed_scale)
+        embedded = F.embedding(input_ids, self.weight, padding_idx=self.padding_idx)
+        return embedded.float() * self.embed_scale
+
+
+class PreparedTiedOutputProjection(nn.Module):
+    """Project through the native BF16 tied table with F32 accumulation."""
+
+    weight: nn.Parameter
+
+    def __init__(self, weight: nn.Parameter) -> None:
+        super().__init__()
+        if weight.ndim != 2 or weight.dtype != torch.bfloat16:
+            raise ValueError("prepared tied output projection requires a BF16 matrix")
+        self.weight = weight
+        self.in_features = weight.shape[1]
+        self.out_features = weight.shape[0]
+        self.bias = None
+
+    def forward(self, value: torch.Tensor) -> torch.Tensor:
+        from nanoquant.runtime.cuda_kernels import launch_bfloat16_output_projection
+
+        return launch_bfloat16_output_projection(value, self.weight)
+
+
+def bind_native_bfloat16_tied_projection(model: nn.Module) -> int:
+    """Keep Gemma's tied table in its persisted BF16 representation."""
+
+    embedding = model.get_submodule("model.embed_tokens")
+    head = getattr(model, "lm_head", None)
+    embedding_weight = getattr(embedding, "weight", None)
+    head_weight = getattr(head, "weight", None)
+    embed_scale = getattr(embedding, "embed_scale", None)
+    if not isinstance(head, nn.Module):
+        raise ValueError("tied projection model contains no lm_head module")
+    if not isinstance(embedding_weight, nn.Parameter):
+        raise ValueError("tied projection embedding contains no parameter weight")
+    if head_weight is not embedding_weight:
+        raise ValueError("tied projection model does not share embedding and output weights")
+    if not isinstance(embed_scale, torch.Tensor):
+        raise ValueError("tied projection embedding contains no scale buffer")
+    source_weight = cast(torch.Tensor, embedding_weight)
+    native_value = (
+        torch.empty(
+            source_weight.shape,
+            dtype=torch.bfloat16,
+            device=source_weight.device,
+        )
+        if source_weight.is_meta
+        else source_weight.detach().to(torch.bfloat16)
+    )
+    native_weight = nn.Parameter(native_value, requires_grad=False)
+    prepared_embedding = PreparedTiedEmbedding(
+        native_weight,
+        padding_idx=getattr(embedding, "padding_idx", None),
+        embed_scale=embed_scale,
+    )
+    prepared_head = PreparedTiedOutputProjection(native_weight)
+    prepared_embedding.train(embedding.training)
+    prepared_head.train(head.training)
+    text_model = model.get_submodule("model")
+    text_model.add_module("embed_tokens", prepared_embedding)
+    model.add_module("lm_head", prepared_head)
+    return 1
 
 
 class PreparedRMSNorm(nn.Module):

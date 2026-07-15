@@ -32,6 +32,7 @@ from nanoquant.runtime import (
     batch_prompts,
     benchmark_wall,
     bind_fused_decode_rope,
+    bind_native_bfloat16_tied_projection,
     bind_prepared_linears,
     bind_prepared_rms_norms,
     bind_short_sliding_masks,
@@ -313,6 +314,13 @@ def _benchmark(args: argparse.Namespace) -> dict[str, Any]:
             attn_implementation="eager",
         ).eval()
         model.to(device)
+        native_bfloat16_tied_projection_count = (
+            bind_native_bfloat16_tied_projection(model)
+            if args.native_bfloat16_tied_projection
+            and device.type == "cuda"
+            and dtype == torch.float32
+            else 0
+        )
         auxiliary_count, global_tuning = _apply_auxiliary(model, args, device)
         prepared = prepare_execution_workloads(plans, states, (backend,), device)
         layer_names = tuple(entry.spec.name for entry in entries)
@@ -691,6 +699,7 @@ def _benchmark(args: argparse.Namespace) -> dict[str, Any]:
             "short_sliding_masks": args.short_sliding_masks,
             "fast_sliding_cache": args.fast_sliding_cache,
             "fused_cache_prefix": args.fused_cache_prefix,
+            "native_bfloat16_tied_projection": args.native_bfloat16_tied_projection,
             "warmups": args.warmups,
             "repetitions": args.repetitions,
             "prompt": args.prompt,
@@ -711,6 +720,9 @@ def _benchmark(args: argparse.Namespace) -> dict[str, Any]:
             "short_sliding_mask_count": short_sliding_mask_count,
             "fused_cache_update_count": getattr(
                 last_cache[0], "nanoquant_fused_cache_update_count", 0
+            ),
+            "native_bfloat16_tied_projection_count": (
+                native_bfloat16_tied_projection_count
             ),
             "prefill_fallback_count": plans.prefill.fallback_count,
             "decode_fallback_count": plans.decode.fallback_count,
@@ -771,6 +783,12 @@ def main() -> None:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="fuse F32-to-F16 prefix updates and F16-to-F32 attention views",
+    )
+    parser.add_argument(
+        "--native-bfloat16-tied-projection",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="retain the tied Gemma embedding/output table in native BF16",
     )
     parser.add_argument("--max-new-tokens", type=int, default=32)
     parser.add_argument("--stopping-check-interval", type=int, default=8)

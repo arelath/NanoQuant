@@ -1224,3 +1224,15 @@ only their *measurement* waits for the Docs/15 P1 baseline if we want clean befo
   isolated-decode medians were 28.77, 30.88, and 29.38 ms; complete 32-token medians were 0.851, 0.914, and 0.893 s.
   Both candidates preserved hash `d91549...` and the same peak allocation. The supported specialization is default;
   `--no-fused-cache-prefix` remains the control.
+- **Native BF16 tied embedding/output table accepted:** the runtime bundle persists Gemma's shared 262144x1152 table
+  as BF16, but the loader previously expanded it to F32, retaining about 1.21 GB and feeding a 2.95 ms F32 cuBLAS
+  vocabulary GEMV. The guarded CUDA/F32 path now keeps the shared parameter in its 0.60 GB native form. One Triton
+  kernel performs BF16 lookup, F32 promotion, and the exact F32 embedding scale; a second reads BF16 output weights
+  with F32 inputs/accumulation. Embedding output is bit-exact. Against the same table expanded to F32, the real output
+  head has 3.70e-6 maximum absolute error and 4.80e-7 RMSE versus a 4.65 top-1 margin, with exact argmax and generation
+  hash. Head device time falls from 2.945 to 1.481 ms, total kernel self time from 6.82 to 5.35 ms, and kernels from
+  834 to 833. Candidate/control/candidate isolated decode medians are 28.60, 36.92, and 29.18 ms; complete-generation
+  medians are 0.999, 1.045, and 1.010 s. More importantly, matched peak allocation falls from 1.218 to 0.655 GB, and
+  production bundle load/generation peak falls from 2.504 to 1.296 GB. The specialization is default only for CUDA
+  F32 runtime loading; unsupported targets/dtypes keep the unchanged representation, and
+  `--no-native-bfloat16-tied-projection` remains the control.

@@ -423,6 +423,12 @@ Outcome: runtime performance is measured, explained, and competitive with the mo
   medians were 0.851, 0.914, and 0.893 s; isolated decode medians were 28.77, 30.88, and 29.38 ms. Rollover and every
   unsupported dtype/device/layout use the unchanged fallback. Eager attention proper, the vocabulary projection,
   and sampling remain.
+  The vocabulary projection is now specialized around the bundle/reference's actual BF16 tied table instead of
+  expanding it to F32. A fused embedding lookup preserves F32 embedding values bit-for-bit, while the mixed
+  BF16-weight/F32-input output kernel has 3.70e-6 maximum real-logit error and exact argmax/hash. The head kernel falls
+  from 2.945 to 1.481 ms, total device self time from 6.82 to 5.35 ms, and matched peak allocation from 1.218 to
+  0.655 GB. Candidate/control/candidate isolated decode medians are 28.60, 36.92, and 29.18 ms. Eager attention and
+  sampling remain, so the broader task stays open.
 - [ ] **M7.15** Compare eager and compiled/static decode-step execution with stable shape/correctness coverage.
   Direct whole-model and decode-only `torch.compile` feasibility probes preserved the exact token but are rejected
   in their current form. Whole-model compilation produced 58 graphs and 47 workload-`ContextVar` breaks. Restricting

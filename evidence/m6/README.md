@@ -336,8 +336,10 @@ The bundle has 36 hashed members and 731,007,650 member bytes. Its 49,104-byte d
 materialized only the ordinary shell around it, restored tied weights and all derived buffers, and rejected any meta
 or uninitialized state. The 32-token run used every packed linear with zero fallback, bound all 157 fused RMSNorms,
 26 decode-only RoPE sites, and 22 short-context sliding layers, reproduced the retained llama.cpp 16-token prefix,
-and replayed exactly. Retained allocation was 1,304,107,520 bytes after the second pass;
-the 2,503,545,344-byte load peak includes transient pre-tie shell allocation and remains well inside the 12 GB device.
+and replayed exactly. The native BF16 tied embedding/output specialization is active once, retaining 702,683,648
+bytes after the second pass; the 1,295,585,792-byte load/generation peak is nearly half the prior 2,503,545,344-byte
+F32-expanded-table peak. The 2,127-byte validation record has SHA-256
+`217110f5c7aa0b5e9bea56589540bd3a7ad304ad7d88c274d9022059eebe54a5`.
 
 The separate deployment distribution and isolated install proof are reproducible with:
 
@@ -354,14 +356,15 @@ The separate deployment distribution and isolated install proof are reproducible
   --output evidence\m6\gemma-pageable-v28-runtime-only-install-validation.json
 ```
 
-The retained wheel is 57,642 bytes with SHA-256
-`8bde4f031c3f880213383a8a23d2f942c2b9157c3168de1e5b2aa26e0a47da56`. Its exact 23-member inventory contains only
+The retained wheel is 59,119 bytes with SHA-256
+`b9b3e53dbbba77191ed8e3c7fc174fac3c6358b86aa97c059bdebf7ec2460ae9`. Its exact 23-member inventory contains only
 `nanoquant/__init__.py`, `nanoquant/runtime/*`, and distribution metadata. The isolated child resolved that installed
 copy, imported zero research modules, loaded the bundle without a source-model path, selected CUDA for all 182
-linears with zero fallback, bound all 157 Gemma3 RMSNorms, all 26 eligible decode-only RoPE sites, and all 22 guarded
-short-context sliding layers to their accepted paths, executed 330 prepared sliding-prefix updates, and generated
-exactly `Okay, here’s a draft of a short paragraph about quantum physics, and`. The 2,854-byte validation record has
-SHA-256 `a8f20f10aa93f6474882534928054a747b03b97f42df259486996c354faa1ac8`. Runtime dependencies came from the pinned
+linears with zero fallback, bound all 157 Gemma3 RMSNorms, all 26 eligible decode-only RoPE sites, all 22 guarded
+short-context sliding layers, and the native BF16 tied-table specialization, executed 330 prepared sliding-prefix
+updates, and generated exactly `Okay, here’s a draft of a short paragraph about quantum physics, and`. Retained
+allocation is 700,979,200 bytes and peak allocation is 1,295,585,792 bytes. The 2,901-byte validation record has
+SHA-256 `f13e204851a12eaaffdd6c6e64cf2384d348da3790b6e6d38d1bdf5b07f91796`. Runtime dependencies came from the pinned
 host environment because the validation was offline; M10.9 retains the broader clean dependency-install matrix.
 Together with full reference/CUDA numerical coverage, this closes M6.22 and the M6 correctness gate, not the
 still-open Milestone 7 throughput gate.

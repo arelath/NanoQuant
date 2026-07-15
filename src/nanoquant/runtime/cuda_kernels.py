@@ -221,6 +221,133 @@ def _nanoquant_cache_prefix_update(
     tl.store(value_output + offsets, selected_values.to(tl.float32), mask=valid)
 
 
+@triton.jit
+def _nanoquant_bfloat16_output_projection(
+    value,
+    weight,
+    output,
+    N_IN: tl.constexpr,
+    N_OUT: tl.constexpr,
+    BLOCK_IN: tl.constexpr,
+    BLOCK_OUT: tl.constexpr,
+):
+    output_block = tl.program_id(0)
+    token = tl.program_id(1)
+    outputs = output_block * BLOCK_OUT + tl.arange(0, BLOCK_OUT)
+    output_mask = outputs < N_OUT
+    accumulator = tl.zeros((BLOCK_OUT,), dtype=tl.float32)
+    for start in range(0, N_IN, BLOCK_IN):
+        columns = start + tl.arange(0, BLOCK_IN)
+        column_mask = columns < N_IN
+        inputs = tl.load(
+            value + token * N_IN + columns,
+            mask=column_mask,
+            other=0.0,
+        ).to(tl.float32)
+        weights = tl.load(
+            weight + outputs[:, None] * N_IN + columns[None, :],
+            mask=output_mask[:, None] & column_mask[None, :],
+            other=0.0,
+        ).to(tl.float32)
+        accumulator += tl.sum(weights * inputs[None, :], axis=1)
+    tl.store(output + token * N_OUT + outputs, accumulator, mask=output_mask)
+
+
+@triton.jit
+def _nanoquant_bfloat16_embedding(
+    input_ids,
+    weight,
+    scale,
+    output,
+    EMBEDDING_DIM: tl.constexpr,
+    TOTAL_ELEMENTS: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    valid = offsets < TOTAL_ELEMENTS
+    tokens = offsets // EMBEDDING_DIM
+    dimensions = offsets % EMBEDDING_DIM
+    rows = tl.load(input_ids + tokens, mask=valid, other=0)
+    values = tl.load(
+        weight + rows * EMBEDDING_DIM + dimensions,
+        mask=valid,
+        other=0.0,
+    ).to(tl.float32)
+    embedding_scale = tl.load(scale).to(tl.float32)
+    tl.store(output + offsets, _mul_rn_f32(values, embedding_scale), mask=valid)
+
+
+def launch_bfloat16_embedding(
+    input_ids: torch.Tensor,
+    weight: torch.Tensor,
+    scale: torch.Tensor,
+) -> torch.Tensor:
+    """Look up native BF16 rows and apply the exact F32 Gemma scale."""
+
+    if input_ids.dtype != torch.int64 or weight.dtype != torch.bfloat16:
+        raise ValueError("embedding requires I64 indices and BF16 weights")
+    if scale.dtype != torch.float32 or scale.numel() != 1:
+        raise ValueError("embedding requires one F32 scale")
+    if input_ids.device.type != "cuda" or weight.device != input_ids.device:
+        raise ValueError("embedding requires indices and weights on one CUDA device")
+    if scale.device != input_ids.device:
+        raise ValueError("embedding scale must share the CUDA device")
+    if weight.ndim != 2 or input_ids.ndim < 1:
+        raise ValueError("embedding geometry is incompatible")
+    if not input_ids.is_contiguous() or not weight.is_contiguous() or not scale.is_contiguous():
+        raise ValueError("embedding requires contiguous tensors")
+    embedding_dim = weight.shape[1]
+    output = torch.empty(
+        (*input_ids.shape, embedding_dim),
+        dtype=torch.float32,
+        device=input_ids.device,
+    )
+    total_elements = output.numel()
+    block_size = 256
+    _nanoquant_bfloat16_embedding[(triton.cdiv(total_elements, block_size),)](
+        input_ids,
+        weight,
+        scale,
+        output,
+        EMBEDDING_DIM=embedding_dim,
+        TOTAL_ELEMENTS=total_elements,
+        BLOCK_SIZE=block_size,
+        num_warps=4,
+    )
+    return output
+
+
+def launch_bfloat16_output_projection(
+    value: torch.Tensor,
+    weight: torch.Tensor,
+) -> torch.Tensor:
+    """Project F32 states through a contiguous BF16 vocabulary matrix."""
+
+    if value.dtype != torch.float32 or weight.dtype != torch.bfloat16:
+        raise ValueError("output projection requires F32 inputs and BF16 weights")
+    if value.device.type != "cuda" or weight.device != value.device:
+        raise ValueError("output projection requires inputs on one CUDA device")
+    if value.ndim < 2 or weight.ndim != 2 or value.shape[-1] != weight.shape[1]:
+        raise ValueError("output projection geometry is incompatible")
+    if not value.is_contiguous() or not weight.is_contiguous():
+        raise ValueError("output projection requires contiguous tensors")
+    n_in = value.shape[-1]
+    n_out = weight.shape[0]
+    token_count = value.numel() // n_in
+    output = torch.empty((token_count, n_out), dtype=torch.float32, device=value.device)
+    _nanoquant_bfloat16_output_projection[(triton.cdiv(n_out, 32), token_count)](
+        value.view(token_count, n_in),
+        weight,
+        output,
+        N_IN=n_in,
+        N_OUT=n_out,
+        BLOCK_IN=256,
+        BLOCK_OUT=32,
+        num_warps=8,
+    )
+    return output.view(*value.shape[:-1], n_out)
+
+
 def launch_cache_prefix_update(
     key_states: torch.Tensor,
     value_states: torch.Tensor,

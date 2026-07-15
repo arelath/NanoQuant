@@ -24,7 +24,12 @@ from nanoquant.runtime import (
     plan_execution_workloads,
     prepare_execution_workloads,
 )
-from nanoquant.runtime.cuda_kernels import launch_cache_prefix_update, launch_decode_rope
+from nanoquant.runtime.cuda_kernels import (
+    launch_bfloat16_embedding,
+    launch_bfloat16_output_projection,
+    launch_cache_prefix_update,
+    launch_decode_rope,
+)
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -201,6 +206,46 @@ def test_fused_cache_prefix_update_matches_pytorch_storage_and_views(
     assert torch.equal(value_cache, expected_value_cache)
     assert torch.equal(key_view, expected_key_cache.float())
     assert torch.equal(value_view, expected_value_cache.float())
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+@pytest.mark.parametrize("token_shape", [(1, 1), (2, 3)])
+def test_bfloat16_output_projection_matches_f32_reference(
+    token_shape: tuple[int, ...],
+) -> None:
+    generator = torch.Generator().manual_seed(20260715)
+    value = torch.randn(
+        *token_shape,
+        1152,
+        generator=generator,
+        dtype=torch.float32,
+    ).cuda()
+    weight = torch.randn(
+        257,
+        1152,
+        generator=generator,
+        dtype=torch.bfloat16,
+    ).cuda()
+
+    actual = launch_bfloat16_output_projection(value, weight)
+    expected = torch.nn.functional.linear(value, weight.float())
+
+    assert actual.dtype == torch.float32
+    torch.testing.assert_close(actual, expected, rtol=2e-5, atol=2e-4)
+    assert torch.equal(actual.argmax(dim=-1), expected.argmax(dim=-1))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_bfloat16_embedding_matches_promoted_f32_lookup_exactly() -> None:
+    generator = torch.Generator().manual_seed(20260715)
+    input_ids = torch.tensor(((3, 17, 5), (9, 2, 21)), dtype=torch.int64).cuda()
+    weight = torch.randn(32, 1152, generator=generator, dtype=torch.bfloat16).cuda()
+    scale = torch.tensor(1152**0.5, dtype=torch.float32).cuda()
+
+    actual = launch_bfloat16_embedding(input_ids, weight, scale)
+    expected = torch.nn.functional.embedding(input_ids, weight).float() * scale
+
+    assert torch.equal(actual, expected)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")

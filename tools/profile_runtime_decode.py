@@ -324,6 +324,7 @@ def _profile(args: argparse.Namespace) -> dict[str, object]:
             fuse_rms_norm=args.fused_rms_norm,
             fuse_decode_rope=args.fused_decode_rope,
             optimize_short_sliding_masks=args.short_sliding_masks,
+            native_bfloat16_tied_projection=args.native_bfloat16_tied_projection,
         )
         model = runtime.model
         cache_factory = hybrid_cache_factory(
@@ -394,6 +395,54 @@ def _profile(args: argparse.Namespace) -> dict[str, object]:
             cache, next_token = prefill()
             decode(cache, next_token)
         torch.cuda.synchronize(device)
+
+        projection_numerics = None
+        if runtime.native_bfloat16_tied_projection_count:
+            captured_inputs: list[torch.Tensor] = []
+
+            def capture_projection_input(
+                _module: torch.nn.Module,
+                inputs: tuple[torch.Tensor, ...],
+            ) -> None:
+                captured_inputs.append(inputs[0].detach())
+
+            handle = model.lm_head.register_forward_pre_hook(capture_projection_input)
+            try:
+                prefill()
+            finally:
+                handle.remove()
+            if len(captured_inputs) != 1:
+                raise ValueError("runtime profile did not capture one output-projection input")
+            hidden = captured_inputs[0]
+            candidate_logits = model.lm_head(hidden)
+            reference_logits = torch.nn.functional.linear(
+                hidden,
+                model.lm_head.weight.float(),
+            )
+            difference = candidate_logits - reference_logits
+            candidate_top = torch.topk(candidate_logits[0, 0], 2)
+            reference_top = torch.topk(reference_logits[0, 0], 2)
+            projection_numerics = {
+                "candidate_argmax": int(candidate_top.indices[0].item()),
+                "reference_argmax": int(reference_top.indices[0].item()),
+                "argmax_exact": bool(candidate_top.indices[0] == reference_top.indices[0]),
+                "reference_top1_margin": float(
+                    (reference_top.values[0] - reference_top.values[1]).item()
+                ),
+                "candidate_top1_margin": float(
+                    (candidate_top.values[0] - candidate_top.values[1]).item()
+                ),
+                "maximum_absolute_error": float(difference.abs().max().item()),
+                "mean_absolute_error": float(difference.abs().mean().item()),
+                "root_mean_square_error": float(
+                    difference.float().square().mean().sqrt().item()
+                ),
+                "reference_maximum_absolute_logit": float(
+                    reference_logits.abs().max().item()
+                ),
+            }
+            del candidate_logits, reference_logits, difference, hidden, captured_inputs
+            torch.cuda.empty_cache()
 
         modules, groups = _module_inventory(model)
         baseline_allocated = torch.cuda.memory_allocated(device)
@@ -528,6 +577,9 @@ def _profile(args: argparse.Namespace) -> dict[str, object]:
             "fused_rms_norm_count": runtime.fused_rms_norm_count,
             "fused_decode_rope_count": runtime.fused_decode_rope_count,
             "short_sliding_mask_count": runtime.short_sliding_mask_count,
+            "native_bfloat16_tied_projection_count": (
+                runtime.native_bfloat16_tied_projection_count
+            ),
             "fused_cache_update_count": getattr(
                 last_cache[0], "nanoquant_fused_cache_update_count", 0
             ),
@@ -569,11 +621,13 @@ def _profile(args: argparse.Namespace) -> dict[str, object]:
             "short_sliding_masks": args.short_sliding_masks,
             "fast_sliding_cache": args.fast_sliding_cache,
             "fused_cache_prefix": args.fused_cache_prefix,
+            "native_bfloat16_tied_projection": args.native_bfloat16_tied_projection,
             "attention": "eager",
             "warmups": args.warmups,
             "repetitions": args.repetitions,
         },
         "dispatch": dispatch,
+        "projection_numerics": projection_numerics,
         "profile_passes": profile_passes,
         "kernel_profile": kernel_profile,
         "accounting": {
@@ -657,6 +711,12 @@ def main() -> None:
         action=argparse.BooleanOptionalAction,
         default=False,
         help="also capture one separate warmed Kineto CPU/CUDA kernel trace",
+    )
+    parser.add_argument(
+        "--native-bfloat16-tied-projection",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="retain the tied Gemma embedding/output table in bundle-native BF16",
     )
     parser.add_argument("--wait-for-device-seconds", type=float, default=0.0)
     parser.add_argument("--output", type=Path)
