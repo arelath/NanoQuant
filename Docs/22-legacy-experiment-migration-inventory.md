@@ -1,5 +1,10 @@
 # Legacy numbered experiment migration inventory
 
+> **Current disposition (2026-07-15):** this is a lessons-and-capability inventory, not a backlog for copying the
+> historical experiments. Existing rewrite runfiles are frozen parity/regression harnesses. New research starts
+> from `experiments/000_experiment_template.py` and uses shared framework capabilities; remaining legacy rows guide
+> framework coverage and real parity gates without requiring one-for-one runfile migrations.
+
 ## Scope and status language
 
 This is the M9.1 inventory of every numbered top-level Python experiment in

@@ -19,15 +19,24 @@ Every level produces a normal run manifest and comparable metrics. A replay is n
 
 ## 3. Numbered zero-argument experiment workflow
 
-Numbered runfiles remain the normal human-facing chronology for promoted experiments:
+Numbered runfiles remain the normal human-facing chronology for new promoted experiments:
 
 ```text
 python experiments/020_low_rank_hessian_replay.py
 ```
 
-The file declares experiment number, purpose, hypothesis, baseline, and canonical `RunConfig`, then calls the shared application entry point. It takes no experiment-defining parameters. This preserves the useful workflow of the current codebase while preventing logging, checkpoint, model-loading, or evaluation mechanics from being copied between runs.
+Start from `experiments/000_experiment_template.py`, not from a historical experiment. The file declares experiment
+number, purpose, hypothesis, baseline, and canonical `RunConfig`, then calls
+`run_quantization_experiment`, the shared resident application entry point. It takes no experiment-defining
+parameters. Logging, checkpoint, model-loading, evaluation, and resume mechanics stay in the framework. The
+callback-based `run_experiment` entry point is compatibility infrastructure and rejects a missing pipeline with
+`RUN002`; it is not the entry point for new research.
 
-After an experiment produces a committed run, changing its hypothesis or semantic settings means copying it to the next number. Resume does not create a new experiment number; a changed recipe does. See [Lessons Carried Forward](12-lessons-carried-forward.md#2-preserve-numbered-experiment-files) and [ADR-0005](adr/0005-numbered-zero-argument-runfiles.md).
+After an experiment produces a committed run, changing its hypothesis or semantic settings means creating the next
+number from the template and expressing the delta in canonical configuration. Resume does not create a new
+experiment number; a changed recipe does. Historical experiments remain evidence and lessons, not templates or a
+migration backlog. See [Lessons Carried Forward](12-lessons-carried-forward.md#2-preserve-numbered-experiment-files)
+and [ADR-0005](adr/0005-numbered-zero-argument-runfiles.md).
 
 ## 4. Captured replay fixtures
 

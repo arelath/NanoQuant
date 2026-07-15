@@ -661,23 +661,12 @@ Outcome: supported users no longer need legacy orchestration.
   defects (016's ` copy`, 017's 016 output names, 018's stale printed title, and 019's misleading 1B filename despite
   its 4B model), cross-cutting mechanism dispositions, and a migration order. No native numbered rewrite runfile is
   counted prematurely; M9.2 remains open.
-- [ ] **M9.2** Convert supported historical experiments into thin numbered zero-argument runfiles while preserving numbers, names, purpose, and lineage.
-  Experiments 001, 002, 003, 008, 011, 013, and 018 are completed migrations. The compression runfiles import canonical typed
-  recipes and call the shared resident workflow, which resolves pinned model/calibration inputs and composes
-  compression followed by the legacy-default model KD stage. Experiment 011 calls the typed shared packed-runtime
-  benchmark and preserves its historical 12-token prompt, BF16 input/cache, one warmup, three 128-token timed
-  generations, and forced-length behavior. Its retained real-Gemma result prepares all 182 linears with zero
-  prefill/decode fallback and reaches 110.18 mean tokens/s versus the retained legacy GEMV result's 22.50 tokens/s.
-  Experiment 002 calls a typed three-case short-decode application/CLI and preserves the historical 32-token
-  prompt/output, top-k 32, temperature 0.8, seed, one-warmup/three-repetition sampling, raw timings, and memory peaks.
-  Its base, factorized-reference, and packed cases are loaded and fully released sequentially to prevent VRAM model
-  overlap. The retained run prepares all 182 packed linears with zero fallback, uses 720,707,072 peak allocated bytes
-  (65.4% below the current base), and records the remaining BF16 packed throughput gap rather than promoting it.
-  Experiment 001 is explicitly historical: its original q/v/o/k/MLP order, no-outlier path, 0.80/1.15 rank bounds,
-  and 1e-3 early stop are pinned, while output uses native immutable artifacts instead of recreating executable
-  pickle. Experiment 003 composes the shared base/frozen quality evaluator; its real result matches legacy base PPL
-  within 0.0023% and all three primary task values exactly after correcting `acc_norm` to use legacy choice-character
-  length. M9.2 remains open for the other supported inventory rows.
+- [x] **M9.2** Preserve historical experiments as evidence and lessons without porting them as the new research surface.
+  The earlier 001/002/003/008/011/013/018 runfiles are retained as frozen parity/regression harnesses, not as a
+  precedent or backlog for migrating the remaining legacy scripts. New experiments start from
+  `000_experiment_template.py`, declare new intent and canonical configuration, and call the shared resident
+  `run_quantization_experiment` entry point. The compatibility application now raises `RUN002` instead of recording
+  a successful no-op when no executable pipeline callback is supplied.
 - [ ] **M9.3** Move copied dotenv, tee logging, output-directory, model-loading, save, and evaluation mechanics into shared infrastructure/application services.
 - [ ] **M9.4** Provide generated YAML/resolved-recipe views for numbered runfiles where useful without making YAML mandatory.
 - [ ] **M9.5** Implement or document migration/import for supported legacy `.pt` checkpoints.

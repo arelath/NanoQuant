@@ -27,8 +27,11 @@ class QuantizeApplication:
     ) -> tuple[str, ...]:
         context.events.emit("run", "info", "configuration.accepted")
         if runner is None:
-            context.events.emit("quantize", "warning", "pipeline.not_configured", code="RUN002")
-            return ()
+            context.events.emit("quantize", "error", "pipeline.not_configured", code="RUN002")
+            raise RuntimeError(
+                "RUN002 no executable pipeline was supplied; new experiments must use "
+                "run_quantization_experiment"
+            )
         with (
             context.events.span("quantize", "legacy_compatibility") if hasattr(context.events, "span") else _nullspan()
         ):
