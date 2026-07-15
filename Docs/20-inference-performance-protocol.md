@@ -254,3 +254,30 @@ contains large WDDM stalls: 1.517, 1.281, and 0.975 s. A subsequent stable adjac
 1.141 versus 1.000 s for 32 exact tokens (12.4% lower) and 37.80 versus 32.95 ms for isolated decode (12.8% lower).
 The final candidate produces 32.01 tokens/s, **17.35%** of the 184.50 tokens/s llama.cpp reference and 3.27x the
 frozen 9.79 tokens/s rewrite baseline. Exact hashes, allocation, 182 CUDA linears, and zero fallback are unchanged.
+
+## Fifth promoted optimization: fused cache conversion, prefix update, and attention views
+
+The prepared prefix update still issued separate F32-to-F16 conversions for K and V, separate indexed writes into
+the F16 backing caches, and separate full-cache F16-to-F32 promotions for eager attention. A guarded Triton kernel
+now performs all six logical operations in one launch per layer. It explicitly rounds new values to F16 before both
+the backing write and F32 output, so the result matches the prior representation rather than bypassing its precision
+boundary. Direct CUDA tests compare both backing tensors and both promoted views with `torch.equal` for one-token and
+multi-token/multi-batch geometries. Only contiguous CUDA F32 states with F16 backing storage strictly before rollover
+use the kernel; all other cases retain the existing PyTorch or Transformers path. A tiny CUDA generation regression
+crosses sliding rollover and exactly matches the fused-off F16-cache control.
+
+The pinned profile executes 26 fused cache kernels/token, preserves token 236764 in every pass, and retains all 182
+packed linears with zero fallback. Kernels fall from 964 to 834, launch APIs from 961 to 831, and ATen calls from
+4,271 to 3,595; non-nested device kernel self time is 6.82 ms and synchronized top-level wall p50 is 31.07 ms. The
+576,004-byte record has SHA-256
+`2a97c8677bbbcd22d038e695db2c157784be8e0432bb56c02b025a3931482811`.
+
+Candidate/control/candidate isolated-decode medians are 28.77, 30.88, and 29.38 ms, a 5.8% candidate-average
+reduction. Exact 32-token generation medians are 0.851, 0.914, and 0.893 s, a 4.6% candidate-average reduction. All
+three runs preserve output hash `d91549bc797d2ff5a31e3b1e224347fac211fd34aa2077e01e521a888d24de3f`
+and identical peak allocation. Their SHA-256 values are respectively
+`14d30f2fd41b8beccd11aa1bd1f4856a7a865c13571fe323ab7fa97685fb2a5c`,
+`4d0beab14f2f542016469b496d0fc6cd28b557f4c20ce56c9c4b6c0499705f15`, and
+`2aad1333ccc7de1c8a3a1ac9249db945aff9471e63913247a80ca8eb2cbab5ff`. The final candidate reaches 35.82 tokens/s,
+**19.42%** of the 184.50 tokens/s reference and 3.66x the frozen rewrite baseline. The specialization is default for
+supported inputs; `--no-fused-cache-prefix` retains the matched control.

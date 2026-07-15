@@ -179,6 +179,107 @@ def _nanoquant_decode_rope(
         )
 
 
+@triton.jit
+def _nanoquant_cache_prefix_update(
+    key_states,
+    value_states,
+    key_cache,
+    value_cache,
+    key_output,
+    value_output,
+    position_start,
+    TOKEN_COUNT: tl.constexpr,
+    CACHE_LENGTH: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    TOTAL_ELEMENTS: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    valid = offsets < TOTAL_ELEMENTS
+    dimension = offsets % HEAD_DIM
+    cache_position = (offsets // HEAD_DIM) % CACHE_LENGTH
+    outer = offsets // (CACHE_LENGTH * HEAD_DIM)
+    updated = valid & (cache_position >= position_start) & (
+        cache_position < position_start + TOKEN_COUNT
+    )
+    source_offsets = (
+        outer * TOKEN_COUNT * HEAD_DIM
+        + (cache_position - position_start) * HEAD_DIM
+        + dimension
+    )
+
+    existing_keys = tl.load(key_cache + offsets, mask=valid, other=0.0)
+    existing_values = tl.load(value_cache + offsets, mask=valid, other=0.0)
+    new_keys = tl.load(key_states + source_offsets, mask=updated, other=0.0).to(tl.float16)
+    new_values = tl.load(value_states + source_offsets, mask=updated, other=0.0).to(tl.float16)
+    selected_keys = tl.where(updated, new_keys, existing_keys)
+    selected_values = tl.where(updated, new_values, existing_values)
+
+    tl.store(key_cache + offsets, selected_keys, mask=updated)
+    tl.store(value_cache + offsets, selected_values, mask=updated)
+    tl.store(key_output + offsets, selected_keys.to(tl.float32), mask=valid)
+    tl.store(value_output + offsets, selected_values.to(tl.float32), mask=valid)
+
+
+def launch_cache_prefix_update(
+    key_states: torch.Tensor,
+    value_states: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    position_start: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Update an F16 KV prefix and materialize its exact F32 attention views."""
+
+    if key_states.dtype != torch.float32 or value_states.dtype != torch.float32:
+        raise ValueError("cache prefix update requires F32 key and value states")
+    if key_cache.dtype != torch.float16 or value_cache.dtype != torch.float16:
+        raise ValueError("cache prefix update requires F16 backing caches")
+    if key_states.device.type != "cuda" or value_states.device != key_states.device:
+        raise ValueError("cache prefix update requires key and value states on one CUDA device")
+    if key_cache.device != key_states.device or value_cache.device != key_states.device:
+        raise ValueError("cache prefix update inputs must share one CUDA device")
+    if not all(
+        tensor.is_contiguous()
+        for tensor in (key_states, value_states, key_cache, value_cache)
+    ):
+        raise ValueError("cache prefix update requires contiguous tensors")
+    if key_states.ndim != 4 or key_cache.ndim != 4:
+        raise ValueError("cache prefix update requires four-dimensional tensors")
+    if key_states.shape != value_states.shape or key_cache.shape != value_cache.shape:
+        raise ValueError("cache prefix update requires matching key/value shapes")
+    if (
+        key_states.shape[0] != key_cache.shape[0]
+        or key_states.shape[1] != key_cache.shape[1]
+        or key_states.shape[3] != key_cache.shape[3]
+    ):
+        raise ValueError("cache prefix update state and cache geometry is incompatible")
+    token_count = key_states.shape[2]
+    cache_length = key_cache.shape[2]
+    if position_start < 0 or position_start + token_count >= cache_length:
+        raise ValueError("cache prefix update must be strictly before cache rollover")
+
+    key_output = torch.empty(key_cache.shape, dtype=torch.float32, device=key_cache.device)
+    value_output = torch.empty(value_cache.shape, dtype=torch.float32, device=value_cache.device)
+    total_elements = key_cache.numel()
+    block_size = 256
+    _nanoquant_cache_prefix_update[(triton.cdiv(total_elements, block_size),)](
+        key_states,
+        value_states,
+        key_cache,
+        value_cache,
+        key_output,
+        value_output,
+        position_start,
+        TOKEN_COUNT=token_count,
+        CACHE_LENGTH=cache_length,
+        HEAD_DIM=key_cache.shape[3],
+        TOTAL_ELEMENTS=total_elements,
+        BLOCK_SIZE=block_size,
+        num_warps=4,
+    )
+    return key_output, value_output
+
+
 def launch_decode_rope(
     query: torch.Tensor,
     key: torch.Tensor,

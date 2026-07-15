@@ -86,6 +86,7 @@ def hybrid_cache_factory(
     dtype_override: torch.dtype | None = None,
     *,
     fast_sliding_prefix: bool = True,
+    fused_cache_prefix: bool = True,
 ) -> CacheFactory:
     """Create a total-length-bounded Transformers HybridCache factory."""
 
@@ -106,6 +107,7 @@ def hybrid_cache_factory(
             _nanoquant_position_start: int | None = None
             _nanoquant_token_count: int | None = None
             nanoquant_fast_sliding_update_count: int = 0
+            nanoquant_fused_cache_update_count: int = 0
 
             def _nanoquant_prepare_for_forward(
                 self,
@@ -132,16 +134,44 @@ def hybrid_cache_factory(
                 prepared_token_count = self._nanoquant_token_count
                 k_out = self.key_cache[layer_idx]
                 v_out = self.value_cache[layer_idx]
-                if (
-                    fast_sliding_prefix
-                    and sliding_window
-                    and isinstance(cache_position, torch.Tensor)
+                prefix_is_pre_rollover = (
+                    isinstance(cache_position, torch.Tensor)
                     and cache_position.numel() == token_count
                     and prepared_token_count == token_count
                     and position_start is not None
                     and position_start + token_count < k_out.shape[2]
                     and k_out.device == key_states.device
                     and v_out.device == value_states.device
+                )
+                if (
+                    fused_cache_prefix
+                    and prefix_is_pre_rollover
+                    and key_states.dtype == torch.float32
+                    and value_states.dtype == torch.float32
+                    and k_out.dtype == torch.float16
+                    and v_out.dtype == torch.float16
+                    and key_states.device.type == "cuda"
+                    and key_states.is_contiguous()
+                    and value_states.is_contiguous()
+                    and k_out.is_contiguous()
+                    and v_out.is_contiguous()
+                ):
+                    from nanoquant.runtime.cuda_kernels import launch_cache_prefix_update
+
+                    assert position_start is not None
+                    keys, values = launch_cache_prefix_update(
+                        key_states,
+                        value_states,
+                        k_out,
+                        v_out,
+                        position_start,
+                    )
+                    self.nanoquant_fused_cache_update_count += 1
+                    return keys, values
+                if (
+                    fast_sliding_prefix
+                    and sliding_window
+                    and prefix_is_pre_rollover
                 ):
                     stored_keys = key_states.to(k_out.dtype)
                     stored_values = value_states.to(v_out.dtype)
@@ -159,7 +189,9 @@ def hybrid_cache_factory(
 
         selected_type = (
             cache_type
-            if not fast_sliding_prefix and (dtype_override is None or dtype_override == dtype)
+            if not fast_sliding_prefix
+            and not fused_cache_prefix
+            and (dtype_override is None or dtype_override == dtype)
             else PreparedHybridCache
         )
         return selected_type(

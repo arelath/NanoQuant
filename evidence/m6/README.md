@@ -354,14 +354,14 @@ The separate deployment distribution and isolated install proof are reproducible
   --output evidence\m6\gemma-pageable-v28-runtime-only-install-validation.json
 ```
 
-The retained wheel is 56,582 bytes with SHA-256
-`5d76f5615b0e85788ecf63b0642659e0a47459221fb88c71023fffbd30359cde`. Its exact 23-member inventory contains only
+The retained wheel is 57,642 bytes with SHA-256
+`8bde4f031c3f880213383a8a23d2f942c2b9157c3168de1e5b2aa26e0a47da56`. Its exact 23-member inventory contains only
 `nanoquant/__init__.py`, `nanoquant/runtime/*`, and distribution metadata. The isolated child resolved that installed
 copy, imported zero research modules, loaded the bundle without a source-model path, selected CUDA for all 182
 linears with zero fallback, bound all 157 Gemma3 RMSNorms, all 26 eligible decode-only RoPE sites, and all 22 guarded
 short-context sliding layers to their accepted paths, executed 330 prepared sliding-prefix updates, and generated
 exactly `Okay, here’s a draft of a short paragraph about quantum physics, and`. The 2,854-byte validation record has
-SHA-256 `702246c45e495bd52b5ef4ed210e311b74b51a866dda1fbc473493b3305618e7`. Runtime dependencies came from the pinned
+SHA-256 `a8f20f10aa93f6474882534928054a747b03b97f42df259486996c354faa1ac8`. Runtime dependencies came from the pinned
 host environment because the validation was offline; M10.9 retains the broader clean dependency-install matrix.
 Together with full reference/CUDA numerical coverage, this closes M6.22 and the M6 correctness gate, not the
 still-open Milestone 7 throughput gate.

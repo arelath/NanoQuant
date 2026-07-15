@@ -339,14 +339,30 @@ def _benchmark(args: argparse.Namespace) -> dict[str, Any]:
             (batch_size, maximum_cache_length), dtype=torch.bool, device=device
         )
         full_attention_mask[:, :prompt_width] = device_attention_mask
-        shell = TransformersGenerationModel(
-            model,
-            hybrid_cache_factory(
-                model.config,
-                None if args.cache_dtype is None else _DTYPES[args.cache_dtype],
-                fast_sliding_prefix=args.fast_sliding_cache,
-            ),
+        cache_factory = hybrid_cache_factory(
+            model.config,
+            None if args.cache_dtype is None else _DTYPES[args.cache_dtype],
+            fast_sliding_prefix=args.fast_sliding_cache,
+            fused_cache_prefix=args.fused_cache_prefix,
         )
+        last_cache: list[object | None] = [None]
+
+        def tracked_cache_factory(
+            current_batch_size: int,
+            current_cache_length: int,
+            current_device: torch.device,
+            current_dtype: torch.dtype,
+        ) -> object:
+            cache = cache_factory(
+                current_batch_size,
+                current_cache_length,
+                current_device,
+                current_dtype,
+            )
+            last_cache[0] = cache
+            return cache
+
+        shell = TransformersGenerationModel(model, tracked_cache_factory)
 
         selected_spec = entries[layer_index].spec
         for workload, plan, token_count in (
@@ -674,6 +690,7 @@ def _benchmark(args: argparse.Namespace) -> dict[str, Any]:
             "fused_decode_rope": args.fused_decode_rope,
             "short_sliding_masks": args.short_sliding_masks,
             "fast_sliding_cache": args.fast_sliding_cache,
+            "fused_cache_prefix": args.fused_cache_prefix,
             "warmups": args.warmups,
             "repetitions": args.repetitions,
             "prompt": args.prompt,
@@ -692,6 +709,9 @@ def _benchmark(args: argparse.Namespace) -> dict[str, Any]:
             "fused_rms_norm_count": fused_rms_norm_count,
             "fused_decode_rope_count": fused_decode_rope_count,
             "short_sliding_mask_count": short_sliding_mask_count,
+            "fused_cache_update_count": getattr(
+                last_cache[0], "nanoquant_fused_cache_update_count", 0
+            ),
             "prefill_fallback_count": plans.prefill.fallback_count,
             "decode_fallback_count": plans.decode.fallback_count,
             "prefill_backend": plans.prefill.layers[0].backend_name,
@@ -745,6 +765,12 @@ def main() -> None:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="use direct prefix updates until a sliding KV cache reaches rollover",
+    )
+    parser.add_argument(
+        "--fused-cache-prefix",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="fuse F32-to-F16 prefix updates and F16-to-F32 attention views",
     )
     parser.add_argument("--max-new-tokens", type=int, default=32)
     parser.add_argument("--stopping-check-interval", type=int, default=8)

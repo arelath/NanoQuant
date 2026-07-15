@@ -1212,5 +1212,15 @@ only their *measurement* waits for the Docs/15 P1 baseline if we want clean befo
   lower). Direct prefix updates are default, `--no-fast-sliding-cache` is the control, and rollover fallback remains.
 - **Direct mixed-dtype indexed cache write rejected:** assigning an F32 key/value tensor directly into the F16
   backing cache does not fuse conversion with `index_put_`; PyTorch rejects the operation because source and
-  destination dtypes differ. The explicit 52 F32-to-F16 casts/token therefore remain. Removing them requires a
-  custom fused cache-update kernel or a representation change with its own exactness and memory gate.
+  destination dtypes differ. This naive shortcut remains rejected.
+- **Fused cache prefix conversion/update/view accepted:** a guarded Triton kernel now performs both F32-to-F16 K/V
+  conversions, writes the prefix into both F16 backing caches, and materializes both complete F32 attention views in
+  one launch per layer. It applies to contiguous CUDA F32 states backed by F16 caches strictly before rollover; every
+  unsupported dtype, device, geometry, layout, and rollover case retains the prior path. Direct CUDA tests prove
+  bit-exact F16 backing bytes and promoted F32 views for prefill and decode geometries; a separate tiny CUDA
+  generation comparison crosses sliding rollover and exactly matches the fused-off F16-cache control. The pinned profile executes
+  the fused kernel in all 26 layers and reduces kernels from 964 to 834, launch APIs from 961 to 831, and ATen calls
+  from 4,271 to 3,595 while preserving token 236764 and zero packed-linear fallback. Candidate/control/candidate
+  isolated-decode medians were 28.77, 30.88, and 29.38 ms; complete 32-token medians were 0.851, 0.914, and 0.893 s.
+  Both candidates preserved hash `d91549...` and the same peak allocation. The supported specialization is default;
+  `--no-fused-cache-prefix` remains the control.

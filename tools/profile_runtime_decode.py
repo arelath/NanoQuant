@@ -326,14 +326,30 @@ def _profile(args: argparse.Namespace) -> dict[str, object]:
             optimize_short_sliding_masks=args.short_sliding_masks,
         )
         model = runtime.model
-        shell = TransformersGenerationModel(
-            model,
-            hybrid_cache_factory(
-                model.config,
-                _DTYPES[args.cache_dtype],
-                fast_sliding_prefix=args.fast_sliding_cache,
-            ),
+        cache_factory = hybrid_cache_factory(
+            model.config,
+            _DTYPES[args.cache_dtype],
+            fast_sliding_prefix=args.fast_sliding_cache,
+            fused_cache_prefix=args.fused_cache_prefix,
         )
+        last_cache: list[object | None] = [None]
+
+        def tracked_cache_factory(
+            current_batch_size: int,
+            current_cache_length: int,
+            current_device: torch.device,
+            current_dtype: torch.dtype,
+        ) -> object:
+            cache = cache_factory(
+                current_batch_size,
+                current_cache_length,
+                current_device,
+                current_dtype,
+            )
+            last_cache[0] = cache
+            return cache
+
+        shell = TransformersGenerationModel(model, tracked_cache_factory)
         tokens = input_ids.to(device)
         prompt_mask = attention_mask.to(device)
         full_mask = torch.zeros((1, maximum_cache_length), dtype=torch.bool, device=device)
@@ -512,6 +528,9 @@ def _profile(args: argparse.Namespace) -> dict[str, object]:
             "fused_rms_norm_count": runtime.fused_rms_norm_count,
             "fused_decode_rope_count": runtime.fused_decode_rope_count,
             "short_sliding_mask_count": runtime.short_sliding_mask_count,
+            "fused_cache_update_count": getattr(
+                last_cache[0], "nanoquant_fused_cache_update_count", 0
+            ),
             "prefill_fallback_count": runtime.plans.prefill.plan.fallback_count,
             "decode_fallback_count": runtime.plans.decode.plan.fallback_count,
         }
@@ -549,6 +568,7 @@ def _profile(args: argparse.Namespace) -> dict[str, object]:
             "fused_decode_rope": args.fused_decode_rope,
             "short_sliding_masks": args.short_sliding_masks,
             "fast_sliding_cache": args.fast_sliding_cache,
+            "fused_cache_prefix": args.fused_cache_prefix,
             "attention": "eager",
             "warmups": args.warmups,
             "repetitions": args.repetitions,
@@ -625,6 +645,12 @@ def main() -> None:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="use direct prefix updates until a sliding KV cache reaches rollover",
+    )
+    parser.add_argument(
+        "--fused-cache-prefix",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="fuse F32-to-F16 prefix updates and F16-to-F32 attention views",
     )
     parser.add_argument(
         "--kernel-profile",

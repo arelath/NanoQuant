@@ -311,7 +311,7 @@ def test_hybrid_cache_factory_can_store_lower_precision_and_promote_attention_vi
         bos_token_id=2,
     )
 
-    cache = hybrid_cache_factory(config, torch.float16)(
+    cache = hybrid_cache_factory(config, torch.float16, fused_cache_prefix=True)(
         2,
         12,
         torch.device("cpu"),
@@ -324,7 +324,11 @@ def test_hybrid_cache_factory_can_store_lower_precision_and_promote_attention_vi
     tokens, mask = batch_prompts(((2, 4, 5),), pad_token_id=0)
     result = generate(
         GenerationRequest(tokens, mask, 3, (1000,), 0),
-        TransformersGenerationModel(model, hybrid_cache_factory(config, torch.float16), lambda kind: nullcontext()),
+        TransformersGenerationModel(
+            model,
+            hybrid_cache_factory(config, torch.float16, fused_cache_prefix=True),
+            lambda kind: nullcontext(),
+        ),
     )
     assert result.lengths == (3,)
     with pytest.raises(ValueError, match="floating point"):

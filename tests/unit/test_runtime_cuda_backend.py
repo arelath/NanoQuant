@@ -1,23 +1,30 @@
 from __future__ import annotations
 
 import importlib.util
+from contextlib import nullcontext
 
 import pytest
 import torch
-from transformers.models.gemma3.modeling_gemma3 import apply_rotary_pos_emb
+from transformers.models.gemma3.configuration_gemma3 import Gemma3TextConfig
+from transformers.models.gemma3.modeling_gemma3 import Gemma3ForCausalLM, apply_rotary_pos_emb
 
 from nanoquant.infrastructure.device_lease import acquire_device_lease
 from nanoquant.runtime import (
     CUDA_PACKED_REFERENCE_SHA256,
     CudaPackedBackend,
+    GenerationRequest,
     LogicalLayerState,
     QuantizedLinearSpec,
+    TransformersGenerationModel,
     WorkloadSpec,
+    batch_prompts,
+    generate,
+    hybrid_cache_factory,
     pack_logical_layer,
     plan_execution_workloads,
     prepare_execution_workloads,
 )
-from nanoquant.runtime.cuda_kernels import launch_decode_rope
+from nanoquant.runtime.cuda_kernels import launch_cache_prefix_update, launch_decode_rope
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -128,6 +135,135 @@ def test_cuda_packed_backend_declares_pinned_layout_and_capabilities() -> None:
     assert capabilities.supports_outliers
     assert capabilities.supports_bias
     assert capabilities.supports_deterministic
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+@pytest.mark.parametrize(("batch_size", "head_count", "token_count", "position_start"), [(1, 1, 1, 16), (2, 2, 5, 0)])
+def test_fused_cache_prefix_update_matches_pytorch_storage_and_views(
+    batch_size: int,
+    head_count: int,
+    token_count: int,
+    position_start: int,
+) -> None:
+    generator = torch.Generator().manual_seed(20260715)
+    cache_length = 24
+    head_dim = 8
+    key_states = torch.randn(
+        batch_size,
+        head_count,
+        token_count,
+        head_dim,
+        generator=generator,
+        dtype=torch.float32,
+    ).cuda()
+    value_states = torch.randn(
+        batch_size,
+        head_count,
+        token_count,
+        head_dim,
+        generator=generator,
+        dtype=torch.float32,
+    ).cuda()
+    key_cache = torch.randn(
+        batch_size,
+        head_count,
+        cache_length,
+        head_dim,
+        generator=generator,
+        dtype=torch.float16,
+    ).cuda()
+    value_cache = torch.randn(
+        batch_size,
+        head_count,
+        cache_length,
+        head_dim,
+        generator=generator,
+        dtype=torch.float16,
+    ).cuda()
+    expected_key_cache = key_cache.clone()
+    expected_value_cache = value_cache.clone()
+    expected_key_cache[:, :, position_start : position_start + token_count] = key_states.to(
+        torch.float16
+    )
+    expected_value_cache[:, :, position_start : position_start + token_count] = value_states.to(
+        torch.float16
+    )
+
+    key_view, value_view = launch_cache_prefix_update(
+        key_states,
+        value_states,
+        key_cache,
+        value_cache,
+        position_start,
+    )
+
+    assert torch.equal(key_cache, expected_key_cache)
+    assert torch.equal(value_cache, expected_value_cache)
+    assert torch.equal(key_view, expected_key_cache.float())
+    assert torch.equal(value_view, expected_value_cache.float())
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_fused_cache_prefix_generation_matches_control_across_sliding_rollover() -> None:
+    torch.manual_seed(20260715)
+    config = Gemma3TextConfig(
+        vocab_size=64,
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=8,
+        max_position_embeddings=128,
+        sliding_window=16,
+        sliding_window_pattern=2,
+        pad_token_id=0,
+        eos_token_id=1,
+        bos_token_id=2,
+        tie_word_embeddings=False,
+    )
+    model = Gemma3ForCausalLM(config).eval().cuda()
+    tokens, mask = batch_prompts(((2, 4), (2, 5, 6)), pad_token_id=0)
+    request = GenerationRequest(
+        tokens.cuda(),
+        mask.cuda(),
+        32,
+        (1000,),
+        0,
+        stopping_check_interval=8,
+    )
+
+    def run(fused_cache_prefix: bool) -> tuple[torch.Tensor, object]:
+        created_caches: list[object] = []
+        factory = hybrid_cache_factory(
+            config,
+            torch.float16,
+            fast_sliding_prefix=True,
+            fused_cache_prefix=fused_cache_prefix,
+        )
+
+        def capture_cache(
+            batch_size: int,
+            maximum_cache_length: int,
+            device: torch.device,
+            dtype: torch.dtype,
+        ) -> object:
+            cache = factory(batch_size, maximum_cache_length, device, dtype)
+            created_caches.append(cache)
+            return cache
+
+        result = generate(
+            request,
+            TransformersGenerationModel(model, capture_cache, lambda kind: nullcontext()),
+        )
+        assert len(created_caches) == 1
+        return result.token_ids, created_caches[0]
+
+    control_tokens, _control_cache = run(False)
+    fused_tokens, fused_cache = run(True)
+
+    assert torch.equal(fused_tokens, control_tokens)
+    assert fused_cache.nanoquant_fused_cache_update_count > 0
 
 
 def test_cuda_packed_backend_reports_missing_runtime(monkeypatch: pytest.MonkeyPatch) -> None:

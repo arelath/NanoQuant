@@ -375,6 +375,10 @@ Outcome: runtime performance is measured, explained, and competitive with the mo
   shell loading. It is bit-exact on the accepted output, preserves the legacy expression for non-F32 inputs, reduces
   the one-token kernel count from 2,558 to 1,616, and lowered matched 32-token latency from 3.268 s to stable 2.467 s
   and 2.440 s candidate medians. This is a 24.9% latency reduction, but the broader task remains open.
+  A later guarded cache kernel removes 130 more launches/token by combining F32-to-F16 K/V conversion, both prefix
+  writes, and both F32 attention-view materializations into one launch per layer. It is bit-exact for backing caches
+  and views, falls back at rollover or for unsupported inputs, and improves candidate/control/candidate isolated
+  decode from 30.88 ms control to 28.77 and 29.38 ms. Python/framework work outside these promoted paths remains.
 - [ ] **M7.5** Ensure every intended NanoQuant layer dispatches to the optimized backend or records an actionable unsupported reason.
 - [ ] **M7.6** Port/evaluate packed sign-word loads, aligned vector loads, lane-zero broadcasts, and branchless sign-bit application from `nanoquant.cu`.
   A decode-only Triton port evaluated one packed sign word per rank/output tile, eight output rows per program,
@@ -412,6 +416,13 @@ Outcome: runtime performance is measured, explained, and competitive with the mo
   matches exactly. Combined with mask elision, the pinned trace falls from 1,382 to 964 launches/token and 5,261 to
   4,271 ATen calls/token with every token exact. The stable adjacent control/candidate pair improves exact 32-token
   latency from 1.141 to 1.000 s (12.4%) and isolated decode from 37.80 to 32.95 ms (12.8%).
+  The next accepted cache specialization fuses both F32-to-F16 conversions, both backing-cache prefix writes, and
+  both full F32 attention-view materializations. Direct CUDA tests are bit-exact against the PyTorch storage and
+  promotion sequence. The pinned trace executes one fused kernel in each of 26 layers and falls from 964 to 834
+  kernels/token, 961 to 831 launch APIs, and 4,271 to 3,595 ATen calls. Candidate/control/candidate exact 32-token
+  medians were 0.851, 0.914, and 0.893 s; isolated decode medians were 28.77, 30.88, and 29.38 ms. Rollover and every
+  unsupported dtype/device/layout use the unchanged fallback. Eager attention proper, the vocabulary projection,
+  and sampling remain.
 - [ ] **M7.15** Compare eager and compiled/static decode-step execution with stable shape/correctness coverage.
   Direct whole-model and decode-only `torch.compile` feasibility probes preserved the exact token but are rejected
   in their current form. Whole-model compilation produced 58 graphs and 47 workload-`ContextVar` breaks. Restricting
