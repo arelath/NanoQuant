@@ -117,8 +117,17 @@ frozen block at a time into that artifact. Its companion validator freshly check
 compares every exported tensor with the selected frozen state. The accepted 26-block Gemma run exported 182 layers
 and passed exact comparison across 1,274 tensors (2,657,404,528 tensor bytes). Dense-reconstruction and factorized
 reference execution also agreed across all 182 real layer shapes with maximum absolute error 0.015625 under the
-declared 0.03125 BF16 tolerance. Packed layouts, shared/model-shell
-conversion, tokenizer/config packaging, and generation remain separate open M6 items.
+declared 0.03125 BF16 tolerance.
+
+The first deployment packed layout is versioned as `llama.cpp-i32-lsb-v1`. It stores canonical I32
+least-significant-bit-first sign words in block-aligned safetensors shards, binds the result to the exact logical
+descriptor hash, supports inspection without eager payload loading, and has an unpack-once correctness backend.
+On the accepted 26-block Gemma artifact, all 1,274 tensors across 182 layers reconstructed exactly and packed versus
+logical reference execution matched exactly across 459,264 output elements. Packed shard bytes were 87,072,592,
+3.2764% of the logical shard bytes.
+The exact mapping, padding/alignment rules, salient constraints, bias boundary, and modified llama.cpp provenance are
+defined in [19-nanoquant-packed-layout-v1.md](19-nanoquant-packed-layout-v1.md). Shared/model-shell conversion,
+tokenizer/config packaging, native CUDA execution, and generation remain separate open M6 items.
 
 `SupportResult` includes a reason code when false. Capability matching covers:
 

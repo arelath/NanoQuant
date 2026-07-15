@@ -17,6 +17,7 @@ from nanoquant.runtime.backend import (
     evaluate_capabilities,
 )
 from nanoquant.runtime.logical import LogicalLayerState
+from nanoquant.runtime.packed import PackedLayerState
 
 _FLOAT_DTYPES = ("float16", "bfloat16", "float32")
 
@@ -141,6 +142,49 @@ class FactorizedReferenceBackend:
 
     def prepare(self, state: RuntimeLayerState, device: DeviceLike) -> PreparedLayer:
         return PreparedLayer(self.name, self.version, state.spec, _prepare_payload(state, device))
+
+    def linear(self, value: torch.Tensor, layer: PreparedLayer) -> torch.Tensor:
+        payload = _payload(layer, self.name, self.version)
+        pre = _masked_scale_pre(payload).to(device=value.device, dtype=value.dtype)
+        right = payload.right.to(device=value.device, dtype=value.dtype)
+        left = payload.left.to(device=value.device, dtype=value.dtype)
+        latent = torch.nn.functional.linear(value * pre, right)
+        output = torch.nn.functional.linear(
+            latent * payload.scale_mid.to(device=value.device, dtype=value.dtype),
+            left * payload.scale_post.to(device=value.device, dtype=value.dtype).reshape(-1, 1),
+        )
+        outliers = _outlier_values(payload)
+        if payload.outlier_indices is not None and outliers is not None:
+            output = output + torch.nn.functional.linear(
+                value.index_select(-1, payload.outlier_indices.long()),
+                outliers.to(device=value.device, dtype=value.dtype),
+            )
+        if payload.bias is not None:
+            output = output + payload.bias.to(device=value.device, dtype=value.dtype)
+        return output
+
+
+class PackedReferenceBackend:
+    """Correctness backend that unpacks once during preparation, never per linear call."""
+
+    name = "torch-packed-reference"
+    version = "1"
+
+    def capabilities(self) -> BackendCapabilities:
+        return _reference_capabilities()
+
+    def supports(self, op: QuantizedLinearSpec, workload: WorkloadSpec) -> SupportResult:
+        return _reference_support(op, workload)
+
+    def prepare(self, state: RuntimeLayerState, device: DeviceLike) -> PreparedLayer:
+        if not isinstance(state, PackedLayerState):
+            raise TypeError("packed reference backend requires PackedLayerState")
+        return PreparedLayer(
+            self.name,
+            self.version,
+            state.spec,
+            _prepare_payload(state.to_logical(), device),
+        )
 
     def linear(self, value: torch.Tensor, layer: PreparedLayer) -> torch.Tensor:
         payload = _payload(layer, self.name, self.version)

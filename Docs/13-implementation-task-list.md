@@ -238,14 +238,19 @@ Outcome: packed artifacts load and generate correctly without research dependenc
   pre/mid/post scales, bias, paired salient indices/values, optional quantized-outlier scales, finite values,
   canonical names, and exact tensor inventories. Schema-v1 logical artifacts use a bounded JSON descriptor,
   one immutable safetensors shard per block, file hashes/sizes, header-only inspection, atomic creation, and
-  per-layer lazy loading. Full packed-model/shared/tokenizer export remains M6.3–M6.5 rather than being implied here.
-- [ ] **M6.3** Finalize and version the first CUDA packed layout, including padding, alignment, scale, outlier, bias, and tensor-name metadata.
-- [ ] **M6.4** Implement offline frozen-to-packed conversion and block-aligned artifact sharding.
-  The frozen-to-logical prerequisite is complete: conversion selects the latest complete commit identity and active
-  tuned state, validates source identity, streams one block per immutable shard, and exactly matched all 1,274
-  tensors in the retained 26-block Gemma export. Both logical reference backends also passed all 182 real layer
-  shapes at a maximum absolute difference of 0.015625. Binary CUDA packing and complete model-shell conversion remain open.
-- [ ] **M6.5** Implement packed artifact inspection and validation without loading all tensors.
+  per-layer lazy loading. Full shared/model-shell/tokenizer export remains open rather than being implied here.
+- [x] **M6.3** Finalize and version the first CUDA packed layout, including padding, alignment, scale, outlier, bias,
+  and tensor-name metadata. `llama.cpp-i32-lsb-v1` is specified in
+  `Docs/19-nanoquant-packed-layout-v1.md`, enforced by the deployment runtime, and binds its exact modified
+  llama.cpp reference provenance in descriptor schema 1.
+- [x] **M6.4** Implement offline frozen-to-packed conversion and block-aligned artifact sharding. Conversion streams
+  the validated logical artifact one block at a time into atomic safetensors shards bound to the source descriptor
+  hash. The accepted 26-block Gemma artifact reconstructed all 1,274 tensors across 182 layers exactly; its 26 packed
+  shards contain 87,072,592 bytes, 3.2764% of the logical shard bytes. Complete model-shell conversion remains open.
+- [x] **M6.5** Implement packed artifact inspection and validation without loading all tensors. Descriptor, path,
+  size, hash, inventory, shape, and dtype checks use shard headers; exact payload/reference validators are separate
+  explicit passes. Packed reference execution matched the logical backend exactly over 459,264 real-shape output
+  elements.
 - [x] **M6.6** Implement the logical dense-reconstruction reference backend.
 - [x] **M6.7** Implement the factorized PyTorch reference backend.
 - [x] **M6.8** Implement the `RuntimeBackend` capability/support/prepare/linear contract. The deployment-only
@@ -256,7 +261,7 @@ Outcome: packed artifacts load and generate correctly without research dependenc
   Planning resolves the complete unique layer inventory once, preserves every rejected backend and reason in a
   structured dispatch report, counts named fallbacks, refuses the first unexpected fallback in strict mode, and
   prepares only the exact planned state/backend inventory without repeating capability discovery in `linear()`.
-- [ ] **M6.10** Map the modified llama.cpp GGUF/NanoQuant logical and packed representation to the rewrite's format documentation.
+- [x] **M6.10** Map the modified llama.cpp GGUF/NanoQuant logical and packed representation to the rewrite's format documentation. `Docs/19-nanoquant-packed-layout-v1.md` records source/dirty-patch hashes, shapes, names, sign bits, padding, alignment, scales, salient semantics, bias handling, and Q/K row-permutation responsibility.
 - [ ] **M6.11** Implement conversion/parity tests between rewrite frozen state, packed runtime state, and modified llama.cpp/GGUF state where semantically compatible.
 - [ ] **M6.12** Integrate or port the initial NanoQuant CUDA backend with explicit version/capabilities.
 - [ ] **M6.13** Implement separate prefill and decode execution plans.

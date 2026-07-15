@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "created_at": "2026-07-15T08:08:35.7738882Z",
+  "logical_artifact": "evidence/m6/gemma-pageable-v28-logical-runtime",
+  "packed_artifact": "evidence/m6/gemma-pageable-v28-packed-runtime",
+  "layout": {
+    "version": "llama.cpp-i32-lsb-v1",
+    "word_dtype": "int32",
+    "word_bits": 32,
+    "bit_order": "least-significant-bit-first",
+    "positive_bit": 0,
+    "negative_bit": 1,
+    "padding_bit": 0,
+    "minimum_alignment_bytes": 4,
+    "vector_alignment_bytes": 16,
+    "tensor_namespace": "layouts.llama.cpp-i32-lsb-v1"
+  },
+  "reference": {
+    "repository": "modified-llama.cpp",
+    "commit": "5c6ae79816ee0f2b3d4bb8ec9061c294185d320b",
+    "dirty_diff_git_object": "cf463b9266db4e1f162ad8970e8ddcc1abfb5fbd",
+    "cuda_sha256": "5c87336c2b6b8fb33805c6ee6a8752d4bd364beed63fd4cca03c2b36be966619",
+    "converter_sha256": "92b0d31c1ce83d0fe3668bbb20cee6a4da24ec3e9476f6699890d01540241e4d",
+    "documentation_sha256": "12c46863a480a04b1ba449bb7bcb2f637419b677678b60f93522c531bd3f9ac8",
+    "model_loader_sha256": "11175fca67ecd8b97f6d6ffa7d2e8b848839d768669d63f7ec629a69d8d704aa",
+    "cpu_sha256": "f51195610b4c533e4f606f984c7083bb542e4c3b3c8e740fdc647f8a5b0eff1c"
+  },
+  "source": {
+    "logical_descriptor_sha256": "1f8a47d7016876b86cc46106c17f0e36ba18cc4b4408e872fec788b25886995e",
+    "logical_weight_bytes": 2657539888
+  },
+  "artifact": {
+    "packed_descriptor_sha256": "b4f0c6270c4b59f8293c909ddeb21042ad1a2d7ee18601c77e4c57563c900487",
+    "descriptor_bytes": 434850,
+    "file_count": 27,
+    "block_count": 26,
+    "layer_count": 182,
+    "tensor_count": 1274,
+    "weight_bytes": 87072592,
+    "physical_bytes": 87507442,
+    "minimum_shard_bytes": 3066244,
+    "maximum_shard_bytes": 3665156,
+    "storage_ratio_to_logical_shards": 0.032764359396136374
+  },
+  "exact_conversion_validation": {
+    "hashes_and_headers_verified": true,
+    "logical_tensor_count": 1274,
+    "packed_tensor_count": 1274,
+    "tensor_specs_equal": true,
+    "tensor_values_equal_after_unpack": true,
+    "exact": true
+  },
+  "packed_reference_validation": {
+    "layer_count": 182,
+    "output_elements": 459264,
+    "absolute_tolerance": 0.0,
+    "maximum_absolute_error": 0.0,
+    "maximum_error_layer": "blocks.0.mlp.gate_proj",
+    "passed": true
+  },
+  "scope": "Quantized linear packed shards only; model-family GGUF conversion parity, non-quantized model shell, tokenizer/config packaging, native CUDA execution, and generation remain open M6 work."
+}

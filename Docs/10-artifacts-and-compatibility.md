@@ -188,11 +188,20 @@ uses the atomically active global-tuning result unless explicitly disabled, and 
 writing. `tools/validate_logical_runtime.py` reopens and hashes every output shard, resolves the same source state,
 and compares every logical specification and tensor role exactly. The pinned Gemma v28 export evidence under
 `evidence/m6` covers 26 shards, 182 layers, 1,274 exact tensors, and all-layer dense-versus-factorized reference
-execution with maximum absolute error 0.015625. This establishes frozen-to-logical conversion;
-it does not pack binary signs into the future CUDA layout or supply the non-quantized model shell.
+execution with maximum absolute error 0.015625. This establishes frozen-to-logical conversion; it does not supply
+the non-quantized model shell.
 Generated logical artifacts are outside the content-addressed research store. Their dedicated
 `tools/cleanup_logical_artifact.py` command is dry-run by default, validates every shard, and requires the exact
 descriptor SHA-256 before apply mode can remove the directory.
+
+Packed descriptor schema 1 and layout `llama.cpp-i32-lsb-v1` provide the next deployment boundary. The offline
+converter consumes a fully validated logical artifact, writes one atomic safetensors shard per transformer block,
+and records the exact source descriptor SHA-256. Packed tensor keys live below the declared layout namespace;
+inspection validates hashes and tensor headers without loading all payloads, while per-layer loading opens only one
+shard. On the accepted Gemma artifact, exact conversion covered 1,274 tensors in 182 layers and unpack-once packed
+reference execution matched the logical reference over 459,264 output elements with zero absolute error. The 26
+packed shards contain 87,072,592 bytes, 3.2764% of the logical shard bytes. See
+[19-nanoquant-packed-layout-v1.md](19-nanoquant-packed-layout-v1.md) for the GGUF mapping and compatibility limits.
 
 ## 9. Exact size and BPW accounting
 

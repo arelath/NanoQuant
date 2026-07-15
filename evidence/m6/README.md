@@ -1,4 +1,4 @@
-# Milestone 6 logical runtime evidence
+# Milestone 6 runtime artifact evidence
 
 ## Pinned Gemma v28 frozen-to-logical export
 
@@ -32,5 +32,30 @@ role with the selected source state.
   --absolute-tolerance 0.03125
 ```
 
-This is evidence for exact frozen-to-logical conversion and bounded block sharding. It is not evidence that the
-still-open CUDA-packed layout, complete model shell, or generation runtime is implemented.
+This is evidence for exact frozen-to-logical conversion and bounded block sharding.
+
+## Pinned Gemma v28 logical-to-packed conversion
+
+The logical artifact was converted CPU-only to packed descriptor schema 1 and layout
+`llama.cpp-i32-lsb-v1`. The converter validated the source, packed one transformer block at a time, and wrote 26
+atomic safetensors shards. The large reproducible packed artifact is ignored at
+`gemma-pageable-v28-packed-runtime/`; `gemma-pageable-v28-packed-runtime-validation.json` is the compact evidence.
+
+```powershell
+.\.venv\Scripts\python.exe tools\convert_logical_to_packed.py `
+  --logical-artifact evidence\m6\gemma-pageable-v28-logical-runtime `
+  --output evidence\m6\gemma-pageable-v28-packed-runtime
+
+.\.venv\Scripts\python.exe tools\validate_packed_runtime.py `
+  --logical-artifact evidence\m6\gemma-pageable-v28-logical-runtime `
+  --packed-artifact evidence\m6\gemma-pageable-v28-packed-runtime `
+  --absolute-tolerance 0
+```
+
+All 1,274 tensors across 182 layers reconstructed exactly. The logical factorized and unpack-once packed reference
+backends matched exactly across 459,264 output elements. Packed shard bytes are 87,072,592, or 3.2764% of the
+logical shard bytes. The descriptor embeds the exact modified llama.cpp commit, tracked dirty-diff object, converter,
+loader, CPU operation, documentation, and CUDA-kernel hashes recorded in
+`Docs/19-nanoquant-packed-layout-v1.md`. This proves the first packed format and offline conversion; it is not
+evidence for the still-open model-family GGUF conversion parity, non-quantized model shell, native CUDA backend,
+tokenizer/config package, or generation.
