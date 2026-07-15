@@ -45,3 +45,15 @@ def test_numbered_runfiles_are_thin() -> None:
         ):
             violations.append(f"{path}: local orchestration call")
     assert violations == []
+
+
+def test_runtime_distribution_contains_only_the_deployment_packages() -> None:
+    root = Path("packaging/runtime")
+    configuration = (root / "pyproject.toml").read_text(encoding="utf-8")
+
+    assert 'packages = ["nanoquant", "nanoquant.runtime"]' in configuration
+    assert '"nanoquant" = "src/nanoquant"' in configuration
+    assert '"nanoquant.runtime" = "../../src/nanoquant/runtime"' in configuration
+    assert {path.name for path in (root / "src" / "nanoquant").iterdir()} == {
+        "__init__.py"
+    }

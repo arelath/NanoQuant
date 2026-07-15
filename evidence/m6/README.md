@@ -107,8 +107,8 @@ All sign words and F32-normalized scales were exact. Its required BF16-to-F16 sa
 elements with a maximum absolute change of `2.9802322387695312e-08`; every final normalized value was exact. Direct
 GGUF inspection then matched all 22,719,854 NanoQuant elements and found the expected 158 non-quantized model-shell
 tensors. The pinned CPU llama.cpp build loaded the GGUF, generated `Okay` for prompt `Hello`, and exited cleanly in
-single-turn mode. This proves M6.11 conversion compatibility; native rewrite execution is validated separately
-below, while a clean runtime-only generation package remains open.
+single-turn mode. This proves M6.11 conversion compatibility; native rewrite execution and the clean runtime-only
+generation package are validated separately below.
 
 ## Pinned Gemma v28 native CUDA packed execution
 
@@ -181,3 +181,185 @@ bytes rather than being duplicated. The pass produced 1,837,056 prefill and 459,
 blocks; transient execution peaked only 342,528 bytes above prepared weight memory. This proves workload-plan
 selection, shared preparation, geometry enforcement, and both dispatch paths. It does not prove attention metadata,
 KV-cache behavior, sampling, or generation-engine correctness.
+
+## Pinned Gemma v28 generation-engine validation
+
+The M6.14--M6.16 validator loads the locally pinned Hugging Face Gemma shell, prepares both execution plans, replaces
+the exact 182 decoder linears with parameter-free packed dispatch modules, releases the displaced source weights,
+and performs allocator cleanup before entering the generation loop:
+
+```powershell
+$model = 'C:\Users\pdykstra\.cache\huggingface\hub\models--google--gemma-3-1b-it\snapshots\dcc83ea841ab6100d6b47a070329e1ba4cf78752'
+$env:TRITON_CACHE_DIR = "$env:TEMP\nanoquant-triton-cache-m614"
+.\.venv\Scripts\python.exe tools\validate_runtime_generation.py `
+  --packed-artifact evidence\m6\gemma-pageable-v28-packed-runtime `
+  --model $model --device cuda:0 --input-dtype bfloat16 `
+  --max-new-tokens 4 --wait-for-device-seconds 30 `
+  --output evidence\m6\gemma-pageable-v28-generation-validation.json
+```
+
+Two prompts with token lengths 2 and 8 were left-padded to width 8 and generated through one prefill plus three
+decode forwards. Both plans selected `cuda-packed-triton` for all 182 linears with zero fallback. A fresh bounded
+`HybridCache` declared maximum length 12, exact replay produced identical token and stopping results, peak allocated
+CUDA memory was 702,635,520 bytes, and retained allocation after the first and second passes differed by 512 bytes.
+The compact record is `gemma-pageable-v28-generation-validation.json`. This proves prompt batching, positions,
+attention metadata, inactive-row behavior at fixture level, bounded cache construction, prepared model-shell
+binding, and deterministic real-model execution. It is not the configured-sampling, long-generation memory-growth,
+performance, or clean-install gate.
+
+### Seeded device sampling
+
+The same validator exercises device-side configured sampling without changing the prepared model shell:
+
+```powershell
+.\.venv\Scripts\python.exe tools\validate_runtime_generation.py `
+  --packed-artifact evidence\m6\gemma-pageable-v28-packed-runtime `
+  --model $model --device cuda:0 --input-dtype bfloat16 `
+  --max-new-tokens 8 --sampling sample --temperature 0.8 `
+  --top-k 64 --top-p 0.95 --seed 20260715 `
+  --stopping-check-interval 4 --wait-for-device-seconds 30 `
+  --output evidence\m6\gemma-pageable-v28-sampling-validation.json
+```
+
+Both full passes returned the same eight tokens for both prompts. Temperature scaling, top-k filtering, top-p
+filtering, and multinomial selection remained on CUDA; the generator was seeded once before the loop. The run
+recorded one stopping-check synchronization and one terminal metadata synchronization, all 182 linears used
+`cuda-packed-triton` with zero fallback, and peak allocated memory was 727,145,472 bytes. The compact record is
+`gemma-pageable-v28-sampling-validation.json`. Fixture tests independently prove top-k exclusion, top-p nucleus
+collapse, seeded replay, invalid-config rejection, and delayed inactive-row stopping checks. This closes M6.17, not
+the long-generation M6.20 gate.
+
+## CUDA packed capability matrix
+
+`tests/unit/test_runtime_cuda_matrix.py` exhaustively crosses every finite capability dimension declared by
+`cuda-packed-triton`: F16/BF16/F32 input, F16/BF16/F32 source factors, F16/BF16/F32 scales, absent or
+F16/BF16/F32/scaled-I8 salient values, bias absent/present, and prefill/decode. The fixed 35-input, 17-output,
+rank-33 geometry deliberately exercises tails in both packed sign-word dimensions. The resulting 540 cases all
+matched an independent F32 operation within `rtol=2e-5, atol=2e-4` and every repeated execution was bit-exact:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -q tests\unit\test_runtime_cuda_matrix.py
+# 1 passed in 24.43s
+```
+
+This finite capability matrix complements, rather than replaces, the two complete packed-artifact validators above.
+Those cover all 182 layers, all 18 real Gemma shape/rank combinations, real salient counts 2/7, and both one-token
+decode and four-token prefill. Together they close M6.19. They do not establish long-generation composed-model
+parity or memory growth, which remains M6.20.
+
+## Long generation, cache, and llama.cpp output parity
+
+The short llama.cpp smoke and rewrite initially appeared to disagree because they used different shell/prompt
+protocols. The retained llama CLI applies Gemma's instruction chat template and its NanoQuant op returns F32 into an
+F32 shell. Raw-text BF16 Transformers execution is a useful diagnostic, but is not that parity protocol:
+
+```powershell
+.\.venv\Scripts\python.exe tools\validate_runtime_generation.py `
+  --packed-artifact evidence\m6\gemma-pageable-v28-packed-runtime `
+  --model $model --device cuda:0 --input-dtype float32 `
+  --prompt "Write a short paragraph about quantization." --chat-template `
+  --max-new-tokens 128 --ignore-eos --stopping-check-interval 8 `
+  --reference-output evidence\m6\gemma-pageable-v28-llamacpp-cuda-smoke.json `
+  --wait-for-device-seconds 30 `
+  --output evidence\m6\gemma-pageable-v28-long-f32-chat-generation-validation.json
+```
+
+The first 16 tokens exactly reproduce `Okay, here’s a draft of a short paragraph about quantum physics, and` from
+both retained llama.cpp CPU and CUDA runs. All 128 tokens replayed exactly on the second rewrite pass, all 182 linears
+used CUDA with zero fallback, maximum cache length was 144, and peak allocated CUDA memory was 1,313,887,232 bytes.
+Retained allocation was 1,304,107,520 bytes after the first pass and 1,304,108,544 after the second, a 1,024-byte
+delta rather than sequence-proportional growth. A separate 32-token unequal-prompt tiny Gemma test exactly matches
+Transformers HybridCache generation and asserts fixed local/global cache shapes after sliding-window rollover.
+Together these close M6.20.
+
+## Layered packed-runtime benchmark baseline
+
+The M6.21 command times kernel, prepared-layer, transformer-block, prefill, decode, time-to-first-token, and complete
+generation scopes without mixing setup into the intended timed boundary. It retains every raw sample and emits
+p10/p50/p90/p99 latency and throughput distributions, allocation peaks, fallback counts, deterministic output hashes,
+and artifact/environment identity:
+
+```powershell
+$env:TRITON_CACHE_DIR = "$env:TEMP\nanoquant-triton-cache-m621"
+.\.venv\Scripts\python.exe tools\benchmark_runtime.py `
+  --packed-artifact evidence\m6\gemma-pageable-v28-packed-runtime `
+  --model $model --device cuda:0 --input-dtype float32 `
+  --suite all --warmups 3 --repetitions 10 `
+  --max-new-tokens 32 --stopping-check-interval 8 `
+  --output evidence\m6\gemma-pageable-v28-runtime-benchmark.json
+```
+
+The retained run used the Gemma chat template, one 16-token prompt, forced-length greedy generation, and separate
+block carrier passes so hook events did not contaminate full-model samples. All 182 linears used
+`cuda-packed-triton` with zero fallback. Selected median results were:
+
+| Scope | Median latency | Median throughput |
+| --- | ---: | ---: |
+| Gate-projection prefill kernel, 16 slots | 0.572 ms | 27,954.92 slots/s |
+| Gate-projection decode kernel | 0.141 ms | 7,233.80 slots/s |
+| Gate-projection prepared decode layer | 0.188 ms | 5,311.39 slots/s |
+| Decoder block 0, decode | 4.692 ms | 213.14 tokens/s |
+| Full model prefill, 16 tokens | 113.78 ms | 140.63 tokens/s |
+| Full model single-token decode | 96.44 ms | 10.37 tokens/s |
+| Time to first token | 117.52 ms | 8.51 tokens/s |
+| Complete 32-token generation | 2.922 s | 10.95 tokens/s |
+
+The compact JSON is 16,560 bytes with SHA-256
+`fb6f28b041dc225f48ed4641bb028dbf41746f81f791fb5e259029acd54f36d1`. This closes command and JSON coverage,
+not performance parity: the composed model is dramatically slower than the retained short llama.cpp CUDA smoke,
+so Milestone 7 must profile the gap and reconcile the stable comparison protocol before accepting any throughput
+claim.
+
+## Self-contained runtime bundle and isolated installation
+
+The M6.22 exporter removes the external source-snapshot dependency from normal loading. Its exact-inventory bundle
+contains the packed descriptor/shards, copied config/tokenizer assets, 158 ordinary source checkpoint tensors, and
+three derived non-persistent Gemma buffers. All 182 dense source linear weights are excluded. The derived embedding
+scale and global/local RoPE frequencies are first-class bundle tensors because meta construction plus `to_empty()`
+would otherwise leave them uninitialized:
+
+```powershell
+.\.venv\Scripts\python.exe tools\export_runtime_bundle.py `
+  --packed-artifact evidence\m6\gemma-pageable-v28-packed-runtime `
+  --model $model `
+  --output evidence\m6\gemma-pageable-v28-runtime-bundle
+
+.\.venv\Scripts\python.exe tools\validate_runtime_bundle.py `
+  --bundle evidence\m6\gemma-pageable-v28-runtime-bundle `
+  --device cuda:0 --input-dtype float32 --max-new-tokens 32 `
+  --reference-output evidence\m6\gemma-pageable-v28-llamacpp-cuda-smoke.json `
+  --output evidence\m6\gemma-pageable-v28-runtime-bundle-validation.json
+```
+
+The bundle has 36 hashed members and 731,007,650 member bytes. Its 49,104-byte descriptor SHA-256 is
+`e5cef7236e2846a49129e991f8fc5efb660a9a8b8c71d9531590bed71739cc42`. Loading prepared the complete CUDA backend,
+materialized only the ordinary shell around it, restored tied weights and all derived buffers, and rejected any meta
+or uninitialized state. The 32-token run used every packed linear with zero fallback, reproduced the retained
+llama.cpp 16-token prefix, and replayed exactly. Retained allocation was 1,304,107,520 bytes after the second pass;
+the 2,503,545,344-byte load peak includes transient pre-tie shell allocation and remains well inside the 12 GB device.
+
+The separate deployment distribution and isolated install proof are reproducible with:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip wheel --no-build-isolation --no-deps `
+  packaging\runtime --wheel-dir .tmp\runtime-wheel
+
+.\.venv\Scripts\python.exe tools\validate_runtime_only_install.py `
+  --wheel evidence\m6\nanoquant_runtime-0.1.0-py3-none-any.whl `
+  --bundle evidence\m6\gemma-pageable-v28-runtime-bundle `
+  --device cuda:0 --max-new-tokens 16 `
+  --reference-output evidence\m6\gemma-pageable-v28-llamacpp-cuda-smoke.json `
+  --triton-cache .triton-cache --work-root .tmp `
+  --output evidence\m6\gemma-pageable-v28-runtime-only-install-validation.json
+```
+
+The retained wheel is 53,006 bytes with SHA-256
+`ecfc4d09b6965134e334d4de969dc10fb0601ec7b19c602838a0ad23bbbd85e4`. Its exact 23-member inventory contains only
+`nanoquant/__init__.py`, `nanoquant/runtime/*`, and distribution metadata. The isolated child resolved that installed
+copy, imported zero research modules, loaded the bundle without a source-model path, selected CUDA for all 182
+linears with zero fallback, bound all 157 Gemma3 RMSNorms to the accepted fused F32 path, and generated exactly
+`Okay, here’s a draft of a short paragraph about quantum physics, and`. The 2,745-byte validation record has SHA-256
+`3e162d2018975bb682f80367e66a29c626c2aac96e33e5f1d4e9edfd52df71a9`. Runtime dependencies came from the pinned
+host environment because the validation was offline; M10.9 retains the broader clean dependency-install matrix.
+Together with full reference/CUDA numerical coverage, this closes M6.22 and the M6 correctness gate, not the
+still-open Milestone 7 throughput gate.

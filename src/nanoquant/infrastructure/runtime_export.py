@@ -51,6 +51,15 @@ class LogicalRunExportValidation:
 
 
 @dataclass(frozen=True, slots=True)
+class FrozenRunAuxiliaryState:
+    """Named non-linear parameters selected by a committed frozen run."""
+
+    identity: CommitIdentity
+    global_tuning: ArtifactRef | None
+    parameters: tuple[tuple[str, torch.Tensor], ...]
+
+
+@dataclass(frozen=True, slots=True)
 class _ResolvedFrozenRun:
     identity: CommitIdentity
     global_tuning: ArtifactRef | None
@@ -226,6 +235,43 @@ def _resolve_frozen_run(
         else global_result.tuned_blocks
     )
     return _ResolvedFrozenRun(identity, global_reference, frozen_blocks, tensors)
+
+
+def load_frozen_run_auxiliary(
+    run_output: str | Path,
+    expected_blocks: int,
+    *,
+    use_global_tuning: bool = True,
+    fresh_validation: bool = True,
+) -> FrozenRunAuxiliaryState:
+    """Load the complete named block/global auxiliary override inventory on CPU."""
+
+    if expected_blocks <= 0:
+        raise ValueError("expected block count must be positive")
+    resolved = _resolve_frozen_run(
+        Path(run_output),
+        expected_blocks,
+        use_global_tuning=use_global_tuning,
+        fresh_validation=fresh_validation,
+    )
+    parameters: dict[str, torch.Tensor] = {}
+    for block in resolved.blocks:
+        for local_name, reference in block.auxiliary_parameters:
+            name = f"model.layers.{block.block.index}.{local_name}"
+            if name in parameters:
+                raise ValueError(f"frozen auxiliary parameter is duplicated: {name}")
+            with resolved.tensors.read(reference, "cpu") as value:
+                parameters[name] = value.detach().clone()
+    if resolved.global_tuning is not None:
+        result = load_global_tuning(resolved.global_tuning, resolved.tensors.artifacts).result
+        for name, reference in result.auxiliary_parameters:
+            with resolved.tensors.read(reference, "cpu") as value:
+                parameters[name] = value.detach().clone()
+    return FrozenRunAuxiliaryState(
+        resolved.identity,
+        resolved.global_tuning,
+        tuple(sorted(parameters.items())),
+    )
 
 
 def export_frozen_run_logical(

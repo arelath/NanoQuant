@@ -164,8 +164,8 @@ optional bias; arbitrary valid positive dimensions/ranks; deterministic executio
 shapes. Preparation validates `PackedLayerState` and transfers each immutable word/sidecar tensor to one CUDA device.
 The launch path performs no packing, factor unpacking, capability discovery, device transfer, allocator cleanup, or
 host synchronization. It currently allocates F32 latent and output tensors per call; static workload-owned workspace
-remains M6.16 work. M6.13 paired planning shares this prepared packed payload across explicit prefill and decode plans
-when both select the CUDA backend.
+is a later performance optimization. M6.13 paired planning shares this prepared packed payload across explicit
+prefill and decode plans when both select the CUDA backend.
 
 Leased unit tests cover bit-tail dimensions, every declared input/scale/salient dtype, no-salient and scaled-I8
 paths, bias, exact deterministic replay, prefill/decode shapes, and salient counts spanning multiple 32-column
@@ -174,6 +174,12 @@ tiles. Complete pinned Gemma validation covered all 182 linears and 18 shape/ran
 maximum absolute error `3.814697265625e-06`. The respective peak incremental allocated CUDA bytes were 1,177,088
 and 1,370,112. This proves the packed linear backend, not model-shell loading, KV-cache/generation behavior, or
 runtime performance parity.
+
+The model-level llama.cpp parity protocol uses an F32 model shell and the Gemma instruction chat template. A BF16
+Hugging Face shell or raw-text prompt is a distinct numerical/tokenization protocol even though it consumes the same
+packed tensors. With those axes reconciled, the rewrite generated 128 deterministic tokens and matched the retained
+modified llama.cpp 16-token prefix exactly; all 182 linears remained on this backend with zero fallback. Evidence is
+`evidence/m6/gemma-pageable-v28-long-f32-chat-generation-validation.json`.
 
 The exact-source modified llama.cpp CUDA build independently loaded the complete GGUF. The same freshly rebuilt
 `b9916-5c6ae7981` binary, run with all layers forced to CPU and then with all layers offloaded to CUDA, produced the
@@ -191,5 +197,7 @@ The checkpoint bridge maps the packed artifact into the pinned converter's legac
 names, one shard per transformer block. On the accepted Gemma artifact, the exact pinned converter accepted all 182
 groups and emitted a 699,863,936-byte GGUF whose 1,274 NanoQuant tensors and 22,719,854 normalized elements matched
 the packed source exactly. The GGUF also contained 158 ordinary model-shell tensors and loaded through the pinned CPU
-llama.cpp build. This completes conversion compatibility (M6.11); it is not a CUDA backend in the rewrite, a
-runtime-owned model shell/tokenizer package, or clean runtime-only generation proof. Those remain M6.14-M6.22 work.
+llama.cpp build. This completes conversion compatibility (M6.11). The native rewrite now separately wraps the packed
+artifact with its 158 ordinary shell tensors, three derived buffers, config, and tokenizer; an isolated 23-member
+runtime-only wheel loaded that bundle and reproduced the retained llama.cpp text through all 182 CUDA linears. This
+closes M6.22 without conflating packaging correctness with the performance comparison and optimization in Milestone 7.

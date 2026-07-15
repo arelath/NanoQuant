@@ -1132,3 +1132,38 @@ Every item, regardless of class, lands with:
 
 Items 1–4 of this sequence are independent of parity sign-off (all preserve behavior by construction);
 only their *measurement* waits for the Docs/15 P1 baseline if we want clean before/after evidence.
+
+## Runtime KV-cache protocol experiment (M7)
+
+- **Rejected as a direct configuration:** F16 `HybridCache` storage returned F16 keys/values to an F32 eager-attention
+  query, which PyTorch rejects rather than implicitly promoting. Likewise, the pinned llama.cpp build rejects F32 KV
+  cache types, so a direct same-dtype F32 comparison is unavailable.
+- **Accepted for protocol parity, not speed:** `PromotingHybridCache` stores F16 K/V and promotes the attention view to
+  the F32 query dtype. It preserves the accepted 32-token output and makes cache storage match llama.cpp. Median
+  32-token rewrite throughput decreased from 10.95 to 9.79 tokens/s (about 10.6%), so this is not claimed as an
+  optimization and the default correctness path remains unchanged unless the benchmark requests F16 cache storage.
+- **Profiled before optimization selection:** the M7.3 protocol-matched profile uses separate top-level, component,
+  and prepared-linear passes. Sparse top-level regions account for 97.77% p50 of synchronized wall. Independent
+  component/linear passes attribute about 51% of model time to eager attention, 13% to MLP, and 29% to the 182
+  prepared linears. The profiled median is slower than the uninstrumented baseline, so its absolute latency is not a
+  promotion measurement; the shares only establish that both framework/cache work and the two-stage packed decode
+  kernels are material.
+- **Prevalidated bound-linear dispatch rejected:** a candidate moved immutable backend/payload validation to binding
+  and bypassed repeated generic plan/device/dtype/shape checks only inside the bound model; public checked calls
+  remained unchanged. In candidate/control/candidate order, exact 32-token output hashes all matched and generation
+  medians were 2.969 s, 2.982 s, and 3.023 s. The isolated one-token candidate medians were lower, but the complete
+  generation result did not repeat and the expected saving was below current WDDM variance. The implementation was
+  reverted rather than carrying an unproven fast path.
+- **Word-granular Triton decode port rejected:** a direct decode-only adaptation of the reference kernel's one-word
+  sign load, branchless sign application, eight-row program, and four-accumulator loop passed all 27 CUDA
+  backend/matrix tests. On a representative retained Gemma gate projection, however, kernel p50 increased from
+  155.14 to 207.90 microseconds (+34.0%) and full prepared-linear p50 increased from 175.62 to 228.35 microseconds.
+  The candidate was reverted before a full-model run. Future M7.6 work must preserve the reference idea while using
+  a launch/tile mapping that is native to Triton rather than transcribing the CUDA warp structure.
+- **Native fused RMSNorm accepted:** the kernel trace counted 157 Gemma3 RMSNorms and 2,558 total CUDA kernels per
+  token. Binding the immutable inference scales to `torch.nn.functional.rms_norm` makes the F32 protocol use one
+  native kernel per norm instead of seven while retaining the pinned expression for F16/BF16. Isolated real-shape
+  tests were bit-exact; the full generation hashes and peak allocation also matched. Candidate/control/candidate
+  evidence removed exactly 942 kernels per token and produced stable 2.467 s and 2.440 s candidate medians versus
+  the frozen 3.268 s baseline, a 24.9% latency reduction (33.2% throughput gain). This path is now the runtime
+  default, with `--no-fused-rms-norm` retained for controls.

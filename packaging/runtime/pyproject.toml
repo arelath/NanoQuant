@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nanoquant-runtime"
+version = "0.1.0"
+description = "Deployment-only packed NanoQuant runtime"
+requires-python = ">=3.10"
+license = {text = "Apache-2.0"}
+dependencies = [
+  "safetensors>=0.4",
+  "torch>=2.6",
+  "transformers==4.51.3",
+  "triton-windows==3.7.1.post27; sys_platform == 'win32'",
+]
+
+[tool.setuptools]
+packages = ["nanoquant", "nanoquant.runtime"]
+
+[tool.setuptools.package-dir]
+"nanoquant" = "src/nanoquant"
+"nanoquant.runtime" = "../../src/nanoquant/runtime"

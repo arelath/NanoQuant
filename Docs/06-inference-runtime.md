@@ -126,15 +126,31 @@ On the accepted 26-block Gemma artifact, all 1,274 tensors across 182 layers rec
 logical reference execution matched exactly across 459,264 output elements. Packed shard bytes were 87,072,592,
 3.2764% of the logical shard bytes.
 The exact mapping, padding/alignment rules, salient constraints, bias boundary, and modified llama.cpp provenance are
-defined in [19-nanoquant-packed-layout-v1.md](19-nanoquant-packed-layout-v1.md). Shared/model-shell conversion,
-tokenizer/config packaging, and generation remain separate open M6 items.
+defined in [19-nanoquant-packed-layout-v1.md](19-nanoquant-packed-layout-v1.md). Model-shell binding, deterministic
+generation, self-contained tokenizer/config packaging, and clean runtime-only installation are now implemented below.
+
+The runtime bundle is a separately hashed, exact-inventory envelope around the packed artifact. It excludes all 182
+source dense linear weights, retains the 158 ordinary checkpoint tensors, and explicitly serializes three derived
+non-persistent Gemma buffers (embedding scale plus global/local RoPE frequencies). The latter is required because a
+meta-created shell followed by `to_empty()` otherwise leaves those buffers uninitialized even when every checkpoint
+tensor is correct. Loading binds prepared packed linears before materializing the remaining shell, copies every
+declared parameter/buffer with shape and dtype checks, restores tied aliases, rejects any uninitialized state, and
+never reads the source Hugging Face checkpoint.
+
+`packaging/runtime/pyproject.toml` builds the separate `nanoquant-runtime` distribution. Its wheel contains only the
+deployment initializer and `nanoquant.runtime`; it declares Torch, safetensors, Transformers, and the Windows Triton
+backend, but contains no research configuration, domain, application, infrastructure, calibration, or resident code.
+The clean-install validator installs this wheel into an isolated target, imports it with the repository absent from
+module resolution, audits all wheel/import members, and generates directly from the self-contained bundle. Dependency
+artifacts were reused from the pinned host environment for this offline M6 proof; fully isolated dependency
+installation remains the broader M10.9 delivery gate.
 
 The modified llama.cpp bridge exports one legacy-compatible checkpoint shard per packed block and binds its manifest
 to the packed descriptor and exact converter provenance. On pinned Gemma, the reference converter accepted all 182
 groups; the resulting GGUF matched all 1,274 NanoQuant tensors (22,719,854 elements) after its declared F32 scale and
 F16 salient normalization. The 699,863,936-byte GGUF also retained 158 non-quantized model-shell tensors and loaded
-and generated one token through the pinned CPU llama.cpp build. This establishes conversion compatibility, not the
-clean runtime-only generation gate.
+and generated one token through the pinned CPU llama.cpp build. This independently establishes conversion
+compatibility; the native runtime-only generation gate is covered by the bundle and wheel above.
 
 The initial native rewrite backend is `cuda-packed-triton`, version 1. It lazily imports Triton, consumes
 `llama.cpp-i32-lsb-v1` sign words without unpacking, and runs a two-stage operation with F32 accumulation and F32
@@ -149,7 +165,8 @@ shape/rank combinations with the F32 mathematical operation. One-token decode co
 absolute error `1.9073486328125e-06` and 1,177,088 peak incremental allocated CUDA bytes. Four-token prefill compared
 1,837,056 outputs with maximum absolute error `3.814697265625e-06` and 1,370,112 peak incremental allocated CUDA
 bytes. Both passes required bit-exact deterministic replay. These results establish the initial packed CUDA
-operation (M6.12); static workspace reuse, the model shell, generation/KV cache, and performance parity remain open.
+operation (M6.12); static kernel-workspace reuse and performance parity remain open. The model shell and bounded
+generation/KV-cache path are described below.
 
 Prefill and decode now use an explicit paired planning contract. Each workload carries its own ordered backend
 priority and resolves independently, so strict mode can select genuinely specialized prefill-only and decode-only
@@ -163,7 +180,8 @@ strict mode, shared preparation, and misuse rejection; a leased CUDA test execut
 packed layer. A complete Gemma validator then prepared all 182 layers into 87,087,616 incremental CUDA bytes, proved
 all 182 prefill/decode dispatches shared those exact prepared payloads with zero fallback, and executed 1,837,056
 prefill plus 459,264 decode outputs with only 342,528 peak incremental execution bytes. This closes M6.13, not
-attention/KV-cache planning or model-level generation.
+attention/KV-cache planning or model-level generation. Those paths were subsequently implemented and validated by
+the pinned generation pass below.
 
 `SupportResult` includes a reason code when false. Capability matching covers:
 
@@ -222,6 +240,61 @@ The generation engine owns:
 - stopping conditions;
 - streaming output callbacks outside timed GPU work;
 - deterministic test mode.
+
+The implemented deterministic engine accepts or constructs an explicit left-padded prompt batch. Left padding keeps
+the last prompt column valid for every row so the model shell can request one vocabulary-logit row. Position IDs use
+the same physical slots as the static cache; the constant offset on a padded row preserves rotary relative positions
+and aligns sliding-window rollover across the batch. It preallocates the complete bounded attention mask and
+cache-position range, masks
+finished rows during later decode calls, and supports EOS, configured token-sequence, and maximum-token stopping.
+Greedy argmax and seeded categorical temperature/top-k/top-p processing stay on the logits device. The request makes
+the stopping-check interval explicit, and results report both stopping-check and terminal metadata synchronization
+counts instead of hiding device-to-host boundaries in helper code.
+
+`PreparedLinear` replaces the exact planned Hugging Face decoder-linear inventory only after both execution plans
+have prepared their immutable packed payloads. The Transformers adapter allocates one total-length-bounded
+`HybridCache` and enters the preselected prefill/decode workload context for each model-shell forward. Packing,
+capability discovery, device transfers, source-weight release, and allocator cleanup therefore occur before
+`generate()` rather than inside the token loop.
+
+The pinned `google/gemma-3-1b-it` validator replaced all 182 linears and generated four tokens for two unequal prompt
+lengths (2 and 8) through `cuda-packed-triton`, with zero prefill/decode fallback and exact second-run replay. The
+cache bound was 12 tokens, peak allocated CUDA memory was 702,635,520 bytes, and post-pass allocations differed by
+only 512 bytes. A second eight-token pass used seeded temperature-0.8, top-k-64, top-p-0.95 sampling and replayed
+exactly, with one stopping plus one terminal synchronization, zero fallback, and 727,145,472 peak allocated bytes.
+This closes M6.14--M6.17 but is intentionally a short correctness smoke; the long-generation cache/memory proof,
+layered benchmark baseline, and clean runtime-only installation are recorded below.
+
+Packed-backend matrix coverage has two complementary scopes. The real-artifact validators execute every one of 182
+Gemma layers and all 18 observed shape/rank combinations for one-token decode and four-token prefill. A synthetic
+word-tail test then crosses every finite capability dimension that cannot vary inside one frozen artifact: three
+input dtypes, three source-factor dtypes, three scale dtypes, absent/F16/BF16/F32/scaled-I8 salients, bias off/on,
+and prefill/decode. All 540 Cartesian cases on 35x17 rank-33 geometry matched the independent F32 operation and
+replayed bit-exactly. Together these close M6.19; long-sequence composed model parity remains M6.20.
+
+Long-generation validation uncovered and corrected the static-cache position boundary above. A two-row tiny Gemma
+fixture with unequal prompt lengths now matches Transformers' HybridCache generation for all 32 output tokens and
+asserts fixed local/global cache shapes after window rollover. On the pinned packed model, the production parity
+protocol is F32 model-shell execution plus Gemma's instruction chat template; BF16 raw-text prompting is a different
+protocol. The reconciled pass generated 128 forced tokens twice, reproduced the retained llama.cpp CPU/CUDA 16-token
+prefix exactly, selected CUDA for all 182 linears with zero fallback, bounded the cache at 144 tokens, peaked at
+1,313,887,232 allocated bytes, and retained only 1,024 additional bytes after the second pass. This closes M6.20;
+a layered benchmark suite now records the current runtime below, while stable reference comparison and clean runtime
+packaging remain open.
+
+`tools/benchmark_runtime.py` provides independently selectable kernel, prepared-layer, transformer-block, full
+prefill, single-token decode, time-to-first-token, and complete-generation scopes. CUDA events delimit device-only
+scopes; end-to-end generation uses synchronized wall time. Each JSON case retains raw samples plus p10/p50/p90/p99,
+warm-up/repetition counts, throughput units, incremental peak allocation, exact artifact/environment identity,
+fallback counts, and deterministic output hashes. Model/block setup and decode-cache prefill occur outside their
+respective timed regions, and block hooks run in separate carrier passes so they do not perturb full-model samples.
+
+The pinned F32/chat Gemma baseline used three warm-ups, ten repetitions, and 32 forced output tokens. All 182 packed
+linears remained on `cuda-packed-triton` with zero fallback. Representative median results were 0.141 ms for the
+selected gate-projection decode kernel, 0.188 ms through its prepared layer wrapper, 4.692 ms for decoder block 0,
+96.44 ms for one full-model decode token, 117.52 ms to first token, and 2.922 s / 10.95 tokens/s end to end. These
+numbers expose a severe composed-runtime performance gap; they close benchmark-command coverage (M6.21), not the
+apples-to-apples reference protocol, profiling, or throughput gates in Milestone 7.
 
 Hot-loop rules:
 

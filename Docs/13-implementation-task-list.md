@@ -286,28 +286,100 @@ Outcome: packed artifacts load and generate correctly without research dependenc
   with zero fallback, all 182 dispatches shared the same prepared layers (87,087,616 incremental bytes), and execution
   produced 1,837,056 prefill plus 459,264 decode outputs with 342,528 peak incremental bytes. Evidence is
   `evidence/m6/gemma-pageable-v28-execution-plans-validation.json`.
-- [ ] **M6.14** Implement generation-engine prompt batching, positions, attention metadata, stopping, and deterministic mode.
-- [ ] **M6.15** Implement bounded/static or paged KV-cache management and verify positions/padding across batches.
-- [ ] **M6.16** Keep packing, capability discovery, device transfers, and allocator cleanup outside the token hot loop.
-- [ ] **M6.17** Implement device-side greedy and configured sampling paths with explicit synchronization boundaries.
+- [x] **M6.14** Implement generation-engine prompt batching, positions, attention metadata, stopping, and deterministic
+  mode. The deployment engine builds explicit left-padded ragged batches, derives physical cache-aligned positions,
+  advances
+  attention/cache metadata while masking finished rows, supports EOS/token-sequence/maximum-token stopping, and
+  performs exact greedy replay. A real two-prompt Gemma pass exercised one prefill plus three decode forwards through
+  all 182 packed linears with zero fallback and exact replay.
+- [x] **M6.15** Implement bounded/static or paged KV-cache management and verify positions/padding across batches.
+  The Transformers shell owns a total-length-bounded `HybridCache`; the generation request fixes its maximum at
+  padded prompt width plus the output limit. Fixture assertions cover unequal prompt lengths, inactive-row masking,
+  positions, cache positions, and growing attention masks, while the pinned Gemma batch used prompt lengths 2 and 8
+  with a 12-token cache bound. A 32-token unequal-length Gemma fixture exactly matches Transformers HybridCache
+  generation and verifies fixed local/global cache extents after sliding-window rollover.
+- [x] **M6.16** Keep packing, capability discovery, device transfers, and allocator cleanup outside the token hot loop.
+  Packed states are planned/prepared and model linears are bound before `generate()`; the loop calls only the already
+  selected prepared dispatches. Static cache-position and attention storage are preallocated, and the real validator
+  performs source-weight release and allocator cleanup before timing. Both real plans had zero fallback; first and
+  second deterministic passes retained 699,885,568 and 699,886,080 allocated CUDA bytes, respectively.
+- [x] **M6.17** Implement device-side greedy and configured sampling paths with explicit synchronization boundaries.
+  Greedy argmax and seeded categorical temperature/top-k/top-p processing remain on the logits device. Static
+  sampling configuration and the device generator are created before the loop; stopping checks use a declared
+  batching interval and the result reports stopping and terminal host synchronization counts. A pinned two-prompt,
+  eight-token Gemma pass used temperature 0.8, top-k 64, top-p 0.95, and seed 20260715; all 182 packed linears had
+  zero fallback, both passes returned identical tokens, and only one stopping plus one terminal sync was recorded.
 - [x] **M6.18** Add logical-reference versus factorized-reference tests over real model shapes.
-- [ ] **M6.19** Add packed-backend parity tests over the full declared shape/rank/dtype/outlier matrix.
-- [ ] **M6.20** Add long-enough generation tests for output parity, cache correctness, and memory growth.
-- [ ] **M6.21** Implement kernel, layer, block, prefill, decode, and end-to-end benchmark commands with JSON output.
-- [ ] **M6.22** Verify a clean runtime-only installation can load a packed artifact and generate text.
-- [ ] **M6.GATE** Load and run a packed NanoQuant artifact through reference and CUDA backends with complete numerical parity coverage and no research-package dependency.
+- [x] **M6.19** Add packed-backend parity tests over the full declared shape/rank/dtype/outlier matrix. The finite
+  capability Cartesian product executes all 540 combinations of three input dtypes, three source-factor dtypes,
+  three scale dtypes, five salient encodings/presence states, bias on/off, and prefill/decode on deliberately
+  unaligned 35x17 rank-33 word-tail geometry; every case matches the independent F32 operation and replays exactly.
+  The complementary complete-artifact passes cover all 182 Gemma layers, 18 real shape/rank combinations, and real
+  salient counts 2/7 for both one-token decode and four-token prefill.
+- [x] **M6.20** Add long-enough generation tests for output parity, cache correctness, and memory growth. A 32-token
+  unequal-prompt Gemma fixture matches the Transformers HybridCache reference exactly and verifies fixed local/global
+  cache shapes. The pinned packed model then generated 128 forced tokens twice in the reconciled F32 shell plus
+  Gemma chat-template protocol: its first 16 tokens exactly equal the retained modified llama.cpp CUDA/CPU output,
+  all 182 linears used CUDA with zero fallback, the cache bound was 144 tokens, peak allocation was 1,313,887,232
+  bytes, and retained allocation differed by only 1,024 bytes between deterministic passes.
+- [x] **M6.21** Implement kernel, layer, block, prefill, decode, and end-to-end benchmark commands with JSON output.
+  `tools/benchmark_runtime.py` selects any combination of the six scopes, keeps preparation outside timed regions,
+  retains every raw sample, and reports p10/p50/p90/p99 latency and throughput, warm-ups, repetitions, peak CUDA/host
+  memory, environment/artifact identity, fallback counts, and deterministic output hashes. The pinned F32/chat Gemma
+  run executed ten cases with three warm-ups and ten samples each, all 182 linears on CUDA, and zero fallback. Median
+  single-token model decode was 96.44 ms (10.37 tokens/s) and 32-token end-to-end generation was 2.922 s
+  (10.95 tokens/s), establishing the unoptimized rewrite baseline for Milestone 7 rather than accepting its speed.
+- [x] **M6.22** Verify a clean runtime-only installation can load a packed artifact and generate text. The atomic
+  runtime bundle contains the complete packed artifact, config/tokenizer assets, 158 ordinary checkpoint tensors,
+  and three explicitly derived non-persistent buffers while excluding all 182 dense source linears. The current
+  53,006-byte `nanoquant-runtime` wheel contains exactly 23 deployment members and no research packages. Installed
+  into an isolated target, it loaded the 731,007,650-byte bundle without a source-model argument, replaced all 182
+  linears, selected CUDA with zero fallback, and generated the exact retained 16-token llama.cpp text.
+- [x] **M6.GATE** Load and run a packed NanoQuant artifact through reference and CUDA backends with complete numerical
+  parity coverage and no research-package dependency. Full-artifact logical/packed reference validation covers all
+  182 Gemma layers; the native CUDA path covers every real shape plus the 540-case declared capability matrix; long
+  generation matches the retained llama.cpp prefix and remains memory-bounded; and the isolated deployment wheel
+  repeats the full composed CUDA generation without importing any research module. Stable performance parity remains
+  Milestone 7 rather than being implied by this correctness gate.
 
 ## Milestone 7 — Close the inference performance gap
 
 Dependencies: Milestone 6 correctness and benchmark suite; Milestone 0 profiles  
 Outcome: runtime performance is measured, explained, and competitive with the modified llama.cpp reference.
 
-- [ ] **M7.1** Freeze the apples-to-apples NanoQuant versus modified llama.cpp benchmark protocol and artifact pair.
+- [x] **M7.1** Freeze the apples-to-apples NanoQuant versus modified llama.cpp benchmark protocol and artifact pair.
+  The v28 packed descriptor and its exactly derived GGUF are bound by hashes in
+  `Docs/20-inference-performance-protocol.md`. The matched workload uses the Gemma chat template, 16 prompt plus 32
+  generated tokens, batch one, F16 KV storage, F32 operation/shell boundary, non-flash attention, greedy sampling,
+  three rewrite warm-ups, and ten samples. Exact-prompt prefill is 96.61% of llama CLI, while decode is only 5.53%,
+  so the protocol is frozen but the throughput gate decisively fails.
 - [ ] **M7.2** Record warm-up, repetitions, median/p10/p90, TTFT, prefill throughput, inter-token latency, decode throughput, memory, and fallback count.
-- [ ] **M7.3** Capture a new end-to-end profile and account for at least 90% of wall time before choosing optimizations.
+- [x] **M7.3** Capture a new end-to-end profile and account for at least 90% of wall time before choosing optimizations.
+  The protocol-matched, three-pass CUDA-event profile uses separate sparse top-level, block-component, and
+  prepared-linear passes to avoid cross-level event inflation. Its top-level pass accounts for 97.77% of synchronized
+  wall time at p50 (97.56–97.82% p10–p90), with model CUDA time itself accounting for 99.85%. The component pass
+  attributes about 51% of profiled model time to eager attention and 13% to MLP; the linear pass attributes about
+  29% to all 182 prepared linears. Instrumented absolute latency is diagnostic only and is compared separately with
+  the uninstrumented M7.1 baseline. A separate warmed Kineto trace counted 2,558 CUDA kernels per token: 364
+  NanoQuant stage kernels and 2,194 shell/cache/attention kernels. NanoQuant consumed about 40% of non-nested device
+  kernel time, proving that framework launch structure is at least as important as packed-kernel arithmetic.
 - [ ] **M7.4** Remove per-token Python/device synchronizations, scalar reads, repeated capability checks, and layout conversions.
+  A binding-time prevalidated-dispatch experiment retained the checked public path as a control and removed repeated
+  plan/backend validation only from internally bound linears. Two candidate runs bracketed one same-code control.
+  All exact output hashes matched, but 32-token medians were 2.969 s candidate, 2.982 s control, and 3.023 s
+  candidate. Because the second candidate regressed and the spread is within observed WDDM variance, the fast path
+  was reverted and this task remains open.
+  The first promoted launch reduction binds all 157 Gemma3 RMSNorms to PyTorch's native fused F32 operation after
+  shell loading. It is bit-exact on the accepted output, preserves the legacy expression for non-F32 inputs, reduces
+  the one-token kernel count from 2,558 to 1,616, and lowered matched 32-token latency from 3.268 s to stable 2.467 s
+  and 2.440 s candidate medians. This is a 24.9% latency reduction, but the broader task remains open.
 - [ ] **M7.5** Ensure every intended NanoQuant layer dispatches to the optimized backend or records an actionable unsupported reason.
 - [ ] **M7.6** Port/evaluate packed sign-word loads, aligned vector loads, lane-zero broadcasts, and branchless sign-bit application from `nanoquant.cu`.
+  A decode-only Triton port evaluated one packed sign word per rank/output tile, eight output rows per program,
+  branchless sign application, and four independent accumulators. All 27 CUDA backend/matrix tests passed, but the
+  representative Gemma gate-projection kernel regressed from 155.14 to 207.90 microseconds p50 (+34.0%), and the
+  complete prepared-linear call regressed from 175.62 to 228.35 microseconds. The candidate was reverted before an
+  end-to-end promotion run; the broader task remains open for a mapping that fits Triton's execution model.
 - [ ] **M7.7** Port/evaluate sign-aware FMA and multiple-accumulator decode loops from `nanoquant.cu`.
 - [ ] **M7.8** Implement and tune dtype-specialized contiguous fast paths for the actual runtime input/scale dtypes.
 - [ ] **M7.9** Evaluate fused first-stage Q/K/V or other shared-input projections using real block profiles.

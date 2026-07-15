@@ -23,6 +23,7 @@ from nanoquant.infrastructure.global_tuning import activate_global_tuning, commi
 from nanoquant.infrastructure.progress import ProgressJournal
 from nanoquant.infrastructure.runtime_export import (
     export_frozen_run_logical,
+    load_frozen_run_auxiliary,
     validate_frozen_run_logical,
 )
 from nanoquant.infrastructure.tensor_store import LocalTensorStore
@@ -67,7 +68,16 @@ def _frozen_block(
         references["bias"],
         "nanoquant-v1",
     )
-    return FrozenBlockState(block, (state,), ())
+    auxiliary = tensors.put(
+        "frozen-block-auxiliary",
+        {"input_layernorm.weight": torch.full((4,), scale + 0.75)},
+    )
+    return FrozenBlockState(
+        block,
+        (state,),
+        (),
+        (("input_layernorm.weight", auxiliary["input_layernorm.weight"]),),
+    )
 
 
 def _losses():  # type: ignore[no-untyped-def]
@@ -107,11 +117,18 @@ def _run(tmp_path: Path) -> tuple[Path, tuple[FrozenBlockState, ...], tuple[Froz
     for value in committed:
         journal.append("block", value.result.block.index, None, value.reference.artifact_id, identity)
     tuned_states = tuple(_frozen_block(index, 4.0 + index, tensors) for index in range(2))
+    global_auxiliary = tensors.put(
+        "global-tuning-parameters",
+        {
+            "model.layers.0.input_layernorm.weight": torch.full((4,), 9.0),
+            "model.norm.weight": torch.full((4,), 10.0),
+        },
+    )
     tuning = GlobalTuningResult(
         1,
         tuple(value.result.teacher_outputs.artifact for value in committed),
         tuned_states,
-        (),
+        tuple(sorted(global_auxiliary.items())),
         "protocol",
         "tokens",
         (1.0,),
@@ -124,6 +141,40 @@ def _run(tmp_path: Path) -> tuple[Path, tuple[FrozenBlockState, ...], tuple[Froz
     )
     activate_global_tuning(run, commit_global_tuning(tuning, artifacts).reference)
     return run, committed_states, tuned_states
+
+
+def test_load_frozen_run_auxiliary_uses_named_global_overrides(tmp_path: Path) -> None:
+    run, _committed, _tuned = _run(tmp_path)
+
+    selected = load_frozen_run_auxiliary(run, 2)
+    parameters = dict(selected.parameters)
+
+    assert selected.identity == CommitIdentity("run-config", "model-config", "plan")
+    assert selected.global_tuning is not None
+    assert tuple(parameters) == (
+        "model.layers.0.input_layernorm.weight",
+        "model.layers.1.input_layernorm.weight",
+        "model.norm.weight",
+    )
+    assert torch.equal(parameters["model.layers.0.input_layernorm.weight"], torch.full((4,), 9.0))
+    assert torch.equal(parameters["model.layers.1.input_layernorm.weight"], torch.full((4,), 5.75))
+    assert torch.equal(parameters["model.norm.weight"], torch.full((4,), 10.0))
+    assert all(value.device.type == "cpu" for value in parameters.values())
+
+
+def test_load_frozen_run_auxiliary_can_select_pre_tuning_state(tmp_path: Path) -> None:
+    run, _committed, _tuned = _run(tmp_path)
+
+    selected = load_frozen_run_auxiliary(run, 2, use_global_tuning=False)
+    parameters = dict(selected.parameters)
+
+    assert selected.global_tuning is None
+    assert tuple(parameters) == (
+        "model.layers.0.input_layernorm.weight",
+        "model.layers.1.input_layernorm.weight",
+    )
+    assert torch.equal(parameters["model.layers.0.input_layernorm.weight"], torch.full((4,), 1.75))
+    assert torch.equal(parameters["model.layers.1.input_layernorm.weight"], torch.full((4,), 2.75))
 
 
 def test_export_frozen_run_streams_active_global_tuning_into_runtime_artifact(tmp_path: Path) -> None:
