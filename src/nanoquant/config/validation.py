@@ -35,7 +35,14 @@ def validate(config: RunConfig, phase: ValidationPhase = ValidationPhase.PRE_RES
     require(config.schema_version == 1, "CFG001", "schema_version", "only schema version 1 is supported")
     require(bool(config.model.source.strip()), "CFG002", "model.source", "model source must not be empty")
     require(config.model.sequence_length > 0, "CFG003", "model.sequence_length", "must be positive")
+    require(
+        (config.dataset.prepared_artifact is None) == (config.dataset.prepared_root is None),
+        "CFG038",
+        "dataset",
+        "prepared_artifact and prepared_root must be supplied together",
+    )
     require(config.calibration.sample_count >= 0, "CFG004", "calibration.sample_count", "must not be negative")
+    require(config.calibration.batch_size > 0, "CFG017", "calibration.batch_size", "must be positive")
     require(0 <= config.calibration.shrinkage <= 1, "CFG005", "calibration.shrinkage", "must be in [0, 1]")
     require(config.allocation.target_bpw > 0, "CFG006", "allocation.target_bpw", "must be positive")
     require(config.allocation.bounds.multiple > 0, "CFG007", "allocation.bounds.multiple", "must be positive")
@@ -66,6 +73,66 @@ def validate(config: RunConfig, phase: ValidationPhase = ValidationPhase.PRE_RES
         config.profiling.raw_samples_per_phase > 0,
         "CFG016",
         "profiling.raw_samples_per_phase",
+        "must be positive",
+    )
+    for path, loop in (
+        ("block_tuning.non_factorized.loop", config.block_tuning.non_factorized.loop),
+        ("block_tuning.factorized.loop", config.block_tuning.factorized.loop),
+    ):
+        require(loop.epochs >= 0, "CFG018", f"{path}.epochs", "must not be negative")
+        require(loop.batch_size > 0, "CFG019", f"{path}.batch_size", "must be positive")
+        require(not loop.enabled or loop.epochs > 0, "CFG020", path, "enabled loop requires positive epochs")
+    microbatch = config.block_tuning.microbatch_size
+    require(microbatch is None or microbatch > 0, "CFG021", "block_tuning.microbatch_size", "must be positive")
+    refit = config.block_tuning.post_block_refit
+    require(refit.epochs >= 0, "CFG022", "block_tuning.post_block_refit.epochs", "must not be negative")
+    require(
+        not refit.enabled or refit.epochs > 0,
+        "CFG023",
+        "block_tuning.post_block_refit",
+        "enabled refit requires positive epochs",
+    )
+    require(
+        refit.batch_size is None or refit.batch_size > 0,
+        "CFG024",
+        "block_tuning.post_block_refit.batch_size",
+        "must be positive",
+    )
+    require(config.distillation.epochs > 0, "CFG025", "distillation.epochs", "must be positive")
+    require(config.distillation.batch_size > 0, "CFG026", "distillation.batch_size", "must be positive")
+    require(config.distillation.learning_rate > 0, "CFG027", "distillation.learning_rate", "must be positive")
+    require(config.distillation.temperature > 0, "CFG028", "distillation.temperature", "must be positive")
+    require(config.distillation.top_k > 0, "CFG029", "distillation.top_k", "must be positive")
+    require(
+        config.distillation.vocabulary_chunk_size > 0,
+        "CFG030",
+        "distillation.vocabulary_chunk_size",
+        "must be positive",
+    )
+    require(config.distillation.token_chunk_size > 0, "CFG031", "distillation.token_chunk_size", "must be positive")
+    require(
+        config.distillation.maximum_tokens_per_batch is None or config.distillation.maximum_tokens_per_batch > 0,
+        "CFG032",
+        "distillation.maximum_tokens_per_batch",
+        "must be positive when provided",
+    )
+    require(config.distillation.weight_decay >= 0, "CFG033", "distillation.weight_decay", "must not be negative")
+    require(
+        config.evaluation.inline_quality_samples > 0, "CFG034", "evaluation.inline_quality_samples", "must be positive"
+    )
+    require(
+        config.evaluation.inline_quality_tokens > 0, "CFG035", "evaluation.inline_quality_tokens", "must be positive"
+    )
+    require(
+        config.observability.block_snapshot_samples > 0,
+        "CFG036",
+        "observability.block_snapshot_samples",
+        "must be positive",
+    )
+    require(
+        config.observability.block_snapshot_tokens > 0,
+        "CFG037",
+        "observability.block_snapshot_tokens",
         "must be positive",
     )
     levels: dict[str, Severity] = {}

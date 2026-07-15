@@ -70,7 +70,9 @@ MAPPINGS: dict[str, tuple[str, Transform]] = {
     ),
     "rank_retry_allow_above_cap": ("allocation.retry.allow_above_allocator_cap", _identity),
     "rank_retry_bump_frac": ("allocation.retry.rank_increase_fraction", _identity),
-    "rank_retry_max_attempts": ("allocation.retry.maximum_attempts", _identity),
+    # Legacy names this value "max attempts" but treats it as retries *after*
+    # the initial solve. The canonical policy counts every attempted solve.
+    "rank_retry_max_attempts": ("allocation.retry.maximum_attempts", lambda value: int(value) + 1),
     "rank_retry_bits_budget_frac": ("allocation.retry.extra_bit_budget_fraction", _identity),
     "rank_utility_profile_path": ("allocation.utility_profile_artifact", _identity),
     "outlier_frac": ("outliers.fraction", _identity),

@@ -37,7 +37,7 @@ recipe/archive disposition so their chronology and intent remain discoverable.
 | 015 | Phase-1 65K dense Hessian with sibling-input reuse | Dense-Hessian sampling/regularization, reuse policy, workspace rejection | Implemented, needs recipe validation | Validate exact 65,536-token recipe and memory plan; never silently fall back to a diagonal objective. |
 | 016 | 65K Hessian safety correction: no sibling reuse, 20% diagonal blend, raw-error retry above cap | Hessian blend, independent sampling, retry thresholds/cap policy, diagnostics | Implemented, needs recipe validation | Migrate the recipe and run its safety comparison. Normalize the legacy filename containing ` copy` while preserving experiment number 016. |
 | 017 | 256K Hessian safety recipe with sibling reuse | Dense-Hessian configuration and resource reservation | Implemented, needs recipe validation | Validate the 262,144-token objective under an explicit feasible resource plan. Legacy output/log constants incorrectly point at experiment 016 and must not be copied. |
-| 018 | 1B phase-1 diagonal/no-Hessian recipe; closest retained quality/performance baseline | Complete v28 resident run, exact contemporary-legacy rank/trajectory/KD/PPL comparison, packed/runtime evidence | Validated replacement | Add the zero-argument 018 runfile and resolved recipe using the pinned calibration/objective/plan identities. |
+| 018 | 1B phase-1 diagonal/no-Hessian recipe; closest retained quality/performance baseline | Complete v28 resident run, exact contemporary-legacy rank/trajectory/KD/PPL comparison, packed/runtime evidence; canonical recipe and zero-argument runfile | Validated and migrated | Keep the import-only recipe/request parity tests and shared resident/KD composition green. |
 | 019 | Despite its filename, Gemma 3 **4B** phase-1 diagonal recipe with pageable CPU activations, bounded pinning, small batches, retry, reports, and KD | Streaming/resource architecture, activation retention/GC, phase-1 math/report contracts | Partial replacement | This is the critical 4B migration canary: pin the model/datasets, run interruption/resume and bounded-memory compression, evaluate, pack, and compare before adding a supported runfile. |
 
 There are no unnumbered gaps between 001 and 019. There is also no current native rewrite experiment runfile for any
@@ -80,8 +80,8 @@ of these numbers; the rewrite's `000_experiment_template.py` and frozen copies u
 
 ## Migration order
 
-1. Add thin runfiles for the already validated 018/013/008 compression lineage and 011 benchmark using shared
-   services; make 001 an explicitly historical baseline recipe.
+1. Continue the validated compression-lineage migration after completed Experiment 018: add thin runfiles for 013/008
+   and the 011 benchmark using shared services; make 001 an explicitly historical baseline recipe.
 2. Compose 003/007 evaluation and 002 comparison/benchmark workflows from the M8 campaign/evaluator surfaces.
 3. Add the 005 sweep and 004 chat front ends without moving business logic into runfiles.
 4. Validate and migrate the unproven 006/009 and 014–017 ablations only when their comparison is useful.

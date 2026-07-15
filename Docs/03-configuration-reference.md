@@ -101,6 +101,16 @@ class EvaluationTier(StringEnum):
     QUICK = "quick"
     STANDARD = "standard"
     FULL = "full"
+
+
+class TuningEpochLossMode(StringEnum):
+    FULL_EVALUATION = "full_evaluation"
+    LEGACY_TRAINING = "legacy_training"
+
+
+class ActivationRetention(StringEnum):
+    ROLLING = "rolling"
+    ALL = "all"
 ```
 
 Enums remove stringly typed comparisons scattered through the pipeline. Serialized values remain readable strings.
@@ -149,6 +159,8 @@ class DatasetConfig:
     shuffle: bool = True
     selection_seed: int = 0
     cache_tokenized: bool = True
+    prepared_artifact: Optional[str] = None
+    prepared_root: Optional[str] = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,6 +171,10 @@ class ReproducibilityConfig:
 ```
 
 The `model.source` is required instead of silently defaulting to a large remote model. Revisions may be omitted only in the input recipe; source resolution pins them in the resolved `RunConfig` before computation begins.
+
+`prepared_artifact` and `prepared_root` are paired resolved inputs for promoted experiments whose exact token tensor is
+already content-addressed. They prevent a zero-argument runfile from hiding a calibration path or artifact identity in
+launcher code. Ordinary dataset preparation leaves both fields unset.
 
 ## 4. Calibration and reconstruction objective
 
@@ -204,6 +220,7 @@ class CalibrationFallbackConfig:
 class CalibrationConfig:
     method: CalibrationMethod = CalibrationMethod.ONLINE_FISHER
     sample_count: int = 128
+    batch_size: int = 1
     shrinkage: float = 0.4
     accumulation_dtype: DType = DType.FLOAT32
     objective: ObjectiveConfig = field(default_factory=ObjectiveConfig)
@@ -397,6 +414,12 @@ class BlockTuningConfig:
     post_block_refit: PostBlockRefitConfig = field(
         default_factory=PostBlockRefitConfig
     )
+    microbatch_size: Optional[int] = None
+    reset_seed_each_stage: bool = False
+    restore_best_state: bool = True
+    epoch_loss_mode: TuningEpochLossMode = (
+        TuningEpochLossMode.FULL_EVALUATION
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -412,10 +435,16 @@ class DistillationConfig:
     token_chunk_size: int = 128
     maximum_tokens_per_batch: Optional[int] = 512
     gradient_checkpointing: bool = True
+    weight_decay: float = 0.0
+    optimizer_version: str = "legacy-optimi-adamw-v1"
+    sampling_version: str = "legacy-python-device-rng-v1"
     teacher_targets_artifact: Optional[str] = None
 ```
 
 Separate nested tuning types prevent unrelated learning rates and batch sizes from becoming a flat list of similarly named fields.
+The block-level microbatch and replay fields are semantic because they can change optimizer arithmetic and legacy
+trajectory parity. Distillation also records optimizer and sampling protocol versions so a resume cannot silently
+adopt checkpoints produced by a different recurrence.
 
 ## 9. Runtime, storage, and resume
 
@@ -450,6 +479,7 @@ class CheckpointConfig:
     commit_granularity: str = "layer"
     keep_attempt_artifacts: bool = False
     verify_on_resume: bool = True
+    activation_retention: ActivationRetention = ActivationRetention.ROLLING
 
 
 @dataclass(frozen=True, slots=True)
@@ -515,6 +545,9 @@ class EvaluationConfig:
     gates: tuple[MetricGateConfig, ...] = ()
     few_shot: int = 0
     sample_limit: Optional[int] = None
+    inline_quality: bool = True
+    inline_quality_samples: int = 1
+    inline_quality_tokens: int = 8
 
 
 @dataclass(frozen=True, slots=True)
@@ -525,6 +558,8 @@ class ObservabilityConfig:
     record_admm_steps: bool = False
     record_weight_reconstruction_table: bool = True
     record_block_loss_snapshots: bool = True
+    block_snapshot_samples: int = 4
+    block_snapshot_tokens: int = 512
     loss_denominator_floor: float = 1e-8
     capture_cuda_trace: bool = False
     diagnostic_fixture_policy: str = "on_failure"

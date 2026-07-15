@@ -4,18 +4,24 @@ from __future__ import annotations
 
 import argparse
 import json
+from dataclasses import replace
 from pathlib import Path
 
-from transformers import AutoTokenizer
+from transformers.models.auto.tokenization_auto import AutoTokenizer
 
-from nanoquant.application.distillation import TopKDistillationConfig
 from nanoquant.config.schema import ProfilingConfig, ProfilingLevel
 from nanoquant.domain.models import ArtifactRef
-from nanoquant.global_distillation import GlobalDistillationRequest, run_global_topk_distillation
+from nanoquant.global_distillation import run_global_topk_distillation
 from nanoquant.infrastructure.hf_calibration_dataset import load_pinned_calibration
+from nanoquant.recipes import EXPERIMENT_018_CONFIG
+from nanoquant.resident_workflow import (
+    ResidentExecutionOptions,
+    ResolvedResidentInputs,
+    distillation_request_from_config,
+)
 
-MODEL_REVISION = "dcc83ea841ab6100d6b47a070329e1ba4cf78752"
-CALIBRATION_ARTIFACT = "sha256-ad1f609729f86db7598eed5c703c55aacbb9cb024cab816ca7b300d574b7a4c8"
+MODEL_REVISION = str(EXPERIMENT_018_CONFIG.model.revision)
+CALIBRATION_ARTIFACT = str(EXPERIMENT_018_CONFIG.dataset.prepared_artifact)
 
 
 def main() -> None:
@@ -74,13 +80,14 @@ def main() -> None:
     if args.samples <= 0 or args.samples > calibration.input_ids.shape[0]:
         raise ValueError("distillation sample count is outside the pinned calibration dataset")
     tokenizer = AutoTokenizer.from_pretrained(args.snapshot, local_files_only=True)
-    request = GlobalDistillationRequest(
-        args.run_output,
-        args.snapshot,
-        "google/gemma-3-1b-it",
-        MODEL_REVISION,
-        calibration.input_ids[: args.samples],
-        TopKDistillationConfig(
+    base = EXPERIMENT_018_CONFIG
+    config = replace(
+        base,
+        intent=replace(base.intent, experiment_number=None, name=args.run_output.name),
+        calibration=replace(base.calibration, sample_count=args.samples),
+        distillation=replace(
+            base.distillation,
+            enabled=True,
             epochs=args.epochs,
             batch_size=args.batch_size,
             learning_rate=args.learning_rate,
@@ -90,17 +97,9 @@ def main() -> None:
             token_chunk_size=args.token_chunk_size,
             maximum_tokens_per_batch=args.maximum_tokens_per_batch,
             gradient_checkpointing=True,
-            # The legacy Optimi AdamW invocation leaves weight decay at its
-            # zero default. Keep this explicit in the pinned protocol.
             weight_decay=0.0,
-            seed=0,
         ),
-        device=args.device,
-        pad_token_id=tokenizer.pad_token_id,
-        replace_existing_global_tuning=args.replace_global_tuning,
-        interrupt_after_epoch_commits=args.interrupt_after_epoch_commits,
-        initial_cooldown_seconds=args.initial_cooldown_seconds,
-        epoch_cooldown_seconds=args.epoch_cooldown_seconds,
+        runtime=replace(base.runtime, compute_device=args.device),
         profiling=ProfilingConfig(
             level=ProfilingLevel(args.profile),
             cuda_timing=args.profile_cuda_timing,
@@ -108,9 +107,28 @@ def main() -> None:
             memory_counters=args.profile_memory_counters,
             emit_span_events=False,
         ),
-        block_snapshot_samples=args.block_snapshot_samples,
-        block_snapshot_tokens=args.block_snapshot_tokens,
+        observability=replace(
+            base.observability,
+            block_snapshot_samples=args.block_snapshot_samples,
+            block_snapshot_tokens=args.block_snapshot_tokens,
+        ),
     )
+    inputs = ResolvedResidentInputs(
+        snapshot=args.snapshot,
+        output=args.run_output,
+        registry_root=args.run_output.parent,
+        token_ids=calibration.input_ids[: args.samples],
+        quality_token_ids=None,
+        launcher_path=Path(__file__),
+        pad_token_id=tokenizer.pad_token_id,
+    )
+    options = ResidentExecutionOptions(
+        replace_existing_global_tuning=args.replace_global_tuning,
+        interrupt_after_distillation_epoch_commits=args.interrupt_after_epoch_commits,
+        distillation_initial_cooldown_seconds=args.initial_cooldown_seconds,
+        distillation_epoch_cooldown_seconds=args.epoch_cooldown_seconds,
+    )
+    request = distillation_request_from_config(config, inputs, options)
     try:
         result = run_global_topk_distillation(request)
     except InterruptedError as exc:

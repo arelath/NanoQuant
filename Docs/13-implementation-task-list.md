@@ -662,6 +662,9 @@ Outcome: supported users no longer need legacy orchestration.
   its 4B model), cross-cutting mechanism dispositions, and a migration order. No native numbered rewrite runfile is
   counted prematurely; M9.2 remains open.
 - [ ] **M9.2** Convert supported historical experiments into thin numbered zero-argument runfiles while preserving numbers, names, purpose, and lineage.
+  Experiment 018 is the first completed migration: its zero-argument runfile imports one canonical typed recipe and
+  calls the shared resident workflow, which resolves the pinned model/calibration and composes compression followed
+  by the legacy-default model KD stage. M9.2 remains open for the other supported inventory rows.
 - [ ] **M9.3** Move copied dotenv, tee logging, output-directory, model-loading, save, and evaluation mechanics into shared infrastructure/application services.
 - [ ] **M9.4** Provide generated YAML/resolved-recipe views for numbered runfiles where useful without making YAML mandatory.
 - [ ] **M9.5** Implement or document migration/import for supported legacy `.pt` checkpoints.

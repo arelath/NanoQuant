@@ -66,6 +66,7 @@ from nanoquant.config.schema import (
     RankBoundsConfig,
     RankRetryConfig,
     RetryThresholdConfig,
+    RunConfig,
     ScaleFitConfig,
 )
 from nanoquant.domain.metrics import reconstruction_metrics
@@ -216,6 +217,16 @@ def _profile_layer_phase(
                     yield
 
 
+_DEFAULT_RESIDENT_RANK_RETRY = RankRetryConfig(
+    enabled=True,
+    thresholds=RetryThresholdConfig(weighted_normalized_error=0.5, raw_normalized_error=0.5),
+    rank_increase_fraction=0.25,
+    maximum_attempts=3,
+    extra_bit_budget_fraction=0.02,
+    allow_above_allocator_cap=True,
+)
+
+
 @dataclass(frozen=True, slots=True)
 class ResidentQuantizationRequest:
     snapshot: Path
@@ -231,6 +242,7 @@ class ResidentQuantizationRequest:
     rank_ceiling_fraction: float = 4.5
     rank_sensitivity_alpha: float = 0.5
     rank_edge_boost: float = 0.0
+    rank_retry: RankRetryConfig = _DEFAULT_RESIDENT_RANK_RETRY
     layer_order: tuple[str, ...] = ()
     admm: ADMMConfig = ADMMConfig(outer_iterations=1, inner_iterations=1)
     outliers: OutlierConfig = OutlierConfig()
@@ -274,6 +286,9 @@ class ResidentQuantizationRequest:
     profiling: ProfilingConfig = ProfilingConfig()
     observability: ObservabilityConfig = ObservabilityConfig()
     registry_root: Path | None = None
+    run_config: RunConfig | None = None
+    launcher_path: Path | None = None
+    defer_run_completion: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -852,53 +867,56 @@ def _run_resident_factorization_attempts(
 
 
 def _resident_config_hash(request: ResidentQuantizationRequest) -> str:
+    semantic_config = {
+        "resident_algorithm_version": RESIDENT_ALGORITHM_VERSION,
+        "runtime": {
+            "torch": str(torch.__version__),
+            "transformers": transformers.__version__,
+            "cuda": torch.version.cuda,
+        },
+        "target_bpw": request.target_bpw,
+        "rank_multiple": request.rank_multiple,
+        "allocation_strategy": request.allocation_strategy,
+        "rank_floor_fraction": request.rank_floor_fraction,
+        "rank_ceiling_fraction": request.rank_ceiling_fraction,
+        "rank_sensitivity_alpha": request.rank_sensitivity_alpha,
+        "rank_edge_boost": request.rank_edge_boost,
+        "layer_order": request.layer_order,
+        "admm": request.admm,
+        "outliers": request.outliers,
+        "scale_fit": request.scale_fit,
+        "factorized_tuning_epochs": request.factorized_tuning_epochs,
+        "factorized_tuning_batch_size": request.factorized_tuning_batch_size,
+        "factorized_tuning_learning_rate": request.factorized_tuning_learning_rate,
+        "nonfactorized_tuning_epochs": request.nonfactorized_tuning_epochs,
+        "nonfactorized_tuning_epochs_by_layer": request.nonfactorized_tuning_epochs_by_layer,
+        "nonfactorized_tuning_batch_size": request.nonfactorized_tuning_batch_size,
+        "nonfactorized_tuning_learning_rate": request.nonfactorized_tuning_learning_rate,
+        "nonfactorized_tuning_early_stop_relative_tolerance": (
+            request.nonfactorized_tuning_early_stop_relative_tolerance
+        ),
+        "post_block_refit_epochs": request.post_block_refit_epochs,
+        "post_block_refit_batch_size": request.post_block_refit_batch_size,
+        "post_block_refit_learning_rate": request.post_block_refit_learning_rate,
+        "tuning_microbatch_size": request.tuning_microbatch_size,
+        "block_forward_batch_size": request.block_forward_batch_size,
+        "legacy_tuning_seed_reset": request.legacy_tuning_seed_reset,
+        "restore_best_tuning_state": request.restore_best_tuning_state,
+        "tuning_epoch_loss_mode": request.tuning_epoch_loss_mode,
+        "activation_retention": request.activation_retention,
+        "calibration_method": request.calibration_method,
+        "calibration_shrinkage": request.calibration_shrinkage,
+        "calibration_batch_size": request.calibration_batch_size,
+        "seed": request.seed,
+    }
+    # Preserve commit identity for the previously hard-coded parity policy.
+    # A non-default retry policy is new semantic input and must invalidate it.
+    if request.rank_retry != _DEFAULT_RESIDENT_RANK_RETRY:
+        semantic_config["rank_retry"] = request.rank_retry
     return (
         "sha256:"
         + hashlib.sha256(
-            canonical_json(
-                {
-                    "resident_algorithm_version": RESIDENT_ALGORITHM_VERSION,
-                    "runtime": {
-                        "torch": str(torch.__version__),
-                        "transformers": transformers.__version__,
-                        "cuda": torch.version.cuda,
-                    },
-                    "target_bpw": request.target_bpw,
-                    "rank_multiple": request.rank_multiple,
-                    "allocation_strategy": request.allocation_strategy,
-                    "rank_floor_fraction": request.rank_floor_fraction,
-                    "rank_ceiling_fraction": request.rank_ceiling_fraction,
-                    "rank_sensitivity_alpha": request.rank_sensitivity_alpha,
-                    "rank_edge_boost": request.rank_edge_boost,
-                    "layer_order": request.layer_order,
-                    "admm": request.admm,
-                    "outliers": request.outliers,
-                    "scale_fit": request.scale_fit,
-                    "factorized_tuning_epochs": request.factorized_tuning_epochs,
-                    "factorized_tuning_batch_size": request.factorized_tuning_batch_size,
-                    "factorized_tuning_learning_rate": request.factorized_tuning_learning_rate,
-                    "nonfactorized_tuning_epochs": request.nonfactorized_tuning_epochs,
-                    "nonfactorized_tuning_epochs_by_layer": request.nonfactorized_tuning_epochs_by_layer,
-                    "nonfactorized_tuning_batch_size": request.nonfactorized_tuning_batch_size,
-                    "nonfactorized_tuning_learning_rate": request.nonfactorized_tuning_learning_rate,
-                    "nonfactorized_tuning_early_stop_relative_tolerance": (
-                        request.nonfactorized_tuning_early_stop_relative_tolerance
-                    ),
-                    "post_block_refit_epochs": request.post_block_refit_epochs,
-                    "post_block_refit_batch_size": request.post_block_refit_batch_size,
-                    "post_block_refit_learning_rate": request.post_block_refit_learning_rate,
-                    "tuning_microbatch_size": request.tuning_microbatch_size,
-                    "block_forward_batch_size": request.block_forward_batch_size,
-                    "legacy_tuning_seed_reset": request.legacy_tuning_seed_reset,
-                    "restore_best_tuning_state": request.restore_best_tuning_state,
-                    "tuning_epoch_loss_mode": request.tuning_epoch_loss_mode,
-                    "activation_retention": request.activation_retention,
-                    "calibration_method": request.calibration_method,
-                    "calibration_shrinkage": request.calibration_shrinkage,
-                    "calibration_batch_size": request.calibration_batch_size,
-                    "seed": request.seed,
-                }
-            ).encode()
+            canonical_json(semantic_config).encode()
         ).hexdigest()
     )
 
@@ -917,19 +935,25 @@ def _manifest_tensor_identity(value: torch.Tensor | tuple[tuple[int, ...], ...] 
 
 def _resident_manifest_config(request: ResidentQuantizationRequest, component: str) -> dict[str, object]:
     payload = cast(dict[str, object], to_dict(request))
+    payload.pop("run_config")
+    payload.pop("launcher_path")
     payload["token_ids"] = _manifest_tensor_identity(request.token_ids)
     payload["quality_token_ids"] = _manifest_tensor_identity(request.quality_token_ids)
     payload["component"] = component
+    if request.run_config is not None:
+        payload["canonical_run_config"] = to_dict(request.run_config)
     return payload
 
 
 def _resident_manifest(request: ResidentQuantizationRequest, component: str) -> RunManifest:
     resolved = _resident_manifest_config(request, component)
     resolved_hash = "sha256:" + hashlib.sha256(canonical_json(resolved).encode()).hexdigest()
+    launcher_path = request.launcher_path or Path(__file__)
+    experiment_number = None if request.run_config is None else request.run_config.intent.experiment_number
     return initial_manifest_from_resolved(
         resolved_hash,
         resolved,
-        launcher_provenance(__file__, None),
+        launcher_provenance(launcher_path, experiment_number),
         capture_environment(),
     )
 
@@ -1176,8 +1200,18 @@ def _run_resident_quantization(request: ResidentQuantizationRequest) -> Resident
                 )
                 _write_resident_manifest(request.output, manifest)
                 raise
-        session.events.emit("run", "info", "run.completed", artifact_id=result.report.artifact_id)
-        manifest = transition(manifest, RunStatus.COMPLETED, artifacts=(result.report.artifact_id,))
+        if request.defer_run_completion:
+            session.events.emit(
+                "run",
+                "info",
+                "run.stage_completed",
+                component="resident-quantization",
+                artifact_id=result.report.artifact_id,
+            )
+            manifest = replace(manifest, artifacts=(result.report.artifact_id,))
+        else:
+            session.events.emit("run", "info", "run.completed", artifact_id=result.report.artifact_id)
+            manifest = transition(manifest, RunStatus.COMPLETED, artifacts=(result.report.artifact_id,))
         _write_resident_manifest(request.output, manifest)
         return result
 
@@ -1823,17 +1857,7 @@ def _run_resident_quantization_impl(
                 ceiling_fraction_of_uniform=request.rank_ceiling_fraction,
                 edge_block_boost=request.rank_edge_boost,
             ),
-            retry=RankRetryConfig(
-                enabled=True,
-                thresholds=RetryThresholdConfig(
-                    weighted_normalized_error=0.5,
-                    raw_normalized_error=0.5,
-                ),
-                rank_increase_fraction=0.25,
-                maximum_attempts=3,
-                extra_bit_budget_fraction=0.02,
-                allow_above_allocator_cap=True,
-            ),
+            retry=request.rank_retry,
         )
         with _logged_operation(
             events,

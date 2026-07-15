@@ -133,6 +133,12 @@ def test_legacy_migration_is_total_and_rejects_uninventoried_fields() -> None:
         migrate_legacy({"model_id": "x", "mystery": 1})
 
 
+def test_legacy_retry_count_migrates_to_total_attempt_count() -> None:
+    migrated, _inventory = migrate_legacy({"model_id": "local/tiny", "rank_retry_max_attempts": 2})
+
+    assert migrated.allocation.retry.maximum_attempts == 3
+
+
 def test_frozen_legacy_inventory_has_one_disposition_for_all_95_fields() -> None:
     inventory = migration_inventory()
     assert len(inventory) == 95

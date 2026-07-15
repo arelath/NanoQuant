@@ -4,40 +4,31 @@ from __future__ import annotations
 
 import argparse
 import json
+from dataclasses import replace
 from pathlib import Path
 
 from nanoquant.config.schema import (
-    ADMMConfig,
-    AllocationStrategy,
-    DType,
+    ActivationRetention,
     ObservabilityConfig,
-    OutlierConfig,
-    OutlierSelector,
     ProfilingConfig,
     ProfilingLevel,
-    ResidualProbeConfig,
-    ScaleFitConfig,
 )
 from nanoquant.domain.models import ArtifactRef, ArtifactTypes
 from nanoquant.infrastructure.hf_calibration_dataset import load_pinned_calibration
 from nanoquant.infrastructure.resource_usage import peak_device_memory_bytes
+from nanoquant.recipes import EXPERIMENT_018_CONFIG
 from nanoquant.resident_quantization import (
-    ResidentQuantizationRequest,
     run_resident_factorization_slice,
     run_resident_quantization,
 )
-
-MODEL_REVISION = "dcc83ea841ab6100d6b47a070329e1ba4cf78752"
-CALIBRATION_ARTIFACT = "sha256-ad1f609729f86db7598eed5c703c55aacbb9cb024cab816ca7b300d574b7a4c8"
-LAYER_ORDER = (
-    "mlp.gate_proj",
-    "mlp.up_proj",
-    "mlp.down_proj",
-    "self_attn.v_proj",
-    "self_attn.o_proj",
-    "self_attn.q_proj",
-    "self_attn.k_proj",
+from nanoquant.resident_workflow import (
+    ResidentExecutionOptions,
+    ResolvedResidentInputs,
+    resident_request_from_config,
 )
+
+MODEL_REVISION = str(EXPERIMENT_018_CONFIG.model.revision)
+CALIBRATION_ARTIFACT = str(EXPERIMENT_018_CONFIG.dataset.prepared_artifact)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -116,75 +107,87 @@ def main() -> None:
         args.calibration,
         ArtifactRef("calibration-dataset-manifest", CALIBRATION_ARTIFACT, 1),
     )
-    request = ResidentQuantizationRequest(
+    base = EXPERIMENT_018_CONFIG
+    factorized_loop = replace(
+        base.block_tuning.factorized.loop,
+        enabled=args.factorized_tuning_epochs > 0,
+        epochs=args.factorized_tuning_epochs,
+        batch_size=args.factorized_tuning_batch_size,
+    )
+    schedule_epochs = max(nonfactorized_schedule, default=0)
+    nonfactorized_loop = replace(
+        base.block_tuning.non_factorized.loop,
+        enabled=args.nonfactorized_tuning_epochs > 0 or bool(nonfactorized_schedule),
+        epochs=max(args.nonfactorized_tuning_epochs, schedule_epochs),
+        batch_size=args.nonfactorized_tuning_batch_size,
+    )
+    refit = replace(
+        base.block_tuning.post_block_refit,
+        enabled=args.post_block_refit_epochs > 0,
+        epochs=args.post_block_refit_epochs,
+        batch_size=args.post_block_refit_batch_size,
+    )
+    config = replace(
+        base,
+        intent=replace(base.intent, experiment_number=None, name=args.output.name),
+        calibration=replace(base.calibration, sample_count=args.samples),
+        reproducibility=replace(base.reproducibility, seed=args.seed),
+        factorization=replace(
+            base.factorization,
+            admm=replace(
+                base.factorization.admm,
+                outer_iterations=args.admm_outer_iterations,
+                inner_iterations=args.admm_inner_iterations,
+                transpose_wide=args.transpose_wide,
+            ),
+        ),
+        block_tuning=replace(
+            base.block_tuning,
+            factorized=replace(base.block_tuning.factorized, loop=factorized_loop),
+            non_factorized=replace(
+                base.block_tuning.non_factorized,
+                loop=nonfactorized_loop,
+                epochs_by_layer_position=nonfactorized_schedule,
+            ),
+            post_block_refit=refit,
+            microbatch_size=args.tuning_microbatch_size,
+        ),
+        distillation=replace(base.distillation, enabled=False),
+        runtime=replace(
+            base.runtime,
+            compute_device=args.device,
+            block_forward_batch_size=args.block_forward_batch_size,
+            source_streaming=replace(
+                base.runtime.source_streaming,
+                verify_tensor_hashes=not args.skip_source_hash_verification,
+            ),
+            checkpoints=replace(
+                base.runtime.checkpoints,
+                activation_retention=ActivationRetention(args.activation_retention),
+            ),
+        ),
+        profiling=ProfilingConfig(
+            level=ProfilingLevel(args.profile),
+            cuda_timing=args.profile_cuda_timing,
+            cuda_sample_every=args.profile_cuda_sample_every,
+            memory_counters=args.profile_memory_counters,
+            emit_span_events=args.profile_span_events,
+        ),
+        observability=ObservabilityConfig(
+            event_level=args.event_level,
+            console_level=args.console_level,
+            record_admm_steps=args.record_admm_steps,
+            record_resource_interval_seconds=args.resource_interval_seconds,
+            capture_cuda_trace=args.capture_cuda_trace,
+        ),
+    )
+    inputs = ResolvedResidentInputs(
         snapshot=args.snapshot,
         output=args.output,
-        source="google/gemma-3-1b-it",
-        revision=MODEL_REVISION,
+        registry_root=args.run_root,
         token_ids=calibration.input_ids[: args.samples],
         quality_token_ids=calibration.input_ids[:1, :8],
-        device=args.device,
-        verify_hashes=not args.skip_source_hash_verification,
-        target_bpw=1.0,
-        rank_multiple=32,
-        allocation_strategy=AllocationStrategy.SENSITIVITY,
-        rank_floor_fraction=0.9,
-        rank_ceiling_fraction=1.1,
-        rank_sensitivity_alpha=0.5,
-        rank_edge_boost=0.15,
-        layer_order=LAYER_ORDER,
-        admm=ADMMConfig(
-            outer_iterations=args.admm_outer_iterations,
-            inner_iterations=args.admm_inner_iterations,
-            transpose_wide=args.transpose_wide,
-        ),
-        outliers=OutlierConfig(
-            selector=OutlierSelector.RESIDUAL,
-            fraction=0.001,
-            storage_dtype=DType.BFLOAT16,
-            charge_to_bit_budget=False,
-            count_multiple=1,
-            removed_column_importance="zero",
-            residual_probe=ResidualProbeConfig(iterations=80, chunk_rows=512),
-        ),
-        scale_fit=ScaleFitConfig(
-            enabled=True,
-            alternating_passes=2,
-            epsilon=1e-8,
-            chunk_rows=512,
-            rollback_on_regression=True,
-        ),
-        factorized_tuning_epochs=args.factorized_tuning_epochs,
-        factorized_tuning_batch_size=args.factorized_tuning_batch_size,
-        factorized_tuning_learning_rate=1e-5,
-        factorized_tuning_epoch_cooldown_seconds=args.factorized_tuning_epoch_cooldown_seconds,
-        initial_cooldown_seconds=args.initial_cooldown_seconds,
-        nonfactorized_tuning_epochs=args.nonfactorized_tuning_epochs,
-        nonfactorized_tuning_epochs_by_layer=nonfactorized_schedule,
-        nonfactorized_tuning_batch_size=args.nonfactorized_tuning_batch_size,
-        nonfactorized_tuning_learning_rate=1e-4,
-        nonfactorized_tuning_epoch_cooldown_seconds=(
-            args.nonfactorized_tuning_epoch_cooldown_seconds
-        ),
-        post_block_refit_epochs=args.post_block_refit_epochs,
-        post_block_refit_batch_size=args.post_block_refit_batch_size,
-        post_block_refit_learning_rate=1e-5,
-        post_block_refit_epoch_cooldown_seconds=args.post_block_refit_epoch_cooldown_seconds,
-        tuning_microbatch_size=args.tuning_microbatch_size,
-        legacy_tuning_seed_reset=True,
-        restore_best_tuning_state=False,
-        tuning_epoch_loss_mode="legacy_training",
-        seed=args.seed,
-        activation_retention=args.activation_retention,
-        calibration_method="online_fisher",
-        calibration_shrinkage=0.6,
-        calibration_batch_size=1,
-        block_forward_batch_size=args.block_forward_batch_size,
-        interrupt_after_layer_commits=args.interrupt_after_layer_commits,
-        interrupt_after_block_commits=args.interrupt_after_block_commits,
-        interrupt_after_factorized_tuning_epoch_commits=(
-            args.interrupt_after_factorized_tuning_epoch_commits
-        ),
+        launcher_path=Path(__file__),
         precomputed_calibration=(
             None
             if args.calibration_artifact is None
@@ -194,29 +197,21 @@ def main() -> None:
             None if args.objectives_artifact is None else ArtifactRef("objective-specs", args.objectives_artifact, 1)
         ),
         precomputed_plan=(
-            None
-            if args.plan_artifact is None
-            else ArtifactRef(ArtifactTypes.QUANTIZATION_PLAN, args.plan_artifact, 1)
-        ),
-        restore_completed_blocks=not args.defer_model_restore,
-        evaluate_inline_quality=not args.defer_model_restore,
-        defer_layer_loss_snapshots=args.defer_layer_loss_snapshots,
-        profiling=ProfilingConfig(
-            level=ProfilingLevel(args.profile),
-            cuda_timing=args.profile_cuda_timing,
-            cuda_sample_every=args.profile_cuda_sample_every,
-            memory_counters=args.profile_memory_counters,
-            emit_span_events=args.profile_span_events,
-        ),
-        registry_root=args.run_root,
-        observability=ObservabilityConfig(
-            event_level=args.event_level,
-            console_level=args.console_level,
-            record_admm_steps=args.record_admm_steps,
-            record_resource_interval_seconds=args.resource_interval_seconds,
-            capture_cuda_trace=args.capture_cuda_trace,
+            None if args.plan_artifact is None else ArtifactRef(ArtifactTypes.QUANTIZATION_PLAN, args.plan_artifact, 1)
         ),
     )
+    options = ResidentExecutionOptions(
+        factorized_tuning_epoch_cooldown_seconds=args.factorized_tuning_epoch_cooldown_seconds,
+        initial_cooldown_seconds=args.initial_cooldown_seconds,
+        nonfactorized_tuning_epoch_cooldown_seconds=args.nonfactorized_tuning_epoch_cooldown_seconds,
+        post_block_refit_epoch_cooldown_seconds=args.post_block_refit_epoch_cooldown_seconds,
+        interrupt_after_layer_commits=args.interrupt_after_layer_commits,
+        interrupt_after_block_commits=args.interrupt_after_block_commits,
+        interrupt_after_factorized_tuning_epoch_commits=args.interrupt_after_factorized_tuning_epoch_commits,
+        restore_completed_blocks=not args.defer_model_restore,
+        defer_layer_loss_snapshots=args.defer_layer_loss_snapshots,
+    )
+    request = resident_request_from_config(config, inputs, options)
     if args.factor_only:
         if args.factor_only_count <= 0:
             raise ValueError("factor-only count must be positive")
