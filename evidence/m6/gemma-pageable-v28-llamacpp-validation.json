@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "created_at": "2026-07-15T08:43:58.3483106Z",
+  "model": {
+    "source": "google/gemma-3-1b-it",
+    "revision": "dcc83ea841ab6100d6b47a070329e1ba4cf78752",
+    "family": "gemma3"
+  },
+  "source": {
+    "packed_artifact": "evidence/m6/gemma-pageable-v28-packed-runtime",
+    "packed_descriptor_sha256": "b4f0c6270c4b59f8293c909ddeb21042ad1a2d7ee18601c77e4c57563c900487"
+  },
+  "checkpoint": {
+    "path": "evidence/m6/gemma-pageable-v28-llamacpp-checkpoint",
+    "descriptor_sha256": "d80e3c03d0f01225f2d6635602119be326985abd02a2977e918a62d2d6edd867",
+    "file_count": 27,
+    "shard_count": 26,
+    "layer_count": 182,
+    "tensor_count": 1638,
+    "weight_bytes": 87078824,
+    "physical_bytes": 87086049
+  },
+  "reference": {
+    "repository": "modified-llama.cpp",
+    "commit": "5c6ae79816ee0f2b3d4bb8ec9061c294185d320b",
+    "dirty_diff_git_object": "cf463b9266db4e1f162ad8970e8ddcc1abfb5fbd",
+    "converter_sha256": "92b0d31c1ce83d0fe3668bbb20cee6a4da24ec3e9476f6699890d01540241e4d"
+  },
+  "converter_validation": {
+    "architecture": "Gemma3ForCausalLM",
+    "sidecar_group_count": 182,
+    "gguf_tensor_count": 1274,
+    "converted_element_count": 22719854,
+    "sign_words_exact": true,
+    "scale_values_exact_after_f32_normalization": true,
+    "salient_values_exact_after_f16_normalization": true,
+    "normalized_salient_element_count": 512,
+    "maximum_salient_normalization_error": 2.9802322387695312e-08,
+    "passed": true
+  },
+  "gguf": {
+    "path": "evidence/m6/gemma-pageable-v28-nanoquant.gguf",
+    "bytes": 699863936,
+    "sha256": "4b3131f65f3c7d73afdb2c5809f87b860356418dae6c78873a3b2e95aa2daad3",
+    "total_tensor_count": 1432,
+    "model_shell_tensor_count": 158,
+    "nanoquant_layer_count": 182,
+    "nanoquant_tensor_count": 1274,
+    "nanoquant_element_count": 22719854,
+    "metadata": {
+      "version": 2,
+      "bit_order": "lsb_first",
+      "positive_bit": "0",
+      "tensor_count": 182,
+      "outlier_format": "column_side_path"
+    },
+    "all_nanoquant_tensors_exact": true
+  },
+  "cpu_smoke": {
+    "binary": "D:/dev/research/llama.cpp/build-nanoquant-cpu/bin/Release/llama-cli.exe",
+    "binary_sha256": "94a682bc3e384a1e05d74638d4f2558baa3f8d42268078c0de9aa099382deb70",
+    "build": "b9915-68a521b59",
+    "prompt": "Hello",
+    "generated": "Okay",
+    "prompt_tokens_per_second": 1.0,
+    "loaded_and_generated": true,
+    "clean_exit": true,
+    "note": "Single-turn CPU smoke generated one token and exited normally; generation timing is not meaningful for a one-token sample."
+  },
+  "scope": "M6.11 conversion compatibility. Native rewrite CUDA execution, packaged model-shell loading, and clean runtime-only generation remain open."
+}

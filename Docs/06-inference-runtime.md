@@ -129,6 +129,13 @@ The exact mapping, padding/alignment rules, salient constraints, bias boundary, 
 defined in [19-nanoquant-packed-layout-v1.md](19-nanoquant-packed-layout-v1.md). Shared/model-shell conversion,
 tokenizer/config packaging, native CUDA execution, and generation remain separate open M6 items.
 
+The modified llama.cpp bridge exports one legacy-compatible checkpoint shard per packed block and binds its manifest
+to the packed descriptor and exact converter provenance. On pinned Gemma, the reference converter accepted all 182
+groups; the resulting GGUF matched all 1,274 NanoQuant tensors (22,719,854 elements) after its declared F32 scale and
+F16 salient normalization. The 699,863,936-byte GGUF also retained 158 non-quantized model-shell tensors and loaded
+and generated one token through the pinned CPU llama.cpp build. This establishes conversion compatibility, not a
+native rewrite CUDA backend or the clean runtime-only generation gate.
+
 `SupportResult` includes a reason code when false. Capability matching covers:
 
 - GPU architecture;

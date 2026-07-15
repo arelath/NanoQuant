@@ -6,10 +6,12 @@ The accepted 26-block `google/gemma-3-1b-it` resident run was exported from its 
 state into the deployment-owned `nanoquant-v1` logical artifact. Export and validation were CPU-only and streamed
 one block at a time; neither operation loaded the Hugging Face model or used CUDA.
 
-The large reproducible artifact is retained locally at `gemma-pageable-v28-logical-runtime/` and remains ignored by
-Git. `gemma-pageable-v28-logical-runtime-validation.json` is the committed compact evidence record. Validation
-freshly hashed the source artifact graph and all output shards, then compared every logical specification and tensor
-role with the selected source state.
+The large reproducible artifact was generated at `gemma-pageable-v28-logical-runtime/` and remained ignored by Git.
+After packed conversion and downstream parity validation, it was removed with
+`tools/cleanup_logical_artifact.py --apply` guarded by its exact descriptor SHA-256. The commands below reproduce it.
+`gemma-pageable-v28-logical-runtime-validation.json` is the committed compact evidence record. Validation freshly
+hashed the source artifact graph and all output shards, then compared every logical specification and tensor role
+with the selected source state.
 
 ```powershell
 .\.venv\Scripts\python.exe tools\export_logical_runtime.py `
@@ -57,5 +59,53 @@ backends matched exactly across 459,264 output elements. Packed shard bytes are 
 logical shard bytes. The descriptor embeds the exact modified llama.cpp commit, tracked dirty-diff object, converter,
 loader, CPU operation, documentation, and CUDA-kernel hashes recorded in
 `Docs/19-nanoquant-packed-layout-v1.md`. This proves the first packed format and offline conversion; it is not
-evidence for the still-open model-family GGUF conversion parity, non-quantized model shell, native CUDA backend,
-tokenizer/config package, or generation.
+by itself evidence for model-family GGUF conversion parity, the non-quantized model shell, native CUDA backend,
+tokenizer/config package, or generation. The independent checks below cover the Gemma GGUF conversion boundary.
+
+## Pinned Gemma v28 modified llama.cpp/GGUF compatibility
+
+The packed artifact was streamed into 26 legacy-compatible checkpoint shards using canonical
+`model.layers.<block>.<path>` prefixes and the exact `U_packed`, `V_packed`, shape, scale, and salient fields consumed
+by the pinned modified llama.cpp converter. The generated checkpoint and 699,863,936-byte GGUF remain ignored;
+`gemma-pageable-v28-llamacpp-validation.json` is the committed compact record.
+
+```powershell
+.\.venv\Scripts\python.exe tools\export_llamacpp_checkpoint.py `
+  --packed-artifact evidence\m6\gemma-pageable-v28-packed-runtime `
+  --output evidence\m6\gemma-pageable-v28-llamacpp-checkpoint
+
+.\.venv\Scripts\python.exe tools\validate_llamacpp_checkpoint.py `
+  --packed-artifact evidence\m6\gemma-pageable-v28-packed-runtime `
+  --checkpoint evidence\m6\gemma-pageable-v28-llamacpp-checkpoint `
+  --reference-root D:\dev\research\llama.cpp
+
+.\.venv\Scripts\python.exe tools\validate_llamacpp_converter.py `
+  --packed-artifact evidence\m6\gemma-pageable-v28-packed-runtime `
+  --checkpoint evidence\m6\gemma-pageable-v28-llamacpp-checkpoint `
+  --llama-root D:\dev\research\llama.cpp `
+  --model C:\Users\pdykstra\.cache\huggingface\hub\models--google--gemma-3-1b-it\snapshots\dcc83ea841ab6100d6b47a070329e1ba4cf78752
+
+.\.venv\Scripts\python.exe D:\dev\research\llama.cpp\convert_nanoquant_to_gguf.py `
+  C:\Users\pdykstra\.cache\huggingface\hub\models--google--gemma-3-1b-it\snapshots\dcc83ea841ab6100d6b47a070329e1ba4cf78752 `
+  --nanoquant-checkpoint evidence\m6\gemma-pageable-v28-llamacpp-checkpoint `
+  --outfile evidence\m6\gemma-pageable-v28-nanoquant.gguf `
+  --outtype bf16 --no-lazy
+
+.\.venv\Scripts\python.exe tools\validate_llamacpp_gguf.py `
+  --packed-artifact evidence\m6\gemma-pageable-v28-packed-runtime `
+  --gguf evidence\m6\gemma-pageable-v28-nanoquant.gguf `
+  --reference-root D:\dev\research\llama.cpp
+
+D:\dev\research\llama.cpp\build-nanoquant-cpu\bin\Release\llama-cli.exe `
+  -m evidence\m6\gemma-pageable-v28-nanoquant.gguf `
+  -p Hello -n 1 --temp 0 --seed 1 -ngl 0 `
+  --single-turn --simple-io --no-display-prompt --no-warmup --no-perf
+```
+
+The pinned converter selected `Gemma3ForCausalLM`, accepted all 182 sidecar groups, and mapped 1,274 GGUF tensors.
+All sign words and F32-normalized scales were exact. Its required BF16-to-F16 salient normalization changed 512
+elements with a maximum absolute change of `2.9802322387695312e-08`; every final normalized value was exact. Direct
+GGUF inspection then matched all 22,719,854 NanoQuant elements and found the expected 158 non-quantized model-shell
+tensors. The pinned CPU llama.cpp build loaded the GGUF, generated `Okay` for prompt `Hello`, and exited cleanly in
+single-turn mode. This proves M6.11 conversion compatibility, not the native rewrite backend or a clean runtime-only
+generation package.

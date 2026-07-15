@@ -23,6 +23,15 @@ from nanoquant.runtime.backend import (
     SupportResult,
     WorkloadSpec,
 )
+from nanoquant.runtime.llamacpp import (
+    LLAMACPP_CHECKPOINT_FORMAT,
+    LLAMACPP_CHECKPOINT_SCHEMA_VERSION,
+    LlamaCppCheckpointManifest,
+    export_llamacpp_checkpoint,
+    gemma_gguf_tensor_prefix,
+    gemma_hf_checkpoint_prefix,
+    llamacpp_checkpoint_tensors,
+)
 from nanoquant.runtime.logical import LogicalLayerState, canonical_torch_dtype
 from nanoquant.runtime.packed import (
     GGUF_TENSOR_SUFFIXES,
@@ -94,6 +103,9 @@ __all__ = [
     "LogicalArtifactError",
     "LogicalLayerState",
     "LogicalModelManifest",
+    "LLAMACPP_CHECKPOINT_FORMAT",
+    "LLAMACPP_CHECKPOINT_SCHEMA_VERSION",
+    "LlamaCppCheckpointManifest",
     "OpenLogicalArtifact",
     "OpenPackedArtifact",
     "GGUF_TENSOR_SUFFIXES",
@@ -130,6 +142,9 @@ __all__ = [
     "WorkloadSpec",
     "canonical_torch_dtype",
     "convert_logical_to_packed",
+    "export_llamacpp_checkpoint",
+    "gemma_gguf_tensor_prefix",
+    "gemma_hf_checkpoint_prefix",
     "plan_backends",
     "pack_logical_layer",
     "pack_sign_matrix",
@@ -137,6 +152,7 @@ __all__ = [
     "packed_word_count",
     "open_logical_artifact",
     "open_packed_artifact",
+    "llamacpp_checkpoint_tensors",
     "prepare_plan",
     "write_logical_artifact",
     "write_logical_artifact_stream",

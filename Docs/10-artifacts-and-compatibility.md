@@ -203,6 +203,13 @@ reference execution matched the logical reference over 459,264 output elements w
 packed shards contain 87,072,592 bytes, 3.2764% of the logical shard bytes. See
 [19-nanoquant-packed-layout-v1.md](19-nanoquant-packed-layout-v1.md) for the GGUF mapping and compatibility limits.
 
+The modified llama.cpp checkpoint bridge is a separate, reproducible conversion staging format. It emits one
+safetensors shard per packed transformer block using the converter's Hugging Face checkpoint names, records the
+source packed descriptor SHA-256 and exact reference provenance, and refuses bias-bearing NanoQuant groups because
+bias belongs to the model shell. Independent validation loads those shards through the pinned converter itself,
+checks its Gemma architecture and tensor-name map, and compares every normalized array. The retained pinned Gemma
+GGUF then passed direct inspection of all 1,274 NanoQuant tensors and 22,719,854 values.
+
 ## 9. Exact size and BPW accounting
 
 Reports distinguish:

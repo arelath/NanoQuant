@@ -262,7 +262,11 @@ Outcome: packed artifacts load and generate correctly without research dependenc
   structured dispatch report, counts named fallbacks, refuses the first unexpected fallback in strict mode, and
   prepares only the exact planned state/backend inventory without repeating capability discovery in `linear()`.
 - [x] **M6.10** Map the modified llama.cpp GGUF/NanoQuant logical and packed representation to the rewrite's format documentation. `Docs/19-nanoquant-packed-layout-v1.md` records source/dirty-patch hashes, shapes, names, sign bits, padding, alignment, scales, salient semantics, bias handling, and Q/K row-permutation responsibility.
-- [ ] **M6.11** Implement conversion/parity tests between rewrite frozen state, packed runtime state, and modified llama.cpp/GGUF state where semantically compatible.
+- [x] **M6.11** Implement conversion/parity tests between rewrite frozen state, packed runtime state, and modified
+  llama.cpp/GGUF state where semantically compatible. The pinned Gemma bridge exported 26 source-bound checkpoint
+  shards; the exact pinned converter accepted 182 groups and mapped 1,274 tensors. Direct GGUF inspection matched all
+  22,719,854 normalized NanoQuant elements exactly, retained 158 model-shell tensors, and the pinned CPU build loaded
+  the resulting 699,863,936-byte GGUF and generated one token. Native rewrite execution remains M6.12+.
 - [ ] **M6.12** Integrate or port the initial NanoQuant CUDA backend with explicit version/capabilities.
 - [ ] **M6.13** Implement separate prefill and decode execution plans.
 - [ ] **M6.14** Implement generation-engine prompt batching, positions, attention metadata, stopping, and deterministic mode.

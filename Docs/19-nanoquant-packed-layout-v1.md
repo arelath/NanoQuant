@@ -4,11 +4,12 @@
 
 The first rewrite packed layout is `llama.cpp-i32-lsb-v1`. It is the canonical, portable sign-word layout consumed
 by the modified llama.cpp NanoQuant CPU and CUDA operations. It is not the legacy extension's optional `half2`
-packing and it is not a claim that a rewrite packed-model artifact is already a complete GGUF model.
+packing. A Gemma3 adapter now emits an exactly validated complete GGUF from it; the rewrite packed artifact itself
+remains independent of the architecture-specific model shell.
 
 This document freezes sign encoding and padding; tensor shapes, dtypes, roles, and names; alignment requirements;
-scale, salient-outlier, and bias semantics; the rewrite packed descriptor and block-shard contract; and the remaining
-adapter work needed to emit a model-family-correct GGUF.
+scale, salient-outlier, and bias semantics; the rewrite packed descriptor and block-shard contract; and the verified
+adapter boundary used to emit the model-family-correct pinned Gemma GGUF.
 
 ## Inspected reference identity
 
@@ -80,6 +81,8 @@ not masquerade as backend-independent logical tensors.
 GGUF base-name mapping is an adapter responsibility. In particular, the modified converter may undo the attention
 Q/K output-row permutation. It must apply the same row order to packed `U`, `scale_post`, and salient weights. The
 rewrite packed artifact remains in the source model's canonical row order until that adapter transform is performed.
+The pinned `Gemma3ForCausalLM` converter declares `undo_permute = False`; validation rejects any model class that
+requests the currently unimplemented row transform rather than silently emitting misordered factors.
 
 ## Sign words, padding, and alignment
 
@@ -133,12 +136,30 @@ packs and writes one block at a time, clears the block state after writing, comm
 overwrite an existing output. Inspection verifies descriptor bounds, paths, file sizes, hashes, tensor inventories,
 shapes, and dtypes without loading every payload. Loading one layer opens only its containing block shard.
 
+## Modified llama.cpp checkpoint bridge
+
+The Gemma3 adapter exports one safetensors checkpoint shard per transformer block. Canonical rewrite names such as
+`blocks.12.self_attn.q_proj` become converter names such as `model.layers.12.self_attn.q_proj`. Each group contains
+packed `U` and `V`, explicit `U_shape` and `V_shape`, the three scales, and optional salient tensors. Its descriptor
+binds the checkpoint to the exact packed descriptor hash and embeds the pinned modified llama.cpp provenance.
+Export is atomic, streams one block at a time, refuses overwrite, and rejects unsupported families and layer bias.
+
+Explicit factor shapes also work around a defect in the pinned reference converter without changing that reference:
+when both factors are packed and `U_shape` is absent, its `U_packed` branch reads `scale_mid` before assigning that
+local. The bridge always supplies authoritative shapes, so the faulty inference branch is never entered. The
+converter normalizes scales to F32 and floating salient values to F16. On Gemma, the latter intentionally changed
+512 source BF16 values with maximum absolute difference `2.9802322387695312e-08`; all converter and GGUF values were
+exact after that declared normalization.
+
 ## Verification and compatibility boundary
 
 Unit coverage includes bit-boundary widths, exact LSB ordering, tail padding, aligned and unaligned row strides,
 all supported factor dtypes, bias, floating and scaled-I8 salient paths, incompatible-state rejection, exact tensor
 round trips, reference execution, descriptor corruption, future schemas, lazy loading, and overwrite rejection.
 
-The current packed artifact is directly compatible with the modified llama.cpp sign-word and sidecar tensor
-semantics. It is not yet a complete GGUF exporter, a CUDA backend in the rewrite, a model shell/tokenizer package, or
-generation proof. Those remain M6.11-M6.22 work and must not be inferred from this format milestone.
+The checkpoint bridge maps the packed artifact into the pinned converter's legacy-compatible Hugging Face sidecar
+names, one shard per transformer block. On the accepted Gemma artifact, the exact pinned converter accepted all 182
+groups and emitted a 699,863,936-byte GGUF whose 1,274 NanoQuant tensors and 22,719,854 normalized elements matched
+the packed source exactly. The GGUF also contained 158 ordinary model-shell tensors and loaded through the pinned CPU
+llama.cpp build. This completes conversion compatibility (M6.11); it is not a CUDA backend in the rewrite, a
+runtime-owned model shell/tokenizer package, or clean runtime-only generation proof. Those remain M6.12-M6.22 work.
