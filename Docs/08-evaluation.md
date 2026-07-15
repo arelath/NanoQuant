@@ -126,6 +126,40 @@ resource_class: single_gpu
 
 Task registries also pin few-shot count, selection seed, prompt formatting, answer normalization, batch behavior, and evaluator package version.
 
+### 6.1 Pinned legacy multiple-choice suite
+
+The rewrite implements the six multiple-choice tasks used by legacy `007-evaluate-all-gemma-quality.py` under
+lm-eval 0.4.12 at harness commit `3ba40d3`. The retained protocol is zero-shot, ordered, limited to the first 200
+evaluation rows, maximum causal input length 2048, and batch size one. The generic renderer also accepts an exact
+ordered demonstration set for few-shot variants; demonstration content hashes, count, and selection seed are part
+of the task-input cache identity. None of the six retained legacy task invocations uses demonstrations.
+
+| Task | Dataset revision | Split | Primary metric | 200-row task-input key |
+| --- | --- | --- | --- | --- |
+| PIQA | `142f6d7367fd9877f0fb3b5734ea6a545f54cdd1` | validation | `acc_norm` | `sha256:05a86219cc331fd279cd0b8e6a4620f8228ffa750799f4ae1337db5c45412067` |
+| ARC Easy | `210d026faf9955653af8916fad021475a3f00453` | test | `acc_norm` | `sha256:4b8aef8a11c2d13314735ed380f97bf46a15deddfb0f660cb29c86b5b9bd39d0` |
+| ARC Challenge | `210d026faf9955653af8916fad021475a3f00453` | test | `acc_norm` | `sha256:4a2df3cc5b5b7bd1c9976142acfecae6aee5c4163fa4667bd5bd5d812843ca5e` |
+| HellaSwag | `218ec52e09a7e7462a5400043bb9a69a41d06b76` | validation | `acc_norm` | `sha256:54aa364a4356023d5c0e15a0de7e13942074e9ab9c3798ae3e85713106d29176` |
+| WinoGrande | `01e74176c63542e6b0bcb004dcdea22d94fb67b5` | validation | `acc` | `sha256:3cf915b5936d0beec011549d3b9238554d4cf0e51c0a8d3b44afef1b94cff96f` |
+| BoolQ | `3de24cf8022e94f4ee4b9d55a6f539891524d646` | validation | `acc` | `sha256:2162a165f5409ec974b543350024ff6998f3d13004114d9a16b94151fc934cde` |
+
+ARC deliberately uses the test split: the harness declares both validation and test data and `simple_evaluate`
+selects test when it exists. The retained legacy row-zero IDs and prompt arguments prove that behavior. PIQA,
+HellaSwag, WinoGrande, and BoolQ use validation because those task definitions do not declare a test split.
+
+The Hugging Face adapter reproduces lm-eval causal pair encoding: trailing context spaces move to the continuation,
+the concatenated string and context are encoded separately, and the continuation is the suffix after the context
+token count. Gemma BOS insertion is explicit (`add_special_tokens=true`) instead of inherited from a mutable
+tokenizer default. The pinned tokenizer behavior-file hash is
+`sha256:19317db471b30f6cfa877d781ecac1db28de6628e44e3751df0c44344444a811`.
+The causal window also matches the harness's `max_length + 1` context-plus-target rule: the final target token is not
+fed as model input, so left truncation does not discard one extra context token.
+
+Evaluation retains both summed and continuation-length-normalized log likelihoods, computes log-softmax and score
+accumulation in FP32, records both accuracy variants, ties, per-example scores, and truncation counts, and chooses
+the task's pinned primary metric. Tests cover known logits, serial/batched equality, limiting, exact window edges,
+cache invalidation, and all six real cached dataset/tokenizer row-zero hashes against the retained legacy samples.
+
 ## 7. Baselines
 
 A candidate can be compared with several named baselines:

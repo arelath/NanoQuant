@@ -508,7 +508,16 @@ Outcome: runs produce cheap-to-expensive decision evidence and actionable report
   both evaluators cumulatively through the smoke tier, while corruption/reference behavior remains covered by the
   underlying validator suite and the architecture contract keeps deployment runtime independent of application code.
 - [x] **M8.4** Implement token-accurate negative-log-likelihood/perplexity evaluation with BOS/EOS, causal shift, padding, stride, and partial-window tests.
-- [ ] **M8.5** Implement the selected zero/few-shot task evaluators with pinned dataset/task/prompt revisions.
+- [x] **M8.5** Implement the selected zero/few-shot task evaluators with pinned dataset/task/prompt revisions.
+  The versioned suite reproduces the legacy lm-eval 0.4.12 PIQA, ARC Easy/Challenge, HellaSwag, WinoGrande, and
+  BoolQ renderers, metrics, zero-shot protocol, 200-row ordering, exact dataset commits/splits, and harness prompt
+  commit. ARC uses the harness-selected test split; retained row-zero prompts caught and prevent a validation-split
+  substitution. Hugging Face causal pair encoding pins Gemma BOS behavior, trailing-space movement, concatenated
+  tokenization, and the harness's `max_length + 1` target window. Complete task-input identities bind raw selected
+  document content, tokenized partitions, tokenizer behavior files/parameters, prompts, and any exact few-shot
+  demonstrations. Known-logit/batching/truncation tests and six real cached dataset plus pinned Gemma tokenizer
+  comparisons reproduce retained legacy row-zero text and token hashes; all six 200-row input identities are
+  recorded in `Docs/08-evaluation.md`.
 - [x] **M8.6** Implement deterministic generation sanity/regression cases.
   A versioned smoke evaluator binds case name/version, prompt tokens, expected generated tokens, expected stop reason,
   and sanity thresholds into one immutable case identity. It compares multiple observed runs, preserves expected and
