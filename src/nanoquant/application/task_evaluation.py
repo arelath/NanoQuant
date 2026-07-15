@@ -112,6 +112,7 @@ class MultipleChoiceTextExample:
     contexts: tuple[str, ...]
     continuations: tuple[str, ...]
     correct_choice: int
+    normalization_lengths: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         if (
@@ -121,6 +122,13 @@ class MultipleChoiceTextExample:
             or any(not value for value in (*self.contexts, *self.continuations))
             or self.correct_choice < 0
             or self.correct_choice >= len(self.contexts)
+            or (
+                self.normalization_lengths
+                and (
+                    len(self.normalization_lengths) != len(self.contexts)
+                    or any(length <= 0 for length in self.normalization_lengths)
+                )
+            )
         ):
             raise ValueError("invalid multiple-choice text example")
 
@@ -135,6 +143,7 @@ class MultipleChoiceExample:
     contexts: tuple[tuple[int, ...], ...]
     continuations: tuple[tuple[int, ...], ...]
     correct_choice: int
+    normalization_lengths: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         if (
@@ -145,6 +154,13 @@ class MultipleChoiceExample:
             or any(token < 0 for values in (*self.contexts, *self.continuations) for token in values)
             or self.correct_choice < 0
             or self.correct_choice >= len(self.contexts)
+            or (
+                self.normalization_lengths
+                and (
+                    len(self.normalization_lengths) != len(self.contexts)
+                    or any(length <= 0 for length in self.normalization_lengths)
+                )
+            )
         ):
             raise ValueError("invalid tokenized multiple-choice example")
 
@@ -303,7 +319,13 @@ def _hellaswag_text(value: str) -> str:
 
 
 def _common_context(context: str, choices: tuple[str, ...], sample_id: str, correct: int) -> MultipleChoiceTextExample:
-    return MultipleChoiceTextExample(sample_id, (context,) * len(choices), choices, correct)
+    return MultipleChoiceTextExample(
+        sample_id,
+        (context,) * len(choices),
+        choices,
+        correct,
+        tuple(len(choice[1:]) if choice.startswith(" ") else len(choice) for choice in choices),
+    )
 
 
 def render_pinned_task_document(
@@ -363,6 +385,7 @@ def render_pinned_task_document(
             tuple(prefix + option for option in options),
             (" " + suffix.strip(),) * 2,
             int(str(document["answer"])) - 1,
+            (len(suffix.strip()),) * 2,
         )
     elif task.task_name == "boolq":
         result = _common_context(
@@ -389,6 +412,7 @@ def render_pinned_task_document(
         tuple(prefix + context for context in result.contexts),
         result.continuations,
         result.correct_choice,
+        result.normalization_lengths,
     )
 
 
@@ -405,6 +429,7 @@ def tokenize_multiple_choice_example(
         tuple(context for context, _continuation in pairs),
         tuple(continuation for _context, continuation in pairs),
         example.correct_choice,
+        example.normalization_lengths,
     )
 
 
@@ -541,7 +566,10 @@ def evaluate_multiple_choice(
         prediction = logits(tokens, mask)
         if prediction.ndim != 3 or prediction.shape[:2] != tokens.shape:
             raise ValueError("multiple-choice evaluator logits have an invalid shape")
-        log_probabilities = torch.nn.functional.log_softmax(prediction.float(), dim=-1)
+        # lm-eval 0.4.12 leaves ``dtype=None`` for log-softmax, so its
+        # historical BF16 protocol scores and accumulates in the model output
+        # dtype.  Promoting here changes close-choice predictions.
+        log_probabilities = torch.nn.functional.log_softmax(prediction, dim=-1)
         for row, (example_index, choice_index, sequence, context_length, choice_length) in enumerate(selected):
             targets = torch.tensor(sequence[context_length:], dtype=torch.long, device=prediction.device)
             if targets.numel() != choice_length or int(targets.max()) >= prediction.shape[-1]:
@@ -555,7 +583,12 @@ def evaluate_multiple_choice(
             if not math.isfinite(score):
                 raise ValueError("multiple-choice evaluator produced a non-finite score")
             raw_scores[example_index][choice_index] = score
-            mean_scores[example_index][choice_index] = score / choice_length
+            normalization_length = (
+                examples[example_index].normalization_lengths[choice_index]
+                if examples[example_index].normalization_lengths
+                else choice_length
+            )
+            mean_scores[example_index][choice_index] = score / normalization_length
     example_results = []
     for example, raw, normalized in zip(examples, raw_scores, mean_scores, strict=True):
         raw_values = tuple(raw)

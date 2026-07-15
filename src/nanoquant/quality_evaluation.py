@@ -1,0 +1,363 @@
+"""Pinned base-versus-frozen quality evaluation over WikiText and legacy tasks."""
+
+from __future__ import annotations
+
+import gc
+import hashlib
+import json
+import math
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, cast
+
+import torch
+from torch import nn
+from transformers import AutoModelForCausalLM
+from transformers.models.auto.configuration_auto import AutoConfig
+from transformers.models.auto.tokenization_auto import AutoTokenizer
+
+from nanoquant.application.evaluation import (
+    CausalEvaluationRequest,
+    evaluate_causal_nll,
+    model_logits,
+)
+from nanoquant.application.task_evaluation import (
+    MultipleChoiceEvaluationRequest,
+    PreparedMultipleChoiceInputs,
+    evaluate_multiple_choice,
+    pinned_legacy_multiple_choice_tasks,
+)
+from nanoquant.config.codec import to_dict
+from nanoquant.infrastructure.device_lease import acquire_device_lease
+from nanoquant.infrastructure.frozen_model_loader import LoadedFrozenModel, load_frozen_run
+from nanoquant.infrastructure.hf_task_evaluation import (
+    hash_hf_tokenizer_snapshot,
+    prepare_pinned_hf_multiple_choice_inputs,
+)
+from nanoquant.infrastructure.resource_usage import (
+    peak_device_memory_bytes,
+    peak_process_memory_bytes,
+)
+
+WIKITEXT_DATASET = "Salesforce/wikitext"
+WIKITEXT_CONFIG = "wikitext-2-raw-v1"
+WIKITEXT_REVISION = "b08601e04326c79dfdd32d625aee71d232d685c3"
+
+
+@dataclass(frozen=True, slots=True)
+class QualityEvaluationRequest:
+    snapshot: Path
+    source: str
+    revision: str
+    run_output: Path
+    device: str = "cuda:0"
+    backend: str = "factorized"
+    use_global_tuning: bool = True
+    wikitext_samples: int = 16
+    wikitext_sequence_length: int = 128
+    wikitext_batch_size: int = 1
+    task_names: tuple[str, ...] = ("piqa", "arc_easy", "boolq")
+    task_limit: int = 25
+    task_batch_size: int = 1
+    local_files_only: bool = True
+
+    def __post_init__(self) -> None:
+        if not self.source or not self.revision:
+            raise ValueError("quality evaluation model source and revision are required")
+        if self.backend not in {"factorized", "dense"}:
+            raise ValueError("quality evaluation backend is unsupported")
+        if self.wikitext_samples <= 0 or self.wikitext_sequence_length < 2:
+            raise ValueError("quality evaluation WikiText dimensions are invalid")
+        if self.wikitext_batch_size <= 0 or self.task_limit <= 0 or self.task_batch_size <= 0:
+            raise ValueError("quality evaluation batch sizes and task limit must be positive")
+        supported = {task.task_name for task in pinned_legacy_multiple_choice_tasks()}
+        if not self.task_names or len(set(self.task_names)) != len(self.task_names):
+            raise ValueError("quality evaluation task names must be non-empty and unique")
+        unknown = set(self.task_names) - supported
+        if unknown:
+            raise ValueError(f"quality evaluation tasks are unsupported: {sorted(unknown)}")
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedQualityInputs:
+    wikitext_tokens: torch.Tensor
+    wikitext_fingerprint: str
+    bos_token_id: int
+    pad_token_id: int
+    tokenizer_hash: str
+    tasks: tuple[PreparedMultipleChoiceInputs, ...]
+
+
+def _checkpoint_dtype(snapshot: Path) -> torch.dtype:
+    config = json.loads((snapshot / "config.json").read_text(encoding="utf-8"))
+    return {
+        "bfloat16": torch.bfloat16,
+        "float16": torch.float16,
+        "float32": torch.float32,
+    }.get(config.get("torch_dtype"), torch.float32)
+
+
+def _wikitext_tokens(
+    snapshot: Path,
+    *,
+    samples: int,
+    sequence_length: int,
+    local_files_only: bool,
+) -> tuple[torch.Tensor, str, int]:
+    # Evaluation data support is optional for non-evaluation package users.
+    from datasets import DownloadConfig, load_dataset  # type: ignore[import-untyped]
+
+    dataset = load_dataset(
+        WIKITEXT_DATASET,
+        WIKITEXT_CONFIG,
+        revision=WIKITEXT_REVISION,
+        split="test",
+        download_config=DownloadConfig(local_files_only=local_files_only),
+    )
+    tokenizer = AutoTokenizer.from_pretrained(snapshot, local_files_only=True)
+    encoded = tokenizer("\n\n".join(dataset["text"]), return_tensors="pt").input_ids
+    bos_id = tokenizer.bos_token_id
+    if bos_id is None:
+        raise ValueError("Gemma WikiText protocol requires a BOS token")
+    payload = sequence_length - 1
+    required = samples * payload
+    if encoded.shape[1] < required:
+        raise ValueError(f"WikiText token stream has {encoded.shape[1]} tokens; protocol requires {required}")
+    rows = tuple(
+        torch.cat(
+            (
+                torch.tensor([[bos_id]], dtype=encoded.dtype),
+                encoded[:, index * payload : (index + 1) * payload],
+            ),
+            dim=1,
+        )
+        for index in range(samples)
+    )
+    return torch.cat(rows, dim=0), str(getattr(dataset, "_fingerprint", "unknown")), int(bos_id)
+
+
+def prepare_quality_inputs(request: QualityEvaluationRequest) -> PreparedQualityInputs:
+    """Materialize the exact shared input partitions before claiming the GPU lease."""
+
+    tokens, fingerprint, bos_id = _wikitext_tokens(
+        request.snapshot,
+        samples=request.wikitext_samples,
+        sequence_length=request.wikitext_sequence_length,
+        local_files_only=request.local_files_only,
+    )
+    tokenizer = AutoTokenizer.from_pretrained(request.snapshot, local_files_only=True)
+    pad_token_id = tokenizer.pad_token_id
+    if pad_token_id is None:
+        raise ValueError("quality evaluation tokenizer contains no pad token ID")
+    tokenizer_hash = hash_hf_tokenizer_snapshot(request.snapshot)
+    by_name = {task.task_name: task for task in pinned_legacy_multiple_choice_tasks()}
+    tasks = tuple(
+        prepare_pinned_hf_multiple_choice_inputs(
+            by_name[name],
+            tokenizer,
+            tokenizer_name=request.source,
+            tokenizer_revision=request.revision,
+            tokenizer_content_hash=tokenizer_hash,
+            maximum_samples=request.task_limit,
+            local_files_only=request.local_files_only,
+        )
+        for name in request.task_names
+    )
+    return PreparedQualityInputs(tokens, fingerprint, bos_id, int(pad_token_id), tokenizer_hash, tasks)
+
+
+def _release_device_memory() -> None:
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+def _evaluate_model(
+    label: str,
+    model: nn.Module,
+    request: QualityEvaluationRequest,
+    inputs: PreparedQualityInputs,
+) -> dict[str, Any]:
+    started = time.perf_counter()
+    if request.device.startswith("cuda"):
+        torch.cuda.reset_peak_memory_stats(request.device)
+    cast(Any, model).config.use_cache = False
+    model.eval()
+    causal = evaluate_causal_nll(
+        CausalEvaluationRequest(
+            inputs.wikitext_tokens.to(request.device),
+            max_length=request.wikitext_sequence_length,
+            stride=request.wikitext_sequence_length,
+            batch_size=request.wikitext_batch_size,
+        ),
+        model_logits(model),
+    )
+    tasks = []
+    for prepared in inputs.tasks:
+        result = evaluate_multiple_choice(
+            MultipleChoiceEvaluationRequest(
+                prepared.task,
+                prepared.examples,
+                batch_size=request.task_batch_size,
+                maximum_samples=request.task_limit,
+                pad_token_id=inputs.pad_token_id,
+                device=request.device,
+            ),
+            model_logits(model),
+        )
+        tasks.append(
+            {
+                "task": to_dict(prepared.task),
+                "task_input_identity": to_dict(prepared.cache_identity),
+                "result": to_dict(result),
+            }
+        )
+    return {
+        "label": label,
+        "wikitext": to_dict(causal),
+        "tasks": tasks,
+        "elapsed_seconds": time.perf_counter() - started,
+        "peak_device_bytes": peak_device_memory_bytes(request.device),
+        "peak_host_bytes": peak_process_memory_bytes(),
+    }
+
+
+def _number(value: object, field: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(f"quality evaluation {field} is not numeric")
+    return float(value)
+
+
+def _comparison(base: dict[str, Any], frozen: dict[str, Any]) -> dict[str, Any]:
+    base_ppl = _number(cast(dict[str, object], base["wikitext"])["perplexity"], "base perplexity")
+    frozen_ppl = _number(
+        cast(dict[str, object], frozen["wikitext"])["perplexity"],
+        "frozen perplexity",
+    )
+    base_tasks = {
+        str(cast(dict[str, object], item["result"])["task_name"]): cast(dict[str, object], item["result"])
+        for item in cast(list[dict[str, object]], base["tasks"])
+    }
+    frozen_tasks = {
+        str(cast(dict[str, object], item["result"])["task_name"]): cast(dict[str, object], item["result"])
+        for item in cast(list[dict[str, object]], frozen["tasks"])
+    }
+    task_rows = []
+    for name in base_tasks:
+        baseline = _number(base_tasks[name]["primary_value"], f"{name} base metric")
+        candidate = _number(frozen_tasks[name]["primary_value"], f"{name} frozen metric")
+        task_rows.append(
+            {
+                "task_name": name,
+                "metric": str(base_tasks[name]["primary_metric"]),
+                "base": baseline,
+                "frozen": candidate,
+                "delta": candidate - baseline,
+                "ratio": None if baseline == 0 else candidate / baseline,
+            }
+        )
+    return {
+        "wikitext": {
+            "base_perplexity": base_ppl,
+            "frozen_perplexity": frozen_ppl,
+            "ratio": frozen_ppl / base_ppl,
+            "relative_change": frozen_ppl / base_ppl - 1.0,
+        },
+        "tasks": task_rows,
+    }
+
+
+def execute_quality_evaluation(
+    request: QualityEvaluationRequest,
+    *,
+    prepared: PreparedQualityInputs | None = None,
+) -> dict[str, Any]:
+    """Evaluate the base and committed frozen models on identical pinned inputs."""
+
+    inputs = prepare_quality_inputs(request) if prepared is None else prepared
+    wall_started = time.perf_counter()
+    with acquire_device_lease(request.device):
+        model_config = AutoConfig.from_pretrained(request.snapshot, local_files_only=True)
+        model_type = str(getattr(model_config, "model_type", "")).lower()
+        attention_implementation = "eager" if model_type.startswith("gemma") else "sdpa"
+        base = cast(
+            nn.Module,
+            AutoModelForCausalLM.from_pretrained(
+                request.snapshot,
+                config=model_config,
+                local_files_only=True,
+                torch_dtype=_checkpoint_dtype(request.snapshot),
+                attn_implementation=attention_implementation,
+            ),
+        ).to(request.device)
+        try:
+            base_result = _evaluate_model("base", base, request, inputs)
+        finally:
+            del base
+            _release_device_memory()
+        loaded: LoadedFrozenModel | None = None
+        try:
+            loaded = load_frozen_run(
+                request.run_output,
+                request.snapshot,
+                source_name=request.source,
+                revision=request.revision,
+                device=request.device,
+                backend=request.backend,
+                use_global_tuning=request.use_global_tuning,
+            )
+            frozen_result = _evaluate_model("frozen", loaded.model, request, inputs)
+            frozen_identity = to_dict(loaded.identity)
+            global_tuning = None if loaded.global_tuning is None else to_dict(loaded.global_tuning)
+        finally:
+            if loaded is not None:
+                del loaded
+            _release_device_memory()
+    token_hash = "sha256:" + hashlib.sha256(
+        inputs.wikitext_tokens.contiguous().view(torch.uint8).numpy().tobytes()
+    ).hexdigest()
+    payload = {
+        "schema_version": 1,
+        "passed": all(
+            math.isfinite(
+                _number(cast(dict[str, object], case["wikitext"])["perplexity"], "perplexity")
+            )
+            for case in (base_result, frozen_result)
+        ),
+        "model": {
+            "source": request.source,
+            "revision": request.revision,
+            "snapshot": str(request.snapshot.resolve()),
+        },
+        "candidate": {
+            "run_output": str(request.run_output.resolve()),
+            "commit_identity": frozen_identity,
+            "global_tuning": global_tuning,
+            "backend": request.backend,
+        },
+        "protocol": {
+            "wikitext_dataset": f"{WIKITEXT_DATASET}:{WIKITEXT_CONFIG}:test@{WIKITEXT_REVISION}",
+            "wikitext_fingerprint": inputs.wikitext_fingerprint,
+            "wikitext_samples": request.wikitext_samples,
+            "wikitext_sequence_length": request.wikitext_sequence_length,
+            "wikitext_batch_size": request.wikitext_batch_size,
+            "wikitext_token_hash": token_hash,
+            "task_names": request.task_names,
+            "task_limit": request.task_limit,
+            "task_batch_size": request.task_batch_size,
+            "tokenizer_hash": inputs.tokenizer_hash,
+        },
+        "results": {"base": base_result, "frozen": frozen_result},
+        "comparison": _comparison(base_result, frozen_result),
+        "wall_seconds": time.perf_counter() - wall_started,
+    }
+    return payload
+
+
+__all__ = [
+    "PreparedQualityInputs",
+    "QualityEvaluationRequest",
+    "execute_quality_evaluation",
+    "prepare_quality_inputs",
+]

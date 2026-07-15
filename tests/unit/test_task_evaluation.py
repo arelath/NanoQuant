@@ -123,8 +123,10 @@ def test_task_renderers_match_retained_lm_eval_prompt_arguments() -> None:
 
     assert piqa.contexts == ("Question: Open the jar?\nAnswer:",) * 2
     assert piqa.continuations == (" Use a lid grip.", " Freeze it.")
+    assert piqa.normalization_lengths == (15, 10)
     assert arc.contexts == ("Question: What is 1+1?\nAnswer:",) * 2
     assert arc.continuations == (" one", " two") and arc.correct_choice == 1
+    assert arc.normalization_lengths == (3, 3)
     assert hella.contexts == ("Roof removal: A man is on a roof. He",) * 2
     assert hella.continuations == (" pulls tiles.", "  falls down.")
     assert wino.contexts == (
@@ -134,6 +136,7 @@ def test_task_renderers_match_retained_lm_eval_prompt_arguments() -> None:
     assert wino.continuations == (" got the cases.",) * 2 and wino.correct_choice == 1
     assert boolq.contexts == ("The retained passage.\nQuestion: is this retained?\nAnswer:",) * 2
     assert boolq.continuations == (" no", " yes") and boolq.correct_choice == 1
+    assert boolq.normalization_lengths == (2, 3)
 
 
 def test_few_shot_rendering_and_pair_tokenization_are_explicit() -> None:
@@ -251,6 +254,33 @@ def test_left_truncation_preserves_all_choice_tokens_and_is_reported() -> None:
 
     assert result.truncated_choice_count == 2
     assert result.sample_count == 1
+
+
+def test_legacy_acc_norm_uses_choice_character_length_not_token_count() -> None:
+    task = _task("piqa")
+    example = MultipleChoiceExample(
+        "character-normalized",
+        ((1,), (2,)),
+        ((3,), (3,)),
+        1,
+        normalization_lengths=(1, 100),
+    )
+
+    def logits(tokens: torch.Tensor, _mask: torch.Tensor | None) -> torch.Tensor:
+        result = torch.zeros((*tokens.shape, 4))
+        result[0, 0, 3] = 2.0
+        result[1, 0, 3] = 1.0
+        return result
+
+    result = evaluate_multiple_choice(
+        MultipleChoiceEvaluationRequest(task, (example,), batch_size=2),
+        logits,
+    )
+
+    assert result.examples[0].raw_prediction == 0
+    assert result.examples[0].normalized_prediction == 1
+    assert not result.examples[0].raw_correct
+    assert result.examples[0].normalized_correct
 
 
 def test_registry_dispatches_only_the_exact_pinned_task_contract() -> None:
