@@ -164,3 +164,51 @@ Candidate/control/candidate generation then retained the exact same TTFT and 32-
 a **24.9% latency reduction** and **33.2% throughput gain**. The paired candidate decode medians average 81.63 ms
 versus the frozen 97.96 ms baseline. Current end-to-end throughput is about 13.04 tokens/s, still only **7.07%** of
 the 184.50 tokens/s llama.cpp reference, so M7 remains decisively open.
+
+## Static compilation feasibility
+
+Two bounded `torch.compile(fullgraph=False, dynamic=False, mode="default")` probes used the same accepted fused-norm
+runtime and exact second-token check. Compiling prefill and decode together produced 58 graphs and 47 graph breaks at
+the packed dispatch workload `ContextVar`. Compiling only decode after eager prefill removed the prefill/decode shape
+transition but still produced 49 graphs and 40 ContextVar breaks, plus layer-index/cache specialization. Its eager
+median was 41.95 ms while the stabilized last-five compiled median was 134.22 ms (3.20x slower). Both returned token
+236764 exactly. The direct compiled paths are therefore rejected; M7.15 requires a traceable fixed-workload packed
+operation and stable cache specialization before a full promotion run.
+The 2,501-byte diagnostic has SHA-256
+`1e532e17d88f69d5edc64539d546137d977c249d4f71c9baef3f92a16d8db7f7`.
+
+## Rejected broad compiled decode
+
+A bounded M7.15 probe compiled only the fixed-shape one-token model forward with
+`torch.compile(mode="reduce-overhead", fullgraph=False, dynamic=False)`; equivalent cache prefill remained eager.
+The exact second token and zero-fallback dispatch were preserved, but the current runtime boundary is structurally
+hostile to broad Dynamo capture: it produced 49 graphs, 40 breaks at the workload `ContextVar`, per-layer
+specialization/recompile-limit failures, and CUDA-graph skips for mutating HybridCache inputs.
+
+Compilation took 32.98 s on the first call. Ten warmed samples measured 890.47 ms p50 compiled versus 80.85 ms eager,
+an 11.0x regression. This path was rejected without production changes. The 2,050-byte record is
+`evidence/m7/gemma-pageable-v28-rewrite-compiled-fixed-decode-probe.json`, SHA-256
+`d6f40afff3c5ea757853a9ab39461e61b4c6fa4a74febd745ba295dc3ab437db`.
+
+## Second promoted optimization: decode-only fused RoPE
+
+After fused RMSNorm, the eager Q/K rotary helper still issued ten kernels per block: two negations, two concatenation
+copies, four multiplies, and two adds. The accepted specialization handles only the pinned batch-one, F32,
+one-token, four-query-head/one-key-head, 256-dimension geometry. One Triton program computes Q and K together;
+prefill and any other dtype or geometry call the original Transformers helper unchanged.
+
+The first prototype exposed CUDA FMA contraction differences of at most 4.77e-7. The promoted kernel instead emits
+explicit `mul.rn.f32` followed by `add.rn.f32`, making both Q and K bit-identical to the eager expression. The direct
+real-shape probe measured 43.01 microseconds p50 versus 156.69 microseconds eager. The complete profile bound all 26
+attentions, reduced total launches from 1,616 to 1,382 and non-NanoQuant launches from 1,252 to 1,018, preserved token
+236764 across every event and Kineto pass, and reduced non-nested CUDA kernel self time from 9.40 to 7.58 ms. The
+588,150-byte exact-kernel profile has SHA-256
+`3a327819399fb30c67a8c0fd0d2b179af9962d81a8a67a973f057ac022c6853c`.
+
+WDDM interference was large enough that the full alternating sequence must not be averaged as a clean speed ratio:
+initial candidate/control/candidate 32-token medians were 2.467, 2.719, and 1.281 s. Both candidates beat that control,
+and a subsequent adjacent control/candidate pair under the faster device state measured 1.391 versus 1.208 s, a
+13.1% latency reduction. All TTFT and generation hashes, peak allocation, 182 packed-linears/zero-fallback dispatch,
+and cache bounds matched. The accepted path is about 26.48 tokens/s in the final retained candidate, still only
+**14.35%** of the 184.50 tokens/s llama.cpp result. The remaining mask/cache, attention, vocabulary projection, and
+host-launch gap remains the dominant M7 work.

@@ -31,6 +31,7 @@ from nanoquant.runtime import (
     WorkloadSpec,
     batch_prompts,
     benchmark_wall,
+    bind_fused_decode_rope,
     bind_prepared_linears,
     bind_prepared_rms_norms,
     execution_workload,
@@ -320,6 +321,7 @@ def _benchmark(args: argparse.Namespace) -> dict[str, Any]:
             transformers_decoder_module_paths(layer_names),
         )
         fused_rms_norm_count = bind_prepared_rms_norms(model) if args.fused_rms_norm else 0
+        fused_decode_rope_count = bind_fused_decode_rope(model) if args.fused_decode_rope else 0
         del states
         gc.collect()
         torch.cuda.empty_cache()
@@ -664,6 +666,7 @@ def _benchmark(args: argparse.Namespace) -> dict[str, Any]:
             "input_dtype": args.input_dtype,
             "cache_dtype": args.cache_dtype or args.input_dtype,
             "fused_rms_norm": args.fused_rms_norm,
+            "fused_decode_rope": args.fused_decode_rope,
             "warmups": args.warmups,
             "repetitions": args.repetitions,
             "prompt": args.prompt,
@@ -680,6 +683,7 @@ def _benchmark(args: argparse.Namespace) -> dict[str, Any]:
         "dispatch": {
             "replaced_linear_count": replaced,
             "fused_rms_norm_count": fused_rms_norm_count,
+            "fused_decode_rope_count": fused_decode_rope_count,
             "prefill_fallback_count": plans.prefill.fallback_count,
             "decode_fallback_count": plans.decode.fallback_count,
             "prefill_backend": plans.prefill.layers[0].backend_name,
@@ -715,6 +719,12 @@ def main() -> None:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="replace Gemma3 RMSNorms with the native fused F32 operation",
+    )
+    parser.add_argument(
+        "--fused-decode-rope",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="replace pinned one-token Gemma3 RoPE with one Triton launch",
     )
     parser.add_argument("--max-new-tokens", type=int, default=32)
     parser.add_argument("--stopping-check-interval", type=int, default=8)

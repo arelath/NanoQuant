@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import Literal
+from typing import Any, Literal
 
 import torch
 from torch import nn
@@ -110,6 +110,151 @@ def bind_prepared_rms_norms(model: nn.Module) -> int:
         )
     for parent, attribute, replacement, training in replacements:
         replacement.train(training)
+        setattr(parent, attribute, replacement)
+    return len(replacements)
+
+
+class PreparedGemma3Attention(nn.Module):
+    """Pinned eager Gemma3 attention with a decode-only fused RoPE."""
+
+    q_proj: nn.Module
+    k_proj: nn.Module
+    v_proj: nn.Module
+    o_proj: nn.Module
+    q_norm: nn.Module
+    k_norm: nn.Module
+    config: Any
+    layer_idx: int
+    head_dim: int
+    num_key_value_groups: int
+    scaling: float
+    attention_dropout: float
+    is_causal: bool
+    is_sliding: bool
+    attn_logit_softcapping: float | None
+    sliding_window: int | None
+
+    def __init__(self, source: nn.Module) -> None:
+        super().__init__()
+        required_modules = ("q_proj", "k_proj", "v_proj", "o_proj", "q_norm", "k_norm")
+        for name in required_modules:
+            child = getattr(source, name, None)
+            if not isinstance(child, nn.Module):
+                raise ValueError(f"Gemma3 attention module is missing {name}")
+            setattr(self, name, child)
+        for name in (
+            "config",
+            "layer_idx",
+            "head_dim",
+            "num_key_value_groups",
+            "scaling",
+            "attention_dropout",
+            "is_causal",
+            "is_sliding",
+            "attn_logit_softcapping",
+            "sliding_window",
+        ):
+            if not hasattr(source, name):
+                raise ValueError(f"Gemma3 attention contract is missing {name}")
+            setattr(self, name, getattr(source, name))
+        if getattr(self.config, "_attn_implementation", None) != "eager":
+            raise ValueError("Gemma3 decode RoPE requires eager attention")
+        self.train(source.training)
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor],
+        attention_mask: torch.Tensor | None,
+        past_key_value: Any | None = None,
+        cache_position: torch.Tensor | None = None,
+        **kwargs: Any,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        input_shape = hidden_states.shape[:-1]
+        hidden_shape = (*input_shape, -1, self.head_dim)
+        query_states = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        key_states = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        query_states = self.q_norm(query_states)
+        key_states = self.k_norm(key_states)
+        cosine, sine = position_embeddings
+        if (
+            tuple(query_states.shape) == (1, 4, 1, 256)
+            and tuple(key_states.shape) == (1, 1, 1, 256)
+            and query_states.dtype == torch.float32
+            and key_states.dtype == torch.float32
+            and query_states.device.type == "cuda"
+        ):
+            from nanoquant.runtime.cuda_kernels import launch_decode_rope
+
+            query_states, key_states = launch_decode_rope(
+                query_states,
+                key_states,
+                cosine,
+                sine,
+            )
+        else:
+            from transformers.models.gemma3.modeling_gemma3 import apply_rotary_pos_emb
+
+            query_states, key_states = apply_rotary_pos_emb(  # type: ignore[no-untyped-call]
+                query_states,
+                key_states,
+                cosine,
+                sine,
+            )
+        if past_key_value is not None:
+            cache_kwargs = {
+                "sin": sine,
+                "cos": cosine,
+                "cache_position": cache_position,
+                "sliding_window": self.sliding_window,
+            }
+            key_states, value_states = past_key_value.update(
+                key_states,
+                value_states,
+                self.layer_idx,
+                cache_kwargs,
+            )
+        if attention_mask is not None:
+            attention_mask = attention_mask.to(query_states)
+        from transformers.models.gemma3.modeling_gemma3 import eager_attention_forward
+
+        attention_output, attention_weights = eager_attention_forward(
+            self,
+            query_states,
+            key_states,
+            value_states,
+            attention_mask,
+            dropout=self.attention_dropout if self.training else 0.0,
+            scaling=self.scaling,
+            sliding_window=self.sliding_window,
+            **kwargs,
+        )
+        attention_output = attention_output.reshape(*input_shape, -1).contiguous()
+        return self.o_proj(attention_output), attention_weights
+
+
+def bind_fused_decode_rope(model: nn.Module) -> int:
+    """Bind the pinned decode-only RoPE without changing eager prefill."""
+
+    replacements: list[tuple[nn.Module, str, PreparedGemma3Attention]] = []
+    for path, module in tuple(model.named_modules()):
+        if module.__class__.__name__ != "Gemma3Attention":
+            continue
+        config = getattr(module, "config", None)
+        if (
+            getattr(module, "head_dim", None) != 256
+            or getattr(module, "num_key_value_groups", None) != 4
+            or getattr(config, "_attn_implementation", None) != "eager"
+        ):
+            continue
+        parent_path, separator, attribute = path.rpartition(".")
+        if not separator or not parent_path or not attribute:
+            raise ValueError(f"Gemma3 attention module path must be dotted: {path!r}")
+        replacements.append(
+            (model.get_submodule(parent_path), attribute, PreparedGemma3Attention(module))
+        )
+    for parent, attribute, replacement in replacements:
         setattr(parent, attribute, replacement)
     return len(replacements)
 

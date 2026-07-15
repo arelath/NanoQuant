@@ -124,6 +124,7 @@ print(json.dumps({
     "shell_tensor_count": len(bundle.manifest.shell_tensors),
     "replaced_linear_count": loaded.replaced_linear_count,
     "fused_rms_norm_count": loaded.fused_rms_norm_count,
+    "fused_decode_rope_count": loaded.fused_decode_rope_count,
     "prefill_fallback_count": loaded.plans.prefill.plan.fallback_count,
     "decode_fallback_count": loaded.plans.decode.plan.fallback_count,
     "prompt_tokens": len(prompt_ids),

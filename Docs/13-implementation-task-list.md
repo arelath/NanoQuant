@@ -332,9 +332,10 @@ Outcome: packed artifacts load and generate correctly without research dependenc
 - [x] **M6.22** Verify a clean runtime-only installation can load a packed artifact and generate text. The atomic
   runtime bundle contains the complete packed artifact, config/tokenizer assets, 158 ordinary checkpoint tensors,
   and three explicitly derived non-persistent buffers while excluding all 182 dense source linears. The current
-  53,006-byte `nanoquant-runtime` wheel contains exactly 23 deployment members and no research packages. Installed
+  55,050-byte `nanoquant-runtime` wheel contains exactly 23 deployment members and no research packages. Installed
   into an isolated target, it loaded the 731,007,650-byte bundle without a source-model argument, replaced all 182
-  linears, selected CUDA with zero fallback, and generated the exact retained 16-token llama.cpp text.
+  linears, selected CUDA with zero fallback, bound all 157 fused RMSNorms and 26 decode-only RoPE sites, and generated
+  the exact retained 16-token llama.cpp text.
 - [x] **M6.GATE** Load and run a packed NanoQuant artifact through reference and CUDA backends with complete numerical
   parity coverage and no research-package dependency. Full-artifact logical/packed reference validation covers all
   182 Gemma layers; the native CUDA path covers every real shape plus the 540-case declared capability matrix; long
@@ -388,7 +389,25 @@ Outcome: runtime performance is measured, explained, and competitive with the mo
 - [ ] **M7.12** Fuse scale, bias, and salient-outlier operations only where end-to-end profiles show a net benefit.
 - [ ] **M7.13** Optimize outlier paths for zero/small/common counts and ensure specialization does not regress general cases.
 - [ ] **M7.14** Measure and optimize KV cache, attention, final vocabulary projection, and sampling after quantized linears no longer dominate.
+  The first accepted attention-side specialization fuses the pinned batch-one/F32/one-token Gemma3 Q/K rotary
+  operation into one Triton launch per block while retaining eager prefill and unsupported-shape/device fallbacks.
+  Explicit `mul.rn.f32` and `add.rn.f32` instructions make the kernel bit-identical to the pinned eager expression,
+  not merely output-token equivalent. The real trace bound all 26 attentions, preserved token 236764 in every pass,
+  and removed exactly 234 launches/token (1,616 to 1,382) while reducing non-nested device kernel time from 9.40 to
+  7.58 ms. WDDM timing varied materially, but both candidates bracketed around the first control were faster and the
+  final adjacent control/candidate pair improved exact 32-token latency from 1.391 to 1.208 s (13.1%). Cache
+  promotion, eager attention proper, the vocabulary projection, and sampling remain.
 - [ ] **M7.15** Compare eager and compiled/static decode-step execution with stable shape/correctness coverage.
+  Direct whole-model and decode-only `torch.compile` feasibility probes preserved the exact token but are rejected
+  in their current form. Whole-model compilation produced 58 graphs and 47 workload-`ContextVar` breaks. Restricting
+  compilation to decode after eager prefill still produced 49 graphs and 40 such breaks; its stabilized last-five
+  median was 134.22 ms versus 41.95 ms eager (3.20x slower). Retrying requires a traceable fixed-workload packed op
+  and stable cache/layer specialization, so the broader task remains open.
+  A bounded fixed-shape `torch.compile(mode="reduce-overhead")` probe preserved the exact token but generated 49
+  graphs, hit 40 `ContextVar.get` graph breaks, exceeded per-layer recompilation limits, and skipped CUDA graphs for
+  mutating HybridCache updates. After a 32.98 s first call, compiled p50 was 890.47 ms versus 80.85 ms eager (11.0x
+  slower). Broad model compilation is rejected; this task remains open for an explicitly compileable static step or
+  smaller pure-function fusions.
 - [ ] **M7.16** Establish designated-host performance CI with raw sample retention and environment health checks.
 - [ ] **M7.17** Add no-more-than-10% regression gates against the accepted NanoQuant runtime baseline.
 - [ ] **M7.18** Reach at least 70% of the fastest compatible modified llama.cpp reference throughput on the agreed workload, or produce an accepted profile-backed gap analysis and follow-up plan.

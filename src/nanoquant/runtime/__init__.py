@@ -126,8 +126,10 @@ from nanoquant.runtime.reference import (
     PackedReferenceBackend,
 )
 from nanoquant.runtime.torch_model import (
+    PreparedGemma3Attention,
     PreparedLinear,
     PreparedRMSNorm,
+    bind_fused_decode_rope,
     bind_prepared_linears,
     bind_prepared_rms_norms,
     execution_workload,
@@ -201,6 +203,7 @@ __all__ = [
     "PreparedExecutionPlans",
     "PreparedLayer",
     "PreparedLinear",
+    "PreparedGemma3Attention",
     "PreparedRMSNorm",
     "QuantizedLinearSpec",
     "ReferenceParityError",
@@ -219,6 +222,7 @@ __all__ = [
     "canonical_torch_dtype",
     "batch_prompts",
     "benchmark_wall",
+    "bind_fused_decode_rope",
     "bind_prepared_linears",
     "bind_prepared_rms_norms",
     "convert_logical_to_packed",

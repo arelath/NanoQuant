@@ -4,6 +4,7 @@ import importlib.util
 
 import pytest
 import torch
+from transformers.models.gemma3.modeling_gemma3 import apply_rotary_pos_emb
 
 from nanoquant.infrastructure.device_lease import acquire_device_lease
 from nanoquant.runtime import (
@@ -16,6 +17,7 @@ from nanoquant.runtime import (
     plan_execution_workloads,
     prepare_execution_workloads,
 )
+from nanoquant.runtime.cuda_kernels import launch_decode_rope
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -249,3 +251,21 @@ def test_cuda_packed_backend_shares_weights_across_prefill_and_decode_plans() ->
     assert prepared.prefill.dispatches[0].layer is prepared.decode.dispatches[0].layer
     torch.testing.assert_close(prefill_output.cpu(), _expected(prefill.cpu(), logical), rtol=2e-5, atol=2e-4)
     torch.testing.assert_close(decode_output.cpu(), _expected(decode.cpu(), logical), rtol=2e-5, atol=2e-4)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_fused_decode_rope_matches_pinned_gemma_geometry() -> None:
+    generator = torch.Generator().manual_seed(20260715)
+    query = torch.randn(1, 4, 1, 256, generator=generator).cuda()
+    key = torch.randn(1, 1, 1, 256, generator=generator).cuda()
+    cosine = torch.randn(1, 1, 256, generator=generator).cuda()
+    sine = torch.randn(1, 1, 256, generator=generator).cuda()
+
+    expected_query, expected_key = apply_rotary_pos_emb(query, key, cosine, sine)
+    actual_query, actual_key = launch_decode_rope(query, key, cosine, sine)
+    repeated_query, repeated_key = launch_decode_rope(query, key, cosine, sine)
+
+    assert torch.equal(actual_query, expected_query)
+    assert torch.equal(actual_key, expected_key)
+    assert torch.equal(actual_query, repeated_query)
+    assert torch.equal(actual_key, repeated_key)

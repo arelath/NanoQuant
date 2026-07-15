@@ -184,7 +184,9 @@ def test_runtime_bundle_loads_shell_and_generates_without_source_checkpoint(
 
     assert loaded.replaced_linear_count == 7
     assert loaded.fused_rms_norm_count == 7
+    assert loaded.fused_decode_rope_count == 0
     assert control.fused_rms_norm_count == 0
+    assert control.fused_decode_rope_count == 0
     assert torch.equal(result.token_ids, control_result.token_ids)
     assert result.lengths == control_result.lengths
     assert result.token_ids.shape == (1, 2)

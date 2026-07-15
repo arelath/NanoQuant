@@ -322,6 +322,7 @@ def _profile(args: argparse.Namespace) -> dict[str, object]:
             batch_size=1,
             prefill_tokens=prompt_width,
             fuse_rms_norm=args.fused_rms_norm,
+            fuse_decode_rope=args.fused_decode_rope,
         )
         model = runtime.model
         shell = TransformersGenerationModel(
@@ -504,6 +505,7 @@ def _profile(args: argparse.Namespace) -> dict[str, object]:
         dispatch = {
             "replaced_linear_count": runtime.replaced_linear_count,
             "fused_rms_norm_count": runtime.fused_rms_norm_count,
+            "fused_decode_rope_count": runtime.fused_decode_rope_count,
             "prefill_fallback_count": runtime.plans.prefill.plan.fallback_count,
             "decode_fallback_count": runtime.plans.decode.plan.fallback_count,
         }
@@ -538,6 +540,7 @@ def _profile(args: argparse.Namespace) -> dict[str, object]:
             "input_dtype": args.input_dtype,
             "cache_dtype": args.cache_dtype,
             "fused_rms_norm": args.fused_rms_norm,
+            "fused_decode_rope": args.fused_decode_rope,
             "attention": "eager",
             "warmups": args.warmups,
             "repetitions": args.repetitions,
@@ -596,6 +599,12 @@ def main() -> None:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="replace Gemma3 RMSNorms with the native fused F32 operation",
+    )
+    parser.add_argument(
+        "--fused-decode-rope",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="replace pinned one-token Gemma3 RoPE with one Triton launch",
     )
     parser.add_argument(
         "--kernel-profile",

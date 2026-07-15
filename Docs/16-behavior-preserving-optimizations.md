@@ -1167,3 +1167,27 @@ only their *measurement* waits for the Docs/15 P1 baseline if we want clean befo
   evidence removed exactly 942 kernels per token and produced stable 2.467 s and 2.440 s candidate medians versus
   the frozen 3.268 s baseline, a 24.9% latency reduction (33.2% throughput gain). This path is now the runtime
   default, with `--no-fused-rms-norm` retained for controls.
+- **Direct `torch.compile` model/decode paths rejected:** both feasibility probes preserved token 236764, but Dynamo
+  fragmented on `ContextVar.get()` in prepared-linear dispatch, per-layer indices, cache layer/type guards, and
+  generator boundaries. The whole-model probe produced 58 graphs and 47 ContextVar breaks. Decode-only compilation
+  after eager prefill still produced 49 graphs and 40 breaks; after compilation activity subsided, its last-five
+  median was 134.22 ms versus 41.95 ms eager (3.20x slower). M7.15 remains open, but it must first expose a traceable
+  fixed-workload packed operation and stabilize cache/layer specialization rather than enabling compilation as-is.
+- **Broad fixed-shape model compilation rejected:** compiling only one fixed-shape decode while keeping cache prefill
+  eager preserved token 236764, but the current composition is not a single compileable graph. Dynamo produced 49
+  graphs and 40 workload-`ContextVar` breaks, then repeatedly specialized the shared packed-linear and cache-update
+  frames by layer index. Mutating HybridCache inputs also prevented CUDA-graph capture. The first call took 32.98 s
+  and measured p50 regressed from 80.85 to 890.47 ms (11.0x). No compile code was retained. Future M7.15 work must
+  define a static decode boundary with opaque/compileable packed ops and cache mutation semantics before retrying
+  broad Inductor compilation; small pure pointwise functions remain viable independent experiments.
+- **Decode-only fused RoPE accepted:** the post-RMSNorm census still expanded each layer's Q/K rotation into ten
+  launches (negate, concatenate, multiply, and add). A pinned batch-one, F32, one-token Triton specialization computes
+  both tensors in one launch and falls back to the unchanged Transformers function for prefill or any unsupported
+  geometry or device. The first kernel prototype exposed fused-multiply-add differences of at most 4.77e-7; the
+  promoted kernel now uses explicit round-to-nearest F32 multiply and add instructions and is bit-identical to eager
+  for both Q and K. The full profile bound all 26 blocks, removed exactly 234 launches/token (1,616 to 1,382),
+  retained token 236764 in every event and Kineto pass, and reduced non-nested device kernel self time from 9.40 to
+  7.58 ms. WDDM made absolute generation samples noisy: the initial candidate/control/candidate medians were 2.467,
+  2.719, and 1.281 s. A subsequent adjacent control/candidate pair under the faster device state measured 1.391 and
+  1.208 s (13.1% lower), with exact hashes and unchanged allocation. The specialization is now default;
+  `--no-fused-decode-rope` retains the control.
