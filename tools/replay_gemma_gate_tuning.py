@@ -432,7 +432,9 @@ def main() -> None:
                         "initialization": name,
                         "epochs": epoch_count,
                         "before_block_loss": before_block,
-                        "tuning_before_loss": metrics.before.loss,
+                        "tuning_before_loss": (
+                            None if metrics.before is None else metrics.before.loss
+                        ),
                         "best_loss": metrics.best.loss,
                         "final_loss": metrics.final.loss,
                         "best_epoch": metrics.best_epoch,

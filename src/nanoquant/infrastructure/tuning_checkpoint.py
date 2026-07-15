@@ -51,23 +51,24 @@ def _validate_state(state: TuningResumeState) -> None:
     if (
         state.completed_epochs < 0
         or len(state.epoch_losses) != state.completed_epochs + 1
-        or not all(math.isfinite(value) for value in state.epoch_losses)
+        or not all(value is None or math.isfinite(value) for value in state.epoch_losses)
+        or any(value is None for value in state.epoch_losses[1:])
         or state.steps_completed < 0
         or state.best_epoch < -1
         or state.best_epoch >= state.completed_epochs
         or len(parameter_names) != len(set(parameter_names))
         or len(best_names) != len(set(best_names))
         or len(optimizer_names) != len(set(optimizer_names))
-        or set(parameter_names) != set(best_names)
+        or (best_names and set(parameter_names) != set(best_names))
         or set(parameter_names) != set(optimizer_names)
     ):
         raise ValueError("tuning checkpoint state is inconsistent")
     for name, value in state.parameter_values:
-        best = dict(state.best_parameter_values)[name]
+        best = dict(state.best_parameter_values).get(name)
         optimizer = {item.parameter_name: item for item in state.optimizer_states}[name]
         if (
             not name
-            or value.shape != best.shape
+            or (best is not None and value.shape != best.shape)
             or value.shape != optimizer.exponential_average.shape
             or value.shape != optimizer.exponential_average_squared.shape
             or (optimizer.kahan_compensation is not None and value.shape != optimizer.kahan_compensation.shape)
@@ -124,7 +125,8 @@ def save_tuning_checkpoint(
             prefix = f"parameter_{index}"
             optimizer = optimizer_by_name[name]
             tensors[f"{prefix}.value"] = value.detach().cpu().contiguous()
-            tensors[f"{prefix}.best"] = best_by_name[name].detach().cpu().contiguous()
+            if name in best_by_name:
+                tensors[f"{prefix}.best"] = best_by_name[name].detach().cpu().contiguous()
             tensors[f"{prefix}.step"] = optimizer.step.detach().cpu().contiguous()
             tensors[f"{prefix}.exp_avg"] = optimizer.exponential_average.detach().cpu().contiguous()
             tensors[f"{prefix}.exp_avg_sq"] = optimizer.exponential_average_squared.detach().cpu().contiguous()
@@ -139,13 +141,14 @@ def save_tuning_checkpoint(
             )
         save_file(tensors, temporary / "state.safetensors")
         manifest = {
-            "schema_version": 1,
+            "schema_version": 2,
             "identity": to_dict(identity),
             "completed_epochs": state.completed_epochs,
             "epoch_losses": list(state.epoch_losses),
             "steps_completed": state.steps_completed,
             "best_epoch": state.best_epoch,
             "stopped_early": state.stopped_early,
+            "has_best_state": bool(best_by_name),
             "parameters": parameters,
         }
         manifest_path = temporary / "checkpoint.json"
@@ -185,7 +188,8 @@ def active_tuning_checkpoint(
         raise ValueError("tuning checkpoint generation is invalid")
     generation_root = root / generation
     manifest = json.loads((generation_root / "checkpoint.json").read_text(encoding="utf-8"))
-    if manifest.get("schema_version") != 1:
+    schema_version = manifest.get("schema_version")
+    if schema_version not in (1, 2):
         raise ValueError("unsupported tuning checkpoint schema")
     manifest_identity = from_dict(
         TuningCheckpointIdentity,
@@ -202,7 +206,8 @@ def active_tuning_checkpoint(
             name = str(item["name"])
             prefix = str(item["prefix"])
             parameter_values.append((name, handle.get_tensor(f"{prefix}.value")))
-            best_parameter_values.append((name, handle.get_tensor(f"{prefix}.best")))
+            if schema_version == 1 or manifest.get("has_best_state", False):
+                best_parameter_values.append((name, handle.get_tensor(f"{prefix}.best")))
             optimizer_states.append(
                 TuningOptimizerState(
                     name,
@@ -216,7 +221,7 @@ def active_tuning_checkpoint(
             )
     state = TuningResumeState(
         int(manifest["completed_epochs"]),
-        tuple(float(value) for value in manifest["epoch_losses"]),
+        tuple(None if value is None else float(value) for value in manifest["epoch_losses"]),
         int(manifest["steps_completed"]),
         tuple(parameter_values),
         tuple(best_parameter_values),

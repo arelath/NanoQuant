@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import Literal, TypeAlias
@@ -51,7 +52,7 @@ TuningOptimizerState: TypeAlias = ParityAdamWState
 @dataclass(frozen=True, slots=True)
 class TuningResumeState:
     completed_epochs: int
-    epoch_losses: tuple[float, ...]
+    epoch_losses: tuple[float | None, ...]
     steps_completed: int
     parameter_values: tuple[tuple[str, torch.Tensor], ...]
     best_parameter_values: tuple[tuple[str, torch.Tensor], ...]
@@ -351,6 +352,8 @@ def tune(
     model_parameter = next(iter(model.parameters()), None)
     device = request.inputs.device if model_parameter is None else model_parameter.device
     importance = _resolve_output_importance(request.output_importance, device, torch.float32)
+    omit_initial_evaluation = request.epoch_loss_mode == "legacy_training" and request.epochs > 0
+    epoch_losses: list[float | None]
     if resume is not None:
         if resume.completed_epochs < 0 or resume.completed_epochs > request.epochs:
             raise ValueError("tuning resume epoch is out of range")
@@ -358,46 +361,77 @@ def tune(
             raise ValueError("tuning resume losses do not match completed epochs")
         if resume.best_epoch < -1 or resume.best_epoch >= resume.completed_epochs:
             raise ValueError("tuning resume best epoch is out of range")
+        if (resume.epoch_losses[0] is None) != omit_initial_evaluation:
+            raise ValueError("tuning resume initial loss mode differs from the request")
+        if any(value is None for value in resume.epoch_losses[1:]):
+            raise ValueError("tuning resume contains a missing completed-epoch loss")
         parameter_values = dict(resume.parameter_values)
         best_parameter_values = dict(resume.best_parameter_values)
-        if set(parameter_values) != set(selected_by_name) or set(best_parameter_values) != set(selected_by_name):
+        if set(parameter_values) != set(selected_by_name):
             raise ValueError("tuning resume parameters do not match the selector")
+        if request.restore_best_state:
+            if set(best_parameter_values) != set(selected_by_name):
+                raise ValueError("tuning resume best parameters do not match the selector")
+        elif best_parameter_values and set(best_parameter_values) != set(selected_by_name):
+            raise ValueError("tuning resume best parameters do not match the selector")
         with torch.no_grad():
             for name, parameter in selected:
                 value = parameter_values[name]
-                best = best_parameter_values[name]
-                if value.shape != parameter.shape or best.shape != parameter.shape:
+                if value.shape != parameter.shape:
                     raise ValueError(f"tuning resume parameter shape differs: {name}")
+                if name in best_parameter_values and best_parameter_values[name].shape != parameter.shape:
+                    raise ValueError(f"tuning resume best parameter shape differs: {name}")
                 parameter.copy_(value.to(device=parameter.device, dtype=parameter.dtype))
         before_value = resume.epoch_losses[0]
-        best_value = min(resume.epoch_losses)
-        expected_best_epoch = min(range(len(resume.epoch_losses)), key=resume.epoch_losses.__getitem__) - 1
+        observed_losses: list[tuple[int, float]] = [
+            (index, value)
+            for index, value in enumerate(resume.epoch_losses)
+            if value is not None
+        ]
+        if not observed_losses:
+            raise ValueError("tuning resume contains no observed loss")
+        best_loss_index, best_value = min(observed_losses, key=lambda item: item[1])
+        expected_best_epoch = best_loss_index - 1
         if resume.best_epoch != expected_best_epoch:
             raise ValueError("tuning resume best epoch disagrees with losses")
         best_epoch = resume.best_epoch
-        best_state = {
-            name: value.to(device=selected_by_name[name].device, dtype=selected_by_name[name].dtype)
-            for name, value in best_parameter_values.items()
-        }
+        best_state = (
+            {
+                name: value.to(device=selected_by_name[name].device, dtype=selected_by_name[name].dtype)
+                for name, value in best_parameter_values.items()
+            }
+            if request.restore_best_state
+            else None
+        )
         epoch_losses = list(resume.epoch_losses)
     else:
-        if recorder is NULL_RECORDER:
-            before_value = _evaluate_loss(model, request, forward)
+        if omit_initial_evaluation:
+            before_value = None
+            best_value = math.inf
+            best_epoch = -1
+            best_state = None
+            epoch_losses = [None]
         else:
-            with recorder.phase("initial_evaluation"):
-                before_value = _evaluate_loss(model, request, forward, recorder)
-        best_value = before_value
-        best_epoch = -1
-        if recorder is NULL_RECORDER:
-            best_state = {name: parameter.detach().clone() for name, parameter in selected}
-        else:
-            with recorder.phase("best_state_clone"):
+            if recorder is NULL_RECORDER:
+                before_value = _evaluate_loss(model, request, forward)
+            else:
+                with recorder.phase("initial_evaluation"):
+                    before_value = _evaluate_loss(model, request, forward, recorder)
+            best_value = before_value
+            best_epoch = -1
+            if request.restore_best_state and recorder is NULL_RECORDER:
                 best_state = {name: parameter.detach().clone() for name, parameter in selected}
-                recorder.add("tuning.best_state_clones", 1)
-        epoch_losses = [before_value]
+            elif request.restore_best_state:
+                with recorder.phase("best_state_clone"):
+                    best_state = {name: parameter.detach().clone() for name, parameter in selected}
+                    recorder.add("tuning.best_state_clones", 1)
+            else:
+                best_state = None
+            epoch_losses = [before_value]
     if request.epoch_observer is not None:
         for epoch, observed_loss in enumerate(epoch_losses):
-            request.epoch_observer(epoch, observed_loss)
+            if observed_loss is not None:
+                request.epoch_observer(epoch, observed_loss)
     optimizer = ParityAdamW(
         [parameter for _, parameter in selected], lr=request.learning_rate, weight_decay=request.weight_decay
     )
@@ -535,14 +569,18 @@ def tune(
                     improvement = (comparison_loss - current) / max(abs(comparison_loss), 1e-12)
                     best_value = current
                     best_epoch = epoch
-                    if recorder is NULL_RECORDER:
+                    if request.restore_best_state and recorder is NULL_RECORDER:
                         best_state = {name: parameter.detach().clone() for name, parameter in selected}
-                    else:
+                    elif request.restore_best_state:
                         with recorder.phase("best_state_clone"):
                             best_state = {name: parameter.detach().clone() for name, parameter in selected}
                             recorder.add("tuning.best_state_clones", 1)
                     if (
                         request.early_stop_relative_tolerance is not None
+                        and (
+                            request.epoch_loss_mode != "legacy_training"
+                            or previous_epoch_loss is not None
+                        )
                         and improvement < request.early_stop_relative_tolerance
                     ):
                         stopped_early = True
@@ -563,7 +601,14 @@ def tune(
                                 tuple(epoch_losses),
                                 int(optimizer_states[0].step.item()),
                                 tuple((name, parameter.detach().cpu().clone()) for name, parameter in selected),
-                                tuple((name, value.detach().cpu().clone()) for name, value in best_state.items()),
+                                (
+                                    ()
+                                    if best_state is None
+                                    else tuple(
+                                        (name, value.detach().cpu().clone())
+                                        for name, value in best_state.items()
+                                    )
+                                ),
                                 optimizer_states,
                                 best_epoch,
                                 stopped_early,
@@ -572,6 +617,8 @@ def tune(
                 if stopped_early:
                     break
         if request.restore_best_state:
+            if best_state is None:
+                raise AssertionError("best-state restoration requested without a best state")
             parameter_map = dict(model.named_parameters())
             if recorder is NULL_RECORDER:
                 with torch.no_grad():
@@ -584,6 +631,8 @@ def tune(
                             parameter_map[name].copy_(value)
         if request.epoch_loss_mode == "legacy_training":
             final_value = epoch_losses[-1]
+            if final_value is None:
+                raise AssertionError("legacy tuning completed without an epoch loss")
         elif recorder is NULL_RECORDER:
             final_value = _evaluate_loss(model, request, forward)
         else:
@@ -599,7 +648,7 @@ def tune(
     if device.type == "cuda":
         _release_cuda_cache_under_pressure(device)
     return TuningMetrics(
-        LossMetrics(before_value, elements, request.objective),
+        None if before_value is None else LossMetrics(before_value, elements, request.objective),
         LossMetrics(best_value, elements, request.objective),
         LossMetrics(final_value, elements, request.objective),
         epochs_completed,

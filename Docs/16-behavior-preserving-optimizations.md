@@ -71,6 +71,8 @@ disposition under each unchecked item is authoritative; unchecked items are not 
 | Done | 16 | Fuse ADMM factor promotion into FP32 additions | S0 | factorization | measured 2.1% per solve | ~5–6 s of anchor | High | XS |
 | Done | 17 | Reuse ADMM symmetrization storage | S0 | factorization | measured 3.6% per solve | ~9–10 s of anchor | High | XS |
 | Done | 18 | Lower-allocation binary sign extraction | S0 | factorization, factorized tuning | measured 1.21–1.92x per sign | ~3–12 s factorization, tuning rerun pending | High | XS |
+| Done | 19 | Reuse legacy tuning-pass losses | parity | tuning | measured 37.5% on eight-epoch gate | full-run included in v28 | High | M |
+| Done | 20 | Omit legacy-mode initial evaluations and unused best states | parity | tuning, checkpoints | measured 5.5–6.3% on eight-epoch gate | projected 2.5–3% pending v29 full run | High | M |
 
 The retained factor+scale changes currently support an estimated **roughly 3–7% anchor improvement** before
 interaction effects; the earlier 8–15% outlook incorrectly counted rejected/deferred store and synchronization
@@ -604,6 +606,35 @@ earlier clean candidate samples were **20.842 s** and **20.790 s**. An immediate
 slowed both initializations to 38–40 seconds without changing any numerical result; it is retained as
 `epochs8.json` but excluded as a thermally/externally contaminated performance sample. After a 60-second
 idle interval, the clean 20.430/20.512-second pair reproduced the original rate.
+
+### [x] 3.20 Omit legacy-mode initial evaluations and unused best states (parity correction)
+
+**Where.** Even after item 3.19 removed epoch and final re-evaluations, `tune()` still ran one complete
+no-grad block evaluation before every non-factorized and factorized phase. It also cloned every selected
+parameter into `best_state`, updated that clone on improving epochs, copied it back to CPU for every durable
+factorized checkpoint, and wrote it to disk even though the parity protocol sets
+`restore_best_tuning_state=False`. Contemporary legacy tuning does neither operation; only post-block refit
+evaluates and restores its best state.
+
+**Done (2026-07-15).** Positive-epoch `legacy_training` calls now report `TuningMetrics.before=None`, begin
+their observable trajectory at epoch 1, and compare early stopping only between completed training epochs.
+They retain the final and best training losses and exact best epoch, but perform no fabricated or redundant
+initial measurement. Calls using `full_evaluation`, including post-block refit and the general tuning API,
+are unchanged. When restoration is disabled, `best_state` is no longer allocated or updated. Tuning
+checkpoint schema v2 records the optional initial loss and whether a best state exists, omits the unused
+tensor inventory, and continues to read schema-v1 checkpoints. Exact current parameters, Adam/Kahan state,
+RNG replay, scheduler position, losses, and stop state remain durable at every epoch. Because tuning metrics
+and checkpoint artifacts changed, the resident algorithm identity advances from v28 to v29.
+
+The retained real gate at `evidence/m4/gemma-gate-legacy-loss-perf-v29/epochs8.json` uses the same pinned
+Gemma snapshot, 256×2,048 calibration set, Fisher state, legacy/rewrite initial tensors, and batch/microbatch
+8 as item 3.19. Removing the remaining evaluation reduced legacy-initialized tuning from **20.430 s to
+19.142 s (6.3%)** and rewrite-initialized tuning from **20.512 s to 19.377 s (5.5%)**. Every epoch loss,
+final loss, and final weighted error is exactly equal to the retained pre-change run. Peak CUDA allocation
+fell by **15.3–15.5 MiB**, consistent with removing the selected BF16 best-state clone. The gate layer also
+avoids copying and writing about **16.3 MiB** of redundant best parameters per epoch checkpoint. Across the
+full schedule this eliminates 364 block evaluations (14 per block, 17.7% of the non-refit dataset-pass
+count); the gate timing projects to roughly a 2.5–3% full-run saving, pending a complete v29 measurement.
 
 ### Parity corrections discovered by performance profiling (not S0)
 

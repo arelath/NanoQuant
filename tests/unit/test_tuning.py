@@ -291,8 +291,9 @@ def test_legacy_training_loss_avoids_redundant_epoch_forwards_without_changing_u
     )
 
     assert full_forwards == 12
-    assert legacy_forwards == 6
-    assert [epoch for epoch, _loss in legacy_trajectory] == [0, 1, 2]
+    assert legacy_forwards == 4
+    assert legacy_metrics.before is None
+    assert [epoch for epoch, _loss in legacy_trajectory] == [1, 2]
     assert legacy_metrics.final.loss == legacy_trajectory[-1][1]
     for full_parameter, legacy_parameter in zip(
         full_model.parameters(), legacy_model.parameters(), strict=True
@@ -374,6 +375,61 @@ def test_factorized_tuning_epoch_resume_is_bitwise_equivalent() -> None:
     )
 
     assert resumed_metrics == control_metrics
+    for control_parameter, resumed_parameter in zip(
+        control.parameters(), restarted.parameters(), strict=True
+    ):
+        assert torch.equal(resumed_parameter, control_parameter)
+
+
+def test_legacy_factorized_tuning_resume_omits_unused_initial_and_best_state() -> None:
+    initial = Hybrid()
+    control = deepcopy(initial)
+    interrupted = deepcopy(initial)
+    inputs = torch.randn(12, 3, generator=torch.Generator().manual_seed(53))
+    targets = torch.randn(12, 2, generator=torch.Generator().manual_seed(54))
+    request = TuningRequest(
+        inputs,
+        targets,
+        5,
+        4,
+        0.02,
+        seed=55,
+        microbatch_size=2,
+        restore_best_state=False,
+        epoch_loss_mode="legacy_training",
+    )
+    checkpoints = []
+
+    control_metrics = tune_factorized(control, "quant", request, _forward)
+
+    def checkpoint_sink(state):  # type: ignore[no-untyped-def]
+        checkpoints.append(state)
+        if state.completed_epochs == 2:
+            raise InterruptedError("injected legacy epoch interruption")
+
+    with pytest.raises(InterruptedError, match="legacy epoch interruption"):
+        tune_factorized(
+            interrupted,
+            "quant",
+            request,
+            _forward,
+            checkpoint_sink=checkpoint_sink,
+        )
+
+    checkpoint = checkpoints[-1]
+    assert checkpoint.epoch_losses[0] is None
+    assert checkpoint.best_parameter_values == ()
+    restarted = deepcopy(initial)
+    resumed_metrics = tune_factorized(
+        restarted,
+        "quant",
+        request,
+        _forward,
+        resume=checkpoint,
+    )
+
+    assert resumed_metrics == control_metrics
+    assert resumed_metrics.before is None
     for control_parameter, resumed_parameter in zip(
         control.parameters(), restarted.parameters(), strict=True
     ):

@@ -456,7 +456,7 @@ class LossMetrics:
 
 @dataclass(frozen=True, slots=True)
 class TuningMetrics:
-    before: LossMetrics
+    before: LossMetrics | None
     best: LossMetrics
     final: LossMetrics
     epochs_completed: int
