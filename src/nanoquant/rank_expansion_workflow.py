@@ -8,7 +8,7 @@ import json
 import math
 import os
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, cast
@@ -443,9 +443,15 @@ def _verify_derivative(
     return exact_non_target, exact_prefixes
 
 
-def execute_rank_expansion(request: RankExpansionRequest) -> dict[str, Any]:
+def execute_rank_expansion(
+    request: RankExpansionRequest,
+    *,
+    safe_point: Callable[[], None] | None = None,
+) -> dict[str, Any]:
     """Create a resumable packed derivative with additive rank only on one layer family."""
 
+    if safe_point is not None:
+        safe_point()
     source_packed = open_packed_artifact(request.source_packed, verify_hashes=True)
     identity = _work_identity(request, source_packed)
     if request.output_packed.exists() or request.report_output.exists():
@@ -509,6 +515,8 @@ def execute_rank_expansion(request: RankExpansionRequest) -> dict[str, Any]:
         gc.collect()
         if torch.cuda.is_available() and request.device.startswith("cuda"):
             torch.cuda.empty_cache()
+        if safe_point is not None:
+            safe_point()
 
     def output_blocks() -> Iterator[tuple[int, list[PackedLayerState]]]:
         for block in source_packed.manifest.blocks:
@@ -565,6 +573,8 @@ def execute_rank_expansion(request: RankExpansionRequest) -> dict[str, Any]:
         "layers": rows,
     }
     atomic_write_json(request.report_output, report)
+    if safe_point is not None:
+        safe_point()
     return report
 
 

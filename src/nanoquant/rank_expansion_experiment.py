@@ -14,6 +14,8 @@ from huggingface_hub import snapshot_download
 from nanoquant.config.codec import config_hash, to_dict
 from nanoquant.config.schema import RunConfig
 from nanoquant.config.validation import ValidationPhase, raise_for_issues, validate
+from nanoquant.infrastructure.device_lease import acquire_device_lease
+from nanoquant.infrastructure.device_memory import SharedDeviceMemoryMonitor
 from nanoquant.infrastructure.gguf_export import export_llamacpp_gguf
 from nanoquant.infrastructure.io_utils import atomic_write_json, atomic_write_text
 from nanoquant.infrastructure.publication import (
@@ -149,29 +151,33 @@ def run_rank_expansion_experiment(
     maximum_shared_bytes = int(resolved.maximum_wddm_shared_gib * 2**30)
     wall_started = time.perf_counter()
     expansion_started = time.perf_counter()
-    expansion = execute_rank_expansion(
-        RankExpansionRequest(
-            parent_run=resolved.parent_run,
-            source_packed=resolved.source_packed,
-            snapshot=snapshot,
-            output_packed=resolved.output_packed,
-            report_output=resolved.expansion_report,
-            source=config.model.source,
-            revision=str(config.model.revision),
-            expected_blocks=resolved.expected_blocks,
-            layer_suffix=resolved.layer_suffix,
-            bit_multiplier=resolved.bit_multiplier,
-            rank_multiple=config.allocation.bounds.multiple,
-            device=config.runtime.compute_device,
-            seed=config.reproducibility.seed,
-            outer_iterations=config.factorization.admm.outer_iterations,
-            inner_iterations=config.factorization.admm.inner_iterations,
-            regularization=config.factorization.admm.regularization,
-            penalty_schedule=config.factorization.admm.penalty_schedule,
-            convergence_check_interval=config.factorization.admm.convergence_check_interval,
-            early_stop_tolerance=config.factorization.admm.early_stop_tolerance,
+    with acquire_device_lease(config.runtime.compute_device), SharedDeviceMemoryMonitor(
+        maximum_shared_bytes
+    ) as expansion_monitor:
+        expansion = execute_rank_expansion(
+            RankExpansionRequest(
+                parent_run=resolved.parent_run,
+                source_packed=resolved.source_packed,
+                snapshot=snapshot,
+                output_packed=resolved.output_packed,
+                report_output=resolved.expansion_report,
+                source=config.model.source,
+                revision=str(config.model.revision),
+                expected_blocks=resolved.expected_blocks,
+                layer_suffix=resolved.layer_suffix,
+                bit_multiplier=resolved.bit_multiplier,
+                rank_multiple=config.allocation.bounds.multiple,
+                device=config.runtime.compute_device,
+                seed=config.reproducibility.seed,
+                outer_iterations=config.factorization.admm.outer_iterations,
+                inner_iterations=config.factorization.admm.inner_iterations,
+                regularization=config.factorization.admm.regularization,
+                penalty_schedule=config.factorization.admm.penalty_schedule,
+                convergence_check_interval=config.factorization.admm.convergence_check_interval,
+                early_stop_tolerance=config.factorization.admm.early_stop_tolerance,
+            ),
+            safe_point=expansion_monitor.check,
         )
-    )
     expansion_seconds = time.perf_counter() - expansion_started
     export_started = time.perf_counter()
     gguf = export_llamacpp_gguf(
