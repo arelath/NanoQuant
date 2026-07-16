@@ -157,6 +157,7 @@ def test_compression_benchmark_executes_export_before_shared_quality_comparison(
         "boolq",
     )
     assert requests[0].task_limit == 200
+    assert requests[0].packed_artifact == resolved.export.packed_output
     assert payload["experiment"]["comparison_labels"] == {
         "base": "bf16",
         "frozen": "nanoquant",

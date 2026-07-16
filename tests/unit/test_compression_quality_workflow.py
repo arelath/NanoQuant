@@ -78,17 +78,18 @@ def test_compression_quality_exports_and_publishes_gguf_before_quality(
         tmp_path / "export-summary.json",
     )
     calls: list[str] = []
+    quality_requests = []
     monkeypatch.setattr(
         workflow,
         "execute_complete_compression",
         lambda *_args, **_kwargs: calls.append("complete") or CompleteCompressionResult(resident, export),
     )
-    monkeypatch.setattr(
-        workflow,
-        "execute_quality_evaluation",
-        lambda *_args: calls.append("quality")
-        or {"passed": True, "comparison": {}, "resource_limits": {}},
-    )
+    def evaluate(request):  # type: ignore[no-untyped-def]
+        calls.append("quality")
+        quality_requests.append(request)
+        return {"passed": True, "comparison": {}, "resource_limits": {}}
+
+    monkeypatch.setattr(workflow, "execute_quality_evaluation", evaluate)
     monkeypatch.setattr(workflow, "render_quality_evaluation_markdown", lambda _payload: "# quality\n")
     published = []
     monkeypatch.setattr(
@@ -104,6 +105,7 @@ def test_compression_quality_exports_and_publishes_gguf_before_quality(
     )
 
     assert calls == ["complete", "quality"]
+    assert quality_requests[0].packed_artifact == tmp_path / "repo" / "outputs/003-gemma-3-4b-it/packed"
     assert payload["exports"]["gguf"]["output"] == str(gguf)
     assert payload["exports"]["mmproj"]["output"] == str(mmproj)
     assert published[0][1] == 3

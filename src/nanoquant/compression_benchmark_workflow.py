@@ -129,6 +129,7 @@ def execute_compression_benchmark_experiment(
             task_limit=experiment.task_limit,
             task_batch_size=experiment.task_batch_size,
             local_files_only=experiment.local_files_only,
+            packed_artifact=resolved.export.packed_output,
         )
     )
     publication_directory = repository_root / "Results" / f"{experiment_number:03d}"

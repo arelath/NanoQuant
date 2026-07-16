@@ -145,6 +145,7 @@ def execute_compression_quality_experiment(
             task_batch_size=experiment.task_batch_size,
             local_files_only=experiment.local_files_only,
             maximum_wddm_shared_bytes=maximum_shared_bytes,
+            packed_artifact=_repository_path(experiment.export.packed_output, repository_root),
         )
     )
     quality_seconds = time.perf_counter() - quality_started
