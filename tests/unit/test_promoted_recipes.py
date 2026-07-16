@@ -116,4 +116,5 @@ def test_promoted_compression_runfiles_import_the_canonical_recipe_objects() -> 
         "002-benchmark-gemma-3-1b-it.py",
         "003-compress-and-benchmark-gemma-3-4b-it.py",
         "004-gemma-3-4b-it-vproj-plus30.py",
+        "005-gemma-3-4b-it-vproj-double-request.py",
     ]

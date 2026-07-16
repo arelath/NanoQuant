@@ -39,6 +39,15 @@ def test_target_rank_meets_requested_packed_bit_multiplier() -> None:
     assert target_bits >= old_bits * 1.30
 
 
+def test_target_rank_saturates_when_requested_multiplier_exceeds_physical_cap() -> None:
+    state = pack_logical_layer(_logical("blocks.0.self_attn.v_proj", 96, seed=5))
+
+    target, old_bits, target_bits = _target_rank(state, 2.0, 32)
+
+    assert target == 128
+    assert target_bits < old_bits * 2.0
+
+
 def test_derivative_verification_requires_exact_non_target_and_target_prefixes(tmp_path: Path) -> None:
     model = RuntimeModelMetadata("fixture/model", "revision", "gemma3", "config", "tokenizer")
     old_v = _logical("blocks.0.self_attn.v_proj", 32, seed=2)
