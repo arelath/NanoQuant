@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 import torch
 from recipes import EXPERIMENT_003, EXPERIMENT_003_CONFIG
 
@@ -117,3 +119,27 @@ def test_compression_quality_exports_and_publishes_gguf_before_quality(
         mmproj,
         mmproj.with_suffix(".gguf.export.json"),
     ]
+
+
+def test_large_model_guard_rejects_resident_recipe_before_compression(
+    tmp_path: Path,
+) -> None:
+    inputs = ResolvedResidentInputs(
+        snapshot=tmp_path / "snapshot",
+        output=tmp_path / "run",
+        registry_root=tmp_path / "registry",
+        token_ids=torch.zeros((1, 8), dtype=torch.long),
+        quality_token_ids=None,
+        launcher_path=tmp_path / "experiments/003.py",
+        pad_token_id=0,
+    )
+    resolved = ResolvedCompressionQualityExperiment(
+        inputs,
+        tmp_path / "summary.json",
+        tmp_path / "quality.json",
+        tmp_path / "quality.md",
+    )
+    guarded = replace(EXPERIMENT_003, large_model_guards=True)
+
+    with pytest.raises(ValueError, match="cpu_offload or streaming"):
+        execute_compression_quality_experiment(EXPERIMENT_003_CONFIG, guarded, resolved)

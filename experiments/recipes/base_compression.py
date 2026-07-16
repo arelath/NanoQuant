@@ -4,6 +4,7 @@ from pathlib import Path
 
 from nanoquant.compression_export_workflow import CompressionExportRecipe
 from nanoquant.config.schema import (
+    ActivationGpuCacheMode,
     AllocationStrategy,
     DatasetSourceConfig,
     ExecutorKind,
@@ -133,6 +134,34 @@ BASE_COMPRESSION_CONFIG = config_delta(
 )
 
 
+LARGE_MODEL_COMPRESSION_CONFIG = config_delta(
+    BASE_COMPRESSION_CONFIG,
+    intent=config_delta(
+        BASE_COMPRESSION_CONFIG.intent,
+        name="base-large-model-compression",
+        purpose="Compress and evaluate a model that cannot safely keep its BF16 shell on CUDA.",
+        hypothesis="Host-resident source blocks and bounded activation caching keep device use block-local.",
+        tags=("base-compression", "large-model", "cpu-offload", "packed-quality"),
+    ),
+    distillation=config_delta(
+        BASE_COMPRESSION_CONFIG.distillation,
+        enabled=False,
+    ),
+    runtime=config_delta(
+        BASE_COMPRESSION_CONFIG.runtime,
+        executor=ExecutorKind.CPU_OFFLOAD,
+        activations=config_delta(
+            BASE_COMPRESSION_CONFIG.runtime.activations,
+            gpu_cache=ActivationGpuCacheMode.AUTO,
+        ),
+    ),
+    evaluation=config_delta(
+        BASE_COMPRESSION_CONFIG.evaluation,
+        inline_quality=False,
+    ),
+)
+
+
 def compression_export_recipe(
     experiment_number: int,
     model_slug: str,
@@ -157,4 +186,9 @@ def compression_export_recipe(
     )
 
 
-__all__ = ["BASE_COMPRESSION_CONFIG", "MODEL_REVISION", "compression_export_recipe"]
+__all__ = [
+    "BASE_COMPRESSION_CONFIG",
+    "LARGE_MODEL_COMPRESSION_CONFIG",
+    "MODEL_REVISION",
+    "compression_export_recipe",
+]

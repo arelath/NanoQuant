@@ -52,6 +52,7 @@ class CompressionQualityExperiment:
     maximum_wddm_shared_gib: float | None = None
     restore_completed_blocks: bool = True
     quality_backend: str = "factorized"
+    large_model_guards: bool = False
 
     def __post_init__(self) -> None:
         if self.expected_blocks <= 0:
@@ -66,6 +67,8 @@ class CompressionQualityExperiment:
             raise ValueError("maximum WDDM shared memory must be finite and non-negative")
         if self.quality_backend not in {"factorized", "dense"}:
             raise ValueError("quality backend must be factorized or dense")
+        if self.large_model_guards and self.restore_completed_blocks:
+            raise ValueError("large-model quality experiments must disable completed-block restoration")
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,6 +105,14 @@ def execute_compression_quality_experiment(
     resolved: ResolvedCompressionQualityExperiment,
 ) -> dict[str, Any]:
     """Compress the pinned model, then compare BF16 and frozen quality."""
+
+    if experiment.large_model_guards:
+        if config.runtime.executor not in {ExecutorKind.CPU_OFFLOAD, ExecutorKind.STREAMING}:
+            raise ValueError("large-model compression requires cpu_offload or streaming execution")
+        if config.evaluation.inline_quality:
+            raise ValueError("large-model compression requires inline quality to be disabled")
+        if config.distillation.enabled:
+            raise ValueError("large-model compression requires distillation to remain disabled until teacher streaming")
 
     wall_started = time.perf_counter()
     compression_started = time.perf_counter()
@@ -146,7 +157,10 @@ def execute_compression_quality_experiment(
             local_files_only=experiment.local_files_only,
             maximum_wddm_shared_bytes=maximum_shared_bytes,
             packed_artifact=_repository_path(experiment.export.packed_output, repository_root),
-            stream_base_model=config.runtime.executor in {ExecutorKind.CPU_OFFLOAD, ExecutorKind.STREAMING},
+            stream_base_model=(
+                experiment.large_model_guards
+                or config.runtime.executor in {ExecutorKind.CPU_OFFLOAD, ExecutorKind.STREAMING}
+            ),
         )
     )
     quality_seconds = time.perf_counter() - quality_started

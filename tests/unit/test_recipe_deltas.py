@@ -10,6 +10,7 @@ from recipes import (
     EXPERIMENT_005_CONFIG,
     EXPERIMENT_006_CONFIG,
     EXPERIMENT_007_CONFIG,
+    LARGE_MODEL_COMPRESSION_CONFIG,
 )
 from recipes._delta import config_delta, run_config_defaults
 from recipes.legacy import (
@@ -45,9 +46,19 @@ def test_run_config_defaults_contains_only_the_required_model_source() -> None:
     assert defaults.runtime.compute_device == "cuda:0"
 
 
+def test_large_model_base_recipe_pins_bounded_memory_guards() -> None:
+    config = LARGE_MODEL_COMPRESSION_CONFIG
+
+    assert config.runtime.executor.value == "cpu_offload"
+    assert config.runtime.activations.gpu_cache.value == "auto"
+    assert not config.evaluation.inline_quality
+    assert not config.distillation.enabled
+
+
 def test_derived_recipe_hashes_are_unchanged_by_delta_only_sources() -> None:
     expected = {
         "base": "sha256:70649cdf490c4669deb3fde28820b4d2e964fc9d09f1237b935488a1c2f07d4c",
+        "large": "sha256:73ccd5149f6a07fb5874b34cf251a65b32383b0826c4c0a8562305c41548d325",
         "001": "sha256:e4c71a1e4977477bdd6a835783c8de27f867ab3941169efb139bd6e14126e3ee",
         "002": "sha256:edf87371018dd3b9d2c91d85a853d9571cdc62b18b444ba68d236e4795561f6f",
         "003": "sha256:c5bb6251a490a575ced7ad12bde112561e56b65cf71de86ea7ede2248ee42c6a",
@@ -63,6 +74,7 @@ def test_derived_recipe_hashes_are_unchanged_by_delta_only_sources() -> None:
     }
     configs = {
         "base": BASE_COMPRESSION_CONFIG,
+        "large": LARGE_MODEL_COMPRESSION_CONFIG,
         "001": EXPERIMENT_001_CONFIG,
         "002": EXPERIMENT_002_CONFIG,
         "003": EXPERIMENT_003_CONFIG,

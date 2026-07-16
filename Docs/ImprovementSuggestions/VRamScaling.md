@@ -83,9 +83,15 @@ The separate quality stage currently loads the full reconstructed model through 
 1. [x] **Evaluate through the packed runtime.** A 1–2 bpw packed 7B is ~1.5–3 GiB and the packed backend already matches the logical backend exactly; the 1B packed model peaked at ~0.8 GiB during benchmarking. This also evaluates the artifact you actually ship. Complete compression workflows now pass their newly exported packed artifact to the quality evaluator by default.
 2. [x] **Block-streamed BF16 baseline:** for `cpu_offload`/`streaming` recipes, keep the source shell in pageable host RAM, move one decoder block at a time through the exact Transformers forward metadata, and move only the final norm/head for the suffix. The NanoQuant candidate still uses option 1, so neither side requires a full dense CUDA model. CPU fixture logits are exact against the resident forward; a real CUDA peak comparison remains part of the first large-model canary.
 
-### R5. [ ] Keep the v30 guards as defaults for ≥7B recipes
+### R5. [x] Keep the v30 guards as defaults for ≥7B recipes
 
 `restore_completed_blocks=False`, inline quality disabled, streamed block loss, compact replay, pinned-cache release per block — all already exist; make the base recipe for larger models pin them explicitly so a future recipe cannot silently regress residency.
+
+Implemented as `LARGE_MODEL_COMPRESSION_CONFIG`: it pins `cpu_offload`, automatic reserve-gated activation caching,
+disabled inline quality, and disabled global KD until teacher streaming exists. Large-model quality experiment definitions
+must opt into `large_model_guards` and disable completed-block restoration; workflow startup then rejects resident
+execution, inline quality, unstreamed KD, or restored completed blocks before loading the model. The common block loop
+already provides streamed loss snapshots and per-block pinned-cache release, while R4 supplies packed/streamed quality.
 
 ## 4. Recommendation for 21B: finish the streaming executor
 
@@ -99,8 +105,8 @@ The actual remaining work:
 2. [ ] **M5.9 source-block prefetch:** overlap the ~45 ms per-block shard read (0.85 GiB at NVMe speeds) with the previous block's compute. Cheap once leases exist; measure before keeping, per the task's own wording.
 3. [ ] **Activation tier at 21B:** two streams at ~6 GiB each (hidden ~6144) still fit pageable RAM on a 64 GiB host; the mmap tier is the pressure valve, and the planner's `auto` logic already picks it. Budget NVMe accordingly (source ~40 GiB + activations ~12 GiB + packed output).
 4. [ ] **Hessian policy:** dense fp32 at a ~16–20k intermediate width is 1.0–1.6 GiB — allowed under the existing `HES001` workspace reservation one layer at a time, or drop to `low_rank_diagonal` for the widest layers. Both paths exist; the recipe just has to choose per layer width.
-5. [ ] **Global distillation:** the top-k teacher cache is already disk-backed, but *producing* a teacher epoch means full-model teacher forwards. Either run the teacher pass block-streamed through the same executor (writing top-k targets to the existing cache), or disable global KD for the first 21B recipe — the [Docs/04 70B plan example](../04-execution-and-scaling.md) already anticipates "Global KD: disabled by recipe".
-6. [ ] **Evaluation:** dense replay is out of the question at 21B; the packed runtime (~2.6–5 GiB at 1–2 bpw) is the only realistic quality/benchmark path. Make R4 option 1 the default before starting 21B work.
+5. [x] **Global distillation:** the top-k teacher cache is already disk-backed, but *producing* a teacher epoch means full-model teacher forwards. The first large-model base recipe now explicitly disables global KD; block-streamed teacher production remains a future feature, not a prerequisite for the initial 21B canary.
+6. [x] **Evaluation:** dense replay is out of the question at 21B; complete compression workflows evaluate the packed runtime (~2.6–5 GiB at 1–2 bpw), and large-model recipes stream the BF16 baseline one block at a time through R4.
 7. [ ] **Close the gates:** M10.11 resident-versus-streaming equivalence report on a small model (this is also the cheapest way to trust streaming for 7B/21B), then the M10.12 large-model canary with bounded memory, interruption, and resume.
 
 M5.11 (streamed forward/backward calibration for Fisher statistics) can stay open: forward-only calibration is implemented and is what current recipes use.
