@@ -89,3 +89,34 @@ def atomic_write_json(
             temporary.unlink()
         except FileNotFoundError:
             pass
+
+
+def atomic_write_text(
+    path: str | Path,
+    text: str,
+    *,
+    suppress_replace_errors: bool = False,
+) -> bool:
+    """Write UTF-8 text durably beside its destination and atomically publish it."""
+
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{destination.name}-", suffix=".tmp", dir=destination.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as output:
+            output.write(text)
+            output.flush()
+            os.fsync(output.fileno())
+        return safe_replace(
+            temporary,
+            destination,
+            suppress_errors=suppress_replace_errors,
+        )
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass

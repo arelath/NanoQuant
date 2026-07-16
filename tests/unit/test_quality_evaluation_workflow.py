@@ -13,6 +13,7 @@ from nanoquant.quality_evaluation import QualityEvaluationRequest
 from nanoquant.quality_evaluation_workflow import (
     QualityEvaluationExperiment,
     execute_quality_evaluation_experiment,
+    render_quality_evaluation_markdown,
     resolve_quality_evaluation_experiment,
 )
 from nanoquant.recipes import (
@@ -65,6 +66,9 @@ def test_experiment002_uses_the_full_common_quality_protocol() -> None:
     assert request.task_batch_size == 1
     assert request.backend == "factorized"
     assert request.use_global_tuning
+    assert EXPERIMENT_002_EVALUATION.markdown_path == Path(
+        "evidence/m9/002-gemma-3-1b-it-quality-benchmark.md"
+    )
 
 
 def test_002_benchmark_runfile_imports_canonical_recipe_objects() -> None:
@@ -100,6 +104,15 @@ def test_quality_experiment_resolution_is_pinned_and_repository_relative(
     )
     assert resolved.result_path == tmp_path / "repo" / "evidence/m9/003-gemma-3-1b-it-quality.json"
 
+    full = resolve_quality_evaluation_experiment(
+        EXPERIMENT_002_CONFIG,
+        EXPERIMENT_002_EVALUATION,
+        launcher_path=launcher,
+    )
+    assert full.markdown_path == (
+        tmp_path / "repo" / "evidence/m9/002-gemma-3-1b-it-quality-benchmark.md"
+    )
+
 
 def test_quality_workflow_records_config_and_launcher_provenance(
     tmp_path: Path,
@@ -129,3 +142,83 @@ def test_quality_workflow_records_config_and_launcher_provenance(
         "003-evaluate-gemma-3-1b-it-quality"
     )
     assert json.loads(output.read_text(encoding="utf-8")) == payload
+
+
+def _quality_result() -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "passed": True,
+        "model": {"source": "fixture/model", "revision": "revision", "snapshot": "snapshot"},
+        "candidate": {
+            "run_output": "run",
+            "commit_identity": {"config_hash": "config", "model_hash": "model", "plan_hash": "plan"},
+            "global_tuning": None,
+            "backend": "factorized",
+        },
+        "protocol": {
+            "wikitext_samples": 64,
+            "wikitext_sequence_length": 128,
+            "wikitext_batch_size": 1,
+            "wikitext_token_hash": "sha256:tokens",
+            "task_names": ("piqa",),
+            "task_limit": 200,
+            "task_batch_size": 1,
+            "tokenizer_hash": "sha256:tokenizer",
+        },
+        "results": {
+            "base": {
+                "elapsed_seconds": 2.0,
+                "peak_device_bytes": 100,
+                "peak_host_bytes": 200,
+            },
+            "frozen": {
+                "elapsed_seconds": 3.0,
+                "peak_device_bytes": 110,
+                "peak_host_bytes": 220,
+            },
+        },
+        "comparison": {
+            "wikitext": {
+                "base_perplexity": 10.0,
+                "frozen_perplexity": 12.5,
+                "ratio": 1.25,
+                "relative_change": 0.25,
+            },
+            "tasks": [
+                {
+                    "task_name": "piqa",
+                    "metric": "acc_norm",
+                    "base": 0.75,
+                    "frozen": 0.70,
+                    "delta": -0.05,
+                    "ratio": 0.7 / 0.75,
+                }
+            ],
+        },
+        "wall_seconds": 5.5,
+    }
+
+
+def test_quality_workflow_writes_deterministic_markdown(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "result.json"
+    markdown = tmp_path / "result.md"
+    launcher = tmp_path / "002-quality.py"
+    launcher.write_text("# provenance fixture\n", encoding="utf-8")
+    request = QualityEvaluationRequest(tmp_path, "model", "revision", tmp_path / "run")
+    experiment = QualityEvaluationExperiment(request, output, markdown_path=markdown)
+    monkeypatch.setattr(workflow, "execute_quality_evaluation", lambda _request: _quality_result())
+
+    payload = execute_quality_evaluation_experiment(
+        EXPERIMENT_002_CONFIG,
+        experiment,
+        launcher_path=launcher,
+    )
+
+    rendered = markdown.read_text(encoding="utf-8")
+    assert rendered == render_quality_evaluation_markdown(payload)
+    assert "| WikiText-2 | perplexity ↓ | 10.000000 | 12.500000 | +2.500000 (+25.00%) | 1.2500x |" in rendered
+    assert "| piqa | acc_norm ↑ | 0.7500 | 0.7000 | -0.0500 | 0.9333x |" in rendered
+    assert "`completed` means all evaluators returned finite metrics" in rendered

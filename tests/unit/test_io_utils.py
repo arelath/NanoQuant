@@ -3,7 +3,12 @@ from pathlib import Path
 
 import pytest
 
-from nanoquant.infrastructure.io_utils import atomic_write_json, hash_file, safe_replace
+from nanoquant.infrastructure.io_utils import (
+    atomic_write_json,
+    atomic_write_text,
+    hash_file,
+    safe_replace,
+)
 
 
 def test_hash_file_and_atomic_json_write_are_deterministic(tmp_path: Path) -> None:
@@ -16,6 +21,15 @@ def test_hash_file_and_atomic_json_write_are_deterministic(tmp_path: Path) -> No
     assert json.loads(destination.read_text(encoding="utf-8")) == {"name": "fixture", "value": 3}
     assert hash_file(content) == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
     assert not tuple(tmp_path.glob(".state.json-*.tmp"))
+
+
+def test_atomic_text_write_uses_utf8_and_leaves_no_temporary_file(tmp_path: Path) -> None:
+    destination = tmp_path / "report.md"
+
+    assert atomic_write_text(destination, "# Résult\n") is True
+
+    assert destination.read_bytes() == "# Résult\n".encode()
+    assert not tuple(tmp_path.glob(".report.md-*.tmp"))
 
 
 def test_safe_replace_retries_permission_errors(monkeypatch: pytest.MonkeyPatch) -> None:

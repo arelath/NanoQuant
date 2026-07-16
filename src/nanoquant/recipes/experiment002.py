@@ -71,6 +71,7 @@ EXPERIMENT_002_EVALUATION = QualityEvaluationExperiment(
     ),
     Path("evidence/m9/002-gemma-3-1b-it-quality-benchmark.json"),
     resolve_model_from_config=True,
+    markdown_path=Path("evidence/m9/002-gemma-3-1b-it-quality-benchmark.md"),
 )
 
 __all__ = ["EXPERIMENT_002_CONFIG", "EXPERIMENT_002_EVALUATION", "MODEL_REVISION"]

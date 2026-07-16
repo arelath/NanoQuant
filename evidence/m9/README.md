@@ -6,6 +6,8 @@
 chronology was reset. It compares the pinned BF16 source model with the accepted v28 NanoQuant candidate over the
 same common dimensions as legacy Experiment 007: 64 WikiText-2 windows of 128 tokens and the first 200 zero-shot
 examples from PIQA, ARC Easy, ARC Challenge, HellaSwag, WinoGrande, and BoolQ. Model lifetimes are sequential.
+`002-gemma-3-1b-it-quality-benchmark.md` is the human-readable report generated from the same retained payload;
+future Experiment 002 runs write both files directly.
 
 | Metric | BF16 | NanoQuant | Delta |
 | --- | ---: | ---: | ---: |
