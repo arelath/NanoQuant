@@ -58,12 +58,25 @@ length, and dense replay backend. Their BF16 results were identical.
 
 Peak WDDM shared memory was 220,200,960 bytes, below the 805,306,368-byte limit.
 
+## Corrected interpretation
+
+Like Experiment 004, this is a post-KD derivative rather than a full pipeline run. The new maximum-rank factors never
+participate in layer/block tuning, post-block refit, or global distillation. Its quality result therefore measures an
+untuned correction applied after the downstream parameters were optimized for the original rank allocation.
+
+The task comparison does not provide statistically persuasive evidence against the change. Exact paired McNemar
+tests on the retained 200-example predictions give two-sided p-values of 0.607 (PIQA), 0.359 (ARC Easy), 0.629
+(ARC Challenge), 0.664 (HellaSwag), 0.164 (Winogrande), and 1.000 (BoolQ). These are descriptive checks without a
+multiple-comparison adjustment, but none rejects equality even before adjustment. The WikiText artifact does not
+retain per-window losses, so the uncertainty of its 2.11% aggregate perplexity change cannot be evaluated post hoc.
+
 ## Decision
 
-Reject uniform additive `v_proj` expansion for the base recipe. The maximum representable expansion strengthens the
-negative result: it lowers local reconstruction error more than Experiment 004, yet degrades held-out perplexity
-more severely and does not improve the task aggregate.
+Do not use Experiment 005 to reject `v_proj` reallocation. The maximum-rank derivative strengthens the positive
+reconstruction signal: all 34 layers improve and aggregate weighted error falls by 34.83%. It also establishes that a
+literal 2x allocation is impossible in the existing format; rank 1024 yields only 1.4162x aggregate `v_proj` bits.
 
-Future allocation experiments should optimize a downstream block/model loss reduction per stored byte, use held-out
-selection, and keep total BPW fixed by trading bytes between layer families. Local weight reconstruction error is not
-a sufficient allocation utility for this final globally tuned model.
+The decisive test is a full run in which the new ranks are present before layer/block tuning and global KD. Experiment
+004's +30% setting is the more storage-efficient first full-run candidate; the maximum-rank setting remains a useful
+upper bound. Promotion to the base recipe should depend on that fully retuned comparison, with realized model size
+reported alongside quality.

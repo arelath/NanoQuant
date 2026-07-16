@@ -66,12 +66,26 @@ length, and dense replay backend. Their BF16 results were also identical.
 
 Peak WDDM shared memory was 220,200,960 bytes, below the 805,306,368-byte fail-fast limit.
 
+## Corrected interpretation
+
+This derivative is not sufficient evidence to reject the allocation change. It modifies the final post-KD artifact:
+the added factors never participate in the original per-layer tuning, post-block refit, or global distillation, and
+the retained KD-tuned scales/outliers/norms were optimized for the lower-rank model. The quality comparison therefore
+measures an untuned overlay on a stale downstream optimum, not the result of applying the allocation policy at the
+start of the full pipeline.
+
+The reconstruction result is a strong positive signal. It improves every target layer, lowers the aggregate weighted
+error by 28.23%, and costs only 0.8795% more packed decoder storage. That is enough to carry the +30% allocation
+forward as a promising full-run candidate.
+
+The task deltas should also not be treated as a definitive rejection gate. The protocol contains only 200 examples
+per task and performs several simultaneous comparisons. It is useful for detecting large regressions, but these small
+mixed changes do not establish the quality effect of a fully retuned model. The retained WikiText result contains
+only aggregate NLL, so a paired per-window uncertainty estimate cannot be reconstructed from this artifact.
+
 ## Decision
 
-Do not promote a uniform 30% additive `v_proj` allocation to the base recipe. It substantially improves the local
-weight objective but does not improve held-out perplexity or the task aggregate. This is evidence that
-per-layer reconstruction error alone is not a sufficient allocation utility for the final globally tuned model.
-
-The selective derivative mechanism remains useful for inexpensive allocation probes. A stronger next experiment
-should spend bits according to measured downstream loss reduction per byte (and ideally trade them from another
-layer family to keep total BPW fixed), rather than uniformly following reconstruction error.
+Do not reject `v_proj` expansion, and do not promote it as proven quality behavior yet. Run the allocation through
+the complete factorization → layer/block tuning → post-block refit → global KD sequence, then compare the fully tuned
+candidate against Experiment 003 on the same protocol. The full run must record the realized size increase separately
+from the quality result because this additive experiment does not keep total BPW fixed.
