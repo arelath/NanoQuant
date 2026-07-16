@@ -1,0 +1,30 @@
+I'll dig into the algorithm implementation now. First, let me get the lay of the codebase.
+
+Now the block tuning loop and calibration importance math — the two other big quality levers.
+
+The full picture is nearly complete. Let me verify one last thing — whether the richer Hessian objectives ever feed the factorizer, or only the metrics.
+
+## What the results show
+
+The m9 run is the legacy-parity smoke replay of Gemma 3 1B at **1.0 bpw** on the factorized (binary) backend. Quality degradation is severe but not surprising for that configuration: wikitext perplexity 94.8 → 396.6 (4.18×), piqa 0.72 → 0.64, boolq 0.76 → 0.60, and arc_easy 0.52 → 0.32 — essentially 4-choice chance. One caveat before optimizing against these numbers: the protocol uses 25 samples per task and 16×128 wikitext tokens, so anything under ~10 percentage points is noise. Worth raising `sample_limit` before A/B-ing changes.
+
+The algorithm itself (OneBit-style rank-r binary factorization via ADMM with SVID projection, per-vector fp16 scales, weighted alternating scale fit with rollback, then per-layer STE block tuning) is soundly implemented — [factorization.py](src/nanoquant/domain/factorization.py), [scale_fit.py](src/nanoquant/domain/scale_fit.py), [layers.py:30](src/nanoquant/application/layers.py:30). The gap is mostly in what this particular run *didn't* use, plus a few genuine code-level opportunities.
+
+## Findings from the code review
+
+**1. The rank-retry mechanism was a silent no-op in this run.** With `strategy: uniform`, [planning.py:102](src/nanoquant/application/planning.py:102) sets floor = cap = base_rank, and with `allow_above_allocator_cap: false` the retry hard cap becomes that same rank ([planning.py:232](src/nanoquant/application/planning.py:232)). `decide_retry` then always hits "rank cap reached" ([domain/planning.py:138](src/nanoquant/domain/planning.py:138)) — so despite `retry.enabled: true` and a 2% extra bit budget, no layer could ever retry at higher rank. Your new `BASE_COMPRESSION_CONFIG` avoids this (sensitivity strategy + `allow_above_allocator_cap=True`), but I've flagged a background task to add a validation warning for the dead combination.
+
+**2. The Hessian-aware objectives exist but are never wired into the factorizer.** [objectives.py](src/nanoquant/domain/objectives.py) has `DenseHessianObjective`, `BlockDiagonalObjective`, `LowRankDiagonalObjective`, plus `whiten`/`unwhiten` and covariance materialization in [covariance.py](src/nanoquant/application/covariance.py) — but `load_covariance_objective` and `transform_for_factorizer` have no callers in any stage. `factorize_admm` only ever sees diagonal importance vectors (rank-1 row/col scaling of the target, [factorization.py:192](src/nanoquant/domain/factorization.py:192)). **This is my top algorithmic recommendation at fixed size**: whiten the weight with the Cholesky factor of E[xxᵀ] before ADMM (GPTQ-style proxy loss instead of diagonal Fisher), factorize in whitened space, and unwhiten scale fitting accordingly. Off-diagonal input correlation is exactly what a diagonal objective misses, and at 1 bpw the reconstruction errors are large enough for it to matter. `low_rank_diagonal` gives you a cheap middle ground where the dense d×d matrix is too big.
+
+**3. Outliers can help at zero size cost — but only if charged to the budget.** This run had `selector: none`. The base recipe enables residual-probe outliers at 0.1%, but with `charge_to_bit_budget: False` — that *grows* the model. Flip it to `True` (the planner already handles this: rank funding shrinks to pay for outlier columns) so binary factorization stops burning rank on heavy-tailed columns while total bits stay exactly at target.
+
+## What to try, ranked by expected impact
+
+1. **Global distillation** — disabled in this run, enabled in the base recipe. Every 1-bit result in the literature (OneBit, BitNet-style) leans on KD as the single biggest lever; a 4× perplexity ratio without it is roughly the expected penalty.
+2. **Wire the whitened/Hessian objective into ADMM** (finding 2 above) — real algorithmic work, but the scaffolding already exists and it's the only untapped structural improvement to the reconstruction objective.
+3. **Better calibration data** — this run used wikitext2-only, 128 samples × 128 tokens (~16K tokens) for both Fisher estimation and block-tuning targets. The base recipe's 256 × 2048 mixed ultrachat+wikitext is a large step; more tokens per layer for the objective sampler (`max_tokens_per_layer: 4096` is very small) is cheap to raise.
+4. **Measured rank allocation** — uniform here; sensitivity in the base recipe still uses a crude scalar (mean input × mean output activation, [planning.py:119](src/nanoquant/application/planning.py:119)). The plumbing for `utility_profile` allocation exists — feed it measured per-layer weighted reconstruction error × activation energy (or leave-one-out perplexity deltas from a probe run). Moving rank from q/k toward down_proj/o_proj at fixed total bits is a well-established win.
+5. **Post-block refit + a joint block-level STE pass** — refit was off in this run (on in base). Currently `tune_factorized` tunes one layer at a time in `layer_order`; after the per-layer passes, a short joint pass over all factorized latents in the block against the block output would let layers co-adapt. Cheap to add — it's just a different parameter selector in [tuning.py:686](src/nanoquant/application/tuning.py:686).
+6. **Cheap knob sweeps** — scale-fit `alternating_passes` 2 → 4–8 (rollback-protected, pure upside), ADMM `outer_iterations` 800 → 1600 and the `logistic`/`exp_growth` penalty schedules (cubic keeps ρ near zero for the first ~400 iterations, so the binary constraint bites late), and retry thresholds tightened from 0.5 once retry can actually fire.
+
+Everything above holds the bit budget exactly at 1.0 bpw — items 1, 3, 5, 6 change no stored bytes at all; items 2 and 4 only redistribute the existing budget.
