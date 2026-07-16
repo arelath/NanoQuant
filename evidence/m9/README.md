@@ -1,6 +1,35 @@
 # Milestone 9 migration evidence
 
-## Experiment 002 paired short-decode migration
+## Active Experiment 002 full quality benchmark
+
+`002-gemma-3-1b-it-quality-benchmark.json` is the benchmark-only run requested after the active experiment
+chronology was reset. It compares the pinned BF16 source model with the accepted v28 NanoQuant candidate over the
+same common dimensions as legacy Experiment 007: 64 WikiText-2 windows of 128 tokens and the first 200 zero-shot
+examples from PIQA, ARC Easy, ARC Challenge, HellaSwag, WinoGrande, and BoolQ. Model lifetimes are sequential.
+
+| Metric | BF16 | NanoQuant | Delta |
+| --- | ---: | ---: | ---: |
+| WikiText-2 PPL | 96.9012 | 453.5710 | +368.08% |
+| PIQA `acc_norm` | 0.715 | 0.595 | -0.120 |
+| ARC Easy `acc_norm` | 0.625 | 0.380 | -0.245 |
+| ARC Challenge `acc_norm` | 0.400 | 0.225 | -0.175 |
+| HellaSwag `acc_norm` | 0.585 | 0.380 | -0.205 |
+| WinoGrande `acc` | 0.620 | 0.545 | -0.075 |
+| BoolQ `acc` | 0.810 | 0.555 | -0.255 |
+
+The quality loss versus BF16 is substantial and must not be hidden by the result's `passed` field, which means only
+that every evaluator completed with finite metrics. Against the matching legacy 007 phase-1/no-Hessian task row,
+the rewrite deltas are `+0.005`, `0.000`, `+0.020`, `-0.030`, `+0.015`, and `-0.025`; mean absolute delta is
+0.0158 and maximum absolute delta is 0.030. Exact serial PPL remains compared with the contemporary legacy run:
+453.5710 versus 444.3328 (+2.0791%). Thus the benchmark confirms old/new quantized quality parity while showing
+the large absolute cost of approximately 1 BPW relative to BF16.
+
+BF16 evaluation took 207.88 seconds and NanoQuant took 336.08 seconds, making the factorized evaluation path 61.7%
+slower. Peak allocated CUDA was 4,148,166,656 and 4,357,881,856 bytes respectively. Total wall time was 555.35
+seconds. The result is 1,883,677 bytes with SHA-256
+`88434096021b8733e91b1c7f116d39f5b3d508457d61fc7ada2af583ade5abac`.
+
+## Retained legacy Experiment 002 paired short-decode migration
 
 `002-gemma-3-1b-it-short-decode.json` is the canonical three-case migration of the historical original/eager/GEMV
 benchmark. It preserves the raw prompt, legacy non-special-token fill to 32 prompt tokens, 32 generated tokens,
