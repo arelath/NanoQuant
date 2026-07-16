@@ -56,6 +56,7 @@ from nanoquant.config.codec import canonical_json, from_dict, to_dict
 from nanoquant.config.schema import (
     ADMMConfig,
     AllocationStrategy,
+    ExecutorKind,
     LayerRankBudgetConfig,
     ObjectiveConfig,
     ObservabilityConfig,
@@ -237,6 +238,7 @@ class ResidentQuantizationRequest:
     revision: str
     token_ids: torch.Tensor | tuple[tuple[int, ...], ...]
     device: str = "cuda"
+    executor: ExecutorKind = ExecutorKind.RESIDENT
     target_bpw: float = 1.0
     rank_multiple: int = 32
     allocation_strategy: AllocationStrategy = AllocationStrategy.SENSITIVITY
@@ -404,6 +406,27 @@ def _clone_forward_metadata(metadata: dict[str, object]) -> dict[str, object]:
         return value
 
     return {key: clone(value) for key, value in metadata.items()}
+
+
+def _forward_metadata_to_device(metadata: dict[str, object], device: str) -> dict[str, object]:
+    """Move captured tensor metadata alongside one active offloaded block."""
+
+    def move(value: object) -> object:
+        if isinstance(value, torch.Tensor):
+            return value.to(device)
+        if isinstance(value, tuple):
+            return tuple(move(item) for item in value)
+        if isinstance(value, list):
+            return [move(item) for item in value]
+        if isinstance(value, dict):
+            return {key: move(item) for key, item in value.items()}
+        return value
+
+    return {key: move(value) for key, value in metadata.items()}
+
+
+def _model_placement_device(request: ResidentQuantizationRequest) -> str:
+    return "cpu" if request.executor is ExecutorKind.CPU_OFFLOAD else request.device
 
 
 def _block_loss(
@@ -1260,6 +1283,13 @@ def _run_resident_quantization(request: ResidentQuantizationRequest) -> Resident
 
 
 def _validate_resident_request(request: ResidentQuantizationRequest) -> None:
+    if request.executor not in {ExecutorKind.RESIDENT, ExecutorKind.CPU_OFFLOAD}:
+        raise ValueError(f"unsupported resident composition executor: {request.executor.value}")
+    if request.executor is ExecutorKind.CPU_OFFLOAD:
+        if request.restore_completed_blocks:
+            raise ValueError("cpu_offload requires restore_completed_blocks=False")
+        if request.evaluate_inline_quality:
+            raise ValueError("cpu_offload requires inline quality evaluation to be disabled")
     if request.block_forward_batch_size <= 0:
         raise ValueError("resident quantization block forward batch size must be positive")
     if request.factorized_tuning_epoch_cooldown_seconds < 0:
@@ -1389,19 +1419,22 @@ def _setup_resident_environment(
                 )
             )
         inventory = replace(inventory, blocks=tuple(reordered_blocks))
+    model_device = _model_placement_device(request)
     with recorder.phase("setup"):
         with recorder.phase("inputs"):
-            tokens = _token_tensor(request.token_ids, request.device)
+            tokens = _token_tensor(request.token_ids, model_device)
             quality_tokens = _token_tensor(
                 request.token_ids if request.quality_token_ids is None else request.quality_token_ids,
-                request.device,
+                model_device,
             )
     if request.device.startswith("cuda"):
         torch.cuda.reset_peak_memory_stats(request.device)
     with _logged_operation(
         events,
         "model_load",
-        device=request.device,
+        device=model_device,
+        compute_device=request.device,
+        executor=request.executor.value,
         dtype=str(_checkpoint_dtype(checkpoint.config)),
         attention_implementation=adapter.attention_implementation,
     ):
@@ -1411,7 +1444,7 @@ def _setup_resident_environment(
                     request.snapshot,
                     torch_dtype=_checkpoint_dtype(checkpoint.config),
                     attention_implementation=adapter.attention_implementation,
-                ).to(request.device)
+                ).to(model_device)
     model.eval()
     return _ResidentEnvironment(
         source,
@@ -1579,7 +1612,7 @@ def _process_resident_block(
     block_window = PeakWindow(request.device).start()
     deferred_slice = request.defer_layer_loss_snapshots
     block_index = block_plan.block.index
-    metadata = _clone_forward_metadata(captured_metadata)
+    metadata = _forward_metadata_to_device(_clone_forward_metadata(captured_metadata), request.device)
     events.emit(
         "resident-quantization",
         "info",

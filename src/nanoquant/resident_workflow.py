@@ -196,10 +196,21 @@ def _validate_supported_recipe(config: RunConfig) -> None:
         "the resident refit currently uses one learning rate",
     )
     _require(
-        config.runtime.executor in {ExecutorKind.AUTO, ExecutorKind.RESIDENT},
+        config.runtime.executor in {ExecutorKind.AUTO, ExecutorKind.RESIDENT, ExecutorKind.CPU_OFFLOAD},
         "runtime.executor",
-        "this composition root launches only the resident executor",
+        "this composition root supports resident and cpu_offload execution",
     )
+    if config.runtime.executor is ExecutorKind.CPU_OFFLOAD:
+        _require(
+            not config.evaluation.inline_quality,
+            "evaluation.inline_quality",
+            "cpu_offload requires inline quality to be disabled",
+        )
+        _require(
+            not config.distillation.enabled,
+            "distillation.enabled",
+            "cpu_offload requires model-level distillation to be disabled until teacher streaming is implemented",
+        )
     _require(
         config.runtime.resources == ResourceLimitsConfig(),
         "runtime.resources",
@@ -265,6 +276,11 @@ def resident_request_from_config(
         token_ids=inputs.token_ids,
         quality_token_ids=inputs.quality_token_ids if config.evaluation.inline_quality else None,
         device=config.runtime.compute_device,
+        executor=(
+            ExecutorKind.RESIDENT
+            if config.runtime.executor is ExecutorKind.AUTO
+            else config.runtime.executor
+        ),
         verify_hashes=config.runtime.source_streaming.verify_tensor_hashes,
         target_bpw=config.allocation.target_bpw,
         rank_multiple=config.allocation.bounds.multiple,

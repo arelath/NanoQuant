@@ -42,7 +42,7 @@ The measured allocator behavior shows up to ~5.5 GiB reserved-but-unallocated af
 Implemented as the package-process default while preserving an explicit operator `expandable_segments` choice and
 coexisting allocator options. The 4B sampler verification remains open in the rollout checklist below.
 
-### R2. [ ] Host-resident source blocks: implement the `cpu_offload` executor (the 7B enabler)
+### R2. [x] Host-resident source blocks: implement the `cpu_offload` executor (the 7B enabler)
 
 Today `cpu_offload` exists only as a schema enum ([schema.py:27](../../src/nanoquant/config/schema.py:27)), a name the resource planner accepts ([resource_planning.py:93](../../src/nanoquant/infrastructure/resource_planning.py:93)), and a calibration OOM fallback action. Implement it as the natural extension of the v30 partial-residency mechanics that already exist:
 
@@ -57,6 +57,13 @@ Today `cpu_offload` exists only as a schema enum ([schema.py:27](../../src/nanoq
 **Host RAM cost:** the shell moves to RAM (~14 GiB pageable) plus two activation streams (scaling by hidden width from the measured 1B streams, roughly ~4 GiB each for a 4096-hidden 7B). With the ~11–12 GiB working sets already measured, plan for a **48 GiB minimum, 64 GiB comfortable** host. The planner's existing host-limit margins and `RES001` refusal already express this.
 
 **Planner change:** teach `auto` the three-step ladder `resident → cpu_offload → streaming` (today it jumps straight from resident to streaming), with `peak_gpu` for `cpu_offload` computed as the streaming GPU formula plus the second block copy. The estimate-versus-measured `budget_utilization` loop from [Docs/17 §5.2](../17-vram-diagnostics.md) is the tool to calibrate these estimates on the first real 7B run.
+
+Implemented in the production resident composition: `cpu_offload` keeps the Hugging Face shell and calibration on
+pageable CPU, materializes each active source/working block on the compute device from safetensors, moves captured
+block metadata with it, and requires completed-block restoration and inline quality to remain disabled. Model-level
+KD is rejected until its teacher forward is streamed. The resource planner now uses the requested three-step ladder
+and accounts for the host shell plus a second active-block GPU copy. CPU tiny-model resident/offload execution is
+artifact- and metric-equivalent; the requested 4B CUDA memory/equivalence canary remains open below.
 
 ### R3. [ ] Spend the freed VRAM on the activation GPU cache (net speed win)
 

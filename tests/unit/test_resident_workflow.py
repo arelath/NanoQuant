@@ -11,7 +11,7 @@ from recipes.legacy.experiment018 import EXPERIMENT_018_CONFIG
 import nanoquant.resident_quantization as resident
 import nanoquant.resident_workflow as workflow
 from nanoquant.config.codec import from_dict
-from nanoquant.config.schema import DistillationLoss, RunConfig
+from nanoquant.config.schema import DistillationLoss, ExecutorKind, RunConfig
 from nanoquant.domain.runs import RunManifest, RunStatus
 from nanoquant.infrastructure.runs import (
     RunDirectory,
@@ -102,6 +102,38 @@ def test_resident_mapping_rejects_unimplemented_semantics(tmp_path: Path) -> Non
 
     with pytest.raises(ValueError, match="only top_k is implemented"):
         resident_request_from_config(unsupported, _inputs(tmp_path))
+
+
+def test_cpu_offload_mapping_requires_large_model_guards(tmp_path: Path) -> None:
+    base = _experiment018_config()
+    guarded = replace(
+        base,
+        runtime=replace(base.runtime, executor=ExecutorKind.CPU_OFFLOAD),
+        evaluation=replace(base.evaluation, inline_quality=False),
+        distillation=replace(base.distillation, enabled=False),
+    )
+
+    request = resident_request_from_config(
+        guarded,
+        _inputs(tmp_path),
+        ResidentExecutionOptions(restore_completed_blocks=False),
+    )
+
+    assert request.executor is ExecutorKind.CPU_OFFLOAD
+    assert not request.restore_completed_blocks
+    assert not request.evaluate_inline_quality
+    with pytest.raises(ValueError, match="inline quality"):
+        resident_request_from_config(
+            replace(guarded, evaluation=base.evaluation),
+            _inputs(tmp_path),
+            ResidentExecutionOptions(restore_completed_blocks=False),
+        )
+    with pytest.raises(ValueError, match="distillation"):
+        resident_request_from_config(
+            replace(guarded, distillation=base.distillation),
+            _inputs(tmp_path),
+            ResidentExecutionOptions(restore_completed_blocks=False),
+        )
 
 
 def test_combined_workflow_runs_quantization_before_distillation(

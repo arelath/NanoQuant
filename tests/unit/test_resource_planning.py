@@ -64,3 +64,26 @@ def test_explicit_cuda_activation_tier_is_included_in_peak() -> None:
         HostInventory(64 * mib, 64 * mib, 64 * mib),
     )
     assert plan.peak_gpu_bytes == 20 * mib
+
+
+def test_auto_uses_cpu_offload_between_resident_and_streaming() -> None:
+    mib = 1024**2
+    plan = build_resource_plan(
+        ResourcePlanningRequest(_components(), margins=ResourceMargins(0, 0, 0)),
+        HostInventory(64 * mib, 4 * mib, 64 * mib),
+    )
+
+    assert plan.executor == "cpu_offload"
+    assert plan.peak_gpu_bytes == 3 * mib
+    assert plan.peak_host_bytes == 20 * mib
+
+
+def test_auto_skips_cpu_offload_when_source_shell_does_not_fit_host() -> None:
+    mib = 1024**2
+    plan = build_resource_plan(
+        ResourcePlanningRequest(_components(), margins=ResourceMargins(0, 0, 0)),
+        HostInventory(10 * mib, 4 * mib, 64 * mib),
+    )
+
+    assert plan.executor == "streaming"
+    assert plan.peak_gpu_bytes == 2 * mib

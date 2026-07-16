@@ -86,13 +86,25 @@ def build_resource_plan(request: ResourcePlanningRequest, host: HostInventory) -
         + components.hessian_bytes
         + components.tuning_state_bytes
     )
-    base_host = components.active_block_bytes + components.factor_workspace_bytes + components.hessian_bytes
+    cpu_offload_gpu = streaming_gpu + components.active_block_bytes
+    streaming_host = components.active_block_bytes + components.factor_workspace_bytes + components.hessian_bytes
+    cpu_offload_host = components.source_checkpoint_bytes + streaming_host
     executor = request.requested_executor
     if executor == "auto":
-        executor = "resident" if resident_cuda_gpu <= gpu_limit else "streaming"
+        if resident_cuda_gpu <= gpu_limit:
+            executor = "resident"
+        elif cpu_offload_gpu <= gpu_limit and cpu_offload_host <= host_limit:
+            executor = "cpu_offload"
+        else:
+            executor = "streaming"
     if executor not in {"resident", "cpu_offload", "streaming"}:
         raise ValueError(f"unsupported executor: {executor}")
-    peak_gpu = resident_base_gpu if executor == "resident" else streaming_gpu
+    peak_gpu = {
+        "resident": resident_base_gpu,
+        "cpu_offload": cpu_offload_gpu,
+        "streaming": streaming_gpu,
+    }[executor]
+    base_host = cpu_offload_host if executor == "cpu_offload" else streaming_host
 
     tier = request.requested_activation_tier
     if tier == "auto":

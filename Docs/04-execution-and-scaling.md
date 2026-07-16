@@ -11,6 +11,12 @@ The algorithm pipeline is independent of placement. Executors implement how tens
 | `streaming` | 70B-class models or constrained hosts | Source on disk, active block/layer materialized | RAM or memory-mapped disk |
 | `distributed` | Multi-GPU acceleration or global training | FSDP/tensor/pipeline sharded | distributed |
 
+The production resident composition supports both `resident` and `cpu_offload`. In `cpu_offload`, the initial model
+shell and calibration stay on pageable CPU, while each active block is loaded directly from safetensors onto the
+compute device. Inline quality, completed-block restoration, and model-level KD are rejected for this placement until
+their full-model forwards have streamed implementations. `auto` resource planning selects
+`resident → cpu_offload → streaming` according to GPU and host limits.
+
 An `auto` planner may choose an executor, but the resolved plan records the choice and the user can require a specific one. An executor cannot change mathematical settings to make a run fit without creating a visible plan revision.
 
 ## 2. Resource plan
@@ -261,4 +267,3 @@ The scaling suite includes:
 - dense-Hessian rejection and approximate-objective fallback planning;
 - a 70B metadata-only/dry-run plan in normal CI;
 - periodic real large-model canary runs on designated hardware.
-

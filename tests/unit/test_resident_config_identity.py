@@ -7,6 +7,7 @@ import torch
 import nanoquant.resident_quantization as resident
 from nanoquant.config.schema import (
     ADMMConfig,
+    ExecutorKind,
     LayerRankBudgetConfig,
     ObservabilityConfig,
     ProfilingConfig,
@@ -113,6 +114,23 @@ def test_layer_budget_multiplier_invalidates_commit_identity() -> None:
         )
     )
 
+
+def test_executor_placement_does_not_invalidate_semantic_commit_identity() -> None:
+    request = ResidentQuantizationRequest(
+        Path("snapshot"), Path("output"), "fixture/model", "revision", ((1, 2, 3),), device="cpu"
+    )
+
+    assert resident._resident_config_hash(request) == resident._resident_config_hash(
+        replace(
+            request,
+            executor=ExecutorKind.CPU_OFFLOAD,
+            restore_completed_blocks=False,
+            evaluate_inline_quality=False,
+        )
+    )
+    assert resident._model_placement_device(
+        replace(request, device="cuda:0", executor=ExecutorKind.CPU_OFFLOAD)
+    ) == "cpu"
 
 def test_profiling_does_not_invalidate_commit_identity() -> None:
     request = ResidentQuantizationRequest(

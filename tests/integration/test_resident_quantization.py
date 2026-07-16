@@ -11,7 +11,7 @@ from transformers.models.gemma3.configuration_gemma3 import Gemma3TextConfig
 from transformers.models.gemma3.modeling_gemma3 import Gemma3ForCausalLM
 
 import nanoquant.resident_quantization as resident
-from nanoquant.config.schema import ADMMConfig, ProfilingConfig, ProfilingLevel
+from nanoquant.config.schema import ADMMConfig, ExecutorKind, ProfilingConfig, ProfilingLevel
 from nanoquant.infrastructure.artifacts import ArtifactCorruptionError, LocalArtifactStore
 from nanoquant.infrastructure.commits import load_block_activations
 from nanoquant.infrastructure.frozen_model_loader import load_frozen_run
@@ -107,6 +107,27 @@ def test_resident_quantization_commits_complete_transformers_model(tmp_path: Pat
     assert all(block.peak_host_bytes > 0 for block in result.blocks)
     assert all(block.peak_gpu_bytes == 0 for block in result.blocks)
     assert result.artifact_bytes > 0
+    offload = run_resident_quantization(
+        ResidentQuantizationRequest(
+            snapshot,
+            tmp_path / "cpu-offload",
+            "fixture/gemma3",
+            "pinned-test-revision",
+            ((1, 2, 3, 4),),
+            device="cpu",
+            executor=ExecutorKind.CPU_OFFLOAD,
+            target_bpw=8.0,
+            rank_multiple=1,
+            admm=ADMMConfig(outer_iterations=2, inner_iterations=1),
+            restore_completed_blocks=False,
+            evaluate_inline_quality=False,
+            profiling=ProfilingConfig(level=ProfilingLevel.OFF),
+        )
+    )
+    assert offload.plan == result.plan
+    assert offload.identity == result.identity
+    for offload_layer, resident_layer in zip(offload.blocks[0].layers, result.blocks[0].layers, strict=True):
+        assert offload_layer.final_reconstruction == resident_layer.final_reconstruction
     manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["run_id"].startswith("run_")
     assert manifest["status"] == "completed"
