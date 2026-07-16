@@ -59,6 +59,26 @@ def validate(config: RunConfig, phase: ValidationPhase = ValidationPhase.PRE_RES
         "allocation.maximum_rank_layer_patterns",
         "patterns must be unique",
     )
+    budget_multipliers = config.allocation.layer_budget_multipliers
+    budget_patterns = tuple(item.pattern for item in budget_multipliers)
+    require(
+        all(bool(pattern.strip()) for pattern in budget_patterns),
+        "CFG041",
+        "allocation.layer_budget_multipliers",
+        "patterns must not be empty",
+    )
+    require(
+        len(set(budget_patterns)) == len(budget_patterns),
+        "CFG042",
+        "allocation.layer_budget_multipliers",
+        "patterns must be unique",
+    )
+    require(
+        all(math.isfinite(item.multiplier) and item.multiplier > 1 for item in budget_multipliers),
+        "CFG043",
+        "allocation.layer_budget_multipliers",
+        "multipliers must be finite and greater than one",
+    )
     require(
         config.allocation.bounds.floor_fraction_of_uniform <= config.allocation.bounds.ceiling_fraction_of_uniform,
         "CFG008",

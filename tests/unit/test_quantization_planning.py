@@ -4,6 +4,7 @@ from pathlib import Path
 from nanoquant.application.planning import PlanningRequest, build_quantization_plan, persist_plan
 from nanoquant.config.schema import (
     AllocationStrategy,
+    LayerRankBudgetConfig,
     OutlierConfig,
     RankAllocationConfig,
     RankBoundsConfig,
@@ -39,7 +40,7 @@ def _request(strategy: AllocationStrategy = AllocationStrategy.UNIFORM) -> Plann
     stats = []
     objectives = []
     for index, importance in enumerate((1.0, 10.0)):
-        path = "self_attn.v_proj" if index == 0 else "mlp.up_proj"
+        path = "self_attn.v_proj" if index == 0 else "self_attn.q_proj"
         layer_id = LayerId(BlockId(index), path)
         source = SourceTensor(
             TensorId(layer_id, "weight"),
@@ -196,3 +197,56 @@ def test_additive_maximum_rank_pattern_must_match_a_quantizable_layer() -> None:
         assert "matched no quantizable layer" in str(error)
     else:
         raise AssertionError("unmatched maximum-rank pattern was accepted")
+
+
+def test_additive_layer_budget_multiplier_promotes_only_matching_rank() -> None:
+    request = _request(AllocationStrategy.SENSITIVITY)
+    baseline = build_quantization_plan(request)
+    promoted = build_quantization_plan(
+        replace(
+            request,
+            allocation=replace(
+                request.allocation,
+                layer_budget_multipliers=(LayerRankBudgetConfig("self_attn.q_proj", 1.25),),
+            ),
+        )
+    )
+
+    baseline_layers = [layer for block in baseline.blocks for layer in block.layers]
+    promoted_layers = [layer for block in promoted.blocks for layer in block.layers]
+    assert promoted_layers[0].rank == baseline_layers[0].rank
+    assert promoted_layers[1].rank > baseline_layers[1].rank
+    baseline_cost = baseline_layers[1].estimated_cost
+    promoted_cost = promoted_layers[1].estimated_cost
+    baseline_factor_bits = baseline_cost.binary_factor_bits + baseline_cost.scale_bits + baseline_cost.padding_bits
+    promoted_factor_bits = promoted_cost.binary_factor_bits + promoted_cost.scale_bits + promoted_cost.padding_bits
+    assert promoted_factor_bits <= baseline_factor_bits * 1.25
+    assert promoted_layers[1].allocator_cap >= promoted_layers[1].rank
+
+
+def test_layer_budget_multiplier_must_match_exactly_one_pattern() -> None:
+    request = _request()
+    unmatched = replace(
+        request.allocation,
+        layer_budget_multipliers=(LayerRankBudgetConfig("self_attn.k_proj", 1.25),),
+    )
+    overlapping = replace(
+        request.allocation,
+        layer_budget_multipliers=(
+            LayerRankBudgetConfig("self_attn.*", 1.25),
+            LayerRankBudgetConfig("self_attn.q_proj", 1.5),
+        ),
+    )
+
+    try:
+        build_quantization_plan(replace(request, allocation=unmatched))
+    except ValueError as error:
+        assert "matched no quantizable layer" in str(error)
+    else:
+        raise AssertionError("unmatched layer-budget pattern was accepted")
+    try:
+        build_quantization_plan(replace(request, allocation=overlapping))
+    except ValueError as error:
+        assert "multiple layer-budget patterns" in str(error)
+    else:
+        raise AssertionError("overlapping layer-budget patterns were accepted")

@@ -274,6 +274,7 @@ def resident_request_from_config(
         rank_sensitivity_alpha=config.allocation.sensitivity_alpha,
         rank_edge_boost=config.allocation.bounds.edge_block_boost,
         maximum_rank_layer_patterns=config.allocation.maximum_rank_layer_patterns,
+        layer_budget_multipliers=config.allocation.layer_budget_multipliers,
         rank_retry=config.allocation.retry,
         layer_order=config.block_tuning.layer_order,
         admm=config.factorization.admm,

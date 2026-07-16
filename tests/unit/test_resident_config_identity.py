@@ -5,7 +5,13 @@ import pytest
 import torch
 
 import nanoquant.resident_quantization as resident
-from nanoquant.config.schema import ADMMConfig, ObservabilityConfig, ProfilingConfig, ProfilingLevel
+from nanoquant.config.schema import (
+    ADMMConfig,
+    LayerRankBudgetConfig,
+    ObservabilityConfig,
+    ProfilingConfig,
+    ProfilingLevel,
+)
 from nanoquant.resident_quantization import ResidentQuantizationRequest
 
 
@@ -92,6 +98,19 @@ def test_maximum_rank_policy_invalidates_commit_identity() -> None:
 
     assert resident._resident_config_hash(request) != resident._resident_config_hash(
         replace(request, maximum_rank_layer_patterns=("self_attn.v_proj",))
+    )
+
+
+def test_layer_budget_multiplier_invalidates_commit_identity() -> None:
+    request = ResidentQuantizationRequest(
+        Path("snapshot"), Path("output"), "fixture/model", "revision", ((1, 2, 3),), device="cpu"
+    )
+
+    assert resident._resident_config_hash(request) != resident._resident_config_hash(
+        replace(
+            request,
+            layer_budget_multipliers=(LayerRankBudgetConfig("self_attn.q_proj", 1.25),),
+        )
     )
 
 

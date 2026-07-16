@@ -208,12 +208,19 @@ class RankRetryConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class LayerRankBudgetConfig:
+    pattern: str
+    multiplier: float
+
+
+@dataclass(frozen=True, slots=True)
 class RankAllocationConfig:
     target_bpw: float = 1.0
     strategy: AllocationStrategy = AllocationStrategy.UNIFORM
     sensitivity_alpha: float = 0.5
     utility_profile_artifact: str | None = None
     maximum_rank_layer_patterns: tuple[str, ...] = ()
+    layer_budget_multipliers: tuple[LayerRankBudgetConfig, ...] = ()
     bounds: RankBoundsConfig = field(default_factory=RankBoundsConfig)
     retry: RankRetryConfig = field(default_factory=RankRetryConfig)
 

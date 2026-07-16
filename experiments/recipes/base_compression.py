@@ -7,6 +7,7 @@ from nanoquant.config.schema import (
     AllocationStrategy,
     DatasetSourceConfig,
     ExecutorKind,
+    LayerRankBudgetConfig,
     OutlierSelector,
     TuningEpochLossMode,
 )
@@ -63,7 +64,8 @@ BASE_COMPRESSION_CONFIG = config_delta(
     allocation=config_delta(
         _SCHEMA_DEFAULTS.allocation,
         strategy=AllocationStrategy.SENSITIVITY,
-        maximum_rank_layer_patterns=("self_attn.v_proj",),
+        maximum_rank_layer_patterns=("self_attn.v_proj", "self_attn.k_proj"),
+        layer_budget_multipliers=(LayerRankBudgetConfig("self_attn.q_proj", 1.25),),
         bounds=config_delta(
             _SCHEMA_DEFAULTS.allocation.bounds,
             floor_fraction_of_uniform=0.9,

@@ -207,18 +207,48 @@ def build_quantization_plan(request: PlanningRequest) -> QuantizationPlan:
             *_, selected, marginal = max(rank_candidates, key=lambda candidate: candidate[:3])
             ranks[selected] += multiple
             spent += marginal
+    if spent > target_bits:
+        raise AssertionError("planner exceeded exact target bit budget before additive promotions")
+
+    budget_multipliers = request.allocation.layer_budget_multipliers
+    matched_budget_patterns: set[str] = set()
+    for layer in layers:
+        budget_matches = tuple(item for item in budget_multipliers if fnmatchcase(layer.layer.path, item.pattern))
+        if len(budget_matches) > 1:
+            raise ValueError(f"multiple layer-budget patterns matched {layer.layer.path}")
+        if not budget_matches:
+            continue
+        rule = budget_matches[0]
+        matched_budget_patterns.add(rule.pattern)
+        maximum = min(layer.in_features, layer.out_features)
+        original_factor_bits = factor_bit_cost(layer.out_features, layer.in_features, ranks[layer.layer]).total
+        promoted_budget = math.floor(original_factor_bits * rule.multiplier)
+        promoted_rank = ranks[layer.layer]
+        while promoted_rank + multiple <= maximum:
+            candidate = promoted_rank + multiple
+            if factor_bit_cost(layer.out_features, layer.in_features, candidate).total > promoted_budget:
+                break
+            promoted_rank = candidate
+        ranks[layer.layer] = promoted_rank
+        caps[layer.layer] = max(caps[layer.layer], promoted_rank)
+    unmatched_budget_patterns = {item.pattern for item in budget_multipliers} - matched_budget_patterns
+    if unmatched_budget_patterns:
+        raise ValueError(
+            f"layer-budget patterns matched no quantizable layer: {sorted(unmatched_budget_patterns)}"
+        )
+
     maximum_rank_patterns = request.allocation.maximum_rank_layer_patterns
     matched_patterns: set[str] = set()
     if maximum_rank_patterns:
         for layer in layers:
-            matches = tuple(
+            maximum_matches = tuple(
                 pattern
                 for pattern in maximum_rank_patterns
                 if fnmatchcase(layer.layer.path, pattern)
             )
-            if not matches:
+            if not maximum_matches:
                 continue
-            matched_patterns.update(matches)
+            matched_patterns.update(maximum_matches)
             maximum = min(layer.in_features, layer.out_features)
             if maximum % multiple:
                 raise ValueError(
@@ -272,8 +302,6 @@ def build_quantization_plan(request: PlanningRequest) -> QuantizationPlan:
             )
         )
     planned_cost = _add_costs(all_costs)
-    if spent > target_bits:
-        raise AssertionError("planner exceeded exact target bit budget")
     return QuantizationPlan(
         1,
         ComponentRef("quantization-planner", "1"),

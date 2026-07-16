@@ -261,12 +261,19 @@ class RankRetryConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class LayerRankBudgetConfig:
+    pattern: str
+    multiplier: float
+
+
+@dataclass(frozen=True, slots=True)
 class RankAllocationConfig:
     target_bpw: float = 1.0
     strategy: AllocationStrategy = AllocationStrategy.UNIFORM
     sensitivity_alpha: float = 0.5
     utility_profile_artifact: Optional[str] = None
     maximum_rank_layer_patterns: tuple[str, ...] = ()
+    layer_budget_multipliers: tuple[LayerRankBudgetConfig, ...] = ()
     bounds: RankBoundsConfig = field(default_factory=RankBoundsConfig)
     retry: RankRetryConfig = field(default_factory=RankRetryConfig)
 ```
@@ -278,6 +285,11 @@ class RankAllocationConfig:
 physical maximum rank (`min(in_features, out_features)`). This is deliberately additive: unmatched ranks do not
 shrink to compensate, and the plan's physical BPW reports the resulting cost above `target_bpw`. Patterns must be
 non-empty, unique, match at least one quantizable layer, and produce a maximum rank aligned to `bounds.multiple`.
+
+`layer_budget_multipliers` is also additive and runs before maximum-rank promotion. Each rule multiplies the matched
+layer's already-allocated packed factor budget and selects the greatest aligned rank that fits the enlarged budget.
+Unmatched layers do not shrink. Patterns must be non-empty, unique, match at least one quantizable layer, and must
+not overlap on a layer; multipliers must be finite and greater than one.
 
 The output of allocation is not stored back into this object:
 
@@ -695,6 +707,10 @@ allocation:
   sensitivity_alpha: 0.5
   maximum_rank_layer_patterns:
     - self_attn.v_proj
+    - self_attn.k_proj
+  layer_budget_multipliers:
+    - pattern: self_attn.q_proj
+      multiplier: 1.25
   bounds:
     multiple: 32
     floor_fraction_of_uniform: 0.9
@@ -921,8 +937,11 @@ NQ-CFG-030 allocation.target_bpw cannot pay mandatory representation overhead
 NQ-CFG-031 retry.maximum_attempts must be >= 1 when retry.enabled=true
 NQ-CFG-039 allocation.maximum_rank_layer_patterns entries must not be empty
 NQ-CFG-040 allocation.maximum_rank_layer_patterns entries must be unique
+NQ-CFG-041 allocation.layer_budget_multipliers patterns must not be empty
+NQ-CFG-042 allocation.layer_budget_multipliers patterns must be unique
+NQ-CFG-043 allocation.layer_budget_multipliers multipliers must be finite and greater than one
 NQ-CFG-009 outliers.fraction must be in [0, 1)
-NQ-CFG-041 int8 outlier training requires a supported trainable master policy
+NQ-CFG-044 int8 outlier training requires a supported trainable master policy
 NQ-CFG-050 post_block_refit.epochs must be > 0 when enabled=true
 NQ-CFG-060 full_kl distillation is incompatible with the selected single-GPU streaming plan
 NQ-CFG-070 mmap activation storage requires a directory or temporary_root

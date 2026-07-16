@@ -56,6 +56,7 @@ from nanoquant.config.codec import canonical_json, from_dict, to_dict
 from nanoquant.config.schema import (
     ADMMConfig,
     AllocationStrategy,
+    LayerRankBudgetConfig,
     ObjectiveConfig,
     ObservabilityConfig,
     OutlierConfig,
@@ -137,7 +138,7 @@ from nanoquant.infrastructure.tuning_checkpoint import (
 from nanoquant.ports.event_sink import EventSink
 from nanoquant.ports.model_adapter import ModelAdapter
 
-RESIDENT_ALGORITHM_VERSION = 30
+RESIDENT_ALGORITHM_VERSION = 31
 
 
 @contextmanager
@@ -243,6 +244,7 @@ class ResidentQuantizationRequest:
     rank_sensitivity_alpha: float = 0.5
     rank_edge_boost: float = 0.0
     maximum_rank_layer_patterns: tuple[str, ...] = ()
+    layer_budget_multipliers: tuple[LayerRankBudgetConfig, ...] = ()
     rank_retry: RankRetryConfig = _DEFAULT_RESIDENT_RANK_RETRY
     layer_order: tuple[str, ...] = ()
     admm: ADMMConfig = ADMMConfig(outer_iterations=1, inner_iterations=1)
@@ -919,6 +921,7 @@ def _resident_config_hash(request: ResidentQuantizationRequest) -> str:
         "rank_sensitivity_alpha": request.rank_sensitivity_alpha,
         "rank_edge_boost": request.rank_edge_boost,
         "maximum_rank_layer_patterns": request.maximum_rank_layer_patterns,
+        "layer_budget_multipliers": request.layer_budget_multipliers,
         "layer_order": request.layer_order,
         "admm": request.admm,
         "outliers": request.outliers,
@@ -1887,6 +1890,7 @@ def _run_resident_quantization_impl(
             strategy=request.allocation_strategy,
             sensitivity_alpha=request.rank_sensitivity_alpha,
             maximum_rank_layer_patterns=request.maximum_rank_layer_patterns,
+            layer_budget_multipliers=request.layer_budget_multipliers,
             bounds=RankBoundsConfig(
                 multiple=request.rank_multiple,
                 floor_fraction_of_uniform=request.rank_floor_fraction,
@@ -1902,6 +1906,7 @@ def _run_resident_quantization_impl(
             target_bpw=request.target_bpw,
             rank_multiple=request.rank_multiple,
             maximum_rank_layer_patterns=request.maximum_rank_layer_patterns,
+            layer_budget_multipliers=request.layer_budget_multipliers,
         ):
             with recorder.phase("plan"):
                 with recorder.phase("ranks"):

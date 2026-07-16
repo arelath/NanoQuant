@@ -25,6 +25,7 @@ EXPERIMENT_001_CONFIG = config_delta(
     allocation=config_delta(
         BASE_COMPRESSION_CONFIG.allocation,
         maximum_rank_layer_patterns=(),
+        layer_budget_multipliers=(),
     ),
 )
 

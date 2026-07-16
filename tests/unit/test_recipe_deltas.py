@@ -45,17 +45,17 @@ def test_run_config_defaults_contains_only_the_required_model_source() -> None:
 
 def test_derived_recipe_hashes_are_unchanged_by_delta_only_sources() -> None:
     expected = {
-        "base": "sha256:90a43eb224d8cbf61feba0bcac1df4a5c537f7fa32e6f3f332dc6dee4230be9c",
-        "001": "sha256:023a487366084505437fac8cc33482fdea027ee9aa1a39bf54297f4754d728c1",
-        "002": "sha256:4d069a6eb153d24017d31474c89c714ed6443b3abbb219d62fdc458bc489f417",
-        "003": "sha256:8f685c7d2f4f80ea30d056808ab7b8fc15972929d75965dc0176a3e1339e23ad",
-        "004": "sha256:4ef82d8a21f5e31fa0bff7f97885c74c9a01fca97ee71fd3a484a2ba85f52809",
-        "005": "sha256:70494f3097448faca7d0fd5a2922ab4b7acba56a87dc2b7a591fcab80080358f",
-        "008": "sha256:b9e587a326069f8c74496652c2095698a613d55ade08ebd547ea68a1216e8bee",
-        "011": "sha256:9ee8e76e383cda97845e273d4ec853155712234b40be86f815dd3d928a8756a5",
-        "013": "sha256:663df968f4d9f176bda4c6ad194d5a630fd026eda11fb758c0c3968aa2168679",
-        "018": "sha256:c20d23b8fb2bcbe168408de0fe1f180b50016c161b3d287ca3eb08447f8c192d",
-        "short": "sha256:5f397781390209ab7fa213730df56e788f377d3a58f883a26722b35ac0dc5752",
+        "base": "sha256:2106e6de0e0299dd296be23e0771bbb97cc2d1bb057a39a6c1d73c9689d817c7",
+        "001": "sha256:d826aa290face0ef6704bf70e149074ef0c7cfe3242ec663f919a1bf45b51ad5",
+        "002": "sha256:cc309b583e4f8ca765dd26e491c4b1cbf4b964f4f4ed2df8edab340aa918da8c",
+        "003": "sha256:a099ece06bae15062617c1e8c546f79cbffde4758d88d68c2e4505a85cae0a02",
+        "004": "sha256:451b37cf97016dcc1da41102f435b0cc98930804700f8079e6341499a7dce72d",
+        "005": "sha256:78ae6f01d8af99e5516847a2efef759f1ffe5e561d8f5d5abf63453b7cd09b22",
+        "008": "sha256:b0f7587302ea70524f615a65c2c26bc853142f1c345287cd8fb8122e4eaf7439",
+        "011": "sha256:016a5f54b4260bfbd95cdab1b56ce56793b0cbd6212a811d2711c19a84aa2967",
+        "013": "sha256:6bdf26ab16b4c73cfbdf2203977185094e14e36c47ec0d75e37e0daf3db3abf2",
+        "018": "sha256:fe3603f4b5bde33721305d5c67bd037fc1b440a76bd58142f06ed806e8ffd78d",
+        "short": "sha256:bccffdb3f0324a35e79725046422e0fa9b62d60dce9c35d4f4065ef728714449",
     }
     configs = {
         "base": BASE_COMPRESSION_CONFIG,

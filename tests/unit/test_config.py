@@ -10,6 +10,7 @@ from nanoquant.config.schema import (
     ActivationStoreKind,
     DatasetSourceConfig,
     DType,
+    LayerRankBudgetConfig,
     ModelConfig,
     ObjectiveKind,
     ObservabilityConfig,
@@ -24,6 +25,9 @@ def test_round_trip_decodes_nested_enums_tuples_and_optionals() -> None:
     raw = {
         "model": {"source": "local/tiny", "load_dtype": "float16"},
         "dataset": {"sources": [{"name": "fixture", "revision": None}], "shuffle": False},
+        "allocation": {
+            "layer_budget_multipliers": [{"pattern": "self_attn.q_proj", "multiplier": 1.25}]
+        },
         "runtime": {"activations": {"kind": "mmap"}},
         "calibration": {"objective": {"kind": "low_rank_diagonal", "low_rank": 4}},
         "profiling": {"level": "micro", "trace_blocks": [3, 7]},
@@ -31,6 +35,9 @@ def test_round_trip_decodes_nested_enums_tuples_and_optionals() -> None:
     config = from_dict(RunConfig, raw)
     assert config.model.load_dtype is DType.FLOAT16
     assert config.dataset.sources == (DatasetSourceConfig(name="fixture"),)
+    assert config.allocation.layer_budget_multipliers == (
+        LayerRankBudgetConfig("self_attn.q_proj", 1.25),
+    )
     assert config.runtime.activations.kind is ActivationStoreKind.MMAP
     assert config.calibration.objective.kind is ObjectiveKind.LOW_RANK_DIAGONAL
     assert config.profiling.level is ProfilingLevel.MICRO
@@ -83,6 +90,22 @@ def test_maximum_rank_patterns_must_be_nonempty_and_unique() -> None:
     )
 
     assert {issue.code for issue in validate(invalid)} == {"CFG039", "CFG040"}
+
+
+def test_layer_budget_multipliers_must_be_valid_and_unique() -> None:
+    config = RunConfig(ModelConfig("x"))
+    invalid = replace(
+        config,
+        allocation=replace(
+            config.allocation,
+            layer_budget_multipliers=(
+                LayerRankBudgetConfig("", 1.0),
+                LayerRankBudgetConfig("", math.inf),
+            ),
+        ),
+    )
+
+    assert {issue.code for issue in validate(invalid)} == {"CFG041", "CFG042", "CFG043"}
 
 
 def test_observability_levels_are_validated_without_changing_schema() -> None:

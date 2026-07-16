@@ -57,6 +57,7 @@ def test_experiment018_maps_every_hidden_resident_parity_semantic(tmp_path: Path
     assert request.rank_retry.maximum_attempts == 3
     assert request.rank_retry.thresholds.raw_normalized_error == 0.5
     assert request.maximum_rank_layer_patterns == config.allocation.maximum_rank_layer_patterns
+    assert request.layer_budget_multipliers == config.allocation.layer_budget_multipliers
     assert request.nonfactorized_tuning_epochs == 0
     assert request.nonfactorized_tuning_epochs_by_layer == (8, 4, 3, 2, 2, 2, 2)
     assert request.factorized_tuning_epochs == 8

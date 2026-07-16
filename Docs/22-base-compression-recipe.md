@@ -5,10 +5,11 @@ All numbered compression experiments derive their numerical configuration from
 practice of treating legacy Experiment 018 as the base recipe. Experiment 018 now derives from the base like every
 other numbered run.
 
-The base allocation promotes every `self_attn.v_proj` layer to its physical maximum rank. The promotion happens
-after the ordinary sensitivity allocation, so other layers retain their target-BPW ranks and the reported physical
-BPW includes the additional `v_proj` storage. Numbered experiments whose results or resumable state predate this
-decision explicitly pin an empty override; newly authored compression experiments inherit the maximum-rank policy.
+The base allocation promotes every `self_attn.v_proj` and `self_attn.k_proj` layer to its physical maximum rank and
+adds 25% to each `self_attn.q_proj` packed-factor budget. Promotions happen after ordinary sensitivity allocation,
+so other layers retain their target-BPW ranks and reported physical BPW includes the additional projection storage.
+Numbered experiments whose results or resumable state predate these decisions explicitly pin empty overrides;
+newly authored compression experiments inherit both policies.
 
 Every recipe definition uses `config_delta(parent, ...)` at each nested dataclass boundary. The shared compression
 recipe is itself a delta from the canonical schema defaults, standalone benchmark recipes use the same schema
