@@ -7,6 +7,8 @@ from nanoquant.config.codec import ConfigDecodeError, apply_overrides, canonical
 from nanoquant.config.migration import migrate_legacy, migration_inventory
 from nanoquant.config.resolution import resolve_config
 from nanoquant.config.schema import (
+    ActivationGpuCacheMode,
+    ActivationStorageConfig,
     ActivationStoreKind,
     DatasetSourceConfig,
     DType,
@@ -28,7 +30,7 @@ def test_round_trip_decodes_nested_enums_tuples_and_optionals() -> None:
         "allocation": {
             "layer_budget_multipliers": [{"pattern": "self_attn.q_proj", "multiplier": 1.25}]
         },
-        "runtime": {"activations": {"kind": "mmap"}},
+        "runtime": {"activations": {"kind": "mmap", "gpu_cache": "auto", "gpu_reserve_gib": 1.5}},
         "calibration": {"objective": {"kind": "low_rank_diagonal", "low_rank": 4}},
         "profiling": {"level": "micro", "trace_blocks": [3, 7]},
     }
@@ -39,6 +41,8 @@ def test_round_trip_decodes_nested_enums_tuples_and_optionals() -> None:
         LayerRankBudgetConfig("self_attn.q_proj", 1.25),
     )
     assert config.runtime.activations.kind is ActivationStoreKind.MMAP
+    assert config.runtime.activations.gpu_cache is ActivationGpuCacheMode.AUTO
+    assert config.runtime.activations.gpu_reserve_gib == 1.5
     assert config.calibration.objective.kind is ObjectiveKind.LOW_RANK_DIAGONAL
     assert config.profiling.level is ProfilingLevel.MICRO
     assert config.profiling.trace_blocks == (3, 7)
@@ -77,6 +81,20 @@ def test_validation_phases_have_stable_codes() -> None:
         profiling=ProfilingConfig(cuda_sample_every=0, raw_samples_per_phase=0),
     )
     assert {issue.code for issue in validate(invalid)} == {"CFG015", "CFG016"}
+
+
+def test_activation_gpu_cache_reserve_must_be_finite_and_non_negative() -> None:
+    base = RunConfig(ModelConfig("x"))
+
+    for reserve in (-1.0, math.inf, math.nan):
+        invalid = replace(
+            base,
+            runtime=replace(
+                base.runtime,
+                activations=ActivationStorageConfig(gpu_reserve_gib=reserve),
+            ),
+        )
+        assert {issue.code for issue in validate(invalid)} == {"CFG044"}
 
 
 def test_maximum_rank_patterns_must_be_nonempty_and_unique() -> None:

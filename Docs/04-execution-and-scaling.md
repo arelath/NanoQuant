@@ -17,6 +17,13 @@ compute device. Inline quality, completed-block restoration, and model-level KD 
 their full-model forwards have streamed implementations. `auto` resource planning selects
 `resident → cpu_offload → streaming` according to GPU and host limits.
 
+The resident and `cpu_offload` compositions also expose an opt-in activation GPU cache through
+`runtime.activations.gpu_cache`. `inputs` retains the compressed block inputs that are reread by every tuning and loss
+pass; `both` also retains the teacher target outputs; `auto` tries those tiers in that order and falls back to pageable
+host tensors when `torch.cuda.mem_get_info` cannot preserve `gpu_reserve_gib` of free device memory. Explicit `inputs`
+and `both` requests fail instead of silently changing placement. Cache placement is an execution policy and therefore
+does not change resident semantic commit identity.
+
 An `auto` planner may choose an executor, but the resolved plan records the choice and the user can require a specific one. An executor cannot change mathematical settings to make a run fit without creating a visible plan revision.
 
 ## 2. Resource plan

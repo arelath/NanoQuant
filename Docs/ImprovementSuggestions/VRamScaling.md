@@ -65,9 +65,16 @@ KD is rejected until its teacher forward is streamed. The resource planner now u
 and accounts for the host shell plus a second active-block GPU copy. CPU tiny-model resident/offload execution is
 artifact- and metric-equivalent; the requested 4B CUDA memory/equivalence canary remains open below.
 
-### R3. [ ] Spend the freed VRAM on the activation GPU cache (net speed win)
+### R3. [x] Spend the freed VRAM on the activation GPU cache (net speed win)
 
 [Docs/18 P1](../18-legacy-quantization-performance-and-vram-investigation.md) already recommends an opt-in `off/inputs/both/auto` activation-cache policy (legacy behavioral reference exists). Under R2 the shell no longer occupies the device, so for 7B both full streams (~8 GiB… too big) or at least the *inputs* stream (~4 GiB) can live on CUDA behind a declared reserve, eliminating the per-pass H2D retransfer that Docs/18 identifies as the dominant self-inflicted tuning overhead. `mem_get_info` gating and the resource plan's activation-tier machinery already support the decision. This is the piece that turns R2 from "no slower" into "probably faster per block than the current 4B configuration".
+
+Implemented as `runtime.activations.gpu_cache = off|inputs|both|auto` with a validated
+`runtime.activations.gpu_reserve_gib`. The production block loop caches the compressed inputs first and teacher targets
+second, logs every admission or rejection, requires explicit policies to fit, lets `auto` fall back to the existing
+pageable streaming path, and releases final-boundary aliases before evaluation/assembly. The policy is deliberately
+excluded from semantic commit identity. A CUDA wall-clock comparison remains open in step 5 below because experiment
+006 currently owns the device.
 
 ### R4. [ ] Quality evaluation must not reload a dense 7B model
 

@@ -1,11 +1,13 @@
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 import torch
 
 import nanoquant.resident_quantization as resident
 from nanoquant.config.schema import (
+    ActivationGpuCacheMode,
     ADMMConfig,
     ExecutorKind,
     LayerRankBudgetConfig,
@@ -131,6 +133,61 @@ def test_executor_placement_does_not_invalidate_semantic_commit_identity() -> No
     assert resident._model_placement_device(
         replace(request, device="cuda:0", executor=ExecutorKind.CPU_OFFLOAD)
     ) == "cpu"
+
+
+def test_activation_gpu_cache_does_not_invalidate_semantic_commit_identity() -> None:
+    request = ResidentQuantizationRequest(
+        Path("snapshot"), Path("output"), "fixture/model", "revision", ((1, 2, 3),), device="cpu"
+    )
+
+    assert resident._resident_config_hash(request) == resident._resident_config_hash(
+        replace(
+            request,
+            activation_gpu_cache=ActivationGpuCacheMode.BOTH,
+            activation_gpu_reserve_bytes=1234,
+        )
+    )
+    assert resident._activation_cache_fits(20, 100, 80)
+    assert not resident._activation_cache_fits(21, 100, 80)
+
+
+def test_activation_gpu_cache_auto_falls_back_but_explicit_policy_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    value = torch.zeros(4)
+    request = ResidentQuantizationRequest(
+        Path("snapshot"),
+        Path("output"),
+        "fixture/model",
+        "revision",
+        ((1, 2, 3),),
+        device="cuda:0",
+        activation_gpu_reserve_bytes=8,
+    )
+    events = Mock()
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda _device: (15, 100))
+
+    assert resident._cache_activation_tensor(
+        value,
+        request,
+        events,
+        role="compressed_inputs",
+        required=False,
+    ) is value
+    assert events.emit.call_args.args[:3] == (
+        "resource",
+        "info",
+        "activation_gpu_cache.skipped",
+    )
+    with pytest.raises(RuntimeError, match="requires 16 bytes plus 8 reserved bytes"):
+        resident._cache_activation_tensor(
+            value,
+            request,
+            events,
+            role="compressed_inputs",
+            required=True,
+        )
+
 
 def test_profiling_does_not_invalidate_commit_identity() -> None:
     request = ResidentQuantizationRequest(

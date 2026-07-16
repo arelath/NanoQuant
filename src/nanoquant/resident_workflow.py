@@ -216,10 +216,14 @@ def _validate_supported_recipe(config: RunConfig) -> None:
         "runtime.resources",
         "explicit limits are not yet enforced",
     )
+    expected_activations = ActivationStorageConfig(
+        gpu_cache=config.runtime.activations.gpu_cache,
+        gpu_reserve_gib=config.runtime.activations.gpu_reserve_gib,
+    )
     _require(
-        config.runtime.activations == ActivationStorageConfig(),
+        config.runtime.activations == expected_activations,
         "runtime.activations",
-        "explicit activation-store selection is not yet mapped",
+        "only the activation GPU cache and its reserve are currently configurable",
     )
     expected_streaming = SourceStreamingConfig(
         verify_tensor_hashes=config.runtime.source_streaming.verify_tensor_hashes
@@ -316,6 +320,8 @@ def resident_request_from_config(
         restore_best_tuning_state=config.block_tuning.restore_best_state,
         tuning_epoch_loss_mode=config.block_tuning.epoch_loss_mode.value,
         activation_retention=config.runtime.checkpoints.activation_retention.value,
+        activation_gpu_cache=config.runtime.activations.gpu_cache,
+        activation_gpu_reserve_bytes=int(config.runtime.activations.gpu_reserve_gib * 2**30),
         seed=config.reproducibility.seed,
         interrupt_after_layer_commits=options.interrupt_after_layer_commits,
         interrupt_after_block_commits=options.interrupt_after_block_commits,

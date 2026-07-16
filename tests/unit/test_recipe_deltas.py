@@ -47,19 +47,19 @@ def test_run_config_defaults_contains_only_the_required_model_source() -> None:
 
 def test_derived_recipe_hashes_are_unchanged_by_delta_only_sources() -> None:
     expected = {
-        "base": "sha256:2106e6de0e0299dd296be23e0771bbb97cc2d1bb057a39a6c1d73c9689d817c7",
-        "001": "sha256:d826aa290face0ef6704bf70e149074ef0c7cfe3242ec663f919a1bf45b51ad5",
-        "002": "sha256:cc309b583e4f8ca765dd26e491c4b1cbf4b964f4f4ed2df8edab340aa918da8c",
-        "003": "sha256:a099ece06bae15062617c1e8c546f79cbffde4758d88d68c2e4505a85cae0a02",
-        "004": "sha256:451b37cf97016dcc1da41102f435b0cc98930804700f8079e6341499a7dce72d",
-        "005": "sha256:78ae6f01d8af99e5516847a2efef759f1ffe5e561d8f5d5abf63453b7cd09b22",
-        "006": "sha256:d4643196beadf9ac009df9d8406cca13780ee83b08933a30682ca355a1dd2a87",
-        "007": "sha256:8ed4c7d0aa65c739d16c8b6eadc98d5f46ca4b7ceb8e5d47f495acf869a00e5a",
-        "008": "sha256:b0f7587302ea70524f615a65c2c26bc853142f1c345287cd8fb8122e4eaf7439",
-        "011": "sha256:016a5f54b4260bfbd95cdab1b56ce56793b0cbd6212a811d2711c19a84aa2967",
-        "013": "sha256:6bdf26ab16b4c73cfbdf2203977185094e14e36c47ec0d75e37e0daf3db3abf2",
-        "018": "sha256:fe3603f4b5bde33721305d5c67bd037fc1b440a76bd58142f06ed806e8ffd78d",
-        "short": "sha256:bccffdb3f0324a35e79725046422e0fa9b62d60dce9c35d4f4065ef728714449",
+        "base": "sha256:70649cdf490c4669deb3fde28820b4d2e964fc9d09f1237b935488a1c2f07d4c",
+        "001": "sha256:e4c71a1e4977477bdd6a835783c8de27f867ab3941169efb139bd6e14126e3ee",
+        "002": "sha256:edf87371018dd3b9d2c91d85a853d9571cdc62b18b444ba68d236e4795561f6f",
+        "003": "sha256:c5bb6251a490a575ced7ad12bde112561e56b65cf71de86ea7ede2248ee42c6a",
+        "004": "sha256:92e5438aceabe34a7ca6062a6924a92da9f2599ed7d32c826cb70eac65bf5302",
+        "005": "sha256:86afa37533f4bc44c2f9339b5ba297458c2a7e14424d0c3450bed9c1583b2328",
+        "006": "sha256:2886bd03dc3f65ad22f8ec319c659ce15357fa23a726f6dc739467294dbced62",
+        "007": "sha256:eab1b0d3eaefaecedb4b8d66695b13f94ee592f07b6b65f2208355849da0b31d",
+        "008": "sha256:1dd444374f8c62649e025529a7f62cae570ab019ed1fdc3b2c751fca3046f335",
+        "011": "sha256:aa64a6604ff724cb526a89114b377f96903739385fba83bb15eacb47b8572013",
+        "013": "sha256:3335aadc2979eb74b7d0f637811920eeb741fe1c779214e65de718a572abe2b2",
+        "018": "sha256:29116da2e7ff34853dafdb9379dad66bc8031e06cc5ba580e3c3857e62ac6498",
+        "short": "sha256:ee105132c19fde12a85269b0ab40e998e253fb5d05f726e313424be0ffeff326",
     }
     configs = {
         "base": BASE_COMPRESSION_CONFIG,

@@ -96,6 +96,13 @@ def validate(config: RunConfig, phase: ValidationPhase = ValidationPhase.PRE_RES
         config.runtime.block_forward_batch_size > 0, "CFG011", "runtime.block_forward_batch_size", "must be positive"
     )
     require(
+        math.isfinite(config.runtime.activations.gpu_reserve_gib)
+        and config.runtime.activations.gpu_reserve_gib >= 0,
+        "CFG044",
+        "runtime.activations.gpu_reserve_gib",
+        "must be finite and non-negative",
+    )
+    require(
         config.factorization.admm.outer_iterations > 0,
         "CFG012",
         "factorization.admm.outer_iterations",

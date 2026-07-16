@@ -37,6 +37,13 @@ class ActivationStoreKind(StringEnum):
     MMAP = "mmap"
 
 
+class ActivationGpuCacheMode(StringEnum):
+    OFF = "off"
+    INPUTS = "inputs"
+    BOTH = "both"
+    AUTO = "auto"
+
+
 class CalibrationMethod(StringEnum):
     ONLINE_FISHER = "online_fisher"
     TWO_PHASE_FISHER = "two_phase_fisher"
@@ -365,6 +372,8 @@ class ActivationStorageConfig:
     directory: str | None = None
     batch_size: int = 8
     prefetch_batches: int = 1
+    gpu_cache: ActivationGpuCacheMode = ActivationGpuCacheMode.OFF
+    gpu_reserve_gib: float = 1.0
 
 
 @dataclass(frozen=True, slots=True)

@@ -11,7 +11,13 @@ from recipes.legacy.experiment018 import EXPERIMENT_018_CONFIG
 import nanoquant.resident_quantization as resident
 import nanoquant.resident_workflow as workflow
 from nanoquant.config.codec import from_dict
-from nanoquant.config.schema import DistillationLoss, ExecutorKind, RunConfig
+from nanoquant.config.schema import (
+    ActivationGpuCacheMode,
+    ActivationStorageConfig,
+    DistillationLoss,
+    ExecutorKind,
+    RunConfig,
+)
 from nanoquant.domain.runs import RunManifest, RunStatus
 from nanoquant.infrastructure.runs import (
     RunDirectory,
@@ -134,6 +140,25 @@ def test_cpu_offload_mapping_requires_large_model_guards(tmp_path: Path) -> None
             _inputs(tmp_path),
             ResidentExecutionOptions(restore_completed_blocks=False),
         )
+
+
+def test_activation_gpu_cache_policy_maps_as_nonsemantic_execution_control(tmp_path: Path) -> None:
+    base = _experiment018_config()
+    cached = replace(
+        base,
+        runtime=replace(
+            base.runtime,
+            activations=ActivationStorageConfig(
+                gpu_cache=ActivationGpuCacheMode.AUTO,
+                gpu_reserve_gib=1.25,
+            ),
+        ),
+    )
+
+    request = resident_request_from_config(cached, _inputs(tmp_path))
+
+    assert request.activation_gpu_cache is ActivationGpuCacheMode.AUTO
+    assert request.activation_gpu_reserve_bytes == 1_342_177_280
 
 
 def test_combined_workflow_runs_quantization_before_distillation(

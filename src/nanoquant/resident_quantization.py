@@ -54,6 +54,7 @@ from nanoquant.application.tuning import (
 )
 from nanoquant.config.codec import canonical_json, from_dict, to_dict
 from nanoquant.config.schema import (
+    ActivationGpuCacheMode,
     ADMMConfig,
     AllocationStrategy,
     ExecutorKind,
@@ -239,6 +240,8 @@ class ResidentQuantizationRequest:
     token_ids: torch.Tensor | tuple[tuple[int, ...], ...]
     device: str = "cuda"
     executor: ExecutorKind = ExecutorKind.RESIDENT
+    activation_gpu_cache: ActivationGpuCacheMode = ActivationGpuCacheMode.OFF
+    activation_gpu_reserve_bytes: int = 2**30
     target_bpw: float = 1.0
     rank_multiple: int = 32
     allocation_strategy: AllocationStrategy = AllocationStrategy.SENSITIVITY
@@ -427,6 +430,53 @@ def _forward_metadata_to_device(metadata: dict[str, object], device: str) -> dic
 
 def _model_placement_device(request: ResidentQuantizationRequest) -> str:
     return "cpu" if request.executor is ExecutorKind.CPU_OFFLOAD else request.device
+
+
+def _activation_cache_fits(required_bytes: int, free_bytes: int, reserve_bytes: int) -> bool:
+    return required_bytes >= 0 and reserve_bytes >= 0 and required_bytes + reserve_bytes <= free_bytes
+
+
+def _cache_activation_tensor(
+    value: torch.Tensor,
+    request: ResidentQuantizationRequest,
+    events: EventSink,
+    *,
+    role: str,
+    required: bool,
+) -> torch.Tensor:
+    if not request.device.startswith("cuda") or value.device.type == "cuda":
+        return value
+    required_bytes = value.numel() * value.element_size()
+    free_bytes, total_bytes = torch.cuda.mem_get_info(request.device)
+    if not _activation_cache_fits(required_bytes, int(free_bytes), request.activation_gpu_reserve_bytes):
+        cast(Any, events).emit(
+            "resource",
+            "warning" if required else "info",
+            "activation_gpu_cache.skipped",
+            role=role,
+            required=required,
+            required_bytes=required_bytes,
+            reserve_bytes=request.activation_gpu_reserve_bytes,
+            free_bytes=int(free_bytes),
+            total_bytes=int(total_bytes),
+        )
+        if required:
+            raise RuntimeError(
+                f"activation GPU cache for {role} requires {required_bytes} bytes plus "
+                f"{request.activation_gpu_reserve_bytes} reserved bytes; only {int(free_bytes)} bytes are free"
+            )
+        return value
+    cached = value.to(request.device)
+    cast(Any, events).emit(
+        "resource",
+        "info",
+        "activation_gpu_cache.loaded",
+        role=role,
+        bytes=required_bytes,
+        reserve_bytes=request.activation_gpu_reserve_bytes,
+        free_bytes_before=int(free_bytes),
+    )
+    return cached
 
 
 def _block_loss(
@@ -1290,6 +1340,8 @@ def _validate_resident_request(request: ResidentQuantizationRequest) -> None:
             raise ValueError("cpu_offload requires restore_completed_blocks=False")
         if request.evaluate_inline_quality:
             raise ValueError("cpu_offload requires inline quality evaluation to be disabled")
+    if request.activation_gpu_reserve_bytes < 0:
+        raise ValueError("activation GPU cache reserve must not be negative")
     if request.block_forward_batch_size <= 0:
         raise ValueError("resident quantization block forward batch size must be positive")
     if request.factorized_tuning_epoch_cooldown_seconds < 0:
@@ -2069,6 +2121,34 @@ def _run_resident_quantization_impl(
         frozen_states = []
         quantization_targets: dict[str, TensorRef] = {}
         tuning_recorder = micro_recorder
+        del block_work
+        # Admit caches only after the active source/working block and its
+        # teacher forward have established the real per-block free-memory
+        # envelope.  Checking before block materialization would overestimate
+        # capacity and could turn an optional cache into an OOM.
+        if request.activation_gpu_cache in {
+            ActivationGpuCacheMode.INPUTS,
+            ActivationGpuCacheMode.BOTH,
+            ActivationGpuCacheMode.AUTO,
+        }:
+            compressed_inputs = _cache_activation_tensor(
+                compressed_inputs,
+                request,
+                events,
+                role="compressed_inputs",
+                required=request.activation_gpu_cache is not ActivationGpuCacheMode.AUTO,
+            )
+        if request.activation_gpu_cache in {
+            ActivationGpuCacheMode.BOTH,
+            ActivationGpuCacheMode.AUTO,
+        }:
+            teacher_outputs = _cache_activation_tensor(
+                teacher_outputs,
+                request,
+                events,
+                role="teacher_outputs",
+                required=request.activation_gpu_cache is ActivationGpuCacheMode.BOTH,
+            )
 
         for layer_position, layer_plan in enumerate(block_plan.layers):
             layer_started = time.perf_counter()
@@ -2725,6 +2805,18 @@ def _run_resident_quantization_impl(
         del working_block
         if request.device.startswith("cuda") and not retained_on_device:
             torch.cuda.empty_cache()
+
+    # The last activation boundary may be GPU-cached, but final quality and
+    # model assembly do not consume it.  Drop every local alias before those
+    # stages so a cache intended for tuning cannot inflate finalization peak.
+    del teacher_inputs, compressed_inputs
+    try:
+        del teacher_outputs, compressed_outputs
+    except UnboundLocalError:
+        # A fully resumed run may skip the block loop entirely.
+        pass
+    if request.device.startswith("cuda"):
+        torch.cuda.empty_cache()
 
     quality_metrics: tuple[float, float, float, float] | None = None
     with _logged_operation(
