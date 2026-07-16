@@ -210,7 +210,7 @@ def execute_compression_export(
     atomic_write_json(
         summary_output,
         {
-            "schema_version": 2,
+            "schema_version": 3,
             "run_output": str(run),
             "logical": logical,
             "packed": packed,
@@ -225,6 +225,22 @@ def execute_compression_export(
                 "reused": gguf.reused,
                 "receipt": str(gguf.output.with_suffix(gguf.output.suffix + ".export.json")),
             },
+            "mmproj": (
+                None
+                if gguf.mmproj is None
+                else {
+                    "output": str(gguf.mmproj.output),
+                    "converter": str(gguf.mmproj.converter),
+                    "bytes": gguf.mmproj.bytes,
+                    "sha256": gguf.mmproj.sha256,
+                    "tensor_count": gguf.mmproj.tensor_count,
+                    "tensor_types": gguf.mmproj.tensor_types,
+                    "reused": gguf.mmproj.reused,
+                    "receipt": str(
+                        gguf.mmproj.output.with_suffix(gguf.mmproj.output.suffix + ".export.json")
+                    ),
+                }
+            ),
         },
     )
     return CompressionExportResult(logical, packed, gguf, summary_output)

@@ -7,11 +7,17 @@ import os
 import subprocess
 import sys
 import tempfile
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, cast
 
 from nanoquant.infrastructure.io_utils import atomic_write_json, hash_file
+from nanoquant.infrastructure.mmproj_export import (
+    MMPROJ_OUTPUT_NAME,
+    MmprojExportResult,
+    export_mmproj_bfloat16,
+    source_has_vision_stack,
+)
 from nanoquant.runtime import (
     LlamaCppCheckpointManifest,
     export_llamacpp_checkpoint,
@@ -49,6 +55,7 @@ class GgufExportResult:
     reused: bool
     token_embedding_type: str = DEFAULT_TOKEN_EMBEDDING_TYPE
     quantizer: Path | None = None
+    mmproj: MmprojExportResult | None = None
 
 
 def normalize_token_embedding_type(value: str) -> str:
@@ -137,6 +144,22 @@ def _require_bfloat16_nanoquant_scales(
     if scale_types != ("bf16",):
         rendered = ", ".join(scale_types) or "none"
         raise ValueError(f"GGUF NanoQuant scale tensors must all be BF16, found: {rendered}")
+
+
+def _export_mmproj_for_source(
+    source: Path,
+    destination: Path,
+    reference: Path,
+    python_executable: str | Path,
+) -> MmprojExportResult | None:
+    if not source_has_vision_stack(source):
+        return None
+    return export_mmproj_bfloat16(
+        source,
+        destination.parent / MMPROJ_OUTPUT_NAME,
+        reference,
+        python_executable=python_executable,
+    )
 
 
 def _checkpoint_for_packed(
@@ -260,7 +283,7 @@ def export_llamacpp_gguf(
     packed_descriptor_hash = hash_file(packed.root / "nanoquant-packed-model.json")
     expected_scale_count = packed.manifest.layer_count * 3
     if destination.exists() or _receipt_path(destination).exists():
-        return _reuse_existing(
+        result = _reuse_existing(
             destination,
             checkpoint_path,
             converter,
@@ -271,6 +294,8 @@ def export_llamacpp_gguf(
             reference,
             python_executable,
         )
+        mmproj = _export_mmproj_for_source(source, destination, reference, python_executable)
+        return replace(result, mmproj=mmproj)
 
     destination.parent.mkdir(parents=True, exist_ok=True)
     descriptor, converted_name = tempfile.mkstemp(
@@ -383,6 +408,7 @@ def export_llamacpp_gguf(
         "quantizer_stderr_log": str(quantizer_stderr_path),
     }
     atomic_write_json(_receipt_path(destination), receipt)
+    mmproj = _export_mmproj_for_source(source, destination, reference, python_executable)
     return GgufExportResult(
         destination,
         checkpoint_path,
@@ -392,6 +418,7 @@ def export_llamacpp_gguf(
         False,
         embedding_type,
         quantizer,
+        mmproj,
     )
 
 

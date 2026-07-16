@@ -247,6 +247,19 @@ def run_rank_expansion_experiment(
             "token_embedding_type": gguf.token_embedding_type,
             "receipt": str(gguf.output.with_suffix(gguf.output.suffix + ".export.json")),
         },
+        "mmproj": (
+            None
+            if gguf.mmproj is None
+            else {
+                "output": str(gguf.mmproj.output),
+                "converter": str(gguf.mmproj.converter),
+                "bytes": gguf.mmproj.bytes,
+                "sha256": gguf.mmproj.sha256,
+                "tensor_count": gguf.mmproj.tensor_count,
+                "tensor_types": gguf.mmproj.tensor_types,
+                "reused": gguf.mmproj.reused,
+            }
+        ),
         "quality": {
             "output": str(resolved.quality_output),
             "markdown": str(resolved.quality_markdown_output),
@@ -270,6 +283,17 @@ def run_rank_expansion_experiment(
             PublishableArtifact(
                 gguf.output.with_suffix(gguf.output.suffix + ".export.json"),
                 PublishableArtifactKind.STATISTICS,
+            ),
+            *(
+                ()
+                if gguf.mmproj is None
+                else (
+                    PublishableArtifact(gguf.mmproj.output, PublishableArtifactKind.MODEL),
+                    PublishableArtifact(
+                        gguf.mmproj.output.with_suffix(gguf.mmproj.output.suffix + ".export.json"),
+                        PublishableArtifactKind.STATISTICS,
+                    ),
+                )
             ),
             PublishableArtifact(resolved.expansion_report, PublishableArtifactKind.STATISTICS),
             PublishableArtifact(resolved.quality_output, PublishableArtifactKind.STATISTICS),

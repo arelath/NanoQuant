@@ -11,6 +11,7 @@ from nanoquant.compression_export_workflow import (
     resolve_compression_export_recipe,
 )
 from nanoquant.infrastructure.gguf_export import GgufExportResult
+from nanoquant.infrastructure.mmproj_export import MmprojExportResult
 from nanoquant.recipes import EXPERIMENT_003_CONFIG
 from nanoquant.resident_workflow import ResolvedResidentInputs
 from nanoquant.runtime import RuntimeModelMetadata
@@ -71,6 +72,15 @@ def test_complete_compression_export_runs_validated_stages_in_order(
             123,
             "sha256:gguf",
             False,
+            mmproj=MmprojExportResult(
+                resolved.gguf_output.parent / "mmproj-BF16.gguf",
+                resolved.llama_cpp_root / "convert_hf_to_gguf.py",
+                456,
+                "sha256:mmproj",
+                7,
+                ("bf16", "f32"),
+                False,
+            ),
         ),
     )
 
@@ -94,6 +104,9 @@ def test_complete_compression_export_runs_validated_stages_in_order(
     assert summary["packed"] == {"exact": True}
     assert summary["gguf"]["sha256"] == "sha256:gguf"
     assert summary["gguf"]["token_embedding_type"] == "q8_0"
+    assert summary["schema_version"] == 3
+    assert summary["mmproj"]["output"] == str(resolved.gguf_output.parent / "mmproj-BF16.gguf")
+    assert summary["mmproj"]["sha256"] == "sha256:mmproj"
 
 
 def test_base_compression_requires_export_after_resident_completion(

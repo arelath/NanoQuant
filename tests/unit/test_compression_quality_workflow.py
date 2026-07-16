@@ -13,6 +13,7 @@ from nanoquant.compression_quality_workflow import (
 )
 from nanoquant.infrastructure.commits import CommitIdentity
 from nanoquant.infrastructure.gguf_export import GgufExportResult
+from nanoquant.infrastructure.mmproj_export import MmprojExportResult
 from nanoquant.recipes import EXPERIMENT_003, EXPERIMENT_003_CONFIG
 from nanoquant.resident_workflow import ResolvedResidentInputs
 
@@ -53,10 +54,27 @@ def test_compression_quality_exports_and_publishes_gguf_before_quality(
     )
     resident = SimpleNamespace(quantization=quantization, distillation=None)
     gguf = tmp_path / "repo" / "outputs" / "model.gguf"
+    mmproj = gguf.parent / "mmproj-BF16.gguf"
     export = CompressionExportResult(
         {"exact": True},
         {"exact": True},
-        GgufExportResult(gguf, tmp_path / "checkpoint", tmp_path / "converter.py", 123, "digest", False),
+        GgufExportResult(
+            gguf,
+            tmp_path / "checkpoint",
+            tmp_path / "converter.py",
+            123,
+            "digest",
+            False,
+            mmproj=MmprojExportResult(
+                mmproj,
+                tmp_path / "convert_hf_to_gguf.py",
+                456,
+                "mmproj-digest",
+                7,
+                ("bf16", "f32"),
+                False,
+            ),
+        ),
         tmp_path / "export-summary.json",
     )
     calls: list[str] = []
@@ -87,9 +105,12 @@ def test_compression_quality_exports_and_publishes_gguf_before_quality(
 
     assert calls == ["complete", "quality"]
     assert payload["exports"]["gguf"]["output"] == str(gguf)
+    assert payload["exports"]["mmproj"]["output"] == str(mmproj)
     assert published[0][1] == 3
-    assert [artifact.source for artifact in published[0][2]][:3] == [
+    assert [artifact.source for artifact in published[0][2]][:5] == [
         gguf,
         tmp_path / "export-summary.json",
         gguf.with_suffix(".gguf.export.json"),
+        mmproj,
+        mmproj.with_suffix(".gguf.export.json"),
     ]

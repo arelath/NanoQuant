@@ -190,6 +190,19 @@ def execute_compression_quality_experiment(
                 "sha256": exports.gguf.sha256,
                 "reused": exports.gguf.reused,
             },
+            "mmproj": (
+                None
+                if exports.gguf.mmproj is None
+                else {
+                    "output": str(exports.gguf.mmproj.output),
+                    "converter": str(exports.gguf.mmproj.converter),
+                    "bytes": exports.gguf.mmproj.bytes,
+                    "sha256": exports.gguf.mmproj.sha256,
+                    "tensor_count": exports.gguf.mmproj.tensor_count,
+                    "tensor_types": exports.gguf.mmproj.tensor_types,
+                    "reused": exports.gguf.mmproj.reused,
+                }
+            ),
         },
         "stage_measurements": {
             "compression_seconds": compression_seconds,
@@ -223,6 +236,19 @@ def execute_compression_quality_experiment(
             PublishableArtifact(
                 exports.gguf.output.with_suffix(exports.gguf.output.suffix + ".export.json"),
                 PublishableArtifactKind.STATISTICS,
+            ),
+            *(
+                ()
+                if exports.gguf.mmproj is None
+                else (
+                    PublishableArtifact(exports.gguf.mmproj.output, PublishableArtifactKind.MODEL),
+                    PublishableArtifact(
+                        exports.gguf.mmproj.output.with_suffix(
+                            exports.gguf.mmproj.output.suffix + ".export.json"
+                        ),
+                        PublishableArtifactKind.STATISTICS,
+                    ),
+                )
             ),
             PublishableArtifact(resolved.summary_output, PublishableArtifactKind.STATISTICS),
             PublishableArtifact(resolved.quality_output, PublishableArtifactKind.STATISTICS),

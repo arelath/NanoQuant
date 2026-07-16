@@ -10,6 +10,7 @@ import torch
 import nanoquant.infrastructure.gguf_export as gguf_export
 from nanoquant.infrastructure.gguf_export import export_llamacpp_gguf
 from nanoquant.infrastructure.io_utils import hash_file as real_hash_file
+from nanoquant.infrastructure.mmproj_export import MmprojExportResult
 from nanoquant.runtime import (
     PACKED_REFERENCE_CONVERTER_SHA256,
     LogicalLayerState,
@@ -53,6 +54,10 @@ def test_gguf_export_is_converter_pinned_and_resumable(
     packed = _packed(tmp_path)
     source = tmp_path / "snapshot"
     source.mkdir()
+    (source / "config.json").write_text(
+        json.dumps({"vision_config": {"hidden_size": 16}}),
+        encoding="utf-8",
+    )
     reference = tmp_path / "llama.cpp"
     reference.mkdir()
     converter = reference / "convert_nanoquant_to_gguf.py"
@@ -98,6 +103,22 @@ Path(a.outfile).write_bytes(b'GGUF-fixture')
         "_inspect_gguf_tensor_contract",
         lambda *_args: ("q8_0", 3, ("bf16",)),
     )
+    mmproj_calls: list[Path] = []
+
+    def export_mmproj(_source, mmproj_output, _reference, **_kwargs):  # type: ignore[no-untyped-def]
+        mmproj_path = Path(mmproj_output).resolve()
+        mmproj_calls.append(mmproj_path)
+        return MmprojExportResult(
+            mmproj_path,
+            reference / "convert_hf_to_gguf.py",
+            456,
+            "sha256:mmproj",
+            7,
+            ("bf16", "f32"),
+            len(mmproj_calls) > 1,
+        )
+
+    monkeypatch.setattr(gguf_export, "export_mmproj_bfloat16", export_mmproj)
     output = tmp_path / "output" / "model.gguf"
     checkpoint = tmp_path / "output" / "checkpoint"
 
@@ -107,6 +128,9 @@ Path(a.outfile).write_bytes(b'GGUF-fixture')
     assert output.read_bytes() == b"GGUF-q8_0"
     assert not first.reused
     assert second.reused
+    assert first.mmproj is not None and not first.mmproj.reused
+    assert second.mmproj is not None and second.mmproj.reused
+    assert mmproj_calls == [output.parent / "mmproj-BF16.gguf"] * 2
     receipt = json.loads(output.with_suffix(".gguf.export.json").read_text(encoding="utf-8"))
     assert receipt["schema_version"] == 3
     assert receipt["gguf_sha256"] == real_hash_file(output)

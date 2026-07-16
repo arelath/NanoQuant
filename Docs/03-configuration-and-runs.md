@@ -282,3 +282,10 @@ The number is a human chronology label, not the immutable run identity:
 - the manifest records launcher path/hash and resolved configuration.
 
 Completed experiment files are not edited into a different experiment. A changed hypothesis or semantic setting receives the next number. The file remains thin and uses the canonical configuration/application API; it does not duplicate orchestration. Full conventions are in [Lessons Carried Forward](12-lessons-carried-forward.md#2-preserve-numbered-experiment-files) and [ADR-0005](adr/0005-numbered-zero-argument-runfiles.md).
+
+## 11. Derived deployment outputs
+
+Deployment filenames are recipe outputs rather than numerical `RunConfig` fields. Every completed compression export
+produces the language GGUF and its receipt. If the pinned source `config.json` contains a non-empty `vision_config`,
+the same shared export boundary also produces `mmproj-BF16.gguf` and its receipt beside the language model. The
+projector is validated and published into `Results/NNN`; text-only models do not emit a placeholder file.
