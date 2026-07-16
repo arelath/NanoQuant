@@ -2,26 +2,24 @@
 
 from pathlib import Path
 
-from nanoquant.config.schema import (
-    EvaluationConfig,
-    IntentConfig,
-    ModelConfig,
-    RunConfig,
-    RuntimeConfig,
-)
 from nanoquant.quality_evaluation import QualityEvaluationRequest
 from nanoquant.quality_evaluation_workflow import QualityEvaluationExperiment
 
+from ._delta import config_delta, run_config_defaults
+
 MODEL_REVISION = "dcc83ea841ab6100d6b47a070329e1ba4cf78752"
 
-EXPERIMENT_002_CONFIG = RunConfig(
-    model=ModelConfig(
-        source="google/gemma-3-1b-it",
+_SCHEMA_DEFAULTS = run_config_defaults("google/gemma-3-1b-it")
+
+EXPERIMENT_002_CONFIG = config_delta(
+    _SCHEMA_DEFAULTS,
+    model=config_delta(
+        _SCHEMA_DEFAULTS.model,
         revision=MODEL_REVISION,
         tokenizer_revision=MODEL_REVISION,
-        sequence_length=2048,
     ),
-    intent=IntentConfig(
+    intent=config_delta(
+        _SCHEMA_DEFAULTS.intent,
         experiment_number=2,
         name="002-benchmark-gemma-3-1b-it",
         purpose="Benchmark the accepted NanoQuant Gemma candidate against its pinned BF16 source model.",
@@ -29,8 +27,8 @@ EXPERIMENT_002_CONFIG = RunConfig(
         baseline_run="bf16-google-gemma-3-1b-it",
         tags=("gemma-3-1b-it", "benchmark", "bf16-comparison", "wikitext2", "multiple-choice"),
     ),
-    runtime=RuntimeConfig(compute_device="cuda:0"),
-    evaluation=EvaluationConfig(
+    evaluation=config_delta(
+        _SCHEMA_DEFAULTS.evaluation,
         suites=(
             "wikitext2-limited",
             "piqa",
@@ -41,7 +39,6 @@ EXPERIMENT_002_CONFIG = RunConfig(
             "boolq",
         ),
         sample_limit=200,
-        few_shot=0,
     ),
 )
 

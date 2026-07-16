@@ -61,18 +61,22 @@ def test_recipes_package_has_one_import_spelling() -> None:
     assert not Path("experiments/__init__.py").exists()
 
 
-def test_inherited_recipes_use_fail_closed_config_deltas() -> None:
-    inherited = (
+def test_recipe_configs_use_fail_closed_config_deltas() -> None:
+    recipes = (
+        Path("experiments/recipes/base_compression.py"),
         Path("experiments/recipes/experiment001.py"),
+        Path("experiments/recipes/experiment002.py"),
         Path("experiments/recipes/experiment003.py"),
         Path("experiments/recipes/experiment004.py"),
         Path("experiments/recipes/experiment005.py"),
         Path("experiments/recipes/legacy/experiment008.py"),
+        Path("experiments/recipes/legacy/experiment011.py"),
         Path("experiments/recipes/legacy/experiment013.py"),
         Path("experiments/recipes/legacy/experiment018.py"),
+        Path("experiments/recipes/legacy/short_decode.py"),
     )
     violations = []
-    for path in inherited:
+    for path in recipes:
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         if any(
             isinstance(node, ast.ImportFrom)

@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import is_dataclass, replace
 from typing import Any, TypeVar, cast
 
+from nanoquant.config.schema import ModelConfig, RunConfig
+
 T = TypeVar("T")
 
 
@@ -20,4 +22,10 @@ def config_delta(parent: T, /, **changes: Any) -> T:
     return cast(T, replace(parent, **changes))
 
 
-__all__ = ["config_delta"]
+def run_config_defaults(model_source: str) -> RunConfig:
+    """Construct the schema-default run baseline for a required model source."""
+
+    return RunConfig(model=ModelConfig(source=model_source))
+
+
+__all__ = ["config_delta", "run_config_defaults"]

@@ -3,25 +3,24 @@
 from pathlib import Path
 
 from nanoquant.benchmark_workflow import RuntimeBenchmarkExperiment
-from nanoquant.config.schema import (
-    EvaluationConfig,
-    IntentConfig,
-    ModelConfig,
-    RunConfig,
-    RuntimeConfig,
-)
 from nanoquant.runtime_benchmark import RuntimeBenchmarkRequest
+
+from .._delta import config_delta, run_config_defaults
 
 MODEL_REVISION = "dcc83ea841ab6100d6b47a070329e1ba4cf78752"
 
-EXPERIMENT_011_CONFIG = RunConfig(
-    model=ModelConfig(
-        source="google/gemma-3-1b-it",
+_SCHEMA_DEFAULTS = run_config_defaults("google/gemma-3-1b-it")
+
+EXPERIMENT_011_CONFIG = config_delta(
+    _SCHEMA_DEFAULTS,
+    model=config_delta(
+        _SCHEMA_DEFAULTS.model,
         revision=MODEL_REVISION,
         tokenizer_revision=MODEL_REVISION,
         sequence_length=512,
     ),
-    intent=IntentConfig(
+    intent=config_delta(
+        _SCHEMA_DEFAULTS.intent,
         experiment_number=11,
         name="011-benchmark-generation-tps",
         purpose="Measure generation-only throughput after load, preparation, tokenization, and warmup.",
@@ -29,8 +28,10 @@ EXPERIMENT_011_CONFIG = RunConfig(
         baseline_run="legacy-experiment-011",
         tags=("gemma-3-1b-it", "runtime", "generation", "throughput"),
     ),
-    runtime=RuntimeConfig(compute_device="cuda:0"),
-    evaluation=EvaluationConfig(suites=("runtime-generation-v1",)),
+    evaluation=config_delta(
+        _SCHEMA_DEFAULTS.evaluation,
+        suites=("runtime-generation-v1",),
+    ),
 )
 
 EXPERIMENT_011_BENCHMARK = RuntimeBenchmarkExperiment(

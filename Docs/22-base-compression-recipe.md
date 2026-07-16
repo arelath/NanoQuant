@@ -10,9 +10,11 @@ after the ordinary sensitivity allocation, so other layers retain their target-B
 BPW includes the additional `v_proj` storage. Numbered experiments whose results or resumable state predate this
 decision explicitly pin an empty override; newly authored compression experiments inherit the maximum-rank policy.
 
-Derived definitions use `config_delta(parent, ...)` at every nested dataclass boundary. The helper rejects an
-explicit value equal to the parent during module import, so experiment files state only material differences while
-their fully resolved `RunConfig` remains complete and hash-stable.
+Every recipe definition uses `config_delta(parent, ...)` at each nested dataclass boundary. The shared compression
+recipe is itself a delta from the canonical schema defaults, standalone benchmark recipes use the same schema
+baseline, and derived experiments inherit from their direct recipe parent. The helper rejects an explicit value
+equal to its parent during module import, so recipe files state only material differences while their fully resolved
+`RunConfig` remains complete and hash-stable.
 
 The same module exposes `compression_export_recipe(experiment_number, model_slug)`. It assigns canonical outputs:
 

@@ -2,26 +2,25 @@
 
 from pathlib import Path
 
-from nanoquant.config.schema import (
-    EvaluationConfig,
-    IntentConfig,
-    ModelConfig,
-    RunConfig,
-    RuntimeConfig,
-)
 from nanoquant.short_decode_benchmark import LegacyShortDecodeCase, ShortDecodeBenchmarkRequest
 from nanoquant.short_decode_workflow import ShortDecodeBenchmarkExperiment
 
+from .._delta import config_delta, run_config_defaults
+
 MODEL_REVISION = "dcc83ea841ab6100d6b47a070329e1ba4cf78752"
 
-LEGACY_SHORT_DECODE_CONFIG = RunConfig(
-    model=ModelConfig(
-        source="google/gemma-3-1b-it",
+_SCHEMA_DEFAULTS = run_config_defaults("google/gemma-3-1b-it")
+
+LEGACY_SHORT_DECODE_CONFIG = config_delta(
+    _SCHEMA_DEFAULTS,
+    model=config_delta(
+        _SCHEMA_DEFAULTS.model,
         revision=MODEL_REVISION,
         tokenizer_revision=MODEL_REVISION,
         sequence_length=128,
     ),
-    intent=IntentConfig(
+    intent=config_delta(
+        _SCHEMA_DEFAULTS.intent,
         experiment_number=2,
         name="002-benchmark-gemma-3-1b-it",
         purpose="Compare source, logical frozen, and production packed short-decode behavior.",
@@ -29,8 +28,10 @@ LEGACY_SHORT_DECODE_CONFIG = RunConfig(
         baseline_run="legacy-experiment-002",
         tags=("gemma-3-1b-it", "runtime", "decode", "paired", "memory"),
     ),
-    runtime=RuntimeConfig(compute_device="cuda:0"),
-    evaluation=EvaluationConfig(suites=("runtime-short-decode-v1",)),
+    evaluation=config_delta(
+        _SCHEMA_DEFAULTS.evaluation,
+        suites=("runtime-short-decode-v1",),
+    ),
 )
 
 LEGACY_SHORT_DECODE_BENCHMARK = ShortDecodeBenchmarkExperiment(

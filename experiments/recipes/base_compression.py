@@ -4,64 +4,35 @@ from pathlib import Path
 
 from nanoquant.compression_export_workflow import CompressionExportRecipe
 from nanoquant.config.schema import (
-    ActivationRetention,
-    ADMMConfig,
     AllocationStrategy,
-    BlockTuningConfig,
-    CalibrationConfig,
-    CalibrationFallbackConfig,
-    CalibrationMethod,
-    CheckpointConfig,
-    DatasetConfig,
     DatasetSourceConfig,
-    DistillationConfig,
-    DType,
-    EvaluationConfig,
     ExecutorKind,
-    FactorizationConfig,
-    FactorizedTuningConfig,
-    IntentConfig,
-    ModelConfig,
-    NonFactorizedTuningConfig,
-    ObjectiveConfig,
-    ObjectiveKind,
-    OptimizerConfig,
-    OutlierConfig,
     OutlierSelector,
-    OutputConfig,
-    PostBlockRefitConfig,
-    RankAllocationConfig,
-    RankBoundsConfig,
-    RankRetryConfig,
-    ReproducibilityConfig,
-    ResidualProbeConfig,
-    RetryThresholdConfig,
-    RunConfig,
-    RuntimeConfig,
-    ScaleFitConfig,
     TuningEpochLossMode,
-    TuningLoopConfig,
 )
+
+from ._delta import config_delta, run_config_defaults
 
 MODEL_REVISION = "dcc83ea841ab6100d6b47a070329e1ba4cf78752"
 
-BASE_COMPRESSION_CONFIG = RunConfig(
-    model=ModelConfig(
-        source="google/gemma-3-1b-it",
+_SCHEMA_DEFAULTS = run_config_defaults("google/gemma-3-1b-it")
+
+BASE_COMPRESSION_CONFIG = config_delta(
+    _SCHEMA_DEFAULTS,
+    model=config_delta(
+        _SCHEMA_DEFAULTS.model,
         revision=MODEL_REVISION,
         tokenizer_revision=MODEL_REVISION,
-        sequence_length=2048,
-        load_dtype=DType.BFLOAT16,
     ),
-    intent=IntentConfig(
-        experiment_number=None,
+    intent=config_delta(
+        _SCHEMA_DEFAULTS.intent,
         name="base-compression-gemma-3",
         purpose="Compress, tune, validate, and export a complete NanoQuant model.",
         hypothesis="The shared compression pipeline produces bounded, resumable, deployable GGUF artifacts.",
-        baseline_run=None,
         tags=("base-compression", "gemma-3", "gguf"),
     ),
-    dataset=DatasetConfig(
+    dataset=config_delta(
+        _SCHEMA_DEFAULTS.dataset,
         sources=(
             DatasetSourceConfig(
                 "HuggingFaceH4/ultrachat_200k",
@@ -72,70 +43,52 @@ BASE_COMPRESSION_CONFIG = RunConfig(
             DatasetSourceConfig(
                 "Salesforce/wikitext",
                 revision="b08601e04326c79dfdd32d625aee71d232d685c3",
-                split="train",
                 subset="wikitext-2-raw-v1",
                 weight=0.5,
             ),
         ),
         formatting="gemma-chat-plus-raw-text-v1",
-        selection_seed=0,
         prepared_artifact="sha256-ad1f609729f86db7598eed5c703c55aacbb9cb024cab816ca7b300d574b7a4c8",
         prepared_root="evidence/m3/experiment018-calibration",
     ),
-    reproducibility=ReproducibilityConfig(seed=0),
-    calibration=CalibrationConfig(
-        method=CalibrationMethod.ONLINE_FISHER,
+    calibration=config_delta(
+        _SCHEMA_DEFAULTS.calibration,
         sample_count=256,
-        batch_size=1,
         shrinkage=0.6,
-        objective=ObjectiveConfig(kind=ObjectiveKind.DIAGONAL),
-        fallback=CalibrationFallbackConfig(on_cuda_oom=("fail",)),
+        fallback=config_delta(
+            _SCHEMA_DEFAULTS.calibration.fallback,
+            on_cuda_oom=("fail",),
+        ),
     ),
-    allocation=RankAllocationConfig(
-        target_bpw=1.0,
+    allocation=config_delta(
+        _SCHEMA_DEFAULTS.allocation,
         strategy=AllocationStrategy.SENSITIVITY,
-        sensitivity_alpha=0.5,
         maximum_rank_layer_patterns=("self_attn.v_proj",),
-        bounds=RankBoundsConfig(
-            multiple=32,
+        bounds=config_delta(
+            _SCHEMA_DEFAULTS.allocation.bounds,
             floor_fraction_of_uniform=0.9,
             ceiling_fraction_of_uniform=1.1,
-            edge_block_boost=0.15,
         ),
         # Legacy's value was two retries after the first attempt; the canonical
         # policy counts all attempts, hence three here.
-        retry=RankRetryConfig(
-            thresholds=RetryThresholdConfig(
-                weighted_normalized_error=0.5,
+        retry=config_delta(
+            _SCHEMA_DEFAULTS.allocation.retry,
+            thresholds=config_delta(
+                _SCHEMA_DEFAULTS.allocation.retry.thresholds,
                 raw_normalized_error=0.5,
             ),
-            rank_increase_fraction=0.25,
             maximum_attempts=3,
-            extra_bit_budget_fraction=0.02,
             allow_above_allocator_cap=True,
         ),
     ),
-    factorization=FactorizationConfig(
-        admm=ADMMConfig(outer_iterations=800, inner_iterations=5, transpose_wide=False),
-        scale_fit=ScaleFitConfig(
-            enabled=True,
-            alternating_passes=2,
-            epsilon=1e-8,
-            chunk_rows=512,
-            rollback_on_regression=True,
-        ),
-    ),
-    outliers=OutlierConfig(
+    outliers=config_delta(
+        _SCHEMA_DEFAULTS.outliers,
         selector=OutlierSelector.RESIDUAL,
         fraction=0.001,
-        storage_dtype=DType.BFLOAT16,
-        layer_patterns=("*",),
         charge_to_bit_budget=False,
-        count_multiple=1,
-        removed_column_importance="zero",
-        residual_probe=ResidualProbeConfig(iterations=80, chunk_rows=512),
     ),
-    block_tuning=BlockTuningConfig(
+    block_tuning=config_delta(
+        _SCHEMA_DEFAULTS.block_tuning,
         layer_order=(
             "mlp.gate_proj",
             "mlp.up_proj",
@@ -145,15 +98,12 @@ BASE_COMPRESSION_CONFIG = RunConfig(
             "self_attn.q_proj",
             "self_attn.k_proj",
         ),
-        non_factorized=NonFactorizedTuningConfig(
-            loop=TuningLoopConfig(enabled=True, epochs=8, batch_size=8),
-            optimizer=OptimizerConfig(learning_rate=1e-4, weight_decay=0.0),
+        non_factorized=config_delta(
+            _SCHEMA_DEFAULTS.block_tuning.non_factorized,
             epochs_by_layer_position=(8, 4, 3, 2, 2, 2, 2),
         ),
-        factorized=FactorizedTuningConfig(
-            loop=TuningLoopConfig(enabled=True, epochs=8, batch_size=8),
-        ),
-        post_block_refit=PostBlockRefitConfig(
+        post_block_refit=config_delta(
+            _SCHEMA_DEFAULTS.block_tuning.post_block_refit,
             enabled=True,
             epochs=2,
             batch_size=8,
@@ -164,35 +114,19 @@ BASE_COMPRESSION_CONFIG = RunConfig(
         restore_best_state=False,
         epoch_loss_mode=TuningEpochLossMode.LEGACY_TRAINING,
     ),
-    distillation=DistillationConfig(
+    distillation=config_delta(
+        _SCHEMA_DEFAULTS.distillation,
         enabled=True,
-        epochs=8,
-        batch_size=1,
-        learning_rate=1e-5,
-        temperature=1.0,
-        top_k=64,
-        vocabulary_chunk_size=8192,
-        token_chunk_size=128,
-        maximum_tokens_per_batch=512,
-        gradient_checkpointing=True,
-        weight_decay=0.0,
     ),
-    runtime=RuntimeConfig(
+    runtime=config_delta(
+        _SCHEMA_DEFAULTS.runtime,
         executor=ExecutorKind.RESIDENT,
         compute_device="cuda",
-        block_forward_batch_size=8,
-        checkpoints=CheckpointConfig(activation_retention=ActivationRetention.ROLLING),
         on_cuda_oom=("fail",),
     ),
-    evaluation=EvaluationConfig(
-        inline_quality=True,
-        inline_quality_samples=1,
-        inline_quality_tokens=8,
-    ),
-    output=OutputConfig(
-        run_root="runs",
+    output=config_delta(
+        _SCHEMA_DEFAULTS.output,
         artifact_root="artifacts",
-        retain_temporary_artifacts=False,
     ),
 )
 
