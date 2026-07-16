@@ -1,16 +1,16 @@
 """Experiment 004: selectively add 30% packed bits to Experiment 003 v_proj layers."""
 
-from dataclasses import replace
 from pathlib import Path
 
-from nanoquant.config.schema import IntentConfig
 from nanoquant.rank_expansion_experiment import RankExpansionExperiment
 
+from ._delta import config_delta
 from .experiment003 import EXPERIMENT_003_CONFIG
 
-EXPERIMENT_004_CONFIG = replace(
+EXPERIMENT_004_CONFIG = config_delta(
     EXPERIMENT_003_CONFIG,
-    intent=IntentConfig(
+    intent=config_delta(
+        EXPERIMENT_003_CONFIG.intent,
         experiment_number=4,
         name="004-gemma-3-4b-it-vproj-plus30",
         purpose="Measure whether additive v_proj rank improves Experiment 003 reconstruction and quality.",

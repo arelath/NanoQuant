@@ -1,38 +1,26 @@
 """Gemma 3 4B compression and quality-proof experiment."""
 
-from dataclasses import replace
 from pathlib import Path
 
 from nanoquant.compression_quality_workflow import CompressionQualityExperiment
-from nanoquant.config.schema import (
-    BlockTuningConfig,
-    IntentConfig,
-    ModelConfig,
-    ObservabilityConfig,
-    OutputConfig,
-    ProfilingConfig,
-    ProfilingLevel,
-    RankRetryConfig,
-    RetryThresholdConfig,
-)
 
+from ._delta import config_delta
 from .base_compression import BASE_COMPRESSION_CONFIG, compression_export_recipe
 
 MODEL_REVISION = "093f9f388b31de276ce2de164bdc2081324b9767"
 
 _base_tuning = BASE_COMPRESSION_CONFIG.block_tuning
-_base_runtime = BASE_COMPRESSION_CONFIG.runtime
 
-EXPERIMENT_003_CONFIG = replace(
+EXPERIMENT_003_CONFIG = config_delta(
     BASE_COMPRESSION_CONFIG,
-    model=ModelConfig(
+    model=config_delta(
+        BASE_COMPRESSION_CONFIG.model,
         source="google/gemma-3-4b-it",
         revision=MODEL_REVISION,
         tokenizer_revision=MODEL_REVISION,
-        sequence_length=2048,
-        load_dtype=BASE_COMPRESSION_CONFIG.model.load_dtype,
     ),
-    intent=IntentConfig(
+    intent=config_delta(
+        BASE_COMPRESSION_CONFIG.intent,
         experiment_number=3,
         name="003-compress-and-benchmark-gemma-3-4b-it-v5",
         purpose=(
@@ -46,66 +34,55 @@ EXPERIMENT_003_CONFIG = replace(
         baseline_run="bf16-google-gemma-3-4b-it",
         tags=("gemma-3-4b-it", "compression", "quality", "shared-vram-guard", "profiling"),
     ),
-    allocation=replace(
+    allocation=config_delta(
         BASE_COMPRESSION_CONFIG.allocation,
         maximum_rank_layer_patterns=(),
-        retry=RankRetryConfig(
-            thresholds=RetryThresholdConfig(
+        retry=config_delta(
+            BASE_COMPRESSION_CONFIG.allocation.retry,
+            thresholds=config_delta(
+                BASE_COMPRESSION_CONFIG.allocation.retry.thresholds,
                 weighted_normalized_error=0.35,
                 raw_normalized_error=0.40,
             ),
-            rank_increase_fraction=0.25,
-            maximum_attempts=3,
-            extra_bit_budget_fraction=0.02,
-            allow_above_allocator_cap=True,
         ),
     ),
-    block_tuning=BlockTuningConfig(
-        layer_order=_base_tuning.layer_order,
-        non_factorized=replace(
+    block_tuning=config_delta(
+        _base_tuning,
+        non_factorized=config_delta(
             _base_tuning.non_factorized,
-            loop=replace(_base_tuning.non_factorized.loop, batch_size=4),
+            loop=config_delta(_base_tuning.non_factorized.loop, batch_size=4),
         ),
-        factorized=replace(
+        factorized=config_delta(
             _base_tuning.factorized,
-            loop=replace(_base_tuning.factorized.loop, batch_size=1),
+            loop=config_delta(_base_tuning.factorized.loop, batch_size=1),
         ),
-        post_block_refit=replace(
+        post_block_refit=config_delta(
             _base_tuning.post_block_refit,
             batch_size=1,
         ),
         microbatch_size=1,
-        reset_seed_each_stage=_base_tuning.reset_seed_each_stage,
-        restore_best_state=_base_tuning.restore_best_state,
-        epoch_loss_mode=_base_tuning.epoch_loss_mode,
     ),
-    runtime=replace(
-        _base_runtime,
+    runtime=config_delta(
+        BASE_COMPRESSION_CONFIG.runtime,
         block_forward_batch_size=4,
     ),
-    evaluation=replace(
+    evaluation=config_delta(
         BASE_COMPRESSION_CONFIG.evaluation,
         inline_quality=False,
     ),
-    observability=ObservabilityConfig(
-        event_level="info",
-        console_level="info",
+    observability=config_delta(
+        BASE_COMPRESSION_CONFIG.observability,
         record_resource_interval_seconds=1.0,
-        record_weight_reconstruction_table=True,
-        record_block_loss_snapshots=True,
     ),
-    profiling=ProfilingConfig(
-        level=ProfilingLevel.MACRO,
+    profiling=config_delta(
+        BASE_COMPRESSION_CONFIG.profiling,
         cuda_timing=True,
-        cuda_sample_every=16,
         memory_counters=True,
-        raw_samples_per_phase=64,
         emit_span_events=True,
     ),
-    output=OutputConfig(
+    output=config_delta(
+        BASE_COMPRESSION_CONFIG.output,
         run_root="evidence/m10",
-        artifact_root="artifacts",
-        retain_temporary_artifacts=False,
     ),
 )
 

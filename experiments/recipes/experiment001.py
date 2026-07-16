@@ -1,15 +1,14 @@
 """Compression, GGUF export, and BF16-versus-NanoQuant benchmark recipe."""
 
-from dataclasses import replace
-
 from nanoquant.compression_benchmark_workflow import CompressionBenchmarkExperiment
-from nanoquant.config.schema import IntentConfig
 
+from ._delta import config_delta
 from .base_compression import BASE_COMPRESSION_CONFIG, compression_export_recipe
 
-EXPERIMENT_001_CONFIG = replace(
+EXPERIMENT_001_CONFIG = config_delta(
     BASE_COMPRESSION_CONFIG,
-    intent=IntentConfig(
+    intent=config_delta(
+        BASE_COMPRESSION_CONFIG.intent,
         experiment_number=1,
         name="001-compress-and-benchmark-gemma-3-1b-it",
         purpose=(
@@ -23,7 +22,7 @@ EXPERIMENT_001_CONFIG = replace(
         baseline_run="bf16-google-gemma-3-1b-it",
         tags=("gemma-3-1b-it", "compression", "gguf", "bf16-comparison", "quality"),
     ),
-    allocation=replace(
+    allocation=config_delta(
         BASE_COMPRESSION_CONFIG.allocation,
         maximum_rank_layer_patterns=(),
     ),

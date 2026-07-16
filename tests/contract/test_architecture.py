@@ -61,6 +61,36 @@ def test_recipes_package_has_one_import_spelling() -> None:
     assert not Path("experiments/__init__.py").exists()
 
 
+def test_inherited_recipes_use_fail_closed_config_deltas() -> None:
+    inherited = (
+        Path("experiments/recipes/experiment001.py"),
+        Path("experiments/recipes/experiment003.py"),
+        Path("experiments/recipes/experiment004.py"),
+        Path("experiments/recipes/experiment005.py"),
+        Path("experiments/recipes/legacy/experiment008.py"),
+        Path("experiments/recipes/legacy/experiment013.py"),
+        Path("experiments/recipes/legacy/experiment018.py"),
+    )
+    violations = []
+    for path in inherited:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        if any(
+            isinstance(node, ast.ImportFrom)
+            and node.module == "dataclasses"
+            and any(alias.name == "replace" for alias in node.names)
+            for node in ast.walk(tree)
+        ):
+            violations.append(f"{path}: imports unchecked dataclasses.replace")
+        if not any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "config_delta"
+            for node in ast.walk(tree)
+        ):
+            violations.append(f"{path}: does not use config_delta")
+    assert violations == []
+
+
 def test_runtime_distribution_contains_only_the_deployment_packages() -> None:
     root = Path("packaging/runtime")
     configuration = (root / "pyproject.toml").read_text(encoding="utf-8")

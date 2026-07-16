@@ -1,16 +1,16 @@
 """Experiment 005: request 2x v_proj bits, saturating all layers at maximum rank."""
 
-from dataclasses import replace
 from pathlib import Path
 
-from nanoquant.config.schema import IntentConfig
 from nanoquant.rank_expansion_experiment import RankExpansionExperiment
 
+from ._delta import config_delta
 from .experiment003 import EXPERIMENT_003_CONFIG
 
-EXPERIMENT_005_CONFIG = replace(
+EXPERIMENT_005_CONFIG = config_delta(
     EXPERIMENT_003_CONFIG,
-    intent=IntentConfig(
+    intent=config_delta(
+        EXPERIMENT_003_CONFIG.intent,
         experiment_number=5,
         name="005-gemma-3-4b-it-vproj-double-request",
         purpose="Upper-bound the Experiment 003 v_proj allocation hypothesis at maximum physical rank.",
