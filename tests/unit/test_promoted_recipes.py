@@ -79,7 +79,7 @@ def test_experiment001_uses_the_current_parity_compression_recipe(tmp_path: Path
     assert request.factorized_tuning_epochs == 8
     assert request.post_block_refit_epochs == 2
     assert request.defer_run_completion
-    assert EXPERIMENT_001.gguf_output.name == "gemma-3-1b-it-nanoquant.gguf"
+    assert EXPERIMENT_001.export.gguf_output.name == "gemma-3-1b-it-nanoquant.gguf"
     assert EXPERIMENT_001.wikitext_samples == 64
     assert EXPERIMENT_001.task_limit == 200
 

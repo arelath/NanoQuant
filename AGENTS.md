@@ -17,7 +17,11 @@ a reduced-iteration diagnostic, or an unfinished real-model run.
 - `src/nanoquant/ports`: infrastructure interfaces.
 - `src/nanoquant/infrastructure`: Hugging Face/model adapters, artifact stores, commits, execution, and resource control.
 - `src/nanoquant/resident_quantization.py`: current real-model resident composition and resumable layer/block flow.
+- `src/nanoquant/recipes/base_compression.py`: visible base numerical recipe and canonical numbered export paths.
+- `src/nanoquant/compression_export_workflow.py`: mandatory complete-run logical, packed, checkpoint, GGUF, and
+  export-summary contract. Compression experiments must use `execute_complete_compression`.
 - `src/nanoquant/runtime`: deployment-only runtime surface; this remains less complete than the research pipeline.
+- `Results/NNN`: zero-copy hard links to publishable GGUF, statistics, and reports for each numbered experiment.
 - `tests`: unit, contract, and integration coverage.
 - `tools/run_gemma_parity.py`: pinned Gemma resident parity launcher.
 - `Docs/13-implementation-task-list.md`: authoritative milestone checklist; unchecked items are real remaining work unless
@@ -25,6 +29,7 @@ a reduced-iteration diagnostic, or an unfinished real-model run.
 - `Docs/requirements-traceability.md`: requirements-to-milestone mapping.
 - `Docs/14-artifact-retention-and-disk-usage.md`: measured design for bounded activation retention, shared stores,
   and store-aware garbage collection.
+- `Docs/22-base-compression-recipe.md`: mandatory GGUF export lifecycle and completed-run backfill procedure.
 - `evidence/m4/README.md`: current Gemma resident-run evidence and comparison notes.
 
 Read the relevant architecture/config/contract documents under `Docs/` before changing a boundary or persisted

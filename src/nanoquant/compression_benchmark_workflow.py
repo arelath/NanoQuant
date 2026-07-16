@@ -2,37 +2,28 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from nanoquant.compression_export_workflow import (
+    CompressionExportRecipe,
+    ResolvedCompressionExportRecipe,
+    execute_complete_compression,
+    resolve_compression_export_recipe,
+)
 from nanoquant.config.codec import to_dict
 from nanoquant.config.schema import RunConfig
-from nanoquant.infrastructure.gguf_export import GgufExportResult, export_llamacpp_gguf
 from nanoquant.infrastructure.io_utils import atomic_write_json
 from nanoquant.infrastructure.publication import (
     PublishableArtifact,
     PublishableArtifactKind,
     publish_experiment_artifacts,
 )
-from nanoquant.infrastructure.runtime_export import (
-    export_frozen_run_logical,
-    validate_frozen_run_logical,
-)
-from nanoquant.infrastructure.safetensors_source import SafetensorsModelSource
 from nanoquant.quality_evaluation import QualityEvaluationRequest, execute_quality_evaluation
 from nanoquant.resident_workflow import (
-    ResidentWorkflowResult,
     ResolvedResidentInputs,
-    execute_resident_workflow,
     resolve_resident_experiment_inputs,
-)
-from nanoquant.runtime import (
-    RuntimeModelMetadata,
-    convert_logical_to_packed,
-    open_logical_artifact,
-    open_packed_artifact,
-    validate_packed_conversion,
 )
 
 LEGACY_007_TASKS = (
@@ -49,13 +40,8 @@ LEGACY_007_TASKS = (
 class CompressionBenchmarkExperiment:
     """Repository-relative material outputs and the comparison protocol."""
 
-    logical_output: Path
-    packed_output: Path
-    checkpoint_output: Path
-    gguf_output: Path
+    export: CompressionExportRecipe
     benchmark_output: Path
-    llama_cpp_root: Path
-    runtime_family: str = "gemma3"
     expected_blocks: int = 26
     wikitext_samples: int = 64
     wikitext_sequence_length: int = 128
@@ -66,8 +52,6 @@ class CompressionBenchmarkExperiment:
     local_files_only: bool = True
 
     def __post_init__(self) -> None:
-        if not self.runtime_family:
-            raise ValueError("runtime family is required")
         if self.expected_blocks <= 0:
             raise ValueError("expected block count must be positive")
         if self.wikitext_samples <= 0 or self.wikitext_sequence_length < 2:
@@ -81,12 +65,8 @@ class CompressionBenchmarkExperiment:
 @dataclass(frozen=True, slots=True)
 class ResolvedCompressionBenchmarkExperiment:
     inputs: ResolvedResidentInputs
-    logical_output: Path
-    packed_output: Path
-    checkpoint_output: Path
-    gguf_output: Path
+    export: ResolvedCompressionExportRecipe
     benchmark_output: Path
-    llama_cpp_root: Path
 
 
 def _repository_path(path: Path, repository_root: Path) -> Path:
@@ -106,71 +86,9 @@ def resolve_compression_benchmark_experiment(
     inputs = resolve_resident_experiment_inputs(config, launcher_path=launcher)
     return ResolvedCompressionBenchmarkExperiment(
         inputs,
-        _repository_path(experiment.logical_output, repository_root),
-        _repository_path(experiment.packed_output, repository_root),
-        _repository_path(experiment.checkpoint_output, repository_root),
-        _repository_path(experiment.gguf_output, repository_root),
+        resolve_compression_export_recipe(experiment.export, repository_root),
         _repository_path(experiment.benchmark_output, repository_root),
-        _repository_path(experiment.llama_cpp_root, repository_root),
     )
-
-
-def _runtime_metadata(
-    config: RunConfig,
-    experiment: CompressionBenchmarkExperiment,
-    resolved: ResolvedCompressionBenchmarkExperiment,
-    workflow: ResidentWorkflowResult,
-) -> RuntimeModelMetadata:
-    checkpoint = SafetensorsModelSource(
-        resolved.inputs.snapshot,
-        source=config.model.source,
-        revision=str(config.model.revision),
-        verify_hashes=False,
-    ).inventory()
-    return RuntimeModelMetadata(
-        config.model.source,
-        str(config.model.revision),
-        experiment.runtime_family,
-        workflow.quantization.inventory.model.config_hash,
-        checkpoint.tokenizer_hash,
-    )
-
-
-def _ensure_logical_export(
-    resolved: ResolvedCompressionBenchmarkExperiment,
-    metadata: RuntimeModelMetadata,
-    expected_blocks: int,
-) -> dict[str, Any]:
-    if resolved.logical_output.exists():
-        artifact = open_logical_artifact(resolved.logical_output, verify_hashes=True)
-        if artifact.manifest.model != metadata:
-            raise ValueError("existing logical export belongs to a different model")
-    else:
-        export_frozen_run_logical(
-            resolved.inputs.output,
-            resolved.logical_output,
-            metadata,
-            expected_blocks,
-            use_global_tuning=True,
-            fresh_validation=True,
-        )
-    return asdict(
-        validate_frozen_run_logical(
-            resolved.inputs.output,
-            resolved.logical_output,
-            expected_blocks,
-            use_global_tuning=True,
-            fresh_validation=True,
-        )
-    )
-
-
-def _ensure_packed_export(resolved: ResolvedCompressionBenchmarkExperiment) -> dict[str, Any]:
-    if resolved.packed_output.exists():
-        open_packed_artifact(resolved.packed_output, verify_hashes=True)
-    else:
-        convert_logical_to_packed(resolved.logical_output, resolved.packed_output)
-    return asdict(validate_packed_conversion(resolved.logical_output, resolved.packed_output))
 
 
 def execute_compression_benchmark_experiment(
@@ -180,23 +98,21 @@ def execute_compression_benchmark_experiment(
 ) -> dict[str, Any]:
     """Compress Gemma, export its committed state to GGUF, then compare quality."""
 
-    workflow = execute_resident_workflow(config, resolved.inputs)
-    block_count = len(workflow.quantization.inventory.blocks)
-    if block_count != experiment.expected_blocks:
-        raise ValueError(
-            f"resolved model block count differs from experiment: {block_count} != "
-            f"{experiment.expected_blocks}"
-        )
-    metadata = _runtime_metadata(config, experiment, resolved, workflow)
-    logical = _ensure_logical_export(resolved, metadata, block_count)
-    packed = _ensure_packed_export(resolved)
-    gguf: GgufExportResult = export_llamacpp_gguf(
-        resolved.packed_output,
-        resolved.inputs.snapshot,
-        resolved.checkpoint_output,
-        resolved.gguf_output,
-        resolved.llama_cpp_root,
+    experiment_number = config.intent.experiment_number
+    if experiment_number is None:
+        raise ValueError("compression benchmark requires an experiment number")
+    launcher = resolved.inputs.launcher_path
+    if launcher is None:
+        raise ValueError("compression benchmark requires launcher provenance")
+    repository_root = launcher.resolve().parent.parent
+    complete = execute_complete_compression(
+        config,
+        resolved.inputs,
+        experiment.export,
+        expected_blocks=experiment.expected_blocks,
     )
+    workflow = complete.workflow
+    exports = complete.exports
     quality = execute_quality_evaluation(
         QualityEvaluationRequest(
             snapshot=resolved.inputs.snapshot,
@@ -215,13 +131,6 @@ def execute_compression_benchmark_experiment(
             local_files_only=experiment.local_files_only,
         )
     )
-    experiment_number = config.intent.experiment_number
-    if experiment_number is None:
-        raise ValueError("compression benchmark requires an experiment number")
-    launcher = resolved.inputs.launcher_path
-    if launcher is None:
-        raise ValueError("compression benchmark requires launcher provenance")
-    repository_root = launcher.resolve().parent.parent
     publication_directory = repository_root / "Results" / f"{experiment_number:03d}"
     payload = {
         "schema_version": 1,
@@ -243,15 +152,15 @@ def execute_compression_benchmark_experiment(
             "distillation": None if workflow.distillation is None else to_dict(workflow.distillation.metrics),
         },
         "exports": {
-            "logical": logical,
-            "packed": packed,
+            "logical": exports.logical,
+            "packed": exports.packed,
             "gguf": {
-                "output": str(gguf.output),
-                "checkpoint": str(gguf.checkpoint),
-                "converter": str(gguf.converter),
-                "bytes": gguf.bytes,
-                "sha256": gguf.sha256,
-                "reused": gguf.reused,
+                "output": str(exports.gguf.output),
+                "checkpoint": str(exports.gguf.checkpoint),
+                "converter": str(exports.gguf.converter),
+                "bytes": exports.gguf.bytes,
+                "sha256": exports.gguf.sha256,
+                "reused": exports.gguf.reused,
             },
         },
         "benchmarks": quality,
@@ -267,7 +176,12 @@ def execute_compression_benchmark_experiment(
         repository_root,
         experiment_number,
         (
-            PublishableArtifact(gguf.output, PublishableArtifactKind.MODEL),
+            PublishableArtifact(exports.gguf.output, PublishableArtifactKind.MODEL),
+            PublishableArtifact(exports.summary_output, PublishableArtifactKind.STATISTICS),
+            PublishableArtifact(
+                exports.gguf.output.with_suffix(exports.gguf.output.suffix + ".export.json"),
+                PublishableArtifactKind.STATISTICS,
+            ),
             PublishableArtifact(resolved.benchmark_output, PublishableArtifactKind.STATISTICS),
             *(PublishableArtifact(path, PublishableArtifactKind.STATISTICS) for path in profile_json),
             *(PublishableArtifact(path, PublishableArtifactKind.REPORT) for path in profile_markdown),

@@ -1,5 +1,6 @@
 """Canonical promoted experiment recipes."""
 
+from .base_compression import BASE_COMPRESSION_CONFIG, compression_export_recipe
 from .experiment001 import EXPERIMENT_001, EXPERIMENT_001_CONFIG
 from .experiment002 import EXPERIMENT_002_CONFIG, EXPERIMENT_002_EVALUATION
 from .experiment003 import EXPERIMENT_003, EXPERIMENT_003_CONFIG
@@ -9,6 +10,8 @@ from .experiment013 import EXPERIMENT_013_CONFIG
 from .experiment018 import EXPERIMENT_018_CONFIG
 
 __all__ = [
+    "BASE_COMPRESSION_CONFIG",
+    "compression_export_recipe",
     "EXPERIMENT_001_CONFIG",
     "EXPERIMENT_001",
     "EXPERIMENT_002_CONFIG",

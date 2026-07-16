@@ -13,12 +13,17 @@ from nanoquant.compression_benchmark_workflow import (
     execute_compression_benchmark_experiment,
     resolve_compression_benchmark_experiment,
 )
+from nanoquant.compression_export_workflow import (
+    CompleteCompressionResult,
+    CompressionExportRecipe,
+    CompressionExportResult,
+    ResolvedCompressionExportRecipe,
+)
 from nanoquant.infrastructure.commits import CommitIdentity
 from nanoquant.infrastructure.gguf_export import GgufExportResult
 from nanoquant.quality_evaluation import QualityEvaluationRequest
 from nanoquant.recipes import EXPERIMENT_001, EXPERIMENT_001_CONFIG
 from nanoquant.resident_workflow import ResolvedResidentInputs
-from nanoquant.runtime import RuntimeModelMetadata
 
 
 def _inputs(tmp_path: Path, launcher: Path) -> ResolvedResidentInputs:
@@ -44,12 +49,14 @@ def test_compression_benchmark_resolution_is_repository_relative(
     inputs = _inputs(tmp_path, launcher)
     monkeypatch.setattr(workflow, "resolve_resident_experiment_inputs", lambda *_args, **_kwargs: inputs)
     experiment = CompressionBenchmarkExperiment(
-        Path("outputs/logical"),
-        Path("outputs/packed"),
-        Path("outputs/checkpoint"),
-        Path("outputs/model.gguf"),
+        CompressionExportRecipe(
+            Path("outputs/logical"),
+            Path("outputs/packed"),
+            Path("outputs/checkpoint"),
+            Path("outputs/model.gguf"),
+            Path(r"D:\reference\llama.cpp"),
+        ),
         Path("outputs/benchmark.json"),
-        Path(r"D:\reference\llama.cpp"),
     )
 
     resolved = resolve_compression_benchmark_experiment(
@@ -58,9 +65,9 @@ def test_compression_benchmark_resolution_is_repository_relative(
         launcher_path=launcher,
     )
 
-    assert resolved.gguf_output == tmp_path / "repo" / "outputs" / "model.gguf"
+    assert resolved.export.gguf_output == tmp_path / "repo" / "outputs" / "model.gguf"
     assert resolved.benchmark_output == tmp_path / "repo" / "outputs" / "benchmark.json"
-    assert resolved.llama_cpp_root == Path(r"D:\reference\llama.cpp")
+    assert resolved.export.llama_cpp_root == Path(r"D:\reference\llama.cpp")
 
 
 def test_compression_benchmark_executes_export_before_shared_quality_comparison(
@@ -71,12 +78,15 @@ def test_compression_benchmark_executes_export_before_shared_quality_comparison(
     inputs = _inputs(tmp_path, launcher)
     resolved = ResolvedCompressionBenchmarkExperiment(
         inputs,
-        tmp_path / "logical",
-        tmp_path / "packed",
-        tmp_path / "checkpoint",
-        tmp_path / "model.gguf",
+        ResolvedCompressionExportRecipe(
+            tmp_path / "logical",
+            tmp_path / "packed",
+            tmp_path / "checkpoint",
+            tmp_path / "model.gguf",
+            tmp_path / "llama.cpp",
+            "gemma3",
+        ),
         tmp_path / "benchmark.json",
-        tmp_path / "llama.cpp",
     )
     quantization = SimpleNamespace(
         inventory=SimpleNamespace(
@@ -97,35 +107,23 @@ def test_compression_benchmark_executes_export_before_shared_quality_comparison(
 
     monkeypatch.setattr(
         workflow,
-        "execute_resident_workflow",
-        lambda *_args: calls.append("compress") or resident_result,
-    )
-    monkeypatch.setattr(
-        workflow,
-        "_runtime_metadata",
-        lambda *_args: RuntimeModelMetadata("source", "revision", "gemma3", "config", "tokenizer"),
-    )
-    monkeypatch.setattr(
-        workflow,
-        "_ensure_logical_export",
-        lambda *_args: calls.append("logical") or {"exact": True},
-    )
-    monkeypatch.setattr(
-        workflow,
-        "_ensure_packed_export",
-        lambda *_args: calls.append("packed") or {"exact": True},
-    )
-    monkeypatch.setattr(
-        workflow,
-        "export_llamacpp_gguf",
-        lambda *_args: calls.append("gguf")
-        or GgufExportResult(
-            resolved.gguf_output,
-            resolved.checkpoint_output,
-            resolved.llama_cpp_root / "convert_nanoquant_to_gguf.py",
-            123,
-            "digest",
-            False,
+        "execute_complete_compression",
+        lambda *_args, **_kwargs: calls.append("complete")
+        or CompleteCompressionResult(
+            resident_result,
+            CompressionExportResult(
+                {"exact": True},
+                {"exact": True},
+                GgufExportResult(
+                    resolved.export.gguf_output,
+                    resolved.export.checkpoint_output,
+                    resolved.export.llama_cpp_root / "convert_nanoquant_to_gguf.py",
+                    123,
+                    "digest",
+                    False,
+                ),
+                tmp_path / "export-summary.json",
+            ),
         ),
     )
 
@@ -148,7 +146,7 @@ def test_compression_benchmark_executes_export_before_shared_quality_comparison(
         resolved,
     )
 
-    assert calls == ["compress", "logical", "packed", "gguf", "quality"]
+    assert calls == ["complete", "quality"]
     assert requests[0].wikitext_samples == 64
     assert requests[0].task_names == (
         "piqa",
@@ -165,7 +163,9 @@ def test_compression_benchmark_executes_export_before_shared_quality_comparison(
     }
     assert json.loads(resolved.benchmark_output.read_text(encoding="utf-8")) == payload
     assert published[0][1] == 1
-    assert [artifact.source for artifact in published[0][2]][:2] == [
-        resolved.gguf_output,
+    assert [artifact.source for artifact in published[0][2]][:4] == [
+        resolved.export.gguf_output,
+        tmp_path / "export-summary.json",
+        resolved.export.gguf_output.with_suffix(".gguf.export.json"),
         resolved.benchmark_output,
     ]

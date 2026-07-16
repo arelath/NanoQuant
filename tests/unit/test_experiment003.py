@@ -39,6 +39,9 @@ def test_experiment003_is_full_gemma4b_compression_quality_proof(tmp_path: Path)
     assert not config.evaluation.inline_quality
     assert not EXPERIMENT_003.restore_completed_blocks
     assert EXPERIMENT_003.quality_backend == "dense"
+    assert EXPERIMENT_003.export.gguf_output == Path(
+        "outputs/003-gemma-3-4b-it/gemma-3-4b-it-nanoquant.gguf"
+    )
     assert config.profiling.level is ProfilingLevel.MACRO
     assert config.profiling.cuda_timing
     assert config.profiling.memory_counters

@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from nanoquant.compression_export_workflow import CompressionExportRecipe, execute_complete_compression
 from nanoquant.config.codec import config_hash, to_dict
 from nanoquant.config.schema import RunConfig
 from nanoquant.config.validation import ValidationPhase, raise_for_issues, validate
@@ -23,13 +24,13 @@ from nanoquant.quality_evaluation_workflow import render_quality_evaluation_mark
 from nanoquant.resident_workflow import (
     ResidentExecutionOptions,
     ResolvedResidentInputs,
-    execute_resident_workflow,
     resolve_resident_experiment_inputs,
 )
 
 
 @dataclass(frozen=True, slots=True)
 class CompressionQualityExperiment:
+    export: CompressionExportRecipe
     summary_output: Path
     quality_output: Path
     quality_markdown_output: Path
@@ -106,20 +107,26 @@ def execute_compression_quality_experiment(
     compression_started = time.perf_counter()
     maximum_shared = experiment.maximum_wddm_shared_gib
     maximum_shared_bytes = None if maximum_shared is None else int(maximum_shared * 2**30)
-    workflow = execute_resident_workflow(
+    complete = execute_complete_compression(
         config,
         resolved.inputs,
-        ResidentExecutionOptions(
+        experiment.export,
+        expected_blocks=experiment.expected_blocks,
+        options=ResidentExecutionOptions(
             restore_completed_blocks=experiment.restore_completed_blocks,
             maximum_wddm_shared_bytes=maximum_shared_bytes,
         ),
     )
+    workflow = complete.workflow
+    exports = complete.exports
     compression_seconds = time.perf_counter() - compression_started
     block_count = len(workflow.quantization.inventory.blocks)
-    if block_count != experiment.expected_blocks:
-        raise ValueError(
-            f"resolved model block count differs from experiment: {block_count} != {experiment.expected_blocks}"
-        )
+    experiment_number = config.intent.experiment_number
+    if experiment_number is None:
+        raise ValueError("compression-quality experiment requires an experiment number")
+    if resolved.inputs.launcher_path is None:
+        raise ValueError("compression-quality experiment requires launcher provenance")
+    repository_root = resolved.inputs.launcher_path.resolve().parent.parent
     quality_started = time.perf_counter()
     quality = execute_quality_evaluation(
         QualityEvaluationRequest(
@@ -141,11 +148,6 @@ def execute_compression_quality_experiment(
         )
     )
     quality_seconds = time.perf_counter() - quality_started
-    experiment_number = config.intent.experiment_number
-    if experiment_number is None:
-        raise ValueError("compression-quality experiment requires an experiment number")
-    if resolved.inputs.launcher_path is None:
-        raise ValueError("compression-quality experiment requires launcher provenance")
     provenance = to_dict(launcher_provenance(resolved.inputs.launcher_path, config.intent.experiment_number))
     quality_payload = {
         **quality,
@@ -161,7 +163,6 @@ def execute_compression_quality_experiment(
         str(path.resolve())
         for path in sorted(resolved.inputs.output.glob("profile*.json"))
     )
-    repository_root = resolved.inputs.launcher_path.resolve().parent.parent
     publication_directory = repository_root / "Results" / f"{experiment_number:03d}"
     payload = {
         "schema_version": 1,
@@ -177,6 +178,18 @@ def execute_compression_quality_experiment(
             "artifact_bytes": workflow.quantization.artifact_bytes,
             "reused_commit_count": workflow.quantization.reused_commit_count,
             "profile_artifacts": profiles,
+        },
+        "exports": {
+            "logical": exports.logical,
+            "packed": exports.packed,
+            "gguf": {
+                "output": str(exports.gguf.output),
+                "checkpoint": str(exports.gguf.checkpoint),
+                "converter": str(exports.gguf.converter),
+                "bytes": exports.gguf.bytes,
+                "sha256": exports.gguf.sha256,
+                "reused": exports.gguf.reused,
+            },
         },
         "stage_measurements": {
             "compression_seconds": compression_seconds,
@@ -205,6 +218,12 @@ def execute_compression_quality_experiment(
         repository_root,
         experiment_number,
         (
+            PublishableArtifact(exports.gguf.output, PublishableArtifactKind.MODEL),
+            PublishableArtifact(exports.summary_output, PublishableArtifactKind.STATISTICS),
+            PublishableArtifact(
+                exports.gguf.output.with_suffix(exports.gguf.output.suffix + ".export.json"),
+                PublishableArtifactKind.STATISTICS,
+            ),
             PublishableArtifact(resolved.summary_output, PublishableArtifactKind.STATISTICS),
             PublishableArtifact(resolved.quality_output, PublishableArtifactKind.STATISTICS),
             PublishableArtifact(resolved.quality_markdown_output, PublishableArtifactKind.REPORT),

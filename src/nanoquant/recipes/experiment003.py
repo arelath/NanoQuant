@@ -16,21 +16,21 @@ from nanoquant.config.schema import (
     RetryThresholdConfig,
 )
 
-from .experiment018 import EXPERIMENT_018_CONFIG
+from .base_compression import BASE_COMPRESSION_CONFIG, compression_export_recipe
 
 MODEL_REVISION = "093f9f388b31de276ce2de164bdc2081324b9767"
 
-_base_tuning = EXPERIMENT_018_CONFIG.block_tuning
-_base_runtime = EXPERIMENT_018_CONFIG.runtime
+_base_tuning = BASE_COMPRESSION_CONFIG.block_tuning
+_base_runtime = BASE_COMPRESSION_CONFIG.runtime
 
 EXPERIMENT_003_CONFIG = replace(
-    EXPERIMENT_018_CONFIG,
+    BASE_COMPRESSION_CONFIG,
     model=ModelConfig(
         source="google/gemma-3-4b-it",
         revision=MODEL_REVISION,
         tokenizer_revision=MODEL_REVISION,
         sequence_length=2048,
-        load_dtype=EXPERIMENT_018_CONFIG.model.load_dtype,
+        load_dtype=BASE_COMPRESSION_CONFIG.model.load_dtype,
     ),
     intent=IntentConfig(
         experiment_number=3,
@@ -47,7 +47,7 @@ EXPERIMENT_003_CONFIG = replace(
         tags=("gemma-3-4b-it", "compression", "quality", "shared-vram-guard", "profiling"),
     ),
     allocation=replace(
-        EXPERIMENT_018_CONFIG.allocation,
+        BASE_COMPRESSION_CONFIG.allocation,
         retry=RankRetryConfig(
             thresholds=RetryThresholdConfig(
                 weighted_normalized_error=0.35,
@@ -83,7 +83,7 @@ EXPERIMENT_003_CONFIG = replace(
         block_forward_batch_size=4,
     ),
     evaluation=replace(
-        EXPERIMENT_018_CONFIG.evaluation,
+        BASE_COMPRESSION_CONFIG.evaluation,
         inline_quality=False,
     ),
     observability=ObservabilityConfig(
@@ -109,6 +109,7 @@ EXPERIMENT_003_CONFIG = replace(
 )
 
 EXPERIMENT_003 = CompressionQualityExperiment(
+    export=compression_export_recipe(3, "gemma-3-4b-it"),
     summary_output=Path("evidence/m10/003-gemma-3-4b-it-summary.json"),
     quality_output=Path("evidence/m10/003-gemma-3-4b-it-quality.json"),
     quality_markdown_output=Path("evidence/m10/003-gemma-3-4b-it-quality.md"),
