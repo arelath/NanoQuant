@@ -76,12 +76,12 @@ pageable streaming path, and releases final-boundary aliases before evaluation/a
 excluded from semantic commit identity. A CUDA wall-clock comparison remains open in step 5 below because experiment
 006 currently owns the device.
 
-### R4. [ ] Quality evaluation must not reload a dense 7B model
+### R4. [x] Quality evaluation must not reload a dense 7B model
 
 The separate quality stage currently loads the full reconstructed model through the compact dense replay module — measured 7.54 GiB peak for 4B, so ~13+ GiB for 7B: it will OOM even after R2. Two options, in order of preference:
 
 1. [x] **Evaluate through the packed runtime.** A 1–2 bpw packed 7B is ~1.5–3 GiB and the packed backend already matches the logical backend exactly; the 1B packed model peaked at ~0.8 GiB during benchmarking. This also evaluates the artifact you actually ship. Complete compression workflows now pass their newly exported packed artifact to the quality evaluator by default.
-2. [ ] **Block-streamed dense replay:** install reconstructed layers one block at a time, run the quality forward block-sequentially over an activation stream, release. Reuses the same streamed-forward machinery as compression.
+2. [x] **Block-streamed BF16 baseline:** for `cpu_offload`/`streaming` recipes, keep the source shell in pageable host RAM, move one decoder block at a time through the exact Transformers forward metadata, and move only the final norm/head for the suffix. The NanoQuant candidate still uses option 1, so neither side requires a full dense CUDA model. CPU fixture logits are exact against the resident forward; a real CUDA peak comparison remains part of the first large-model canary.
 
 ### R5. [ ] Keep the v30 guards as defaults for ≥7B recipes
 
@@ -127,7 +127,7 @@ Wall-clock impact: R2 adds one ~0.4–0.9 GiB H2D per block (< 0.1%); R3 should 
 ## 7. Suggested order of work
 
 1. [ ] R1 allocator setting + Docs/17 sampler verification on the existing 4B workload (hours).
-2. [ ] R4 packed-runtime quality evaluation path (needed by everything ≥7B, useful for 4B today).
+2. [x] R4 packed-runtime candidate plus block-streamed BF16 baseline quality path (needed by everything ≥7B, useful for 4B today).
 3. [ ] R2 `cpu_offload` executor + planner ladder; validate on Gemma 3 4B first — peak should drop to ~4–5 GiB with unchanged block losses (same math, different placement), giving a cheap equivalence check before any 7B run.
 4. [ ] First 7B compression run; calibrate planner estimates against measured window peaks.
 5. [ ] R3 activation GPU cache behind `mem_get_info` reserve; measure per-block wall clock against step 4.

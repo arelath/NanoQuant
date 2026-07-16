@@ -10,7 +10,7 @@ from typing import Any
 
 from nanoquant.compression_export_workflow import CompressionExportRecipe, execute_complete_compression
 from nanoquant.config.codec import config_hash, to_dict
-from nanoquant.config.schema import RunConfig
+from nanoquant.config.schema import ExecutorKind, RunConfig
 from nanoquant.config.validation import ValidationPhase, raise_for_issues, validate
 from nanoquant.infrastructure.io_utils import atomic_write_json, atomic_write_text
 from nanoquant.infrastructure.publication import (
@@ -146,6 +146,7 @@ def execute_compression_quality_experiment(
             local_files_only=experiment.local_files_only,
             maximum_wddm_shared_bytes=maximum_shared_bytes,
             packed_artifact=_repository_path(experiment.export.packed_output, repository_root),
+            stream_base_model=config.runtime.executor in {ExecutorKind.CPU_OFFLOAD, ExecutorKind.STREAMING},
         )
     )
     quality_seconds = time.perf_counter() - quality_started

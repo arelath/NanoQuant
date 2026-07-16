@@ -24,6 +24,12 @@ host tensors when `torch.cuda.mem_get_info` cannot preserve `gpu_reserve_gib` of
 and `both` requests fail instead of silently changing placement. Cache placement is an execution policy and therefore
 does not change resident semantic commit identity.
 
+Quality workflows paired with `cpu_offload` or `streaming` use block-streamed BF16 baseline evaluation. The source
+Transformers shell remains in pageable host RAM, exact prefix metadata is captured for each evaluation batch, one
+decoder block visits the compute device at a time, and only the final norm/head are loaded for the suffix. The
+NanoQuant side evaluates the exported packed artifact. Consequently neither side reloads a complete dense model onto
+CUDA for large-model quality comparison.
+
 An `auto` planner may choose an executor, but the resolved plan records the choice and the user can require a specific one. An executor cannot change mathematical settings to make a run fit without creating a visible plan revision.
 
 ## 2. Resource plan

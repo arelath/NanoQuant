@@ -106,6 +106,7 @@ def test_compression_quality_exports_and_publishes_gguf_before_quality(
 
     assert calls == ["complete", "quality"]
     assert quality_requests[0].packed_artifact == tmp_path / "repo" / "outputs/003-gemma-3-4b-it/packed"
+    assert not quality_requests[0].stream_base_model
     assert payload["exports"]["gguf"]["output"] == str(gguf)
     assert payload["exports"]["mmproj"]["output"] == str(mmproj)
     assert published[0][1] == 3

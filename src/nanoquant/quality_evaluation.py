@@ -37,11 +37,13 @@ from nanoquant.infrastructure.hf_task_evaluation import (
     hash_hf_tokenizer_snapshot,
     prepare_pinned_hf_multiple_choice_inputs,
 )
+from nanoquant.infrastructure.model_adapters import adapter_for_config
 from nanoquant.infrastructure.packed_model_loader import LoadedPackedModel, load_packed_model
 from nanoquant.infrastructure.resource_usage import (
     peak_device_memory_bytes,
     peak_process_memory_bytes,
 )
+from nanoquant.infrastructure.streamed_language_model import BlockStreamedCausalLM
 
 WIKITEXT_DATASET = "Salesforce/wikitext"
 WIKITEXT_CONFIG = "wikitext-2-raw-v1"
@@ -66,6 +68,7 @@ class QualityEvaluationRequest:
     local_files_only: bool = True
     maximum_wddm_shared_bytes: int | None = None
     packed_artifact: Path | None = None
+    stream_base_model: bool = False
 
     def __post_init__(self) -> None:
         if not self.source or not self.revision:
@@ -309,19 +312,29 @@ def execute_quality_evaluation(
             model_type = str(getattr(model_config, "model_type", "")).lower()
             attention_implementation = "eager" if model_type.startswith("gemma") else "sdpa"
             base_load_started = time.perf_counter()
-            base = load_causal_language_model(
+            source_model = load_causal_language_model(
                 request.snapshot,
                 torch_dtype=_checkpoint_dtype(request.snapshot),
                 attention_implementation=attention_implementation,
-            ).to(request.device)
+            ).to("cpu" if request.stream_base_model else request.device)
+            base = (
+                BlockStreamedCausalLM(
+                    source_model,
+                    adapter_for_config(cast(dict[str, object], model_config.to_dict())),
+                    request.device,
+                )
+                if request.stream_base_model
+                else source_model
+            )
             if monitor is not None:
                 monitor.check()
             base_load_seconds = time.perf_counter() - base_load_started
             try:
                 base_result = _evaluate_model("base", base, request, inputs, monitor)
                 base_result["model_load_seconds"] = base_load_seconds
+                base_result["execution"] = "block_streamed" if request.stream_base_model else "resident"
             finally:
-                del base
+                del base, source_model
                 _release_device_memory()
             loaded: LoadedFrozenModel | LoadedPackedModel | None = None
             packed_descriptor_sha256 = None
@@ -402,6 +415,7 @@ def execute_quality_evaluation(
             "task_limit": request.task_limit,
             "task_batch_size": request.task_batch_size,
             "tokenizer_hash": inputs.tokenizer_hash,
+            "base_execution": "block_streamed" if request.stream_base_model else "resident",
         },
         "results": {"base": base_result, "frozen": frozen_result},
         "comparison": _comparison(base_result, frozen_result),
