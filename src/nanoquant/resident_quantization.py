@@ -115,6 +115,7 @@ from nanoquant.infrastructure.device_lease import acquire_device_lease
 from nanoquant.infrastructure.device_memory import PeakWindow, release_cached_host_memory
 from nanoquant.infrastructure.environment import capture_environment
 from nanoquant.infrastructure.hf_language_model import load_causal_language_model
+from nanoquant.infrastructure.live_reconstruction import update_live_weight_error_report
 from nanoquant.infrastructure.model_adapters import TransformersModelAdapter, adapter_for_config
 from nanoquant.infrastructure.profiling import profiled_run
 from nanoquant.infrastructure.progress import JournalRecord, ProgressJournal
@@ -1959,6 +1960,29 @@ def _run_resident_quantization_impl(
     completed_block_indexes = resume.completed_block_indexes
     layer_container = resume.layer_container
     partial_layer_records = resume.partial_layer_records
+    live_layers = {
+        (layer.layer.block.index, layer.layer.path): layer
+        for _reference, block in committed_blocks
+        for layer in block.layers
+    }
+    for (partial_block, partial_path), partial_record in partial_layer_records.items():
+        if partial_path is None:
+            raise ValueError("partial layer journal record is missing its layer path")
+        partial = load_committed_layer(
+            ArtifactRef(ArtifactTypes.LAYER_RESULT, partial_record.artifact_id, 1),
+            artifacts,
+            identity,
+        ).result
+        live_layers[(partial_block, partial_path)] = partial
+    live_blocks = {block.block.index: block for _reference, block in committed_blocks}
+    live_layer_order = tuple(layer.layer.path for layer in plan.blocks[0].layers) if plan.blocks else ()
+    update_live_weight_error_report(
+        request.output,
+        tuple(live_layers.values()),
+        tuple(live_blocks.values()),
+        expected_blocks=len(plan.blocks),
+        layer_order=live_layer_order,
+    )
     del initial_inputs
     del decoder_layers
     peak_device_bytes = 0
@@ -2384,6 +2408,14 @@ def _run_resident_quantization_impl(
                         weighted_error=layer_result.final_reconstruction.export_weighted_normalized_error,
                         raw_error=layer_result.final_reconstruction.raw_normalized_error,
                     )
+                    live_layers[(block_index, layer_plan.layer.path)] = layer_result
+                    update_live_weight_error_report(
+                        request.output,
+                        tuple(live_layers.values()),
+                        tuple(live_blocks.values()),
+                        expected_blocks=len(plan.blocks),
+                        layer_order=live_layer_order,
+                    )
             new_layer_commits += 1
             if (
                 request.interrupt_after_layer_commits is not None
@@ -2576,6 +2608,16 @@ def _run_resident_quantization_impl(
                 if request.activation_retention == "rolling" and committed_blocks:
                     retire_block_activations(committed_blocks[-1][1], artifacts)
         committed_blocks.append((committed.reference, committed.result))
+        live_blocks[block_index] = committed.result
+        for final_layer in committed.result.layers:
+            live_layers[(block_index, final_layer.layer.path)] = final_layer
+        update_live_weight_error_report(
+            request.output,
+            tuple(live_layers.values()),
+            tuple(live_blocks.values()),
+            expected_blocks=len(plan.blocks),
+            layer_order=live_layer_order,
+        )
         cast(Any, events).emit(
             "resident-quantization",
             "info",
@@ -2680,6 +2722,14 @@ def _run_resident_quantization_impl(
                     (),
                     original_elements,
                 )
+    update_live_weight_error_report(
+        request.output,
+        tuple(live_layers.values()),
+        tuple(live_blocks.values()),
+        expected_blocks=len(plan.blocks),
+        layer_order=live_layer_order,
+        status="compression complete",
+    )
     with recorder.phase("finalize"):
         with recorder.phase("metrics"):
             if quality_metrics is None:

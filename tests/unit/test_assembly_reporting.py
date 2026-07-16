@@ -5,7 +5,10 @@ import torch
 
 from nanoquant.application.assembly import assemble_frozen_model
 from nanoquant.application.block_snapshots import compare_block_snapshots, select_block_snapshot_tokens
-from nanoquant.application.reconstruction_report import render_reconstruction_tables
+from nanoquant.application.reconstruction_report import (
+    render_live_weight_error_report,
+    render_reconstruction_tables,
+)
 from nanoquant.domain.models import GlobalTuningResult
 from nanoquant.infrastructure.artifacts import LocalArtifactStore
 from nanoquant.infrastructure.commits import CommitIdentity, commit_block
@@ -56,6 +59,44 @@ def test_reconstruction_report_preserves_named_baselines_and_na(tmp_path: Path) 
     assert "Per-layer objective-weighted reconstruction" in report
     assert "Block entry pre-quantization" in report
     assert "n/a" in report
+
+
+def test_live_reconstruction_report_renders_partial_and_block_final_states(tmp_path: Path) -> None:
+    layer, _plan, frozen_block, losses = _objects()
+    partial = render_live_weight_error_report(
+        (layer,),
+        (),
+        expected_blocks=2,
+        layer_order=("linear",),
+        status="running",
+    )
+    artifacts = LocalArtifactStore(tmp_path / "artifacts")
+    committed = commit_block(
+        frozen_block.block,
+        (layer,),
+        frozen_block,
+        losses,
+        torch.ones(1, 2, 2),
+        torch.ones(1, 2, 2),
+        0,
+        artifacts,
+        CommitIdentity("c", "m", "p"),
+    )
+    final = render_live_weight_error_report(
+        (layer,),
+        (committed.result,),
+        expected_blocks=2,
+        layer_order=("linear",),
+        status="compression complete",
+    )
+
+    assert "Durable progress: **1/2 layers**, **0/2 blocks**" in partial
+    assert "| 1 | 0.1000 |" in partial
+    assert "layer commit" in partial
+    assert "| 2 | — |" in partial
+    assert "Status: **compression complete**" in final
+    assert "block final" in final
+    assert "Completed block error before model-level KD" in final
 
 
 def test_reconstruction_report_preserves_local_pre_kd_and_probe_post_kd_snapshots(

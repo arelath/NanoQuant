@@ -15,6 +15,7 @@ from nanoquant.infrastructure.gguf_export import (
     normalize_token_embedding_type,
 )
 from nanoquant.infrastructure.io_utils import atomic_write_json
+from nanoquant.infrastructure.live_reconstruction import initialize_live_weight_error_report
 from nanoquant.infrastructure.model_adapters import adapter_for_config
 from nanoquant.infrastructure.runtime_export import (
     export_frozen_run_logical,
@@ -258,6 +259,17 @@ def execute_complete_compression(
 
     if inputs.launcher_path is None:
         raise ValueError("complete compression requires launcher provenance")
+    experiment_number = config.intent.experiment_number
+    if experiment_number is None:
+        raise ValueError("complete compression requires a numbered experiment")
+    repository_root = inputs.launcher_path.resolve().parent.parent
+    initialize_live_weight_error_report(
+        repository_root,
+        experiment_number,
+        inputs.output,
+        expected_blocks=expected_blocks,
+        layer_order=config.block_tuning.layer_order,
+    )
     workflow = execute_resident_workflow(
         config,
         inputs,
@@ -271,7 +283,7 @@ def execute_complete_compression(
     exports = execute_compression_export(
         config,
         recipe,
-        repository_root=inputs.launcher_path.resolve().parent.parent,
+        repository_root=repository_root,
         run_output=inputs.output,
         snapshot=inputs.snapshot,
         expected_blocks=block_count,

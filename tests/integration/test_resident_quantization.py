@@ -155,6 +155,9 @@ def test_resident_quantization_commits_complete_transformers_model(tmp_path: Pat
     )
     with pytest.raises(InterruptedError, match="after 3"):
         run_resident_quantization(interrupted_request)
+    live_report = (resumed_output / "weight-errors.md").read_text(encoding="utf-8")
+    assert "Durable progress: **3/7 layers**, **0/1 blocks**" in live_report
+    assert live_report.count("| layer commit |") == 3
     interrupted_manifest = json.loads((resumed_output / "manifest.json").read_text(encoding="utf-8"))
     assert interrupted_manifest["status"] == "interrupted"
     interrupted_run_id = interrupted_manifest["run_id"]
@@ -162,6 +165,9 @@ def test_resident_quantization_commits_complete_transformers_model(tmp_path: Pat
     completed_manifest = json.loads((resumed_output / "manifest.json").read_text(encoding="utf-8"))
     assert completed_manifest["status"] == "completed"
     assert completed_manifest["run_id"] == interrupted_run_id
+    completed_live_report = (resumed_output / "weight-errors.md").read_text(encoding="utf-8")
+    assert "Status: **compression complete**" in completed_live_report
+    assert "Durable progress: **7/7 layers**, **1/1 blocks**" in completed_live_report
 
     assert (resumed_output / "profile.json").is_file()
     assert (resumed_output / "profile.2.json").is_file()

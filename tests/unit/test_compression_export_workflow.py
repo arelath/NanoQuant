@@ -147,3 +147,5 @@ def test_base_compression_requires_export_after_resident_completion(
     assert calls == ["compress", "export"]
     assert result.workflow is resident
     assert result.exports is export
+    assert (inputs.output / "weight-errors.md").is_file()
+    assert (launcher.parent.parent / "Results" / "003" / "weight-errors.md").is_file()

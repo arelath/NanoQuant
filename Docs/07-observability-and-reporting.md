@@ -209,6 +209,19 @@ The default table renders per-layer residual error and a `Block final vs block-e
 
 The report also retains the per-layer objective-weighted weight-reconstruction table from the same reference file. Together, these distinguish a matrix approximation problem from a block-behavior/tuning problem.
 
+Every numbered compression also creates `weight-errors.md` in the run root before resident execution starts and
+immediately publishes the same file under `Results/NNN/weight-errors.md`. The live report uses a stable hard link (or
+symbolic-link fallback), so updates remain visible from `Results` without copying artifacts. It is rewritten after
+each durable layer journal commit and each block commit. Partial layer rows are explicitly labeled `layer commit`;
+when post-block refit finishes, the block's final durable rows replace them and the completed-block loss table grows.
+Resume reconstructs the table from committed layer/block artifacts before new work begins.
+
+Runs that started with an older worker can be backfilled without acquiring the GPU or mutating compression state:
+
+```powershell
+.\.venv\Scripts\python.exe tools\update_live_weight_errors.py evidence\m13\006-compress-and-benchmark-gemma-3-1b-it
+```
+
 ## 9. Console output
 
 The console is concise and optimized for active monitoring:

@@ -120,3 +120,17 @@ def atomic_write_text(
             temporary.unlink()
         except FileNotFoundError:
             pass
+
+
+def rewrite_linked_text(path: str | Path, text: str) -> None:
+    """Durably rewrite a file without replacing its inode, preserving published hard links."""
+
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if not destination.exists():
+        atomic_write_text(destination, text)
+        return
+    with destination.open("w", encoding="utf-8", newline="\n") as output:
+        output.write(text)
+        output.flush()
+        os.fsync(output.fileno())

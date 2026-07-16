@@ -1036,8 +1036,8 @@ The migration tool maps old flat names to canonical paths. Representative curren
 | `rank_retry_bump_frac` | `allocation.retry.rank_increase_fraction` |
 | `rank_retry_max_attempts` | `allocation.retry.maximum_attempts` |
 | `rank_retry_bits_budget_frac` | `allocation.retry.extra_bit_budget_fraction` |
-| `weight_error_log_path` | removed; canonical layer-result events/artifacts are always produced |
-| `weight_error_table_path` | `output.report_formats`; report path is derived from run ID |
+| `weight_error_log_path` | removed; canonical `weight-errors.md` is derived from the run output and published early |
+| `weight_error_table_path` | removed; canonical `Results/NNN/weight-errors.md` is linked to the live run report |
 | `rank_utility_profile_path` | `allocation.utility_profile_artifact` |
 | `rank_utility_log_path` | removed; rank utility is a standard layer metric artifact |
 | `outlier_frac` | `outliers.fraction` |
