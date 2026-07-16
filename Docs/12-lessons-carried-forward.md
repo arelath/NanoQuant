@@ -45,10 +45,12 @@ Chronology remains understandable in a directory listing, while the run manifest
 
 ## 3. Preserve zero-argument runfiles
 
-A runfile that requires no command-line parameters is valuable because it is an executable record of the intended run:
+A runfile that requires no command-line parameters is valuable because it is an executable record of the intended
+run. Historical legacy runfiles are retained as evidence rather than copied into the active directory; the current
+chronology begins with:
 
 ```text
-python experiments/020_low_rank_hessian_replay.py
+python experiments/001-compress-gemma-3-1b-it.py
 ```
 
 There is no shell history to reconstruct and no risk that a required flag was omitted from a note.

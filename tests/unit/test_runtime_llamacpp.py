@@ -17,6 +17,7 @@ from nanoquant.runtime import (
     gemma_gguf_tensor_prefix,
     gemma_hf_checkpoint_prefix,
     llamacpp_checkpoint_tensors,
+    open_llamacpp_checkpoint,
     write_logical_artifact,
 )
 
@@ -163,6 +164,17 @@ def test_llamacpp_checkpoint_export_refuses_overwrite(tmp_path: Path) -> None:
     with pytest.raises(FileExistsError, match="already exists"):
         export_llamacpp_checkpoint(packed.root, root)
     assert not list(tmp_path.glob(".nanoquant-llamacpp-*"))
+
+
+def test_llamacpp_checkpoint_open_verifies_every_shard(tmp_path: Path) -> None:
+    _packed, manifest, root = _export(tmp_path)
+
+    assert open_llamacpp_checkpoint(root) == manifest
+    with (root / manifest.shards[0].path).open("ab") as stream:
+        stream.write(b"corrupt")
+
+    with pytest.raises(ValueError, match="size or presence differs"):
+        open_llamacpp_checkpoint(root)
 
 
 def test_llamacpp_checkpoint_export_rejects_unmapped_model_family(tmp_path: Path) -> None:

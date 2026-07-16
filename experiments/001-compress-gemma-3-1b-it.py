@@ -1,10 +1,13 @@
-"""Experiment 001: historical Gemma 3 1B compression baseline."""
+"""Experiment 001: compress, export, and benchmark pinned Gemma 3 1B."""
 
-from nanoquant.recipes import EXPERIMENT_001_CONFIG
-from nanoquant.resident_workflow import run_resident_experiment
+from nanoquant.compression_benchmark_workflow import run_compression_benchmark_experiment
+from nanoquant.recipes import EXPERIMENT_001, EXPERIMENT_001_CONFIG
 
 CONFIG = EXPERIMENT_001_CONFIG
+EXPERIMENT = EXPERIMENT_001
 
 
 if __name__ == "__main__":
-    raise SystemExit(run_resident_experiment(CONFIG, launcher_path=__file__))
+    raise SystemExit(
+        run_compression_benchmark_experiment(CONFIG, EXPERIMENT, launcher_path=__file__)
+    )

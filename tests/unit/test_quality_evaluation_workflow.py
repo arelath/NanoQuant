@@ -1,15 +1,13 @@
 from __future__ import annotations
 
 import json
-import runpy
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import pytest
 
 import nanoquant.quality_evaluation_workflow as workflow
-from nanoquant.config.schema import RunConfig
 from nanoquant.quality_evaluation import QualityEvaluationRequest
 from nanoquant.quality_evaluation_workflow import (
     QualityEvaluationExperiment,
@@ -78,6 +76,8 @@ def test_quality_workflow_records_config_and_launcher_provenance(
     request = QualityEvaluationRequest(tmp_path, "model", "revision", tmp_path / "run")
     experiment = QualityEvaluationExperiment(request, output)
     observed: list[QualityEvaluationRequest] = []
+    launcher = tmp_path / "003-evaluate-gemma-3-1b-it-quality.py"
+    launcher.write_text("# provenance fixture\n", encoding="utf-8")
 
     def evaluate(resolved: QualityEvaluationRequest) -> dict[str, Any]:
         observed.append(resolved)
@@ -87,7 +87,7 @@ def test_quality_workflow_records_config_and_launcher_provenance(
     payload = execute_quality_evaluation_experiment(
         EXPERIMENT_003_CONFIG,
         experiment,
-        launcher_path="experiments/003-evaluate-gemma-3-1b-it-quality.py",
+        launcher_path=launcher,
     )
 
     assert observed == [replace(request, source="google/gemma-3-1b-it", revision=EXPERIMENT_003_CONFIG.model.revision)]
@@ -96,10 +96,3 @@ def test_quality_workflow_records_config_and_launcher_provenance(
         "003-evaluate-gemma-3-1b-it-quality"
     )
     assert json.loads(output.read_text(encoding="utf-8")) == payload
-
-
-def test_003_numbered_runfile_imports_canonical_recipe_objects() -> None:
-    namespace = runpy.run_path("experiments/003-evaluate-gemma-3-1b-it-quality.py")
-
-    assert cast(RunConfig, namespace["CONFIG"]) is EXPERIMENT_003_CONFIG
-    assert cast(QualityEvaluationExperiment, namespace["EVALUATION"]) is EXPERIMENT_003_EVALUATION

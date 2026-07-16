@@ -9,6 +9,7 @@ import shutil
 import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Any, cast
 
 import torch
 from safetensors.torch import save_file
@@ -56,6 +57,79 @@ class LlamaCppCheckpointManifest:
     layer_count: int
     tensor_count: int
     weight_bytes: int
+
+
+def open_llamacpp_checkpoint(
+    root: str | Path,
+    *,
+    verify_hashes: bool = True,
+) -> LlamaCppCheckpointManifest:
+    """Validate a converter checkpoint descriptor and all of its block shards."""
+
+    checkpoint_root = Path(root)
+    descriptor = checkpoint_root / "nanoquant-llamacpp-checkpoint.json"
+    if not descriptor.is_file():
+        raise ValueError("llama.cpp checkpoint descriptor is missing")
+    try:
+        payload = cast(Any, json.loads(descriptor.read_text(encoding="utf-8")))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError("llama.cpp checkpoint descriptor is invalid") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("llama.cpp checkpoint descriptor must be an object")
+    expected_fields = {
+        "schema_version",
+        "artifact_format",
+        "model",
+        "source_packed_descriptor_sha256",
+        "reference",
+        "shards",
+        "layer_count",
+        "tensor_count",
+        "weight_bytes",
+    }
+    if set(payload) != expected_fields:
+        raise ValueError("llama.cpp checkpoint descriptor fields differ from schema")
+    try:
+        model_payload = cast(dict[str, Any], payload["model"])
+        reference_payload = cast(dict[str, Any], payload["reference"])
+        shard_payloads = cast(list[dict[str, Any]], payload["shards"])
+        manifest = LlamaCppCheckpointManifest(
+            int(payload["schema_version"]),
+            str(payload["artifact_format"]),
+            RuntimeModelMetadata(**model_payload),
+            str(payload["source_packed_descriptor_sha256"]),
+            PackedReferenceProvenance(**reference_payload),
+            tuple(LlamaCppCheckpointShard(**shard) for shard in shard_payloads),
+            int(payload["layer_count"]),
+            int(payload["tensor_count"]),
+            int(payload["weight_bytes"]),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("llama.cpp checkpoint descriptor fields are invalid") from exc
+    if manifest.schema_version != LLAMACPP_CHECKPOINT_SCHEMA_VERSION:
+        raise ValueError("llama.cpp checkpoint schema version is unsupported")
+    if manifest.artifact_format != LLAMACPP_CHECKPOINT_FORMAT:
+        raise ValueError("llama.cpp checkpoint artifact format is unsupported")
+    if len({shard.index for shard in manifest.shards}) != len(manifest.shards):
+        raise ValueError("llama.cpp checkpoint shard indices are duplicated")
+    if tuple(shard.index for shard in manifest.shards) != tuple(range(len(manifest.shards))):
+        raise ValueError("llama.cpp checkpoint shard indices are not contiguous")
+    for shard in manifest.shards:
+        relative = Path(shard.path)
+        if relative.is_absolute() or ".." in relative.parts or relative.suffix != ".safetensors":
+            raise ValueError(f"llama.cpp checkpoint shard path is unsafe: {shard.path}")
+        path = checkpoint_root / relative
+        if not path.is_file() or path.stat().st_size != shard.bytes:
+            raise ValueError(f"llama.cpp checkpoint shard size or presence differs: {shard.path}")
+        if verify_hashes and _hash_file(path) != shard.sha256:
+            raise ValueError(f"llama.cpp checkpoint shard hash differs: {shard.path}")
+    if sum(shard.layer_count for shard in manifest.shards) != manifest.layer_count:
+        raise ValueError("llama.cpp checkpoint layer count differs from its shards")
+    if sum(shard.tensor_count for shard in manifest.shards) != manifest.tensor_count:
+        raise ValueError("llama.cpp checkpoint tensor count differs from its shards")
+    if sum(shard.bytes for shard in manifest.shards) != manifest.weight_bytes:
+        raise ValueError("llama.cpp checkpoint byte count differs from its shards")
+    return manifest
 
 
 def gemma_hf_checkpoint_prefix(canonical_name: str) -> str:

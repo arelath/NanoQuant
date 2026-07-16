@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import runpy
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
@@ -19,6 +18,7 @@ from nanoquant.infrastructure.runs import (
     launcher_provenance,
     transition,
 )
+from nanoquant.recipes.experiment018 import EXPERIMENT_018_CONFIG
 from nanoquant.resident_workflow import (
     ResidentExecutionOptions,
     ResolvedResidentInputs,
@@ -30,8 +30,7 @@ from nanoquant.resident_workflow import (
 
 
 def _experiment018_config() -> RunConfig:
-    namespace = runpy.run_path("experiments/018-compress-gemma-3-1b-it-phase1-no-hessian.py")
-    return cast(RunConfig, namespace["CONFIG"])
+    return EXPERIMENT_018_CONFIG
 
 
 def _inputs(tmp_path: Path) -> ResolvedResidentInputs:
@@ -42,7 +41,7 @@ def _inputs(tmp_path: Path) -> ResolvedResidentInputs:
         registry_root=tmp_path / "runs",
         token_ids=tokens,
         quality_token_ids=tokens[:1, :8],
-        launcher_path=Path("experiments/018-compress-gemma-3-1b-it-phase1-no-hessian.py"),
+        launcher_path=Path("src/nanoquant/recipes/experiment018.py"),
         pad_token_id=0,
     )
 
@@ -74,7 +73,7 @@ def test_experiment018_maps_every_hidden_resident_parity_semantic(tmp_path: Path
     assert manifest.launcher.kind == "numbered_runfile"
     assert manifest.launcher.experiment_number == 18
     assert manifest.launcher.repository_relative_path == (
-        "experiments/018-compress-gemma-3-1b-it-phase1-no-hessian.py"
+        "src/nanoquant/recipes/experiment018.py"
     )
     assert cast(dict[str, object], manifest.resolved_config)["canonical_run_config"]
 
@@ -184,7 +183,7 @@ def test_workflow_manifest_completes_only_with_global_tuning_artifact(tmp_path: 
         "sha256:config",
         {},
         launcher_provenance(
-            "experiments/018-compress-gemma-3-1b-it-phase1-no-hessian.py",
+            "src/nanoquant/recipes/experiment018.py",
             18,
         ),
         {},

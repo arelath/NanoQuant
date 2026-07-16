@@ -19,21 +19,22 @@ Every level produces a normal run manifest and comparable metrics. A replay is n
 
 ## 3. Numbered zero-argument experiment workflow
 
-Numbered runfiles remain the normal human-facing chronology for new promoted experiments:
+Numbered runfiles remain the normal human-facing chronology for new promoted experiments. The active chronology was
+reset on 2026-07-15 after the legacy lessons were absorbed into shared services, tests, recipes, and retained
+evidence. The `experiments/` directory therefore contains only the current Experiment 001:
 
 ```text
-python experiments/020_low_rank_hessian_replay.py
+python experiments/001-compress-gemma-3-1b-it.py
 ```
 
-Start from `experiments/000_experiment_template.py`, not from a historical experiment. The file declares experiment
-number, purpose, hypothesis, baseline, and canonical `RunConfig`, then calls
-`run_quantization_experiment`, the shared resident application entry point. It takes no experiment-defining
-parameters. Logging, checkpoint, model-loading, evaluation, and resume mechanics stay in the framework. The
-callback-based `run_experiment` entry point is compatibility infrastructure and rejects a missing pipeline with
-`RUN002`; it is not the entry point for new research.
+New experiments should compose the shared workflow modules under `src/nanoquant`; do not restore or copy the old
+experiment scripts. Experiment 001 is a thin example: it declares canonical configuration and material outputs,
+then delegates compression, validated GGUF export, and BF16-versus-NanoQuant evaluation to the framework. It takes
+no experiment-defining parameters. Logging, checkpoint, model loading, evaluation, and resume mechanics stay in
+shared code.
 
 After an experiment produces a committed run, changing its hypothesis or semantic settings means creating the next
-number from the template and expressing the delta in canonical configuration. Resume does not create a new
+number and expressing the delta in canonical configuration. Resume does not create a new
 experiment number; a changed recipe does. Historical experiments remain evidence and lessons, not templates or a
 migration backlog. See [Lessons Carried Forward](12-lessons-carried-forward.md#2-preserve-numbered-experiment-files)
 and [ADR-0005](adr/0005-numbered-zero-argument-runfiles.md).

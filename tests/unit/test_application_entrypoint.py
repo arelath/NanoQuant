@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import runpy
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -48,10 +46,3 @@ def test_new_experiment_entrypoint_delegates_to_resident_workflow(
 
     assert run_quantization_experiment(config, launcher_path="experiments/020-new.py") == 17
     assert observed == [(config, "experiments/020-new.py")]
-
-
-def test_new_experiment_template_uses_the_real_quantization_entrypoint() -> None:
-    namespace = runpy.run_path(str(Path("experiments/000_experiment_template.py")))
-
-    assert namespace["run_quantization_experiment"] is run_quantization_experiment
-    assert "run_experiment" not in namespace

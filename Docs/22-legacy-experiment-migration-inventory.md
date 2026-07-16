@@ -1,9 +1,9 @@
 # Legacy numbered experiment migration inventory
 
 > **Current disposition (2026-07-15):** this is a lessons-and-capability inventory, not a backlog for copying the
-> historical experiments. Existing rewrite runfiles are frozen parity/regression harnesses. New research starts
-> from `experiments/000_experiment_template.py` and uses shared framework capabilities; remaining legacy rows guide
-> framework coverage and real parity gates without requiring one-for-one runfile migrations.
+> historical experiments. The old rewrite runfiles were removed from the active `experiments/` directory after
+> their lessons moved into shared framework code, tests, recipes, and evidence. New research starts with the new
+> end-to-end Experiment 001; remaining legacy rows guide capability and parity gates without one-for-one scripts.
 
 ## Scope and status language
 
@@ -45,9 +45,10 @@ recipe/archive disposition so their chronology and intent remain discoverable.
 | 018 | 1B phase-1 diagonal/no-Hessian recipe; closest retained quality/performance baseline | Complete v28 resident run, exact contemporary-legacy rank/trajectory/KD/PPL comparison, packed/runtime evidence; canonical recipe and zero-argument runfile | Validated and migrated | Keep the import-only recipe/request parity tests and shared resident/KD composition green. |
 | 019 | Despite its filename, Gemma 3 **4B** phase-1 diagonal recipe with pageable CPU activations, bounded pinning, small batches, retry, reports, and KD | Streaming/resource architecture, activation retention/GC, phase-1 math/report contracts | Partial replacement | This is the critical 4B migration canary: pin the model/datasets, run interruption/resume and bounded-memory compression, evaluate, pack, and compare before adding a supported runfile. |
 
-There are no unnumbered gaps between 001 and 019. Native rewrite runfiles now exist for validated Experiments 001,
-002, 003, 008, 011, 013, and 018. The `000_experiment_template.py` and frozen copies under `evidence/m0` are not migrations; every
-other inventory row still needs either a tested runfile or an explicit unsupported/deprecated diagnostic.
+The table records the legacy chronology and the framework behavior learned from it; it no longer describes files
+that should be present under `experiments/`. Frozen source copies under `evidence/m0`, typed regression recipes,
+tests, and retained results preserve that provenance. The active experiment directory intentionally contains only
+the new Experiment 001 compression/export/benchmark workflow.
 
 The retained Experiment 002 migration result is `evidence/m9/002-gemma-3-1b-it-short-decode.json` (SHA-256
 `a32f0ffc092d426842e50c97b61245f561fae60aa3884e79bfe4c5979d7feb7c`). It reproduces the historical raw prompt,

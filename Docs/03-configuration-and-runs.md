@@ -268,7 +268,9 @@ Schema migration rules are explicit:
 
 ## 10. Experiment numbering and naming
 
-Sequential numbers are retained as a useful chronological research record. A promoted experiment should normally have a descriptive zero-argument launcher such as `experiments/020_low_rank_hessian_replay.py`.
+Sequential numbers are retained as a useful chronological research record. The active chronology was reset after
+legacy migration lessons moved into shared code and evidence; its first zero-argument launcher is
+`experiments/001-compress-gemma-3-1b-it.py`.
 
 The number is a human chronology label, not the immutable run identity:
 

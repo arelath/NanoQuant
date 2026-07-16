@@ -62,7 +62,9 @@ Outcome: even legacy-backed work can run through the new auditable shell.
 - [x] **M1.11** Generate CLI help and configuration reference data from the canonical schema.
 - [x] **M1.12** Implement `IntentConfig.experiment_number` and validation against a numbered launcher filename.
 - [x] **M1.13** Implement the thin numbered zero-argument runfile adapter calling the shared application service.
-- [x] **M1.14** Add a `000_experiment_template.py` showing the approved no-argument runfile pattern without consuming a research experiment number.
+- [x] **M1.14** Demonstrate the approved no-argument runfile pattern. The original `000` template was later retired
+  when the active experiment chronology was reset; shared composition remains in `src/nanoquant` and current
+  Experiment 001 is the executable example.
 - [x] **M1.15** Add static tests prohibiting `argparse`, copied orchestration, and direct infrastructure imports in numbered runfiles.
 - [x] **M1.16** Implement run IDs, run lifecycle states, parent/fork relationships, and active-process leases.
 - [x] **M1.17** Implement `LauncherProvenance`, including kind, experiment number, repository-relative path, content hash, revision, and arguments.
@@ -662,11 +664,11 @@ Outcome: supported users no longer need legacy orchestration.
   its 4B model), cross-cutting mechanism dispositions, and a migration order. No native numbered rewrite runfile is
   counted prematurely; M9.2 remains open.
 - [x] **M9.2** Preserve historical experiments as evidence and lessons without porting them as the new research surface.
-  The earlier 001/002/003/008/011/013/018 runfiles are retained as frozen parity/regression harnesses, not as a
-  precedent or backlog for migrating the remaining legacy scripts. New experiments start from
-  `000_experiment_template.py`, declare new intent and canonical configuration, and call the shared resident
-  `run_quantization_experiment` entry point. The compatibility application now raises `RUN002` instead of recording
-  a successful no-op when no executable pipeline callback is supplied.
+  The earlier 001/002/003/008/011/013/018 active runfiles were removed when the experiment chronology was reset.
+  Their lessons remain in shared services, typed recipes, regression tests, and retained evidence rather than in
+  executable historical scripts. The active directory now contains only the new end-to-end Experiment 001. The
+  compatibility application raises `RUN002` instead of recording a successful no-op when no executable pipeline
+  callback is supplied.
 - [ ] **M9.3** Move copied dotenv, tee logging, output-directory, model-loading, save, and evaluation mechanics into shared infrastructure/application services.
 - [ ] **M9.4** Provide generated YAML/resolved-recipe views for numbered runfiles where useful without making YAML mandatory.
 - [ ] **M9.5** Implement or document migration/import for supported legacy `.pt` checkpoints.

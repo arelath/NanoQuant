@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import json
-import runpy
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import pytest
 
@@ -14,7 +13,6 @@ from nanoquant.benchmark_workflow import (
     execute_runtime_benchmark_experiment,
     resolve_runtime_benchmark_experiment,
 )
-from nanoquant.config.schema import RunConfig
 from nanoquant.recipes import EXPERIMENT_011_BENCHMARK, EXPERIMENT_011_CONFIG
 from nanoquant.runtime_benchmark import RuntimeBenchmarkRequest
 
@@ -88,6 +86,8 @@ def test_benchmark_workflow_records_config_and_launcher_provenance(
     )
     experiment = RuntimeBenchmarkExperiment(request, output)
     observed: list[RuntimeBenchmarkRequest] = []
+    launcher = tmp_path / "011-benchmark-generation-tps.py"
+    launcher.write_text("# provenance fixture\n", encoding="utf-8")
 
     def benchmark(resolved: RuntimeBenchmarkRequest) -> dict[str, Any]:
         observed.append(resolved)
@@ -97,22 +97,13 @@ def test_benchmark_workflow_records_config_and_launcher_provenance(
     payload = execute_runtime_benchmark_experiment(
         EXPERIMENT_011_CONFIG,
         experiment,
-        launcher_path="experiments/011-benchmark-generation-tps.py",
+        launcher_path=launcher,
     )
 
     assert observed == [request]
     assert payload["experiment"]["launcher"]["experiment_number"] == 11
-    assert payload["experiment"]["launcher"]["repository_relative_path"] == (
-        "experiments/011-benchmark-generation-tps.py"
-    )
+    assert payload["experiment"]["launcher"]["repository_relative_path"] is None
     assert payload["experiment"]["resolved_config"]["intent"]["name"] == (
         "011-benchmark-generation-tps"
     )
     assert json.loads(output.read_text(encoding="utf-8")) == payload
-
-
-def test_011_numbered_runfile_imports_canonical_recipe_objects() -> None:
-    namespace = runpy.run_path("experiments/011-benchmark-generation-tps.py")
-
-    assert cast(RunConfig, namespace["CONFIG"]) is EXPERIMENT_011_CONFIG
-    assert cast(RuntimeBenchmarkExperiment, namespace["BENCHMARK"]) is EXPERIMENT_011_BENCHMARK

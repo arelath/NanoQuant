@@ -1,16 +1,14 @@
 from __future__ import annotations
 
 import json
-import runpy
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import pytest
 import torch
 
 import nanoquant.short_decode_workflow as workflow
-from nanoquant.config.schema import RunConfig
 from nanoquant.recipes import EXPERIMENT_002_BENCHMARK, EXPERIMENT_002_CONFIG
 from nanoquant.short_decode_benchmark import (
     ShortDecodeBenchmarkRequest,
@@ -127,6 +125,8 @@ def test_short_decode_workflow_records_config_and_launcher_provenance(
     )
     experiment = ShortDecodeBenchmarkExperiment(request, output)
     observed: list[ShortDecodeBenchmarkRequest] = []
+    launcher = tmp_path / "002-benchmark-gemma-3-1b-it.py"
+    launcher.write_text("# provenance fixture\n", encoding="utf-8")
 
     def benchmark(resolved: ShortDecodeBenchmarkRequest) -> dict[str, Any]:
         observed.append(resolved)
@@ -136,7 +136,7 @@ def test_short_decode_workflow_records_config_and_launcher_provenance(
     payload = execute_short_decode_experiment(
         EXPERIMENT_002_CONFIG,
         experiment,
-        launcher_path="experiments/002-benchmark-gemma-3-1b-it.py",
+        launcher_path=launcher,
     )
 
     assert observed == [request]
@@ -145,12 +145,3 @@ def test_short_decode_workflow_records_config_and_launcher_provenance(
         "002-benchmark-gemma-3-1b-it"
     )
     assert json.loads(output.read_text(encoding="utf-8")) == payload
-
-
-def test_002_numbered_runfile_imports_canonical_recipe_objects() -> None:
-    namespace = runpy.run_path("experiments/002-benchmark-gemma-3-1b-it.py")
-
-    assert cast(RunConfig, namespace["CONFIG"]) is EXPERIMENT_002_CONFIG
-    assert cast(ShortDecodeBenchmarkExperiment, namespace["BENCHMARK"]) is (
-        EXPERIMENT_002_BENCHMARK
-    )

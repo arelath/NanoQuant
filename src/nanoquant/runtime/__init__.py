@@ -65,6 +65,7 @@ from nanoquant.runtime.llamacpp import (
     gemma_gguf_tensor_prefix,
     gemma_hf_checkpoint_prefix,
     llamacpp_checkpoint_tensors,
+    open_llamacpp_checkpoint,
 )
 from nanoquant.runtime.logical import LogicalLayerState, canonical_torch_dtype
 from nanoquant.runtime.packed import (
@@ -250,6 +251,7 @@ __all__ = [
     "packed_row_stride_bytes",
     "packed_word_count",
     "open_logical_artifact",
+    "open_llamacpp_checkpoint",
     "open_packed_artifact",
     "open_runtime_bundle",
     "llamacpp_checkpoint_tensors",

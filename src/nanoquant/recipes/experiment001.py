@@ -1,71 +1,40 @@
-"""Canonical historical recipe for legacy Experiment 001."""
+"""Compression, GGUF export, and BF16-versus-NanoQuant benchmark recipe."""
 
 from dataclasses import replace
+from pathlib import Path
 
-from nanoquant.config.schema import (
-    IntentConfig,
-    OutlierConfig,
-    PostBlockRefitConfig,
-)
+from nanoquant.compression_benchmark_workflow import CompressionBenchmarkExperiment
+from nanoquant.config.schema import IntentConfig
 
 from .experiment018 import EXPERIMENT_018_CONFIG
 
-_BASE = EXPERIMENT_018_CONFIG
-
-# Legacy 001 used the adapter's original order, which predates the MLP-first
-# Phase-1 experiments.  Spell it out so future adapter-order changes cannot
-# silently change this historical recipe.
-_LEGACY_LAYER_ORDER = (
-    "self_attn.q_proj",
-    "self_attn.v_proj",
-    "self_attn.o_proj",
-    "self_attn.k_proj",
-    "mlp.gate_proj",
-    "mlp.up_proj",
-    "mlp.down_proj",
-)
-
 EXPERIMENT_001_CONFIG = replace(
-    _BASE,
+    EXPERIMENT_018_CONFIG,
     intent=IntentConfig(
         experiment_number=1,
-        name="001-compress-gemma-3-1b-it",
-        purpose="Preserve the original 1B sensitivity-ranked compression baseline as a native resident recipe.",
-        hypothesis="The historical no-outlier recipe remains reproducible without its executable pickle output.",
-        baseline_run="legacy-experiment-001",
-        tags=("gemma-3-1b-it", "historical-baseline", "diagonal", "model-kd"),
-    ),
-    allocation=replace(
-        _BASE.allocation,
-        bounds=replace(
-            _BASE.allocation.bounds,
-            floor_fraction_of_uniform=0.8,
-            ceiling_fraction_of_uniform=1.15,
+        name="001-compress-and-benchmark-gemma-3-1b-it",
+        purpose=(
+            "Compress pinned Gemma 3 1B with the current parity recipe, export a deployable "
+            "NanoQuant GGUF, and compare it with the BF16 source model."
         ),
-        retry=replace(
-            _BASE.allocation.retry,
-            thresholds=replace(
-                _BASE.allocation.retry.thresholds,
-                weighted_normalized_error=0.5,
-                raw_normalized_error=None,
-            ),
-            allow_above_allocator_cap=False,
+        hypothesis=(
+            "The current resident recipe produces a validated GGUF while retaining measured "
+            "quality parity on WikiText-2 and the six-task legacy evaluation suite."
         ),
-    ),
-    outliers=OutlierConfig(),
-    block_tuning=replace(
-        _BASE.block_tuning,
-        layer_order=_LEGACY_LAYER_ORDER,
-        non_factorized=replace(
-            _BASE.block_tuning.non_factorized,
-            loop=replace(
-                _BASE.block_tuning.non_factorized.loop,
-                early_stop_relative_tolerance=1e-3,
-            ),
-            epochs_by_layer_position=(),
-        ),
-        post_block_refit=PostBlockRefitConfig(),
+        baseline_run="bf16-google-gemma-3-1b-it",
+        tags=("gemma-3-1b-it", "compression", "gguf", "bf16-comparison", "quality"),
     ),
 )
 
-__all__ = ["EXPERIMENT_001_CONFIG"]
+_OUTPUT_ROOT = Path("outputs/001-gemma-3-1b-it")
+
+EXPERIMENT_001 = CompressionBenchmarkExperiment(
+    logical_output=_OUTPUT_ROOT / "logical",
+    packed_output=_OUTPUT_ROOT / "packed",
+    checkpoint_output=_OUTPUT_ROOT / "llamacpp-checkpoint",
+    gguf_output=_OUTPUT_ROOT / "gemma-3-1b-it-nanoquant.gguf",
+    benchmark_output=_OUTPUT_ROOT / "benchmark.json",
+    llama_cpp_root=Path(r"D:\dev\research\llama.cpp"),
+)
+
+__all__ = ["EXPERIMENT_001", "EXPERIMENT_001_CONFIG"]
