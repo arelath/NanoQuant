@@ -226,6 +226,7 @@ __marimo__/
 
 # NanoQuant local run and content-addressed state
 /runs/
+/outputs/
 /.nanoquant/
 /evidence
 /.tmp
