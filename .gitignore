@@ -229,6 +229,8 @@ __marimo__/
 /.nanoquant/
 /evidence
 /.tmp
+/weight_images/
+/weight_frequency_plots/
 .context
 MegaContext.txt
 MegaContext-files.txt
