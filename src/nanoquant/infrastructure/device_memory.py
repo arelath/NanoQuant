@@ -55,6 +55,11 @@ class SharedDeviceMemoryGuard:
         with self._lock:
             return self._peak_bytes
 
+    @property
+    def metric_seen(self) -> bool:
+        with self._lock:
+            return self._metric_seen
+
     def raise_if_violated(self, *, require_available: bool = False) -> None:
         with self._lock:
             measured = self._violation_bytes
@@ -385,6 +390,8 @@ class ResourceEventSink:
         terminal = name in {"run.failed", "run.interrupted"}
         if self._shared_memory_guard is not None and not terminal:
             self._shared_memory_guard.raise_if_violated()
+            if bool(getattr(torch.cuda, "_initialized", False)) and not self._shared_memory_guard.metric_seen:
+                self._shared_memory_guard.sample_and_check(self._sampler)
         parsed = Severity.parse(severity)
         enriched = fields
         if (

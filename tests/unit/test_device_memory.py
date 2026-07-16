@@ -203,6 +203,26 @@ def test_boundary_event_raises_immediately_when_shared_limit_is_crossed() -> Non
     assert not any(name == "run.started" for _severity, name, _fields in sink.events)
 
 
+def test_first_post_cuda_event_establishes_wddm_baseline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sink = RecordingSink()
+    guard = SharedDeviceMemoryGuard(100)
+    monkeypatch.setattr(torch.cuda, "_initialized", True)
+    events = ResourceEventSink(
+        sink,
+        Severity.INFO,
+        lambda: {"wddm.shared_bytes": 25},
+        shared_memory_guard=guard,
+    )
+
+    events.emit("profile", "info", "phase.started")
+
+    assert guard.metric_seen
+    assert guard.peak_bytes == 25
+    assert [name for _severity, name, _fields in sink.events] == ["phase.started"]
+
+
 def test_shared_device_memory_monitor_fails_at_safe_point_after_transient_spill() -> None:
     readings = iter((10, 150, 20, 20))
 
