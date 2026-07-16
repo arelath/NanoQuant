@@ -37,6 +37,7 @@ from nanoquant.infrastructure.hf_task_evaluation import (
     hash_hf_tokenizer_snapshot,
     prepare_pinned_hf_multiple_choice_inputs,
 )
+from nanoquant.infrastructure.packed_model_loader import LoadedPackedModel, load_packed_model
 from nanoquant.infrastructure.resource_usage import (
     peak_device_memory_bytes,
     peak_process_memory_bytes,
@@ -64,6 +65,7 @@ class QualityEvaluationRequest:
     task_batch_size: int = 1
     local_files_only: bool = True
     maximum_wddm_shared_bytes: int | None = None
+    packed_artifact: Path | None = None
 
     def __post_init__(self) -> None:
         if not self.source or not self.revision:
@@ -321,17 +323,31 @@ def execute_quality_evaluation(
             finally:
                 del base
                 _release_device_memory()
-            loaded: LoadedFrozenModel | None = None
+            loaded: LoadedFrozenModel | LoadedPackedModel | None = None
+            packed_descriptor_sha256 = None
             try:
                 frozen_load_started = time.perf_counter()
-                loaded = load_frozen_run(
-                    request.run_output,
-                    request.snapshot,
-                    source_name=request.source,
-                    revision=request.revision,
-                    device=request.device,
-                    backend=request.backend,
-                    use_global_tuning=request.use_global_tuning,
+                loaded = (
+                    load_frozen_run(
+                        request.run_output,
+                        request.snapshot,
+                        source_name=request.source,
+                        revision=request.revision,
+                        device=request.device,
+                        backend=request.backend,
+                        use_global_tuning=request.use_global_tuning,
+                    )
+                    if request.packed_artifact is None
+                    else load_packed_model(
+                        request.packed_artifact,
+                        request.run_output,
+                        request.snapshot,
+                        source_name=request.source,
+                        revision=request.revision,
+                        device=request.device,
+                        backend=request.backend,
+                        use_global_tuning=request.use_global_tuning,
+                    )
                 )
                 if monitor is not None:
                     monitor.check()
@@ -340,6 +356,9 @@ def execute_quality_evaluation(
                 frozen_result["model_load_seconds"] = frozen_load_seconds
                 frozen_identity = to_dict(loaded.identity)
                 global_tuning = None if loaded.global_tuning is None else to_dict(loaded.global_tuning)
+                packed_descriptor_sha256 = (
+                    loaded.packed_descriptor_sha256 if isinstance(loaded, LoadedPackedModel) else None
+                )
             finally:
                 if loaded is not None:
                     del loaded
@@ -365,6 +384,12 @@ def execute_quality_evaluation(
             "commit_identity": frozen_identity,
             "global_tuning": global_tuning,
             "backend": request.backend,
+            "packed_artifact": None
+            if request.packed_artifact is None
+            else str(request.packed_artifact.resolve()),
+            "packed_descriptor_sha256": None
+            if request.packed_artifact is None
+            else packed_descriptor_sha256,
         },
         "protocol": {
             "wikitext_dataset": f"{WIKITEXT_DATASET}:{WIKITEXT_CONFIG}:test@{WIKITEXT_REVISION}",

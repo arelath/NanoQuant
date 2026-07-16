@@ -64,6 +64,11 @@ def resolve_quality_evaluation_experiment(
             source=config.model.source,
             revision=str(config.model.revision),
             run_output=_resolve(request.run_output, repository_root),
+            packed_artifact=(
+                None
+                if request.packed_artifact is None
+                else _resolve(request.packed_artifact, repository_root)
+            ),
         ),
         _resolve(experiment.result_path, repository_root),
         experiment.resolve_model_from_config,

@@ -77,15 +77,23 @@ def test_quality_experiment_resolution_is_pinned_and_repository_relative(
         lambda *, repo_id, revision: str(snapshot),
     )
 
+    experiment = replace(
+        EXPERIMENT_002_EVALUATION,
+        request=replace(
+            EXPERIMENT_002_EVALUATION.request,
+            packed_artifact=Path("outputs/candidate/packed"),
+        ),
+    )
     resolved = resolve_quality_evaluation_experiment(
         EXPERIMENT_002_CONFIG,
-        EXPERIMENT_002_EVALUATION,
+        experiment,
         launcher_path=launcher,
     )
     assert resolved.request.snapshot == snapshot.resolve()
     assert resolved.markdown_path == (
         tmp_path / "repo" / "evidence/m9/002-gemma-3-1b-it-quality-benchmark.md"
     )
+    assert resolved.request.packed_artifact == tmp_path / "repo" / "outputs/candidate/packed"
 
 
 def test_quality_workflow_records_config_and_launcher_provenance(
