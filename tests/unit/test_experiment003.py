@@ -30,12 +30,15 @@ def test_experiment003_is_full_gemma4b_compression_quality_proof(tmp_path: Path)
     config = EXPERIMENT_003_CONFIG
     assert config.model.source == "google/gemma-3-4b-it"
     assert config.model.revision == "093f9f388b31de276ce2de164bdc2081324b9767"
-    assert config.intent.name == "003-compress-and-benchmark-gemma-3-4b-it-v4"
+    assert config.intent.name == "003-compress-and-benchmark-gemma-3-4b-it-v5"
     assert config.runtime.block_forward_batch_size == 4
     assert config.block_tuning.non_factorized.loop.batch_size == 4
     assert config.block_tuning.factorized.loop.batch_size == 1
     assert config.block_tuning.microbatch_size == 1
     assert EXPERIMENT_003.maximum_wddm_shared_gib == 0.75
+    assert not config.evaluation.inline_quality
+    assert not EXPERIMENT_003.restore_completed_blocks
+    assert EXPERIMENT_003.quality_backend == "dense"
     assert config.profiling.level is ProfilingLevel.MACRO
     assert config.profiling.cuda_timing
     assert config.profiling.memory_counters

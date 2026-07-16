@@ -8,6 +8,7 @@ from nanoquant.config.schema import ProfilingConfig, ProfilingLevel
 from nanoquant.infrastructure.profiling import Profiler
 from nanoquant.resident_quantization import (
     _block_loss,
+    _place_completed_decoder_block,
     _release_uncompleted_decoder_blocks,
     _run_block_batched,
     _run_quality_logits_batched,
@@ -99,6 +100,26 @@ def test_uncompleted_dense_decoder_blocks_are_released_from_model_shell() -> Non
     assert isinstance(layers[2], nn.Identity)
 
 
+def test_completed_decoder_block_is_not_retained_when_full_model_restore_is_disabled() -> None:
+    layers = nn.ModuleList((nn.Identity(), nn.Identity()))
+    completed = nn.Linear(2, 2)
+
+    retained = _place_completed_decoder_block(layers, 0, completed, retain=False)
+
+    assert not retained
+    assert isinstance(layers[0], nn.Identity)
+
+
+def test_completed_decoder_block_is_retained_for_inline_full_model_forward() -> None:
+    layers = nn.ModuleList((nn.Identity(), nn.Identity()))
+    completed = nn.Linear(2, 2)
+
+    retained = _place_completed_decoder_block(layers, 0, completed, retain=True)
+
+    assert retained
+    assert layers[0] is completed
+
+
 def test_block_forward_does_not_retain_autograd_graphs() -> None:
     inputs = torch.randn(5, 4, requires_grad=True)
     block = nn.Linear(4, 3, bias=False)
@@ -148,6 +169,19 @@ def test_block_loss_micro_profile_preserves_accumulation_and_attributes_work() -
     counters = {counter["name"]: counter for counter in payload["counters"]}
     assert counters["forward.batches"]["total"] == 3
     assert counters["forward.elements"]["total"] == targets.numel()
+
+
+def test_block_loss_streamed_fp32_accumulation_matches_full_tensor_formula() -> None:
+    inputs = torch.randn(2, 300, 4, generator=torch.Generator().manual_seed(52))
+    targets = torch.randn(2, 300, 3, generator=torch.Generator().manual_seed(53))
+    importance = torch.linspace(0.5, 1.5, 3)
+    block = nn.Linear(4, 3, bias=False)
+    prediction = block(inputs).detach()
+    expected = float(((prediction.float() - targets.float()).square() * importance).sum() / targets.numel())
+
+    actual = _block_loss(_BlockAdapter(), block, inputs, targets, importance, {}, 2)
+
+    assert actual == pytest.approx(expected, rel=1e-6, abs=1e-7)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA resident transfer requires a GPU")

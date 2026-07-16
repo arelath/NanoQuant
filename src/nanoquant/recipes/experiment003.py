@@ -34,7 +34,7 @@ EXPERIMENT_003_CONFIG = replace(
     ),
     intent=IntentConfig(
         experiment_number=3,
-        name="003-compress-and-benchmark-gemma-3-4b-it-v4",
+        name="003-compress-and-benchmark-gemma-3-4b-it-v5",
         purpose=(
             "Prove that the multimodal Gemma 3 4B checkpoint's text model still compresses "
             "within dedicated VRAM and measure its BF16-versus-NanoQuant quality."
@@ -82,6 +82,10 @@ EXPERIMENT_003_CONFIG = replace(
         _base_runtime,
         block_forward_batch_size=4,
     ),
+    evaluation=replace(
+        EXPERIMENT_018_CONFIG.evaluation,
+        inline_quality=False,
+    ),
     observability=ObservabilityConfig(
         event_level="info",
         console_level="info",
@@ -110,6 +114,8 @@ EXPERIMENT_003 = CompressionQualityExperiment(
     quality_markdown_output=Path("evidence/m10/003-gemma-3-4b-it-quality.md"),
     expected_blocks=34,
     maximum_wddm_shared_gib=0.75,
+    restore_completed_blocks=False,
+    quality_backend="dense",
 )
 
 __all__ = ["EXPERIMENT_003", "EXPERIMENT_003_CONFIG", "MODEL_REVISION"]

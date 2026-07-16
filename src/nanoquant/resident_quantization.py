@@ -137,7 +137,7 @@ from nanoquant.infrastructure.tuning_checkpoint import (
 from nanoquant.ports.event_sink import EventSink
 from nanoquant.ports.model_adapter import ModelAdapter
 
-RESIDENT_ALGORITHM_VERSION = 29
+RESIDENT_ALGORITHM_VERSION = 30
 
 
 @contextmanager
@@ -350,6 +350,22 @@ def _release_uncompleted_decoder_blocks(
     return released
 
 
+def _place_completed_decoder_block(
+    layers: nn.ModuleList,
+    index: int,
+    block: nn.Module,
+    *,
+    retain: bool,
+) -> bool:
+    """Keep a completed block only when a later in-process full-model forward needs it."""
+
+    if retain:
+        layers[index] = block
+        return True
+    layers[index] = nn.Identity()
+    return False
+
+
 def _weighted_mse(prediction: torch.Tensor, target: torch.Tensor, importance: torch.Tensor) -> float:
     if importance.ndim != 1 or importance.shape[0] != prediction.shape[-1]:
         raise ValueError("block output importance does not match hidden width")
@@ -399,6 +415,25 @@ def _block_loss(
     block_device = next(iter(block.parameters()), None)
     device = inputs.device if block_device is None else block_device.device
     weights = output_importance.to(device=device, dtype=torch.float32)
+
+    def accumulate(prediction: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        # Converting the complete activation batch to fp32 used several hidden-width
+        # temporaries at once.  On Gemma 3 4B that could request another 512 MiB after
+        # a layer had already committed.  Stream token rows and reuse the error buffer
+        # so diagnostic loss memory is independent of sequence and batch length.
+        hidden = prediction.shape[-1]
+        prediction_rows = prediction.detach().reshape(-1, hidden)
+        target_rows = target.detach().reshape(-1, hidden)
+        total = torch.zeros((), device=device)
+        for start in range(0, prediction_rows.shape[0], 256):
+            stop = min(start + 256, prediction_rows.shape[0])
+            error = prediction_rows[start:stop].float()
+            error.sub_(target_rows[start:stop])
+            error.square_()
+            error.mul_(weights)
+            total += error.sum()
+        return total
+
     with torch.no_grad():
         squared_error = torch.zeros((), device=device)
         elements = 0
@@ -417,7 +452,7 @@ def _block_loss(
                 with recorder.phase("forward"):
                     prediction = adapter.run_block(block, input_batch, **metadata)
                 with recorder.phase("loss"):
-                    squared_error += ((prediction.float() - target.float()).square() * weights).sum()
+                    squared_error += accumulate(prediction, target)
                     elements += target.numel()
                 recorder.add("forward.batches", 1)
                 recorder.add("forward.elements", target.numel())
@@ -425,7 +460,7 @@ def _block_loss(
                 return float(squared_error / elements)
         for input_batch, target in iter_device_batches((inputs, targets), batch_size, device):
             prediction = adapter.run_block(block, input_batch, **metadata)
-            squared_error += ((prediction.float() - target.float()).square() * weights).sum()
+            squared_error += accumulate(prediction, target)
             elements += target.numel()
         return float(squared_error / elements)
 
@@ -2589,8 +2624,23 @@ def _run_resident_quantization_impl(
         else:
             teacher_inputs = teacher_outputs
             compressed_inputs = compressed_outputs
-        layer_container[block_index] = working_block
+        retained_on_device = _place_completed_decoder_block(
+            layer_container,
+            block_index,
+            working_block,
+            retain=request.restore_completed_blocks,
+        )
+        events.emit(
+            "resident-quantization",
+            "info",
+            "block.device_residency_updated",
+            block=block_index,
+            retained=retained_on_device,
+            reason=("inline_full_model_forward" if retained_on_device else "streaming_compression"),
+        )
         del working_block
+        if request.device.startswith("cuda") and not retained_on_device:
+            torch.cuda.empty_cache()
 
     quality_metrics: tuple[float, float, float, float] | None = None
     with _logged_operation(

@@ -61,3 +61,29 @@ The subsequent full 26-block continuation preserved the same bound: shared memor
 all 26 cache-release events returned it to 80 MiB. Peak CUDA reservation rose normally with later, larger blocks to
 7.107 GiB, while peak host working set remained 11.908 GiB. The complete 979-artifact graph passed strict validation
 after unreachable training scratch was collected.
+
+## Follow-up: completed-block accumulation on Gemma 3 4B
+
+Experiment 003 v4 exposed a third, independent residency bug. Compression successfully committed block 5's
+`mlp.up_proj`, then the per-layer loss snapshot failed while requesting another 512 MiB. At failure, CUDA had
+10.02 GiB allocated and 1.02 GiB reserved but unallocated. WDDM shared memory remained bounded at 530 MiB, so this
+was neither the original quality-logit issue nor pinned-host spill.
+
+The resident loop was unconditionally installing every completed working block back into the CUDA model shell.
+That was correct only for the optional in-process full-model quality forward. It also happened when callers had
+disabled completed-block restoration, causing the factorized representation of each finished 4B block to
+accumulate on the device. The snapshot was only the first subsequent allocation to collide with that growth.
+
+Resident algorithm version 30 addresses both contributors:
+
+- the loop now honors `restore_completed_blocks=False`, leaves the shell slot empty, and releases the completed
+  block after its durable block commit;
+- block-loss accumulation converts at most 256 hidden-state rows to fp32 at a time and reuses the error buffer,
+  instead of creating several full-batch fp32 temporaries;
+- the 4B experiment disables redundant inline quality, streams completed blocks during compression, and evaluates
+  the committed NanoQuant reconstruction with the memory-smaller dense backend in the separate quality stage;
+- the retained/offloaded decision is logged as `block.device_residency_updated` for every block.
+
+Unit tests cover both completed-block residency modes and the streamed loss calculation. Experiment 003 v5 is the
+first real-model regression run for this fix; its per-stage CUDA and WDDM measurements remain the authoritative
+proof that the bound holds through all 34 blocks.

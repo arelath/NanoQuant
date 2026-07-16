@@ -44,6 +44,8 @@ class CompressionQualityExperiment:
     task_batch_size: int = 1
     local_files_only: bool = True
     maximum_wddm_shared_gib: float | None = None
+    restore_completed_blocks: bool = True
+    quality_backend: str = "factorized"
 
     def __post_init__(self) -> None:
         if self.expected_blocks <= 0:
@@ -56,6 +58,8 @@ class CompressionQualityExperiment:
             not math.isfinite(self.maximum_wddm_shared_gib) or self.maximum_wddm_shared_gib < 0
         ):
             raise ValueError("maximum WDDM shared memory must be finite and non-negative")
+        if self.quality_backend not in {"factorized", "dense"}:
+            raise ValueError("quality backend must be factorized or dense")
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,7 +104,10 @@ def execute_compression_quality_experiment(
     workflow = execute_resident_workflow(
         config,
         resolved.inputs,
-        ResidentExecutionOptions(maximum_wddm_shared_bytes=maximum_shared_bytes),
+        ResidentExecutionOptions(
+            restore_completed_blocks=experiment.restore_completed_blocks,
+            maximum_wddm_shared_bytes=maximum_shared_bytes,
+        ),
     )
     compression_seconds = time.perf_counter() - compression_started
     block_count = len(workflow.quantization.inventory.blocks)
@@ -116,7 +123,7 @@ def execute_compression_quality_experiment(
             revision=str(config.model.revision),
             run_output=resolved.inputs.output,
             device=config.runtime.compute_device,
-            backend="factorized",
+            backend=experiment.quality_backend,
             use_global_tuning=config.distillation.enabled,
             wikitext_samples=experiment.wikitext_samples,
             wikitext_sequence_length=experiment.wikitext_sequence_length,
