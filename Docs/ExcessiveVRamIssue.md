@@ -87,3 +87,21 @@ Resident algorithm version 30 addresses both contributors:
 Unit tests cover both completed-block residency modes and the streamed loss calculation. Experiment 003 v5 is the
 first real-model regression run for this fix; its per-stage CUDA and WDDM measurements remain the authoritative
 proof that the bound holds through all 34 blocks.
+
+## Follow-up: redundant factors during dense quality replay
+
+Experiment 003 v5 completed all 34 compression blocks and global tuning, but the separate dense quality stage
+failed while installing a later reconstructed layer. The dense reference module cached its reconstructed weight
+while also retaining the left/right factors, three scale vectors, and outlier tensors used to create that weight.
+Across 238 layers this raised steady CUDA allocation to 10.83 GiB; the next 100 MiB reconstruction then exhausted
+the 12 GiB device.
+
+The frozen-model loader now uses a compact dense replay module. It materializes the reconstructed weight directly,
+keeps that weight and the optional bias, and releases all reconstruction inputs before advancing to the next layer.
+Research paths that need factor inspection retain the original non-compact module, and factorized execution is
+unchanged.
+
+Loading the exact v5 34-block globally tuned model now succeeds with peak CUDA allocation of 8,101,217,280 bytes
+(7.54 GiB), peak reservation of 8,227,127,296 bytes (7.66 GiB), and 3,333,423,104 bytes (3.10 GiB) device free.
+WDDM shared memory remains at 83,886,080 bytes (80 MiB). A unit regression requires compact dense loads to retain
+only the materialized weight buffer and verifies bit-identical output against the regular dense reference.
