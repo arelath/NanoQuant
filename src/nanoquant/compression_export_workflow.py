@@ -14,6 +14,13 @@ from nanoquant.infrastructure.gguf_export import (
     export_llamacpp_gguf,
     normalize_token_embedding_type,
 )
+from nanoquant.infrastructure.huggingface_upload import (
+    HuggingFaceUploadConfig,
+    HuggingFaceUploadResult,
+    ValidatedModelArtifact,
+    huggingface_upload_summary,
+    upload_validated_model_artifacts,
+)
 from nanoquant.infrastructure.io_utils import atomic_write_json
 from nanoquant.infrastructure.live_reconstruction import initialize_live_weight_error_report
 from nanoquant.infrastructure.model_adapters import adapter_for_config
@@ -48,12 +55,18 @@ class CompressionExportRecipe:
     llama_cpp_root: Path
     runtime_family: str = "gemma3"
     token_embedding_type: str = DEFAULT_TOKEN_EMBEDDING_TYPE
+    huggingface: HuggingFaceUploadConfig | None = None
 
     def __post_init__(self) -> None:
         if not self.runtime_family:
             raise ValueError("compression export runtime family is required")
         if self.gguf_output.suffix.lower() != ".gguf":
             raise ValueError("compression export output must use the .gguf extension")
+        if self.huggingface is not None and not isinstance(
+            self.huggingface,
+            HuggingFaceUploadConfig,
+        ):
+            raise ValueError("compression export Hugging Face destination is invalid")
         object.__setattr__(
             self,
             "token_embedding_type",
@@ -70,6 +83,7 @@ class ResolvedCompressionExportRecipe:
     llama_cpp_root: Path
     runtime_family: str
     token_embedding_type: str = DEFAULT_TOKEN_EMBEDDING_TYPE
+    huggingface: HuggingFaceUploadConfig | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +92,7 @@ class CompressionExportResult:
     packed: dict[str, Any]
     gguf: GgufExportResult
     summary_output: Path
+    huggingface: HuggingFaceUploadResult | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,6 +118,7 @@ def resolve_compression_export_recipe(
         _repository_path(recipe.llama_cpp_root, root),
         recipe.runtime_family,
         recipe.token_embedding_type,
+        recipe.huggingface,
     )
 
 
@@ -174,6 +190,28 @@ def _ensure_packed_export(resolved: ResolvedCompressionExportRecipe) -> dict[str
     )
 
 
+def _upload_huggingface_model(
+    gguf: GgufExportResult,
+    config: HuggingFaceUploadConfig | None,
+) -> HuggingFaceUploadResult | None:
+    if config is None:
+        return None
+    artifacts = [ValidatedModelArtifact(gguf.output, gguf.bytes, gguf.sha256)]
+    if gguf.mmproj is not None:
+        artifacts.append(
+            ValidatedModelArtifact(
+                gguf.mmproj.output,
+                gguf.mmproj.bytes,
+                gguf.mmproj.sha256,
+            )
+        )
+    return upload_validated_model_artifacts(
+        config,
+        artifacts,
+        receipt_output=gguf.output.with_suffix(gguf.output.suffix + ".huggingface.json"),
+    )
+
+
 def execute_compression_export(
     config: RunConfig,
     recipe: CompressionExportRecipe,
@@ -207,11 +245,12 @@ def execute_compression_export(
         resolved.llama_cpp_root,
         token_embedding_type=resolved.token_embedding_type,
     )
+    huggingface = _upload_huggingface_model(gguf, resolved.huggingface)
     summary_output = resolved.gguf_output.with_suffix(".export-summary.json")
     atomic_write_json(
         summary_output,
         {
-            "schema_version": 3,
+            "schema_version": 4,
             "run_output": str(run),
             "logical": logical,
             "packed": packed,
@@ -242,9 +281,12 @@ def execute_compression_export(
                     ),
                 }
             ),
+            "huggingface": (
+                None if huggingface is None else huggingface_upload_summary(huggingface)
+            ),
         },
     )
-    return CompressionExportResult(logical, packed, gguf, summary_output)
+    return CompressionExportResult(logical, packed, gguf, summary_output, huggingface)
 
 
 def execute_complete_compression(
@@ -295,6 +337,8 @@ __all__ = [
     "CompressionExportRecipe",
     "CompressionExportResult",
     "CompleteCompressionResult",
+    "HuggingFaceUploadConfig",
+    "HuggingFaceUploadResult",
     "ResolvedCompressionExportRecipe",
     "execute_compression_export",
     "execute_complete_compression",

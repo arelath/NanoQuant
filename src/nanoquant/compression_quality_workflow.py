@@ -12,6 +12,7 @@ from nanoquant.compression_export_workflow import CompressionExportRecipe, execu
 from nanoquant.config.codec import config_hash, to_dict
 from nanoquant.config.schema import ExecutorKind, RunConfig
 from nanoquant.config.validation import ValidationPhase, raise_for_issues, validate
+from nanoquant.infrastructure.huggingface_upload import huggingface_upload_summary
 from nanoquant.infrastructure.io_utils import atomic_write_json, atomic_write_text
 from nanoquant.infrastructure.publication import (
     PublishableArtifact,
@@ -181,7 +182,7 @@ def execute_compression_quality_experiment(
     )
     publication_directory = repository_root / "Results" / f"{experiment_number:03d}"
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "passed": bool(quality.get("passed")),
         "experiment": quality_payload["experiment"],
         "compression": {
@@ -218,6 +219,11 @@ def execute_compression_quality_experiment(
                     "tensor_types": exports.gguf.mmproj.tensor_types,
                     "reused": exports.gguf.mmproj.reused,
                 }
+            ),
+            "huggingface": (
+                None
+                if exports.huggingface is None
+                else huggingface_upload_summary(exports.huggingface)
             ),
         },
         "stage_measurements": {
@@ -262,6 +268,16 @@ def execute_compression_quality_experiment(
                         exports.gguf.mmproj.output.with_suffix(
                             exports.gguf.mmproj.output.suffix + ".export.json"
                         ),
+                        PublishableArtifactKind.STATISTICS,
+                    ),
+                )
+            ),
+            *(
+                ()
+                if exports.huggingface is None
+                else (
+                    PublishableArtifact(
+                        exports.huggingface.receipt_output,
                         PublishableArtifactKind.STATISTICS,
                     ),
                 )

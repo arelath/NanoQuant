@@ -26,6 +26,7 @@ outputs/NNN-model-slug/
   llamacpp-checkpoint/
   model-slug-nanoquant.gguf
   model-slug-nanoquant.gguf.export.json
+  model-slug-nanoquant.gguf.huggingface.json  # only when a Hub upload is configured
   mmproj-BF16.gguf                 # multimodal snapshots only
   mmproj-BF16.gguf.export.json     # multimodal snapshots only
   model-slug-nanoquant.export-summary.json
@@ -44,7 +45,9 @@ complete until all of these stages succeed:
 5. when the source snapshot declares a non-empty `vision_config`, the pinned upstream converter exports the vision
    tower and projector as `mmproj-BF16.gguf`, verifies `general.type=mmproj`, `MOSTLY_BF16`, a non-empty tensor
    inventory, and a receipt bound to the source config and converter;
-6. the GGUF files, export summaries, receipts, and experiment statistics are hard-linked into `Results/NNN`.
+6. when the export recipe declares a Hugging Face destination, the validated language GGUF and optional mmproj are
+   uploaded in one model-repository commit and a local token-free receipt records its exact commit and file hashes;
+7. the GGUF files, export summaries, receipts, and experiment statistics are hard-linked into `Results/NNN`.
 
 The embedding level is part of the export recipe and receipt identity. Use
 `compression_export_recipe(..., token_embedding_type="q4_k")` for a Q4_K embedding; Q4/Q5/Q6/Q8 llama.cpp
@@ -58,9 +61,40 @@ Hugging Face vision stack. Text-only snapshots, including Gemma 3 1B, do not pro
 Each stage is resumable. Existing logical, packed, checkpoint, language GGUF, and mmproj outputs are hash-validated
 and reused. A partial or provenance-mismatched output fails closed rather than being treated as complete.
 
+## Optional Hugging Face upload
+
+Hugging Face publication is an explicit experiment-recipe choice. A newly authored compression experiment can add
+the destination to its export declaration:
+
+```python
+from recipes import HuggingFaceUploadConfig, compression_export_recipe
+
+export = compression_export_recipe(
+    8,
+    "gemma-3-1b-it",
+    huggingface=HuggingFaceUploadConfig(
+        "owner/gemma-3-1b-it-nanoquant-GGUF",
+        private=True,
+        commit_message="Publish NanoQuant Experiment 008",
+    ),
+)
+```
+
+Do not put a token in the recipe. The uploader uses the standard cached Hugging Face login or `HF_TOKEN`; environment
+capture continues to exclude that secret. Before making any Hub request, it opens each exported model file, verifies
+the byte count and SHA-256 from the GGUF export result, rewinds the same open handle, and gives that handle to the Hub
+client. The language GGUF and optional mmproj therefore enter one commit without a save or conversion step that could
+change numerical content.
+
+On success, `<model>.gguf.huggingface.json` records the canonical repository ID and URL, commit OID and URL, requested
+visibility, commit message, and each uploaded filename, byte count, and SHA-256. High-level compression experiments
+also publish this receipt under `Results/NNN` and include it in their schema-2 summary. Upload failures propagate, but
+the completed local compression and validated exports remain reusable; rerunning retries publication without
+recompressing. Recipes without `huggingface=...` remain fully offline and retain the previous behavior.
+
 ## Exporting an older completed run
 
-`execute_compression_export` performs only stages 2–5 and never recompresses the model. This is the supported
+`execute_compression_export` performs only stages 2–6 and never recompresses the model. This is the supported
 backfill path for a resident run that predates the mandatory export contract. After export, use
 `tools/publish_results.py` to add its GGUF files, export summary, and receipts to the experiment's Results directory.
 

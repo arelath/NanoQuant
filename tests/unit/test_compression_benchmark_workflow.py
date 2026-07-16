@@ -22,6 +22,7 @@ from nanoquant.compression_export_workflow import (
 )
 from nanoquant.infrastructure.commits import CommitIdentity
 from nanoquant.infrastructure.gguf_export import GgufExportResult
+from nanoquant.infrastructure.huggingface_upload import HuggingFaceUploadResult
 from nanoquant.quality_evaluation import QualityEvaluationRequest
 from nanoquant.resident_workflow import ResolvedResidentInputs
 
@@ -123,6 +124,16 @@ def test_compression_benchmark_executes_export_before_shared_quality_comparison(
                     False,
                 ),
                 tmp_path / "export-summary.json",
+                HuggingFaceUploadResult(
+                    "owner/model",
+                    "https://huggingface.co/owner/model",
+                    "a" * 40,
+                    f"https://huggingface.co/owner/model/commit/{'a' * 40}",
+                    True,
+                    "Upload validated NanoQuant GGUF",
+                    (),
+                    tmp_path / "model.gguf.huggingface.json",
+                ),
             ),
         ),
     )
@@ -162,11 +173,13 @@ def test_compression_benchmark_executes_export_before_shared_quality_comparison(
         "base": "bf16",
         "frozen": "nanoquant",
     }
+    assert payload["exports"]["huggingface"]["commit_oid"] == "a" * 40
     assert json.loads(resolved.benchmark_output.read_text(encoding="utf-8")) == payload
     assert published[0][1] == 1
-    assert [artifact.source for artifact in published[0][2]][:4] == [
+    assert [artifact.source for artifact in published[0][2]][:5] == [
         resolved.export.gguf_output,
         tmp_path / "export-summary.json",
         resolved.export.gguf_output.with_suffix(".gguf.export.json"),
+        tmp_path / "model.gguf.huggingface.json",
         resolved.benchmark_output,
     ]

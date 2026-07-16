@@ -3,6 +3,7 @@
 from .base_compression import (
     BASE_COMPRESSION_CONFIG,
     LARGE_MODEL_COMPRESSION_CONFIG,
+    HuggingFaceUploadConfig,
     compression_export_recipe,
 )
 from .experiment001 import EXPERIMENT_001, EXPERIMENT_001_CONFIG
@@ -22,6 +23,7 @@ from .legacy import (
 
 __all__ = [
     "BASE_COMPRESSION_CONFIG",
+    "HuggingFaceUploadConfig",
     "LARGE_MODEL_COMPRESSION_CONFIG",
     "compression_export_recipe",
     "EXPERIMENT_001_CONFIG",

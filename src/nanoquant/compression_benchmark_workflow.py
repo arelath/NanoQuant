@@ -14,6 +14,7 @@ from nanoquant.compression_export_workflow import (
 )
 from nanoquant.config.codec import to_dict
 from nanoquant.config.schema import RunConfig
+from nanoquant.infrastructure.huggingface_upload import huggingface_upload_summary
 from nanoquant.infrastructure.io_utils import atomic_write_json
 from nanoquant.infrastructure.publication import (
     PublishableArtifact,
@@ -134,7 +135,7 @@ def execute_compression_benchmark_experiment(
     )
     publication_directory = repository_root / "Results" / f"{experiment_number:03d}"
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "passed": bool(quality.get("passed")),
         "experiment": {
             "config": to_dict(config),
@@ -176,6 +177,11 @@ def execute_compression_benchmark_experiment(
                     "reused": exports.gguf.mmproj.reused,
                 }
             ),
+            "huggingface": (
+                None
+                if exports.huggingface is None
+                else huggingface_upload_summary(exports.huggingface)
+            ),
         },
         "benchmarks": quality,
         "publication": {
@@ -205,6 +211,16 @@ def execute_compression_benchmark_experiment(
                         exports.gguf.mmproj.output.with_suffix(
                             exports.gguf.mmproj.output.suffix + ".export.json"
                         ),
+                        PublishableArtifactKind.STATISTICS,
+                    ),
+                )
+            ),
+            *(
+                ()
+                if exports.huggingface is None
+                else (
+                    PublishableArtifact(
+                        exports.huggingface.receipt_output,
                         PublishableArtifactKind.STATISTICS,
                     ),
                 )

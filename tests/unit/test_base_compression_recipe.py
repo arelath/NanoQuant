@@ -7,6 +7,7 @@ from recipes import (
     EXPERIMENT_001_CONFIG,
     EXPERIMENT_003,
     EXPERIMENT_003_CONFIG,
+    HuggingFaceUploadConfig,
     compression_export_recipe,
 )
 
@@ -55,3 +56,15 @@ def test_base_compression_export_recipe_requires_safe_numbered_outputs() -> None
         compression_export_recipe(3, "../escape")
     with pytest.raises(ValueError, match="unsupported token embedding"):
         compression_export_recipe(3, "gemma-3-4b-it", token_embedding_type="bf16")
+
+
+def test_base_compression_export_recipe_accepts_explicit_huggingface_destination() -> None:
+    destination = HuggingFaceUploadConfig(
+        "owner/gemma-3-4b-it-nanoquant-GGUF",
+        private=True,
+        commit_message="Publish Experiment 008",
+    )
+
+    export = compression_export_recipe(8, "gemma-3-4b-it", huggingface=destination)
+
+    assert export.huggingface is destination

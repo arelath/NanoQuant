@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -9,6 +10,8 @@ from recipes import EXPERIMENT_003_CONFIG
 import nanoquant.compression_export_workflow as workflow
 from nanoquant.compression_export_workflow import (
     CompressionExportRecipe,
+    HuggingFaceUploadConfig,
+    HuggingFaceUploadResult,
     execute_compression_export,
     resolve_compression_export_recipe,
 )
@@ -44,7 +47,7 @@ def test_complete_compression_export_runs_validated_stages_in_order(
     monkeypatch,
 ) -> None:  # type: ignore[no-untyped-def]
     calls: list[object] = []
-    recipe = _recipe()
+    recipe = replace(_recipe(), huggingface=HuggingFaceUploadConfig("owner/model"))
     resolved = resolve_compression_export_recipe(recipe, tmp_path)
     monkeypatch.setattr(
         workflow,
@@ -71,19 +74,37 @@ def test_complete_compression_export_runs_validated_stages_in_order(
             resolved.checkpoint_output,
             resolved.llama_cpp_root / "convert_nanoquant_to_gguf.py",
             123,
-            "sha256:gguf",
+            "a" * 64,
             False,
             mmproj=MmprojExportResult(
                 resolved.gguf_output.parent / "mmproj-BF16.gguf",
                 resolved.llama_cpp_root / "convert_hf_to_gguf.py",
                 456,
-                "sha256:mmproj",
+                "b" * 64,
                 7,
                 ("bf16", "f32"),
                 False,
             ),
         ),
     )
+    uploaded = []
+
+    def upload(config, artifacts, *, receipt_output):  # type: ignore[no-untyped-def]
+        material = tuple(artifacts)
+        calls.append("huggingface")
+        uploaded.append((config, material, receipt_output))
+        return HuggingFaceUploadResult(
+            "owner/model",
+            "https://huggingface.co/owner/model",
+            "c" * 40,
+            f"https://huggingface.co/owner/model/commit/{'c' * 40}",
+            None,
+            config.commit_message,
+            (),
+            receipt_output,
+        )
+
+    monkeypatch.setattr(workflow, "upload_validated_model_artifacts", upload)
 
     result = execute_compression_export(
         EXPERIMENT_003_CONFIG,
@@ -94,7 +115,13 @@ def test_complete_compression_export_runs_validated_stages_in_order(
         expected_blocks=34,
     )
 
-    assert calls == [("logical", True), "packed", ("gguf", "q8_0")]
+    assert calls == [("logical", True), "packed", ("gguf", "q8_0"), "huggingface"]
+    assert [artifact.source for artifact in uploaded[0][1]] == [
+        resolved.gguf_output,
+        resolved.gguf_output.parent / "mmproj-BF16.gguf",
+    ]
+    assert [artifact.sha256 for artifact in uploaded[0][1]] == ["a" * 64, "b" * 64]
+    assert uploaded[0][2] == resolved.gguf_output.with_suffix(".gguf.huggingface.json")
     assert result.logical == {"exact": True}
     assert result.packed == {"exact": True}
     assert result.gguf.output == resolved.gguf_output
@@ -103,11 +130,12 @@ def test_complete_compression_export_runs_validated_stages_in_order(
     summary = json.loads(result.summary_output.read_text(encoding="utf-8"))
     assert summary["logical"] == {"exact": True}
     assert summary["packed"] == {"exact": True}
-    assert summary["gguf"]["sha256"] == "sha256:gguf"
+    assert summary["gguf"]["sha256"] == "a" * 64
     assert summary["gguf"]["token_embedding_type"] == "q8_0"
-    assert summary["schema_version"] == 3
+    assert summary["schema_version"] == 4
     assert summary["mmproj"]["output"] == str(resolved.gguf_output.parent / "mmproj-BF16.gguf")
-    assert summary["mmproj"]["sha256"] == "sha256:mmproj"
+    assert summary["mmproj"]["sha256"] == "b" * 64
+    assert summary["huggingface"]["commit_oid"] == "c" * 40
 
 
 def test_base_compression_requires_export_after_resident_completion(

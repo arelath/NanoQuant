@@ -2,7 +2,10 @@
 
 from pathlib import Path
 
-from nanoquant.compression_export_workflow import CompressionExportRecipe
+from nanoquant.compression_export_workflow import (
+    CompressionExportRecipe,
+    HuggingFaceUploadConfig,
+)
 from nanoquant.config.schema import (
     ActivationGpuCacheMode,
     AllocationStrategy,
@@ -167,6 +170,7 @@ def compression_export_recipe(
     model_slug: str,
     *,
     token_embedding_type: str = "q8_0",
+    huggingface: HuggingFaceUploadConfig | None = None,
 ) -> CompressionExportRecipe:
     """Return the mandatory deployment outputs for a numbered compression experiment."""
 
@@ -183,6 +187,7 @@ def compression_export_recipe(
         llama_cpp_root=Path(r"D:\dev\research\llama.cpp"),
         runtime_family="gemma3",
         token_embedding_type=token_embedding_type,
+        huggingface=huggingface,
     )
 
 
@@ -190,5 +195,6 @@ __all__ = [
     "BASE_COMPRESSION_CONFIG",
     "LARGE_MODEL_COMPRESSION_CONFIG",
     "MODEL_REVISION",
+    "HuggingFaceUploadConfig",
     "compression_export_recipe",
 ]

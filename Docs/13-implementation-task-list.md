@@ -681,7 +681,12 @@ Outcome: supported users no longer need legacy orchestration.
 - [ ] **M9.8** Implement the final CLI commands: inspect, calibrate, plan, quantize, resume, fork, replay, pack, validate, evaluate, benchmark, compare, and report.
 - [ ] **M9.9** Implement the stable Python application API using the same canonical types and services.
 - [ ] **M9.10** Rebuild Hugging Face load/save/publish integration as infrastructure over validated artifacts.
+  The compression-export path now has opt-in model-repository publication of the validated GGUF and optional mmproj.
+  It records a hash-bound Hub commit receipt without persisting credentials. Native packed-artifact Hub load/save and
+  the broader stable application surface remain open, so this milestone is not complete.
 - [ ] **M9.11** Ensure publishing cannot alter numerical content without creating/revalidating a new artifact.
+  The new GGUF Hub path rechecks the export byte count and SHA-256 and uploads from the same held-open handles in one
+  commit. This proves the property for compression Hub publication; the gate remains open for every future publisher.
 - [ ] **M9.12** Publish contributor guidance for adding a factorizer, policy, adapter, evaluator, packed layout, and backend.
 - [ ] **M9.13** Publish operator guidance for resident, offload, streaming, resume, evaluation, benchmark, and failure recovery.
 - [ ] **M9.14** Remove duplicate CLI/config dataclasses and flat dictionary config factories after migration tests pass.
