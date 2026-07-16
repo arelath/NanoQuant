@@ -34,6 +34,7 @@ def test_compression_export_recipe_resolves_all_material_paths(tmp_path: Path) -
     assert resolved.checkpoint_output == tmp_path / "outputs" / "checkpoint"
     assert resolved.gguf_output == tmp_path / "outputs" / "model.gguf"
     assert resolved.llama_cpp_root == Path(r"D:\reference\llama.cpp")
+    assert resolved.token_embedding_type == "q8_0"
 
 
 def test_complete_compression_export_runs_validated_stages_in_order(
@@ -62,7 +63,7 @@ def test_complete_compression_export_runs_validated_stages_in_order(
     monkeypatch.setattr(
         workflow,
         "export_llamacpp_gguf",
-        lambda *_args: calls.append("gguf")
+        lambda *_args, **kwargs: calls.append(("gguf", kwargs["token_embedding_type"]))
         or GgufExportResult(
             resolved.gguf_output,
             resolved.checkpoint_output,
@@ -82,7 +83,7 @@ def test_complete_compression_export_runs_validated_stages_in_order(
         expected_blocks=34,
     )
 
-    assert calls == [("logical", True), "packed", "gguf"]
+    assert calls == [("logical", True), "packed", ("gguf", "q8_0")]
     assert result.logical == {"exact": True}
     assert result.packed == {"exact": True}
     assert result.gguf.output == resolved.gguf_output
@@ -92,6 +93,7 @@ def test_complete_compression_export_runs_validated_stages_in_order(
     assert summary["logical"] == {"exact": True}
     assert summary["packed"] == {"exact": True}
     assert summary["gguf"]["sha256"] == "sha256:gguf"
+    assert summary["gguf"]["token_embedding_type"] == "q8_0"
 
 
 def test_base_compression_requires_export_after_resident_completion(

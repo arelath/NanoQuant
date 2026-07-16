@@ -196,7 +196,12 @@ BASE_COMPRESSION_CONFIG = RunConfig(
 )
 
 
-def compression_export_recipe(experiment_number: int, model_slug: str) -> CompressionExportRecipe:
+def compression_export_recipe(
+    experiment_number: int,
+    model_slug: str,
+    *,
+    token_embedding_type: str = "q8_0",
+) -> CompressionExportRecipe:
     """Return the mandatory deployment outputs for a numbered compression experiment."""
 
     if experiment_number < 0 or experiment_number > 999:
@@ -211,6 +216,7 @@ def compression_export_recipe(experiment_number: int, model_slug: str) -> Compre
         gguf_output=root / f"{model_slug}-nanoquant.gguf",
         llama_cpp_root=Path(r"D:\dev\research\llama.cpp"),
         runtime_family="gemma3",
+        token_embedding_type=token_embedding_type,
     )
 
 

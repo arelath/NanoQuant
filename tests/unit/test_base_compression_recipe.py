@@ -27,5 +27,9 @@ def test_base_compression_export_recipe_requires_safe_numbered_outputs() -> None
     assert export.logical_output == Path("outputs/003-gemma-3-4b-it/logical")
     assert export.packed_output == Path("outputs/003-gemma-3-4b-it/packed")
     assert export.gguf_output == Path("outputs/003-gemma-3-4b-it/gemma-3-4b-it-nanoquant.gguf")
+    assert export.token_embedding_type == "q8_0"
+    assert compression_export_recipe(3, "gemma-3-4b-it", token_embedding_type="Q4_K").token_embedding_type == "q4_k"
     with pytest.raises(ValueError, match="safe path"):
         compression_export_recipe(3, "../escape")
+    with pytest.raises(ValueError, match="unsupported token embedding"):
+        compression_export_recipe(3, "gemma-3-4b-it", token_embedding_type="bf16")

@@ -19,7 +19,24 @@ from nanoquant.runtime import (
     open_packed_artifact,
 )
 
-GGUF_EXPORT_SCHEMA_VERSION = 1
+GGUF_EXPORT_SCHEMA_VERSION = 2
+DEFAULT_TOKEN_EMBEDDING_TYPE = "q8_0"
+SUPPORTED_TOKEN_EMBEDDING_TYPES = frozenset(
+    {
+        "q4_0",
+        "q4_1",
+        "q4_k",
+        "q4_k_m",
+        "q4_k_s",
+        "q5_0",
+        "q5_1",
+        "q5_k",
+        "q5_k_m",
+        "q5_k_s",
+        "q6_k",
+        "q8_0",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,6 +47,69 @@ class GgufExportResult:
     bytes: int
     sha256: str
     reused: bool
+    token_embedding_type: str = DEFAULT_TOKEN_EMBEDDING_TYPE
+    quantizer: Path | None = None
+
+
+def normalize_token_embedding_type(value: str) -> str:
+    """Return a supported llama.cpp token-embedding quantization type."""
+
+    normalized = value.strip().lower()
+    if normalized not in SUPPORTED_TOKEN_EMBEDDING_TYPES:
+        supported = ", ".join(sorted(SUPPORTED_TOKEN_EMBEDDING_TYPES))
+        raise ValueError(f"unsupported token embedding quantization type {value!r}; choose one of: {supported}")
+    return normalized
+
+
+def _find_quantizer(reference: Path) -> Path:
+    candidates = (
+        reference / "build" / "bin" / "Release" / "llama-quantize.exe",
+        reference / "build" / "bin" / "llama-quantize.exe",
+        reference / "build" / "bin" / "llama-quantize",
+        reference / "llama-quantize.exe",
+        reference / "llama-quantize",
+    )
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate.resolve()
+    searched = ", ".join(str(path) for path in candidates)
+    raise FileNotFoundError(f"llama.cpp quantizer is missing; searched: {searched}")
+
+
+def _inspect_token_embedding_type(
+    gguf_path: Path,
+    reference: Path,
+    python_executable: str | Path,
+) -> str:
+    """Read the material GGUF tensor type with llama.cpp's pinned GGUF reader."""
+
+    gguf_python = reference / "gguf-py"
+    if not gguf_python.is_dir():
+        raise FileNotFoundError(f"llama.cpp GGUF Python package is missing: {gguf_python}")
+    program = """import sys
+sys.path.insert(0, sys.argv[1])
+from gguf import GGUFReader
+reader = GGUFReader(sys.argv[2])
+for tensor in reader.tensors:
+    if tensor.name == 'token_embd.weight':
+        print(tensor.tensor_type.name.lower())
+        break
+else:
+    raise SystemExit('token_embd.weight is missing')
+"""
+    completed = subprocess.run(
+        (str(Path(python_executable)), "-c", program, str(gguf_python), str(gguf_path)),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip()
+        raise RuntimeError(f"failed to inspect GGUF token embedding type: {detail}")
+    actual = completed.stdout.strip().lower()
+    if not actual:
+        raise RuntimeError("GGUF token embedding inspection returned no type")
+    return actual
 
 
 def _checkpoint_for_packed(
@@ -59,7 +139,11 @@ def _reuse_existing(
     output: Path,
     checkpoint_root: Path,
     converter: Path,
+    quantizer: Path,
     packed_descriptor_hash: str,
+    token_embedding_type: str,
+    reference: Path,
+    python_executable: str | Path,
 ) -> GgufExportResult:
     receipt_path = _receipt_path(output)
     if not output.is_file() or not receipt_path.is_file():
@@ -75,6 +159,8 @@ def _reuse_existing(
         "schema_version": GGUF_EXPORT_SCHEMA_VERSION,
         "packed_descriptor_sha256": packed_descriptor_hash,
         "converter_sha256": hash_file(converter),
+        "quantizer_sha256": hash_file(quantizer),
+        "token_embedding_type": token_embedding_type,
         "gguf_sha256": hash_file(output),
         "gguf_bytes": output.stat().st_size,
     }
@@ -83,6 +169,12 @@ def _reuse_existing(
             raise ValueError(f"GGUF export receipt field differs: {name}")
     if receipt.get("checkpoint") != str(checkpoint_root.resolve()):
         raise ValueError("GGUF export receipt checkpoint path differs")
+    actual_type = _inspect_token_embedding_type(output, reference, python_executable)
+    if actual_type != token_embedding_type:
+        raise ValueError(
+            "GGUF token embedding tensor type differs from export recipe: "
+            f"{actual_type} != {token_embedding_type}"
+        )
     return GgufExportResult(
         output.resolve(),
         checkpoint_root.resolve(),
@@ -90,6 +182,8 @@ def _reuse_existing(
         output.stat().st_size,
         str(receipt["gguf_sha256"]),
         True,
+        token_embedding_type,
+        quantizer,
     )
 
 
@@ -101,6 +195,7 @@ def export_llamacpp_gguf(
     reference_root: str | Path,
     *,
     python_executable: str | Path = sys.executable,
+    token_embedding_type: str = DEFAULT_TOKEN_EMBEDDING_TYPE,
 ) -> GgufExportResult:
     """Export one packed artifact to GGUF and bind it to a durable receipt.
 
@@ -109,6 +204,7 @@ def export_llamacpp_gguf(
     valid deployment artifact.
     """
 
+    embedding_type = normalize_token_embedding_type(token_embedding_type)
     packed = open_packed_artifact(packed_root, verify_hashes=True)
     source = Path(source_model).resolve()
     if not source.is_dir():
@@ -124,6 +220,7 @@ def export_llamacpp_gguf(
             "modified llama.cpp converter hash differs from packed provenance: "
             f"{converter_hash} != {expected_converter_hash}"
         )
+    quantizer = _find_quantizer(reference)
     checkpoint_path = Path(checkpoint_root).resolve()
     _checkpoint_for_packed(packed.root, checkpoint_path)
     destination = Path(output).resolve()
@@ -133,47 +230,90 @@ def export_llamacpp_gguf(
             destination,
             checkpoint_path,
             converter,
+            quantizer,
             packed_descriptor_hash,
+            embedding_type,
+            reference,
+            python_executable,
         )
 
     destination.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(
+    descriptor, converted_name = tempfile.mkstemp(
         prefix=f".{destination.stem}-",
-        suffix=".gguf",
+        suffix=".converted.gguf",
         dir=destination.parent,
     )
     os.close(descriptor)
-    temporary = Path(temporary_name)
-    temporary.unlink()
-    stdout_path = destination.with_suffix(destination.suffix + ".converter.stdout.log")
-    stderr_path = destination.with_suffix(destination.suffix + ".converter.stderr.log")
-    command = (
+    converted = Path(converted_name)
+    converted.unlink()
+    descriptor, quantized_name = tempfile.mkstemp(
+        prefix=f".{destination.stem}-",
+        suffix=".quantized.gguf",
+        dir=destination.parent,
+    )
+    os.close(descriptor)
+    quantized = Path(quantized_name)
+    quantized.unlink()
+    converter_stdout_path = destination.with_suffix(destination.suffix + ".converter.stdout.log")
+    converter_stderr_path = destination.with_suffix(destination.suffix + ".converter.stderr.log")
+    quantizer_stdout_path = destination.with_suffix(destination.suffix + ".quantizer.stdout.log")
+    quantizer_stderr_path = destination.with_suffix(destination.suffix + ".quantizer.stderr.log")
+    converter_command = (
         str(Path(python_executable)),
         str(converter),
         str(source),
         "--nanoquant-checkpoint",
         str(checkpoint_path),
         "--outfile",
-        str(temporary),
+        str(converted),
         "--outtype",
         "bf16",
         "--no-lazy",
     )
+    # COPY disables llama.cpp's per-tensor overrides. F16 is intentional here:
+    # the converter's NanoQuant sidecars are already F16/I32/F32, so this base
+    # type leaves them alone while allowing token_embd.weight to be overridden.
+    quantizer_command = (
+        str(quantizer),
+        "--token-embedding-type",
+        embedding_type.upper(),
+        str(converted),
+        str(quantized),
+        "F16",
+    )
     try:
-        with stdout_path.open("w", encoding="utf-8", newline="\n") as stdout, stderr_path.open(
+        with converter_stdout_path.open("w", encoding="utf-8", newline="\n") as stdout, converter_stderr_path.open(
             "w", encoding="utf-8", newline="\n"
         ) as stderr:
-            completed = subprocess.run(command, stdout=stdout, stderr=stderr, check=False)
+            completed = subprocess.run(converter_command, stdout=stdout, stderr=stderr, check=False)
         if completed.returncode != 0:
             raise RuntimeError(
                 f"modified llama.cpp GGUF converter failed with exit code {completed.returncode}; "
-                f"see {stderr_path}"
+                f"see {converter_stderr_path}"
             )
-        if not temporary.is_file() or temporary.stat().st_size == 0:
+        if not converted.is_file() or converted.stat().st_size == 0:
             raise RuntimeError("modified llama.cpp converter did not produce a non-empty GGUF")
-        os.replace(temporary, destination)
+        with quantizer_stdout_path.open("w", encoding="utf-8", newline="\n") as stdout, quantizer_stderr_path.open(
+            "w", encoding="utf-8", newline="\n"
+        ) as stderr:
+            completed = subprocess.run(quantizer_command, stdout=stdout, stderr=stderr, check=False)
+        if completed.returncode != 0:
+            raise RuntimeError(
+                f"llama.cpp token embedding quantization failed with exit code {completed.returncode}; "
+                f"see {quantizer_stderr_path}"
+            )
+        if not quantized.is_file() or quantized.stat().st_size == 0:
+            raise RuntimeError("llama.cpp quantizer did not produce a non-empty GGUF")
+        actual_type = _inspect_token_embedding_type(quantized, reference, python_executable)
+        if actual_type != embedding_type:
+            raise RuntimeError(
+                "GGUF token embedding quantization did not produce the requested tensor type: "
+                f"{actual_type} != {embedding_type}"
+            )
+        os.replace(quantized, destination)
     finally:
-        temporary.unlink(missing_ok=True)
+        converted.unlink(missing_ok=True)
+        quantized.unlink(missing_ok=True)
 
     digest = hash_file(destination)
     receipt = {
@@ -184,13 +324,20 @@ def export_llamacpp_gguf(
         "checkpoint_manifest": asdict(open_llamacpp_checkpoint(checkpoint_path, verify_hashes=True)),
         "converter": str(converter),
         "converter_sha256": converter_hash,
+        "quantizer": str(quantizer),
+        "quantizer_sha256": hash_file(quantizer),
         "source_model": str(source),
+        "token_embedding_type": embedding_type,
+        "token_embedding_tensor": "token_embd.weight",
         "gguf": str(destination),
         "gguf_sha256": digest,
         "gguf_bytes": destination.stat().st_size,
-        "command": command,
-        "stdout_log": str(stdout_path),
-        "stderr_log": str(stderr_path),
+        "converter_command": converter_command,
+        "converter_stdout_log": str(converter_stdout_path),
+        "converter_stderr_log": str(converter_stderr_path),
+        "quantizer_command": quantizer_command,
+        "quantizer_stdout_log": str(quantizer_stdout_path),
+        "quantizer_stderr_log": str(quantizer_stderr_path),
     }
     atomic_write_json(_receipt_path(destination), receipt)
     return GgufExportResult(
@@ -200,7 +347,16 @@ def export_llamacpp_gguf(
         destination.stat().st_size,
         digest,
         False,
+        embedding_type,
+        quantizer,
     )
 
 
-__all__ = ["GGUF_EXPORT_SCHEMA_VERSION", "GgufExportResult", "export_llamacpp_gguf"]
+__all__ = [
+    "DEFAULT_TOKEN_EMBEDDING_TYPE",
+    "GGUF_EXPORT_SCHEMA_VERSION",
+    "SUPPORTED_TOKEN_EMBEDDING_TYPES",
+    "GgufExportResult",
+    "export_llamacpp_gguf",
+    "normalize_token_embedding_type",
+]

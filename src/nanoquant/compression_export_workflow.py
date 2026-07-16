@@ -8,7 +8,12 @@ from typing import Any, cast
 
 from nanoquant.config.codec import to_dict
 from nanoquant.config.schema import RunConfig
-from nanoquant.infrastructure.gguf_export import GgufExportResult, export_llamacpp_gguf
+from nanoquant.infrastructure.gguf_export import (
+    DEFAULT_TOKEN_EMBEDDING_TYPE,
+    GgufExportResult,
+    export_llamacpp_gguf,
+    normalize_token_embedding_type,
+)
 from nanoquant.infrastructure.io_utils import atomic_write_json
 from nanoquant.infrastructure.model_adapters import adapter_for_config
 from nanoquant.infrastructure.runtime_export import (
@@ -41,12 +46,18 @@ class CompressionExportRecipe:
     gguf_output: Path
     llama_cpp_root: Path
     runtime_family: str = "gemma3"
+    token_embedding_type: str = DEFAULT_TOKEN_EMBEDDING_TYPE
 
     def __post_init__(self) -> None:
         if not self.runtime_family:
             raise ValueError("compression export runtime family is required")
         if self.gguf_output.suffix.lower() != ".gguf":
             raise ValueError("compression export output must use the .gguf extension")
+        object.__setattr__(
+            self,
+            "token_embedding_type",
+            normalize_token_embedding_type(self.token_embedding_type),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +68,7 @@ class ResolvedCompressionExportRecipe:
     gguf_output: Path
     llama_cpp_root: Path
     runtime_family: str
+    token_embedding_type: str = DEFAULT_TOKEN_EMBEDDING_TYPE
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,6 +101,7 @@ def resolve_compression_export_recipe(
         _repository_path(recipe.gguf_output, root),
         _repository_path(recipe.llama_cpp_root, root),
         recipe.runtime_family,
+        recipe.token_embedding_type,
     )
 
 
@@ -191,12 +204,13 @@ def execute_compression_export(
         resolved.checkpoint_output,
         resolved.gguf_output,
         resolved.llama_cpp_root,
+        token_embedding_type=resolved.token_embedding_type,
     )
     summary_output = resolved.gguf_output.with_suffix(".export-summary.json")
     atomic_write_json(
         summary_output,
         {
-            "schema_version": 1,
+            "schema_version": 2,
             "run_output": str(run),
             "logical": logical,
             "packed": packed,
@@ -204,6 +218,8 @@ def execute_compression_export(
                 "output": str(gguf.output),
                 "checkpoint": str(gguf.checkpoint),
                 "converter": str(gguf.converter),
+                "quantizer": None if gguf.quantizer is None else str(gguf.quantizer),
+                "token_embedding_type": gguf.token_embedding_type,
                 "bytes": gguf.bytes,
                 "sha256": gguf.sha256,
                 "reused": gguf.reused,
