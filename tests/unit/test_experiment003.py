@@ -30,6 +30,7 @@ def test_experiment003_is_full_gemma4b_compression_quality_proof(tmp_path: Path)
     config = EXPERIMENT_003_CONFIG
     assert config.model.source == "google/gemma-3-4b-it"
     assert config.model.revision == "093f9f388b31de276ce2de164bdc2081324b9767"
+    assert config.intent.name == "003-compress-and-benchmark-gemma-3-4b-it-v2"
     assert config.runtime.block_forward_batch_size == 4
     assert config.block_tuning.non_factorized.loop.batch_size == 4
     assert config.block_tuning.factorized.loop.batch_size == 1
