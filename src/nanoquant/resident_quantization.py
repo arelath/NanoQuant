@@ -242,6 +242,7 @@ class ResidentQuantizationRequest:
     rank_ceiling_fraction: float = 4.5
     rank_sensitivity_alpha: float = 0.5
     rank_edge_boost: float = 0.0
+    maximum_rank_layer_patterns: tuple[str, ...] = ()
     rank_retry: RankRetryConfig = _DEFAULT_RESIDENT_RANK_RETRY
     layer_order: tuple[str, ...] = ()
     admm: ADMMConfig = ADMMConfig(outer_iterations=1, inner_iterations=1)
@@ -917,6 +918,7 @@ def _resident_config_hash(request: ResidentQuantizationRequest) -> str:
         "rank_ceiling_fraction": request.rank_ceiling_fraction,
         "rank_sensitivity_alpha": request.rank_sensitivity_alpha,
         "rank_edge_boost": request.rank_edge_boost,
+        "maximum_rank_layer_patterns": request.maximum_rank_layer_patterns,
         "layer_order": request.layer_order,
         "admm": request.admm,
         "outliers": request.outliers,
@@ -1884,6 +1886,7 @@ def _run_resident_quantization_impl(
             target_bpw=request.target_bpw,
             strategy=request.allocation_strategy,
             sensitivity_alpha=request.rank_sensitivity_alpha,
+            maximum_rank_layer_patterns=request.maximum_rank_layer_patterns,
             bounds=RankBoundsConfig(
                 multiple=request.rank_multiple,
                 floor_fraction_of_uniform=request.rank_floor_fraction,
@@ -1898,6 +1901,7 @@ def _run_resident_quantization_impl(
             strategy=request.allocation_strategy.value,
             target_bpw=request.target_bpw,
             rank_multiple=request.rank_multiple,
+            maximum_rank_layer_patterns=request.maximum_rank_layer_patterns,
         ):
             with recorder.phase("plan"):
                 with recorder.phase("ranks"):

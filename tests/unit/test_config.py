@@ -1,5 +1,5 @@
 import math
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 
 import pytest
 
@@ -70,6 +70,19 @@ def test_validation_phases_have_stable_codes() -> None:
         profiling=ProfilingConfig(cuda_sample_every=0, raw_samples_per_phase=0),
     )
     assert {issue.code for issue in validate(invalid)} == {"CFG015", "CFG016"}
+
+
+def test_maximum_rank_patterns_must_be_nonempty_and_unique() -> None:
+    config = RunConfig(ModelConfig("x"))
+    invalid = replace(
+        config,
+        allocation=replace(
+            config.allocation,
+            maximum_rank_layer_patterns=("", "self_attn.v_proj", "self_attn.v_proj"),
+        ),
+    )
+
+    assert {issue.code for issue in validate(invalid)} == {"CFG039", "CFG040"}
 
 
 def test_observability_levels_are_validated_without_changing_schema() -> None:

@@ -48,6 +48,7 @@ EXPERIMENT_003_CONFIG = replace(
     ),
     allocation=replace(
         BASE_COMPRESSION_CONFIG.allocation,
+        maximum_rank_layer_patterns=(),
         retry=RankRetryConfig(
             thresholds=RetryThresholdConfig(
                 weighted_normalized_error=0.35,

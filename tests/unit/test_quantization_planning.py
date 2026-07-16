@@ -39,7 +39,8 @@ def _request(strategy: AllocationStrategy = AllocationStrategy.UNIFORM) -> Plann
     stats = []
     objectives = []
     for index, importance in enumerate((1.0, 10.0)):
-        layer_id = LayerId(BlockId(index), "mlp.up_proj")
+        path = "self_attn.v_proj" if index == 0 else "mlp.up_proj"
+        layer_id = LayerId(BlockId(index), path)
         source = SourceTensor(
             TensorId(layer_id, "weight"),
             f"blocks.{index}.weight",
@@ -150,3 +151,48 @@ def test_retry_plan_honors_enabled_and_above_allocator_cap_policy() -> None:
     assert above_cap_layer.retry.maximum_attempts == 3
     assert above_cap_layer.retry.hard_rank_cap == 64
     assert above_cap_layer.retry.hard_rank_cap >= above_cap_layer.allocator_cap
+
+
+def test_additive_maximum_rank_pattern_overrides_rank_after_budget_allocation() -> None:
+    request = _request(AllocationStrategy.SENSITIVITY)
+    baseline = build_quantization_plan(request)
+    overridden = build_quantization_plan(
+        replace(
+            request,
+            allocation=replace(
+                request.allocation,
+                maximum_rank_layer_patterns=("self_attn.v_proj",),
+            ),
+        )
+    )
+
+    baseline_ranks = [layer.rank for block in baseline.blocks for layer in block.layers]
+    overridden_layers = [layer for block in overridden.blocks for layer in block.layers]
+    assert baseline_ranks[0] < 64
+    assert [layer.rank for layer in overridden_layers] == [64, baseline_ranks[1]]
+    assert overridden_layers[0].allocator_cap == 64
+    nominal_target_bits = sum(
+        layer.in_features * layer.out_features
+        for block in request.inventory.blocks
+        for layer in block.quantizable_layers
+    )
+    assert overridden.planned_cost.total > nominal_target_bits
+
+
+def test_additive_maximum_rank_pattern_must_match_a_quantizable_layer() -> None:
+    request = _request()
+
+    try:
+        build_quantization_plan(
+            replace(
+                request,
+                allocation=replace(
+                    request.allocation,
+                    maximum_rank_layer_patterns=("self_attn.k_proj",),
+                ),
+            )
+        )
+    except ValueError as error:
+        assert "matched no quantizable layer" in str(error)
+    else:
+        raise AssertionError("unmatched maximum-rank pattern was accepted")

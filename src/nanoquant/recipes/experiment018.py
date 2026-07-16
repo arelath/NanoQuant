@@ -16,6 +16,10 @@ EXPERIMENT_018_CONFIG = replace(
         baseline_run="legacy-experiment-018",
         tags=("gemma-3-1b-it", "parity", "diagonal", "model-kd"),
     ),
+    allocation=replace(
+        BASE_COMPRESSION_CONFIG.allocation,
+        maximum_rank_layer_patterns=(),
+    ),
 )
 
 __all__ = ["EXPERIMENT_018_CONFIG", "MODEL_REVISION"]

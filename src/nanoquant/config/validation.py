@@ -46,6 +46,19 @@ def validate(config: RunConfig, phase: ValidationPhase = ValidationPhase.PRE_RES
     require(0 <= config.calibration.shrinkage <= 1, "CFG005", "calibration.shrinkage", "must be in [0, 1]")
     require(config.allocation.target_bpw > 0, "CFG006", "allocation.target_bpw", "must be positive")
     require(config.allocation.bounds.multiple > 0, "CFG007", "allocation.bounds.multiple", "must be positive")
+    maximum_rank_patterns = config.allocation.maximum_rank_layer_patterns
+    require(
+        all(bool(pattern.strip()) for pattern in maximum_rank_patterns),
+        "CFG039",
+        "allocation.maximum_rank_layer_patterns",
+        "patterns must not be empty",
+    )
+    require(
+        len(set(maximum_rank_patterns)) == len(maximum_rank_patterns),
+        "CFG040",
+        "allocation.maximum_rank_layer_patterns",
+        "patterns must be unique",
+    )
     require(
         config.allocation.bounds.floor_fraction_of_uniform <= config.allocation.bounds.ceiling_fraction_of_uniform,
         "CFG008",

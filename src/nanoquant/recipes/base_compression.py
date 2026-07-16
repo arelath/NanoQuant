@@ -95,6 +95,7 @@ BASE_COMPRESSION_CONFIG = RunConfig(
         target_bpw=1.0,
         strategy=AllocationStrategy.SENSITIVITY,
         sensitivity_alpha=0.5,
+        maximum_rank_layer_patterns=("self_attn.v_proj",),
         bounds=RankBoundsConfig(
             multiple=32,
             floor_fraction_of_uniform=0.9,

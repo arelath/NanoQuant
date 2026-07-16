@@ -84,6 +84,17 @@ def test_rank_retry_policy_invalidates_commit_identity() -> None:
         replace(request, rank_retry=replace(request.rank_retry, maximum_attempts=2))
     )
 
+
+def test_maximum_rank_policy_invalidates_commit_identity() -> None:
+    request = ResidentQuantizationRequest(
+        Path("snapshot"), Path("output"), "fixture/model", "revision", ((1, 2, 3),), device="cpu"
+    )
+
+    assert resident._resident_config_hash(request) != resident._resident_config_hash(
+        replace(request, maximum_rank_layer_patterns=("self_attn.v_proj",))
+    )
+
+
 def test_profiling_does_not_invalidate_commit_identity() -> None:
     request = ResidentQuantizationRequest(
         Path("snapshot"), Path("output"), "fixture/model", "revision", ((1, 2, 3),), device="cpu"

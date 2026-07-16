@@ -5,6 +5,11 @@ All numbered compression experiments derive their numerical configuration from
 practice of treating legacy Experiment 018 as the base recipe. Experiment 018 now derives from the base like every
 other numbered run.
 
+The base allocation promotes every `self_attn.v_proj` layer to its physical maximum rank. The promotion happens
+after the ordinary sensitivity allocation, so other layers retain their target-BPW ranks and the reported physical
+BPW includes the additional `v_proj` storage. Numbered experiments whose results or resumable state predate this
+decision explicitly pin an empty override; newly authored compression experiments inherit the maximum-rank policy.
+
 The same module exposes `compression_export_recipe(experiment_number, model_slug)`. It assigns canonical outputs:
 
 ```text

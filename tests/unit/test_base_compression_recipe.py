@@ -15,6 +15,11 @@ from nanoquant.recipes import (
 def test_base_compression_recipe_is_visible_and_unnumbered() -> None:
     assert BASE_COMPRESSION_CONFIG.intent.experiment_number is None
     assert BASE_COMPRESSION_CONFIG.intent.name == "base-compression-gemma-3"
+    assert BASE_COMPRESSION_CONFIG.allocation.maximum_rank_layer_patterns == (
+        "self_attn.v_proj",
+    )
+    assert not EXPERIMENT_001_CONFIG.allocation.maximum_rank_layer_patterns
+    assert not EXPERIMENT_003_CONFIG.allocation.maximum_rank_layer_patterns
     assert EXPERIMENT_001_CONFIG.factorization == BASE_COMPRESSION_CONFIG.factorization
     assert EXPERIMENT_003_CONFIG.factorization == BASE_COMPRESSION_CONFIG.factorization
     assert EXPERIMENT_001.export == compression_export_recipe(1, "gemma-3-1b-it")

@@ -23,6 +23,10 @@ EXPERIMENT_001_CONFIG = replace(
         baseline_run="bf16-google-gemma-3-1b-it",
         tags=("gemma-3-1b-it", "compression", "gguf", "bf16-comparison", "quality"),
     ),
+    allocation=replace(
+        BASE_COMPRESSION_CONFIG.allocation,
+        maximum_rank_layer_patterns=(),
+    ),
 )
 
 _EXPORT = compression_export_recipe(1, "gemma-3-1b-it")

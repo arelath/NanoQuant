@@ -266,11 +266,18 @@ class RankAllocationConfig:
     strategy: AllocationStrategy = AllocationStrategy.UNIFORM
     sensitivity_alpha: float = 0.5
     utility_profile_artifact: Optional[str] = None
+    maximum_rank_layer_patterns: tuple[str, ...] = ()
     bounds: RankBoundsConfig = field(default_factory=RankBoundsConfig)
     retry: RankRetryConfig = field(default_factory=RankRetryConfig)
 ```
 
 `None` means a retry threshold is disabled. The rewrite does not overload numeric zero with boolean semantics.
+
+`maximum_rank_layer_patterns` contains `fnmatch` patterns matched against canonical quantizable layer paths such as
+`self_attn.v_proj`. Allocation first computes the ordinary target-BPW plan, then promotes every matched layer to its
+physical maximum rank (`min(in_features, out_features)`). This is deliberately additive: unmatched ranks do not
+shrink to compensate, and the plan's physical BPW reports the resulting cost above `target_bpw`. Patterns must be
+non-empty, unique, match at least one quantizable layer, and produce a maximum rank aligned to `bounds.multiple`.
 
 The output of allocation is not stored back into this object:
 
@@ -686,6 +693,8 @@ allocation:
   target_bpw: 1.0
   strategy: sensitivity
   sensitivity_alpha: 0.5
+  maximum_rank_layer_patterns:
+    - self_attn.v_proj
   bounds:
     multiple: 32
     floor_fraction_of_uniform: 0.9
@@ -910,7 +919,9 @@ NQ-CFG-021 objective.low_rank is required when kind=low_rank_diagonal
 NQ-CFG-022 objective.block_size is invalid when kind=diagonal
 NQ-CFG-030 allocation.target_bpw cannot pay mandatory representation overhead
 NQ-CFG-031 retry.maximum_attempts must be >= 1 when retry.enabled=true
-NQ-CFG-040 outliers.fraction must be 0 when selector=none
+NQ-CFG-039 allocation.maximum_rank_layer_patterns entries must not be empty
+NQ-CFG-040 allocation.maximum_rank_layer_patterns entries must be unique
+NQ-CFG-009 outliers.fraction must be in [0, 1)
 NQ-CFG-041 int8 outlier training requires a supported trainable master policy
 NQ-CFG-050 post_block_refit.epochs must be > 0 when enabled=true
 NQ-CFG-060 full_kl distillation is incompatible with the selected single-GPU streaming plan

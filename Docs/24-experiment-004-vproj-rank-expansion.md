@@ -85,7 +85,9 @@ only aggregate NLL, so a paired per-window uncertainty estimate cannot be recons
 
 ## Decision
 
-Do not reject `v_proj` expansion, and do not promote it as proven quality behavior yet. Run the allocation through
-the complete factorization → layer/block tuning → post-block refit → global KD sequence, then compare the fully tuned
-candidate against Experiment 003 on the same protocol. The full run must record the realized size increase separately
-from the quality result because this additive experiment does not keep total BPW fixed.
+Do not reject `v_proj` expansion, and do not treat this post-KD derivative as a final quality measurement. A later
+decision, informed by Experiment 005's stronger reconstruction result, selected physical maximum rank rather than
+the +30% setting for future full compression experiments. That policy must run through the complete factorization →
+layer/block tuning → post-block refit → global KD sequence before its downstream quality effect is considered proven.
+The full run must record the realized size increase separately from the quality result because the allocation is
+additive and does not keep total BPW fixed.

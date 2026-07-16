@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import dataclass
+from fnmatch import fnmatchcase
 
 from nanoquant.config.codec import to_dict
 from nanoquant.config.schema import OutlierConfig, RankAllocationConfig
@@ -206,6 +207,29 @@ def build_quantization_plan(request: PlanningRequest) -> QuantizationPlan:
             *_, selected, marginal = max(rank_candidates, key=lambda candidate: candidate[:3])
             ranks[selected] += multiple
             spent += marginal
+    maximum_rank_patterns = request.allocation.maximum_rank_layer_patterns
+    matched_patterns: set[str] = set()
+    if maximum_rank_patterns:
+        for layer in layers:
+            matches = tuple(
+                pattern
+                for pattern in maximum_rank_patterns
+                if fnmatchcase(layer.layer.path, pattern)
+            )
+            if not matches:
+                continue
+            matched_patterns.update(matches)
+            maximum = min(layer.in_features, layer.out_features)
+            if maximum % multiple:
+                raise ValueError(
+                    f"maximum rank {maximum} for {layer.layer.path} is not aligned to "
+                    f"allocation rank multiple {multiple}"
+                )
+            ranks[layer.layer] = maximum
+            caps[layer.layer] = maximum
+        unmatched = set(maximum_rank_patterns) - matched_patterns
+        if unmatched:
+            raise ValueError(f"maximum-rank layer patterns matched no quantizable layer: {sorted(unmatched)}")
     extra_budget = math.floor(target_bits * request.allocation.retry.extra_bit_budget_fraction)
     block_plans = []
     all_costs = []

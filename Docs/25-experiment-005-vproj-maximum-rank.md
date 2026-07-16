@@ -76,7 +76,11 @@ Do not use Experiment 005 to reject `v_proj` reallocation. The maximum-rank deri
 reconstruction signal: all 34 layers improve and aggregate weighted error falls by 34.83%. It also establishes that a
 literal 2x allocation is impossible in the existing format; rank 1024 yields only 1.4162x aggregate `v_proj` bits.
 
-The decisive test is a full run in which the new ranks are present before layer/block tuning and global KD. Experiment
-004's +30% setting is the more storage-efficient first full-run candidate; the maximum-rank setting remains a useful
-upper bound. Promotion to the base recipe should depend on that fully retuned comparison, with realized model size
-reported alongside quality.
+The maximum-rank setting is selected for future full compression experiments. It is now an explicit additive policy
+in the base compression recipe: normal sensitivity allocation determines every other layer, then each
+`self_attn.v_proj` is promoted to physical full rank and the true increased BPW is reported. Historical numbered
+recipes remain pinned to their original allocation so their completed evidence and resume identities do not change.
+
+This selection is based on the strong reconstruction signal, not a claim that the post-KD Experiment 005 artifact
+proved downstream quality. The decisive validation remains a full run in which maximum ranks are present before
+layer/block tuning and global KD, followed by the same matched quality protocol with realized model size reported.

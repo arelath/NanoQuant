@@ -273,6 +273,7 @@ def resident_request_from_config(
         rank_ceiling_fraction=config.allocation.bounds.ceiling_fraction_of_uniform,
         rank_sensitivity_alpha=config.allocation.sensitivity_alpha,
         rank_edge_boost=config.allocation.bounds.edge_block_boost,
+        maximum_rank_layer_patterns=config.allocation.maximum_rank_layer_patterns,
         rank_retry=config.allocation.retry,
         layer_order=config.block_tuning.layer_order,
         admm=config.factorization.admm,
