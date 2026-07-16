@@ -34,7 +34,7 @@ EXPERIMENT_003_CONFIG = replace(
     ),
     intent=IntentConfig(
         experiment_number=3,
-        name="003-compress-and-benchmark-gemma-3-4b-it-v2",
+        name="003-compress-and-benchmark-gemma-3-4b-it-v3",
         purpose=(
             "Prove that the multimodal Gemma 3 4B checkpoint's text model still compresses "
             "within dedicated VRAM and measure its BF16-versus-NanoQuant quality."

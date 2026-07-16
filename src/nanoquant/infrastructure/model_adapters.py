@@ -62,7 +62,14 @@ def _gemma3_wrapper_text_config(values: dict[str, object]) -> Gemma3TextConfig:
     text_config = values.get("text_config")
     if not isinstance(text_config, dict):
         raise UnsupportedModelVariant("SRC001 Gemma 3 wrapper contains no text_config object")
-    return cast(Gemma3TextConfig, Gemma3TextConfig.from_dict(cast(dict[str, object], text_config)))
+    resolved = dict(cast(dict[str, object], text_config))
+    # Multimodal Gemma checkpoints declare dtype on the wrapper, not inside
+    # text_config. Streamed decoder blocks must inherit it or PyTorch constructs
+    # FP32 weights that cannot consume the BF16 activations captured from the
+    # detached language model.
+    if resolved.get("torch_dtype") is None and "torch_dtype" in values:
+        resolved["torch_dtype"] = values["torch_dtype"]
+    return cast(Gemma3TextConfig, Gemma3TextConfig.from_dict(resolved))
 
 
 DEFINITIONS = (

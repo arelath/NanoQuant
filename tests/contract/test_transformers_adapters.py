@@ -161,7 +161,7 @@ def test_gemma3_multimodal_wrapper_maps_only_language_model_tensors(tmp_path: Pa
     )
     values = {
         "model_type": "gemma3",
-        "torch_dtype": "float32",
+        "torch_dtype": "bfloat16",
         "text_config": text_config.to_dict(),
     }
     adapter = adapter_for_config(values)
@@ -186,6 +186,7 @@ def test_gemma3_multimodal_wrapper_maps_only_language_model_tensors(tmp_path: Pa
     assert not any(tensor.source_key.startswith("vision_tower.") for tensor in inventory.shared_tensors)
     loaded = adapter.load_block(source, BlockId(0), "cpu")
     assert isinstance(loaded, torch.nn.Module)
+    assert next(loaded.parameters()).dtype is torch.bfloat16
 
 
 def test_gemma3_text_stack_capture_preserves_position_and_attention_metadata() -> None:
