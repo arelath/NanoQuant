@@ -1,7 +1,8 @@
 """Experiment 001: compress, export, and benchmark pinned Gemma 3 1B."""
 
+from recipes import EXPERIMENT_001, EXPERIMENT_001_CONFIG
+
 from nanoquant.compression_benchmark_workflow import run_compression_benchmark_experiment
-from nanoquant.recipes import EXPERIMENT_001, EXPERIMENT_001_CONFIG
 
 CONFIG = EXPERIMENT_001_CONFIG
 EXPERIMENT = EXPERIMENT_001

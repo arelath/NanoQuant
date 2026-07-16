@@ -3,7 +3,7 @@ from __future__ import annotations
 import runpy
 from pathlib import Path
 
-from nanoquant.recipes import EXPERIMENT_005, EXPERIMENT_005_CONFIG
+from recipes import EXPERIMENT_005, EXPERIMENT_005_CONFIG
 
 
 def test_experiment005_requests_double_vproj_bits_from_experiment003() -> None:

@@ -5,16 +5,16 @@ from pathlib import Path
 from typing import cast
 
 import torch
-
-from nanoquant.config.codec import to_dict
-from nanoquant.config.schema import RunConfig
-from nanoquant.recipes import (
+from recipes import (
     EXPERIMENT_001,
     EXPERIMENT_001_CONFIG,
     EXPERIMENT_008_CONFIG,
     EXPERIMENT_013_CONFIG,
     EXPERIMENT_018_CONFIG,
 )
+
+from nanoquant.config.codec import to_dict
+from nanoquant.config.schema import RunConfig
 from nanoquant.resident_workflow import ResolvedResidentInputs, resident_request_from_config
 
 

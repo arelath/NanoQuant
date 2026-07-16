@@ -1,8 +1,7 @@
 from pathlib import Path
 
 import pytest
-
-from nanoquant.recipes import (
+from recipes import (
     BASE_COMPRESSION_CONFIG,
     EXPERIMENT_001,
     EXPERIMENT_001_CONFIG,

@@ -7,12 +7,12 @@ from typing import Any
 
 import pytest
 import torch
-
-import nanoquant.short_decode_workflow as workflow
-from nanoquant.recipes.legacy_short_decode import (
+from recipes.legacy.short_decode import (
     LEGACY_SHORT_DECODE_BENCHMARK,
     LEGACY_SHORT_DECODE_CONFIG,
 )
+
+import nanoquant.short_decode_workflow as workflow
 from nanoquant.short_decode_benchmark import (
     ShortDecodeBenchmarkRequest,
     force_prompt_tokens,

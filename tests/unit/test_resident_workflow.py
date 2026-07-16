@@ -6,6 +6,7 @@ from typing import Any, cast
 
 import pytest
 import torch
+from recipes.legacy.experiment018 import EXPERIMENT_018_CONFIG
 
 import nanoquant.resident_quantization as resident
 import nanoquant.resident_workflow as workflow
@@ -18,7 +19,6 @@ from nanoquant.infrastructure.runs import (
     launcher_provenance,
     transition,
 )
-from nanoquant.recipes.experiment018 import EXPERIMENT_018_CONFIG
 from nanoquant.resident_workflow import (
     ResidentExecutionOptions,
     ResolvedResidentInputs,
@@ -41,7 +41,7 @@ def _inputs(tmp_path: Path) -> ResolvedResidentInputs:
         registry_root=tmp_path / "runs",
         token_ids=tokens,
         quality_token_ids=tokens[:1, :8],
-        launcher_path=Path("src/nanoquant/recipes/experiment018.py"),
+        launcher_path=Path("experiments/recipes/legacy/experiment018.py"),
         pad_token_id=0,
     )
 
@@ -74,7 +74,7 @@ def test_experiment018_maps_every_hidden_resident_parity_semantic(tmp_path: Path
     assert manifest.launcher.kind == "numbered_runfile"
     assert manifest.launcher.experiment_number == 18
     assert manifest.launcher.repository_relative_path == (
-        "src/nanoquant/recipes/experiment018.py"
+        "experiments/recipes/legacy/experiment018.py"
     )
     assert cast(dict[str, object], manifest.resolved_config)["canonical_run_config"]
 
@@ -184,7 +184,7 @@ def test_workflow_manifest_completes_only_with_global_tuning_artifact(tmp_path: 
         "sha256:config",
         {},
         launcher_provenance(
-            "src/nanoquant/recipes/experiment018.py",
+            "experiments/recipes/legacy/experiment018.py",
             18,
         ),
         {},

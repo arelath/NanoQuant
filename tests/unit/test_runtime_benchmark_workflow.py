@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from recipes import EXPERIMENT_011_BENCHMARK, EXPERIMENT_011_CONFIG
 
 import nanoquant.benchmark_workflow as workflow
 from nanoquant.benchmark_workflow import (
@@ -13,7 +14,6 @@ from nanoquant.benchmark_workflow import (
     execute_runtime_benchmark_experiment,
     resolve_runtime_benchmark_experiment,
 )
-from nanoquant.recipes import EXPERIMENT_011_BENCHMARK, EXPERIMENT_011_CONFIG
 from nanoquant.runtime_benchmark import RuntimeBenchmarkRequest
 
 

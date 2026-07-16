@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import torch
+from recipes import EXPERIMENT_001, EXPERIMENT_001_CONFIG
 
 import nanoquant.compression_benchmark_workflow as workflow
 from nanoquant.compression_benchmark_workflow import (
@@ -22,7 +23,6 @@ from nanoquant.compression_export_workflow import (
 from nanoquant.infrastructure.commits import CommitIdentity
 from nanoquant.infrastructure.gguf_export import GgufExportResult
 from nanoquant.quality_evaluation import QualityEvaluationRequest
-from nanoquant.recipes import EXPERIMENT_001, EXPERIMENT_001_CONFIG
 from nanoquant.resident_workflow import ResolvedResidentInputs
 
 

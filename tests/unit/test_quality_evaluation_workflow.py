@@ -7,6 +7,10 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from recipes import (
+    EXPERIMENT_002_CONFIG,
+    EXPERIMENT_002_EVALUATION,
+)
 
 import nanoquant.quality_evaluation_workflow as workflow
 from nanoquant.quality_evaluation import QualityEvaluationRequest
@@ -15,10 +19,6 @@ from nanoquant.quality_evaluation_workflow import (
     execute_quality_evaluation_experiment,
     render_quality_evaluation_markdown,
     resolve_quality_evaluation_experiment,
-)
-from nanoquant.recipes import (
-    EXPERIMENT_002_CONFIG,
-    EXPERIMENT_002_EVALUATION,
 )
 
 

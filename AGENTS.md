@@ -17,7 +17,7 @@ a reduced-iteration diagnostic, or an unfinished real-model run.
 - `src/nanoquant/ports`: infrastructure interfaces.
 - `src/nanoquant/infrastructure`: Hugging Face/model adapters, artifact stores, commits, execution, and resource control.
 - `src/nanoquant/resident_quantization.py`: current real-model resident composition and resumable layer/block flow.
-- `src/nanoquant/recipes/base_compression.py`: visible base numerical recipe and canonical numbered export paths.
+- `experiments/recipes/base_compression.py`: visible base numerical recipe and canonical numbered export paths.
 - `src/nanoquant/compression_export_workflow.py`: mandatory complete-run logical, packed, checkpoint, GGUF, and
   export-summary contract. Compression experiments must use `execute_complete_compression`.
 - `src/nanoquant/runtime`: deployment-only runtime surface; this remains less complete than the research pipeline.
@@ -53,7 +53,7 @@ The global `python` may resolve to unsupported Python 3.7. Use the repository vi
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q
 .\.venv\Scripts\python.exe -m ruff check .
-.\.venv\Scripts\python.exe -m mypy src/nanoquant
+.\.venv\Scripts\python.exe -m mypy src/nanoquant experiments/recipes
 ```
 
 The project requires Python 3.10 or newer. Before handing off code changes, run focused tests first, followed by all

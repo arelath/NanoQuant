@@ -47,6 +47,20 @@ def test_numbered_runfiles_are_thin() -> None:
     assert violations == []
 
 
+def test_src_contains_no_experiment_definitions() -> None:
+    assert not Path("src/nanoquant/recipes").exists()
+    violations = []
+    for path in Path("src/nanoquant").rglob("*.py"):
+        for imported in _imports(path):
+            if imported == "recipes" or imported.startswith("recipes."):
+                violations.append(f"{path}: {imported}")
+    assert violations == []
+
+
+def test_recipes_package_has_one_import_spelling() -> None:
+    assert not Path("experiments/__init__.py").exists()
+
+
 def test_runtime_distribution_contains_only_the_deployment_packages() -> None:
     root = Path("packaging/runtime")
     configuration = (root / "pyproject.toml").read_text(encoding="utf-8")

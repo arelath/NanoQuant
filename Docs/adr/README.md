@@ -20,6 +20,7 @@ Architecture decision records (ADRs) preserve the context and tradeoffs behind d
 - [ADR-0006: DBF remains research-only](0006-dbf-research-only.md)
 - [ADR-0007: Calibration and Hessian support tiers](0007-calibration-and-objective-support.md)
 - [ADR-0008: Legacy artifact compatibility is conversion-based](0008-legacy-artifact-compatibility.md)
+- [ADR-0009: Colocate experiment definitions outside the library](0009-experiment-definitions-outside-library.md)
 
 ## Template
 

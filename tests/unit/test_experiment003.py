@@ -2,9 +2,9 @@ import runpy
 from pathlib import Path
 
 import torch
+from recipes import EXPERIMENT_003, EXPERIMENT_003_CONFIG
 
 from nanoquant.config.schema import ProfilingLevel
-from nanoquant.recipes import EXPERIMENT_003, EXPERIMENT_003_CONFIG
 from nanoquant.resident_workflow import (
     ResidentExecutionOptions,
     ResolvedResidentInputs,

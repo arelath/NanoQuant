@@ -1,7 +1,7 @@
 # Base compression recipe and mandatory GGUF export
 
 All numbered compression experiments derive their numerical configuration from
-`src/nanoquant/recipes/base_compression.py`. The visible `BASE_COMPRESSION_CONFIG` replaces the previous implicit
+`experiments/recipes/base_compression.py`. The visible `BASE_COMPRESSION_CONFIG` replaces the previous implicit
 practice of treating legacy Experiment 018 as the base recipe. Experiment 018 now derives from the base like every
 other numbered run.
 

@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+from recipes import EXPERIMENT_003_CONFIG
+
 import nanoquant.compression_export_workflow as workflow
 from nanoquant.compression_export_workflow import (
     CompressionExportRecipe,
@@ -12,7 +14,6 @@ from nanoquant.compression_export_workflow import (
 )
 from nanoquant.infrastructure.gguf_export import GgufExportResult
 from nanoquant.infrastructure.mmproj_export import MmprojExportResult
-from nanoquant.recipes import EXPERIMENT_003_CONFIG
 from nanoquant.resident_workflow import ResolvedResidentInputs
 from nanoquant.runtime import RuntimeModelMetadata
 

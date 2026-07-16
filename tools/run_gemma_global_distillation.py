@@ -7,13 +7,14 @@ import json
 from dataclasses import replace
 from pathlib import Path
 
+import _paths  # noqa: F401
+from recipes.legacy import EXPERIMENT_018_CONFIG
 from transformers.models.auto.tokenization_auto import AutoTokenizer
 
 from nanoquant.config.schema import ProfilingConfig, ProfilingLevel
 from nanoquant.domain.models import ArtifactRef
 from nanoquant.global_distillation import run_global_topk_distillation
 from nanoquant.infrastructure.hf_calibration_dataset import load_pinned_calibration
-from nanoquant.recipes import EXPERIMENT_018_CONFIG
 from nanoquant.resident_workflow import (
     ResidentExecutionOptions,
     ResolvedResidentInputs,

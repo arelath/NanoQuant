@@ -271,6 +271,8 @@ Schema migration rules are explicit:
 Sequential numbers are retained as a useful chronological research record. The active chronology was reset after
 legacy migration lessons moved into shared code and evidence; its first launchers are
 `experiments/001-compress-gemma-3-1b-it.py` and `experiments/002-benchmark-gemma-3-1b-it.py`.
+Canonical typed definitions consumed by these thin launchers are colocated under `experiments/recipes/` and are not
+part of the installable `nanoquant` library package.
 
 The number is a human chronology label, not the immutable run identity:
 

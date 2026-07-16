@@ -4,7 +4,7 @@ from dataclasses import replace
 
 from nanoquant.config.schema import IntentConfig
 
-from .base_compression import BASE_COMPRESSION_CONFIG, MODEL_REVISION
+from ..base_compression import BASE_COMPRESSION_CONFIG, MODEL_REVISION
 
 EXPERIMENT_018_CONFIG = replace(
     BASE_COMPRESSION_CONFIG,

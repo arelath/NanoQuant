@@ -4,9 +4,9 @@ import runpy
 from pathlib import Path
 
 import pytest
+from recipes import EXPERIMENT_004, EXPERIMENT_004_CONFIG
 
 from nanoquant.rank_expansion_experiment import _candidate_comparison
-from nanoquant.recipes import EXPERIMENT_004, EXPERIMENT_004_CONFIG
 
 
 def test_experiment004_is_a_selective_experiment003_derivative() -> None:

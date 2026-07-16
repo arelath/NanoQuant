@@ -7,6 +7,9 @@ import json
 from dataclasses import replace
 from pathlib import Path
 
+import _paths  # noqa: F401
+from recipes.legacy import EXPERIMENT_018_CONFIG
+
 from nanoquant.config.schema import (
     ActivationRetention,
     ObservabilityConfig,
@@ -16,7 +19,6 @@ from nanoquant.config.schema import (
 from nanoquant.domain.models import ArtifactRef, ArtifactTypes
 from nanoquant.infrastructure.hf_calibration_dataset import load_pinned_calibration
 from nanoquant.infrastructure.resource_usage import peak_device_memory_bytes
-from nanoquant.recipes import EXPERIMENT_018_CONFIG
 from nanoquant.resident_quantization import (
     run_resident_factorization_slice,
     run_resident_quantization,
