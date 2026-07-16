@@ -382,9 +382,9 @@ Because the scales are cast to bf16 *before* the reconstruction that later stage
 The scale-rounding term combines with the residual in quadrature, so replacing bf16 scales with
 fp16 — or even exact fp32 — changes total weight error by well under 0.01%. That is the *why*
 behind the artifact's dtype choices: every tensor is either exact (signs, indices, outlier
-columns) or its rounding is provably negligible (scales). If the layout is ever revised, F32
-scales are the only defensible upgrade (the GGUF converter already normalizes scales to F32
-downstream), at a cost of ~1.8 MB on an 87 MB artifact.
+columns) or its rounding is provably negligible (scales). The GGUF converter now preserves the
+frozen BF16 scale values instead of widening them to F32, avoiding ~1.8 MB of storage on an
+87 MB artifact without changing any represented value.
 
 ---
 

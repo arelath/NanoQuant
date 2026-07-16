@@ -55,11 +55,19 @@ def _exact(label: str, actual: np.ndarray, expected: np.ndarray) -> None:
 class _CaptureWriter:
     def __init__(self) -> None:
         self.tensors: dict[str, np.ndarray] = {}
+        self.raw_dtypes: dict[str, object | None] = {}
 
-    def add_tensor(self, name: str, value: np.ndarray) -> None:
+    def add_tensor(
+        self,
+        name: str,
+        value: np.ndarray,
+        *,
+        raw_dtype: object | None = None,
+    ) -> None:
         if name in self.tensors:
             raise ValueError(f"modified llama.cpp writer emitted a duplicate tensor: {name}")
         self.tensors[name] = value
+        self.raw_dtypes[name] = raw_dtype
 
 
 class _CaptureModel:
@@ -185,6 +193,22 @@ def main() -> None:
                 expected_names.add(f"{mapped_base}.nq_salient_scale")
             if set(capture.gguf_writer.tensors) != expected_names:
                 raise ValueError(f"modified llama.cpp GGUF tensor names differ: {prefix}")
+            for role, expected in (
+                ("nq_scale_pre", sidecar.scale_pre),
+                ("nq_scale_mid", sidecar.scale_mid),
+                ("nq_scale_post", sidecar.scale_post),
+            ):
+                name = f"{mapped_base}.{role}"
+                if capture.gguf_writer.raw_dtypes[name] != converter.gguf.GGMLQuantizationType.BF16:
+                    raise ValueError(f"modified llama.cpp converter did not emit BF16: {name}")
+                encoded = capture.gguf_writer.tensors[name]
+                if encoded.dtype != np.uint8 or encoded.nbytes != expected.size * 2:
+                    raise ValueError(f"modified llama.cpp converter emitted invalid BF16 storage: {name}")
+                decoded = converter.gguf.dequantize(
+                    encoded,
+                    converter.gguf.GGMLQuantizationType.BF16,
+                )
+                _exact(name, decoded, expected)
             gguf_tensor_count += len(expected_names)
 
     if set(sidecars) != expected_prefixes:
@@ -206,7 +230,7 @@ def main() -> None:
                 "sidecar_group_count": len(sidecars),
                 "gguf_tensor_count": gguf_tensor_count,
                 "sign_words_exact": True,
-                "scale_values_exact_after_f32_normalization": True,
+                "scale_values_exact_after_bf16_serialization": True,
                 "salient_values_exact_after_f16_normalization": True,
                 "normalized_salient_element_count": normalized_salient_elements,
                 "maximum_salient_normalization_error": maximum_salient_normalization_error,

@@ -86,7 +86,7 @@ def test_packed_artifact_conversion_is_sharded_bound_and_executable(tmp_path: Pa
     assert packed.manifest.logical_descriptor_sha256 == descriptor_hash
     assert packed.manifest.layout.version == "llama.cpp-i32-lsb-v1"
     assert packed.manifest.layout.reference.repository == "modified-llama.cpp"
-    assert packed.manifest.layout.reference.commit == "5c6ae79816ee0f2b3d4bb8ec9061c294185d320b"
+    assert packed.manifest.layout.reference.commit == "da52148384591f4b0d87d58c12862e30f43014f1"
     assert packed.manifest.layer_count == 2
     assert packed.manifest.weight_bytes < logical.manifest.weight_bytes
     assert [block.path for block in packed.manifest.blocks] == [

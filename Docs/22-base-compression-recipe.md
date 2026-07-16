@@ -37,7 +37,7 @@ complete until all of these stages succeed:
 The embedding level is part of the export recipe and receipt identity. Use
 `compression_export_recipe(..., token_embedding_type="q4_k")` for a Q4_K embedding; Q4/Q5/Q6/Q8 llama.cpp
 variants accepted by the recipe are supported. The second pass uses F16 as its base type because llama.cpp's `COPY`
-mode disables per-tensor overrides. On NanoQuant GGUFs, the F16 base leaves the existing F16/I32/F32 sidecars alone
+mode disables per-tensor overrides. On NanoQuant GGUFs, the F16 base leaves the existing BF16/F16/I32/F32 sidecars alone
 and changes only the BF16 token embedding.
 
 Each stage is resumable. Existing logical, packed, checkpoint, and GGUF outputs are hash-validated and reused. A

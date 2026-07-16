@@ -18,10 +18,10 @@ upstream llama.cpp alone:
 
 | Item | Identity |
 | --- | --- |
-| Git HEAD | `5c6ae79816ee0f2b3d4bb8ec9061c294185d320b` |
+| Git HEAD | `da52148384591f4b0d87d58c12862e30f43014f1` |
 | Binary dirty-diff Git object | `cf463b9266db4e1f162ad8970e8ddcc1abfb5fbd` |
 | `ggml/src/ggml-cuda/nanoquant.cu` SHA-256 | `5c87336c2b6b8fb33805c6ee6a8752d4bd364beed63fd4cca03c2b36be966619` |
-| `convert_nanoquant_to_gguf.py` SHA-256 | `92b0d31c1ce83d0fe3668bbb20cee6a4da24ec3e9476f6699890d01540241e4d` |
+| `convert_nanoquant_to_gguf.py` SHA-256 | `3ee6ccd976445b8e5669d34080067b0e36bac6166cd109c5f8cf7bc20893690c` |
 | `docs/development/nanoquant.md` SHA-256 | `12c46863a480a04b1ba449bb7bcb2f637419b677678b60f93522c531bd3f9ac8` |
 | `src/llama-model.cpp` SHA-256 | `11175fca67ecd8b97f6d6ffa7d2e8b848839d768669d63f7ec629a69d8d704aa` |
 | `ggml/src/ggml-cpu/ops.cpp` SHA-256 | `f51195610b4c533e4f606f984c7083bb542e4c3b3c8e740fdc647f8a5b0eff1c` |
@@ -147,9 +147,11 @@ Export is atomic, streams one block at a time, refuses overwrite, and rejects un
 Explicit factor shapes also work around a defect in the pinned reference converter without changing that reference:
 when both factors are packed and `U_shape` is absent, its `U_packed` branch reads `scale_mid` before assigning that
 local. The bridge always supplies authoritative shapes, so the faulty inference branch is never entered. The
-converter normalizes scales to F32 and floating salient values to F16. On Gemma, the latter intentionally changed
-512 source BF16 values with maximum absolute difference `2.9802322387695312e-08`; all converter and GGUF values were
-exact after that declared normalization.
+converter serializes the three scale sidecars as BF16, preserving the frozen values without widening them to F32,
+and normalizes floating salient values to F16. On Gemma, the latter intentionally changed 512 source BF16 values
+with maximum absolute difference `2.9802322387695312e-08`; all converter and GGUF values were exact after those
+declared storage transforms. Export receipt schema 3 inspects the final post-quantizer GGUF and rejects missing or
+non-BF16 NanoQuant scale tensors.
 
 ## Native rewrite CUDA backend
 

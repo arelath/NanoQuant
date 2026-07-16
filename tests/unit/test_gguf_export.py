@@ -93,7 +93,11 @@ Path(a.outfile).write_bytes(b'GGUF-fixture')
         return subprocess.CompletedProcess(command, 0)
 
     monkeypatch.setattr(gguf_export.subprocess, "run", fake_run)
-    monkeypatch.setattr(gguf_export, "_inspect_token_embedding_type", lambda *_args: "q8_0")
+    monkeypatch.setattr(
+        gguf_export,
+        "_inspect_gguf_tensor_contract",
+        lambda *_args: ("q8_0", 3, ("bf16",)),
+    )
     output = tmp_path / "output" / "model.gguf"
     checkpoint = tmp_path / "output" / "checkpoint"
 
@@ -104,13 +108,23 @@ Path(a.outfile).write_bytes(b'GGUF-fixture')
     assert not first.reused
     assert second.reused
     receipt = json.loads(output.with_suffix(".gguf.export.json").read_text(encoding="utf-8"))
+    assert receipt["schema_version"] == 3
     assert receipt["gguf_sha256"] == real_hash_file(output)
     assert receipt["converter_sha256"] == PACKED_REFERENCE_CONVERTER_SHA256
     assert receipt["token_embedding_type"] == "q8_0"
+    assert receipt["nanoquant_scale_type"] == "bf16"
+    assert receipt["nanoquant_scale_tensor_count"] == 3
     assert receipt["quantizer_sha256"] == real_hash_file(quantizer)
     assert len(commands) == 2
     assert commands[1][1:3] == ("--token-embedding-type", "Q8_0")
     assert commands[1][-1] == "F16"
+
+
+def test_gguf_export_contract_rejects_widened_or_missing_scales() -> None:
+    with pytest.raises(ValueError, match="must all be BF16"):
+        gguf_export._require_bfloat16_nanoquant_scales(3, ("f32",), 3)
+    with pytest.raises(ValueError, match="tensor count differs"):
+        gguf_export._require_bfloat16_nanoquant_scales(0, (), 3)
 
 
 def test_gguf_export_rejects_unsupported_embedding_type(tmp_path: Path) -> None:

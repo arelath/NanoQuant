@@ -37,6 +37,10 @@ The logical report says 0.9963 BPW, but the exported NanoQuant tensors occupy 88
 
 Storing those scale sidecars as BF16 would save 1,842,432 bytes. The raw byte arithmetic is enough to raise every current `k_proj` and `v_proj` to their maximum rank 256—approximately 980 KB—while remaining below the current serialized size. This requires converter/kernel support for BF16 sidecars, but the kernel can still upcast during computation.
 
+**Implemented:** the pinned converter now writes `nq_scale_pre`, `nq_scale_mid`, and `nq_scale_post` as BF16, and
+export receipt schema 3 rejects a final GGUF containing missing or widened NanoQuant scale tensors. The existing
+runtime kernels already support BF16 sidecars and retain F32 accumulation.
+
 This is especially promising because the [reconstruction table](D:/dev/research/NanoQuantRewrite/evidence/m4/gemma-pageable-v28-four-block-canary/artifacts/ed/sha256-ed7a3ab022aae1460af83d3bdef20b269eaffcd23102a7c9fb5aa4d2aeb1b340/reconstruction.md) shows:
 
 - `v_proj`: mean weighted error 0.425, mostly rank 160

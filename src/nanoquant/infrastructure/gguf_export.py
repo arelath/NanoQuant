@@ -19,7 +19,7 @@ from nanoquant.runtime import (
     open_packed_artifact,
 )
 
-GGUF_EXPORT_SCHEMA_VERSION = 2
+GGUF_EXPORT_SCHEMA_VERSION = 3
 DEFAULT_TOKEN_EMBEDDING_TYPE = "q8_0"
 SUPPORTED_TOKEN_EMBEDDING_TYPES = frozenset(
     {
@@ -76,26 +76,35 @@ def _find_quantizer(reference: Path) -> Path:
     raise FileNotFoundError(f"llama.cpp quantizer is missing; searched: {searched}")
 
 
-def _inspect_token_embedding_type(
+def _inspect_gguf_tensor_contract(
     gguf_path: Path,
     reference: Path,
     python_executable: str | Path,
-) -> str:
-    """Read the material GGUF tensor type with llama.cpp's pinned GGUF reader."""
+) -> tuple[str, int, tuple[str, ...]]:
+    """Read deployment-critical tensor types with llama.cpp's pinned GGUF reader."""
 
     gguf_python = reference / "gguf-py"
     if not gguf_python.is_dir():
         raise FileNotFoundError(f"llama.cpp GGUF Python package is missing: {gguf_python}")
-    program = """import sys
+    program = """import json
+import sys
 sys.path.insert(0, sys.argv[1])
 from gguf import GGUFReader
 reader = GGUFReader(sys.argv[2])
+embedding_type = None
+scale_types = []
 for tensor in reader.tensors:
     if tensor.name == 'token_embd.weight':
-        print(tensor.tensor_type.name.lower())
-        break
-else:
+        embedding_type = tensor.tensor_type.name.lower()
+    if tensor.name.endswith(('.nq_scale_pre', '.nq_scale_mid', '.nq_scale_post')):
+        scale_types.append(tensor.tensor_type.name.lower())
+if embedding_type is None:
     raise SystemExit('token_embd.weight is missing')
+print(json.dumps({
+    'token_embedding_type': embedding_type,
+    'nanoquant_scale_tensor_count': len(scale_types),
+    'nanoquant_scale_types': sorted(set(scale_types)),
+}))
 """
     completed = subprocess.run(
         (str(Path(python_executable)), "-c", program, str(gguf_python), str(gguf_path)),
@@ -105,11 +114,29 @@ else:
     )
     if completed.returncode != 0:
         detail = completed.stderr.strip() or completed.stdout.strip()
-        raise RuntimeError(f"failed to inspect GGUF token embedding type: {detail}")
-    actual = completed.stdout.strip().lower()
-    if not actual:
-        raise RuntimeError("GGUF token embedding inspection returned no type")
-    return actual
+        raise RuntimeError(f"failed to inspect GGUF tensor contract: {detail}")
+    try:
+        payload = cast(dict[str, Any], json.loads(completed.stdout))
+        embedding_type = str(payload["token_embedding_type"]).lower()
+        scale_count = int(payload["nanoquant_scale_tensor_count"])
+        scale_types = tuple(str(value).lower() for value in payload["nanoquant_scale_types"])
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise RuntimeError("GGUF tensor contract inspection returned invalid output") from exc
+    return embedding_type, scale_count, scale_types
+
+
+def _require_bfloat16_nanoquant_scales(
+    scale_count: int,
+    scale_types: tuple[str, ...],
+    expected_scale_count: int,
+) -> None:
+    if scale_count != expected_scale_count:
+        raise ValueError(
+            f"GGUF NanoQuant scale tensor count differs: {scale_count} != {expected_scale_count}"
+        )
+    if scale_types != ("bf16",):
+        rendered = ", ".join(scale_types) or "none"
+        raise ValueError(f"GGUF NanoQuant scale tensors must all be BF16, found: {rendered}")
 
 
 def _checkpoint_for_packed(
@@ -142,6 +169,7 @@ def _reuse_existing(
     quantizer: Path,
     packed_descriptor_hash: str,
     token_embedding_type: str,
+    expected_scale_count: int,
     reference: Path,
     python_executable: str | Path,
 ) -> GgufExportResult:
@@ -155,12 +183,18 @@ def _reuse_existing(
         receipt = cast(dict[str, Any], json.loads(receipt_path.read_text(encoding="utf-8")))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise ValueError("GGUF export receipt is invalid") from exc
+    actual_type, scale_count, scale_types = _inspect_gguf_tensor_contract(
+        output, reference, python_executable
+    )
+    _require_bfloat16_nanoquant_scales(scale_count, scale_types, expected_scale_count)
     expected = {
         "schema_version": GGUF_EXPORT_SCHEMA_VERSION,
         "packed_descriptor_sha256": packed_descriptor_hash,
         "converter_sha256": hash_file(converter),
         "quantizer_sha256": hash_file(quantizer),
         "token_embedding_type": token_embedding_type,
+        "nanoquant_scale_type": "bf16",
+        "nanoquant_scale_tensor_count": scale_count,
         "gguf_sha256": hash_file(output),
         "gguf_bytes": output.stat().st_size,
     }
@@ -169,7 +203,6 @@ def _reuse_existing(
             raise ValueError(f"GGUF export receipt field differs: {name}")
     if receipt.get("checkpoint") != str(checkpoint_root.resolve()):
         raise ValueError("GGUF export receipt checkpoint path differs")
-    actual_type = _inspect_token_embedding_type(output, reference, python_executable)
     if actual_type != token_embedding_type:
         raise ValueError(
             "GGUF token embedding tensor type differs from export recipe: "
@@ -225,6 +258,7 @@ def export_llamacpp_gguf(
     _checkpoint_for_packed(packed.root, checkpoint_path)
     destination = Path(output).resolve()
     packed_descriptor_hash = hash_file(packed.root / "nanoquant-packed-model.json")
+    expected_scale_count = packed.manifest.layer_count * 3
     if destination.exists() or _receipt_path(destination).exists():
         return _reuse_existing(
             destination,
@@ -233,6 +267,7 @@ def export_llamacpp_gguf(
             quantizer,
             packed_descriptor_hash,
             embedding_type,
+            expected_scale_count,
             reference,
             python_executable,
         )
@@ -271,7 +306,7 @@ def export_llamacpp_gguf(
         "--no-lazy",
     )
     # COPY disables llama.cpp's per-tensor overrides. F16 is intentional here:
-    # the converter's NanoQuant sidecars are already F16/I32/F32, so this base
+    # the converter's NanoQuant sidecars are already BF16/F16/I32/F32, so this base
     # type leaves them alone while allowing token_embd.weight to be overridden.
     quantizer_command = (
         str(quantizer),
@@ -304,12 +339,18 @@ def export_llamacpp_gguf(
             )
         if not quantized.is_file() or quantized.stat().st_size == 0:
             raise RuntimeError("llama.cpp quantizer did not produce a non-empty GGUF")
-        actual_type = _inspect_token_embedding_type(quantized, reference, python_executable)
+        actual_type, scale_count, scale_types = _inspect_gguf_tensor_contract(
+            quantized, reference, python_executable
+        )
         if actual_type != embedding_type:
             raise RuntimeError(
                 "GGUF token embedding quantization did not produce the requested tensor type: "
                 f"{actual_type} != {embedding_type}"
             )
+        try:
+            _require_bfloat16_nanoquant_scales(scale_count, scale_types, expected_scale_count)
+        except ValueError as exc:
+            raise RuntimeError(str(exc)) from exc
         os.replace(quantized, destination)
     finally:
         converted.unlink(missing_ok=True)
@@ -329,6 +370,8 @@ def export_llamacpp_gguf(
         "source_model": str(source),
         "token_embedding_type": embedding_type,
         "token_embedding_tensor": "token_embd.weight",
+        "nanoquant_scale_type": "bf16",
+        "nanoquant_scale_tensor_count": scale_count,
         "gguf": str(destination),
         "gguf_sha256": digest,
         "gguf_bytes": destination.stat().st_size,

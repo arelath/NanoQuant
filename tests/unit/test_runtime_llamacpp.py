@@ -142,7 +142,7 @@ def test_llamacpp_checkpoint_export_is_block_sharded_and_source_bound(tmp_path: 
     ]
     descriptor = json.loads((root / "nanoquant-llamacpp-checkpoint.json").read_text())
     assert descriptor["reference"]["converter_sha256"] == (
-        "92b0d31c1ce83d0fe3668bbb20cee6a4da24ec3e9476f6699890d01540241e4d"
+        "3ee6ccd976445b8e5669d34080067b0e36bac6166cd109c5f8cf7bc20893690c"
     )
     with safe_open(root / manifest.shards[0].path, framework="pt", device="cpu") as handle:
         assert set(handle.keys()) == {
