@@ -161,6 +161,20 @@ def test_profiler_mirrors_parented_span_events() -> None:
     assert events.events[2].fields["path"] == "run/child"
 
 
+def test_profiler_span_attributes_do_not_collide_with_event_arguments() -> None:
+    events = MemoryEvents()
+    profiler = Profiler(ProfilingConfig(emit_span_events=True), run_id="test", events=events)
+
+    with profiler.phase("stage", stage="outlier-selection", name="fixture"):
+        pass
+
+    assert events.events[0].fields["profile_stage"] == "outlier-selection"
+    assert events.events[0].fields["profile_name"] == "fixture"
+    assert events.events[1].fields["profile_stage"] == "outlier-selection"
+    phase = _phases(profiler.snapshot())["stage"]
+    assert "name=fixture|stage=outlier-selection" in phase["groups"]
+
+
 def test_null_recorder_reuses_one_context_and_accepts_namespaced_counters() -> None:
     first = NULL_RECORDER.phase("anything")
     second = NULL_RECORDER.phase("anything_else", block=1)

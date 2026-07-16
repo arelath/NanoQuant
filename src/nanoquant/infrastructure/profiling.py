@@ -27,6 +27,7 @@ from nanoquant.ports.event_sink import EventSink
 _PROFILE_SCHEMA_VERSION = 2
 _MAX_MARKS = 256
 _ATTRIBUTE_TYPES = (str, int, float, bool, type(None))
+_EVENT_ARGUMENT_NAMES = frozenset({"stage", "severity", "name", "span_id", "parent_span_id"})
 
 
 def _utc_now() -> str:
@@ -49,6 +50,15 @@ def _validate_attributes(attributes: Mapping[str, object]) -> None:
     invalid = [name for name, value in attributes.items() if not isinstance(value, _ATTRIBUTE_TYPES)]
     if invalid:
         raise TypeError(f"profiling attributes must be scalar: {', '.join(sorted(invalid))}")
+
+
+def _span_event_fields(attributes: Mapping[str, object]) -> dict[str, object]:
+    """Keep profiler attributes from colliding with EventSink call arguments."""
+
+    return {
+        (f"profile_{name}" if name in _EVENT_ARGUMENT_NAMES else name): value
+        for name, value in attributes.items()
+    }
 
 
 @dataclass(slots=True)
@@ -362,7 +372,7 @@ class Profiler:
                 span_id=span_id,
                 parent_span_id=parent_span_id,
                 path=path,
-                **attributes,
+                **_span_event_fields(attributes),
             )
         memory_start = self._sample_memory()
         frame = _Frame(path, self._now(), attributes, span_id, parent_span_id, cuda_start, memory_start)
@@ -400,7 +410,7 @@ class Profiler:
             fields: dict[str, object] = {
                 "path": frame.path,
                 "wall_seconds": elapsed,
-                **frame.attributes,
+                **_span_event_fields(frame.attributes),
             }
             if error is not None:
                 fields.update(error_type=type(error).__name__, error=str(error))
