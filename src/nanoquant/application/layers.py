@@ -172,6 +172,25 @@ class FrozenReferenceLinear(nn.Module):
         return torch.nn.functional.linear(value, self.dense_weight(), self.bias)
 
 
+class DenseWeightReferenceLinear(FrozenReferenceLinear):
+    """Dense replay module that does not retain the factors used to reconstruct its weight."""
+
+    def __init__(self, weight: torch.Tensor, bias: torch.Tensor | None = None) -> None:
+        nn.Module.__init__(self)
+        # The reconstruction result is already a new immutable tensor. Register it
+        # directly so loading a full model never holds a second dense clone.
+        self.register_buffer("_cached_dense_weight", weight.detach(), persistent=False)
+        self.register_buffer("bias", None if bias is None else bias.detach())
+
+    def dense_weight(self) -> torch.Tensor:
+        if self._cached_dense_weight is None:
+            raise AssertionError("compact dense reference is missing its materialized weight")
+        return self._cached_dense_weight
+
+    def forward(self, value: torch.Tensor) -> torch.Tensor:
+        return torch.nn.functional.linear(value, self.dense_weight(), self.bias)
+
+
 class FactorizedReferenceLinear(FrozenReferenceLinear):
     def __init__(
         self,
@@ -282,9 +301,12 @@ class LayerFreezer:
         device: str = "cpu",
         dtype: torch.dtype | None = None,
         backend: str = "dense",
+        compact_dense: bool = False,
     ) -> FrozenLayer:
         if backend not in {"dense", "factorized"}:
             raise ValueError(f"unsupported frozen reference backend: {backend}")
+        if compact_dense and backend != "dense":
+            raise ValueError("compact dense storage requires the dense backend")
         if state.scales.mid is None:
             raise ValueError("frozen NanoQuant state is missing its mid scale")
         with (
@@ -311,18 +333,34 @@ class LayerFreezer:
                 if state.outliers.scales is not None:
                     with tensors.read(state.outliers.scales, device) as scales:
                         outlier_scales = scales.clone()
-            module_type = FrozenReferenceLinear if backend == "dense" else FactorizedReferenceLinear
-            module = module_type(
-                left,
-                right,
-                scale_pre,
-                scale_mid,
-                scale_post,
-                bias,
-                outlier_indices,
-                outlier_values,
-                outlier_scales,
-            )
+            module: FrozenReferenceLinear
+            if compact_dense:
+                module = DenseWeightReferenceLinear(
+                    functional_dense_reconstruction(
+                        left,
+                        right,
+                        scale_pre,
+                        scale_mid,
+                        scale_post,
+                        outlier_indices,
+                        outlier_values,
+                        outlier_scales,
+                    ),
+                    bias,
+                )
+            else:
+                module_type = FrozenReferenceLinear if backend == "dense" else FactorizedReferenceLinear
+                module = module_type(
+                    left,
+                    right,
+                    scale_pre,
+                    scale_mid,
+                    scale_post,
+                    bias,
+                    outlier_indices,
+                    outlier_values,
+                    outlier_scales,
+                )
         if dtype is not None:
             module = module.to(dtype=dtype)
         return FrozenLayer(state, module)

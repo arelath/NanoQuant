@@ -119,7 +119,14 @@ def load_frozen_run(
             block_dtype = next(block.parameters()).dtype
             for state in block_state.quantized_layers:
                 with recorder.phase("install_layer", layer=state.layer.path):
-                    frozen = freezer.load(state, tensors, device=device, dtype=block_dtype, backend=backend)
+                    frozen = freezer.load(
+                        state,
+                        tensors,
+                        device=device,
+                        dtype=block_dtype,
+                        backend=backend,
+                        compact_dense=backend == "dense",
+                    )
                     editor.install_frozen_layer(block, state.layer.path, frozen.module)
                 recorder.add("replay.layers", 1)
             with recorder.phase("auxiliary"):

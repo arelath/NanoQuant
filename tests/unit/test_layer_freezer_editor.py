@@ -7,6 +7,7 @@ from torch import nn
 
 from nanoquant.application.layers import (
     BlockEditor,
+    DenseWeightReferenceLinear,
     FactorizedReferenceLinear,
     FrozenReferenceLinear,
     LayerFreezer,
@@ -92,6 +93,32 @@ def test_freezer_persists_immutable_state_and_editor_installs_explicitly(tmp_pat
         torch.nn.functional.linear(inputs, expected_weight),
         atol=1e-6,
     )
+
+
+def test_compact_dense_load_discards_reconstruction_factors(tmp_path: Path) -> None:
+    trainable = TrainableFactorizedLinear(
+        torch.tensor([[1.0, -1.0], [-1.0, 1.0]]),
+        torch.tensor([[1.0, -1.0, 1.0], [-1.0, 1.0, 1.0]]),
+        torch.tensor([1.0, 2.0, 3.0]),
+        torch.tensor([0.5, 1.5]),
+        torch.tensor([2.0, 1.0]),
+    )
+    inputs = torch.randn(4, 3, generator=torch.Generator().manual_seed(54))
+    tensors = LocalTensorStore(LocalArtifactStore(tmp_path / "artifacts"))
+    frozen = LayerFreezer().freeze(LayerId(BlockId(0), "mlp.up_proj"), trainable, tensors)
+
+    compact = LayerFreezer().load(
+        frozen.state,
+        tensors,
+        backend="dense",
+        compact_dense=True,
+    ).module
+
+    assert isinstance(compact, DenseWeightReferenceLinear)
+    assert torch.equal(compact(inputs), frozen.module(inputs))
+    assert set(dict(compact.named_buffers())) == {"_cached_dense_weight"}
+    assert not hasattr(compact, "left_binary")
+    assert not hasattr(compact, "right_binary")
 
 
 def test_editor_rejects_missing_or_non_linear_targets() -> None:
