@@ -9,6 +9,7 @@ from recipes import (
     EXPERIMENT_004_CONFIG,
     EXPERIMENT_005_CONFIG,
     EXPERIMENT_006_CONFIG,
+    EXPERIMENT_007_CONFIG,
 )
 from recipes._delta import config_delta, run_config_defaults
 from recipes.legacy import (
@@ -53,6 +54,7 @@ def test_derived_recipe_hashes_are_unchanged_by_delta_only_sources() -> None:
         "004": "sha256:451b37cf97016dcc1da41102f435b0cc98930804700f8079e6341499a7dce72d",
         "005": "sha256:78ae6f01d8af99e5516847a2efef759f1ffe5e561d8f5d5abf63453b7cd09b22",
         "006": "sha256:d4643196beadf9ac009df9d8406cca13780ee83b08933a30682ca355a1dd2a87",
+        "007": "sha256:8ed4c7d0aa65c739d16c8b6eadc98d5f46ca4b7ceb8e5d47f495acf869a00e5a",
         "008": "sha256:b0f7587302ea70524f615a65c2c26bc853142f1c345287cd8fb8122e4eaf7439",
         "011": "sha256:016a5f54b4260bfbd95cdab1b56ce56793b0cbd6212a811d2711c19a84aa2967",
         "013": "sha256:6bdf26ab16b4c73cfbdf2203977185094e14e36c47ec0d75e37e0daf3db3abf2",
@@ -67,6 +69,7 @@ def test_derived_recipe_hashes_are_unchanged_by_delta_only_sources() -> None:
         "004": EXPERIMENT_004_CONFIG,
         "005": EXPERIMENT_005_CONFIG,
         "006": EXPERIMENT_006_CONFIG,
+        "007": EXPERIMENT_007_CONFIG,
         "008": EXPERIMENT_008_CONFIG,
         "011": EXPERIMENT_011_CONFIG,
         "013": EXPERIMENT_013_CONFIG,

@@ -70,6 +70,7 @@ def test_recipe_configs_use_fail_closed_config_deltas() -> None:
         Path("experiments/recipes/experiment004.py"),
         Path("experiments/recipes/experiment005.py"),
         Path("experiments/recipes/experiment006.py"),
+        Path("experiments/recipes/experiment007.py"),
         Path("experiments/recipes/legacy/experiment008.py"),
         Path("experiments/recipes/legacy/experiment011.py"),
         Path("experiments/recipes/legacy/experiment013.py"),
