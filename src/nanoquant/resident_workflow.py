@@ -80,6 +80,7 @@ class ResidentExecutionOptions:
     restore_completed_blocks: bool = True
     defer_layer_loss_snapshots: bool = False
     replace_existing_global_tuning: bool = False
+    maximum_wddm_shared_bytes: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -313,6 +314,7 @@ def resident_request_from_config(
         defer_layer_loss_snapshots=options.defer_layer_loss_snapshots,
         profiling=config.profiling,
         observability=config.observability,
+        maximum_wddm_shared_bytes=options.maximum_wddm_shared_bytes,
         registry_root=inputs.registry_root,
         run_config=config,
         launcher_path=inputs.launcher_path,
@@ -365,6 +367,7 @@ def distillation_request_from_config(
         block_snapshot_samples=config.observability.block_snapshot_samples,
         block_snapshot_tokens=config.observability.block_snapshot_tokens,
         block_snapshot_denominator_floor=config.observability.loss_denominator_floor,
+        maximum_wddm_shared_bytes=options.maximum_wddm_shared_bytes,
     )
 
 

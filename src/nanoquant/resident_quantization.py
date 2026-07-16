@@ -15,7 +15,6 @@ from typing import Any, cast
 import torch
 import transformers
 from torch import nn
-from transformers import AutoModelForCausalLM
 
 from nanoquant.application.assembly import assemble_frozen_model
 from nanoquant.application.calibration import MaterializedLayerCalibration, calibrate_block, calibrate_causal_model
@@ -114,6 +113,7 @@ from nanoquant.infrastructure.commits import (
 from nanoquant.infrastructure.device_lease import acquire_device_lease
 from nanoquant.infrastructure.device_memory import PeakWindow, release_cached_host_memory
 from nanoquant.infrastructure.environment import capture_environment
+from nanoquant.infrastructure.hf_language_model import load_causal_language_model
 from nanoquant.infrastructure.model_adapters import TransformersModelAdapter, adapter_for_config
 from nanoquant.infrastructure.profiling import profiled_run
 from nanoquant.infrastructure.progress import JournalRecord, ProgressJournal
@@ -285,6 +285,7 @@ class ResidentQuantizationRequest:
     defer_layer_loss_snapshots: bool = False
     profiling: ProfilingConfig = ProfilingConfig()
     observability: ObservabilityConfig = ObservabilityConfig()
+    maximum_wddm_shared_bytes: int | None = None
     registry_root: Path | None = None
     run_config: RunConfig | None = None
     launcher_path: Path | None = None
@@ -1127,6 +1128,7 @@ def _run_resident_quantization(request: ResidentQuantizationRequest) -> Resident
         observability=request.observability,
         registry_root=request.registry_root,
         console=True,
+        maximum_wddm_shared_bytes=request.maximum_wddm_shared_bytes,
     ) as session:
         manifest = _start_resident_manifest(session.manifest, proposed)
         _write_resident_manifest(request.output, manifest)
@@ -1364,14 +1366,10 @@ def _setup_resident_environment(
     ):
         with recorder.phase("setup"):
             with recorder.phase("model_load"):
-                model = cast(
-                    nn.Module,
-                    AutoModelForCausalLM.from_pretrained(
-                        request.snapshot,
-                        local_files_only=True,
-                        torch_dtype=_checkpoint_dtype(checkpoint.config),
-                        attn_implementation=adapter.attention_implementation,
-                    ),
+                model = load_causal_language_model(
+                    request.snapshot,
+                    torch_dtype=_checkpoint_dtype(checkpoint.config),
+                    attention_implementation=adapter.attention_implementation,
                 ).to(request.device)
     model.eval()
     return _ResidentEnvironment(
@@ -2929,6 +2927,7 @@ def _run_resident_factorization_slice(request: ResidentQuantizationRequest) -> R
         observability=request.observability,
         registry_root=request.registry_root,
         console=True,
+        maximum_wddm_shared_bytes=request.maximum_wddm_shared_bytes,
     ) as session:
         manifest = _start_resident_manifest(session.manifest, proposed)
         _write_resident_manifest(request.output, manifest)

@@ -195,13 +195,20 @@ Mapping onto [LoggingRefactorV3](LoggingRefactorV3.md) explicitly:
 
 ## 10. Configuration
 
-No new fields, consistent with V3 §5:
+The diagnostics implementation subsequently added one opt-in execution guard required by the 4B canary:
+
+- `CompressionQualityExperiment.maximum_wddm_shared_gib` — operator guard used by the 4B canary without changing
+  semantic compression identity. The sampler latches a transient violation and compression, distillation, or
+  quality evaluation raises `VRAM001` at a safe point.
+
+The remaining fields are unchanged from V3 §5:
 
 - `observability.record_resource_interval_seconds` — existing; becomes effective. `≤ 0` disables; `OBS004` validates finiteness and warns under 1.0 s.
 - `observability.capture_cuda_trace` — existing dead knob; defined here as the allocator-history gate.
 - `profiling.memory_counters` — existing; unchanged.
 - Environment overrides (no schema impact): `NANOQUANT_VRAM_HISTORY=1`, `NANOQUANT_VRAM_REPORT=PATH`.
-- Resident request dataclasses gain nothing: sessions read the interval from the observability config for managed runs and from a tool flag with the same default for resident tools.
+- Resident, distillation, and quality requests receive the resolved byte ceiling as a non-semantic execution option
+  from the numbered experiment workflow.
 
 ## 11. Test matrix
 

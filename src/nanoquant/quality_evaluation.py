@@ -7,13 +7,13 @@ import hashlib
 import json
 import math
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
 import torch
 from torch import nn
-from transformers import AutoModelForCausalLM
 from transformers.models.auto.configuration_auto import AutoConfig
 from transformers.models.auto.tokenization_auto import AutoTokenizer
 
@@ -30,7 +30,9 @@ from nanoquant.application.task_evaluation import (
 )
 from nanoquant.config.codec import to_dict
 from nanoquant.infrastructure.device_lease import acquire_device_lease
+from nanoquant.infrastructure.device_memory import SharedDeviceMemoryMonitor
 from nanoquant.infrastructure.frozen_model_loader import LoadedFrozenModel, load_frozen_run
+from nanoquant.infrastructure.hf_language_model import load_causal_language_model
 from nanoquant.infrastructure.hf_task_evaluation import (
     hash_hf_tokenizer_snapshot,
     prepare_pinned_hf_multiple_choice_inputs,
@@ -61,6 +63,7 @@ class QualityEvaluationRequest:
     task_limit: int = 25
     task_batch_size: int = 1
     local_files_only: bool = True
+    maximum_wddm_shared_bytes: int | None = None
 
     def __post_init__(self) -> None:
         if not self.source or not self.revision:
@@ -71,6 +74,8 @@ class QualityEvaluationRequest:
             raise ValueError("quality evaluation WikiText dimensions are invalid")
         if self.wikitext_batch_size <= 0 or self.task_limit <= 0 or self.task_batch_size <= 0:
             raise ValueError("quality evaluation batch sizes and task limit must be positive")
+        if self.maximum_wddm_shared_bytes is not None and self.maximum_wddm_shared_bytes < 0:
+            raise ValueError("quality evaluation shared-memory limit must be non-negative")
         supported = {task.task_name for task in pinned_legacy_multiple_choice_tasks()}
         if not self.task_names or len(set(self.task_names)) != len(self.task_names):
             raise ValueError("quality evaluation task names must be non-empty and unique")
@@ -178,12 +183,22 @@ def _evaluate_model(
     model: nn.Module,
     request: QualityEvaluationRequest,
     inputs: PreparedQualityInputs,
+    monitor: SharedDeviceMemoryMonitor | None = None,
 ) -> dict[str, Any]:
     started = time.perf_counter()
     if request.device.startswith("cuda"):
         torch.cuda.reset_peak_memory_stats(request.device)
     cast(Any, model).config.use_cache = False
     model.eval()
+    raw_logits = model_logits(model)
+
+    def guarded_logits(tokens: torch.Tensor, attention_mask: torch.Tensor | None) -> torch.Tensor:
+        logits = raw_logits(tokens, attention_mask)
+        if monitor is not None:
+            monitor.check()
+        return logits
+
+    wikitext_started = time.perf_counter()
     causal = evaluate_causal_nll(
         CausalEvaluationRequest(
             inputs.wikitext_tokens.to(request.device),
@@ -191,10 +206,12 @@ def _evaluate_model(
             stride=request.wikitext_sequence_length,
             batch_size=request.wikitext_batch_size,
         ),
-        model_logits(model),
+        guarded_logits,
     )
+    wikitext_seconds = time.perf_counter() - wikitext_started
     tasks = []
     for prepared in inputs.tasks:
+        task_started = time.perf_counter()
         result = evaluate_multiple_choice(
             MultipleChoiceEvaluationRequest(
                 prepared.task,
@@ -204,18 +221,20 @@ def _evaluate_model(
                 pad_token_id=inputs.pad_token_id,
                 device=request.device,
             ),
-            model_logits(model),
+            guarded_logits,
         )
         tasks.append(
             {
                 "task": to_dict(prepared.task),
                 "task_input_identity": to_dict(prepared.cache_identity),
                 "result": to_dict(result),
+                "elapsed_seconds": time.perf_counter() - task_started,
             }
         )
     return {
         "label": label,
         "wikitext": to_dict(causal),
+        "wikitext_elapsed_seconds": wikitext_seconds,
         "tasks": tasks,
         "elapsed_seconds": time.perf_counter() - started,
         "peak_device_bytes": peak_device_memory_bytes(request.device),
@@ -278,42 +297,53 @@ def execute_quality_evaluation(
     inputs = prepare_quality_inputs(request) if prepared is None else prepared
     wall_started = time.perf_counter()
     with acquire_device_lease(request.device):
-        model_config = AutoConfig.from_pretrained(request.snapshot, local_files_only=True)
-        model_type = str(getattr(model_config, "model_type", "")).lower()
-        attention_implementation = "eager" if model_type.startswith("gemma") else "sdpa"
-        base = cast(
-            nn.Module,
-            AutoModelForCausalLM.from_pretrained(
+        monitor_context = (
+            SharedDeviceMemoryMonitor(request.maximum_wddm_shared_bytes)
+            if request.maximum_wddm_shared_bytes is not None
+            else nullcontext(None)
+        )
+        with monitor_context as monitor:
+            model_config = AutoConfig.from_pretrained(request.snapshot, local_files_only=True)
+            model_type = str(getattr(model_config, "model_type", "")).lower()
+            attention_implementation = "eager" if model_type.startswith("gemma") else "sdpa"
+            base_load_started = time.perf_counter()
+            base = load_causal_language_model(
                 request.snapshot,
-                config=model_config,
-                local_files_only=True,
                 torch_dtype=_checkpoint_dtype(request.snapshot),
-                attn_implementation=attention_implementation,
-            ),
-        ).to(request.device)
-        try:
-            base_result = _evaluate_model("base", base, request, inputs)
-        finally:
-            del base
-            _release_device_memory()
-        loaded: LoadedFrozenModel | None = None
-        try:
-            loaded = load_frozen_run(
-                request.run_output,
-                request.snapshot,
-                source_name=request.source,
-                revision=request.revision,
-                device=request.device,
-                backend=request.backend,
-                use_global_tuning=request.use_global_tuning,
-            )
-            frozen_result = _evaluate_model("frozen", loaded.model, request, inputs)
-            frozen_identity = to_dict(loaded.identity)
-            global_tuning = None if loaded.global_tuning is None else to_dict(loaded.global_tuning)
-        finally:
-            if loaded is not None:
-                del loaded
-            _release_device_memory()
+                attention_implementation=attention_implementation,
+            ).to(request.device)
+            if monitor is not None:
+                monitor.check()
+            base_load_seconds = time.perf_counter() - base_load_started
+            try:
+                base_result = _evaluate_model("base", base, request, inputs, monitor)
+                base_result["model_load_seconds"] = base_load_seconds
+            finally:
+                del base
+                _release_device_memory()
+            loaded: LoadedFrozenModel | None = None
+            try:
+                frozen_load_started = time.perf_counter()
+                loaded = load_frozen_run(
+                    request.run_output,
+                    request.snapshot,
+                    source_name=request.source,
+                    revision=request.revision,
+                    device=request.device,
+                    backend=request.backend,
+                    use_global_tuning=request.use_global_tuning,
+                )
+                if monitor is not None:
+                    monitor.check()
+                frozen_load_seconds = time.perf_counter() - frozen_load_started
+                frozen_result = _evaluate_model("frozen", loaded.model, request, inputs, monitor)
+                frozen_result["model_load_seconds"] = frozen_load_seconds
+                frozen_identity = to_dict(loaded.identity)
+                global_tuning = None if loaded.global_tuning is None else to_dict(loaded.global_tuning)
+            finally:
+                if loaded is not None:
+                    del loaded
+                _release_device_memory()
     token_hash = "sha256:" + hashlib.sha256(
         inputs.wikitext_tokens.contiguous().view(torch.uint8).numpy().tobytes()
     ).hexdigest()
@@ -351,6 +381,10 @@ def execute_quality_evaluation(
         "results": {"base": base_result, "frozen": frozen_result},
         "comparison": _comparison(base_result, frozen_result),
         "wall_seconds": time.perf_counter() - wall_started,
+        "resource_limits": {
+            "maximum_wddm_shared_bytes": request.maximum_wddm_shared_bytes,
+            "peak_wddm_shared_bytes": None if monitor is None else monitor.guard.peak_bytes,
+        },
     }
     return payload
 

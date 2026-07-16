@@ -9,7 +9,6 @@ from typing import Any, cast
 
 import torch
 from torch import nn
-from transformers import AutoModelForCausalLM
 
 from nanoquant.application.layers import BlockEditor, LayerFreezer, restore_block_auxiliary_parameters
 from nanoquant.domain.models import ArtifactRef, ArtifactTypes, BlockResult
@@ -17,6 +16,7 @@ from nanoquant.domain.profiling import NULL_RECORDER, PhaseRecorder
 from nanoquant.infrastructure.artifacts import LocalArtifactStore
 from nanoquant.infrastructure.commits import CommitIdentity, latest_complete_identity, load_committed_block
 from nanoquant.infrastructure.global_tuning import active_global_tuning, load_global_tuning
+from nanoquant.infrastructure.hf_language_model import load_causal_language_model
 from nanoquant.infrastructure.model_adapters import adapter_for_config
 from nanoquant.infrastructure.safetensors_source import SafetensorsModelSource
 from nanoquant.infrastructure.tensor_store import LocalTensorStore
@@ -100,14 +100,10 @@ def load_frozen_run(
         if tuple(state.block.index for state in global_tuning.tuned_blocks) != tuple(range(expected_blocks)):
             raise ValueError("global tuning result does not contain complete contiguous block states")
     with recorder.phase("model_load"):
-        model = cast(
-            nn.Module,
-            AutoModelForCausalLM.from_pretrained(
-                snapshot,
-                local_files_only=True,
-                torch_dtype=_dtype(checkpoint.config),
-                attn_implementation=adapter.attention_implementation,
-            ),
+        model = load_causal_language_model(
+            snapshot,
+            torch_dtype=_dtype(checkpoint.config),
+            attention_implementation=adapter.attention_implementation,
         ).to(device)
     model.eval()
     decoder_layers = _decoder_layers(model)

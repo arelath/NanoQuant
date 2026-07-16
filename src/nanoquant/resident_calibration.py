@@ -7,11 +7,9 @@ import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
 
 import torch
 from torch import nn
-from transformers import AutoModelForCausalLM
 
 from nanoquant.application.calibration import MaterializedLayerCalibration, calibrate_block
 from nanoquant.application.calibration_artifacts import build_objectives, persist_calibration
@@ -27,6 +25,7 @@ from nanoquant.domain.models import (
 from nanoquant.domain.profiling import NULL_RECORDER, PhaseRecorder
 from nanoquant.infrastructure.artifacts import LocalArtifactStore
 from nanoquant.infrastructure.device_lease import acquire_device_lease
+from nanoquant.infrastructure.hf_language_model import load_causal_language_model
 from nanoquant.infrastructure.model_adapters import adapter_for_config
 from nanoquant.infrastructure.profiling import profiled_run
 from nanoquant.infrastructure.resource_usage import peak_device_memory_bytes
@@ -108,14 +107,10 @@ def _run_resident_calibration(
         torch.cuda.reset_peak_memory_stats(request.device)
 
     with recorder.phase("model_load"):
-        model = cast(
-            nn.Module,
-            AutoModelForCausalLM.from_pretrained(
-                request.snapshot,
-                local_files_only=True,
-                torch_dtype=_checkpoint_dtype(checkpoint.config),
-                attn_implementation=adapter.attention_implementation,
-            ),
+        model = load_causal_language_model(
+            request.snapshot,
+            torch_dtype=_checkpoint_dtype(checkpoint.config),
+            attention_implementation=adapter.attention_implementation,
         ).to(request.device)
         model.eval()
         decoder_layers = adapter.get_decoder_layers(model)

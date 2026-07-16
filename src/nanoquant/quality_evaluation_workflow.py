@@ -103,7 +103,7 @@ def render_quality_evaluation_markdown(payload: dict[str, Any]) -> str:
     frozen_ppl = _number(wikitext["frozen_perplexity"], "frozen_perplexity")
     relative = _number(wikitext["relative_change"], "relative_change")
     lines = [
-        f"# Experiment {intent.get('experiment_number')}: Gemma 3 1B quality benchmark",
+        f"# Experiment {intent.get('experiment_number')}: {_markdown_cell(model['source'])} quality benchmark",
         "",
         f"- Status: `{'completed' if payload.get('passed') else 'invalid'}`",
         f"- Model: `{_markdown_cell(model['source'])}`",

@@ -20,6 +20,119 @@ from nanoquant.ports.event_sink import Event, EventSink, Severity
 
 MemorySampler = Callable[[], Mapping[str, int]]
 
+
+class SharedDeviceMemoryLimitExceeded(RuntimeError):
+    """Raised when a WDDM process crosses its configured shared-memory ceiling."""
+
+    code = "VRAM001"
+
+
+class SharedDeviceMemoryGuard:
+    """Thread-safe fail-closed monitor for process-scoped WDDM shared memory."""
+
+    def __init__(self, maximum_bytes: int) -> None:
+        if maximum_bytes < 0:
+            raise ValueError("maximum WDDM shared memory must be non-negative")
+        self.maximum_bytes = maximum_bytes
+        self._peak_bytes = 0
+        self._violation_bytes: int | None = None
+        self._metric_seen = False
+        self._lock = threading.Lock()
+
+    def observe(self, sample: Mapping[str, int]) -> None:
+        value = sample.get("wddm.shared_bytes")
+        if value is None:
+            return
+        measured = int(value)
+        with self._lock:
+            self._metric_seen = True
+            self._peak_bytes = max(self._peak_bytes, measured)
+            if measured > self.maximum_bytes:
+                self._violation_bytes = max(self._violation_bytes or 0, measured)
+
+    @property
+    def peak_bytes(self) -> int:
+        with self._lock:
+            return self._peak_bytes
+
+    def raise_if_violated(self, *, require_available: bool = False) -> None:
+        with self._lock:
+            measured = self._violation_bytes
+            metric_seen = self._metric_seen
+        if require_available and bool(getattr(torch.cuda, "_initialized", False)) and not metric_seen:
+            raise RuntimeError("VRAM002 WDDM shared-memory meter is unavailable after CUDA initialization")
+        if measured is not None:
+            raise SharedDeviceMemoryLimitExceeded(
+                "VRAM001 WDDM shared GPU memory limit exceeded: "
+                f"observed={measured} bytes, maximum={self.maximum_bytes} bytes"
+            )
+
+    def sample_and_check(self, sampler: MemorySampler | None = None) -> Mapping[str, int]:
+        resolved_sampler = sample_device_memory if sampler is None else sampler
+        sample = resolved_sampler()
+        self.observe(sample)
+        self.raise_if_violated(require_available=True)
+        return sample
+
+
+class SharedDeviceMemoryMonitor(AbstractContextManager["SharedDeviceMemoryMonitor"]):
+    """Poll a shared-memory guard and expose explicit safe-point checks."""
+
+    def __init__(
+        self,
+        maximum_bytes: int,
+        *,
+        interval_seconds: float = 0.25,
+        sampler: MemorySampler | None = None,
+    ) -> None:
+        if interval_seconds <= 0:
+            raise ValueError("shared-memory monitoring interval must be positive")
+        self.guard = SharedDeviceMemoryGuard(maximum_bytes)
+        self._interval_seconds = interval_seconds
+        self._sampler = sample_device_memory if sampler is None else sampler
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._sampling_error: BaseException | None = None
+
+    def _run(self) -> None:
+        while not self._stop.wait(self._interval_seconds):
+            try:
+                self.guard.observe(self._sampler())
+            except BaseException as exc:
+                self._sampling_error = exc
+                return
+
+    def start(self) -> SharedDeviceMemoryMonitor:
+        self.guard.observe(self._sampler())
+        self._thread = threading.Thread(
+            target=self._run,
+            name="nanoquant-shared-memory-monitor",
+            daemon=True,
+        )
+        self._thread.start()
+        return self
+
+    def check(self) -> None:
+        if self._sampling_error is not None:
+            raise RuntimeError("VRAM002 WDDM shared-memory monitoring failed") from self._sampling_error
+        self.guard.sample_and_check(self._sampler)
+
+    def __enter__(self) -> SharedDeviceMemoryMonitor:
+        return self.start()
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=max(1.0, self._interval_seconds * 2))
+        if exc_value is None:
+            self.check()
+        return None
+
 _BOUNDARY_EVENTS = frozenset(
     {
         "run.started",
@@ -235,6 +348,7 @@ class ResourceEventSink:
         threshold: Severity,
         sampler: MemorySampler = sample_device_memory,
         oom_callback: Callable[[BaseException, str | None, int | None, str | None], None] | None = None,
+        shared_memory_guard: SharedDeviceMemoryGuard | None = None,
     ) -> None:
         self._sink = sink
         self._threshold = threshold
@@ -242,6 +356,7 @@ class ResourceEventSink:
         self._sampling_failed = False
         self._oom_callback = oom_callback
         self._captured_ooms: set[int] = set()
+        self._shared_memory_guard = shared_memory_guard
 
     def capture_oom(
         self,
@@ -267,6 +382,9 @@ class ResourceEventSink:
         parent_span_id: str | None = None,
         **fields: object,
     ) -> Event | None:
+        terminal = name in {"run.failed", "run.interrupted"}
+        if self._shared_memory_guard is not None and not terminal:
+            self._shared_memory_guard.raise_if_violated()
         parsed = Severity.parse(severity)
         enriched = fields
         if (
@@ -275,7 +393,10 @@ class ResourceEventSink:
             and not self._sampling_failed
         ):
             try:
-                enriched = {**self._sampler(), **fields}
+                sample = self._sampler()
+                if self._shared_memory_guard is not None:
+                    self._shared_memory_guard.observe(sample)
+                enriched = {**sample, **fields}
             except Exception as exc:
                 self._sampling_failed = True
                 self._sink.emit(
@@ -284,6 +405,8 @@ class ResourceEventSink:
                     "observability.boundary_memory_disabled",
                     error_type=type(exc).__name__,
                 )
+        if self._shared_memory_guard is not None and not terminal:
+            self._shared_memory_guard.raise_if_violated(require_available=True)
         return self._sink.emit(
             stage,
             severity,
@@ -302,10 +425,12 @@ class ResourceSampler:
         events: EventSink,
         interval_seconds: float,
         sampler: MemorySampler = sample_device_memory,
+        observer: Callable[[Mapping[str, int]], None] | None = None,
     ) -> None:
         self._events = events
         self._interval_seconds = interval_seconds
         self._sampler = sampler
+        self._observer = observer
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -319,6 +444,8 @@ class ResourceSampler:
         while not self._stop.wait(self._interval_seconds):
             try:
                 fields = self._sampler()
+                if self._observer is not None:
+                    self._observer(fields)
             except Exception as exc:
                 try:
                     self._events.emit(

@@ -1,61 +1,115 @@
-"""Canonical recipe for legacy Experiment 003's quality smoke comparison."""
+"""Gemma 3 4B compression and quality-proof experiment."""
 
+from dataclasses import replace
 from pathlib import Path
 
+from nanoquant.compression_quality_workflow import CompressionQualityExperiment
 from nanoquant.config.schema import (
-    EvaluationConfig,
+    BlockTuningConfig,
     IntentConfig,
     ModelConfig,
-    RunConfig,
-    RuntimeConfig,
+    ObservabilityConfig,
+    OutputConfig,
+    ProfilingConfig,
+    ProfilingLevel,
+    RankRetryConfig,
+    RetryThresholdConfig,
 )
-from nanoquant.quality_evaluation import QualityEvaluationRequest
-from nanoquant.quality_evaluation_workflow import QualityEvaluationExperiment
 
-MODEL_REVISION = "dcc83ea841ab6100d6b47a070329e1ba4cf78752"
+from .experiment018 import EXPERIMENT_018_CONFIG
 
-EXPERIMENT_003_CONFIG = RunConfig(
+MODEL_REVISION = "093f9f388b31de276ce2de164bdc2081324b9767"
+
+_base_tuning = EXPERIMENT_018_CONFIG.block_tuning
+_base_runtime = EXPERIMENT_018_CONFIG.runtime
+
+EXPERIMENT_003_CONFIG = replace(
+    EXPERIMENT_018_CONFIG,
     model=ModelConfig(
-        source="google/gemma-3-1b-it",
+        source="google/gemma-3-4b-it",
         revision=MODEL_REVISION,
         tokenizer_revision=MODEL_REVISION,
-        sequence_length=128,
+        sequence_length=2048,
+        load_dtype=EXPERIMENT_018_CONFIG.model.load_dtype,
     ),
     intent=IntentConfig(
         experiment_number=3,
-        name="003-evaluate-gemma-3-1b-it-quality",
-        purpose="Compare the base and native frozen Gemma models on the historical quality smoke protocol.",
-        hypothesis="The native release candidate preserves the legacy smoke evaluator contract and reports its gap.",
-        baseline_run="legacy-experiment-003",
-        tags=("gemma-3-1b-it", "quality", "wikitext2", "multiple-choice"),
+        name="003-compress-and-benchmark-gemma-3-4b-it",
+        purpose=(
+            "Prove that the multimodal Gemma 3 4B checkpoint's text model still compresses "
+            "within dedicated VRAM and measure its BF16-versus-NanoQuant quality."
+        ),
+        hypothesis=(
+            "CPU extraction of the language model plus pageable activation streaming keeps WDDM "
+            "shared memory below the hard limit while producing a complete 34-block candidate."
+        ),
+        baseline_run="bf16-google-gemma-3-4b-it",
+        tags=("gemma-3-4b-it", "compression", "quality", "shared-vram-guard", "profiling"),
     ),
-    runtime=RuntimeConfig(compute_device="cuda:0"),
-    evaluation=EvaluationConfig(
-        suites=("wikitext2-limited", "piqa", "arc_easy", "boolq"),
-        sample_limit=25,
-        few_shot=0,
+    allocation=replace(
+        EXPERIMENT_018_CONFIG.allocation,
+        retry=RankRetryConfig(
+            thresholds=RetryThresholdConfig(
+                weighted_normalized_error=0.35,
+                raw_normalized_error=0.40,
+            ),
+            rank_increase_fraction=0.25,
+            maximum_attempts=3,
+            extra_bit_budget_fraction=0.02,
+            allow_above_allocator_cap=True,
+        ),
+    ),
+    block_tuning=BlockTuningConfig(
+        layer_order=_base_tuning.layer_order,
+        non_factorized=replace(
+            _base_tuning.non_factorized,
+            loop=replace(_base_tuning.non_factorized.loop, batch_size=4),
+        ),
+        factorized=replace(
+            _base_tuning.factorized,
+            loop=replace(_base_tuning.factorized.loop, batch_size=1),
+        ),
+        post_block_refit=replace(
+            _base_tuning.post_block_refit,
+            batch_size=1,
+        ),
+        microbatch_size=1,
+        reset_seed_each_stage=_base_tuning.reset_seed_each_stage,
+        restore_best_state=_base_tuning.restore_best_state,
+        epoch_loss_mode=_base_tuning.epoch_loss_mode,
+    ),
+    runtime=replace(
+        _base_runtime,
+        block_forward_batch_size=4,
+    ),
+    observability=ObservabilityConfig(
+        event_level="info",
+        console_level="info",
+        record_resource_interval_seconds=1.0,
+        record_weight_reconstruction_table=True,
+        record_block_loss_snapshots=True,
+    ),
+    profiling=ProfilingConfig(
+        level=ProfilingLevel.MACRO,
+        cuda_timing=True,
+        cuda_sample_every=16,
+        memory_counters=True,
+        raw_samples_per_phase=64,
+        emit_span_events=True,
+    ),
+    output=OutputConfig(
+        run_root="evidence/m10",
+        artifact_root="artifacts",
+        retain_temporary_artifacts=False,
     ),
 )
 
-EXPERIMENT_003_EVALUATION = QualityEvaluationExperiment(
-    QualityEvaluationRequest(
-        snapshot=Path("google/gemma-3-1b-it"),
-        source="google/gemma-3-1b-it",
-        revision=MODEL_REVISION,
-        run_output=Path("evidence/m4/gemma-pageable-v28-four-block-canary"),
-        device="cuda:0",
-        backend="factorized",
-        use_global_tuning=True,
-        wikitext_samples=16,
-        wikitext_sequence_length=128,
-        wikitext_batch_size=1,
-        task_names=("piqa", "arc_easy", "boolq"),
-        task_limit=25,
-        task_batch_size=1,
-        local_files_only=True,
-    ),
-    Path("evidence/m9/003-gemma-3-1b-it-quality.json"),
-    resolve_model_from_config=True,
+EXPERIMENT_003 = CompressionQualityExperiment(
+    summary_output=Path("evidence/m10/003-gemma-3-4b-it-summary.json"),
+    quality_output=Path("evidence/m10/003-gemma-3-4b-it-quality.json"),
+    quality_markdown_output=Path("evidence/m10/003-gemma-3-4b-it-quality.md"),
+    expected_blocks=34,
+    maximum_wddm_shared_gib=0.75,
 )
 
-__all__ = ["EXPERIMENT_003_CONFIG", "EXPERIMENT_003_EVALUATION", "MODEL_REVISION"]
+__all__ = ["EXPERIMENT_003", "EXPERIMENT_003_CONFIG", "MODEL_REVISION"]

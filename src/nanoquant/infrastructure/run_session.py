@@ -15,6 +15,7 @@ from nanoquant.infrastructure.device_memory import (
     CudaMemoryHistory,
     ResourceEventSink,
     ResourceSampler,
+    SharedDeviceMemoryGuard,
     capture_oom_forensics,
     is_cuda_oom,
 )
@@ -61,6 +62,7 @@ def open_run_session(
     observability: ObservabilityConfig,
     registry_root: Path | None = None,
     console: bool = True,
+    maximum_wddm_shared_bytes: int | None = None,
 ) -> Iterator[RunSession]:
     """Open the sole event writer for a run and render its disposable log at close."""
 
@@ -83,6 +85,11 @@ def open_run_session(
     events: ResourceEventSink | None = None
     sampler: ResourceSampler | None = None
     history: CudaMemoryHistory | None = None
+    shared_memory_guard = (
+        None
+        if maximum_wddm_shared_bytes is None
+        else SharedDeviceMemoryGuard(maximum_wddm_shared_bytes)
+    )
     try:
         initial_sequence, recovered_bytes = prepare_event_stream(directory.events_path)
         last_event = read_last_event(directory.events_path)
@@ -118,8 +125,13 @@ def open_run_session(
                 block=block,
                 layer=layer,
             ),
+            shared_memory_guard=shared_memory_guard,
         )
-        sampler = ResourceSampler(router, observability.record_resource_interval_seconds)
+        sampler = ResourceSampler(
+            router,
+            observability.record_resource_interval_seconds,
+            observer=None if shared_memory_guard is None else shared_memory_guard.observe,
+        )
         sampler.start()
         previous_run_id = None if last_event is None or last_event.run_id == adopted.run_id else last_event.run_id
         if recovered_bytes:
@@ -157,6 +169,8 @@ def open_run_session(
                 )
         try:
             yield RunSession(adopted.run_id, directory.root, events, adopted, had_existing_state, previous_run_id)
+            if shared_memory_guard is not None:
+                shared_memory_guard.raise_if_violated(require_available=True)
         except BaseException as exc:
             if is_cuda_oom(exc) and events is not None:
                 events.capture_oom(exc)

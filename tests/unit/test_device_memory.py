@@ -16,6 +16,9 @@ from nanoquant.infrastructure.device_memory import (
     PeakWindow,
     ResourceEventSink,
     ResourceSampler,
+    SharedDeviceMemoryGuard,
+    SharedDeviceMemoryLimitExceeded,
+    SharedDeviceMemoryMonitor,
     capture_oom_forensics,
     release_cached_host_memory,
     sample_device_memory,
@@ -172,6 +175,46 @@ def test_periodic_sampler_disables_itself_after_first_failure() -> None:
     sampler.stop()
 
     assert [name for _severity, name, _fields in sink.events] == ["observability.sampler_disabled"]
+
+
+def test_shared_device_memory_guard_latches_peak_violation() -> None:
+    guard = SharedDeviceMemoryGuard(100)
+    guard.observe({"wddm.shared_bytes": 80})
+    guard.observe({"wddm.shared_bytes": 120})
+    guard.observe({"wddm.shared_bytes": 10})
+
+    assert guard.peak_bytes == 120
+    with pytest.raises(SharedDeviceMemoryLimitExceeded, match="VRAM001.*observed=120.*maximum=100"):
+        guard.raise_if_violated()
+
+
+def test_boundary_event_raises_immediately_when_shared_limit_is_crossed() -> None:
+    sink = RecordingSink()
+    guard = SharedDeviceMemoryGuard(100)
+    events = ResourceEventSink(
+        sink,
+        Severity.INFO,
+        lambda: {"wddm.shared_bytes": 101},
+        shared_memory_guard=guard,
+    )
+
+    with pytest.raises(SharedDeviceMemoryLimitExceeded, match="VRAM001"):
+        events.emit("run", "info", "run.started")
+    assert not any(name == "run.started" for _severity, name, _fields in sink.events)
+
+
+def test_shared_device_memory_monitor_fails_at_safe_point_after_transient_spill() -> None:
+    readings = iter((10, 150, 20, 20))
+
+    def sample() -> dict[str, int]:
+        return {"wddm.shared_bytes": next(readings, 20)}
+
+    with pytest.raises(SharedDeviceMemoryLimitExceeded, match="VRAM001"):
+        with SharedDeviceMemoryMonitor(100, interval_seconds=0.001, sampler=sample) as monitor:
+            deadline = time.monotonic() + 1
+            while monitor.guard.peak_bytes < 150 and time.monotonic() < deadline:
+                time.sleep(0.002)
+            monitor.check()
 
 
 def test_oom_forensics_records_standard_meters_and_summary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

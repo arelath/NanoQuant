@@ -58,6 +58,13 @@ def _config(cls: type[PretrainedConfig]) -> Callable[[dict[str, object]], Pretra
     return lambda values: cls.from_dict(values)
 
 
+def _gemma3_wrapper_text_config(values: dict[str, object]) -> Gemma3TextConfig:
+    text_config = values.get("text_config")
+    if not isinstance(text_config, dict):
+        raise UnsupportedModelVariant("SRC001 Gemma 3 wrapper contains no text_config object")
+    return cast(Gemma3TextConfig, Gemma3TextConfig.from_dict(cast(dict[str, object], text_config)))
+
+
 DEFINITIONS = (
     AdapterDefinition(
         "llama",
@@ -124,6 +131,22 @@ DEFINITIONS = (
         lambda config, index: Gemma3DecoderLayer(config, index),
     ),
     AdapterDefinition(
+        "gemma",
+        ("gemma3",),
+        "language_model.model.layers.{index}",
+        (
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj",
+            "self_attn.o_proj",
+            "mlp.gate_proj",
+            "mlp.up_proj",
+            "mlp.down_proj",
+        ),
+        _gemma3_wrapper_text_config,
+        lambda config, index: Gemma3DecoderLayer(config, index),
+    ),
+    AdapterDefinition(
         "qwen",
         ("qwen3",),
         "model.layers.{index}",
@@ -165,6 +188,10 @@ class TransformersModelAdapter:
         compatible and must not be invalidated by an unrelated global bump.
         """
         model_type = config.get("model_type")
+        if model_type == "gemma3":
+            text_config = config.get("text_config")
+            softcap = text_config.get("final_logit_softcapping") if isinstance(text_config, dict) else None
+            return "3" if softcap is not None else "2"
         if model_type in {"opt", "gemma", "gemma2"}:
             return "3"
         if model_type == "gemma3_text" and config.get("final_logit_softcapping") is not None:
@@ -187,7 +214,12 @@ class TransformersModelAdapter:
         return "eager" if self.family == "gemma" else "sdpa"
 
     def decoder_block_count(self, source: ModelSource) -> int:
-        value = self._checkpoint(source).config.get(self.definition.block_count_field)
+        config = self._checkpoint(source).config
+        if config.get("model_type") == "gemma3":
+            text_config = config.get("text_config")
+            value = text_config.get(self.definition.block_count_field) if isinstance(text_config, dict) else None
+        else:
+            value = config.get(self.definition.block_count_field)
         if not isinstance(value, int) or value <= 0:
             raise UnsupportedModelVariant(f"SRC001 invalid {self.definition.block_count_field}: {value!r}")
         return value
@@ -260,6 +292,7 @@ class TransformersModelAdapter:
             )
             for item in checkpoint.tensors
             if item.key not in block_keys
+            and (checkpoint.config.get("model_type") != "gemma3" or item.key.startswith("language_model."))
         )
         config_hash = hashlib.sha256(json.dumps(checkpoint.config, sort_keys=True).encode()).hexdigest()
         identity = ModelIdentity(
@@ -371,7 +404,7 @@ class TransformersModelAdapter:
         base = getattr(model, "model", model)
         norm = getattr(base, "norm", nn.Identity())
         logits = cast(torch.Tensor, self.lm_head(model)(norm(inputs)))
-        if self.definition.model_types[0] in {"gemma2", "gemma3_text"}:
+        if self.definition.model_types[0] in {"gemma2", "gemma3_text", "gemma3"}:
             softcap = getattr(cast(Any, model).config, "final_logit_softcapping", None)
             if softcap is not None:
                 logits = torch.tanh(logits / softcap) * softcap

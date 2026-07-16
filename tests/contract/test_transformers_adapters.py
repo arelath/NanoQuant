@@ -149,6 +149,45 @@ def test_unsupported_variant_is_explicit() -> None:
         adapter_for_config({"model_type": "mixtral"})
 
 
+def test_gemma3_multimodal_wrapper_maps_only_language_model_tensors(tmp_path: Path) -> None:
+    text_config = Gemma3TextConfig(
+        vocab_size=32,
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=4,
+    )
+    values = {
+        "model_type": "gemma3",
+        "torch_dtype": "float32",
+        "text_config": text_config.to_dict(),
+    }
+    adapter = adapter_for_config(values)
+    block = adapter.definition.block_factory(text_config, 0)
+    prefix = adapter.definition.block_prefix.format(index=0)
+    state = {
+        f"{prefix}.{key}": value.detach().clone().contiguous()
+        for key, value in block.state_dict().items()
+    }
+    state["language_model.model.embed_tokens.weight"] = torch.zeros(32, 16)
+    state["vision_tower.probe.weight"] = torch.zeros(2, 2)
+    snapshot = tmp_path / "gemma3-wrapper"
+    snapshot.mkdir()
+    save_file(state, snapshot / "model.safetensors")
+    (snapshot / "config.json").write_text(json.dumps(values), encoding="utf-8")
+    (snapshot / "tokenizer.json").write_text("{}", encoding="utf-8")
+    source = SafetensorsModelSource(snapshot, source="fixture/gemma3-wrapper", revision="abc", verify_hashes=False)
+
+    assert adapter.decoder_block_count(source) == 1
+    inventory = adapter.model_inventory(source)
+    assert all(tensor.source_key.startswith("language_model.") for tensor in inventory.shared_tensors)
+    assert not any(tensor.source_key.startswith("vision_tower.") for tensor in inventory.shared_tensors)
+    loaded = adapter.load_block(source, BlockId(0), "cpu")
+    assert isinstance(loaded, torch.nn.Module)
+
+
 def test_gemma3_text_stack_capture_preserves_position_and_attention_metadata() -> None:
     config = Gemma3TextConfig(
         vocab_size=32,

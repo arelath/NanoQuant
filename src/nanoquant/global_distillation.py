@@ -12,7 +12,6 @@ from typing import Any, cast
 
 import torch
 from torch import nn
-from transformers import AutoModelForCausalLM
 
 from nanoquant.application.block_snapshots import (
     compare_block_snapshots,
@@ -36,6 +35,7 @@ from nanoquant.infrastructure.block_snapshot_probe import (
     measure_block_output_mse,
 )
 from nanoquant.infrastructure.device_lease import acquire_device_lease
+from nanoquant.infrastructure.device_memory import SharedDeviceMemoryMonitor
 from nanoquant.infrastructure.distillation_cache import (
     TeacherCacheIdentity,
     commit_teacher_epoch,
@@ -51,6 +51,7 @@ from nanoquant.infrastructure.distillation_checkpoint import (
 )
 from nanoquant.infrastructure.frozen_model_loader import LoadedFrozenModel, load_frozen_run
 from nanoquant.infrastructure.global_tuning import activate_global_tuning, commit_global_tuning
+from nanoquant.infrastructure.hf_language_model import load_causal_language_model
 from nanoquant.infrastructure.profiling import profiled_run
 from nanoquant.infrastructure.resource_usage import peak_device_memory_bytes, peak_process_memory_bytes
 from nanoquant.infrastructure.tensor_store import LocalTensorStore
@@ -75,6 +76,7 @@ class GlobalDistillationRequest:
     block_snapshot_samples: int = 4
     block_snapshot_tokens: int = 512
     block_snapshot_denominator_floor: float = 1e-12
+    maximum_wddm_shared_bytes: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -322,14 +324,10 @@ def _run_global_topk_distillation(
     # block snapshots compare pre- and post-KD states against the same hidden
     # outputs. Only the bounded snapshot selection is retained in host memory.
     with recorder.phase("teacher_load"):
-        teacher = cast(
-            nn.Module,
-            AutoModelForCausalLM.from_pretrained(
-                request.snapshot,
-                local_files_only=True,
-                torch_dtype=_checkpoint_dtype(request.snapshot),
-                attn_implementation=cast(Any, loaded.model).config._attn_implementation,
-            ),
+        teacher = load_causal_language_model(
+            request.snapshot,
+            torch_dtype=_checkpoint_dtype(request.snapshot),
+            attention_implementation=cast(Any, loaded.model).config._attn_implementation,
         ).to(request.device)
     cast(Any, teacher).config.use_cache = False
     teacher_head = _lm_head(teacher)
@@ -499,5 +497,8 @@ def run_global_topk_distillation(request: GlobalDistillationRequest) -> GlobalDi
 
     if request.device.startswith("cuda"):
         with acquire_device_lease(request.device):
+            if request.maximum_wddm_shared_bytes is not None:
+                with SharedDeviceMemoryMonitor(request.maximum_wddm_shared_bytes):
+                    return execute()
             return execute()
     return execute()
