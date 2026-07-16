@@ -672,7 +672,11 @@ Outcome: supported users no longer need legacy orchestration.
 - [ ] **M9.3** Move copied dotenv, tee logging, output-directory, model-loading, save, and evaluation mechanics into shared infrastructure/application services.
 - [ ] **M9.4** Provide generated YAML/resolved-recipe views for numbered runfiles where useful without making YAML mandatory.
 - [ ] **M9.5** Implement or document migration/import for supported legacy `.pt` checkpoints.
-- [ ] **M9.6** Implement or document conversion/compatibility with the modified llama.cpp GGUF NanoQuant representation.
+- [x] **M9.6** Implement or document conversion/compatibility with the modified llama.cpp GGUF NanoQuant representation.
+  The deployment runtime exports hash-bound block-sharded converter checkpoints, and the shared Experiment 001
+  workflow invokes only the converter pinned by packed-artifact provenance with resumable receipts. The retained
+  699,863,936-byte Gemma GGUF was freshly compared with the packed artifact: all 1,274 NanoQuant arrays and
+  22,719,854 elements match exactly, and CPU/CUDA modified llama.cpp smoke tests load and execute it.
 - [ ] **M9.7** Implement supported artifact schema/layout migrations as new immutable artifacts with lineage.
 - [ ] **M9.8** Implement the final CLI commands: inspect, calibrate, plan, quantize, resume, fork, replay, pack, validate, evaluate, benchmark, compare, and report.
 - [ ] **M9.9** Implement the stable Python application API using the same canonical types and services.
@@ -702,11 +706,20 @@ Outcome: the rewrite is safe to use for research and deployment.
 - [ ] **M10.7** Pass corruption, disk-full, source-change, OOM fallback, cancellation, and expired-lease tests.
 - [ ] **M10.8** Pass security review for non-executable artifacts, path traversal, JSON limits, remote-code policy, secret redaction, and source integrity.
 - [ ] **M10.9** Pass clean-install tests for research and runtime-only packages.
-- [ ] **M10.10** Complete the legacy-versus-rewrite tiny and 1B parity reports with approved tolerances.
+- [x] **M10.10** Complete the legacy-versus-rewrite tiny and 1B parity reports with approved tolerances.
+  Tiny deterministic integration coverage and the pinned 26-block Gemma report are complete. The real run has zero
+  rank mismatches, 0.996318 effective BPW, +0.2527% final KD-objective delta, +2.0791% exact WikiText-2 PPL delta,
+  bounded memory, and 979 freshly validated artifacts. `Docs/23-gemma-1b-parity-completion-audit.md` binds the
+  requirement-by-requirement evidence.
 - [ ] **M10.11** Complete the resident-versus-streaming equivalence report.
 - [ ] **M10.12** Complete a large-model canary report showing bounded memory, disk use, interruption, and resume.
-- [ ] **M10.13** Complete the modified llama.cpp performance/correctness comparison on the agreed workload.
-- [ ] **M10.14** Complete quick, standard, and full evaluation of the release-candidate artifact against the accepted baseline.
+- [x] **M10.13** Complete the modified llama.cpp performance/correctness comparison on the agreed workload.
+  The source/kernel/artifact-pinned M7 comparison records exact output, zero fallback, 160.74 rewrite tokens/s
+  versus 184.5 llama.cpp tokens/s, and the remaining 12.88% performance gap without weakening correctness.
+- [x] **M10.14** Complete quick, standard, and full evaluation of the release-candidate artifact against the accepted baseline.
+  `evidence/m8/gemma-pageable-v28-evaluation-campaign-v2/results/campaign.json` records promotion through replay,
+  quick artifact/trajectory, standard exact WikiText-2, and full long-context/runtime tiers with final outcome
+  `full-promotion`.
 - [ ] **M10.15** Verify all supported artifact/config migrations with golden and numerical tests.
 - [ ] **M10.16** Verify all warning codes, schemas, public interfaces, and compatibility tables are documented.
 - [ ] **M10.17** Rebuild every release report from manifests/events/results without console-log parsing.

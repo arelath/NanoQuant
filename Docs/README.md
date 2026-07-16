@@ -105,6 +105,9 @@ python experiments/001-compress-gemma-3-1b-it.py
 
 The runfile constructs the same canonical `RunConfig` and calls the same application service. It contains no copied orchestration and its path/hash are recorded in the manifest. See [Lessons Carried Forward](12-lessons-carried-forward.md#2-preserve-numbered-experiment-files).
 
+The pinned Gemma 3 1B legacy-parity decision and its requirement-by-requirement evidence are recorded in
+[Gemma 3 1B parity completion audit](23-gemma-1b-parity-completion-audit.md).
+
 ## Definition of done for the rewrite
 
 The rewrite is complete when:
