@@ -269,8 +269,8 @@ Schema migration rules are explicit:
 ## 10. Experiment numbering and naming
 
 Sequential numbers are retained as a useful chronological research record. The active chronology was reset after
-legacy migration lessons moved into shared code and evidence; its first zero-argument launcher is
-`experiments/001-compress-gemma-3-1b-it.py`.
+legacy migration lessons moved into shared code and evidence; its first launchers are
+`experiments/001-compress-gemma-3-1b-it.py` and `experiments/002-benchmark-gemma-3-1b-it.py`.
 
 The number is a human chronology label, not the immutable run identity:
 

@@ -9,7 +9,10 @@ import pytest
 import torch
 
 import nanoquant.short_decode_workflow as workflow
-from nanoquant.recipes import EXPERIMENT_002_BENCHMARK, EXPERIMENT_002_CONFIG
+from nanoquant.recipes.legacy_short_decode import (
+    LEGACY_SHORT_DECODE_BENCHMARK,
+    LEGACY_SHORT_DECODE_CONFIG,
+)
 from nanoquant.short_decode_benchmark import (
     ShortDecodeBenchmarkRequest,
     force_prompt_tokens,
@@ -62,8 +65,8 @@ def test_short_decode_request_rejects_invalid_protocols(tmp_path: Path) -> None:
         replace(base, legacy_summary_sha256="INVALID")
 
 
-def test_experiment002_preserves_legacy_short_decode_workload() -> None:
-    request = EXPERIMENT_002_BENCHMARK.request
+def test_retained_recipe_preserves_legacy_short_decode_workload() -> None:
+    request = LEGACY_SHORT_DECODE_BENCHMARK.request
 
     assert request.dtype == "bfloat16"
     assert request.prompt_tokens == 32
@@ -96,8 +99,8 @@ def test_short_decode_experiment_resolution_is_repository_relative(
     )
 
     resolved = resolve_short_decode_experiment(
-        EXPERIMENT_002_CONFIG,
-        EXPERIMENT_002_BENCHMARK,
+        LEGACY_SHORT_DECODE_CONFIG,
+        LEGACY_SHORT_DECODE_BENCHMARK,
         launcher_path=launcher,
     )
 
@@ -118,7 +121,7 @@ def test_short_decode_workflow_records_config_and_launcher_provenance(
 ) -> None:
     output = tmp_path / "result.json"
     request = replace(
-        EXPERIMENT_002_BENCHMARK.request,
+        LEGACY_SHORT_DECODE_BENCHMARK.request,
         snapshot=tmp_path / "snapshot",
         run_output=tmp_path / "run",
         runtime_bundle=tmp_path / "bundle",
@@ -134,7 +137,7 @@ def test_short_decode_workflow_records_config_and_launcher_provenance(
 
     monkeypatch.setattr(workflow, "execute_short_decode_benchmark", benchmark)
     payload = execute_short_decode_experiment(
-        EXPERIMENT_002_CONFIG,
+        LEGACY_SHORT_DECODE_CONFIG,
         experiment,
         launcher_path=launcher,
     )

@@ -48,7 +48,7 @@ recipe/archive disposition so their chronology and intent remain discoverable.
 The table records the legacy chronology and the framework behavior learned from it; it no longer describes files
 that should be present under `experiments/`. Frozen source copies under `evidence/m0`, typed regression recipes,
 tests, and retained results preserve that provenance. The active experiment directory intentionally contains only
-the new Experiment 001 compression/export/benchmark workflow.
+the new Experiment 001 compression/export/benchmark workflow and Experiment 002's benchmark-only companion.
 
 The retained Experiment 002 migration result is `evidence/m9/002-gemma-3-1b-it-short-decode.json` (SHA-256
 `a32f0ffc092d426842e50c97b61245f561fae60aa3884e79bfe4c5979d7feb7c`). It reproduces the historical raw prompt,

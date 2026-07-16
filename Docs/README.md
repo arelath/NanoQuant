@@ -97,10 +97,11 @@ nanoquant report runs/<run-id>
 
 Commands do not contain unique business logic. They validate input, invoke an application service, stream structured progress, and select an exit code.
 
-Promoted research experiments use thin numbered, zero-argument runfiles. The current active entry point is:
+Promoted research experiments use thin numbered, zero-argument runfiles. The current active entry points are:
 
 ```text
 python experiments/001-compress-gemma-3-1b-it.py
+python experiments/002-benchmark-gemma-3-1b-it.py
 ```
 
 The runfile constructs the same canonical `RunConfig` and calls the same application service. It contains no copied orchestration and its path/hash are recorded in the manifest. See [Lessons Carried Forward](12-lessons-carried-forward.md#2-preserve-numbered-experiment-files).

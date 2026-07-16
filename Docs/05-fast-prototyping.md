@@ -21,10 +21,12 @@ Every level produces a normal run manifest and comparable metrics. A replay is n
 
 Numbered runfiles remain the normal human-facing chronology for new promoted experiments. The active chronology was
 reset on 2026-07-15 after the legacy lessons were absorbed into shared services, tests, recipes, and retained
-evidence. The `experiments/` directory therefore contains only the current Experiment 001:
+evidence. The active directory now contains the end-to-end Experiment 001 and its benchmark-only companion,
+Experiment 002:
 
 ```text
 python experiments/001-compress-gemma-3-1b-it.py
+python experiments/002-benchmark-gemma-3-1b-it.py
 ```
 
 New experiments should compose the shared workflow modules under `src/nanoquant`; do not restore or copy the old

@@ -1,4 +1,4 @@
-"""Canonical recipe for legacy Experiment 002's paired short decode."""
+"""Benchmark-only BF16-versus-NanoQuant Gemma 3 1B experiment."""
 
 from pathlib import Path
 
@@ -9,8 +9,8 @@ from nanoquant.config.schema import (
     RunConfig,
     RuntimeConfig,
 )
-from nanoquant.short_decode_benchmark import LegacyShortDecodeCase, ShortDecodeBenchmarkRequest
-from nanoquant.short_decode_workflow import ShortDecodeBenchmarkExperiment
+from nanoquant.quality_evaluation import QualityEvaluationRequest
+from nanoquant.quality_evaluation_workflow import QualityEvaluationExperiment
 
 MODEL_REVISION = "dcc83ea841ab6100d6b47a070329e1ba4cf78752"
 
@@ -19,47 +19,58 @@ EXPERIMENT_002_CONFIG = RunConfig(
         source="google/gemma-3-1b-it",
         revision=MODEL_REVISION,
         tokenizer_revision=MODEL_REVISION,
-        sequence_length=128,
+        sequence_length=2048,
     ),
     intent=IntentConfig(
         experiment_number=2,
         name="002-benchmark-gemma-3-1b-it",
-        purpose="Compare source, logical frozen, and production packed short-decode behavior.",
-        hypothesis="The immutable packed runtime replaces the legacy mutable GEMV case.",
-        baseline_run="legacy-experiment-002",
-        tags=("gemma-3-1b-it", "runtime", "decode", "paired", "memory"),
+        purpose="Benchmark the accepted NanoQuant Gemma candidate against its pinned BF16 source model.",
+        hypothesis="NanoQuant retains quality across WikiText-2 and the common legacy multiple-choice suite.",
+        baseline_run="bf16-google-gemma-3-1b-it",
+        tags=("gemma-3-1b-it", "benchmark", "bf16-comparison", "wikitext2", "multiple-choice"),
     ),
     runtime=RuntimeConfig(compute_device="cuda:0"),
-    evaluation=EvaluationConfig(suites=("runtime-short-decode-v1",)),
+    evaluation=EvaluationConfig(
+        suites=(
+            "wikitext2-limited",
+            "piqa",
+            "arc_easy",
+            "arc_challenge",
+            "hellaswag",
+            "winogrande",
+            "boolq",
+        ),
+        sample_limit=200,
+        few_shot=0,
+    ),
 )
 
-EXPERIMENT_002_BENCHMARK = ShortDecodeBenchmarkExperiment(
-    ShortDecodeBenchmarkRequest(
+EXPERIMENT_002_EVALUATION = QualityEvaluationExperiment(
+    QualityEvaluationRequest(
         snapshot=Path("google/gemma-3-1b-it"),
-        run_output=Path("evidence/m4/gemma-pageable-v28-four-block-canary"),
-        runtime_bundle=Path("evidence/m6/gemma-pageable-v28-runtime-bundle"),
         source="google/gemma-3-1b-it",
         revision=MODEL_REVISION,
+        run_output=Path("evidence/m4/gemma-pageable-v28-four-block-canary"),
         device="cuda:0",
-        dtype="bfloat16",
         backend="factorized",
-        prompt="Explain why compact language models are useful for local inference.",
-        prompt_tokens=32,
-        max_new_tokens=32,
-        warmups=1,
-        repetitions=3,
-        seed=0,
-        top_k=32,
-        temperature=0.8,
-        legacy_cases=(
-            LegacyShortDecodeCase("fp_original", 8.094968, 2_081_724_928, 2_099_249_152),
-            LegacyShortDecodeCase("nq_eager", 8.297656, 1_999_090_176, 2_040_528_896),
-            LegacyShortDecodeCase("nq_gemv_kernel", 7.127174, 719_535_616, 734_003_200),
+        use_global_tuning=True,
+        wikitext_samples=64,
+        wikitext_sequence_length=128,
+        wikitext_batch_size=1,
+        task_names=(
+            "piqa",
+            "arc_easy",
+            "arc_challenge",
+            "hellaswag",
+            "winogrande",
+            "boolq",
         ),
-        legacy_summary_sha256="fb54cfd9f8244b8a6dec30dbd8450b8a8cda729c728ab4959ddc9112954dfaa8",
+        task_limit=200,
+        task_batch_size=1,
+        local_files_only=True,
     ),
-    Path("evidence/m9/002-gemma-3-1b-it-short-decode.json"),
+    Path("evidence/m9/002-gemma-3-1b-it-quality-benchmark.json"),
     resolve_model_from_config=True,
 )
 
-__all__ = ["EXPERIMENT_002_BENCHMARK", "EXPERIMENT_002_CONFIG", "MODEL_REVISION"]
+__all__ = ["EXPERIMENT_002_CONFIG", "EXPERIMENT_002_EVALUATION", "MODEL_REVISION"]

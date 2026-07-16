@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import runpy
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -14,7 +15,12 @@ from nanoquant.quality_evaluation_workflow import (
     execute_quality_evaluation_experiment,
     resolve_quality_evaluation_experiment,
 )
-from nanoquant.recipes import EXPERIMENT_003_CONFIG, EXPERIMENT_003_EVALUATION
+from nanoquant.recipes import (
+    EXPERIMENT_002_CONFIG,
+    EXPERIMENT_002_EVALUATION,
+    EXPERIMENT_003_CONFIG,
+    EXPERIMENT_003_EVALUATION,
+)
 
 
 def test_quality_evaluation_request_rejects_ambiguous_protocols(tmp_path: Path) -> None:
@@ -39,6 +45,33 @@ def test_experiment003_preserves_legacy_quality_smoke_protocol() -> None:
     assert request.task_batch_size == 1
     assert request.backend == "factorized"
     assert request.use_global_tuning
+
+
+def test_experiment002_uses_the_full_common_quality_protocol() -> None:
+    request = EXPERIMENT_002_EVALUATION.request
+
+    assert request.wikitext_samples == 64
+    assert request.wikitext_sequence_length == 128
+    assert request.wikitext_batch_size == 1
+    assert request.task_names == (
+        "piqa",
+        "arc_easy",
+        "arc_challenge",
+        "hellaswag",
+        "winogrande",
+        "boolq",
+    )
+    assert request.task_limit == 200
+    assert request.task_batch_size == 1
+    assert request.backend == "factorized"
+    assert request.use_global_tuning
+
+
+def test_002_benchmark_runfile_imports_canonical_recipe_objects() -> None:
+    namespace = runpy.run_path("experiments/002-benchmark-gemma-3-1b-it.py")
+
+    assert namespace["CONFIG"] is EXPERIMENT_002_CONFIG
+    assert namespace["EVALUATION"] is EXPERIMENT_002_EVALUATION
 
 
 def test_quality_experiment_resolution_is_pinned_and_repository_relative(

@@ -666,9 +666,9 @@ Outcome: supported users no longer need legacy orchestration.
 - [x] **M9.2** Preserve historical experiments as evidence and lessons without porting them as the new research surface.
   The earlier 001/002/003/008/011/013/018 active runfiles were removed when the experiment chronology was reset.
   Their lessons remain in shared services, typed recipes, regression tests, and retained evidence rather than in
-  executable historical scripts. The active directory now contains only the new end-to-end Experiment 001. The
-  compatibility application raises `RUN002` instead of recording a successful no-op when no executable pipeline
-  callback is supplied.
+  executable historical scripts. The active directory contains the new end-to-end Experiment 001 and benchmark-only
+  Experiment 002. The compatibility application raises `RUN002` instead of recording a successful no-op when no
+  executable pipeline callback is supplied.
 - [ ] **M9.3** Move copied dotenv, tee logging, output-directory, model-loading, save, and evaluation mechanics into shared infrastructure/application services.
 - [ ] **M9.4** Provide generated YAML/resolved-recipe views for numbered runfiles where useful without making YAML mandatory.
 - [ ] **M9.5** Implement or document migration/import for supported legacy `.pt` checkpoints.

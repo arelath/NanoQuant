@@ -112,5 +112,6 @@ def test_promoted_compression_runfiles_import_the_canonical_recipe_objects() -> 
     assert cast(RunConfig, namespace["CONFIG"]) is EXPERIMENT_001_CONFIG
     assert namespace["EXPERIMENT"] is EXPERIMENT_001
     assert [path.name for path in Path("experiments").glob("*.py")] == [
-        "001-compress-gemma-3-1b-it.py"
+        "001-compress-gemma-3-1b-it.py",
+        "002-benchmark-gemma-3-1b-it.py",
     ]
