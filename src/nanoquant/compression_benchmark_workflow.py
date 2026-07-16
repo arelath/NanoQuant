@@ -10,6 +10,11 @@ from nanoquant.config.codec import to_dict
 from nanoquant.config.schema import RunConfig
 from nanoquant.infrastructure.gguf_export import GgufExportResult, export_llamacpp_gguf
 from nanoquant.infrastructure.io_utils import atomic_write_json
+from nanoquant.infrastructure.publication import (
+    PublishableArtifact,
+    PublishableArtifactKind,
+    publish_experiment_artifacts,
+)
 from nanoquant.infrastructure.runtime_export import (
     export_frozen_run_logical,
     validate_frozen_run_logical,
@@ -210,6 +215,14 @@ def execute_compression_benchmark_experiment(
             local_files_only=experiment.local_files_only,
         )
     )
+    experiment_number = config.intent.experiment_number
+    if experiment_number is None:
+        raise ValueError("compression benchmark requires an experiment number")
+    launcher = resolved.inputs.launcher_path
+    if launcher is None:
+        raise ValueError("compression benchmark requires launcher provenance")
+    repository_root = launcher.resolve().parent.parent
+    publication_directory = repository_root / "Results" / f"{experiment_number:03d}"
     payload = {
         "schema_version": 1,
         "passed": bool(quality.get("passed")),
@@ -242,8 +255,24 @@ def execute_compression_benchmark_experiment(
             },
         },
         "benchmarks": quality,
+        "publication": {
+            "directory": str(publication_directory),
+            "manifest": str(publication_directory / "publication.json"),
+        },
     }
     atomic_write_json(resolved.benchmark_output, payload)
+    profile_json = sorted(resolved.inputs.output.glob("profile*.json"))
+    profile_markdown = sorted(resolved.inputs.output.glob("profile*.md"))
+    publish_experiment_artifacts(
+        repository_root,
+        experiment_number,
+        (
+            PublishableArtifact(gguf.output, PublishableArtifactKind.MODEL),
+            PublishableArtifact(resolved.benchmark_output, PublishableArtifactKind.STATISTICS),
+            *(PublishableArtifact(path, PublishableArtifactKind.STATISTICS) for path in profile_json),
+            *(PublishableArtifact(path, PublishableArtifactKind.REPORT) for path in profile_markdown),
+        ),
+    )
     return payload
 
 

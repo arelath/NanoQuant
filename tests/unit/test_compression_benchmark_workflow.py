@@ -135,6 +135,12 @@ def test_compression_benchmark_executes_export_before_shared_quality_comparison(
         return {"passed": True, "comparison": {}}
 
     monkeypatch.setattr(workflow, "execute_quality_evaluation", quality)
+    published = []
+    monkeypatch.setattr(
+        workflow,
+        "publish_experiment_artifacts",
+        lambda root, number, artifacts: published.append((root, number, tuple(artifacts))),
+    )
 
     payload = execute_compression_benchmark_experiment(
         EXPERIMENT_001_CONFIG,
@@ -158,3 +164,8 @@ def test_compression_benchmark_executes_export_before_shared_quality_comparison(
         "frozen": "nanoquant",
     }
     assert json.loads(resolved.benchmark_output.read_text(encoding="utf-8")) == payload
+    assert published[0][1] == 1
+    assert [artifact.source for artifact in published[0][2]][:2] == [
+        resolved.gguf_output,
+        resolved.benchmark_output,
+    ]

@@ -12,6 +12,11 @@ from nanoquant.config.codec import config_hash, to_dict
 from nanoquant.config.schema import RunConfig
 from nanoquant.config.validation import ValidationPhase, raise_for_issues, validate
 from nanoquant.infrastructure.io_utils import atomic_write_json
+from nanoquant.infrastructure.publication import (
+    PublishableArtifact,
+    PublishableArtifactKind,
+    publish_experiment_artifacts,
+)
 from nanoquant.infrastructure.runs import launcher_provenance, validate_launcher_number
 from nanoquant.runtime_benchmark import RuntimeBenchmarkRequest, run_runtime_benchmark
 
@@ -79,6 +84,11 @@ def execute_runtime_benchmark_experiment(
         launcher_path=launcher_path,
     )
     result = run_runtime_benchmark(resolved.request)
+    experiment_number = config.intent.experiment_number
+    if experiment_number is None:
+        raise ValueError("runtime benchmark requires an experiment number")
+    repository_root = Path(launcher_path).resolve().parent.parent
+    publication_directory = repository_root / "Results" / f"{experiment_number:03d}"
     payload = {
         **result,
         "experiment": {
@@ -88,8 +98,17 @@ def execute_runtime_benchmark_experiment(
                 launcher_provenance(launcher_path, config.intent.experiment_number)
             ),
         },
+        "publication": {
+            "directory": str(publication_directory),
+            "manifest": str(publication_directory / "publication.json"),
+        },
     }
     atomic_write_json(resolved.result_path, payload)
+    publish_experiment_artifacts(
+        repository_root,
+        experiment_number,
+        (PublishableArtifact(resolved.result_path, PublishableArtifactKind.STATISTICS),),
+    )
     return payload
 
 

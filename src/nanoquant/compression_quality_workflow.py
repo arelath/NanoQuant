@@ -12,6 +12,11 @@ from nanoquant.config.codec import config_hash, to_dict
 from nanoquant.config.schema import RunConfig
 from nanoquant.config.validation import ValidationPhase, raise_for_issues, validate
 from nanoquant.infrastructure.io_utils import atomic_write_json, atomic_write_text
+from nanoquant.infrastructure.publication import (
+    PublishableArtifact,
+    PublishableArtifactKind,
+    publish_experiment_artifacts,
+)
 from nanoquant.infrastructure.runs import launcher_provenance, validate_launcher_number
 from nanoquant.quality_evaluation import QualityEvaluationRequest, execute_quality_evaluation
 from nanoquant.quality_evaluation_workflow import render_quality_evaluation_markdown
@@ -136,6 +141,9 @@ def execute_compression_quality_experiment(
         )
     )
     quality_seconds = time.perf_counter() - quality_started
+    experiment_number = config.intent.experiment_number
+    if experiment_number is None:
+        raise ValueError("compression-quality experiment requires an experiment number")
     if resolved.inputs.launcher_path is None:
         raise ValueError("compression-quality experiment requires launcher provenance")
     provenance = to_dict(launcher_provenance(resolved.inputs.launcher_path, config.intent.experiment_number))
@@ -153,6 +161,8 @@ def execute_compression_quality_experiment(
         str(path.resolve())
         for path in sorted(resolved.inputs.output.glob("profile*.json"))
     )
+    repository_root = resolved.inputs.launcher_path.resolve().parent.parent
+    publication_directory = repository_root / "Results" / f"{experiment_number:03d}"
     payload = {
         "schema_version": 1,
         "passed": bool(quality.get("passed")),
@@ -183,8 +193,25 @@ def execute_compression_quality_experiment(
             "comparison": quality["comparison"],
             "resource_limits": quality["resource_limits"],
         },
+        "publication": {
+            "directory": str(publication_directory),
+            "manifest": str(publication_directory / "publication.json"),
+        },
     }
     atomic_write_json(resolved.summary_output, payload)
+    profile_json = sorted(resolved.inputs.output.glob("profile*.json"))
+    profile_markdown = sorted(resolved.inputs.output.glob("profile*.md"))
+    publish_experiment_artifacts(
+        repository_root,
+        experiment_number,
+        (
+            PublishableArtifact(resolved.summary_output, PublishableArtifactKind.STATISTICS),
+            PublishableArtifact(resolved.quality_output, PublishableArtifactKind.STATISTICS),
+            PublishableArtifact(resolved.quality_markdown_output, PublishableArtifactKind.REPORT),
+            *(PublishableArtifact(path, PublishableArtifactKind.STATISTICS) for path in profile_json),
+            *(PublishableArtifact(path, PublishableArtifactKind.REPORT) for path in profile_markdown),
+        ),
+    )
     return payload
 
 

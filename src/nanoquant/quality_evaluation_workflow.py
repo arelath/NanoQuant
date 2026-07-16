@@ -13,6 +13,11 @@ from nanoquant.config.codec import config_hash, to_dict
 from nanoquant.config.schema import RunConfig
 from nanoquant.config.validation import ValidationPhase, raise_for_issues, validate
 from nanoquant.infrastructure.io_utils import atomic_write_json, atomic_write_text
+from nanoquant.infrastructure.publication import (
+    PublishableArtifact,
+    PublishableArtifactKind,
+    publish_experiment_artifacts,
+)
 from nanoquant.infrastructure.runs import launcher_provenance, validate_launcher_number
 from nanoquant.quality_evaluation import QualityEvaluationRequest, execute_quality_evaluation
 
@@ -195,6 +200,11 @@ def execute_quality_evaluation_experiment(
         launcher_path=launcher_path,
     )
     result = execute_quality_evaluation(resolved.request)
+    experiment_number = config.intent.experiment_number
+    if experiment_number is None:
+        raise ValueError("quality evaluation requires an experiment number")
+    repository_root = Path(launcher_path).resolve().parent.parent
+    publication_directory = repository_root / "Results" / f"{experiment_number:03d}"
     payload = {
         **result,
         "experiment": {
@@ -204,6 +214,10 @@ def execute_quality_evaluation_experiment(
                 launcher_provenance(launcher_path, config.intent.experiment_number)
             ),
         },
+        "publication": {
+            "directory": str(publication_directory),
+            "manifest": str(publication_directory / "publication.json"),
+        },
     }
     atomic_write_json(resolved.result_path, payload)
     if resolved.markdown_path is not None:
@@ -211,6 +225,18 @@ def execute_quality_evaluation_experiment(
             resolved.markdown_path,
             render_quality_evaluation_markdown(payload),
         )
+    publish_experiment_artifacts(
+        repository_root,
+        experiment_number,
+        (
+            PublishableArtifact(resolved.result_path, PublishableArtifactKind.STATISTICS),
+            *(
+                ()
+                if resolved.markdown_path is None
+                else (PublishableArtifact(resolved.markdown_path, PublishableArtifactKind.REPORT),)
+            ),
+        ),
+    )
     return payload
 
 

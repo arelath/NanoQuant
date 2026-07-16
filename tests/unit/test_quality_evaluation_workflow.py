@@ -104,6 +104,12 @@ def test_quality_workflow_records_config_and_launcher_provenance(
         return {"schema_version": 1, "passed": True, "results": {}}
 
     monkeypatch.setattr(workflow, "execute_quality_evaluation", evaluate)
+    published = []
+    monkeypatch.setattr(
+        workflow,
+        "publish_experiment_artifacts",
+        lambda root, number, artifacts: published.append((root, number, tuple(artifacts))),
+    )
     payload = execute_quality_evaluation_experiment(
         EXPERIMENT_002_CONFIG,
         experiment,
@@ -116,6 +122,8 @@ def test_quality_workflow_records_config_and_launcher_provenance(
         "002-benchmark-gemma-3-1b-it"
     )
     assert json.loads(output.read_text(encoding="utf-8")) == payload
+    assert published[0][1] == 2
+    assert [artifact.source for artifact in published[0][2]] == [output]
 
 
 def _quality_result() -> dict[str, Any]:
@@ -184,6 +192,12 @@ def test_quality_workflow_writes_deterministic_markdown(
     request = QualityEvaluationRequest(tmp_path, "model", "revision", tmp_path / "run")
     experiment = QualityEvaluationExperiment(request, output, markdown_path=markdown)
     monkeypatch.setattr(workflow, "execute_quality_evaluation", lambda _request: _quality_result())
+    published = []
+    monkeypatch.setattr(
+        workflow,
+        "publish_experiment_artifacts",
+        lambda root, number, artifacts: published.append((root, number, tuple(artifacts))),
+    )
 
     payload = execute_quality_evaluation_experiment(
         EXPERIMENT_002_CONFIG,
@@ -196,3 +210,4 @@ def test_quality_workflow_writes_deterministic_markdown(
     assert "| WikiText-2 | perplexity ↓ | 10.000000 | 12.500000 | +2.500000 (+25.00%) | 1.2500x |" in rendered
     assert "| piqa | acc_norm ↑ | 0.7500 | 0.7000 | -0.0500 | 0.9333x |" in rendered
     assert "`completed` means all evaluators returned finite metrics" in rendered
+    assert [artifact.source for artifact in published[0][2]] == [output, markdown]
