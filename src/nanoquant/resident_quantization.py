@@ -141,7 +141,7 @@ from nanoquant.infrastructure.tuning_checkpoint import (
 from nanoquant.ports.event_sink import EventSink
 from nanoquant.ports.model_adapter import ModelAdapter
 
-RESIDENT_ALGORITHM_VERSION = 31
+RESIDENT_ALGORITHM_VERSION = 32
 
 
 @contextmanager
@@ -1881,8 +1881,22 @@ def _run_resident_quantization_impl(
         calibration_values.extend((causal_ids[item.path], item) for item in stats)
     elif request.calibration_method == "forward_only":
         calibration_inputs = initial_inputs
-        for block_inventory, block in zip(inventory.blocks, decoder_layers, strict=True):
-            metadata = _clone_forward_metadata(captured_metadata)
+        for block_inventory, resident_block in zip(inventory.blocks, decoder_layers, strict=True):
+            streamed_block = request.executor is ExecutorKind.CPU_OFFLOAD
+            if streamed_block:
+                with _logged_operation(
+                    events,
+                    "calibration_block_prepare",
+                    block=block_inventory.block.index,
+                    device=request.device,
+                ):
+                    block = adapter.load_block(source, block_inventory.block, request.device)
+                    block.eval()
+            else:
+                block = resident_block
+            block_parameter = next(iter(block.parameters()), None)
+            block_device = calibration_inputs.device if block_parameter is None else block_parameter.device
+            metadata = _forward_metadata_to_device(_clone_forward_metadata(captured_metadata), str(block_device))
             paths = tuple(layer.path for layer in adapter.quantizable_layers(block, block_inventory.block))
 
             def calibration_runner(
@@ -1902,6 +1916,8 @@ def _run_resident_quantization_impl(
                 layers=len(paths),
                 samples=int(calibration_inputs.shape[0]),
                 batch_size=request.block_forward_batch_size,
+                device=str(block_device),
+                streamed_source=streamed_block,
             ):
                 with recorder.phase("calibrate", block=block_inventory.block.index, method="forward_only"):
                     stats = calibrate_block(
@@ -1926,6 +1942,10 @@ def _run_resident_quantization_impl(
                     request.block_forward_batch_size,
                     recorder=micro_recorder,
                 ).detach()
+            if streamed_block:
+                del block
+                if request.device.startswith("cuda"):
+                    torch.cuda.empty_cache()
     else:
         raise ValueError(f"unsupported resident calibration method: {request.calibration_method}")
     if preprocessed is None:
