@@ -120,7 +120,7 @@ from nanoquant.infrastructure.hf_language_model import load_causal_language_mode
 from nanoquant.infrastructure.live_reconstruction import update_live_weight_error_report
 from nanoquant.infrastructure.model_adapters import TransformersModelAdapter, adapter_for_config
 from nanoquant.infrastructure.profiling import profiled_run
-from nanoquant.infrastructure.progress import JournalRecord, ProgressJournal
+from nanoquant.infrastructure.progress_journal import JournalRecord, ProgressJournal
 from nanoquant.infrastructure.resident_executor import Cancellation, ResidentExecutor
 from nanoquant.infrastructure.resource_usage import peak_device_memory_bytes, peak_process_memory_bytes
 from nanoquant.infrastructure.run_session import open_run_session

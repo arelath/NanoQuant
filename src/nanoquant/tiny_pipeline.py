@@ -66,7 +66,7 @@ from nanoquant.infrastructure.artifacts import LocalArtifactStore
 from nanoquant.infrastructure.commits import CommitIdentity, commit_block, commit_layer
 from nanoquant.infrastructure.environment import capture_environment
 from nanoquant.infrastructure.profiling import profiled_run
-from nanoquant.infrastructure.progress import ProgressJournal
+from nanoquant.infrastructure.progress_journal import ProgressJournal
 from nanoquant.infrastructure.resident_executor import Cancellation, ResidentExecutor
 from nanoquant.infrastructure.run_session import open_run_session
 from nanoquant.infrastructure.runs import (
