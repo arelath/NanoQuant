@@ -1,0 +1,55 @@
+from pathlib import Path
+
+from nanoquant.config.codec import to_dict
+from tests.support.experiments import load_experiment
+
+
+def _diff(left: object, right: object, prefix: str = "") -> set[str]:
+    left = to_dict(left)
+    right = to_dict(right)
+    if isinstance(left, dict) and isinstance(right, dict):
+        paths = set()
+        for key in left.keys() | right.keys():
+            path = f"{prefix}.{key}" if prefix else key
+            paths.update(_diff(left.get(key), right.get(key), path))
+        return paths
+    return set() if left == right else {prefix}
+
+
+def test_experiment010_repeats_experiment009_without_huggingface_publication() -> None:
+    previous = load_experiment(9)
+    definition = load_experiment(10)
+    config = definition.config
+    experiment = definition.workflow
+
+    assert _diff(previous.config, config) == {
+        "intent.experiment_number",
+        "intent.name",
+        "intent.purpose",
+        "intent.hypothesis",
+        "intent.tags",
+        "output.run_root",
+    }
+    assert definition.identity.canonical_name == (
+        "010-compress-and-benchmark-gemma-3-270m-it"
+    )
+    assert config.model.source == "unsloth/gemma-3-270m-it"
+    assert config.model.revision == "23cf460f6bb16954176b3ddcc8d4f250501458a9"
+    assert config.output.run_root == "evidence/010"
+    assert experiment.expected_blocks == previous.workflow.expected_blocks == 18
+    assert experiment.maximum_wddm_shared_gib == previous.workflow.maximum_wddm_shared_gib == 0.75
+    assert experiment.quality_backend == previous.workflow.quality_backend == "factorized"
+    assert experiment.wikitext_samples == previous.workflow.wikitext_samples
+    assert experiment.task_names == previous.workflow.task_names
+    assert experiment.task_limit == previous.workflow.task_limit
+    assert experiment.summary_output == Path(
+        "outputs/010/010-compress-and-benchmark-gemma-3-270m-it-summary.json"
+    )
+    assert experiment.quality_markdown_output == Path(
+        "Results/010/010-compress-and-benchmark-gemma-3-270m-it-quality.md"
+    )
+    assert experiment.export.gguf_output == Path(
+        "Results/010/gemma-3-270m-it-nanoquant.gguf"
+    )
+    assert previous.workflow.export.huggingface is not None
+    assert experiment.export.huggingface is None

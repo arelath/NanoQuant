@@ -48,8 +48,8 @@ def test_templates_are_unnumbered_and_concrete_configs_are_numbered() -> None:
     assert BASE_COMPRESSION_TEMPLATE.intent.experiment_number is None
     assert BASE_COMPRESSION_TEMPLATE.intent.name == "unnamed-run"
 
-    definitions = tuple(load_experiment(number) for number in range(1, 10))
-    assert tuple(definition.identity.number for definition in definitions) == tuple(range(1, 10))
+    definitions = tuple(load_experiment(number) for number in range(1, 11))
+    assert tuple(definition.identity.number for definition in definitions) == tuple(range(1, 11))
     assert all(
         definition.config.intent.name == definition.identity.canonical_name
         for definition in definitions
@@ -67,4 +67,4 @@ def test_templates_are_unnumbered_and_concrete_configs_are_numbered() -> None:
         == (("self_attn.q_proj", 1.25),)
         for definition in definitions
     )
-    assert len({config_hash(definition.config) for definition in definitions}) == 9
+    assert len({config_hash(definition.config) for definition in definitions}) == 10

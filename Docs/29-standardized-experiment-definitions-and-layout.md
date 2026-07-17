@@ -140,7 +140,7 @@ parent quality   Results/NNN/NNN-<name>-quality.json
 
 ## Current experiment inventory
 
-All nine active launchers now own their concrete definitions:
+All ten active launchers now own their concrete definitions:
 
 | Experiment | Workflow | Reusable template | Explicit semantic choices |
 | --- | --- | --- | --- |
@@ -153,6 +153,7 @@ All nine active launchers now own their concrete definitions:
 | 007 | compression + export + quality | `GEMMA_3_270M_COMPRESSION_TEMPLATE` | 270M model pin and 18 blocks |
 | 008 | large-model compression + quality | local delta of `LARGE_MODEL_COMPRESSION_TEMPLATE` | 12B model pin, 48 blocks, CPU-offload guards |
 | 009 | compression + quality + Hugging Face publication | `GEMMA_3_270M_COMPRESSION_TEMPLATE` | 18 blocks, factorized quality, public GGUF repository |
+| 010 | compression + quality, without external publication | `GEMMA_3_270M_COMPRESSION_TEMPLATE` | Experiment 009 settings, but no Hugging Face upload |
 
 The reusable recipe package exports four unnumbered templates:
 
@@ -231,7 +232,7 @@ Contract and unit tests enforce that:
 - `experiments/recipes` contains only the four generic Python modules;
 - no recipe module constructs a concrete `ExperimentIdentity`;
 - every numbered launcher constructs an `ExperimentIdentity`;
-- all nine launcher stems equal their canonical identity names;
+- all ten launcher stems equal their canonical identity names;
 - every active config uses the derived intent and run root;
 - templates are unnumbered;
 - derived active config hashes are distinct;
