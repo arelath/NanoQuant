@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, replace
 from enum import Enum
@@ -21,7 +22,9 @@ from nanoquant.rank_expansion_experiment import RankExpansionExperiment
 
 _SAFE_NAME = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _NUMBERED_NAME = re.compile(r"^\d{3}-")
-_LLAMA_CPP_ROOT = Path(r"D:\dev\research\llama.cpp")
+_LLAMA_CPP_ROOT = Path(
+    os.environ.get("NANOQUANT_LLAMA_CPP_ROOT", r"D:\dev\research\llama.cpp")
+)
 
 
 class BaselineKind(str, Enum):

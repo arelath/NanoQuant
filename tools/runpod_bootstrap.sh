@@ -1,0 +1,195 @@
+#!/usr/bin/env bash
+# Bootstrap a persistent RunPod workspace and run one complete NanoQuant experiment.
+# Defaults to the smaller Gemma 3 270M experiment for fast environment validation.
+set -Eeuo pipefail
+
+REPOSITORY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+WORKSPACE_ROOT="${NANOQUANT_WORKSPACE_ROOT:-/workspace}"
+VENV="${NANOQUANT_VENV:-${WORKSPACE_ROOT}/nanoquant-venv}"
+EXPERIMENT="${NANOQUANT_EXPERIMENT:-007}"
+export HF_HOME="${HF_HOME:-${WORKSPACE_ROOT}/huggingface}"
+export NANOQUANT_LLAMA_CPP_ROOT="${NANOQUANT_LLAMA_CPP_ROOT:-${WORKSPACE_ROOT}/llama.cpp}"
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+export PIP_CACHE_DIR="${PIP_CACHE_DIR:-${WORKSPACE_ROOT}/pip-cache}"
+
+LLAMA_CPP_REPOSITORY="${NANOQUANT_LLAMA_CPP_REPOSITORY:-https://github.com/arelath/llama.cpp.git}"
+LLAMA_CPP_REVISION="${NANOQUANT_LLAMA_CPP_REVISION:-5c6ae79816ee0f2b3d4bb8ec9061c294185d320b}"
+CALIBRATION_ROOT="${REPOSITORY_ROOT}/evidence/m3/experiment018-calibration"
+CALIBRATION_ID="sha256-ad1f609729f86db7598eed5c703c55aacbb9cb024cab816ca7b300d574b7a4c8"
+
+case "${EXPERIMENT}" in
+  001)
+    MODEL_ID="google/gemma-3-1b-it"
+    MODEL_REVISION="dcc83ea841ab6100d6b47a070329e1ba4cf78752"
+    LAUNCHER="experiments/001-compress-gemma-3-1b-it.py"
+    ;;
+  003)
+    MODEL_ID="google/gemma-3-4b-it"
+    MODEL_REVISION="093f9f388b31de276ce2de164bdc2081324b9767"
+    LAUNCHER="experiments/003-compress-and-benchmark-gemma-3-4b-it.py"
+    ;;
+  006)
+    MODEL_ID="google/gemma-3-1b-it"
+    MODEL_REVISION="dcc83ea841ab6100d6b47a070329e1ba4cf78752"
+    LAUNCHER="experiments/006-compress-and-benchmark-gemma-3-1b-it.py"
+    ;;
+  007)
+    MODEL_ID="unsloth/gemma-3-270m-it"
+    MODEL_REVISION="23cf460f6bb16954176b3ddcc8d4f250501458a9"
+    LAUNCHER="experiments/007-compress-and-benchmark-gemma-3-270m-it.py"
+    ;;
+  008)
+    MODEL_ID="unsloth/gemma-3-12b-it"
+    MODEL_REVISION="9478e665381f42974aa06177b019352fb6291876"
+    LAUNCHER="experiments/008-compress-and-benchmark-gemma-3-12b-it.py"
+    ;;
+  *)
+    echo "Unsupported NANOQUANT_EXPERIMENT=${EXPERIMENT}; choose 001, 003, 006, 007, or 008." >&2
+    exit 2
+    ;;
+esac
+
+mkdir -p "${WORKSPACE_ROOT}" "${HF_HOME}" "${PIP_CACHE_DIR}" "${REPOSITORY_ROOT}/outputs/runpod-logs"
+cd "${REPOSITORY_ROOT}"
+
+if ! command -v cmake >/dev/null || ! command -v c++ >/dev/null; then
+  if ! command -v apt-get >/dev/null; then
+    echo "cmake and a C++ compiler are required, and apt-get is unavailable" >&2
+    exit 1
+  fi
+  echo "==> Installing system build dependencies"
+  apt-get update
+  DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential cmake git python3-venv
+fi
+
+echo "==> Repository: ${REPOSITORY_ROOT}"
+echo "==> Experiment: ${EXPERIMENT} (${MODEL_ID}@${MODEL_REVISION})"
+echo "==> Persistent environment: ${VENV}"
+
+if [[ ! -x "${VENV}/bin/python" ]]; then
+  python3 -m venv "${VENV}"
+fi
+# shellcheck disable=SC1091
+source "${VENV}/bin/activate"
+python -m pip install --upgrade pip setuptools wheel
+python -m pip install -e ".[dev,evaluation]"
+
+if [[ "${NANOQUANT_RUN_TESTS:-1}" == "1" ]]; then
+  echo "==> Running fast recipe preflight tests"
+  tests=(tests/unit/test_base_compression_recipe.py)
+  experiment_test="tests/unit/test_experiment${EXPERIMENT}.py"
+  if [[ -f "${experiment_test}" ]]; then
+    tests+=("${experiment_test}")
+  fi
+  python -m pytest -q "${tests[@]}"
+fi
+
+python - <<'PY'
+import sys
+import torch
+print(f"Python: {sys.version.split()[0]}")
+print(f"PyTorch: {torch.__version__}")
+if not torch.cuda.is_available():
+    raise SystemExit("CUDA is unavailable; select a CUDA RunPod image and GPU pod")
+print(f"CUDA device: {torch.cuda.get_device_name(0)}")
+print(f"CUDA VRAM: {torch.cuda.get_device_properties(0).total_memory / 2**30:.1f} GiB")
+PY
+
+# Download the exact model snapshot now, so authentication or network errors happen
+# before llama.cpp compilation or a long compression stage.
+export NANOQUANT_BOOTSTRAP_MODEL_ID="${MODEL_ID}"
+export NANOQUANT_BOOTSTRAP_MODEL_REVISION="${MODEL_REVISION}"
+MODEL_SNAPSHOT="$(${VENV}/bin/python - <<'PY'
+import os
+from huggingface_hub import snapshot_download
+print(snapshot_download(
+    repo_id=os.environ["NANOQUANT_BOOTSTRAP_MODEL_ID"],
+    revision=os.environ["NANOQUANT_BOOTSTRAP_MODEL_REVISION"],
+))
+PY
+)"
+export NANOQUANT_BOOTSTRAP_MODEL_SNAPSHOT="${MODEL_SNAPSHOT}"
+echo "==> Model snapshot: ${MODEL_SNAPSHOT}"
+
+# The prepared calibration data is intentionally excluded from Git. Recreate and
+# hash-check it on a fresh persistent volume.
+if [[ ! -f "${CALIBRATION_ROOT}/artifacts/ad/${CALIBRATION_ID}/descriptor.json" ]]; then
+  echo "==> Preparing pinned 256x2048 calibration artifact"
+  rm -rf "${CALIBRATION_ROOT}"
+  "${VENV}/bin/python" - <<'PY'
+import os
+from nanoquant.infrastructure.hf_calibration_dataset import prepare_experiment018_calibration
+result = prepare_experiment018_calibration(
+    os.environ["NANOQUANT_BOOTSTRAP_MODEL_SNAPSHOT"],
+    "evidence/m3/experiment018-calibration",
+)
+expected = "sha256-ad1f609729f86db7598eed5c703c55aacbb9cb024cab816ca7b300d574b7a4c8"
+if result.artifact.artifact_id != expected:
+    raise SystemExit(
+        f"prepared calibration identity differs: {result.artifact.artifact_id} != {expected}"
+    )
+print(result.artifact.artifact_id)
+PY
+else
+  echo "==> Reusing pinned calibration artifact"
+fi
+
+# Quality launchers deliberately run offline. Populate every pinned evaluation
+# dataset while networking is still allowed during setup.
+if [[ "${NANOQUANT_PREFETCH_QUALITY:-1}" == "1" ]]; then
+  echo "==> Caching pinned quality datasets"
+  "${VENV}/bin/python" - <<'PY'
+from datasets import load_dataset
+from nanoquant.application.task_evaluation import pinned_legacy_multiple_choice_tasks
+from nanoquant.quality_evaluation import WIKITEXT_CONFIG, WIKITEXT_DATASET, WIKITEXT_REVISION
+
+load_dataset(WIKITEXT_DATASET, WIKITEXT_CONFIG, revision=WIKITEXT_REVISION, split="test")
+for task in pinned_legacy_multiple_choice_tasks():
+    load_dataset(
+        task.dataset_name,
+        task.dataset_config,
+        revision=task.dataset_revision,
+        split=task.split,
+    )
+    print(f"cached {task.task_name}")
+PY
+fi
+
+if [[ ! -d "${NANOQUANT_LLAMA_CPP_ROOT}/.git" ]]; then
+  echo "==> Cloning modified NanoQuant llama.cpp"
+  git clone "${LLAMA_CPP_REPOSITORY}" "${NANOQUANT_LLAMA_CPP_ROOT}"
+fi
+if [[ "$(git -C "${NANOQUANT_LLAMA_CPP_ROOT}" rev-parse HEAD)" != "${LLAMA_CPP_REVISION}" ]]; then
+  if [[ -n "$(git -C "${NANOQUANT_LLAMA_CPP_ROOT}" status --porcelain)" ]]; then
+    echo "llama.cpp has local changes and is not at ${LLAMA_CPP_REVISION}; refusing to overwrite it" >&2
+    exit 1
+  fi
+  git -C "${NANOQUANT_LLAMA_CPP_ROOT}" fetch origin "${LLAMA_CPP_REVISION}"
+  git -C "${NANOQUANT_LLAMA_CPP_ROOT}" checkout --detach "${LLAMA_CPP_REVISION}"
+fi
+
+if [[ ! -x "${NANOQUANT_LLAMA_CPP_ROOT}/build/bin/llama-quantize" ]]; then
+  echo "==> Building llama.cpp quantizer"
+  cmake -S "${NANOQUANT_LLAMA_CPP_ROOT}" -B "${NANOQUANT_LLAMA_CPP_ROOT}/build" \
+    -DGGML_CUDA=ON -DCMAKE_BUILD_TYPE=Release
+  cmake --build "${NANOQUANT_LLAMA_CPP_ROOT}/build" --target llama-quantize \
+    --config Release -j"$(nproc)"
+fi
+
+if [[ "${NANOQUANT_SETUP_ONLY:-0}" == "1" ]]; then
+  echo "==> Setup complete (NANOQUANT_SETUP_ONLY=1); experiment was not launched"
+  exit 0
+fi
+
+LOG="${REPOSITORY_ROOT}/outputs/runpod-logs/experiment-${EXPERIMENT}-$(date -u +%Y%m%dT%H%M%SZ).log"
+echo "==> Launching ${LAUNCHER}"
+echo "==> Console log: ${LOG}"
+set +e
+"${VENV}/bin/python" "${LAUNCHER}" 2>&1 | tee "${LOG}"
+status=${PIPESTATUS[0]}
+set -e
+if [[ ${status} -ne 0 ]]; then
+  echo "Experiment exited with status ${status}. Run this script again to resume durable work." >&2
+  exit "${status}"
+fi
+echo "==> Experiment ${EXPERIMENT} complete"

@@ -12,6 +12,26 @@ python -m pip install -e ".[dev]"
 pytest
 ```
 
+RunPod setup and complete compression can be bootstrapped from a fresh repository sync on a persistent
+`/workspace` volume. The default is the smaller Gemma 3 270M Experiment 007; rerunning the same command resumes
+its durable commits:
+
+```bash
+export HF_TOKEN=<hugging-face-token>  # required for gated Gemma snapshots
+bash tools/runpod_bootstrap.sh
+```
+
+Select the complete Gemma 3 1B quality workflow with `NANOQUANT_EXPERIMENT=006`. The script creates a persistent
+virtual environment and Hugging Face cache, recreates and verifies the ignored pinned calibration artifact,
+prefetches the offline quality datasets, clones/builds the pinned modified llama.cpp quantizer, and launches the
+numbered experiment. Useful controls are:
+
+```bash
+NANOQUANT_SETUP_ONLY=1 bash tools/runpod_bootstrap.sh
+NANOQUANT_EXPERIMENT=006 bash tools/runpod_bootstrap.sh
+NANOQUANT_LLAMA_CPP_ROOT=/workspace/llama.cpp bash tools/runpod_bootstrap.sh
+```
+
 Artifact cleanup is dry-run by default. The collector keeps artifacts referenced by evidence files and follows
 artifact-to-artifact references transitively:
 
