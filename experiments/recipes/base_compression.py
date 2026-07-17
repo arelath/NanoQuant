@@ -9,6 +9,7 @@ from nanoquant.compression_export_workflow import (
 from nanoquant.config.schema import (
     ActivationGpuCacheMode,
     AllocationStrategy,
+    CalibrationMethod,
     DatasetSourceConfig,
     ExecutorKind,
     LayerRankBudgetConfig,
@@ -149,6 +150,10 @@ LARGE_MODEL_COMPRESSION_CONFIG = config_delta(
     distillation=config_delta(
         BASE_COMPRESSION_CONFIG.distillation,
         enabled=False,
+    ),
+    calibration=config_delta(
+        BASE_COMPRESSION_CONFIG.calibration,
+        method=CalibrationMethod.FORWARD_ONLY,
     ),
     runtime=config_delta(
         BASE_COMPRESSION_CONFIG.runtime,

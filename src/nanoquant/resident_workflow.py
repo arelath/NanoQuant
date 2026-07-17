@@ -257,6 +257,21 @@ def resident_request_from_config(
     """Map one validated canonical recipe to the resident engine request."""
 
     _validate_supported_recipe(config)
+    if config.runtime.executor is ExecutorKind.CPU_OFFLOAD and config.calibration.method in {
+        CalibrationMethod.ONLINE_FISHER,
+        CalibrationMethod.TWO_PHASE_FISHER,
+    }:
+        precomputed = (
+            inputs.precomputed_calibration,
+            inputs.precomputed_objectives,
+            inputs.precomputed_plan,
+        )
+        _require(
+            all(reference is not None for reference in precomputed),
+            "calibration.method",
+            "cpu_offload Fisher calibration requires complete precomputed calibration, objectives, and plan; "
+            "use forward_only when preprocessing must run in-process",
+        )
     token_count = len(inputs.token_ids)
     if token_count != config.calibration.sample_count:
         raise ValueError(

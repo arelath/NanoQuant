@@ -14,10 +14,12 @@ from nanoquant.config.codec import from_dict
 from nanoquant.config.schema import (
     ActivationGpuCacheMode,
     ActivationStorageConfig,
+    CalibrationMethod,
     DistillationLoss,
     ExecutorKind,
     RunConfig,
 )
+from nanoquant.domain.models import ArtifactRef
 from nanoquant.domain.runs import RunManifest, RunStatus
 from nanoquant.infrastructure.runs import (
     RunDirectory,
@@ -114,6 +116,7 @@ def test_cpu_offload_mapping_requires_large_model_guards(tmp_path: Path) -> None
     base = _experiment018_config()
     guarded = replace(
         base,
+        calibration=replace(base.calibration, method=CalibrationMethod.FORWARD_ONLY),
         runtime=replace(base.runtime, executor=ExecutorKind.CPU_OFFLOAD),
         evaluation=replace(base.evaluation, inline_quality=False),
         distillation=replace(base.distillation, enabled=False),
@@ -128,6 +131,24 @@ def test_cpu_offload_mapping_requires_large_model_guards(tmp_path: Path) -> None
     assert request.executor is ExecutorKind.CPU_OFFLOAD
     assert not request.restore_completed_blocks
     assert not request.evaluate_inline_quality
+    with pytest.raises(ValueError, match="requires complete precomputed calibration"):
+        resident_request_from_config(
+            replace(guarded, calibration=base.calibration),
+            _inputs(tmp_path),
+            ResidentExecutionOptions(restore_completed_blocks=False),
+        )
+    precomputed = replace(
+        _inputs(tmp_path),
+        precomputed_calibration=ArtifactRef("calibration", "calibration-id", 1),
+        precomputed_objectives=ArtifactRef("objectives", "objectives-id", 1),
+        precomputed_plan=ArtifactRef("plan", "plan-id", 1),
+    )
+    fisher_request = resident_request_from_config(
+        replace(guarded, calibration=base.calibration),
+        precomputed,
+        ResidentExecutionOptions(restore_completed_blocks=False),
+    )
+    assert fisher_request.precomputed_calibration == precomputed.precomputed_calibration
     with pytest.raises(ValueError, match="inline quality"):
         resident_request_from_config(
             replace(guarded, evaluation=base.evaluation),
