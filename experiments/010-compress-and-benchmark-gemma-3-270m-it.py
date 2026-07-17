@@ -1,4 +1,4 @@
-"""Experiment 010: repeat Experiment 009 without Hugging Face publication."""
+"""Experiment 010: test 1,600-iteration cubic ADMM on pinned Gemma 3 270M."""
 
 from recipes import (
     GEMMA_3_270M_COMPRESSION_TEMPLATE,
@@ -6,21 +6,32 @@ from recipes import (
     ExperimentIdentity,
     define_compression_quality_experiment,
 )
+from recipes._delta import config_delta
 
 from nanoquant.compression_quality_workflow import run_compression_quality_experiment
+
+_TEMPLATE = config_delta(
+    GEMMA_3_270M_COMPRESSION_TEMPLATE,
+    factorization=config_delta(
+        GEMMA_3_270M_COMPRESSION_TEMPLATE.factorization,
+        admm=config_delta(
+            GEMMA_3_270M_COMPRESSION_TEMPLATE.factorization.admm,
+            outer_iterations=1600,
+        ),
+    ),
+)
 
 EXPERIMENT = define_compression_quality_experiment(
     ExperimentIdentity(
         number=10,
         name="compress-and-benchmark-gemma-3-270m-it",
         purpose=(
-            "Repeat Experiment 009's pinned Gemma 3 270M compression and complete "
-            "BF16-versus-NanoQuant quality benchmark without publishing artifacts to Hugging Face."
+            "Measure whether doubling cubic-schedule ADMM from 800 to 1,600 iterations improves "
+            "Experiment 009's pinned Gemma 3 270M compression and quality results."
         ),
         hypothesis=(
-            "The promoted attention-rank recipe reproduces Experiment 009's validated 270M "
-            "NanoQuant GGUF and measured WikiText-2 and common-task quality without requiring "
-            "external publication."
+            "Giving cubic ADMM 1,600 outer iterations lowers layer and block fitting error without "
+            "changing the rank, outlier, tuning, export, or evaluation policies."
         ),
         baseline=BaselineRef.external("bf16-unsloth-gemma-3-270m-it"),
         tags=(
@@ -28,11 +39,13 @@ EXPERIMENT = define_compression_quality_experiment(
             "compression",
             "quality",
             "gguf",
+            "admm-1600",
+            "cubic-schedule",
             "wikitext2",
             "ultrachat",
         ),
     ),
-    GEMMA_3_270M_COMPRESSION_TEMPLATE,
+    _TEMPLATE,
     expected_blocks=18,
     maximum_wddm_shared_gib=0.75,
 )

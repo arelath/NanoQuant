@@ -153,7 +153,7 @@ All ten active launchers now own their concrete definitions:
 | 007 | compression + export + quality | `GEMMA_3_270M_COMPRESSION_TEMPLATE` | 270M model pin and 18 blocks |
 | 008 | large-model compression + quality | local delta of `LARGE_MODEL_COMPRESSION_TEMPLATE` | 12B model pin, 48 blocks, CPU-offload guards |
 | 009 | compression + quality + Hugging Face publication | `GEMMA_3_270M_COMPRESSION_TEMPLATE` | 18 blocks, factorized quality, public GGUF repository |
-| 010 | compression + quality, without external publication | `GEMMA_3_270M_COMPRESSION_TEMPLATE` | Experiment 009 settings, but no Hugging Face upload |
+| 010 | compression + quality, without external publication | local delta of `GEMMA_3_270M_COMPRESSION_TEMPLATE` | Experiment 009 with 1,600-iteration cubic ADMM and no Hugging Face upload |
 
 The reusable recipe package exports four unnumbered templates:
 
