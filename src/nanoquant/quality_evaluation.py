@@ -126,12 +126,22 @@ def _wikitext_tokens(
         download_config=DownloadConfig(local_files_only=local_files_only),
     )
     tokenizer = AutoTokenizer.from_pretrained(snapshot, local_files_only=True)
-    encoded = tokenizer("\n\n".join(dataset["text"]), return_tensors="pt").input_ids
+    payload = sequence_length - 1
+    required = samples * payload
+    # The protocol evaluates independent, bounded windows.  Ask the tokenizer
+    # for exactly the prefix those windows consume instead of materializing the
+    # entire WikiText test split as one apparent model input.  Explicit
+    # truncation both preserves the historical token prefix and prevents
+    # Transformers from warning that the full corpus exceeds model context.
+    encoded = tokenizer(
+        "\n\n".join(dataset["text"]),
+        return_tensors="pt",
+        truncation=True,
+        max_length=required,
+    ).input_ids
     bos_id = tokenizer.bos_token_id
     if bos_id is None:
         raise ValueError("Gemma WikiText protocol requires a BOS token")
-    payload = sequence_length - 1
-    required = samples * payload
     if encoded.shape[1] < required:
         raise ValueError(f"WikiText token stream has {encoded.shape[1]} tokens; protocol requires {required}")
     rows = tuple(
