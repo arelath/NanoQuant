@@ -13,8 +13,9 @@ pytest
 ```
 
 RunPod setup and complete compression can be bootstrapped from a fresh repository sync on a persistent
-`/workspace` volume. The default is the smaller Gemma 3 270M Experiment 007; rerunning the same command resumes
-its durable commits:
+`/workspace` volume. See [`RUNPOD.md`](RUNPOD.md) for pod sizing, environment variables, secrets, experiment
+selection, output locations, and troubleshooting. The default is the smaller Gemma 3 270M Experiment 007; rerunning
+the same command resumes its durable commits:
 
 ```bash
 export HF_TOKEN=<hugging-face-token>  # required for gated Gemma snapshots
