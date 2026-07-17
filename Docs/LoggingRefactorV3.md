@@ -116,10 +116,11 @@ Initial destinations:
 
 - `JsonlEventDestination` — required, threshold = `event_level` (accepts everything routed). Writes compact JSON with `sort_keys=True`, `allow_nan=False`, and **no** `default=` hook; the sanitizer guarantees serializability before this point. Flushes per event (no `fsync`).
 - `ConsoleEventDestination` — optional, threshold = `console_level`. Renders ordinary events with the single shared
-  line renderer (§8.1), and folds resident `compression.progress_initialized`, block, and layer events into a
-  console-only `Compressing Layers` progress/elapsed/ETA line. A TTY redraws one carriage-return line; captured
-  output receives checkpoint lines. Resume seeds elapsed time and ETA from durable completed-block results, without
-  reading the historical event stream. The progress-bar text is not part of `run.log` or `memory.log`.
+  line renderer (§8.1), folds `calibration.progress_*` events into a console-only `Calibrating` batch bar, and then
+  folds resident `compression.progress_initialized`, block, and layer events into the `Compressing Layers`
+  progress/elapsed/ETA line. A TTY redraws one carriage-return line; captured output receives bounded start/finish
+  checkpoints. Resume seeds compression elapsed time and ETA from durable completed-block results, without reading
+  the historical event stream. The progress-bar text is not part of `run.log` or `memory.log`.
 
 There is no text-file destination; see §8. The destination protocol deliberately supports adding one (or a remote forwarder) later without touching the router.
 

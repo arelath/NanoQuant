@@ -45,6 +45,13 @@ class CompressionProgress:
 
     def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
         self._clock = clock
+        self._phase: Literal["pending", "calibration", "compression"] = "pending"
+        self._calibration_total_batches = 0
+        self._calibration_completed_batches = 0
+        self._calibration_started: float | None = None
+        self._calibration_last_updated: float | None = None
+        self._calibration_last_completed = 0
+        self._seconds_per_calibration_batch: float | None = None
         self._total_blocks = 0
         self._completed_blocks = 0
         self._completed_wall_seconds = 0.0
@@ -66,11 +73,57 @@ class CompressionProgress:
     def observe(self, event: Event) -> ProgressAction:
         """Update progress state and report how a console should redraw it."""
 
+        if event.name == "calibration.progress_initialized":
+            total = _integer_field(event, "total_batches")
+            if total is None or total <= 0:
+                return "none"
+            now = self._clock()
+            self._phase = "calibration"
+            self._calibration_total_batches = total
+            self._calibration_completed_batches = 0
+            self._calibration_started = now
+            self._calibration_last_updated = now
+            self._calibration_last_completed = 0
+            self._seconds_per_calibration_batch = None
+            self._active = True
+            self._status = "running"
+            return "checkpoint"
+
+        if event.name == "calibration.progress_updated" and self._phase == "calibration":
+            completed = _integer_field(event, "completed_batches")
+            if completed is None:
+                return "none"
+            completed = min(self._calibration_total_batches, completed)
+            now = self._clock()
+            advanced = completed - self._calibration_last_completed
+            if advanced > 0 and self._calibration_last_updated is not None:
+                observed = max(0.0, now - self._calibration_last_updated) / advanced
+                self._seconds_per_calibration_batch = (
+                    observed
+                    if self._seconds_per_calibration_batch is None
+                    else (1.0 - _EMA_ALPHA) * self._seconds_per_calibration_batch
+                    + _EMA_ALPHA * observed
+                )
+                self._calibration_last_updated = now
+                self._calibration_last_completed = completed
+            self._calibration_completed_batches = max(
+                self._calibration_completed_batches,
+                completed,
+            )
+            return "refresh"
+
+        if event.name == "calibration.progress_completed" and self._phase == "calibration":
+            self._calibration_completed_batches = self._calibration_total_batches
+            self._active = False
+            self._status = "completed"
+            return "finish"
+
         if event.name == "compression.progress_initialized":
             total = _integer_field(event, "total_blocks")
             completed = _integer_field(event, "completed_blocks")
             if total is None or total <= 0:
                 return "none"
+            self._phase = "compression"
             self._total_blocks = total
             self._completed_blocks = min(total, completed or 0)
             self._completed_wall_seconds = _float_field(event, "completed_wall_seconds") or 0.0
@@ -175,6 +228,36 @@ class CompressionProgress:
 
     def render(self) -> str:
         """Render the current state as one bounded, carriage-return-safe line."""
+
+        if self._phase == "calibration":
+            total = self._calibration_total_batches
+            completed = self._calibration_completed_batches
+            fraction = completed / total if total else 0.0
+            filled = min(_BAR_WIDTH, int(fraction * _BAR_WIDTH))
+            bar = "#" * filled + "-" * (_BAR_WIDTH - filled)
+            elapsed = (
+                None
+                if self._calibration_started is None
+                else max(0.0, self._clock() - self._calibration_started)
+            )
+            eta = (
+                None
+                if self._seconds_per_calibration_batch is None
+                else (total - completed) * self._seconds_per_calibration_batch
+            )
+            rate = (
+                "?s/batch"
+                if self._seconds_per_calibration_batch is None
+                else f"{self._seconds_per_calibration_batch:.1f}s/batch"
+            )
+            suffix = ""
+            if self._status not in {"pending", "running", "completed"}:
+                suffix = f" status={self._status}"
+            return (
+                f"Calibrating: {fraction * 100:5.1f}%|{bar}| "
+                f"{completed}/{total} "
+                f"[{_duration(elapsed)}<{_duration(eta)}, {rate}]{suffix}"
+            )
 
         progress = self._progress_units()
         fraction = progress / self._total_blocks if self._total_blocks else 0.0

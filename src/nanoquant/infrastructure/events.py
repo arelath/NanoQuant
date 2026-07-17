@@ -511,8 +511,13 @@ class ConsoleEventDestination:
         if self._progress is not None:
             action = self._progress.observe(event)
         projected = project_event(event, self._view)
-        # Initialization is represented by the progress line itself on the console.
-        if event.name == "compression.progress_initialized":
+        # Progress lifecycle events are represented by the progress line itself.
+        if event.name in {
+            "calibration.progress_initialized",
+            "calibration.progress_updated",
+            "calibration.progress_completed",
+            "compression.progress_initialized",
+        }:
             projected = None
         if projected is not None:
             self._clear_progress()

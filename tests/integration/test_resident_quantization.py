@@ -67,6 +67,9 @@ def test_resident_quantization_commits_complete_transformers_model(tmp_path: Pat
     assert "resume.discovery_completed" in event_names
     assert event_names.count("inventory.started") == event_names.count("inventory.completed") == 1
     assert event_names.count("model_load.started") == event_names.count("model_load.completed") == 1
+    assert event_names.count("calibration.progress_initialized") == 1
+    assert event_names.count("calibration.progress_updated") == 1
+    assert event_names.count("calibration.progress_completed") == 1
     assert event_names.count("calibration_block.started") == event_names.count("calibration_block.completed") == 1
     assert event_names.count("calibration_persist.started") == 1
     assert event_names.count("calibration_persist.completed") == 1
@@ -342,6 +345,9 @@ def test_resident_tuning_recipe_refits_blocks_and_resumes_exactly(tmp_path: Path
     resumed_request = replace(base, output=tmp_path / "resumed", interrupt_after_layer_commits=3)
     with pytest.raises(InterruptedError, match="after 3"):
         run_resident_quantization(resumed_request)
+    # Simulate a run created before the active preprocessing pointer existed.
+    # Its journal and immutable artifacts must still recover the exact plan.
+    (resumed_request.output / "state" / "preprocessing.json").unlink()
     resumed = run_resident_quantization(replace(resumed_request, interrupt_after_layer_commits=None))
 
     assert resumed.reused_commit_count == 3
@@ -351,6 +357,20 @@ def test_resident_tuning_recipe_refits_blocks_and_resumes_exactly(tmp_path: Path
         rel=1e-6,
         abs=1e-7,
     )
+    resumed_events = [
+        json.loads(line)
+        for line in (resumed_request.output / "events.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert sum(event["name"] == "calibration_persist.started" for event in resumed_events) == 1
+    preprocessing_events = [
+        event for event in resumed_events if event["name"] == "preprocessing.selected"
+    ]
+    assert [event["fields"]["source"] for event in preprocessing_events] == [
+        "computed",
+        "journal_recovery",
+    ]
+    assert preprocessing_events[-1]["fields"]["reused"] is True
+    assert (resumed_request.output / "state" / "preprocessing.json").exists()
 
     epoch_output = tmp_path / "epoch-resumed"
     with pytest.raises(InterruptedError, match="after 1"):

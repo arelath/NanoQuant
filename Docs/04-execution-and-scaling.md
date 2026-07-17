@@ -217,12 +217,20 @@ On resume:
 
 1. acquire the run lease;
 2. validate the manifest and requested recipe;
-3. scan committed stage and loop-unit references, not arbitrary files;
-4. verify hashes, schema versions, and semantic cache keys;
-5. reconstruct executor state from the latest valid commit;
-6. restore deterministic random streams from logical seed derivation;
-7. resume the first incomplete unit;
-8. emit a `run_resumed` event describing reused and discarded work.
+3. load `state/preprocessing.json` when its resident semantic-config hash matches, then validate the referenced
+   calibration, objectives, and quantization plan transitively;
+4. for runs created before that pointer existed, recover the exact plan identity from the journal and its linked
+   preprocessing selection instead of rerunning calibration;
+5. scan committed stage and loop-unit references, not arbitrary files;
+6. verify hashes, schema versions, and semantic cache keys;
+7. reconstruct executor state from the latest valid commit;
+8. restore deterministic random streams from logical seed derivation;
+9. resume the first incomplete unit;
+10. emit a `run_resumed` event describing reused and discarded work.
+
+The active preprocessing pointer is published atomically only after all three content-addressed artifacts commit. A
+matching but corrupt pointer or referenced artifact fails closed. A semantic configuration change does not reuse the
+pointer and may produce a new plan identity; placement-only settings remain outside that identity.
 
 Seeds are derived from stable identifiers:
 

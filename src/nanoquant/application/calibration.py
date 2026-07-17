@@ -175,6 +175,7 @@ def calibrate_causal_model(
     shrinkage: float = 0.0,
     initial_state: CausalOnlineCalibrationState | None = None,
     state_sink: Callable[[CausalOnlineCalibrationState], None] | None = None,
+    progress_callback: Callable[[int, int], None] | None = None,
     recorder: PhaseRecorder = NULL_RECORDER,
 ) -> tuple[MaterializedLayerCalibration, ...]:
     """Collect legacy-compatible full-model input and output Fisher diagonals.
@@ -218,6 +219,14 @@ def calibrate_causal_model(
     if config is not None and original_use_cache is not None:
         config.use_cache = False
     model.train()
+    total_progress_batches = len(batches) * (2 if method == "two_phase_fisher" else 1)
+    completed_progress_batches = 0
+
+    def advance_progress() -> None:
+        nonlocal completed_progress_batches
+        completed_progress_batches += 1
+        if progress_callback is not None:
+            progress_callback(completed_progress_batches, total_progress_batches)
 
     def backward_batch(batch: torch.Tensor) -> None:
         text_model = getattr(model, "model", None)
@@ -287,6 +296,7 @@ def calibrate_causal_model(
                 backward_batch(batch)
                 recorder.add("calibration.batches", 1)
                 recorder.add("calibration.samples", batch.shape[0])
+                advance_progress()
 
     try:
         if method == "two_phase_fisher":
@@ -302,6 +312,7 @@ def calibrate_causal_model(
                     backward_batch(batch)
                     recorder.add("calibration.batches", 1, pass_name="threshold")
                     recorder.add("calibration.samples", batch.shape[0], pass_name="threshold")
+                    advance_progress()
             inputs: dict[str, Accumulator] = {
                 path: FixedClippedAccumulator(module.in_features, input_thresholds[path]) for path, module in layers
             }
@@ -443,6 +454,7 @@ def calibrate_block(
     method: str = "online_fisher",
     shrinkage: float = 0.0,
     loss_builder: LossBuilder | None = None,
+    progress_callback: Callable[[int, int], None] | None = None,
     recorder: PhaseRecorder = NULL_RECORDER,
 ) -> tuple[MaterializedLayerCalibration, ...]:
     if not batches:
@@ -452,6 +464,14 @@ def calibrate_block(
     linears = _linears(block, layer_paths)
     requires_backward = method != "forward_only"
     objective = loss_builder or (lambda output, _batch: output.float().square().mean())
+    total_progress_batches = len(batches) * (2 if method == "two_phase_fisher" else 1)
+    completed_progress_batches = 0
+
+    def advance_progress() -> None:
+        nonlocal completed_progress_batches
+        completed_progress_batches += 1
+        if progress_callback is not None:
+            progress_callback(completed_progress_batches, total_progress_batches)
 
     def execute(input_accumulators: dict[str, Accumulator], output_accumulators: dict[str, Accumulator]) -> None:
         with _apply_calibration_hooks(
@@ -471,6 +491,7 @@ def calibrate_block(
                         torch.autograd.backward(loss)
                 recorder.add("calibration.batches", 1)
                 recorder.add("calibration.samples", batch.shape[0])
+                advance_progress()
 
     if method == "two_phase_fisher":
         input_thresholds = {
@@ -494,6 +515,7 @@ def calibrate_block(
                     torch.autograd.backward(loss)
                 recorder.add("calibration.batches", 1, pass_name="threshold")
                 recorder.add("calibration.samples", batch.shape[0], pass_name="threshold")
+                advance_progress()
         inputs: dict[str, Accumulator] = {
             path: FixedClippedAccumulator(module.in_features, input_thresholds[path])
             for path, module in linears.items()
@@ -535,6 +557,7 @@ def calibrate_block_streamed(
     batch_size: int,
     device: str = "cpu",
     shrinkage: float = 0.0,
+    progress_callback: Callable[[int, int], None] | None = None,
     recorder: PhaseRecorder = NULL_RECORDER,
 ) -> tuple[MaterializedLayerCalibration, ...]:
     """Accumulate forward-only statistics from batch views over an activation generation."""
@@ -551,5 +574,6 @@ def calibrate_block_streamed(
             runner,
             method="forward_only",
             shrinkage=shrinkage,
+            progress_callback=progress_callback,
             recorder=recorder,
         )

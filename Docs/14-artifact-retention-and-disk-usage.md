@@ -161,6 +161,12 @@ leave the journal pointing at a generation eligible for collection.
 Layer-level resume within a block continues to use the predecessor block-entry activations. Those generations stay
 rooted until the block commit is durable. Deterministic replay of already accepted layers remains unchanged.
 
+Calibration statistics, objective specifications, and the quantization plan are immutable durable results. After all
+three commit, `state/preprocessing.json` atomically records their typed references together with the resident semantic
+configuration hash. Resume validates that pointer before any calibration work. Runs predating the pointer recover the
+plan hash from their authoritative journal and validate the linked preprocessing artifacts before publishing the
+pointer. A matching corrupt pointer fails closed rather than silently recalibrating and changing commit identity.
+
 At the final block, the teacher stream normally expires immediately after final metrics are committed. The final
 compressed stream may remain rooted through suffix execution/evaluation and then expire unless explicitly pinned.
 Frozen model loading never depends on either stream.

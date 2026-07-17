@@ -117,6 +117,7 @@ from nanoquant.infrastructure.device_lease import acquire_device_lease
 from nanoquant.infrastructure.device_memory import PeakWindow, release_cached_host_memory
 from nanoquant.infrastructure.environment import capture_environment
 from nanoquant.infrastructure.hf_language_model import load_causal_language_model
+from nanoquant.infrastructure.io_utils import atomic_write_json
 from nanoquant.infrastructure.live_reconstruction import update_live_weight_error_report
 from nanoquant.infrastructure.model_adapters import TransformersModelAdapter, adapter_for_config
 from nanoquant.infrastructure.profiling import profiled_run
@@ -142,6 +143,15 @@ from nanoquant.ports.event_sink import EventSink
 from nanoquant.ports.model_adapter import ModelAdapter
 
 RESIDENT_ALGORITHM_VERSION = 32
+
+
+@dataclass(frozen=True, slots=True)
+class _ActivePreprocessingState:
+    schema_version: int
+    resident_config_hash: str
+    calibration: ArtifactRef
+    objectives: ArtifactRef
+    plan: ArtifactRef
 
 
 @contextmanager
@@ -1237,24 +1247,136 @@ def _legacy_sensitivity_profile(
     return tuple(result)
 
 
+def _active_preprocessing_path(output: Path) -> Path:
+    return output / "state" / "preprocessing.json"
+
+
+def _read_active_preprocessing_state(
+    request: ResidentQuantizationRequest,
+) -> _ActivePreprocessingState | None:
+    path = _active_preprocessing_path(request.output)
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        state = from_dict(_ActivePreprocessingState, payload, path="active_preprocessing")
+    except (OSError, TypeError, ValueError, KeyError, json.JSONDecodeError) as exc:
+        raise ValueError(f"active preprocessing state is invalid: {path}") from exc
+    if state.schema_version != 1:
+        raise ValueError(f"unsupported active preprocessing schema: {state.schema_version}")
+    if state.resident_config_hash != _resident_config_hash(request):
+        return None
+    return state
+
+
+def _recover_preprocessing_references_from_journal(
+    request: ResidentQuantizationRequest,
+) -> tuple[ArtifactRef, ArtifactRef, ArtifactRef] | None:
+    """Recover the preprocessing identity of runs created before the active pointer.
+
+    The journal supplies the authoritative semantic config and plan identity.  The
+    event stream only supplies the calibration/objective links for that exact plan;
+    the normal artifact loader subsequently validates every descriptor and link.
+    """
+
+    journal_path = request.output / "state" / "journal.jsonl"
+    events_path = request.output / "events.jsonl"
+    if not journal_path.exists() or not events_path.exists():
+        return None
+    expected_config_hash = _resident_config_hash(request)
+    plan_artifact: str | None = None
+    for line in journal_path.read_text(encoding="utf-8").splitlines():
+        try:
+            identity = json.loads(line)["identity"]
+            if identity["config_hash"] == expected_config_hash:
+                plan_artifact = str(identity["plan_hash"])
+        except (TypeError, ValueError, KeyError, json.JSONDecodeError):
+            break
+    if plan_artifact is None:
+        return None
+    recovered: tuple[ArtifactRef, ArtifactRef, ArtifactRef] | None = None
+    for line in events_path.read_text(encoding="utf-8").splitlines():
+        try:
+            event = json.loads(line)
+            fields = event["fields"]
+            if event["name"] != "preprocessing.selected" or fields["plan_artifact"] != plan_artifact:
+                continue
+            recovered = (
+                ArtifactRef("calibration-stats", str(fields["calibration_artifact"]), 1),
+                ArtifactRef("objective-specs", str(fields["objectives_artifact"]), 1),
+                ArtifactRef(ArtifactTypes.QUANTIZATION_PLAN, plan_artifact, 1),
+            )
+        except (TypeError, ValueError, KeyError, json.JSONDecodeError):
+            continue
+    return recovered
+
+
+def _resolve_preprocessing_references(
+    request: ResidentQuantizationRequest,
+) -> tuple[tuple[ArtifactRef, ArtifactRef, ArtifactRef] | None, str]:
+    explicit = (
+        request.precomputed_calibration,
+        request.precomputed_objectives,
+        request.precomputed_plan,
+    )
+    if any(reference is not None for reference in explicit):
+        if any(reference is None for reference in explicit):
+            raise ValueError("precomputed calibration, objectives, and plan must be supplied together")
+        return cast(tuple[ArtifactRef, ArtifactRef, ArtifactRef], explicit), "explicit"
+    active = _read_active_preprocessing_state(request)
+    if active is not None:
+        return (active.calibration, active.objectives, active.plan), "active_state"
+    recovered = _recover_preprocessing_references_from_journal(request)
+    if recovered is not None:
+        return recovered, "journal_recovery"
+    return None, "computed"
+
+
+def _write_active_preprocessing_state(
+    request: ResidentQuantizationRequest,
+    calibration: ArtifactRef,
+    objectives: ArtifactRef,
+    plan: ArtifactRef,
+) -> None:
+    atomic_write_json(
+        _active_preprocessing_path(request.output),
+        to_dict(
+            _ActivePreprocessingState(
+                1,
+                _resident_config_hash(request),
+                calibration,
+                objectives,
+                plan,
+            )
+        ),
+    )
+
+
 def _load_precomputed_preprocessing(
     request: ResidentQuantizationRequest,
     artifacts: LocalArtifactStore,
     inventory: ModelInventory,
     dataset: DatasetIdentity,
     total_tokens: int,
+    references: tuple[ArtifactRef, ArtifactRef, ArtifactRef] | None = None,
 ) -> tuple[PersistedCalibration, PersistedObjectives, PersistedPlan] | None:
-    references = (
-        request.precomputed_calibration,
-        request.precomputed_objectives,
-        request.precomputed_plan,
+    selected_references: tuple[ArtifactRef | None, ArtifactRef | None, ArtifactRef | None] = (
+        references
+        if references is not None
+        else (
+            request.precomputed_calibration,
+            request.precomputed_objectives,
+            request.precomputed_plan,
+        )
     )
-    if all(reference is None for reference in references):
+    if all(reference is None for reference in selected_references):
         return None
-    if any(reference is None for reference in references):
+    if any(reference is None for reference in selected_references):
         raise ValueError("precomputed calibration, objectives, and plan must be supplied together")
-    calibration_ref, objectives_ref, plan_ref = cast(tuple[ArtifactRef, ArtifactRef, ArtifactRef], references)
-    for reference in references:
+    calibration_ref, objectives_ref, plan_ref = cast(
+        tuple[ArtifactRef, ArtifactRef, ArtifactRef], selected_references
+    )
+    for reference in selected_references:
         artifacts.validate(cast(ArtifactRef, reference).artifact_id)
     calibration_payload = json.loads(
         (artifacts.path_for(calibration_ref.artifact_id) / "stats.json").read_text(encoding="utf-8")
@@ -1891,12 +2013,16 @@ def _run_resident_quantization_impl(
                     checkpoint.tokenizer_hash,
                     "raw-token-ids-v1",
                 )
+                preprocessing_references, preprocessing_source = _resolve_preprocessing_references(
+                    request
+                )
                 preprocessed = _load_precomputed_preprocessing(
                     request,
                     artifacts,
                     inventory,
                     dataset,
                     tokens.numel(),
+                    preprocessing_references,
                 )
 
     calibration_values: list[tuple[LayerId, MaterializedLayerCalibration]] = []
@@ -1914,6 +2040,30 @@ def _run_resident_quantization_impl(
                 key = f"block.{block_inventory.block.index}.{layer.path}"
                 causal_layers.append((key, module))
                 causal_ids[key] = layer
+        causal_batch_count = (
+            tokens.shape[0] + request.calibration_batch_size - 1
+        ) // request.calibration_batch_size
+        causal_progress_total = causal_batch_count * (
+            2 if request.calibration_method == "two_phase_fisher" else 1
+        )
+        cast(Any, events).emit(
+            "resident-quantization",
+            "info",
+            "calibration.progress_initialized",
+            method=request.calibration_method,
+            total_batches=causal_progress_total,
+        )
+
+        def causal_progress(completed: int, total: int) -> None:
+            cast(Any, events).emit(
+                "resident-quantization",
+                "info",
+                "calibration.progress_updated",
+                method=request.calibration_method,
+                completed_batches=completed,
+                total_batches=total,
+            )
+
         with _logged_operation(
             events,
             "calibration",
@@ -1932,12 +2082,35 @@ def _run_resident_quantization_impl(
                     tuple(causal_layers),
                     method=request.calibration_method,
                     shrinkage=request.calibration_shrinkage,
+                    progress_callback=causal_progress,
                     recorder=micro_recorder,
                 )
+        cast(Any, events).emit(
+            "resident-quantization",
+            "info",
+            "calibration.progress_completed",
+            method=request.calibration_method,
+            completed_batches=causal_progress_total,
+            total_batches=causal_progress_total,
+        )
         calibration_values.extend((causal_ids[item.path], item) for item in stats)
     elif request.calibration_method == "forward_only":
         calibration_inputs = initial_inputs
-        for block_inventory, resident_block in zip(inventory.blocks, decoder_layers, strict=True):
+        forward_batch_count = (
+            calibration_inputs.shape[0] + request.block_forward_batch_size - 1
+        ) // request.block_forward_batch_size
+        forward_progress_total = len(inventory.blocks) * forward_batch_count
+        cast(Any, events).emit(
+            "resident-quantization",
+            "info",
+            "calibration.progress_initialized",
+            method="forward_only",
+            total_batches=forward_progress_total,
+            total_blocks=len(inventory.blocks),
+        )
+        for calibration_block_position, (block_inventory, resident_block) in enumerate(
+            zip(inventory.blocks, decoder_layers, strict=True)
+        ):
             streamed_block = request.executor is ExecutorKind.CPU_OFFLOAD
             if streamed_block:
                 with _logged_operation(
@@ -1964,6 +2137,22 @@ def _run_resident_quantization_impl(
                 device = value.device if parameter is None else parameter.device
                 return adapter.run_block(module, value.to(device, non_blocking=True), **block_metadata)
 
+            def forward_progress(
+                completed: int,
+                _total: int,
+                offset: int = calibration_block_position * forward_batch_count,
+                block_index: int = block_inventory.block.index,
+            ) -> None:
+                cast(Any, events).emit(
+                    "resident-quantization",
+                    "info",
+                    "calibration.progress_updated",
+                    method="forward_only",
+                    completed_batches=offset + completed,
+                    total_batches=forward_progress_total,
+                    block=block_index,
+                )
+
             with _logged_operation(
                 events,
                 "calibration_block",
@@ -1986,6 +2175,7 @@ def _run_resident_quantization_impl(
                         calibration_runner,
                         method="forward_only",
                         shrinkage=request.calibration_shrinkage,
+                        progress_callback=forward_progress,
                         recorder=micro_recorder,
                     )
             calibration_values.extend((LayerId(block_inventory.block, item.path), item) for item in stats)
@@ -2002,6 +2192,15 @@ def _run_resident_quantization_impl(
                 del block
                 if request.device.startswith("cuda"):
                     torch.cuda.empty_cache()
+        cast(Any, events).emit(
+            "resident-quantization",
+            "info",
+            "calibration.progress_completed",
+            method="forward_only",
+            completed_batches=forward_progress_total,
+            total_batches=forward_progress_total,
+            total_blocks=len(inventory.blocks),
+        )
     else:
         raise ValueError(f"unsupported resident calibration method: {request.calibration_method}")
     if preprocessed is None:
@@ -2087,11 +2286,18 @@ def _run_resident_quantization_impl(
     else:
         calibration, objectives, persisted_plan = preprocessed
         plan = persisted_plan.plan
+    _write_active_preprocessing_state(
+        request,
+        calibration.reference,
+        objectives.reference,
+        persisted_plan.reference,
+    )
     events.emit(
         "resident-quantization",
         "info",
         "preprocessing.selected",
         reused=preprocessed is not None,
+        source=preprocessing_source,
         calibration_artifact=calibration.reference.artifact_id,
         objectives_artifact=objectives.reference.artifact_id,
         plan_artifact=persisted_plan.reference.artifact_id,

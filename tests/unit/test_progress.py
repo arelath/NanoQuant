@@ -41,6 +41,38 @@ def test_progress_tracks_layers_and_learns_block_eta() -> None:
     assert "1/3 [00:00:12<00:00:24, 12.0s/block]" in rendered
 
 
+def test_progress_tracks_calibration_batches_before_compression() -> None:
+    clock = Clock()
+    progress = CompressionProgress(clock)
+
+    assert progress.observe(_event("calibration.progress_initialized", total_batches=4)) == "checkpoint"
+    assert "Calibrating:" in progress.render()
+    assert "0/4 [00:00:00<?, ?s/batch]" in progress.render()
+
+    clock.now = 2.0
+    assert progress.observe(
+        _event("calibration.progress_updated", completed_batches=1, total_batches=4)
+    ) == "refresh"
+    assert "25.0%" in progress.render()
+    assert "1/4 [00:00:02<00:00:06, 2.0s/batch]" in progress.render()
+
+    clock.now = 8.0
+    assert progress.observe(
+        _event("calibration.progress_completed", completed_batches=4, total_batches=4)
+    ) == "finish"
+    assert "100.0%" in progress.render()
+    assert "4/4" in progress.render()
+
+    assert progress.observe(
+        _event(
+            "compression.progress_initialized",
+            total_blocks=2,
+            completed_blocks=0,
+        )
+    ) == "checkpoint"
+    assert "Compressing Layers:" in progress.render()
+
+
 def test_progress_initialization_seeds_resume_eta() -> None:
     progress = CompressionProgress(lambda: 0.0)
 

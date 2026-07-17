@@ -113,7 +113,20 @@ def test_online_forward_and_two_phase_calibration_are_typed_finite_and_remove_ho
     )
     for method in ("online_fisher", "two_phase_fisher", "forward_only"):
         block = CalibrationBlock()
-        results = calibrate_block(block, batches, ("first", "second"), _runner, method=method, shrinkage=0.2)
+        progress = []
+        results = calibrate_block(
+            block,
+            batches,
+            ("first", "second"),
+            _runner,
+            method=method,
+            shrinkage=0.2,
+            progress_callback=lambda completed, total, sink=progress: sink.append(
+                (completed, total)
+            ),
+        )
+        total = len(batches) * (2 if method == "two_phase_fisher" else 1)
+        assert progress == [(completed, total) for completed in range(1, total + 1)]
         assert [result.path for result in results] == ["first", "second"]
         assert all(torch.isfinite(result.input_importance).all() for result in results)
         assert all(torch.isfinite(result.output_importance).all() for result in results)
@@ -167,13 +180,17 @@ def test_causal_loss_applies_exact_next_token_shift() -> None:
 def test_full_causal_calibration_collects_output_fisher_and_restores_model(method: str) -> None:
     model = TinyCausalModel().eval()
     original_requires_grad = tuple(parameter.requires_grad for parameter in model.parameters())
+    progress = []
     results = calibrate_causal_model(
         model,
         (torch.tensor([[0, 1, 2, 3]]), torch.tensor([[3, 2, 1, 0]])),
         (("hidden", model.hidden),),
         method=method,
         shrinkage=0.2,
+        progress_callback=lambda completed, total: progress.append((completed, total)),
     )
+    total = 4 if method == "two_phase_fisher" else 2
+    assert progress == [(completed, total) for completed in range(1, total + 1)]
     assert len(results) == 1
     assert results[0].sample_count == 2
     assert results[0].method == method

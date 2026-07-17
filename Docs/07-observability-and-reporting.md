@@ -227,14 +227,17 @@ Runs that started with an older worker can be backfilled without acquiring the G
 The console is concise and optimized for active monitoring:
 
 ```text
+Calibrating:  43.8%|##########--------------| 112/256 [00:18:40<00:23:59, 10.0s/batch]
 Compressing Layers:  83.3%|####################----| 15/18 [00:54:35<00:10:59, 219.8s/block] block=16/18 layer=4/7 self_attn.v_proj
 [12/80] self_attn.v_proj attempt 1 rank=1536 err=0.284 threshold=0.350 18.4s ACCEPT
 [12/80] block entry=1.91e-4 final-pre-KD=2.02e-4 delta=+1.10e-5 (+5.76%)
 ```
 
-The resident compression bar is a console-only projection of structured block and layer events. Interactive
-terminals update one carriage-return line; captured output emits bounded checkpoints instead. Its elapsed time and
-ETA use committed block wall times, and resume initializes the estimate from already committed blocks without
+The calibration and resident compression bars are console-only projections of structured events. Calibration
+advances once per processed batch (across both passes for two-phase Fisher), then the same console line transitions
+to block/layer compression. Interactive terminals update one carriage-return line; captured output emits bounded
+start and finish checkpoints instead. Calibration ETA uses observed batch time. Compression elapsed time and ETA use
+committed block wall times, and resume initializes the compression estimate from already committed blocks without
 scanning the historical event stream. No progress-bar text is written to `run.log` or `memory.log`.
 
 Periodic resource samples and memory fields injected into lifecycle events are omitted from the normal console and

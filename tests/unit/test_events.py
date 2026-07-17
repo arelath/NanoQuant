@@ -194,6 +194,44 @@ def test_console_renders_progress_checkpoints_for_captured_output() -> None:
     assert "\r" not in output
 
 
+def test_console_renders_bounded_calibration_progress_for_captured_output() -> None:
+    stream = io.StringIO()
+    console = ConsoleEventDestination(Severity.INFO, stream)
+    timestamp = "2026-01-01T00:00:00+00:00"
+
+    for sequence, name, fields in (
+        (1, "calibration.progress_initialized", {"total_batches": 2}),
+        (
+            2,
+            "calibration.progress_updated",
+            {"completed_batches": 1, "total_batches": 2},
+        ),
+        (
+            3,
+            "calibration.progress_completed",
+            {"completed_batches": 2, "total_batches": 2},
+        ),
+    ):
+        console.accept(
+            Event(
+                1,
+                timestamp,
+                "run",
+                sequence,
+                "resident",
+                "info",
+                name,
+                fields,
+            )
+        )
+
+    output = stream.getvalue()
+    assert "calibration.progress_" not in output
+    assert output.count("Calibrating:") == 2
+    assert "0/2" in output
+    assert "2/2" in output
+
+
 def test_console_uses_one_carriage_return_progress_line_for_tty() -> None:
     stream = TtyStringIO()
     console = ConsoleEventDestination(Severity.INFO, stream)
