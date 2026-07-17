@@ -8,9 +8,9 @@ import torch
 from recipes import (
     EXPERIMENT_001,
     EXPERIMENT_001_CONFIG,
-    EXPERIMENT_008_CONFIG,
     EXPERIMENT_013_CONFIG,
     EXPERIMENT_018_CONFIG,
+    LEGACY_EXPERIMENT_008_CONFIG,
 )
 
 from nanoquant.config.codec import to_dict
@@ -84,8 +84,8 @@ def test_experiment001_uses_the_current_parity_compression_recipe(tmp_path: Path
     assert EXPERIMENT_001.task_limit == 200
 
 
-def test_experiment008_is_only_the_documented_recipe_delta_from_013(tmp_path: Path) -> None:
-    config = EXPERIMENT_008_CONFIG
+def test_legacy_experiment008_is_only_the_documented_recipe_delta_from_013(tmp_path: Path) -> None:
+    config = LEGACY_EXPERIMENT_008_CONFIG
     request = resident_request_from_config(config, _inputs(config, tmp_path))
 
     assert _diff(EXPERIMENT_013_CONFIG, config) == {
@@ -119,4 +119,5 @@ def test_promoted_compression_runfiles_import_the_canonical_recipe_objects() -> 
         "005-gemma-3-4b-it-vproj-double-request.py",
         "006-compress-and-benchmark-gemma-3-1b-it.py",
         "007-compress-and-benchmark-gemma-3-270m-it.py",
+        "008-compress-and-benchmark-gemma-3-12b-it.py",
     ]
