@@ -32,7 +32,7 @@ from nanoquant.application.layers import (
     freeze_block_auxiliary_parameters,
     restore_block_auxiliary_parameters,
 )
-from nanoquant.application.loss_snapshots import BlockLossRecorder
+from nanoquant.application.loss_snapshots import BlockLossRecorder, normalized_activation_error
 from nanoquant.application.planning import PersistedPlan, PlanningRequest, build_quantization_plan, persist_plan
 from nanoquant.application.prefix_capture import capture_prefix_invocations
 from nanoquant.application.quantization_stages import (
@@ -384,6 +384,24 @@ def _weighted_mse(prediction: torch.Tensor, target: torch.Tensor, importance: to
         error = prediction[index].detach().float() - target[index].detach().float()
         total += (error.square() * weights).sum()
     return float(total / prediction.numel())
+
+
+def _weighted_target_mean_square(target: torch.Tensor, importance: torch.Tensor) -> float:
+    """Measure teacher signal power with bounded temporary memory."""
+
+    if importance.ndim != 1 or importance.shape[0] != target.shape[-1]:
+        raise ValueError("block output importance does not match hidden width")
+    weights = importance.to(device=target.device, dtype=torch.float32)
+    hidden = target.shape[-1]
+    rows = target.detach().reshape(-1, hidden)
+    total = torch.zeros((), device=target.device)
+    for start in range(0, rows.shape[0], 256):
+        stop = min(start + 256, rows.shape[0])
+        value = rows[start:stop].float()
+        value.square_()
+        value.mul_(weights)
+        total += value.sum()
+    return float(total / target.numel())
 
 
 def _self_reference_weighted_mse(value: torch.Tensor, importance: torch.Tensor) -> float:
@@ -780,6 +798,7 @@ def _epoch_cooldown_observer(
     tuning_kind: str | None = None,
     block: int | None = None,
     layer: str | None = None,
+    target_weighted_mean_square: float | None = None,
 ) -> Any:
     """Sleep after completed tuning epochs, never after the initial loss probe."""
 
@@ -798,6 +817,12 @@ def _epoch_cooldown_observer(
                     layer=layer,
                     epoch=epoch,
                     loss=loss,
+                    normalized_loss=(
+                        None
+                        if target_weighted_mean_square is None
+                        else normalized_activation_error(loss, target_weighted_mean_square)
+                    ),
+                    target_weighted_mean_square=target_weighted_mean_square,
                 )
             if seconds:
                 time.sleep(seconds)
@@ -1749,6 +1774,9 @@ def _process_resident_block(
             with tensors.read(block_output_stats.output_importance, request.device) as value:
                 block_output_importance = value.clone()
             loss_recorder = BlockLossRecorder()
+            loss_recorder.record_target_weighted_mean_square(
+                _weighted_target_mean_square(teacher_outputs, block_output_importance)
+            )
             loss_recorder.record_source_reference(
                 _self_reference_weighted_mse(teacher_outputs, block_output_importance)
             )
@@ -2165,6 +2193,9 @@ def _run_resident_quantization_impl(
         teacher_outputs = block_work.teacher_outputs
         block_output_importance = block_work.output_importance
         loss_recorder = block_work.loss_recorder
+        block_target_weighted_mean_square = loss_recorder.target_weighted_mean_square
+        if block_target_weighted_mean_square is None:
+            raise AssertionError("resident block is missing teacher activation power")
         layer_results: list[LayerResult] = []
         frozen_states = []
         quantization_targets: dict[str, TensorRef] = {}
@@ -2255,6 +2286,7 @@ def _run_resident_quantization_impl(
                                     tuning_kind="nonfactorized",
                                     block=block_index,
                                     layer=layer_plan.layer.path,
+                                    target_weighted_mean_square=block_target_weighted_mean_square,
                                 ),
                                 restore_best_state=request.restore_best_tuning_state,
                                 epoch_loss_mode=request.tuning_epoch_loss_mode,
@@ -2418,6 +2450,7 @@ def _run_resident_quantization_impl(
                     checkpoint_identity: TuningCheckpointIdentity = tuning_checkpoint_identity,
                     checkpoint_block: int = block_index,
                     checkpoint_layer: str = layer_plan.layer.path,
+                    checkpoint_target_power: float = block_target_weighted_mean_square,
                 ) -> None:
                     nonlocal new_factorized_tuning_epoch_commits
                     stored = save_tuning_checkpoint(request.output, state, checkpoint_identity)
@@ -2431,6 +2464,15 @@ def _run_resident_quantization_impl(
                         completed_epochs=stored.state.completed_epochs,
                         generation=stored.generation,
                         loss=(stored.state.epoch_losses[-1] if stored.state.epoch_losses else None),
+                        normalized_loss=(
+                            None
+                            if not stored.state.epoch_losses or stored.state.epoch_losses[-1] is None
+                            else normalized_activation_error(
+                                stored.state.epoch_losses[-1],
+                                checkpoint_target_power,
+                            )
+                        ),
+                        target_weighted_mean_square=checkpoint_target_power,
                         best_epoch=stored.state.best_epoch,
                         stopped_early=stored.state.stopped_early,
                     )
@@ -2651,6 +2693,7 @@ def _run_resident_quantization_impl(
                                 events,
                                 tuning_kind="post_block_refit",
                                 block=block_index,
+                                target_weighted_mean_square=block_target_weighted_mean_square,
                             ),
                         ),
                         tuning_forward,
@@ -2788,6 +2831,9 @@ def _run_resident_quantization_impl(
             journal_sequence=block_journal_record.sequence,
             entry_loss=committed.result.losses.block_entry_pre_quantization,
             final_loss=committed.result.losses.final_frozen_pre_kd,
+            target_weighted_mean_square=committed.result.losses.target_weighted_mean_square,
+            entry_normalized_error=committed.result.losses.block_entry_normalized_error,
+            final_normalized_error=committed.result.losses.final_frozen_normalized_error,
             wall_seconds=committed.result.wall_seconds,
             gpu_peak_bytes=committed.result.peak_gpu_bytes,
             host_peak_bytes=committed.result.peak_host_bytes,

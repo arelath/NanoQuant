@@ -12,6 +12,6 @@
 
 ## Final frozen block error before model-level KD
 
-| Block | Source reference | Block entry pre-quantization | Final frozen pre-KD | Final − block entry | Relative vs block entry | Final − source reference | Relative vs source |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0 | 0.000000 | 0.000000 | 9.044044 | 9.044044 | n/a | 9.044044 | n/a |
+| Block | Source reference | Target weighted power | Block entry pre-quantization | Entry normalized | Final frozen pre-KD | Final normalized | Final − block entry | Relative vs block entry | Final − source reference | Relative vs source |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | 0.000000 | n/a | 0.000000 | n/a | 9.044044 | n/a | 9.044044 | n/a | 9.044044 | n/a |

@@ -79,3 +79,5 @@ def test_live_report_rebuilds_partial_and_completed_rows_from_the_journal(tmp_pa
     assert "Durable progress: **1/1 layers**, **1/1 blocks**" in text
     assert "Status: **compression complete**" in text
     assert "block final" in text
+    assert "Entry normalized" in text
+    assert "Final normalized" in text

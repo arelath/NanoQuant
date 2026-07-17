@@ -30,7 +30,7 @@ def test_experiment008_is_guarded_12b_compression_quality_proof(tmp_path: Path) 
     assert config.model.source == MODEL_SOURCE
     assert config.model.revision == MODEL_REVISION
     assert config.intent.experiment_number == 8
-    assert config.intent.name == "008-compress-and-benchmark-gemma-3-12b-it-forward-only-v3"
+    assert config.intent.name == "008-compress-and-benchmark-gemma-3-12b-it-forward-only-v4"
     assert REQUESTED_GGUF_REPOSITORY in str(config.intent.baseline_run)
     assert config.runtime.executor is ExecutorKind.CPU_OFFLOAD
     assert config.calibration.method is CalibrationMethod.FORWARD_ONLY
@@ -38,9 +38,9 @@ def test_experiment008_is_guarded_12b_compression_quality_proof(tmp_path: Path) 
     assert config.runtime.activations.gpu_reserve_gib == 4.0
     assert config.runtime.block_forward_batch_size == 1
     assert config.block_tuning.microbatch_size == 1
-    assert config.block_tuning.non_factorized.loop.batch_size == 1
-    assert config.block_tuning.factorized.loop.batch_size == 1
-    assert config.block_tuning.post_block_refit.batch_size == 1
+    assert config.block_tuning.non_factorized.loop.batch_size == 8
+    assert config.block_tuning.factorized.loop.batch_size == 8
+    assert config.block_tuning.post_block_refit.batch_size == 8
     assert not config.evaluation.inline_quality
     assert not config.distillation.enabled
     assert EXPERIMENT_008.expected_blocks == 48

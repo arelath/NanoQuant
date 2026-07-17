@@ -468,7 +468,13 @@ class DistillationConfig:
 ```
 
 Separate nested tuning types prevent unrelated learning rates and batch sizes from becoming a flat list of similarly named fields.
-The block-level microbatch and replay fields are semantic because they can change optimizer arithmetic and legacy
+`loop.batch_size` is the logical optimizer batch: it determines gradient accumulation, optimizer-step count, and the
+cosine schedule. `block_tuning.microbatch_size` bounds each physical forward/backward allocation. For constrained
+devices, preserve the intended logical batch and reduce only the microbatch; for example, batch 8 with microbatch 1
+accumulates eight one-sample forwards before each optimizer step. `runtime.block_forward_batch_size` independently
+controls no-gradient teacher propagation and loss snapshots.
+
+The block-level batch, microbatch, and replay fields are semantic because they can change optimizer arithmetic and legacy
 trajectory parity. Distillation also records optimizer and sampling protocol versions so a resume cannot silently
 adopt checkpoints produced by a different recurrence.
 

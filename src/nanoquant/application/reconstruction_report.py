@@ -94,20 +94,24 @@ def render_live_weight_error_report(
             "",
             "## Completed block error before model-level KD",
             "",
-            "| Block | Entry pre-quantization | Final frozen pre-KD | Absolute delta | Relative vs entry |",
-            "| ---: | ---: | ---: | ---: | ---: |",
+            "| Block | Target weighted power | Entry pre-quantization | Entry normalized | "
+            "Final frozen pre-KD | Final normalized | Absolute delta | Relative vs entry |",
+            "| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
         ]
     )
     for block_index, block in sorted(block_map.items()):
         losses = block.losses
         lines.append(
-            f"| {block_index + 1} | {_number(losses.block_entry_pre_quantization, 6)} | "
+            f"| {block_index + 1} | {_number(losses.target_weighted_mean_square, 6)} | "
+            f"{_number(losses.block_entry_pre_quantization, 6)} | "
+            f"{_number(losses.block_entry_normalized_error, 6)} | "
             f"{_number(losses.final_frozen_pre_kd, 6)} | "
+            f"{_number(losses.final_frozen_normalized_error, 6)} | "
             f"{_number(losses.final_vs_block_entry.absolute_delta, 6)} | "
             f"{_percent(losses.final_vs_block_entry.relative_delta)} |"
         )
     if not block_map:
-        lines.append("| — | — | — | — | awaiting first durable block commit |")
+        lines.append("| — | — | — | — | — | — | — | awaiting first durable block commit |")
     return "\n".join(lines) + "\n"
 
 
@@ -134,16 +138,21 @@ def render_reconstruction_tables(
             "",
             "## Final frozen block error before model-level KD",
             "",
-            "| Block | Source reference | Block entry pre-quantization | Final frozen pre-KD | "
+            "| Block | Source reference | Target weighted power | Block entry pre-quantization | Entry normalized | "
+            "Final frozen pre-KD | Final normalized | "
             "Final − block entry | Relative vs block entry | Final − source reference | Relative vs source |",
-            "| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+            "| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
         ]
     )
     for block in blocks:
         losses = block.losses
         lines.append(
             f"| {block.block.index} | {_number(losses.source_reference, 6)} | "
-            f"{_number(losses.block_entry_pre_quantization, 6)} | {_number(losses.final_frozen_pre_kd, 6)} | "
+            f"{_number(losses.target_weighted_mean_square, 6)} | "
+            f"{_number(losses.block_entry_pre_quantization, 6)} | "
+            f"{_number(losses.block_entry_normalized_error, 6)} | "
+            f"{_number(losses.final_frozen_pre_kd, 6)} | "
+            f"{_number(losses.final_frozen_normalized_error, 6)} | "
             f"{_number(losses.final_vs_block_entry.absolute_delta, 6)} | "
             f"{_number(losses.final_vs_block_entry.relative_delta, 4)} | "
             f"{_number(losses.final_vs_source_reference.absolute_delta, 6)} | "

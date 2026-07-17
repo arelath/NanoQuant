@@ -26,6 +26,12 @@ factorization workspace. Explicit `inputs`
 and `both` requests fail instead of silently changing placement. Cache placement is an execution policy and therefore
 does not change resident semantic commit identity.
 
+Block diagnostics report both objective-weighted MSE and a scale-independent normalized activation error. The
+normalizer is the teacher activation's weighted mean square for that block, so
+`normalized_error = weighted_mse / target_weighted_mean_square`. Tuning epoch events carry `normalized_loss`, and
+`block.completed` plus the live `weight-errors.md` report carry entry/final normalized errors. This makes trends
+comparable when hidden-state magnitude and calibration importance change across depth.
+
 Quality workflows paired with `cpu_offload` or `streaming` use block-streamed BF16 baseline evaluation. The source
 Transformers shell remains in pageable host RAM, exact prefix metadata is captured for each evaluation batch, one
 decoder block visits the compute device at a time, and only the final norm/head are loaded for the suffix. The

@@ -87,6 +87,15 @@ def test_resident_quantization_commits_complete_transformers_model(tmp_path: Pat
     completed_event = next(event for event in events if event["name"] == "block.completed")
     assert completed_event["fields"]["journal_sequence"] == 8
     assert completed_event["fields"]["host_peak_bytes"] > 0
+    assert completed_event["fields"]["target_weighted_mean_square"] > 0
+    assert completed_event["fields"]["entry_normalized_error"] == pytest.approx(
+        completed_event["fields"]["entry_loss"]
+        / completed_event["fields"]["target_weighted_mean_square"]
+    )
+    assert completed_event["fields"]["final_normalized_error"] == pytest.approx(
+        completed_event["fields"]["final_loss"]
+        / completed_event["fields"]["target_weighted_mean_square"]
+    )
     outlier_attempts = sum(
         event["name"] == "stage.completed" and event["stage"] == "select-outliers"
         for event in events
@@ -289,6 +298,21 @@ def test_resident_tuning_recipe_refits_blocks_and_resumes_exactly(tmp_path: Path
         "nonfactorized",
         "post_block_refit",
     }
+    assert all(event["fields"]["target_weighted_mean_square"] > 0 for event in epoch_summaries)
+    assert all(
+        event["fields"]["normalized_loss"]
+        == pytest.approx(
+            event["fields"]["loss"] / event["fields"]["target_weighted_mean_square"]
+        )
+        for event in epoch_summaries
+    )
+    factorized_summaries = [
+        event
+        for event in tuning_events
+        if event["name"] == "factorized_tuning.epoch_checkpoint_committed"
+    ]
+    assert factorized_summaries
+    assert all(event["fields"]["normalized_loss"] is not None for event in factorized_summaries)
     loaded = load_frozen_run(
         base.output,
         snapshot,

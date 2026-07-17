@@ -21,6 +21,22 @@ def compare_losses(
     return LossComparison(baseline_name, candidate_name, baseline, candidate, delta, relative, denominator_floor)
 
 
+def normalized_activation_error(
+    loss: float,
+    target_weighted_mean_square: float,
+    denominator_floor: float = 1e-12,
+) -> float | None:
+    """Return scale-independent weighted activation error.
+
+    The ratio matches the reconstruction metric convention: weighted squared
+    error divided by the weighted squared norm of the teacher activations.
+    """
+
+    if abs(target_weighted_mean_square) < denominator_floor:
+        return None
+    return loss / target_weighted_mean_square
+
+
 def compare_global_tuning_losses(
     block: BlockId,
     final_frozen_pre_kd: float,
@@ -49,6 +65,10 @@ class BlockLossRecorder:
     after_layers: list[tuple[LayerId, float]] = field(default_factory=list)
     after_post_block_refit: float | None = None
     final_frozen_pre_kd: float | None = None
+    target_weighted_mean_square: float | None = None
+
+    def record_target_weighted_mean_square(self, value: float) -> None:
+        self.target_weighted_mean_square = value
 
     def record_source_reference(self, value: float) -> None:
         self.source_reference = value
@@ -70,6 +90,24 @@ class BlockLossRecorder:
     def finalize(self) -> BlockLossMetrics:
         if self.source_reference is None or self.block_entry is None or self.final_frozen_pre_kd is None:
             raise ValueError("source-reference, block-entry, and final-frozen-pre-KD losses are required")
+        entry_normalized = (
+            None
+            if self.target_weighted_mean_square is None
+            else normalized_activation_error(
+                self.block_entry,
+                self.target_weighted_mean_square,
+                self.denominator_floor,
+            )
+        )
+        final_normalized = (
+            None
+            if self.target_weighted_mean_square is None
+            else normalized_activation_error(
+                self.final_frozen_pre_kd,
+                self.target_weighted_mean_square,
+                self.denominator_floor,
+            )
+        )
         return BlockLossMetrics(
             self.source_reference,
             self.block_entry,
@@ -90,4 +128,7 @@ class BlockLossRecorder:
                 self.final_frozen_pre_kd,
                 self.denominator_floor,
             ),
+            self.target_weighted_mean_square,
+            entry_normalized,
+            final_normalized,
         )

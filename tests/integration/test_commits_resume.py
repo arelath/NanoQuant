@@ -100,6 +100,7 @@ def test_named_loss_snapshots_include_near_zero_na_semantics() -> None:
     layer = LayerId(BlockId(0), "linear")
     recorder = BlockLossRecorder(denominator_floor=1e-6)
     recorder.record_source_reference(0.0)
+    recorder.record_target_weighted_mean_square(4.0)
     recorder.record_block_entry(2.0)
     recorder.record_after_layer(layer, 1.0)
     recorder.record_final_frozen_pre_kd(1.0)
@@ -107,6 +108,16 @@ def test_named_loss_snapshots_include_near_zero_na_semantics() -> None:
     assert result.final_vs_block_entry.relative_delta == -0.5
     assert result.final_vs_source_reference.relative_delta is None
     assert result.final_vs_source_reference.baseline_name == "source_reference"
+    assert result.target_weighted_mean_square == 4.0
+    assert result.block_entry_normalized_error == 0.5
+    assert result.final_frozen_normalized_error == 0.25
+
+    near_zero = BlockLossRecorder(denominator_floor=1e-6)
+    near_zero.record_source_reference(0.0)
+    near_zero.record_target_weighted_mean_square(0.0000005)
+    near_zero.record_block_entry(2.0)
+    near_zero.record_final_frozen_pre_kd(1.0)
+    assert near_zero.finalize().final_frozen_normalized_error is None
 
 
 def test_layer_block_commits_are_atomic_and_post_commit_failures_are_discoverable(tmp_path: Path) -> None:

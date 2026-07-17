@@ -532,6 +532,9 @@ class BlockLossMetrics:
     final_frozen_pre_kd: float
     final_vs_block_entry: LossComparison
     final_vs_source_reference: LossComparison
+    target_weighted_mean_square: float | None = None
+    block_entry_normalized_error: float | None = None
+    final_frozen_normalized_error: float | None = None
 
 
 @dataclass(frozen=True, slots=True)

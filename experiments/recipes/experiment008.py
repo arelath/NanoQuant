@@ -16,8 +16,6 @@ REQUESTED_GGUF_FILENAME = "gemma-3-12b-it-BF16.gguf"
 MODEL_SOURCE = "unsloth/gemma-3-12b-it"
 MODEL_REVISION = "9478e665381f42974aa06177b019352fb6291876"
 
-_base_tuning = LARGE_MODEL_COMPRESSION_CONFIG.block_tuning
-
 EXPERIMENT_008_CONFIG = config_delta(
     LARGE_MODEL_COMPRESSION_CONFIG,
     model=config_delta(
@@ -30,7 +28,7 @@ EXPERIMENT_008_CONFIG = config_delta(
     intent=config_delta(
         LARGE_MODEL_COMPRESSION_CONFIG.intent,
         experiment_number=8,
-        name="008-compress-and-benchmark-gemma-3-12b-it-forward-only-v3",
+        name="008-compress-and-benchmark-gemma-3-12b-it-forward-only-v4",
         purpose=(
             "Compress and quality-benchmark the BF16 weights corresponding to "
             "unsloth/gemma-3-12b-it-GGUF without entering WDDM shared memory."
@@ -56,19 +54,7 @@ EXPERIMENT_008_CONFIG = config_delta(
         ),
     ),
     block_tuning=config_delta(
-        _base_tuning,
-        non_factorized=config_delta(
-            _base_tuning.non_factorized,
-            loop=config_delta(_base_tuning.non_factorized.loop, batch_size=1),
-        ),
-        factorized=config_delta(
-            _base_tuning.factorized,
-            loop=config_delta(_base_tuning.factorized.loop, batch_size=1),
-        ),
-        post_block_refit=config_delta(
-            _base_tuning.post_block_refit,
-            batch_size=1,
-        ),
+        LARGE_MODEL_COMPRESSION_CONFIG.block_tuning,
         microbatch_size=1,
     ),
     runtime=config_delta(
