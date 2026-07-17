@@ -1,41 +1,29 @@
 """Experiment 004: selectively add 30% packed bits to Experiment 003 v_proj layers."""
 
-from pathlib import Path
+from ._experiment import (
+    BaselineRef,
+    ExperimentIdentity,
+    define_rank_expansion_experiment,
+)
+from .experiment003 import EXPERIMENT_003
 
-from nanoquant.rank_expansion_experiment import RankExpansionExperiment
-
-from ._delta import config_delta
-from .experiment003 import EXPERIMENT_003_CONFIG
-
-EXPERIMENT_004_CONFIG = config_delta(
-    EXPERIMENT_003_CONFIG,
-    intent=config_delta(
-        EXPERIMENT_003_CONFIG.intent,
-        experiment_number=4,
-        name="004-gemma-3-4b-it-vproj-plus30",
+_IDENTITY = ExperimentIdentity(
+        number=4,
+        name="gemma-3-4b-it-vproj-plus30",
         purpose="Measure whether additive v_proj rank improves Experiment 003 reconstruction and quality.",
         hypothesis=(
             "Adding 30% packed bits only to final Experiment 003 v_proj states lowers weighted reconstruction "
             "error and improves matched WikiText/task quality while every non-v_proj tensor remains exact."
         ),
-        baseline_run="003-compress-and-benchmark-gemma-3-4b-it-v5",
+        baseline=BaselineRef.experiment(EXPERIMENT_003.identity),
         tags=("rank-allocation", "v-proj", "selective-replay", "gemma-3-4b-it"),
-    ),
 )
 
-_ROOT = Path("outputs/004-gemma-3-4b-it-vproj-plus30")
-EXPERIMENT_004 = RankExpansionExperiment(
-    parent_run=Path("evidence/m10/003-compress-and-benchmark-gemma-3-4b-it-v5"),
-    source_packed=Path("outputs/003-gemma-3-4b-it/packed"),
-    output_packed=_ROOT / "packed",
-    checkpoint_output=_ROOT / "llamacpp-checkpoint",
-    gguf_output=_ROOT / "gemma-3-4b-it-vproj-plus30-nanoquant.gguf",
-    expansion_report=Path("evidence/m11/004-gemma-3-4b-it-vproj-plus30-expansion.json"),
-    quality_output=Path("evidence/m11/004-gemma-3-4b-it-vproj-plus30-quality.json"),
-    quality_markdown_output=Path("evidence/m11/004-gemma-3-4b-it-vproj-plus30-quality.md"),
-    summary_output=Path("evidence/m11/004-gemma-3-4b-it-vproj-plus30-summary.json"),
-    baseline_quality=Path("Results/003/003-gemma-3-4b-it-quality.json"),
-    llama_cpp_root=Path(r"D:\dev\research\llama.cpp"),
+EXPERIMENT_004 = define_rank_expansion_experiment(
+    _IDENTITY,
+    EXPERIMENT_003.config,
+    parent=EXPERIMENT_003,
+    release_name="gemma-3-4b-it-vproj-plus30",
 )
 
-__all__ = ["EXPERIMENT_004", "EXPERIMENT_004_CONFIG"]
+__all__ = ["EXPERIMENT_004"]

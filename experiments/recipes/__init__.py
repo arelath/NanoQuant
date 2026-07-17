@@ -1,51 +1,60 @@
-"""Canonical promoted experiment recipes."""
+"""Canonical active experiment definitions and unnumbered templates."""
 
+from nanoquant.compression_export_workflow import HuggingFaceUploadConfig
+
+from ._experiment import (
+    BaselineKind,
+    BaselineRef,
+    CompressionExportPolicy,
+    ExperimentDefinition,
+    ExperimentIdentity,
+    ExperimentLayout,
+    validate_experiment_registry,
+)
 from .base_compression import (
-    BASE_COMPRESSION_CONFIG,
-    LARGE_MODEL_COMPRESSION_CONFIG,
-    HuggingFaceUploadConfig,
-    compression_export_recipe,
+    BASE_COMPRESSION_TEMPLATE,
+    GEMMA_3_1B_PARITY_TEMPLATE,
+    LARGE_MODEL_COMPRESSION_TEMPLATE,
 )
-from .experiment001 import EXPERIMENT_001, EXPERIMENT_001_CONFIG
-from .experiment002 import EXPERIMENT_002_CONFIG, EXPERIMENT_002_EVALUATION
-from .experiment003 import EXPERIMENT_003, EXPERIMENT_003_CONFIG
-from .experiment004 import EXPERIMENT_004, EXPERIMENT_004_CONFIG
-from .experiment005 import EXPERIMENT_005, EXPERIMENT_005_CONFIG
-from .experiment006 import EXPERIMENT_006, EXPERIMENT_006_CONFIG
-from .experiment007 import EXPERIMENT_007, EXPERIMENT_007_CONFIG
-from .experiment008 import EXPERIMENT_008, EXPERIMENT_008_CONFIG
-from .legacy import (
-    EXPERIMENT_011_BENCHMARK,
-    EXPERIMENT_011_CONFIG,
-    EXPERIMENT_013_CONFIG,
-    EXPERIMENT_018_CONFIG,
-    LEGACY_EXPERIMENT_008_CONFIG,
+from .experiment001 import EXPERIMENT_001
+from .experiment002 import EXPERIMENT_002
+from .experiment003 import EXPERIMENT_003
+from .experiment004 import EXPERIMENT_004
+from .experiment005 import EXPERIMENT_005
+from .experiment006 import EXPERIMENT_006
+from .experiment007 import EXPERIMENT_007
+from .experiment008 import EXPERIMENT_008
+
+ALL_EXPERIMENTS = (
+    EXPERIMENT_001,
+    EXPERIMENT_002,
+    EXPERIMENT_003,
+    EXPERIMENT_004,
+    EXPERIMENT_005,
+    EXPERIMENT_006,
+    EXPERIMENT_007,
+    EXPERIMENT_008,
 )
+validate_experiment_registry(ALL_EXPERIMENTS)
 
 __all__ = [
-    "BASE_COMPRESSION_CONFIG",
+    "ALL_EXPERIMENTS",
+    "BASE_COMPRESSION_TEMPLATE",
+    "BaselineKind",
+    "BaselineRef",
+    "CompressionExportPolicy",
+    "ExperimentDefinition",
+    "ExperimentIdentity",
+    "ExperimentLayout",
+    "GEMMA_3_1B_PARITY_TEMPLATE",
     "HuggingFaceUploadConfig",
-    "LARGE_MODEL_COMPRESSION_CONFIG",
-    "compression_export_recipe",
-    "EXPERIMENT_001_CONFIG",
+    "LARGE_MODEL_COMPRESSION_TEMPLATE",
     "EXPERIMENT_001",
-    "EXPERIMENT_002_CONFIG",
-    "EXPERIMENT_002_EVALUATION",
-    "EXPERIMENT_003_CONFIG",
+    "EXPERIMENT_002",
     "EXPERIMENT_003",
-    "EXPERIMENT_004_CONFIG",
     "EXPERIMENT_004",
-    "EXPERIMENT_005_CONFIG",
     "EXPERIMENT_005",
-    "EXPERIMENT_006_CONFIG",
     "EXPERIMENT_006",
-    "EXPERIMENT_007_CONFIG",
     "EXPERIMENT_007",
-    "EXPERIMENT_008_CONFIG",
     "EXPERIMENT_008",
-    "LEGACY_EXPERIMENT_008_CONFIG",
-    "EXPERIMENT_011_BENCHMARK",
-    "EXPERIMENT_011_CONFIG",
-    "EXPERIMENT_013_CONFIG",
-    "EXPERIMENT_018_CONFIG",
 ]

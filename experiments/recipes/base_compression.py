@@ -1,11 +1,4 @@
-"""Visible base recipe shared by all complete NanoQuant compression experiments."""
-
-from pathlib import Path
-
-from nanoquant.compression_export_workflow import (
-    CompressionExportRecipe,
-    HuggingFaceUploadConfig,
-)
+"""Visible unnumbered templates shared by NanoQuant compression experiments."""
 from nanoquant.config.schema import (
     ActivationGpuCacheMode,
     AllocationStrategy,
@@ -23,19 +16,12 @@ MODEL_REVISION = "dcc83ea841ab6100d6b47a070329e1ba4cf78752"
 
 _SCHEMA_DEFAULTS = run_config_defaults("google/gemma-3-1b-it")
 
-BASE_COMPRESSION_CONFIG = config_delta(
+BASE_COMPRESSION_TEMPLATE = config_delta(
     _SCHEMA_DEFAULTS,
     model=config_delta(
         _SCHEMA_DEFAULTS.model,
         revision=MODEL_REVISION,
         tokenizer_revision=MODEL_REVISION,
-    ),
-    intent=config_delta(
-        _SCHEMA_DEFAULTS.intent,
-        name="base-compression-gemma-3",
-        purpose="Compress, tune, validate, and export a complete NanoQuant model.",
-        hypothesis="The shared compression pipeline produces bounded, resumable, deployable GGUF artifacts.",
-        tags=("base-compression", "gemma-3", "gguf"),
     ),
     dataset=config_delta(
         _SCHEMA_DEFAULTS.dataset,
@@ -138,69 +124,45 @@ BASE_COMPRESSION_CONFIG = config_delta(
 )
 
 
-LARGE_MODEL_COMPRESSION_CONFIG = config_delta(
-    BASE_COMPRESSION_CONFIG,
-    intent=config_delta(
-        BASE_COMPRESSION_CONFIG.intent,
-        name="base-large-model-compression",
-        purpose="Compress and evaluate a model that cannot safely keep its BF16 shell on CUDA.",
-        hypothesis="Host-resident source blocks and bounded activation caching keep device use block-local.",
-        tags=("base-compression", "large-model", "cpu-offload", "packed-quality"),
+GEMMA_3_1B_PARITY_TEMPLATE = config_delta(
+    BASE_COMPRESSION_TEMPLATE,
+    allocation=config_delta(
+        BASE_COMPRESSION_TEMPLATE.allocation,
+        maximum_rank_layer_patterns=(),
+        layer_budget_multipliers=(),
     ),
+)
+
+
+LARGE_MODEL_COMPRESSION_TEMPLATE = config_delta(
+    BASE_COMPRESSION_TEMPLATE,
     distillation=config_delta(
-        BASE_COMPRESSION_CONFIG.distillation,
+        BASE_COMPRESSION_TEMPLATE.distillation,
         enabled=False,
     ),
     calibration=config_delta(
-        BASE_COMPRESSION_CONFIG.calibration,
+        BASE_COMPRESSION_TEMPLATE.calibration,
         method=CalibrationMethod.FORWARD_ONLY,
     ),
     runtime=config_delta(
-        BASE_COMPRESSION_CONFIG.runtime,
+        BASE_COMPRESSION_TEMPLATE.runtime,
         executor=ExecutorKind.CPU_OFFLOAD,
         activations=config_delta(
-            BASE_COMPRESSION_CONFIG.runtime.activations,
+            BASE_COMPRESSION_TEMPLATE.runtime.activations,
             gpu_cache=ActivationGpuCacheMode.AUTO,
             gpu_reserve_gib=4.0,
         ),
     ),
     evaluation=config_delta(
-        BASE_COMPRESSION_CONFIG.evaluation,
+        BASE_COMPRESSION_TEMPLATE.evaluation,
         inline_quality=False,
     ),
 )
 
 
-def compression_export_recipe(
-    experiment_number: int,
-    model_slug: str,
-    *,
-    token_embedding_type: str = "q8_0",
-    huggingface: HuggingFaceUploadConfig | None = None,
-) -> CompressionExportRecipe:
-    """Return the mandatory deployment outputs for a numbered compression experiment."""
-
-    if experiment_number < 0 or experiment_number > 999:
-        raise ValueError("compression experiment number must be between 0 and 999")
-    if not model_slug or Path(model_slug).name != model_slug:
-        raise ValueError("compression model slug must be one safe path component")
-    root = Path(f"outputs/{experiment_number:03d}-{model_slug}")
-    return CompressionExportRecipe(
-        logical_output=root / "logical",
-        packed_output=root / "packed",
-        checkpoint_output=root / "llamacpp-checkpoint",
-        gguf_output=root / f"{model_slug}-nanoquant.gguf",
-        llama_cpp_root=Path(r"D:\dev\research\llama.cpp"),
-        runtime_family="gemma3",
-        token_embedding_type=token_embedding_type,
-        huggingface=huggingface,
-    )
-
-
 __all__ = [
-    "BASE_COMPRESSION_CONFIG",
-    "LARGE_MODEL_COMPRESSION_CONFIG",
+    "BASE_COMPRESSION_TEMPLATE",
+    "GEMMA_3_1B_PARITY_TEMPLATE",
+    "LARGE_MODEL_COMPRESSION_TEMPLATE",
     "MODEL_REVISION",
-    "HuggingFaceUploadConfig",
-    "compression_export_recipe",
 ]

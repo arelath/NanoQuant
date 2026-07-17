@@ -1,11 +1,12 @@
 """Experiment 008: Gemma 3 12B large-model compression quality benchmark."""
 
-from pathlib import Path
-
-from nanoquant.compression_quality_workflow import CompressionQualityExperiment
-
 from ._delta import config_delta
-from .base_compression import LARGE_MODEL_COMPRESSION_CONFIG, compression_export_recipe
+from ._experiment import (
+    BaselineRef,
+    ExperimentIdentity,
+    define_compression_quality_experiment,
+)
+from .base_compression import LARGE_MODEL_COMPRESSION_TEMPLATE
 
 # The requested repository publishes GGUF containers only. NanoQuant currently
 # inventories safetensors sources, so compression uses the matching Unsloth BF16
@@ -16,19 +17,29 @@ REQUESTED_GGUF_FILENAME = "gemma-3-12b-it-BF16.gguf"
 MODEL_SOURCE = "unsloth/gemma-3-12b-it"
 MODEL_REVISION = "9478e665381f42974aa06177b019352fb6291876"
 
-EXPERIMENT_008_CONFIG = config_delta(
-    LARGE_MODEL_COMPRESSION_CONFIG,
+_TEMPLATE = config_delta(
+    LARGE_MODEL_COMPRESSION_TEMPLATE,
     model=config_delta(
-        LARGE_MODEL_COMPRESSION_CONFIG.model,
+        LARGE_MODEL_COMPRESSION_TEMPLATE.model,
         source=MODEL_SOURCE,
         revision=MODEL_REVISION,
         tokenizer_source=MODEL_SOURCE,
         tokenizer_revision=MODEL_REVISION,
     ),
-    intent=config_delta(
-        LARGE_MODEL_COMPRESSION_CONFIG.intent,
-        experiment_number=8,
-        name="008-compress-and-benchmark-gemma-3-12b-it-forward-only-v4",
+    block_tuning=config_delta(
+        LARGE_MODEL_COMPRESSION_TEMPLATE.block_tuning,
+        microbatch_size=1,
+    ),
+    runtime=config_delta(
+        LARGE_MODEL_COMPRESSION_TEMPLATE.runtime,
+        block_forward_batch_size=1,
+    ),
+)
+
+EXPERIMENT_008 = define_compression_quality_experiment(
+    ExperimentIdentity(
+        number=8,
+        name="compress-and-benchmark-gemma-3-12b-it",
         purpose=(
             "Compress and quality-benchmark the BF16 weights corresponding to "
             "unsloth/gemma-3-12b-it-GGUF without entering WDDM shared memory."
@@ -37,9 +48,8 @@ EXPERIMENT_008_CONFIG = config_delta(
             "CPU-offloaded block compression and packed evaluation can process the 48-block 12B model "
             "within 12 GiB of dedicated VRAM."
         ),
-        baseline_run=(
-            f"{REQUESTED_GGUF_REPOSITORY}@{REQUESTED_GGUF_REVISION}:"
-            f"{REQUESTED_GGUF_FILENAME}"
+        baseline=BaselineRef.external(
+            f"{REQUESTED_GGUF_REPOSITORY}@{REQUESTED_GGUF_REVISION}:{REQUESTED_GGUF_FILENAME}"
         ),
         tags=(
             "gemma-3-12b-it",
@@ -53,25 +63,7 @@ EXPERIMENT_008_CONFIG = config_delta(
             "ultrachat",
         ),
     ),
-    block_tuning=config_delta(
-        LARGE_MODEL_COMPRESSION_CONFIG.block_tuning,
-        microbatch_size=1,
-    ),
-    runtime=config_delta(
-        LARGE_MODEL_COMPRESSION_CONFIG.runtime,
-        block_forward_batch_size=1,
-    ),
-    output=config_delta(
-        LARGE_MODEL_COMPRESSION_CONFIG.output,
-        run_root="evidence/m15",
-    ),
-)
-
-EXPERIMENT_008 = CompressionQualityExperiment(
-    export=compression_export_recipe(8, "gemma-3-12b-it"),
-    summary_output=Path("evidence/m15/008-gemma-3-12b-it-summary.json"),
-    quality_output=Path("evidence/m15/008-gemma-3-12b-it-quality.json"),
-    quality_markdown_output=Path("evidence/m15/008-gemma-3-12b-it-quality.md"),
+    _TEMPLATE,
     expected_blocks=48,
     maximum_wddm_shared_gib=0.75,
     restore_completed_blocks=False,
@@ -80,7 +72,6 @@ EXPERIMENT_008 = CompressionQualityExperiment(
 
 __all__ = [
     "EXPERIMENT_008",
-    "EXPERIMENT_008_CONFIG",
     "MODEL_REVISION",
     "MODEL_SOURCE",
     "REQUESTED_GGUF_FILENAME",

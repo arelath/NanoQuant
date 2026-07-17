@@ -3,29 +3,23 @@
 from pathlib import Path
 
 from nanoquant.quality_evaluation import QualityEvaluationRequest
-from nanoquant.quality_evaluation_workflow import QualityEvaluationExperiment
-
 from ._delta import config_delta, run_config_defaults
+from ._experiment import (
+    BaselineRef,
+    ExperimentIdentity,
+    define_quality_evaluation_experiment,
+)
 
 MODEL_REVISION = "dcc83ea841ab6100d6b47a070329e1ba4cf78752"
 
 _SCHEMA_DEFAULTS = run_config_defaults("google/gemma-3-1b-it")
 
-EXPERIMENT_002_CONFIG = config_delta(
+_TEMPLATE = config_delta(
     _SCHEMA_DEFAULTS,
     model=config_delta(
         _SCHEMA_DEFAULTS.model,
         revision=MODEL_REVISION,
         tokenizer_revision=MODEL_REVISION,
-    ),
-    intent=config_delta(
-        _SCHEMA_DEFAULTS.intent,
-        experiment_number=2,
-        name="002-benchmark-gemma-3-1b-it",
-        purpose="Benchmark the accepted NanoQuant Gemma candidate against its pinned BF16 source model.",
-        hypothesis="NanoQuant retains quality across WikiText-2 and the common legacy multiple-choice suite.",
-        baseline_run="bf16-google-gemma-3-1b-it",
-        tags=("gemma-3-1b-it", "benchmark", "bf16-comparison", "wikitext2", "multiple-choice"),
     ),
     evaluation=config_delta(
         _SCHEMA_DEFAULTS.evaluation,
@@ -42,7 +36,16 @@ EXPERIMENT_002_CONFIG = config_delta(
     ),
 )
 
-EXPERIMENT_002_EVALUATION = QualityEvaluationExperiment(
+EXPERIMENT_002 = define_quality_evaluation_experiment(
+    ExperimentIdentity(
+        number=2,
+        name="benchmark-gemma-3-1b-it",
+        purpose="Benchmark the accepted NanoQuant Gemma candidate against its pinned BF16 source model.",
+        hypothesis="NanoQuant retains quality across WikiText-2 and the common multiple-choice suite.",
+        baseline=BaselineRef.external("bf16-google-gemma-3-1b-it"),
+        tags=("gemma-3-1b-it", "benchmark", "bf16-comparison", "wikitext2", "multiple-choice"),
+    ),
+    _TEMPLATE,
     QualityEvaluationRequest(
         snapshot=Path("google/gemma-3-1b-it"),
         source="google/gemma-3-1b-it",
@@ -66,9 +69,7 @@ EXPERIMENT_002_EVALUATION = QualityEvaluationExperiment(
         task_batch_size=1,
         local_files_only=True,
     ),
-    Path("evidence/m9/002-gemma-3-1b-it-quality-benchmark.json"),
     resolve_model_from_config=True,
-    markdown_path=Path("evidence/m9/002-gemma-3-1b-it-quality-benchmark.md"),
 )
 
-__all__ = ["EXPERIMENT_002_CONFIG", "EXPERIMENT_002_EVALUATION", "MODEL_REVISION"]
+__all__ = ["EXPERIMENT_002", "MODEL_REVISION"]
