@@ -23,6 +23,7 @@ from nanoquant.infrastructure.events import (
     ConsoleEventDestination,
     EventDestination,
     EventRouter,
+    EventView,
     JsonlEventDestination,
     prepare_event_stream,
     read_last_event,
@@ -191,16 +192,22 @@ def open_run_session(
                         )
                     history.stop()
                 router.flush()
-                try:
-                    render_event_log(directory.events_path, directory.root / "run.log")
-                except Exception as exc:
-                    router.emit(
-                        "observability",
-                        "warning",
-                        "observability.render_failed",
-                        error_type=type(exc).__name__,
-                    )
-                    router.flush()
+                renderings: tuple[tuple[str, EventView], ...] = (
+                    ("run.log", "run"),
+                    ("memory.log", "memory"),
+                )
+                for filename, view in renderings:
+                    try:
+                        render_event_log(directory.events_path, directory.root / filename, view=view)
+                    except Exception as exc:
+                        router.emit(
+                            "observability",
+                            "warning",
+                            "observability.render_failed",
+                            error_type=type(exc).__name__,
+                            output=filename,
+                        )
+                        router.flush()
                 router.close()
         finally:
             lease.release()

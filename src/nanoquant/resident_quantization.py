@@ -2121,6 +2121,18 @@ def _run_resident_quantization_impl(
     completed_block_indexes = resume.completed_block_indexes
     layer_container = resume.layer_container
     partial_layer_records = resume.partial_layer_records
+    completed_wall_seconds = sum(block.wall_seconds for _reference, block in committed_blocks)
+    cast(Any, events).emit(
+        "resident-quantization",
+        "info",
+        "compression.progress_initialized",
+        total_blocks=len(plan.blocks),
+        completed_blocks=len(completed_block_indexes),
+        completed_wall_seconds=completed_wall_seconds,
+        mean_block_seconds=(
+            completed_wall_seconds / len(committed_blocks) if committed_blocks else None
+        ),
+    )
     live_layers = {
         (layer.layer.block.index, layer.layer.path): layer
         for _reference, block in committed_blocks

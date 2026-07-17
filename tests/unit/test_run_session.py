@@ -122,6 +122,12 @@ def test_run_session_emits_host_resource_samples_and_stops_sampler(tmp_path: Pat
     samples = [event for event in events if event["name"] == "resource.sample"]
     assert samples
     assert "host.working_set_bytes" in samples[0]["fields"]
+    run_log = (output / "run.log").read_text(encoding="utf-8")
+    memory_log = (output / "memory.log").read_text(encoding="utf-8")
+    assert "resource.sample" not in run_log
+    assert "host.working_set_bytes" not in run_log
+    assert "resource.sample" in memory_log
+    assert "host.working_set_bytes" in memory_log
     assert not any(thread.name == "nanoquant-resource-sampler" for thread in threading.enumerate())
 
 

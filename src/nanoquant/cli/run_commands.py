@@ -16,6 +16,7 @@ from nanoquant.domain.runs import RunStatus
 from nanoquant.infrastructure.events import (
     EventStreamError,
     event_stream_integrity,
+    project_event,
     read_event_prefix,
     render_event_line,
     render_event_log,
@@ -65,7 +66,11 @@ def add_run_commands(subcommands: argparse._SubParsersAction[argparse.ArgumentPa
     path = run_commands.add_parser("path", help="print one absolute run evidence path")
     _add_root(path)
     _add_selector(path)
-    path.add_argument("--kind", choices=("run", "manifest", "events", "journal", "report"), required=True)
+    path.add_argument(
+        "--kind",
+        choices=("run", "manifest", "events", "journal", "report", "log", "memory-log"),
+        required=True,
+    )
 
     rebuild = run_commands.add_parser("rebuild-registry", help="rebuild immutable external-run pointers")
     _add_root(rebuild)
@@ -82,6 +87,7 @@ def add_run_commands(subcommands: argparse._SubParsersAction[argparse.ArgumentPa
     logs.add_argument("--follow", action="store_true")
     logs.add_argument("--level", choices=tuple(level.value for level in Severity), default=Severity.DEBUG.value)
     logs.add_argument("--json", action="store_true")
+    logs.add_argument("--memory", action="store_true", help="show the memory-focused event view")
     logs.add_argument("--save", action="store_true")
     logs.add_argument("--poll-seconds", type=float, default=1.0)
 
@@ -167,6 +173,8 @@ def _path(args: argparse.Namespace) -> int:
         "manifest": item.path / "manifest.json",
         "events": item.path / "events.jsonl",
         "journal": item.path / "state" / "journal.jsonl",
+        "log": item.path / "run.log",
+        "memory-log": item.path / "memory.log",
         "report": (
             item.path / "reports" / "summary.md"
             if (item.path / "reports" / "summary.md").exists()
@@ -285,11 +293,14 @@ def _vram(args: argparse.Namespace) -> int:
     return 0
 
 
-def _print_event(event: Event, *, json_output: bool) -> None:
+def _print_event(event: Event, *, json_output: bool, memory: bool) -> None:
+    projected = project_event(event, "memory" if memory else ("all" if json_output else "run"))
+    if projected is None:
+        return
     if json_output:
-        print(json.dumps(asdict(event), sort_keys=True, separators=(",", ":")), flush=True)
+        print(json.dumps(asdict(projected), sort_keys=True, separators=(",", ":")), flush=True)
     else:
-        print(render_event_line(event), flush=True)
+        print(render_event_line(projected), flush=True)
 
 
 def _manifest_status(path: Path) -> str | None:
@@ -313,7 +324,8 @@ def _logs(args: argparse.Namespace) -> int:
     if args.poll_seconds <= 0:
         raise CommandError("--poll-seconds must be positive", 2)
     if args.save:
-        render_event_log(events_path, item.path / "run.log")
+        render_event_log(events_path, item.path / "run.log", view="run")
+        render_event_log(events_path, item.path / "memory.log", view="memory")
 
     last_sequence = 0
     previous_identity: tuple[int, int] | None = None
@@ -333,7 +345,7 @@ def _logs(args: argparse.Namespace) -> int:
                     continue
                 last_sequence = event.sequence
                 if Severity.parse(event.severity).rank >= level.rank:
-                    _print_event(event, json_output=args.json)
+                    _print_event(event, json_output=args.json, memory=args.memory)
             integrity = event_stream_integrity(events_path)
             if not args.follow:
                 return 0 if integrity == "ok" else 4

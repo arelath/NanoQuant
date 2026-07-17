@@ -227,12 +227,21 @@ Runs that started with an older worker can be backfilled without acquiring the G
 The console is concise and optimized for active monitoring:
 
 ```text
+Compressing Layers:  83.3%|####################----| 15/18 [00:54:35<00:10:59, 219.8s/block] block=16/18 layer=4/7 self_attn.v_proj
 [12/80] self_attn.v_proj attempt 1 rank=1536 err=0.284 threshold=0.350 18.4s ACCEPT
 [12/80] block entry=1.91e-4 final-pre-KD=2.02e-4 delta=+1.10e-5 (+5.76%)
-[resources] gpu=31.2/44.0 GiB host=42.8/64.0 GiB temp=38.1/500 GiB
 ```
 
-Detailed tensors and histories remain in structured artifacts. Progress rendering must not synchronize CUDA or become a material part of stage time.
+The resident compression bar is a console-only projection of structured block and layer events. Interactive
+terminals update one carriage-return line; captured output emits bounded checkpoints instead. Its elapsed time and
+ETA use committed block wall times, and resume initializes the estimate from already committed blocks without
+scanning the historical event stream. No progress-bar text is written to `run.log` or `memory.log`.
+
+Periodic resource samples and memory fields injected into lifecycle events are omitted from the normal console and
+`run.log`. They remain canonical in `events.jsonl`, are rendered to the disposable `memory.log` snapshot, and can be
+followed live with `nanoquant logs latest --memory --follow`. OOM and sampler warnings remain visible in the normal
+view with non-meter diagnostic context. Detailed tensors and histories remain in structured artifacts. Progress
+rendering must not synchronize CUDA or become a material part of stage time.
 
 ## 10. Run summary report
 
@@ -294,7 +303,9 @@ Initial sinks:
 - in-memory sink for tests;
 - optional OpenTelemetry-compatible exporter later.
 
-Large traces, profiles, and per-step convergence arrays are separate compressed artifacts referenced by events. Routine event logs remain small enough to inspect and diff.
+`run.log` and `memory.log` are rebuildable human projections, not additional event sinks or authorities. Large traces,
+profiles, and per-step convergence arrays are separate compressed artifacts referenced by events. Routine event logs
+remain small enough to inspect and diff.
 
 Retention classes:
 

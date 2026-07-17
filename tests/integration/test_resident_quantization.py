@@ -71,6 +71,7 @@ def test_resident_quantization_commits_complete_transformers_model(tmp_path: Pat
     assert event_names.count("calibration_persist.started") == 1
     assert event_names.count("calibration_persist.completed") == 1
     assert event_names.count("rank_planning.started") == event_names.count("rank_planning.completed") == 1
+    assert event_names.count("compression.progress_initialized") == 1
     assert event_names.count("block.started") == 1
     assert event_names.count("block_teacher_forward.started") == 1
     assert event_names.count("block_teacher_forward.completed") == 1
@@ -84,6 +85,15 @@ def test_resident_quantization_commits_complete_transformers_model(tmp_path: Pat
     assert run_started["fields"]["component"] == "resident-quantization"
     assert run_started["fields"]["device"] == "cpu"
     assert run_started["fields"]["calibration_samples"] == 1
+    progress_initialized = next(
+        event for event in events if event["name"] == "compression.progress_initialized"
+    )
+    assert progress_initialized["fields"] == {
+        "completed_blocks": 0,
+        "completed_wall_seconds": 0,
+        "mean_block_seconds": None,
+        "total_blocks": 1,
+    }
     completed_event = next(event for event in events if event["name"] == "block.completed")
     assert completed_event["fields"]["journal_sequence"] == 8
     assert completed_event["fields"]["host_peak_bytes"] > 0

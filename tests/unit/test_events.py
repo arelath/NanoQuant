@@ -12,6 +12,7 @@ from nanoquant.infrastructure.events import (
     EventWriteError,
     JsonlEventSink,
     prepare_event_stream,
+    project_event,
     render_event_line,
     sanitize_fields,
 )
@@ -44,6 +45,11 @@ class MemoryDestination:
 
     def close(self) -> None:
         self.closed = True
+
+
+class TtyStringIO(io.StringIO):
+    def isatty(self) -> bool:
+        return True
 
 
 def test_router_filters_before_sequence_and_shares_one_envelope() -> None:
@@ -143,6 +149,166 @@ def test_shared_renderer_is_one_line_and_console_uses_it() -> None:
     stream = io.StringIO()
     ConsoleEventDestination(Severity.INFO, stream).accept(event)
     assert stream.getvalue() == rendered + "\n"
+
+
+def test_console_renders_progress_checkpoints_for_captured_output() -> None:
+    stream = io.StringIO()
+    console = ConsoleEventDestination(Severity.INFO, stream)
+    base = Event(1, "2026-01-01T00:00:00+00:00", "run", 1, "resident", "info", "", {})
+
+    console.accept(
+        Event(
+            1,
+            base.timestamp,
+            "run",
+            2,
+            "resident",
+            "info",
+            "compression.progress_initialized",
+            {
+                "total_blocks": 2,
+                "completed_blocks": 1,
+                "completed_wall_seconds": 15.0,
+                "mean_block_seconds": 15.0,
+            },
+        )
+    )
+    console.accept(
+        Event(
+            1,
+            base.timestamp,
+            "run",
+            3,
+            "resident",
+            "info",
+            "block.started",
+            {"block": 1, "layers": 2},
+        )
+    )
+
+    output = stream.getvalue()
+    assert "compression.progress_initialized" not in output
+    assert "Compressing Layers:" in output
+    assert "1/2 [00:00:15<00:00:15, 15.0s/block]" in output
+    assert "block=2/2" in output
+    assert "\r" not in output
+
+
+def test_console_uses_one_carriage_return_progress_line_for_tty() -> None:
+    stream = TtyStringIO()
+    console = ConsoleEventDestination(Severity.INFO, stream)
+    timestamp = "2026-01-01T00:00:00+00:00"
+    console.accept(
+        Event(
+            1,
+            timestamp,
+            "run",
+            1,
+            "resident",
+            "info",
+            "compression.progress_initialized",
+            {"total_blocks": 1, "completed_blocks": 0},
+        )
+    )
+    console.accept(
+        Event(
+            1,
+            timestamp,
+            "run",
+            2,
+            "resident",
+            "info",
+            "block.started",
+            {"block": 0, "layers": 1},
+        )
+    )
+    console.accept(
+        Event(
+            1,
+            timestamp,
+            "run",
+            3,
+            "resident",
+            "info",
+            "block.completed",
+            {"block": 0, "wall_seconds": 4.0},
+        )
+    )
+    console.close()
+
+    output = stream.getvalue()
+    assert "\rCompressing Layers:" in output
+    assert "100.0%" in output
+    assert output.endswith("\n")
+
+
+def test_human_views_split_memory_metrics_and_keep_oom_visible() -> None:
+    boundary = Event(
+        1,
+        "2026-07-14T16:12:33.482000+00:00",
+        "run",
+        12,
+        "resident",
+        "info",
+        "block.completed",
+        {
+            "block": 2,
+            "final_loss": 1.25,
+            "rank": 64,
+            "cuda.allocated_bytes": 100,
+            "gpu_peak_bytes": 150,
+            "host.working_set_bytes": 200,
+        },
+    )
+
+    run_view = project_event(boundary, "run")
+    memory_view = project_event(boundary, "memory")
+
+    assert run_view is not None
+    assert run_view.fields == {"block": 2, "final_loss": 1.25, "rank": 64}
+    assert memory_view is not None
+    assert memory_view.fields == {
+        "block": 2,
+        "cuda.allocated_bytes": 100,
+        "gpu_peak_bytes": 150,
+        "host.working_set_bytes": 200,
+        "rank": 64,
+    }
+
+    sample = Event(1, boundary.timestamp, "run", 13, "resource", "info", "resource.sample", boundary.fields)
+    assert project_event(sample, "run") is None
+    assert project_event(sample, "memory") is sample
+
+    oom = Event(
+        1,
+        boundary.timestamp,
+        "run",
+        14,
+        "resource",
+        "error",
+        "resource.oom_snapshot",
+        {
+            "error_type": "OutOfMemoryError",
+            "oom_report_path": "state/oom-report-1.txt",
+            "requested_bytes": 4 * 2**20,
+            "cuda.allocated_bytes": 100,
+        },
+    )
+    oom_run_view = project_event(oom, "run")
+    assert oom_run_view is not None
+    assert oom_run_view.fields == {
+        "error_type": "OutOfMemoryError",
+        "oom_report_path": "state/oom-report-1.txt",
+    }
+    assert project_event(oom, "memory") is oom
+
+    stream = io.StringIO()
+    console = ConsoleEventDestination(Severity.INFO, stream)
+    console.accept(boundary)
+    console.accept(sample)
+    assert "final_loss=1.25" in stream.getvalue()
+    assert "allocated_bytes" not in stream.getvalue()
+    assert "resource.sample" not in stream.getvalue()
 
 
 def test_torn_tail_is_quarantined_and_sequence_continues(tmp_path: Path) -> None:

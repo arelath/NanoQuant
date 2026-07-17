@@ -23,7 +23,8 @@ def _managed_run(tmp_path: Path) -> tuple[Path, str]:
     completed = transition(running, RunStatus.COMPLETED)
     directory.write_manifest(completed)
     with JsonlEventSink(directory.events_path, manifest.run_id) as events:
-        events.emit("run", "info", "run.started")
+        events.emit("run", "info", "run.started", **{"cuda.allocated_bytes": 100})
+        events.emit("resource", "info", "resource.sample", **{"cuda.allocated_bytes": 125})
         events.emit("run", "warning", "run.warning", message="first\nsecond")
         events.emit("run", "info", "run.completed")
     return root, manifest.run_id
@@ -45,6 +46,9 @@ def test_runs_list_show_and_path_use_live_manifests(tmp_path: Path, capsys) -> N
     assert main(["runs", "path", "exp:19", "--kind", "journal", "--run-root", str(root)]) == 0
     assert capsys.readouterr().out.strip() == str((root / run_id / "state" / "journal.jsonl").resolve())
 
+    assert main(["runs", "path", run_id, "--kind", "memory-log", "--run-root", str(root)]) == 0
+    assert capsys.readouterr().out.strip() == str((root / run_id / "memory.log").resolve())
+
 
 def test_logs_render_filter_save_and_follow_completed_run(tmp_path: Path, capsys) -> None:
     root, run_id = _managed_run(tmp_path)
@@ -56,11 +60,22 @@ def test_logs_render_filter_save_and_follow_completed_run(tmp_path: Path, capsys
     rendered = (root / run_id / "run.log").read_text(encoding="utf-8")
     assert len(rendered.splitlines()) == 3
     assert 'message="first\\nsecond"' in rendered
+    assert "allocated_bytes" not in rendered
+    memory = (root / run_id / "memory.log").read_text(encoding="utf-8")
+    assert len(memory.splitlines()) == 2
+    assert "resource.sample" in memory
+    assert "cuda.allocated_bytes=125" in memory
 
     assert main(["logs", "latest", "--run-root", str(root), "--follow", "--poll-seconds", "0.01"]) == 0
     captured = capsys.readouterr()
     assert "run.completed" in captured.out
+    assert "resource.sample" not in captured.out
     assert "status=completed" in captured.err
+
+    assert main(["logs", run_id, "--run-root", str(root), "--memory"]) == 0
+    memory_output = capsys.readouterr().out
+    assert "resource.sample" in memory_output
+    assert "run.warning" not in memory_output
 
 
 def test_unmanaged_path_is_read_only_and_missing_selector_has_stable_code(tmp_path: Path, capsys) -> None:

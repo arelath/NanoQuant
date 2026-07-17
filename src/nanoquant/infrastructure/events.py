@@ -6,16 +6,19 @@ import json
 import math
 import os
 import re
+import shutil
+import sys
 import tempfile
 import threading
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, Protocol, TextIO
 from uuid import uuid4
 
+from nanoquant.infrastructure.compression_progress import CompressionProgress, ProgressAction
 from nanoquant.infrastructure.environment import SECRET_PATTERN
 from nanoquant.infrastructure.io_utils import safe_replace
 from nanoquant.ports.event_sink import Event, Severity
@@ -24,6 +27,67 @@ _IDENTIFIER = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,127}$")
 _MAX_STRING_BYTES = 4 * 1024
 _MAX_FIELDS_BYTES = 30 * 1024
 _MAX_DEPTH = 4
+
+EventView = Literal["all", "run", "memory"]
+
+_MEMORY_FIELD_PREFIXES = ("cuda.", "host.", "wddm.")
+_MEMORY_FIELDS = frozenset(
+    {
+        "allocated_after_bytes",
+        "baseline_allocated_bytes",
+        "budget_utilization",
+        "device_total_bytes",
+        "device_total_memory_bytes",
+        "gpu_peak_bytes",
+        "host_peak_bytes",
+        "incremental_peak_allocated_bytes",
+        "maximum_wddm_shared_bytes",
+        "peak_allocated_bytes",
+        "peak_device_bytes",
+        "peak_gpu_bytes",
+        "peak_host_bytes",
+        "peak_reserved_bytes",
+        "peak_wddm_shared_bytes",
+        "peak_workspace_bytes",
+        "planned_device_bytes",
+        "requested_bytes",
+        "window_peak_allocated_bytes",
+        "window_peak_reserved_bytes",
+    }
+)
+_MEMORY_CONTEXT_FIELDS = frozenset(
+    {
+        "attempt",
+        "block",
+        "device",
+        "epoch",
+        "error_type",
+        "layer",
+        "oom_report_path",
+        "path",
+        "probe_kind",
+        "rank",
+        "reason",
+        "stage_context",
+        "supported",
+        "vram_history_path",
+    }
+)
+_MEMORY_DIAGNOSTIC_EVENTS = frozenset(
+    {
+        "observability.boundary_memory_disabled",
+        "observability.sampler_disabled",
+        "observability.vram_history_dumped",
+        "observability.vram_history_unavailable",
+    }
+)
+_MEMORY_ONLY_EVENTS = frozenset(
+    {
+        "host_pinned_cache.released",
+        "observability.vram_history_dumped",
+        "resource.sample",
+    }
+)
 
 
 class EventWriteError(RuntimeError):
@@ -130,6 +194,37 @@ def render_event_line(event: Event) -> str:
     )
 
 
+def _is_memory_field(name: str) -> bool:
+    return name in _MEMORY_FIELDS or name.startswith(_MEMORY_FIELD_PREFIXES)
+
+
+def project_event(event: Event, view: EventView) -> Event | None:
+    """Project one canonical event into a human-readable run or memory view."""
+
+    if view == "all":
+        return event
+    if view == "run":
+        if event.name in _MEMORY_ONLY_EVENTS:
+            return None
+        fields = {name: value for name, value in event.fields.items() if not _is_memory_field(name)}
+        return event if len(fields) == len(event.fields) else replace(event, fields=fields)
+    if view != "memory":
+        raise ValueError(f"unknown event view: {view!r}")
+
+    memory_fields = {name: value for name, value in event.fields.items() if _is_memory_field(name)}
+    memory_diagnostic = event.stage == "resource" or event.name in _MEMORY_DIAGNOSTIC_EVENTS
+    if not memory_fields and not memory_diagnostic:
+        return None
+    if memory_diagnostic:
+        return event
+    fields = {
+        name: value
+        for name, value in event.fields.items()
+        if name in _MEMORY_CONTEXT_FIELDS or name in memory_fields
+    }
+    return replace(event, fields=fields)
+
+
 def event_from_dict(payload: Mapping[str, object]) -> Event:
     """Decode an event envelope while keeping schema-1 streams readable."""
 
@@ -229,8 +324,13 @@ def event_stream_integrity(path: str | Path) -> str:
     return "ok"
 
 
-def render_event_log(events_path: str | Path, output_path: str | Path) -> None:
-    """Atomically render the canonical valid event prefix as a text snapshot."""
+def render_event_log(
+    events_path: str | Path,
+    output_path: str | Path,
+    *,
+    view: EventView = "run",
+) -> None:
+    """Atomically render one human-readable view of the canonical event prefix."""
 
     destination = Path(output_path)
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -238,7 +338,9 @@ def render_event_log(events_path: str | Path, output_path: str | Path) -> None:
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as output:
             for event in read_event_prefix(events_path):
-                output.write(render_event_line(event) + "\n")
+                projected = project_event(event, view)
+                if projected is not None:
+                    output.write(render_event_line(projected) + "\n")
             output.flush()
         safe_replace(temporary, destination)
     finally:
@@ -357,18 +459,75 @@ class JsonlEventDestination:
 class ConsoleEventDestination:
     role: Literal["required", "optional"] = "optional"
 
-    def __init__(self, threshold: Severity, stream: TextIO | None = None) -> None:
+    def __init__(
+        self,
+        threshold: Severity,
+        stream: TextIO | None = None,
+        *,
+        view: EventView = "run",
+    ) -> None:
         self.threshold = threshold
         self._stream = stream
+        self._view = view
+        self._progress = CompressionProgress() if view == "run" else None
+        self._progress_visible = False
+        self._progress_width = 0
+
+    @property
+    def _output(self) -> TextIO:
+        return self._stream if self._stream is not None else sys.stdout
+
+    def _is_tty(self) -> bool:
+        isatty = getattr(self._output, "isatty", None)
+        return bool(isatty()) if callable(isatty) else False
+
+    def _clear_progress(self) -> None:
+        if self._progress_visible:
+            self._output.write("\r" + " " * self._progress_width + "\r")
+            self._progress_visible = False
+
+    def _draw_progress(self, action: ProgressAction) -> None:
+        if self._progress is None or action == "none":
+            return
+        line = self._progress.render()
+        if not self._is_tty():
+            if action in {"checkpoint", "finish"}:
+                print(line, file=self._output, flush=True)
+            return
+        columns = shutil.get_terminal_size((120, 20)).columns
+        visible = line[: max(1, columns - 1)]
+        padding = " " * max(0, self._progress_width - len(visible))
+        self._output.write("\r" + visible + padding)
+        self._progress_width = len(visible)
+        if action == "finish":
+            self._output.write("\n")
+            self._progress_visible = False
+        else:
+            self._progress_visible = True
+        self._output.flush()
 
     def accept(self, event: Event) -> None:
-        print(render_event_line(event), file=self._stream, flush=True)
+        action: ProgressAction = "none"
+        if self._progress is not None:
+            action = self._progress.observe(event)
+        projected = project_event(event, self._view)
+        # Initialization is represented by the progress line itself on the console.
+        if event.name == "compression.progress_initialized":
+            projected = None
+        if projected is not None:
+            self._clear_progress()
+            print(render_event_line(projected), file=self._output, flush=True)
+            if action == "none" and self._progress is not None and self._progress.active:
+                action = "refresh"
+        self._draw_progress(action)
 
     def flush(self) -> None:
-        if self._stream is not None:
-            self._stream.flush()
+        self._output.flush()
 
     def close(self) -> None:
+        if self._progress_visible:
+            self._output.write("\n")
+            self._progress_visible = False
         self.flush()
 
 
@@ -624,5 +783,10 @@ class JsonlEventSink:
 class ConsoleRenderer:
     """Compatibility callback using the shared deterministic line renderer."""
 
+    def __init__(self, view: EventView = "run") -> None:
+        self._view = view
+
     def __call__(self, event: Event) -> None:
-        print(render_event_line(event), flush=True)
+        projected = project_event(event, self._view)
+        if projected is not None:
+            print(render_event_line(projected), flush=True)

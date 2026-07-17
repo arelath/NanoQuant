@@ -14,7 +14,7 @@ This design defines **one meter vocabulary, one sampling function, and five inst
 
 | Instrument | Question | Consumer | Gate | Default |
 |---|---|---|---|---|
-| Periodic sampler | What is VRAM doing *right now* on an hours-long run? | `resource.sample` events → `logs --follow` | `record_resource_interval_seconds` | On (5 s) |
+| Periodic sampler | What is VRAM doing *right now* on an hours-long run? | `resource.sample` events → `memory.log` / `logs --memory --follow` | `record_resource_interval_seconds` | On (5 s) |
 | Boundary checkpoints | Which block/epoch/probe moved the peak, and did it match the plan? | Enriched existing info events | Always with default logging | On |
 | Phase memory counters | Which phase grows or holds memory, aggregated over a run? | `profile.json` / `profile.md` (existing) | `profiling.memory_counters` | Off |
 | Test budget fixture | Did this change regress peak VRAM for a known workload? | pytest assertion + JSONL report | Per-test opt-in | Off |
@@ -172,7 +172,7 @@ Mapping onto [LoggingRefactorV3](LoggingRefactorV3.md) explicitly:
 - **Severities:** `resource.sample` and enriched checkpoints are `info` (part of the "monitor an hours-long run" stream, V3 §11.2); probe details are `debug`; `resource.oom_snapshot` is `error`; self-diagnostics (`observability.sampler_disabled`, `observability.vram_history_unavailable`) are `warning`. All obey `event_level`.
 - **Field contract compliance:** every field is a bounded integer, float, or short string; `memory_summary()` text and history pickles are artifacts referenced by path, never inline (V3 §6.4).
 - **Failure isolation:** the sampler thread and OOM forensics follow the same doctrine as optional destinations — degrade once, warn once, never alter stage results, commits, or the progress journal.
-- **Discovery and reading:** live monitoring is `nanoquant logs latest --follow`; post-hoc analysis is `logs RUN --json` piped to analysis, plus a small reader-side `nanoquant runs vram SELECTOR` that folds `resource.sample` and checkpoint events into a summary table (run peak, baseline, per-block window peaks, budget utilization, empty-cache sawtooth count). Consistent with V3's computed-views principle, it stores nothing.
+- **Discovery and reading:** live memory monitoring is `nanoquant logs latest --memory --follow`; the default log view stays focused on progress and decisions. Post-hoc inspection uses `memory.log`, canonical `logs RUN --json` output, or the reader-side `nanoquant runs vram SELECTOR`, which folds `resource.sample` and checkpoint events into a summary table (run peak, baseline, per-block window peaks, budget utilization, empty-cache sawtooth count). Both text logs remain disposable projections of `events.jsonl`.
 - **Manifest synergy:** `PYTORCH_CUDA_ALLOC_CONF` and `CUDA_VISIBLE_DEVICES` are already in the environment-capture allowlist, so every run's manifest records the allocator configuration its VRAM numbers were measured under — required context when comparing runs across `expandable_segments` changes.
 
 ## 8. Reading the numbers: diagnosis playbook
@@ -231,7 +231,7 @@ The remaining fields are unchanged from V3 §5:
 
 - **Per-allocation events in `events.jsonl`** — unbounded cardinality, duplicates the allocator's own history mechanism, and violates the V3 field contract. Allocator detail belongs in snapshot artifacts.
 - **NVML/pynvml or `nvidia-smi` polling** — a new dependency or subprocess for numbers `mem_get_info` already provides in-process; per-process attribution from NVML adds little when NanoQuant owns the device via the existing lease.
-- **A separate `vram.jsonl` stream** — a second stream needs its own discovery, rotation, and correlation story; `resource.sample` events in the canonical stream get follow, filtering, and rebuild semantics for free.
+- **A separate `vram.jsonl` stream** — a second canonical stream needs its own discovery, rotation, and correlation story. `memory.log` is deliberately only a rebuildable human projection; `resource.sample` events remain in `events.jsonl` and retain the existing follow, filtering, and sequence semantics.
 - **Inlining `memory_summary()` into event fields** — multi-KB text blobs in events break the size contract and tailing; it is an artifact.
 - **Default-on allocator history** — allocation-path overhead and large artifacts for evidence needed only during active investigations.
 - **Sampler resetting peak counters to get per-interval peaks** — a read-only instrument mutating process-global state would corrupt every window owner below it; interval peaks are derivable from window events plus samples.
@@ -239,4 +239,4 @@ The remaining fields are unchanged from V3 §5:
 
 ## 14. Definition of done
 
-A researcher watching `nanoquant logs latest --follow` sees the VRAM sawtooth of a resident Gemma run in real time; every block-completion line states its window peak and budget utilization; a GPU test that regresses peak memory fails with a meter table and one line of JSONL evidence; an OOM leaves behind an event, a summary report, and (when tracing) a clickable allocator snapshot instead of only a traceback; and all of it shares one field vocabulary across `events.jsonl`, `profile.json`, and test reports — with no new configuration fields, no CUDA synchronization, and no change to committed artifacts or resume behavior.
+A researcher watching `nanoquant logs latest --follow` sees concise resident Gemma progress, while `nanoquant logs latest --memory --follow` shows the VRAM sawtooth and block window peaks in real time. A GPU test that regresses peak memory fails with a meter table and one line of JSONL evidence; an OOM remains visible in the main view and leaves behind a memory event, summary report, and (when tracing) a clickable allocator snapshot instead of only a traceback. All of it shares one field vocabulary across `events.jsonl`, `memory.log`, `profile.json`, and test reports — with no new configuration fields, no CUDA synchronization, and no change to committed artifacts or resume behavior.
