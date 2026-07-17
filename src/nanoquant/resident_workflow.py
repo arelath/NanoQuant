@@ -15,7 +15,7 @@ import torch
 from huggingface_hub import snapshot_download
 from transformers.models.auto.tokenization_auto import AutoTokenizer
 
-from nanoquant.application.distillation import TopKDistillationConfig
+from nanoquant.application.distillation import DistillationMetrics, TopKDistillationConfig
 from nanoquant.config.codec import from_dict
 from nanoquant.config.schema import (
     ActivationStorageConfig,
@@ -38,11 +38,15 @@ from nanoquant.global_distillation import (
     GlobalDistillationRunResult,
     run_global_topk_distillation,
 )
+from nanoquant.infrastructure.artifacts import LocalArtifactStore
+from nanoquant.infrastructure.environment import load_repository_dotenv
+from nanoquant.infrastructure.global_tuning import active_global_tuning, load_global_tuning
 from nanoquant.infrastructure.hf_calibration_dataset import load_pinned_calibration
 from nanoquant.infrastructure.runs import RunDirectory, transition
 from nanoquant.resident_quantization import (
     ResidentQuantizationRequest,
     ResidentQuantizationResult,
+    load_completed_resident_quantization,
     run_resident_quantization,
 )
 
@@ -444,6 +448,44 @@ def execute_resident_workflow(
     return ResidentWorkflowResult(quantization, distillation)
 
 
+def load_completed_resident_workflow(
+    config: RunConfig,
+    inputs: ResolvedResidentInputs,
+    options: ResidentExecutionOptions = _DEFAULT_EXECUTION_OPTIONS,
+) -> ResidentWorkflowResult | None:
+    """Load a terminal completed workflow, or return ``None`` for an active/new run."""
+
+    directory = RunDirectory(inputs.output.parent, inputs.output.name)
+    manifest_path = inputs.output / "manifest.json"
+    if not manifest_path.is_file():
+        return None
+    manifest = from_dict(RunManifest, directory.read_manifest(), path="manifest")
+    if manifest.status is not RunStatus.COMPLETED:
+        return None
+    quantization = load_completed_resident_quantization(
+        resident_request_from_config(config, inputs, options)
+    )
+    distillation = None
+    if config.distillation.enabled:
+        reference = active_global_tuning(inputs.output)
+        if reference is None or reference.artifact_id not in manifest.artifacts:
+            raise ValueError("completed resident workflow has no active global tuning result")
+        artifacts = LocalArtifactStore(
+            inputs.output / "artifacts",
+            use_persistent_validation_cache=False,
+        )
+        committed = load_global_tuning(reference, artifacts)
+        result = committed.result
+        metrics = DistillationMetrics(
+            result.epoch_losses,
+            result.steps_completed,
+            result.selected_parameter_count,
+            result.teacher_cache_bytes,
+        )
+        distillation = GlobalDistillationRunResult(reference, result, metrics)
+    return ResidentWorkflowResult(quantization, distillation)
+
+
 def _transition_workflow_manifest(
     inputs: ResolvedResidentInputs,
     status: RunStatus,
@@ -465,6 +507,7 @@ def resolve_resident_experiment_inputs(config: RunConfig, *, launcher_path: str 
     _validate_supported_recipe(config)
     launcher = Path(launcher_path).resolve()
     repository_root = launcher.parent.parent
+    load_repository_dotenv(repository_root)
     model_path = Path(config.model.source)
     if model_path.exists():
         snapshot = model_path.resolve()
@@ -523,6 +566,7 @@ __all__ = [
     "ResidentWorkflowResult",
     "distillation_request_from_config",
     "execute_resident_workflow",
+    "load_completed_resident_workflow",
     "resident_request_from_config",
     "resolve_resident_experiment_inputs",
     "run_resident_experiment",

@@ -58,7 +58,7 @@ def test_compression_benchmark_resolution_is_repository_relative(
             Path("outputs/logical"),
             Path("outputs/packed"),
             Path("outputs/checkpoint"),
-            Path("outputs/model.gguf"),
+            Path("Results/001/model.gguf"),
             Path(r"D:\reference\llama.cpp"),
         ),
         Path("outputs/benchmark.json"),
@@ -70,7 +70,7 @@ def test_compression_benchmark_resolution_is_repository_relative(
         launcher_path=launcher,
     )
 
-    assert resolved.export.gguf_output == tmp_path / "repo" / "outputs" / "model.gguf"
+    assert resolved.export.gguf_output == tmp_path / "repo" / "Results" / "001" / "model.gguf"
     assert resolved.benchmark_output == tmp_path / "repo" / "outputs" / "benchmark.json"
     assert resolved.export.llama_cpp_root == Path(r"D:\reference\llama.cpp")
 

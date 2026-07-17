@@ -23,7 +23,7 @@ def test_experiment009_runs_quality_and_public_huggingface_publication() -> None
         "Results/009/009-compress-benchmark-and-publish-gemma-3-270m-it-quality.md"
     )
     assert experiment.export.gguf_output == Path(
-        "outputs/009/gemma-3-270m-it-nanoquant.gguf"
+        "Results/009/gemma-3-270m-it-nanoquant.gguf"
     )
     assert experiment.export.huggingface is not None
     assert experiment.export.huggingface.repo_id == "gemma-3-270m-it-nanoquant-GGUF"

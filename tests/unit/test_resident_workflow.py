@@ -240,6 +240,11 @@ def test_zero_argument_resolution_uses_pinned_snapshot_and_calibration(
 
     monkeypatch.setattr(workflow, "load_pinned_calibration", load_calibration)
     monkeypatch.setattr(
+        workflow,
+        "load_repository_dotenv",
+        lambda path: observed.setdefault("dotenv_root", path) or True,
+    )
+    monkeypatch.setattr(
         workflow.AutoTokenizer,
         "from_pretrained",
         lambda *_args, **_kwargs: type("Tokenizer", (), {"pad_token_id": 7})(),
@@ -253,6 +258,7 @@ def test_zero_argument_resolution_uses_pinned_snapshot_and_calibration(
     assert torch.equal(cast(torch.Tensor, resolved.token_ids), tokens)
     assert torch.equal(cast(torch.Tensor, resolved.quality_token_ids), tokens[:1, :8])
     assert resolved.pad_token_id == 7
+    assert observed["dotenv_root"] == repository
     assert observed["path"] == repository / "evidence/m3/experiment018-calibration"
 
 

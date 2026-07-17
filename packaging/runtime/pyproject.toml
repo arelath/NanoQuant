@@ -9,6 +9,7 @@ description = "Deployment-only packed NanoQuant runtime"
 requires-python = ">=3.10"
 license = {text = "Apache-2.0"}
 dependencies = [
+  "python-dotenv>=1.0,<2",
   "safetensors>=0.4",
   "torch>=2.6",
   "transformers==4.51.3",

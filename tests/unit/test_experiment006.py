@@ -47,7 +47,7 @@ def test_experiment006_is_the_new_gemma1b_attention_rank_quality_baseline() -> N
     )
     assert experiment.expected_blocks == 26
     assert experiment.maximum_wddm_shared_gib == 0.75
-    assert experiment.export.gguf_output == Path("outputs/006/gemma-3-1b-it-nanoquant.gguf")
+    assert experiment.export.gguf_output == Path("Results/006/gemma-3-1b-it-nanoquant.gguf")
     assert experiment.wikitext_samples == 64
     assert len(experiment.task_names) == 6
     assert experiment.task_limit == 200

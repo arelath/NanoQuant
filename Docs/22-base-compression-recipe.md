@@ -17,19 +17,23 @@ baseline, and derived experiments inherit from their direct recipe parent. The h
 equal to its parent during module import, so recipe files state only material differences while their fully resolved
 `RunConfig` remains complete and hash-stable.
 
-The generic experiment builder derives export locations from `ExperimentIdentity`. For Experiment `NNN`, it assigns:
+The generic experiment builder derives export locations from `ExperimentIdentity`. Intermediate runtime artifacts
+remain rebuildable under `outputs/NNN`, while final deployment files are created directly in `Results/NNN`:
 
 ```text
 outputs/NNN/
   logical/
   packed/
   llamacpp-checkpoint/
+  NNN-canonical-name-summary.json
+
+Results/NNN/
   model-slug-nanoquant.gguf
   model-slug-nanoquant.gguf.export.json
+  model-slug-nanoquant.export-summary.json
   model-slug-nanoquant.gguf.huggingface.json  # only when a Hub upload is configured
   mmproj-BF16.gguf                 # multimodal snapshots only
   mmproj-BF16.gguf.export.json     # multimodal snapshots only
-  NNN-canonical-name-summary.json
 ```
 
 ## Completion contract
@@ -47,7 +51,8 @@ complete until all of these stages succeed:
    inventory, and a receipt bound to the source config and converter;
 6. when the export recipe declares a Hugging Face destination, the validated language GGUF and optional mmproj are
    uploaded in one model-repository commit and a local token-free receipt records its exact commit and file hashes;
-7. the GGUF files, export summaries, receipts, and experiment statistics are hard-linked into `Results/NNN`.
+7. final GGUFs, export summaries, and export/upload receipts already reside in `Results/NNN`; remaining validated
+   experiment statistics are hard-linked there without copying large artifacts.
 
 The embedding level is part of `CompressionExportPolicy` and receipt identity. Set
 `CompressionExportPolicy(token_embedding_type="q4_k")` for a Q4_K embedding; Q4/Q5/Q6/Q8 llama.cpp variants
@@ -66,7 +71,9 @@ not required to create a GGUF. Upstream `conversion.py`, `convert_hf_to_gguf.py`
 all llama.cpp tooling. The modified fork remains the reference implementation for llama.cpp NanoQuant inference.
 
 Each stage is resumable. Existing logical, packed, checkpoint, language GGUF, and mmproj outputs are hash-validated
-and reused. A partial or provenance-mismatched output fails closed rather than being treated as complete.
+and reused. A complete pre-convention GGUF under `outputs/NNN` is validated and hard-linked into `Results/NNN` on
+the first retry, so the layout transition does not repeat conversion or duplicate model bytes. A partial or
+provenance-mismatched output fails closed rather than being treated as complete.
 
 ## Optional Hugging Face upload
 
@@ -86,8 +93,10 @@ export = CompressionExportPolicy(
 )
 ```
 
-Do not put a token in the recipe. The uploader uses the standard cached Hugging Face login or `HF_TOKEN`; environment
-capture continues to exclude that secret. Before making any Hub request, it opens each exported model file, verifies
+Do not put a token in the recipe. The shared resident launcher loads the repository-root `.env` with override
+semantics before resolving Hugging Face inputs, so a corrected local `HF_TOKEN` takes precedence over an inherited
+token; the uploader also supports the standard cached Hugging Face login. Environment capture continues to exclude
+that secret. Before making any Hub request, it opens each exported model file, verifies
 the byte count and SHA-256 from the GGUF export result, rewinds the same open handle, and gives that handle to the Hub
 client. The language GGUF and optional mmproj therefore enter one commit without a save or conversion step that could
 change numerical content.
@@ -101,8 +110,9 @@ recompressing. Experiments whose export policy omits `huggingface` remain fully 
 ## Exporting an older completed run
 
 `execute_compression_export` performs only stages 2–6 and never recompresses the model. This is the supported
-backfill path for a resident run that predates the mandatory export contract. After export, use
-`tools/publish_results.py` to add its GGUF files, export summary, and receipts to the experiment's Results directory.
+backfill path for a resident run that predates the mandatory export contract. Its GGUF and receipt are written
+directly to the experiment's Results directory; use `tools/publish_results.py` to add remaining summaries and
+statistics.
 
 Experiment 003 v5 was the first backfill through this contract. Its 34-block globally tuned state passed validation.
 The initial export incorrectly retained `token_embd.weight` as BF16; it was superseded by the verified Q8_0 export

@@ -22,6 +22,7 @@ from nanoquant.resident_quantization import (
     _clone_forward_metadata,
     _epoch_cooldown_observer,
     _resident_config_hash,
+    load_completed_resident_quantization,
     run_resident_quantization,
 )
 from nanoquant.resident_replay import capture_and_replay_resident_layer
@@ -41,21 +42,35 @@ def test_resident_quantization_commits_complete_transformers_model(tmp_path: Pat
     Gemma3ForCausalLM(config).save_pretrained(snapshot, safe_serialization=True)
     output = tmp_path / "run"
 
-    result = run_resident_quantization(
-        ResidentQuantizationRequest(
-            snapshot,
-            output,
-            "fixture/gemma3",
-            "pinned-test-revision",
-            ((1, 2, 3, 4),),
-            device="cpu",
-            target_bpw=8.0,
-            rank_multiple=1,
-            admm=ADMMConfig(outer_iterations=2, inner_iterations=1),
-            profiling=ProfilingConfig(level=ProfilingLevel.OFF),
-            registry_root=tmp_path / "runs",
-        )
+    request = ResidentQuantizationRequest(
+        snapshot,
+        output,
+        "fixture/gemma3",
+        "pinned-test-revision",
+        ((1, 2, 3, 4),),
+        device="cpu",
+        target_bpw=8.0,
+        rank_multiple=1,
+        admm=ADMMConfig(outer_iterations=2, inner_iterations=1),
+        profiling=ProfilingConfig(level=ProfilingLevel.OFF),
+        registry_root=tmp_path / "runs",
     )
+    result = run_resident_quantization(request)
+
+    manifest_before_rehydrate = (output / "manifest.json").read_bytes()
+    events_before_rehydrate = (output / "events.jsonl").read_bytes()
+    rehydrated = load_completed_resident_quantization(request)
+    assert rehydrated.identity == result.identity
+    assert rehydrated.plan == result.plan
+    assert rehydrated.blocks == result.blocks
+    assert rehydrated.frozen_model == result.frozen_model
+    assert rehydrated.report == result.report
+    assert rehydrated.reference_nll == result.reference_nll
+    assert rehydrated.compressed_nll == result.compressed_nll
+    assert rehydrated.logit_mse == result.logit_mse
+    assert rehydrated.argmax_agreement == result.argmax_agreement
+    assert (output / "manifest.json").read_bytes() == manifest_before_rehydrate
+    assert (output / "events.jsonl").read_bytes() == events_before_rehydrate
 
     assert len(result.blocks) == 1
     assert len(result.blocks[0].layers) == 7

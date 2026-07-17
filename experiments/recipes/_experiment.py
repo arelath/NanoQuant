@@ -201,7 +201,7 @@ class ExperimentLayout:
 
     def gguf_output(self, release_name: str) -> Path:
         _require_safe_name(release_name, "release name")
-        return self.outputs_root / f"{release_name}-nanoquant.gguf"
+        return self.results_root / f"{release_name}-nanoquant.gguf"
 
     def published_quality_output(self) -> Path:
         return self.results_root / self.quality_output.name

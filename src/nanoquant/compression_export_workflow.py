@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -34,6 +35,7 @@ from nanoquant.resident_workflow import (
     ResidentWorkflowResult,
     ResolvedResidentInputs,
     execute_resident_workflow,
+    load_completed_resident_workflow,
 )
 from nanoquant.runtime import (
     RuntimeModelMetadata,
@@ -120,6 +122,82 @@ def resolve_compression_export_recipe(
         recipe.token_embedding_type,
         recipe.huggingface,
     )
+
+
+def _numbered_results_directory(config: RunConfig, repository_root: Path) -> Path:
+    experiment_number = config.intent.experiment_number
+    if experiment_number is None:
+        raise ValueError("compression export requires a numbered experiment")
+    return (repository_root / "Results" / f"{experiment_number:03d}").resolve()
+
+
+def _require_results_gguf_output(
+    config: RunConfig,
+    repository_root: Path,
+    gguf_output: Path,
+) -> None:
+    expected_directory = _numbered_results_directory(config, repository_root)
+    if gguf_output.parent != expected_directory:
+        raise ValueError(
+            "compression export GGUF must be written directly to the numbered Results directory: "
+            f"{expected_directory}"
+        )
+
+
+def _link_validated_export_member(source: Path, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.exists():
+        if os.path.samefile(source, destination):
+            return
+        raise FileExistsError(f"Results export destination already exists: {destination}")
+    try:
+        os.link(source, destination)
+    except OSError as exc:
+        raise OSError(
+            f"cannot adopt validated legacy export into Results: {source} -> {destination}"
+        ) from exc
+
+
+def _adopt_legacy_gguf_export(
+    config: RunConfig,
+    resolved: ResolvedCompressionExportRecipe,
+    repository_root: Path,
+    source_snapshot: Path,
+) -> None:
+    """Zero-copy a validated pre-convention GGUF from ``outputs/NNN`` into Results."""
+
+    destination = resolved.gguf_output
+    destination_receipt = destination.with_suffix(destination.suffix + ".export.json")
+    if destination.exists() or destination_receipt.exists():
+        return
+    experiment_number = config.intent.experiment_number
+    if experiment_number is None:
+        return
+    legacy_output = (
+        repository_root / "outputs" / f"{experiment_number:03d}" / destination.name
+    ).resolve()
+    legacy_receipt = legacy_output.with_suffix(legacy_output.suffix + ".export.json")
+    if not legacy_output.is_file() or not legacy_receipt.is_file():
+        return
+
+    legacy = export_llamacpp_gguf(
+        resolved.packed_output,
+        source_snapshot,
+        resolved.checkpoint_output,
+        legacy_output,
+        resolved.llama_cpp_root,
+        token_embedding_type=resolved.token_embedding_type,
+    )
+    _link_validated_export_member(legacy.output, destination)
+    _link_validated_export_member(legacy_receipt, destination_receipt)
+    if legacy.mmproj is not None:
+        mmproj_destination = destination.parent / legacy.mmproj.output.name
+        mmproj_receipt = legacy.mmproj.output.with_suffix(legacy.mmproj.output.suffix + ".export.json")
+        _link_validated_export_member(legacy.mmproj.output, mmproj_destination)
+        _link_validated_export_member(
+            mmproj_receipt,
+            mmproj_destination.with_suffix(mmproj_destination.suffix + ".export.json"),
+        )
 
 
 def _runtime_metadata(
@@ -225,7 +303,9 @@ def execute_compression_export(
 
     if expected_blocks <= 0:
         raise ValueError("compression export expected block count must be positive")
-    resolved = resolve_compression_export_recipe(recipe, repository_root)
+    root = Path(repository_root).resolve()
+    resolved = resolve_compression_export_recipe(recipe, root)
+    _require_results_gguf_output(config, root, resolved.gguf_output)
     run = Path(run_output).resolve()
     source_snapshot = Path(snapshot).resolve()
     metadata = _runtime_metadata(config, source_snapshot, resolved.runtime_family)
@@ -237,6 +317,7 @@ def execute_compression_export(
         use_global_tuning=config.distillation.enabled,
     )
     packed = _ensure_packed_export(resolved)
+    _adopt_legacy_gguf_export(config, resolved, root, source_snapshot)
     gguf = export_llamacpp_gguf(
         resolved.packed_output,
         source_snapshot,
@@ -305,18 +386,17 @@ def execute_complete_compression(
     if experiment_number is None:
         raise ValueError("complete compression requires a numbered experiment")
     repository_root = inputs.launcher_path.resolve().parent.parent
-    initialize_live_weight_error_report(
-        repository_root,
-        experiment_number,
-        inputs.output,
-        expected_blocks=expected_blocks,
-        layer_order=config.block_tuning.layer_order,
-    )
-    workflow = execute_resident_workflow(
-        config,
-        inputs,
-        ResidentExecutionOptions() if options is None else options,
-    )
+    execution_options = ResidentExecutionOptions() if options is None else options
+    workflow = load_completed_resident_workflow(config, inputs, execution_options)
+    if workflow is None:
+        initialize_live_weight_error_report(
+            repository_root,
+            experiment_number,
+            inputs.output,
+            expected_blocks=expected_blocks,
+            layer_order=config.block_tuning.layer_order,
+        )
+        workflow = execute_resident_workflow(config, inputs, execution_options)
     block_count = len(workflow.quantization.inventory.blocks)
     if block_count != expected_blocks:
         raise ValueError(

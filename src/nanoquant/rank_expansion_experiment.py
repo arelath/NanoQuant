@@ -133,7 +133,6 @@ def run_rank_expansion_experiment(
     validate_launcher_number(config, launcher_path)
     launcher = Path(launcher_path).resolve()
     root = launcher.parent.parent
-    snapshot = _snapshot(config)
     resolved = replace(
         experiment,
         parent_run=_resolve(root, experiment.parent_run),
@@ -148,6 +147,16 @@ def run_rank_expansion_experiment(
         baseline_quality=_resolve(root, experiment.baseline_quality),
         llama_cpp_root=_resolve(root, experiment.llama_cpp_root),
     )
+    experiment_number = config.intent.experiment_number
+    if experiment_number is None:
+        raise ValueError("rank expansion requires an experiment number")
+    expected_results = (root / "Results" / f"{experiment_number:03d}").resolve()
+    if resolved.gguf_output.parent != expected_results:
+        raise ValueError(
+            "rank expansion GGUF must be written directly to the numbered Results directory: "
+            f"{expected_results}"
+        )
+    snapshot = _snapshot(config)
     maximum_shared_bytes = int(resolved.maximum_wddm_shared_gib * 2**30)
     wall_started = time.perf_counter()
     expansion_started = time.perf_counter()
@@ -226,9 +235,6 @@ def run_rank_expansion_experiment(
         json.loads(resolved.baseline_quality.read_text(encoding="utf-8")),
     )
     derivative_comparison = _candidate_comparison(baseline_payload, quality_payload)
-    experiment_number = config.intent.experiment_number
-    if experiment_number is None:
-        raise ValueError("rank expansion requires an experiment number")
     summary = {
         "schema_version": 1,
         "passed": bool(quality["passed"]),

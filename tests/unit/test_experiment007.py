@@ -42,7 +42,7 @@ def test_experiment007_is_the_270m_counterpart_to_experiment006() -> None:
     assert config.dataset == previous.dataset
     assert experiment.expected_blocks == 18
     assert experiment.maximum_wddm_shared_gib == 0.75
-    assert experiment.export.gguf_output == Path("outputs/007/gemma-3-270m-it-nanoquant.gguf")
+    assert experiment.export.gguf_output == Path("Results/007/gemma-3-270m-it-nanoquant.gguf")
     assert experiment.wikitext_samples == 64
     assert len(experiment.task_names) == 6
     assert experiment.task_limit == 200

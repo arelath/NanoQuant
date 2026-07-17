@@ -138,8 +138,9 @@ declared parameter/buffer with shape and dtype checks, restores tied aliases, re
 never reads the source Hugging Face checkpoint.
 
 `packaging/runtime/pyproject.toml` builds the separate `nanoquant-runtime` distribution. Its wheel contains only the
-deployment initializer and `nanoquant.runtime`; it declares Torch, safetensors, Transformers, and the Windows Triton
-backend, but contains no research configuration, domain, application, infrastructure, calibration, or resident code.
+deployment initializer and `nanoquant.runtime`; it declares python-dotenv, Torch, safetensors, Transformers, and the
+Windows Triton backend, but contains no research configuration, domain, application, infrastructure, calibration,
+or resident code.
 The clean-install validator installs this wheel into an isolated target, imports it with the repository absent from
 module resolution, audits all wheel/import members, and generates directly from the self-contained bundle. Dependency
 artifacts were reused from the pinned host environment for this offline M6 proof; fully isolated dependency

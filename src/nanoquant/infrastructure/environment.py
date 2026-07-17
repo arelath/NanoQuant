@@ -7,6 +7,9 @@ import platform
 import re
 import sys
 from importlib.metadata import distributions
+from pathlib import Path
+
+from dotenv import load_dotenv
 
 ALLOWED_ENVIRONMENT = frozenset(
     {
@@ -20,6 +23,12 @@ ALLOWED_ENVIRONMENT = frozenset(
     }
 )
 SECRET_PATTERN = re.compile(r"(?i)(token|secret|password|passwd|api[_-]?key|credential|authorization)")
+
+
+def load_repository_dotenv(repository_root: str | Path) -> bool:
+    """Load a repository-local ``.env`` with precedence over inherited values."""
+
+    return load_dotenv(Path(repository_root).resolve() / ".env", override=True)
 
 
 def redact(name: str, value: str) -> str:

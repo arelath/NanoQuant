@@ -37,7 +37,7 @@ def test_experiment008_is_guarded_12b_compression_quality_proof(tmp_path: Path) 
     assert experiment.large_model_guards
     assert not experiment.restore_completed_blocks
     assert experiment.maximum_wddm_shared_gib == 0.75
-    assert experiment.export.gguf_output == Path("outputs/008/gemma-3-12b-it-nanoquant.gguf")
+    assert experiment.export.gguf_output == Path("Results/008/gemma-3-12b-it-nanoquant.gguf")
 
     tokens = torch.zeros((config.calibration.sample_count, 8), dtype=torch.long)
     inputs = ResolvedResidentInputs(

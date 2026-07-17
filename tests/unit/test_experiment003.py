@@ -42,7 +42,7 @@ def test_experiment003_is_full_gemma4b_compression_quality_proof(tmp_path: Path)
     assert not config.evaluation.inline_quality
     assert not experiment.restore_completed_blocks
     assert experiment.quality_backend == "dense"
-    assert experiment.export.gguf_output == Path("outputs/003/gemma-3-4b-it-nanoquant.gguf")
+    assert experiment.export.gguf_output == Path("Results/003/gemma-3-4b-it-nanoquant.gguf")
     assert experiment.quality_markdown_output == Path(
         "Results/003/003-compress-and-benchmark-gemma-3-4b-it-quality.md"
     )

@@ -88,16 +88,17 @@ experiment's canonical name, `BaselineRef.external(label)` records a non-experim
 | logical runtime | `outputs/009/logical` |
 | packed runtime | `outputs/009/packed` |
 | converter checkpoint | `outputs/009/llamacpp-checkpoint` |
-| GGUF staging file | `outputs/009/<release>-nanoquant.gguf` |
+| final GGUF | `Results/009/<release>-nanoquant.gguf` |
 | summary | `outputs/009/009-<name>-summary.json` |
 | benchmark | `outputs/009/009-<name>-benchmark.json` |
 | quality JSON staging file | `outputs/009/009-<name>-quality.json` |
 | quality Markdown public file | `Results/009/009-<name>-quality.md` |
 | rank expansion report | `outputs/009/009-<name>-expansion.json` |
 
-GGUFs, final JSON statistics, receipts, and other publishable files are validated and hard-linked into
-`Results/009` by the existing publication service. Quality Markdown is written directly to its derived public path;
-there is no recipe-facing `quality_markdown_output` choice.
+GGUFs, paired mmproj files, their export summaries, and their export/upload receipts are created directly in
+`Results/009`. Final JSON statistics and other publishable files are validated and hard-linked there by the existing
+publication service. Quality Markdown is also written directly to its derived public path; there is no recipe-facing
+`quality_markdown_output` choice.
 
 Intermediate logs belong below `outputs/NNN`, conventionally `outputs/NNN/logs` when a workflow needs a dedicated
 log directory. Durable journals, manifests, commits, and resumable numerical state remain below `evidence/NNN`.
@@ -219,11 +220,13 @@ The three roots represent different lifecycle classes:
 | Root | Contents | Retention rule |
 | --- | --- | --- |
 | `evidence/NNN` | manifests, journals, commits, metrics, durable artifacts, resumable state | authoritative run evidence; clean only with store-aware tools |
-| `outputs/NNN` | logical/packed conversion, checkpoints, staged GGUFs, reports, logs | rebuildable/intermediate; never delete while a run is active |
-| `Results/NNN` | released GGUF/mmproj, receipts, final statistics, Markdown reports | stable public zero-copy view |
+| `outputs/NNN` | logical/packed conversion, checkpoints, reports, logs | rebuildable/intermediate; never delete while a run is active |
+| `Results/NNN` | final GGUF/mmproj, receipts, final statistics, Markdown reports | stable public output and zero-copy publication view |
 
-Publication continues to use validated hard links so large model files are not duplicated. A workflow is not complete
-merely because a staging file exists under `outputs`; required publication must also succeed.
+Publication continues to use validated hard links for artifacts originating outside `Results/NNN`, so files are not
+duplicated. Pre-convention GGUFs already present under `outputs/NNN` are validated and adopted into the final path by
+hard link on retry. A workflow is not complete merely because a GGUF exists; required receipts, evaluation, and
+publication must also succeed.
 
 ## Validation
 

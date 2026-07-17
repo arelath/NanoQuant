@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 import nanoquant.compression_export_workflow as workflow
 from nanoquant.compression_export_workflow import (
@@ -27,7 +30,7 @@ def _recipe() -> CompressionExportRecipe:
         Path("outputs/logical"),
         Path("outputs/packed"),
         Path("outputs/checkpoint"),
-        Path("outputs/model.gguf"),
+        Path("Results/003/model.gguf"),
         Path(r"D:\reference\llama.cpp"),
     )
 
@@ -38,7 +41,7 @@ def test_compression_export_recipe_resolves_all_material_paths(tmp_path: Path) -
     assert resolved.logical_output == tmp_path / "outputs" / "logical"
     assert resolved.packed_output == tmp_path / "outputs" / "packed"
     assert resolved.checkpoint_output == tmp_path / "outputs" / "checkpoint"
-    assert resolved.gguf_output == tmp_path / "outputs" / "model.gguf"
+    assert resolved.gguf_output == tmp_path / "Results" / "003" / "model.gguf"
     assert resolved.llama_cpp_root == Path(r"D:\reference\llama.cpp")
     assert resolved.token_embedding_type == "q8_0"
 
@@ -178,3 +181,118 @@ def test_base_compression_requires_export_after_resident_completion(
     assert result.exports is export
     assert (inputs.output / "weight-errors.md").is_file()
     assert (launcher.parent.parent / "Results" / "003" / "weight-errors.md").is_file()
+
+
+def test_compression_export_rejects_gguf_outside_numbered_results(tmp_path: Path) -> None:
+    recipe = replace(_recipe(), gguf_output=Path("outputs/003/model.gguf"))
+
+    with pytest.raises(ValueError, match="numbered Results directory"):
+        execute_compression_export(
+            _CONFIG,
+            recipe,
+            repository_root=tmp_path,
+            run_output=tmp_path / "run",
+            snapshot=tmp_path / "snapshot",
+            expected_blocks=34,
+        )
+
+
+def test_compression_export_adopts_validated_legacy_gguf_without_copying(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    recipe = _recipe()
+    resolved = resolve_compression_export_recipe(recipe, tmp_path)
+    legacy_output = tmp_path / "outputs" / "003" / "model.gguf"
+    legacy_receipt = legacy_output.with_suffix(".gguf.export.json")
+    legacy_output.parent.mkdir(parents=True)
+    legacy_output.write_bytes(b"validated model")
+    legacy_receipt.write_text('{"schema_version":3}\n', encoding="utf-8")
+    monkeypatch.setattr(
+        workflow,
+        "_runtime_metadata",
+        lambda *_args: RuntimeModelMetadata("source", "revision", "gemma3", "config", "tokenizer"),
+    )
+    monkeypatch.setattr(workflow, "_ensure_logical_export", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(workflow, "_ensure_packed_export", lambda *_args: {})
+    calls: list[Path] = []
+
+    def export(*args, **_kwargs):  # type: ignore[no-untyped-def]
+        output = Path(args[3])
+        calls.append(output)
+        return GgufExportResult(
+            output,
+            resolved.checkpoint_output,
+            resolved.llama_cpp_root / "convert_nanoquant_to_gguf.py",
+            output.stat().st_size,
+            "a" * 64,
+            True,
+        )
+
+    monkeypatch.setattr(workflow, "export_llamacpp_gguf", export)
+
+    result = execute_compression_export(
+        _CONFIG,
+        recipe,
+        repository_root=tmp_path,
+        run_output=tmp_path / "run",
+        snapshot=tmp_path / "snapshot",
+        expected_blocks=34,
+    )
+
+    assert calls == [legacy_output.resolve(), resolved.gguf_output]
+    assert os.path.samefile(legacy_output, resolved.gguf_output)
+    assert os.path.samefile(
+        legacy_receipt,
+        resolved.gguf_output.with_suffix(".gguf.export.json"),
+    )
+    assert result.gguf.output == resolved.gguf_output
+
+
+def test_complete_compression_reuses_terminal_completed_workflow_before_export(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    launcher = tmp_path / "repo" / "experiments" / "003.py"
+    inputs = ResolvedResidentInputs(
+        tmp_path / "snapshot",
+        tmp_path / "run",
+        tmp_path / "registry",
+        ((1, 2, 3),),
+        None,
+        launcher_path=launcher,
+    )
+    resident = SimpleNamespace(quantization=SimpleNamespace(inventory=SimpleNamespace(blocks=(0, 1))))
+    export = SimpleNamespace()
+    calls: list[str] = []
+    monkeypatch.setattr(
+        workflow,
+        "load_completed_resident_workflow",
+        lambda *_args: calls.append("load-completed") or resident,
+    )
+    monkeypatch.setattr(
+        workflow,
+        "initialize_live_weight_error_report",
+        lambda *_args, **_kwargs: calls.append("initialize-report"),
+    )
+    monkeypatch.setattr(
+        workflow,
+        "execute_resident_workflow",
+        lambda *_args: calls.append("compress") or resident,
+    )
+    monkeypatch.setattr(
+        workflow,
+        "execute_compression_export",
+        lambda *_args, **_kwargs: calls.append("export") or export,
+    )
+
+    result = workflow.execute_complete_compression(
+        _CONFIG,
+        inputs,
+        _recipe(),
+        expected_blocks=2,
+    )
+
+    assert calls == ["load-completed", "export"]
+    assert result.workflow is resident
+    assert result.exports is export

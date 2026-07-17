@@ -108,6 +108,7 @@ from nanoquant.infrastructure.commits import (
     CommitIdentity,
     commit_block,
     commit_layer,
+    latest_complete_identity,
     load_block_activations,
     load_committed_block,
     load_committed_layer,
@@ -3561,3 +3562,127 @@ def run_resident_quantization(request: ResidentQuantizationRequest) -> ResidentQ
                 time.sleep(request.initial_cooldown_seconds)
             return _run_resident_quantization(request)
     return _run_resident_quantization(request)
+
+
+def load_completed_resident_quantization(
+    request: ResidentQuantizationRequest,
+) -> ResidentQuantizationResult:
+    """Rehydrate one completed resident result without reopening its run session."""
+
+    _validate_resident_request(request)
+    directory = RunDirectory(request.output.parent, request.output.name)
+    manifest = from_dict(RunManifest, directory.read_manifest(), path="manifest")
+    if manifest.status is not RunStatus.COMPLETED:
+        raise ValueError(f"resident run is not completed: {manifest.status.value}")
+    proposed = _resident_manifest(request, "resident-quantization")
+    if manifest.config_hash != proposed.config_hash:
+        raise ValueError("completed resident run configuration differs from the current request")
+
+    artifacts = LocalArtifactStore(
+        request.output / "artifacts",
+        use_persistent_validation_cache=False,
+    )
+    _source, _checkpoint, inventory = _factor_slice_source_inventory(request)
+    records: list[dict[str, Any]] = []
+    journal_path = request.output / "state" / "journal.jsonl"
+    try:
+        lines = journal_path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise ValueError(f"could not read completed resident journal: {journal_path}") from exc
+    for line_number, line in enumerate(lines, start=1):
+        if not line.strip():
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"completed resident journal line {line_number} is invalid JSON") from exc
+        if not isinstance(payload, dict):
+            raise ValueError(f"completed resident journal line {line_number} is not an object")
+        records.append(payload)
+    identity, block_records = latest_complete_identity(records, len(inventory.blocks))
+    if identity.config_hash != _resident_config_hash(request):
+        raise ValueError("completed resident commit identity differs from the current algorithm request")
+    if identity.model_hash != inventory.model.config_hash:
+        raise ValueError("completed resident commit identity belongs to a different model")
+
+    plan_descriptor = artifacts.validate(identity.plan_hash)
+    if plan_descriptor.artifact_type != ArtifactTypes.QUANTIZATION_PLAN:
+        raise ValueError("completed resident plan reference is not a quantization plan")
+    plan_payload = json.loads(
+        (artifacts.path_for(identity.plan_hash) / "plan.json").read_text(encoding="utf-8")
+    )
+    plan = from_dict(QuantizationPlan, plan_payload, path="plan")
+    if plan.model != inventory.model or len(plan.blocks) != len(inventory.blocks):
+        raise ValueError("completed resident plan does not match the current model inventory")
+    plan_reference = ArtifactRef(
+        ArtifactTypes.QUANTIZATION_PLAN,
+        identity.plan_hash,
+        plan_descriptor.schema_version,
+    )
+
+    committed = tuple(
+        (
+            ArtifactRef(ArtifactTypes.BLOCK_RESULT, str(block_records[index]["artifact_id"]), 1),
+            load_committed_block(
+                ArtifactRef(ArtifactTypes.BLOCK_RESULT, str(block_records[index]["artifact_id"]), 1),
+                artifacts,
+                identity,
+            ).result,
+        )
+        for index in range(len(inventory.blocks))
+    )
+    original_elements = sum(
+        layer.in_features * layer.out_features
+        for block in inventory.blocks
+        for layer in block.quantizable_layers
+    )
+    frozen_model = assemble_frozen_model(
+        inventory.model,
+        plan_reference,
+        committed,
+        (),
+        original_elements,
+    )
+
+    report_references: list[ArtifactRef] = []
+    for artifact_id in manifest.artifacts:
+        descriptor = artifacts.validate(artifact_id)
+        if descriptor.artifact_type == "resident-quantization-report":
+            report_references.append(
+                ArtifactRef(descriptor.artifact_type, artifact_id, descriptor.schema_version)
+            )
+    if len(report_references) != 1:
+        raise ValueError("completed resident manifest must reference exactly one quantization report")
+    report_reference = report_references[0]
+    report_root = artifacts.path_for(report_reference.artifact_id)
+    report_payload = json.loads((report_root / "report.json").read_text(encoding="utf-8"))
+    if (
+        report_payload.get("source") != request.source
+        or report_payload.get("revision") != request.revision
+        or report_payload.get("model") != to_dict(inventory.model)
+        or report_payload.get("plan") != identity.plan_hash
+        or int(report_payload.get("block_count", -1)) != len(committed)
+        or int(report_payload.get("actual_total_bits", -1)) != frozen_model.actual_total_bits
+        or float(report_payload.get("effective_bpw", -1.0)) != frozen_model.effective_bpw
+    ):
+        raise ValueError("completed resident report does not match its validated commits")
+    report_bytes = sum(path.stat().st_size for path in report_root.rglob("*") if path.is_file())
+    artifact_bytes = int(report_payload["artifact_bytes_before_report"]) + report_bytes
+
+    return ResidentQuantizationResult(
+        inventory,
+        plan,
+        identity,
+        frozen_model,
+        tuple(block for _reference, block in committed),
+        report_reference,
+        float(report_payload["reference_nll"]),
+        float(report_payload["compressed_nll"]),
+        float(report_payload["logit_mse"]),
+        float(report_payload["argmax_agreement"]),
+        int(report_payload["peak_device_bytes"]),
+        int(report_payload["peak_host_bytes"]),
+        artifact_bytes,
+        float(report_payload["elapsed_seconds"]),
+        int(report_payload["reused_commit_count"]),
+    )
