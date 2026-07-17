@@ -12,8 +12,10 @@ export NANOQUANT_LLAMA_CPP_ROOT="${NANOQUANT_LLAMA_CPP_ROOT:-${WORKSPACE_ROOT}/l
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 export PIP_CACHE_DIR="${PIP_CACHE_DIR:-${WORKSPACE_ROOT}/pip-cache}"
 
-LLAMA_CPP_REPOSITORY="${NANOQUANT_LLAMA_CPP_REPOSITORY:-https://github.com/arelath/llama.cpp.git}"
-LLAMA_CPP_REVISION="${NANOQUANT_LLAMA_CPP_REVISION:-5c6ae79816ee0f2b3d4bb8ec9061c294185d320b}"
+LLAMA_CPP_REPOSITORY="${NANOQUANT_LLAMA_CPP_REPOSITORY:-https://github.com/ggml-org/llama.cpp.git}"
+LLAMA_CPP_REVISION="${NANOQUANT_LLAMA_CPP_REVISION:-68a521b591edd2f36a456809230d63aa81003dfc}"
+VENDORED_CONVERTER="${REPOSITORY_ROOT}/tools/llamacpp/convert_nanoquant_to_gguf.py"
+VENDORED_CONVERTER_SHA256="3ee6ccd976445b8e5669d34080067b0e36bac6166cd109c5f8cf7bc20893690c"
 CALIBRATION_ROOT="${REPOSITORY_ROOT}/evidence/m3/experiment018-calibration"
 CALIBRATION_ID="sha256-ad1f609729f86db7598eed5c703c55aacbb9cb024cab816ca7b300d574b7a4c8"
 
@@ -156,8 +158,12 @@ PY
 fi
 
 if [[ ! -d "${NANOQUANT_LLAMA_CPP_ROOT}/.git" ]]; then
-  echo "==> Cloning modified NanoQuant llama.cpp"
-  git clone "${LLAMA_CPP_REPOSITORY}" "${NANOQUANT_LLAMA_CPP_ROOT}"
+  echo "==> Fetching pinned upstream llama.cpp conversion toolchain"
+  mkdir -p "${NANOQUANT_LLAMA_CPP_ROOT}"
+  git -C "${NANOQUANT_LLAMA_CPP_ROOT}" init
+  git -C "${NANOQUANT_LLAMA_CPP_ROOT}" remote add origin "${LLAMA_CPP_REPOSITORY}"
+  git -C "${NANOQUANT_LLAMA_CPP_ROOT}" fetch --depth 1 origin "${LLAMA_CPP_REVISION}"
+  git -C "${NANOQUANT_LLAMA_CPP_ROOT}" checkout --detach FETCH_HEAD
 fi
 if [[ "$(git -C "${NANOQUANT_LLAMA_CPP_ROOT}" rev-parse HEAD)" != "${LLAMA_CPP_REVISION}" ]]; then
   if [[ -n "$(git -C "${NANOQUANT_LLAMA_CPP_ROOT}" status --porcelain)" ]]; then
@@ -168,10 +174,22 @@ if [[ "$(git -C "${NANOQUANT_LLAMA_CPP_ROOT}" rev-parse HEAD)" != "${LLAMA_CPP_R
   git -C "${NANOQUANT_LLAMA_CPP_ROOT}" checkout --detach "${LLAMA_CPP_REVISION}"
 fi
 
+python - "${VENDORED_CONVERTER}" "${VENDORED_CONVERTER_SHA256}" <<'PY'
+import hashlib
+import pathlib
+import sys
+path = pathlib.Path(sys.argv[1])
+actual = hashlib.sha256(path.read_bytes()).hexdigest()
+if actual != sys.argv[2]:
+    raise SystemExit(f"vendored NanoQuant converter hash differs: {actual} != {sys.argv[2]}")
+PY
+cp "${VENDORED_CONVERTER}" "${NANOQUANT_LLAMA_CPP_ROOT}/convert_nanoquant_to_gguf.py"
+
+echo "==> Using repository-vendored NanoQuant GGUF converter"
 if [[ ! -x "${NANOQUANT_LLAMA_CPP_ROOT}/build/bin/llama-quantize" ]]; then
-  echo "==> Building llama.cpp quantizer"
+  echo "==> Building upstream llama.cpp token-embedding quantizer"
   cmake -S "${NANOQUANT_LLAMA_CPP_ROOT}" -B "${NANOQUANT_LLAMA_CPP_ROOT}/build" \
-    -DGGML_CUDA=ON -DCMAKE_BUILD_TYPE=Release
+    -DGGML_CUDA=OFF -DCMAKE_BUILD_TYPE=Release
   cmake --build "${NANOQUANT_LLAMA_CPP_ROOT}/build" --target llama-quantize \
     --config Release -j"$(nproc)"
 fi

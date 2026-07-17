@@ -23,8 +23,8 @@ bash tools/runpod_bootstrap.sh
 
 Select the complete Gemma 3 1B quality workflow with `NANOQUANT_EXPERIMENT=006`. The script creates a persistent
 virtual environment and Hugging Face cache, recreates and verifies the ignored pinned calibration artifact,
-prefetches the offline quality datasets, clones/builds the pinned modified llama.cpp quantizer, and launches the
-numbered experiment. Useful controls are:
+prefetches the offline quality datasets, installs the repository-vendored NanoQuant converter into a pinned upstream
+llama.cpp conversion toolchain, builds its standard token-embedding quantizer, and launches the numbered experiment. Useful controls are:
 
 ```bash
 NANOQUANT_SETUP_ONLY=1 bash tools/runpod_bootstrap.sh

@@ -58,6 +58,13 @@ and changes only the BF16 token embedding.
 The mmproj remains independent of NanoQuant language-weight compression and is generated directly from the pinned
 Hugging Face vision stack. Text-only snapshots, including Gemma 3 1B, do not produce a placeholder mmproj.
 
+The NanoQuant-specific language converter is vendored at
+`tools/llamacpp/convert_nanoquant_to_gguf.py`, with its upstream license and provenance beside it. Portable setup may
+copy that hash-pinned file into the pinned upstream llama.cpp conversion toolchain; the NanoQuant llama.cpp fork is
+not required to create a GGUF. Upstream `conversion.py`, `convert_hf_to_gguf.py`, `gguf-py`, and the standard
+`llama-quantize` executable are still required, so vendoring this converter does not make GGUF export independent of
+all llama.cpp tooling. The modified fork remains the reference implementation for llama.cpp NanoQuant inference.
+
 Each stage is resumable. Existing logical, packed, checkpoint, language GGUF, and mmproj outputs are hash-validated
 and reused. A partial or provenance-mismatched output fails closed rather than being treated as complete.
 

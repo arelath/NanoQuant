@@ -48,6 +48,7 @@ pythonpath = [".", "experiments", "tools"]
 [tool.ruff]
 line-length = 120
 target-version = "py310"
+exclude = ["tools/llamacpp/convert_nanoquant_to_gguf.py"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
