@@ -5,7 +5,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import torch
-from recipes import EXPERIMENT_001, EXPERIMENT_001_CONFIG
 
 import nanoquant.compression_benchmark_workflow as workflow
 from nanoquant.compression_benchmark_workflow import (
@@ -25,6 +24,11 @@ from nanoquant.infrastructure.gguf_export import GgufExportResult
 from nanoquant.infrastructure.huggingface_upload import HuggingFaceUploadResult
 from nanoquant.quality_evaluation import QualityEvaluationRequest
 from nanoquant.resident_workflow import ResolvedResidentInputs
+from tests.support.experiments import load_experiment
+
+_DEFINITION = load_experiment(1)
+_CONFIG = _DEFINITION.config
+_EXPERIMENT = _DEFINITION.workflow
 
 
 def _inputs(tmp_path: Path, launcher: Path) -> ResolvedResidentInputs:
@@ -61,7 +65,7 @@ def test_compression_benchmark_resolution_is_repository_relative(
     )
 
     resolved = resolve_compression_benchmark_experiment(
-        EXPERIMENT_001_CONFIG,
+        _CONFIG,
         experiment,
         launcher_path=launcher,
     )
@@ -152,8 +156,8 @@ def test_compression_benchmark_executes_export_before_shared_quality_comparison(
     )
 
     payload = execute_compression_benchmark_experiment(
-        EXPERIMENT_001_CONFIG,
-        EXPERIMENT_001,
+        _CONFIG,
+        _EXPERIMENT,
         resolved,
     )
 

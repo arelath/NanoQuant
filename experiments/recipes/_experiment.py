@@ -48,8 +48,8 @@ class BaselineRef:
         return cls(BaselineKind.EXTERNAL, label)
 
     @classmethod
-    def experiment(cls, identity: ExperimentIdentity) -> BaselineRef:
-        return cls(BaselineKind.EXPERIMENT, identity.canonical_name)
+    def experiment(cls, reference: ExperimentIdentity | ExperimentRef) -> BaselineRef:
+        return cls(BaselineKind.EXPERIMENT, reference.canonical_name)
 
     @classmethod
     def none(cls, reason: str) -> BaselineRef:
@@ -109,6 +109,37 @@ class ExperimentIdentity:
             owner=self.owner,
             tags=self.tags,
         )
+
+
+@dataclass(frozen=True, slots=True)
+class ExperimentRef:
+    """Typed reference to another standardized experiment without importing its launcher."""
+
+    number: int
+    name: str
+
+    def __post_init__(self) -> None:
+        _validate_number_and_name(self.number, self.name)
+
+    @property
+    def number_token(self) -> str:
+        return f"{self.number:03d}"
+
+    @property
+    def canonical_name(self) -> str:
+        return f"{self.number_token}-{self.name}"
+
+    @property
+    def run_output(self) -> Path:
+        return Path("evidence") / self.number_token / self.canonical_name
+
+    @property
+    def packed_output(self) -> Path:
+        return Path("outputs") / self.number_token / "packed"
+
+    @property
+    def published_quality_output(self) -> Path:
+        return Path("Results") / self.number_token / f"{self.canonical_name}-quality.json"
 
 
 @dataclass(frozen=True, slots=True)
@@ -216,6 +247,15 @@ def _require_safe_name(value: str, field: str) -> None:
         raise ValueError(f"experiment {field} must be lowercase kebab-case")
 
 
+def _validate_number_and_name(number: int, name: str) -> None:
+    if isinstance(number, bool) or number < 1 or number > 999:
+        raise ValueError("experiment number must be between 1 and 999")
+    if _NUMBERED_NAME.match(name):
+        raise ValueError("experiment name must not include its numeric prefix")
+    if not _SAFE_NAME.fullmatch(name):
+        raise ValueError("experiment name must be one lowercase kebab-case path component")
+
+
 def _default_release_name(config: RunConfig) -> str:
     value = config.model.source.rstrip("/\\").replace("\\", "/").rsplit("/", 1)[-1].lower()
     _require_safe_name(value, "model-derived release name")
@@ -253,12 +293,13 @@ def define_compression_benchmark_experiment(
     template: RunConfig,
     *,
     expected_blocks: int = 26,
-    export: CompressionExportPolicy = CompressionExportPolicy(),
+    export: CompressionExportPolicy | None = None,
 ) -> ExperimentDefinition[CompressionBenchmarkExperiment]:
     layout = ExperimentLayout(identity)
     config = _materialize_config(template, identity, layout)
+    export_policy = CompressionExportPolicy() if export is None else export
     workflow = CompressionBenchmarkExperiment(
-        export=_export_recipe(config, layout, export),
+        export=_export_recipe(config, layout, export_policy),
         benchmark_output=layout.benchmark_output,
         expected_blocks=expected_blocks,
     )
@@ -288,7 +329,7 @@ def define_compression_quality_experiment(
     template: RunConfig,
     *,
     expected_blocks: int,
-    export: CompressionExportPolicy = CompressionExportPolicy(),
+    export: CompressionExportPolicy | None = None,
     maximum_wddm_shared_gib: float | None = None,
     restore_completed_blocks: bool = True,
     quality_backend: str = "factorized",
@@ -296,8 +337,9 @@ def define_compression_quality_experiment(
 ) -> ExperimentDefinition[CompressionQualityExperiment]:
     layout = ExperimentLayout(identity)
     config = _materialize_config(template, identity, layout)
+    export_policy = CompressionExportPolicy() if export is None else export
     workflow = CompressionQualityExperiment(
-        export=_export_recipe(config, layout, export),
+        export=_export_recipe(config, layout, export_policy),
         summary_output=layout.summary_output,
         quality_output=layout.quality_output,
         quality_markdown_output=layout.quality_markdown_output,
@@ -314,7 +356,7 @@ def define_rank_expansion_experiment(
     identity: ExperimentIdentity,
     template: RunConfig,
     *,
-    parent: ExperimentDefinition[CompressionQualityExperiment],
+    parent: ExperimentRef,
     release_name: str,
     bit_multiplier: float = 1.30,
     layer_suffix: str = "self_attn.v_proj",
@@ -325,8 +367,8 @@ def define_rank_expansion_experiment(
     config = _materialize_config(template, identity, layout)
     _require_safe_name(release_name, "release name")
     workflow = RankExpansionExperiment(
-        parent_run=parent.layout.run_output,
-        source_packed=parent.layout.packed_output,
+        parent_run=parent.run_output,
+        source_packed=parent.packed_output,
         output_packed=layout.packed_output,
         checkpoint_output=layout.checkpoint_output,
         gguf_output=layout.gguf_output(release_name),
@@ -334,7 +376,7 @@ def define_rank_expansion_experiment(
         quality_output=layout.quality_output,
         quality_markdown_output=layout.quality_markdown_output,
         summary_output=layout.summary_output,
-        baseline_quality=parent.layout.published_quality_output(),
+        baseline_quality=parent.published_quality_output,
         llama_cpp_root=_LLAMA_CPP_ROOT,
         expected_blocks=expected_blocks,
         layer_suffix=layer_suffix,
@@ -362,6 +404,7 @@ __all__ = [
     "ExperimentDefinition",
     "ExperimentIdentity",
     "ExperimentLayout",
+    "ExperimentRef",
     "define_compression_benchmark_experiment",
     "define_compression_quality_experiment",
     "define_quality_evaluation_experiment",

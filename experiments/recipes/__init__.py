@@ -9,36 +9,21 @@ from ._experiment import (
     ExperimentDefinition,
     ExperimentIdentity,
     ExperimentLayout,
-    validate_experiment_registry,
+    ExperimentRef,
+    define_compression_benchmark_experiment,
+    define_compression_quality_experiment,
+    define_quality_evaluation_experiment,
+    define_rank_expansion_experiment,
 )
 from .base_compression import (
     BASE_COMPRESSION_TEMPLATE,
     GEMMA_3_1B_PARITY_TEMPLATE,
+    GEMMA_3_4B_COMPRESSION_TEMPLATE,
+    GEMMA_3_4B_MODEL_REVISION,
     LARGE_MODEL_COMPRESSION_TEMPLATE,
 )
-from .experiment001 import EXPERIMENT_001
-from .experiment002 import EXPERIMENT_002
-from .experiment003 import EXPERIMENT_003
-from .experiment004 import EXPERIMENT_004
-from .experiment005 import EXPERIMENT_005
-from .experiment006 import EXPERIMENT_006
-from .experiment007 import EXPERIMENT_007
-from .experiment008 import EXPERIMENT_008
-
-ALL_EXPERIMENTS = (
-    EXPERIMENT_001,
-    EXPERIMENT_002,
-    EXPERIMENT_003,
-    EXPERIMENT_004,
-    EXPERIMENT_005,
-    EXPERIMENT_006,
-    EXPERIMENT_007,
-    EXPERIMENT_008,
-)
-validate_experiment_registry(ALL_EXPERIMENTS)
 
 __all__ = [
-    "ALL_EXPERIMENTS",
     "BASE_COMPRESSION_TEMPLATE",
     "BaselineKind",
     "BaselineRef",
@@ -46,15 +31,14 @@ __all__ = [
     "ExperimentDefinition",
     "ExperimentIdentity",
     "ExperimentLayout",
+    "ExperimentRef",
     "GEMMA_3_1B_PARITY_TEMPLATE",
+    "GEMMA_3_4B_COMPRESSION_TEMPLATE",
+    "GEMMA_3_4B_MODEL_REVISION",
     "HuggingFaceUploadConfig",
     "LARGE_MODEL_COMPRESSION_TEMPLATE",
-    "EXPERIMENT_001",
-    "EXPERIMENT_002",
-    "EXPERIMENT_003",
-    "EXPERIMENT_004",
-    "EXPERIMENT_005",
-    "EXPERIMENT_006",
-    "EXPERIMENT_007",
-    "EXPERIMENT_008",
+    "define_compression_benchmark_experiment",
+    "define_compression_quality_experiment",
+    "define_quality_evaluation_experiment",
+    "define_rank_expansion_experiment",
 ]

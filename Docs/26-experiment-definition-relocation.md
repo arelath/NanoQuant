@@ -1,7 +1,11 @@
 # Experiment Definition Relocation
 
-Status: accepted and implemented
+Status: superseded by [standardized experiment definitions and layout](29-standardized-experiment-definitions-and-layout.md)
 Date: 2026-07-16
+
+This document records the first relocation from `src/nanoquant/recipes` into `experiments/recipes`. The final
+boundary moves concrete definitions one step further, into their numbered launchers, leaving `experiments/recipes`
+generic and reusable. Its inventories and code examples are historical and must not be used for new experiments.
 
 ## 1. Problem
 

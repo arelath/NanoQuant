@@ -1,9 +1,10 @@
-import runpy
 from pathlib import Path
 
-from recipes import EXPERIMENT_006_CONFIG, EXPERIMENT_007, EXPERIMENT_007_CONFIG
-
 from nanoquant.config.codec import to_dict
+from tests.support.experiments import load_experiment
+
+_DEFINITION_006 = load_experiment(6)
+_DEFINITION_007 = load_experiment(7)
 
 
 def _diff(left: object, right: object, prefix: str = "") -> set[str]:
@@ -19,9 +20,11 @@ def _diff(left: object, right: object, prefix: str = "") -> set[str]:
 
 
 def test_experiment007_is_the_270m_counterpart_to_experiment006() -> None:
-    config = EXPERIMENT_007_CONFIG
+    config = _DEFINITION_007.config
+    previous = _DEFINITION_006.config
+    experiment = _DEFINITION_007.workflow
 
-    assert _diff(EXPERIMENT_006_CONFIG, config) == {
+    assert _diff(previous, config) == {
         "model.source",
         "model.revision",
         "model.tokenizer_revision",
@@ -35,20 +38,11 @@ def test_experiment007_is_the_270m_counterpart_to_experiment006() -> None:
     }
     assert config.model.source == "unsloth/gemma-3-270m-it"
     assert config.model.revision == "23cf460f6bb16954176b3ddcc8d4f250501458a9"
-    assert config.allocation == EXPERIMENT_006_CONFIG.allocation
-    assert config.dataset == EXPERIMENT_006_CONFIG.dataset
-    assert EXPERIMENT_007.expected_blocks == 18
-    assert EXPERIMENT_007.maximum_wddm_shared_gib == 0.75
-    assert EXPERIMENT_007.export.gguf_output == Path(
-        "outputs/007-gemma-3-270m-it/gemma-3-270m-it-nanoquant.gguf"
-    )
-    assert EXPERIMENT_007.wikitext_samples == 64
-    assert len(EXPERIMENT_007.task_names) == 6
-    assert EXPERIMENT_007.task_limit == 200
-
-
-def test_experiment007_runfile_imports_canonical_recipe() -> None:
-    namespace = runpy.run_path("experiments/007-compress-and-benchmark-gemma-3-270m-it.py")
-
-    assert namespace["CONFIG"] is EXPERIMENT_007_CONFIG
-    assert namespace["EXPERIMENT"] is EXPERIMENT_007
+    assert config.allocation == previous.allocation
+    assert config.dataset == previous.dataset
+    assert experiment.expected_blocks == 18
+    assert experiment.maximum_wddm_shared_gib == 0.75
+    assert experiment.export.gguf_output == Path("outputs/007/gemma-3-270m-it-nanoquant.gguf")
+    assert experiment.wikitext_samples == 64
+    assert len(experiment.task_names) == 6
+    assert experiment.task_limit == 200

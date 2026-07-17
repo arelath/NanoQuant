@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from recipes import EXPERIMENT_011_BENCHMARK, EXPERIMENT_011_CONFIG
+from recipes._delta import config_delta, run_config_defaults
 
 import nanoquant.benchmark_workflow as workflow
 from nanoquant.benchmark_workflow import (
@@ -15,6 +15,48 @@ from nanoquant.benchmark_workflow import (
     resolve_runtime_benchmark_experiment,
 )
 from nanoquant.runtime_benchmark import RuntimeBenchmarkRequest
+
+_MODEL_REVISION = "dcc83ea841ab6100d6b47a070329e1ba4cf78752"
+_DEFAULTS = run_config_defaults("google/gemma-3-1b-it")
+_CONFIG = config_delta(
+    _DEFAULTS,
+    model=config_delta(
+        _DEFAULTS.model,
+        revision=_MODEL_REVISION,
+        tokenizer_revision=_MODEL_REVISION,
+        sequence_length=512,
+    ),
+    intent=config_delta(
+        _DEFAULTS.intent,
+        experiment_number=11,
+        name="benchmark-generation-tps",
+        purpose="Exercise the generation-throughput workflow contract.",
+        hypothesis="The packed runtime completes the configured workload.",
+        tags=("runtime", "generation", "throughput"),
+    ),
+    evaluation=config_delta(_DEFAULTS.evaluation, suites=("runtime-generation-v1",)),
+)
+_BENCHMARK = RuntimeBenchmarkExperiment(
+    RuntimeBenchmarkRequest(
+        packed_artifact=Path("evidence/m6/gemma-pageable-v28-runtime-bundle/packed"),
+        model=Path("google/gemma-3-1b-it"),
+        run_output=Path("evidence/m4/gemma-pageable-v28-four-block-canary"),
+        expected_blocks=26,
+        device="cuda:0",
+        input_dtype="bfloat16",
+        cache_dtype="bfloat16",
+        suite=("end-to-end",),
+        warmups=1,
+        repetitions=3,
+        max_new_tokens=128,
+        stopping_check_interval=8,
+        chat_template=False,
+        ignore_eos=True,
+        prompt=("Explain why compact language models are useful for local inference.",),
+    ),
+    Path("evidence/m9/011-generation-tps.json"),
+    resolve_model_from_config=True,
+)
 
 
 def test_runtime_benchmark_request_rejects_invalid_protocols(tmp_path: Path) -> None:
@@ -28,8 +70,8 @@ def test_runtime_benchmark_request_rejects_invalid_protocols(tmp_path: Path) -> 
         replace(base, prompt=())
 
 
-def test_experiment011_preserves_legacy_generation_workload_on_packed_runtime() -> None:
-    request = EXPERIMENT_011_BENCHMARK.request
+def test_generation_workload_uses_the_packed_runtime() -> None:
+    request = _BENCHMARK.request
 
     assert request.suite == ("end-to-end",)
     assert request.input_dtype == "bfloat16"
@@ -63,8 +105,8 @@ def test_benchmark_experiment_resolution_is_repository_relative(
     )
 
     resolved = resolve_runtime_benchmark_experiment(
-        EXPERIMENT_011_CONFIG,
-        EXPERIMENT_011_BENCHMARK,
+        _CONFIG,
+        _BENCHMARK,
         launcher_path=launcher,
     )
 
@@ -95,7 +137,7 @@ def test_benchmark_workflow_records_config_and_launcher_provenance(
 
     monkeypatch.setattr(workflow, "run_runtime_benchmark", benchmark)
     payload = execute_runtime_benchmark_experiment(
-        EXPERIMENT_011_CONFIG,
+        _CONFIG,
         experiment,
         launcher_path=launcher,
     )
@@ -104,6 +146,6 @@ def test_benchmark_workflow_records_config_and_launcher_provenance(
     assert payload["experiment"]["launcher"]["experiment_number"] == 11
     assert payload["experiment"]["launcher"]["repository_relative_path"] is None
     assert payload["experiment"]["resolved_config"]["intent"]["name"] == (
-        "011-benchmark-generation-tps"
+        "benchmark-generation-tps"
     )
     assert json.loads(output.read_text(encoding="utf-8")) == payload

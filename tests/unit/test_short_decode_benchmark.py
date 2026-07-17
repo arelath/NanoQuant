@@ -7,13 +7,11 @@ from typing import Any
 
 import pytest
 import torch
-from recipes.legacy.short_decode import (
-    LEGACY_SHORT_DECODE_BENCHMARK,
-    LEGACY_SHORT_DECODE_CONFIG,
-)
+from recipes._delta import config_delta, run_config_defaults
 
 import nanoquant.short_decode_workflow as workflow
 from nanoquant.short_decode_benchmark import (
+    LegacyShortDecodeCase,
     ShortDecodeBenchmarkRequest,
     force_prompt_tokens,
 )
@@ -23,7 +21,56 @@ from nanoquant.short_decode_workflow import (
     resolve_short_decode_experiment,
 )
 
-
+_MODEL_REVISION = "dcc83ea841ab6100d6b47a070329e1ba4cf78752"
+_DEFAULTS = run_config_defaults("google/gemma-3-1b-it")
+_CONFIG = config_delta(
+    _DEFAULTS,
+    model=config_delta(
+        _DEFAULTS.model,
+        revision=_MODEL_REVISION,
+        tokenizer_revision=_MODEL_REVISION,
+        sequence_length=128,
+    ),
+    intent=config_delta(
+        _DEFAULTS.intent,
+        experiment_number=2,
+        name="benchmark-gemma-3-1b-it",
+        purpose="Exercise the paired short-decode workflow contract.",
+        hypothesis="The packed runtime completes the configured decode workload.",
+        tags=("runtime", "decode", "paired", "memory"),
+    ),
+    evaluation=config_delta(_DEFAULTS.evaluation, suites=("runtime-short-decode-v1",)),
+)
+_BENCHMARK = ShortDecodeBenchmarkExperiment(
+    ShortDecodeBenchmarkRequest(
+        snapshot=Path("google/gemma-3-1b-it"),
+        run_output=Path("evidence/m4/gemma-pageable-v28-four-block-canary"),
+        runtime_bundle=Path("evidence/m6/gemma-pageable-v28-runtime-bundle"),
+        source="google/gemma-3-1b-it",
+        revision=_MODEL_REVISION,
+        device="cuda:0",
+        dtype="bfloat16",
+        backend="factorized",
+        prompt="Explain why compact language models are useful for local inference.",
+        prompt_tokens=32,
+        max_new_tokens=32,
+        warmups=1,
+        repetitions=3,
+        seed=0,
+        top_k=32,
+        temperature=0.8,
+        legacy_cases=(
+            LegacyShortDecodeCase("fp_original", 8.094968, 2_081_724_928, 2_099_249_152),
+            LegacyShortDecodeCase("nq_eager", 8.297656, 1_999_090_176, 2_040_528_896),
+            LegacyShortDecodeCase("nq_gemv_kernel", 7.127174, 719_535_616, 734_003_200),
+        ),
+        legacy_summary_sha256=(
+            "fb54cfd9f8244b8a6dec30dbd8450b8a8cda729c728ab4959ddc9112954dfaa8"
+        ),
+    ),
+    Path("evidence/m9/002-gemma-3-1b-it-short-decode.json"),
+    resolve_model_from_config=True,
+)
 class _FakeTokenizer:
     eos_token_id = 2
     pad_token_id = 0
@@ -65,8 +112,8 @@ def test_short_decode_request_rejects_invalid_protocols(tmp_path: Path) -> None:
         replace(base, legacy_summary_sha256="INVALID")
 
 
-def test_retained_recipe_preserves_legacy_short_decode_workload() -> None:
-    request = LEGACY_SHORT_DECODE_BENCHMARK.request
+def test_short_decode_fixture_exercises_all_comparison_cases() -> None:
+    request = _BENCHMARK.request
 
     assert request.dtype == "bfloat16"
     assert request.prompt_tokens == 32
@@ -99,8 +146,8 @@ def test_short_decode_experiment_resolution_is_repository_relative(
     )
 
     resolved = resolve_short_decode_experiment(
-        LEGACY_SHORT_DECODE_CONFIG,
-        LEGACY_SHORT_DECODE_BENCHMARK,
+        _CONFIG,
+        _BENCHMARK,
         launcher_path=launcher,
     )
 
@@ -121,7 +168,7 @@ def test_short_decode_workflow_records_config_and_launcher_provenance(
 ) -> None:
     output = tmp_path / "result.json"
     request = replace(
-        LEGACY_SHORT_DECODE_BENCHMARK.request,
+        _BENCHMARK.request,
         snapshot=tmp_path / "snapshot",
         run_output=tmp_path / "run",
         runtime_bundle=tmp_path / "bundle",
@@ -137,7 +184,7 @@ def test_short_decode_workflow_records_config_and_launcher_provenance(
 
     monkeypatch.setattr(workflow, "execute_short_decode_benchmark", benchmark)
     payload = execute_short_decode_experiment(
-        LEGACY_SHORT_DECODE_CONFIG,
+        _CONFIG,
         experiment,
         launcher_path=launcher,
     )
@@ -145,6 +192,6 @@ def test_short_decode_workflow_records_config_and_launcher_provenance(
     assert observed == [request]
     assert payload["experiment"]["launcher"]["experiment_number"] == 2
     assert payload["experiment"]["resolved_config"]["intent"]["name"] == (
-        "002-benchmark-gemma-3-1b-it"
+        "benchmark-gemma-3-1b-it"
     )
     assert json.loads(output.read_text(encoding="utf-8")) == payload

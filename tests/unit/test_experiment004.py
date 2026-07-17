@@ -1,30 +1,25 @@
 from __future__ import annotations
 
-import runpy
 from pathlib import Path
 
 import pytest
-from recipes import EXPERIMENT_004, EXPERIMENT_004_CONFIG
 
 from nanoquant.rank_expansion_experiment import _candidate_comparison
+from tests.support.experiments import load_experiment
+
+_DEFINITION = load_experiment(4)
 
 
 def test_experiment004_is_a_selective_experiment003_derivative() -> None:
-    assert EXPERIMENT_004_CONFIG.intent.experiment_number == 4
-    assert EXPERIMENT_004_CONFIG.intent.baseline_run == "003-compress-and-benchmark-gemma-3-4b-it-v5"
-    assert EXPERIMENT_004.parent_run == Path(
-        "evidence/m10/003-compress-and-benchmark-gemma-3-4b-it-v5"
-    )
-    assert EXPERIMENT_004.layer_suffix == "self_attn.v_proj"
-    assert EXPERIMENT_004.bit_multiplier == 1.30
-    assert EXPERIMENT_004.expected_blocks == 34
-
-
-def test_experiment004_runfile_imports_canonical_recipe() -> None:
-    namespace = runpy.run_path("experiments/004-gemma-3-4b-it-vproj-plus30.py")
-
-    assert namespace["CONFIG"] is EXPERIMENT_004_CONFIG
-    assert namespace["EXPERIMENT"] is EXPERIMENT_004
+    config = _DEFINITION.config
+    experiment = _DEFINITION.workflow
+    assert config.intent.experiment_number == 4
+    assert config.intent.baseline_run == "003-compress-and-benchmark-gemma-3-4b-it"
+    assert experiment.parent_run == Path("evidence/003/003-compress-and-benchmark-gemma-3-4b-it")
+    assert experiment.source_packed == Path("outputs/003/packed")
+    assert experiment.layer_suffix == "self_attn.v_proj"
+    assert experiment.bit_multiplier == 1.30
+    assert experiment.expected_blocks == 34
 
 
 def test_candidate_comparison_uses_experiment003_frozen_metrics() -> None:

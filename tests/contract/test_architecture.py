@@ -61,40 +61,39 @@ def test_recipes_package_has_one_import_spelling() -> None:
     assert not Path("experiments/__init__.py").exists()
 
 
-def test_recipe_configs_use_fail_closed_config_deltas() -> None:
-    recipes = (
-        Path("experiments/recipes/base_compression.py"),
-        Path("experiments/recipes/experiment001.py"),
-        Path("experiments/recipes/experiment002.py"),
-        Path("experiments/recipes/experiment003.py"),
-        Path("experiments/recipes/experiment004.py"),
-        Path("experiments/recipes/experiment005.py"),
-        Path("experiments/recipes/experiment006.py"),
-        Path("experiments/recipes/experiment007.py"),
-        Path("experiments/recipes/experiment008.py"),
-        Path("experiments/recipes/legacy/experiment008.py"),
-        Path("experiments/recipes/legacy/experiment011.py"),
-        Path("experiments/recipes/legacy/experiment013.py"),
-        Path("experiments/recipes/legacy/experiment018.py"),
-        Path("experiments/recipes/legacy/short_decode.py"),
-    )
+def test_recipes_contain_only_generic_reusable_definitions() -> None:
+    root = Path("experiments/recipes")
+    assert {path.relative_to(root).as_posix() for path in root.rglob("*.py")} == {
+        "__init__.py",
+        "_delta.py",
+        "_experiment.py",
+        "base_compression.py",
+    }
+
     violations = []
-    for path in recipes:
+    for path in root.rglob("*.py"):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         if any(
-            isinstance(node, ast.ImportFrom)
-            and node.module == "dataclasses"
-            and any(alias.name == "replace" for alias in node.names)
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "ExperimentIdentity"
             for node in ast.walk(tree)
         ):
-            violations.append(f"{path}: imports unchecked dataclasses.replace")
+            violations.append(f"{path}: owns a concrete experiment identity")
+    assert violations == []
+
+
+def test_each_numbered_launcher_owns_its_concrete_definition() -> None:
+    violations = []
+    for path in Path("experiments").glob("[0-9][0-9][0-9]-*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         if not any(
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Name)
-            and node.func.id == "config_delta"
+            and node.func.id == "ExperimentIdentity"
             for node in ast.walk(tree)
         ):
-            violations.append(f"{path}: does not use config_delta")
+            violations.append(f"{path}: does not declare ExperimentIdentity")
     assert violations == []
 
 

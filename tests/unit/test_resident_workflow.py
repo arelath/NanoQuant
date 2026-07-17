@@ -6,7 +6,6 @@ from typing import Any, cast
 
 import pytest
 import torch
-from recipes.legacy.experiment018 import EXPERIMENT_018_CONFIG
 
 import nanoquant.resident_quantization as resident
 import nanoquant.resident_workflow as workflow
@@ -35,27 +34,28 @@ from nanoquant.resident_workflow import (
     resident_request_from_config,
     resolve_resident_experiment_inputs,
 )
+from tests.support.experiments import load_experiment
 
 
-def _experiment018_config() -> RunConfig:
-    return EXPERIMENT_018_CONFIG
+def _resident_config() -> RunConfig:
+    return load_experiment(1).config
 
 
 def _inputs(tmp_path: Path) -> ResolvedResidentInputs:
     tokens = torch.arange(256 * 8, dtype=torch.long).reshape(256, 8)
     return ResolvedResidentInputs(
         snapshot=tmp_path / "snapshot",
-        output=tmp_path / "runs" / "018",
+        output=tmp_path / "runs" / "001",
         registry_root=tmp_path / "runs",
         token_ids=tokens,
         quality_token_ids=tokens[:1, :8],
-        launcher_path=Path("experiments/recipes/legacy/experiment018.py"),
+        launcher_path=Path("experiments/001-compress-gemma-3-1b-it.py"),
         pad_token_id=0,
     )
 
 
-def test_experiment018_maps_every_hidden_resident_parity_semantic(tmp_path: Path) -> None:
-    config = _experiment018_config()
+def test_resident_recipe_maps_every_hidden_parity_semantic(tmp_path: Path) -> None:
+    config = _resident_config()
     request = resident_request_from_config(config, _inputs(tmp_path))
 
     assert request.revision == "dcc83ea841ab6100d6b47a070329e1ba4cf78752"
@@ -81,15 +81,15 @@ def test_experiment018_maps_every_hidden_resident_parity_semantic(tmp_path: Path
 
     manifest = resident._resident_manifest(request, "resident-quantization")
     assert manifest.launcher.kind == "numbered_runfile"
-    assert manifest.launcher.experiment_number == 18
+    assert manifest.launcher.experiment_number == 1
     assert manifest.launcher.repository_relative_path == (
-        "experiments/recipes/legacy/experiment018.py"
+        "experiments/001-compress-gemma-3-1b-it.py"
     )
     assert cast(dict[str, object], manifest.resolved_config)["canonical_run_config"]
 
 
-def test_experiment018_maps_implicit_legacy_model_kd_defaults(tmp_path: Path) -> None:
-    request = distillation_request_from_config(_experiment018_config(), _inputs(tmp_path))
+def test_resident_recipe_maps_implicit_model_kd_defaults(tmp_path: Path) -> None:
+    request = distillation_request_from_config(_resident_config(), _inputs(tmp_path))
 
     assert request.config.epochs == 8
     assert request.config.batch_size == 1
@@ -105,7 +105,7 @@ def test_experiment018_maps_implicit_legacy_model_kd_defaults(tmp_path: Path) ->
 
 
 def test_resident_mapping_rejects_unimplemented_semantics(tmp_path: Path) -> None:
-    config = _experiment018_config()
+    config = _resident_config()
     unsupported = replace(config, distillation=replace(config.distillation, loss=DistillationLoss.FULL_KL))
 
     with pytest.raises(ValueError, match="only top_k is implemented"):
@@ -113,7 +113,7 @@ def test_resident_mapping_rejects_unimplemented_semantics(tmp_path: Path) -> Non
 
 
 def test_cpu_offload_mapping_requires_large_model_guards(tmp_path: Path) -> None:
-    base = _experiment018_config()
+    base = _resident_config()
     guarded = replace(
         base,
         calibration=replace(base.calibration, method=CalibrationMethod.FORWARD_ONLY),
@@ -164,7 +164,7 @@ def test_cpu_offload_mapping_requires_large_model_guards(tmp_path: Path) -> None
 
 
 def test_activation_gpu_cache_policy_maps_as_nonsemantic_execution_control(tmp_path: Path) -> None:
-    base = _experiment018_config()
+    base = _resident_config()
     cached = replace(
         base,
         runtime=replace(
@@ -185,7 +185,7 @@ def test_activation_gpu_cache_policy_maps_as_nonsemantic_execution_control(tmp_p
 def test_combined_workflow_runs_quantization_before_distillation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    config = _experiment018_config()
+    config = _resident_config()
     inputs = _inputs(tmp_path)
     calls: list[str] = []
     quantization_result = object()
@@ -223,12 +223,12 @@ def test_zero_argument_resolution_uses_pinned_snapshot_and_calibration(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     repository = tmp_path / "repository"
-    launcher = repository / "experiments" / "018-example.py"
+    launcher = repository / "experiments" / "001-compress-gemma-3-1b-it.py"
     launcher.parent.mkdir(parents=True)
     launcher.write_text("# fixture\n", encoding="utf-8")
     snapshot = repository / "snapshot"
     snapshot.mkdir()
-    config = _experiment018_config()
+    config = _resident_config()
     config = replace(config, model=replace(config.model, source=str(snapshot)))
     tokens = torch.arange(256 * 16, dtype=torch.long).reshape(256, 16)
     observed: dict[str, object] = {}
@@ -248,8 +248,8 @@ def test_zero_argument_resolution_uses_pinned_snapshot_and_calibration(
     resolved = resolve_resident_experiment_inputs(config, launcher_path=launcher)
 
     assert resolved.snapshot == snapshot
-    assert resolved.output == repository / "runs" / config.intent.name
-    assert resolved.registry_root == repository / "runs"
+    assert resolved.output == repository / "evidence/001" / config.intent.name
+    assert resolved.registry_root == repository / "evidence/001"
     assert torch.equal(cast(torch.Tensor, resolved.token_ids), tokens)
     assert torch.equal(cast(torch.Tensor, resolved.quality_token_ids), tokens[:1, :8])
     assert resolved.pad_token_id == 7
@@ -263,8 +263,8 @@ def test_workflow_manifest_completes_only_with_global_tuning_artifact(tmp_path: 
         "sha256:config",
         {},
         launcher_provenance(
-            "experiments/recipes/legacy/experiment018.py",
-            18,
+            "experiments/001-compress-gemma-3-1b-it.py",
+            1,
         ),
         {},
     )

@@ -6,7 +6,6 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from recipes import EXPERIMENT_003, EXPERIMENT_003_CONFIG
 
 import nanoquant.compression_quality_workflow as workflow
 from nanoquant.compression_export_workflow import CompleteCompressionResult, CompressionExportResult
@@ -18,6 +17,11 @@ from nanoquant.infrastructure.commits import CommitIdentity
 from nanoquant.infrastructure.gguf_export import GgufExportResult
 from nanoquant.infrastructure.mmproj_export import MmprojExportResult
 from nanoquant.resident_workflow import ResolvedResidentInputs
+from tests.support.experiments import load_experiment
+
+_DEFINITION = load_experiment(3)
+_CONFIG = _DEFINITION.config
+_EXPERIMENT = _DEFINITION.workflow
 
 
 def test_compression_quality_exports_and_publishes_gguf_before_quality(
@@ -101,13 +105,13 @@ def test_compression_quality_exports_and_publishes_gguf_before_quality(
     )
 
     payload = execute_compression_quality_experiment(
-        EXPERIMENT_003_CONFIG,
-        EXPERIMENT_003,
+        _CONFIG,
+        _EXPERIMENT,
         resolved,
     )
 
     assert calls == ["complete", "quality"]
-    assert quality_requests[0].packed_artifact == tmp_path / "repo" / "outputs/003-gemma-3-4b-it/packed"
+    assert quality_requests[0].packed_artifact == tmp_path / "repo" / "outputs/003/packed"
     assert not quality_requests[0].stream_base_model
     assert payload["exports"]["gguf"]["output"] == str(gguf)
     assert payload["exports"]["mmproj"]["output"] == str(mmproj)
@@ -139,7 +143,7 @@ def test_large_model_guard_rejects_resident_recipe_before_compression(
         tmp_path / "quality.json",
         tmp_path / "quality.md",
     )
-    guarded = replace(EXPERIMENT_003, large_model_guards=True)
+    guarded = replace(_EXPERIMENT, large_model_guards=True)
 
     with pytest.raises(ValueError, match="cpu_offload or streaming"):
-        execute_compression_quality_experiment(EXPERIMENT_003_CONFIG, guarded, resolved)
+        execute_compression_quality_experiment(_CONFIG, guarded, resolved)

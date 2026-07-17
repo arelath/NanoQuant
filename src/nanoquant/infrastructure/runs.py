@@ -62,13 +62,20 @@ def launcher_provenance(
 
 def validate_launcher_number(config: RunConfig, launcher_path: str | Path) -> None:
     expected = config.intent.experiment_number
-    match = re.match(r"^(\d{3})[-_]", Path(launcher_path).name)
+    launcher = Path(launcher_path)
+    match = re.match(r"^(\d{3})[-_]", launcher.name)
     actual = int(match.group(1)) if match else None
     if expected is None:
         if actual is not None and actual != 0:
             raise ValueError("EXP001 numbered launcher requires intent.experiment_number")
     elif actual != expected:
         raise ValueError(f"EXP001 launcher number {actual!r} does not match intent.experiment_number {expected}")
+    canonical_prefix = None if expected is None else f"{expected:03d}-"
+    if canonical_prefix is not None and config.intent.name.startswith(canonical_prefix):
+        if launcher.stem != config.intent.name:
+            raise ValueError(
+                f"EXP002 launcher name {launcher.stem!r} does not match intent.name {config.intent.name!r}"
+            )
 
 
 class RunLease:

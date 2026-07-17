@@ -138,6 +138,14 @@ def test_launcher_number_validation() -> None:
     with pytest.raises(ValueError, match="does not match"):
         validate_launcher_number(config, "018_other.py")
 
+    canonical = RunConfig(
+        ModelConfig("x"),
+        intent=IntentConfig(experiment_number=19, name="019-baseline"),
+    )
+    validate_launcher_number(canonical, "019-baseline.py")
+    with pytest.raises(ValueError, match="launcher name"):
+        validate_launcher_number(canonical, "019-other.py")
+
 
 def test_semantic_cache_explains_reuse_and_precise_invalidation() -> None:
     first = semantic_key("calibrate", "online-fisher", "1", {"sample_count": 8, "presentation": "ignored"})

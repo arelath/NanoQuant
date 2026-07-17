@@ -1,16 +1,11 @@
 from __future__ import annotations
 
 import json
-import runpy
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import pytest
-from recipes import (
-    EXPERIMENT_002_CONFIG,
-    EXPERIMENT_002_EVALUATION,
-)
 
 import nanoquant.quality_evaluation_workflow as workflow
 from nanoquant.quality_evaluation import QualityEvaluationRequest
@@ -20,6 +15,11 @@ from nanoquant.quality_evaluation_workflow import (
     render_quality_evaluation_markdown,
     resolve_quality_evaluation_experiment,
 )
+from tests.support.experiments import load_experiment
+
+_DEFINITION = load_experiment(2)
+_CONFIG = _DEFINITION.config
+_EVALUATION = _DEFINITION.workflow
 
 
 def test_quality_evaluation_request_rejects_ambiguous_protocols(tmp_path: Path) -> None:
@@ -34,7 +34,7 @@ def test_quality_evaluation_request_rejects_ambiguous_protocols(tmp_path: Path) 
 
 
 def test_experiment002_uses_the_full_common_quality_protocol() -> None:
-    request = EXPERIMENT_002_EVALUATION.request
+    request = _EVALUATION.request
 
     assert request.wikitext_samples == 64
     assert request.wikitext_sequence_length == 128
@@ -51,16 +51,9 @@ def test_experiment002_uses_the_full_common_quality_protocol() -> None:
     assert request.task_batch_size == 1
     assert request.backend == "factorized"
     assert request.use_global_tuning
-    assert EXPERIMENT_002_EVALUATION.markdown_path == Path(
-        "evidence/m9/002-gemma-3-1b-it-quality-benchmark.md"
+    assert _EVALUATION.markdown_path == Path(
+        "Results/002/002-benchmark-gemma-3-1b-it-quality.md"
     )
-
-
-def test_002_benchmark_runfile_imports_canonical_recipe_objects() -> None:
-    namespace = runpy.run_path("experiments/002-benchmark-gemma-3-1b-it.py")
-
-    assert namespace["CONFIG"] is EXPERIMENT_002_CONFIG
-    assert namespace["EVALUATION"] is EXPERIMENT_002_EVALUATION
 
 
 def test_quality_experiment_resolution_is_pinned_and_repository_relative(
@@ -78,20 +71,20 @@ def test_quality_experiment_resolution_is_pinned_and_repository_relative(
     )
 
     experiment = replace(
-        EXPERIMENT_002_EVALUATION,
+        _EVALUATION,
         request=replace(
-            EXPERIMENT_002_EVALUATION.request,
+            _EVALUATION.request,
             packed_artifact=Path("outputs/candidate/packed"),
         ),
     )
     resolved = resolve_quality_evaluation_experiment(
-        EXPERIMENT_002_CONFIG,
+        _CONFIG,
         experiment,
         launcher_path=launcher,
     )
     assert resolved.request.snapshot == snapshot.resolve()
     assert resolved.markdown_path == (
-        tmp_path / "repo" / "evidence/m9/002-gemma-3-1b-it-quality-benchmark.md"
+        tmp_path / "repo" / "Results/002/002-benchmark-gemma-3-1b-it-quality.md"
     )
     assert resolved.request.packed_artifact == tmp_path / "repo" / "outputs/candidate/packed"
 
@@ -104,7 +97,7 @@ def test_quality_workflow_records_config_and_launcher_provenance(
     request = QualityEvaluationRequest(tmp_path, "model", "revision", tmp_path / "run")
     experiment = QualityEvaluationExperiment(request, output)
     observed: list[QualityEvaluationRequest] = []
-    launcher = tmp_path / "002-evaluate-gemma-3-1b-it-quality.py"
+    launcher = tmp_path / "002-benchmark-gemma-3-1b-it.py"
     launcher.write_text("# provenance fixture\n", encoding="utf-8")
 
     def evaluate(resolved: QualityEvaluationRequest) -> dict[str, Any]:
@@ -119,12 +112,14 @@ def test_quality_workflow_records_config_and_launcher_provenance(
         lambda root, number, artifacts: published.append((root, number, tuple(artifacts))),
     )
     payload = execute_quality_evaluation_experiment(
-        EXPERIMENT_002_CONFIG,
+        _CONFIG,
         experiment,
         launcher_path=launcher,
     )
 
-    assert observed == [replace(request, source="google/gemma-3-1b-it", revision=EXPERIMENT_002_CONFIG.model.revision)]
+    assert observed == [
+        replace(request, source="google/gemma-3-1b-it", revision=_CONFIG.model.revision)
+    ]
     assert payload["experiment"]["launcher"]["experiment_number"] == 2
     assert payload["experiment"]["resolved_config"]["intent"]["name"] == (
         "002-benchmark-gemma-3-1b-it"
@@ -195,7 +190,7 @@ def test_quality_workflow_writes_deterministic_markdown(
 ) -> None:
     output = tmp_path / "result.json"
     markdown = tmp_path / "result.md"
-    launcher = tmp_path / "002-quality.py"
+    launcher = tmp_path / "002-benchmark-gemma-3-1b-it.py"
     launcher.write_text("# provenance fixture\n", encoding="utf-8")
     request = QualityEvaluationRequest(tmp_path, "model", "revision", tmp_path / "run")
     experiment = QualityEvaluationExperiment(request, output, markdown_path=markdown)
@@ -208,7 +203,7 @@ def test_quality_workflow_writes_deterministic_markdown(
     )
 
     payload = execute_quality_evaluation_experiment(
-        EXPERIMENT_002_CONFIG,
+        _CONFIG,
         experiment,
         launcher_path=launcher,
     )

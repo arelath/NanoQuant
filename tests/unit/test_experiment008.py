@@ -1,15 +1,6 @@
-import runpy
 from pathlib import Path
 
 import torch
-from recipes import EXPERIMENT_008, EXPERIMENT_008_CONFIG
-from recipes.experiment008 import (
-    MODEL_REVISION,
-    MODEL_SOURCE,
-    REQUESTED_GGUF_FILENAME,
-    REQUESTED_GGUF_REPOSITORY,
-    REQUESTED_GGUF_REVISION,
-)
 
 from nanoquant.config.schema import ActivationGpuCacheMode, CalibrationMethod, ExecutorKind
 from nanoquant.resident_workflow import (
@@ -17,21 +8,20 @@ from nanoquant.resident_workflow import (
     ResolvedResidentInputs,
     resident_request_from_config,
 )
+from tests.support.experiments import load_experiment
+
+_DEFINITION = load_experiment(8)
 
 
 def test_experiment008_is_guarded_12b_compression_quality_proof(tmp_path: Path) -> None:
-    config = EXPERIMENT_008_CONFIG
+    config = _DEFINITION.config
+    experiment = _DEFINITION.workflow
 
-    assert MODEL_SOURCE == "unsloth/gemma-3-12b-it"
-    assert MODEL_REVISION == "9478e665381f42974aa06177b019352fb6291876"
-    assert REQUESTED_GGUF_REPOSITORY == "unsloth/gemma-3-12b-it-GGUF"
-    assert REQUESTED_GGUF_REVISION == "d15e4c7dc21dc55d56bf8549db57a71ad8a2a35d"
-    assert REQUESTED_GGUF_FILENAME == "gemma-3-12b-it-BF16.gguf"
-    assert config.model.source == MODEL_SOURCE
-    assert config.model.revision == MODEL_REVISION
+    assert config.model.source == "unsloth/gemma-3-12b-it"
+    assert config.model.revision == "9478e665381f42974aa06177b019352fb6291876"
     assert config.intent.experiment_number == 8
-    assert config.intent.name == "008-compress-and-benchmark-gemma-3-12b-it-forward-only-v4"
-    assert REQUESTED_GGUF_REPOSITORY in str(config.intent.baseline_run)
+    assert config.intent.name == "008-compress-and-benchmark-gemma-3-12b-it"
+    assert "unsloth/gemma-3-12b-it-GGUF" in str(config.intent.baseline_run)
     assert config.runtime.executor is ExecutorKind.CPU_OFFLOAD
     assert config.calibration.method is CalibrationMethod.FORWARD_ONLY
     assert config.runtime.activations.gpu_cache is ActivationGpuCacheMode.AUTO
@@ -43,13 +33,11 @@ def test_experiment008_is_guarded_12b_compression_quality_proof(tmp_path: Path) 
     assert config.block_tuning.post_block_refit.batch_size == 8
     assert not config.evaluation.inline_quality
     assert not config.distillation.enabled
-    assert EXPERIMENT_008.expected_blocks == 48
-    assert EXPERIMENT_008.large_model_guards
-    assert not EXPERIMENT_008.restore_completed_blocks
-    assert EXPERIMENT_008.maximum_wddm_shared_gib == 0.75
-    assert EXPERIMENT_008.export.gguf_output == Path(
-        "outputs/008-gemma-3-12b-it/gemma-3-12b-it-nanoquant.gguf"
-    )
+    assert experiment.expected_blocks == 48
+    assert experiment.large_model_guards
+    assert not experiment.restore_completed_blocks
+    assert experiment.maximum_wddm_shared_gib == 0.75
+    assert experiment.export.gguf_output == Path("outputs/008/gemma-3-12b-it-nanoquant.gguf")
 
     tokens = torch.zeros((config.calibration.sample_count, 8), dtype=torch.long)
     inputs = ResolvedResidentInputs(
@@ -69,10 +57,3 @@ def test_experiment008_is_guarded_12b_compression_quality_proof(tmp_path: Path) 
     assert request.executor is ExecutorKind.CPU_OFFLOAD
     assert not request.restore_completed_blocks
     assert not request.evaluate_inline_quality
-
-
-def test_experiment008_runfile_imports_canonical_recipe() -> None:
-    namespace = runpy.run_path("experiments/008-compress-and-benchmark-gemma-3-12b-it.py")
-
-    assert namespace["CONFIG"] is EXPERIMENT_008_CONFIG
-    assert namespace["EXPERIMENT"] is EXPERIMENT_008

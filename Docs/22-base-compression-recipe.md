@@ -1,9 +1,10 @@
 # Base compression recipe and mandatory GGUF export
 
-All numbered compression experiments derive their numerical configuration from
-`experiments/recipes/base_compression.py`. The visible `BASE_COMPRESSION_CONFIG` replaces the previous implicit
-practice of treating legacy Experiment 018 as the base recipe. Experiment 018 now derives from the base like every
-other numbered run.
+Numbered compression experiments start from an unnumbered reusable template in
+`experiments/recipes/base_compression.py`. The package exposes `BASE_COMPRESSION_TEMPLATE`,
+`GEMMA_3_1B_PARITY_TEMPLATE`, `GEMMA_3_4B_COMPRESSION_TEMPLATE`, and
+`LARGE_MODEL_COMPRESSION_TEMPLATE`. Concrete identities and experiment-specific deltas live in the numbered
+launchers in `experiments/`, not in `recipes`.
 
 The base allocation promotes every `self_attn.v_proj` and `self_attn.k_proj` layer to its physical maximum rank and
 adds 25% to each `self_attn.q_proj` packed-factor budget. Promotions happen after ordinary sensitivity allocation,
@@ -17,10 +18,10 @@ baseline, and derived experiments inherit from their direct recipe parent. The h
 equal to its parent during module import, so recipe files state only material differences while their fully resolved
 `RunConfig` remains complete and hash-stable.
 
-The same module exposes `compression_export_recipe(experiment_number, model_slug)`. It assigns canonical outputs:
+The generic experiment builder derives export locations from `ExperimentIdentity`. For Experiment `NNN`, it assigns:
 
 ```text
-outputs/NNN-model-slug/
+outputs/NNN/
   logical/
   packed/
   llamacpp-checkpoint/
@@ -29,7 +30,7 @@ outputs/NNN-model-slug/
   model-slug-nanoquant.gguf.huggingface.json  # only when a Hub upload is configured
   mmproj-BF16.gguf                 # multimodal snapshots only
   mmproj-BF16.gguf.export.json     # multimodal snapshots only
-  model-slug-nanoquant.export-summary.json
+  NNN-canonical-name-summary.json
 ```
 
 ## Completion contract
@@ -49,9 +50,9 @@ complete until all of these stages succeed:
    uploaded in one model-repository commit and a local token-free receipt records its exact commit and file hashes;
 7. the GGUF files, export summaries, receipts, and experiment statistics are hard-linked into `Results/NNN`.
 
-The embedding level is part of the export recipe and receipt identity. Use
-`compression_export_recipe(..., token_embedding_type="q4_k")` for a Q4_K embedding; Q4/Q5/Q6/Q8 llama.cpp
-variants accepted by the recipe are supported. The second pass uses F16 as its base type because llama.cpp's `COPY`
+The embedding level is part of `CompressionExportPolicy` and receipt identity. Set
+`CompressionExportPolicy(token_embedding_type="q4_k")` for a Q4_K embedding; Q4/Q5/Q6/Q8 llama.cpp variants
+accepted by the export contract are supported. The second pass uses F16 as its base type because llama.cpp's `COPY`
 mode disables per-tensor overrides. On NanoQuant GGUFs, the F16 base leaves the existing BF16/F16/I32/F32 sidecars alone
 and changes only the BF16 token embedding.
 
@@ -67,11 +68,10 @@ Hugging Face publication is an explicit experiment-recipe choice. A newly author
 the destination to its export declaration:
 
 ```python
-from recipes import HuggingFaceUploadConfig, compression_export_recipe
+from recipes import CompressionExportPolicy, HuggingFaceUploadConfig
 
-export = compression_export_recipe(
-    8,
-    "gemma-3-1b-it",
+export = CompressionExportPolicy(
+    release_name="gemma-3-1b-it",
     huggingface=HuggingFaceUploadConfig(
         "owner/gemma-3-1b-it-nanoquant-GGUF",
         private=True,
@@ -90,7 +90,7 @@ On success, `<model>.gguf.huggingface.json` records the canonical repository ID 
 visibility, commit message, and each uploaded filename, byte count, and SHA-256. High-level compression experiments
 also publish this receipt under `Results/NNN` and include it in their schema-2 summary. Upload failures propagate, but
 the completed local compression and validated exports remain reusable; rerunning retries publication without
-recompressing. Recipes without `huggingface=...` remain fully offline and retain the previous behavior.
+recompressing. Experiments whose export policy omits `huggingface` remain fully offline.
 
 ## Exporting an older completed run
 
