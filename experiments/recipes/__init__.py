@@ -17,9 +17,10 @@ from ._experiment import (
 )
 from .base_compression import (
     BASE_COMPRESSION_TEMPLATE,
-    GEMMA_3_1B_PARITY_TEMPLATE,
     GEMMA_3_4B_COMPRESSION_TEMPLATE,
     GEMMA_3_4B_MODEL_REVISION,
+    GEMMA_3_270M_COMPRESSION_TEMPLATE,
+    GEMMA_3_270M_MODEL_REVISION,
     LARGE_MODEL_COMPRESSION_TEMPLATE,
 )
 
@@ -32,7 +33,8 @@ __all__ = [
     "ExperimentIdentity",
     "ExperimentLayout",
     "ExperimentRef",
-    "GEMMA_3_1B_PARITY_TEMPLATE",
+    "GEMMA_3_270M_COMPRESSION_TEMPLATE",
+    "GEMMA_3_270M_MODEL_REVISION",
     "GEMMA_3_4B_COMPRESSION_TEMPLATE",
     "GEMMA_3_4B_MODEL_REVISION",
     "HuggingFaceUploadConfig",

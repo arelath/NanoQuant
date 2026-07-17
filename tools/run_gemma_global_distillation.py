@@ -8,7 +8,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import _paths  # noqa: F401
-from recipes import GEMMA_3_1B_PARITY_TEMPLATE
+from recipes import BASE_COMPRESSION_TEMPLATE
 from transformers.models.auto.tokenization_auto import AutoTokenizer
 
 from nanoquant.config.schema import ProfilingConfig, ProfilingLevel
@@ -21,8 +21,8 @@ from nanoquant.resident_workflow import (
     distillation_request_from_config,
 )
 
-MODEL_REVISION = str(GEMMA_3_1B_PARITY_TEMPLATE.model.revision)
-CALIBRATION_ARTIFACT = str(GEMMA_3_1B_PARITY_TEMPLATE.dataset.prepared_artifact)
+MODEL_REVISION = str(BASE_COMPRESSION_TEMPLATE.model.revision)
+CALIBRATION_ARTIFACT = str(BASE_COMPRESSION_TEMPLATE.dataset.prepared_artifact)
 
 
 def main() -> None:
@@ -81,7 +81,7 @@ def main() -> None:
     if args.samples <= 0 or args.samples > calibration.input_ids.shape[0]:
         raise ValueError("distillation sample count is outside the pinned calibration dataset")
     tokenizer = AutoTokenizer.from_pretrained(args.snapshot, local_files_only=True)
-    base = GEMMA_3_1B_PARITY_TEMPLATE
+    base = BASE_COMPRESSION_TEMPLATE
     config = replace(
         base,
         intent=replace(base.intent, experiment_number=None, name=args.run_output.name),

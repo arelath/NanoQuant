@@ -3,7 +3,6 @@ from pathlib import Path
 import pytest
 from recipes import (
     BASE_COMPRESSION_TEMPLATE,
-    GEMMA_3_1B_PARITY_TEMPLATE,
     CompressionExportPolicy,
     HuggingFaceUploadConfig,
 )
@@ -25,8 +24,14 @@ def test_base_compression_templates_are_visible_and_unnumbered() -> None:
         (item.pattern, item.multiplier)
         for item in BASE_COMPRESSION_TEMPLATE.allocation.layer_budget_multipliers
     ) == (("self_attn.q_proj", 1.25),)
-    assert not GEMMA_3_1B_PARITY_TEMPLATE.allocation.maximum_rank_layer_patterns
-    assert not GEMMA_3_1B_PARITY_TEMPLATE.allocation.layer_budget_multipliers
+    assert experiment_001.config.allocation == BASE_COMPRESSION_TEMPLATE.allocation
+    assert experiment_003.config.allocation.maximum_rank_layer_patterns == (
+        "self_attn.v_proj",
+        "self_attn.k_proj",
+    )
+    assert experiment_003.config.allocation.layer_budget_multipliers == (
+        BASE_COMPRESSION_TEMPLATE.allocation.layer_budget_multipliers
+    )
     assert experiment_001.config.factorization == BASE_COMPRESSION_TEMPLATE.factorization
     assert experiment_003.config.factorization == BASE_COMPRESSION_TEMPLATE.factorization
 

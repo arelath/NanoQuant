@@ -13,6 +13,7 @@ from nanoquant.config.schema import (
 from ._delta import config_delta, run_config_defaults
 
 MODEL_REVISION = "dcc83ea841ab6100d6b47a070329e1ba4cf78752"
+GEMMA_3_270M_MODEL_REVISION = "23cf460f6bb16954176b3ddcc8d4f250501458a9"
 GEMMA_3_4B_MODEL_REVISION = "093f9f388b31de276ce2de164bdc2081324b9767"
 
 _SCHEMA_DEFAULTS = run_config_defaults("google/gemma-3-1b-it")
@@ -125,32 +126,33 @@ BASE_COMPRESSION_TEMPLATE = config_delta(
 )
 
 
-GEMMA_3_1B_PARITY_TEMPLATE = config_delta(
+GEMMA_3_270M_COMPRESSION_TEMPLATE = config_delta(
     BASE_COMPRESSION_TEMPLATE,
-    allocation=config_delta(
-        BASE_COMPRESSION_TEMPLATE.allocation,
-        maximum_rank_layer_patterns=(),
-        layer_budget_multipliers=(),
+    model=config_delta(
+        BASE_COMPRESSION_TEMPLATE.model,
+        source="unsloth/gemma-3-270m-it",
+        revision=GEMMA_3_270M_MODEL_REVISION,
+        tokenizer_revision=GEMMA_3_270M_MODEL_REVISION,
     ),
 )
 
 
-_4B_TUNING = GEMMA_3_1B_PARITY_TEMPLATE.block_tuning
+_4B_TUNING = BASE_COMPRESSION_TEMPLATE.block_tuning
 
 GEMMA_3_4B_COMPRESSION_TEMPLATE = config_delta(
-    GEMMA_3_1B_PARITY_TEMPLATE,
+    BASE_COMPRESSION_TEMPLATE,
     model=config_delta(
-        GEMMA_3_1B_PARITY_TEMPLATE.model,
+        BASE_COMPRESSION_TEMPLATE.model,
         source="google/gemma-3-4b-it",
         revision=GEMMA_3_4B_MODEL_REVISION,
         tokenizer_revision=GEMMA_3_4B_MODEL_REVISION,
     ),
     allocation=config_delta(
-        GEMMA_3_1B_PARITY_TEMPLATE.allocation,
+        BASE_COMPRESSION_TEMPLATE.allocation,
         retry=config_delta(
-            GEMMA_3_1B_PARITY_TEMPLATE.allocation.retry,
+            BASE_COMPRESSION_TEMPLATE.allocation.retry,
             thresholds=config_delta(
-                GEMMA_3_1B_PARITY_TEMPLATE.allocation.retry.thresholds,
+                BASE_COMPRESSION_TEMPLATE.allocation.retry.thresholds,
                 weighted_normalized_error=0.35,
                 raw_normalized_error=0.40,
             ),
@@ -173,19 +175,19 @@ GEMMA_3_4B_COMPRESSION_TEMPLATE = config_delta(
         microbatch_size=1,
     ),
     runtime=config_delta(
-        GEMMA_3_1B_PARITY_TEMPLATE.runtime,
+        BASE_COMPRESSION_TEMPLATE.runtime,
         block_forward_batch_size=4,
     ),
     evaluation=config_delta(
-        GEMMA_3_1B_PARITY_TEMPLATE.evaluation,
+        BASE_COMPRESSION_TEMPLATE.evaluation,
         inline_quality=False,
     ),
     observability=config_delta(
-        GEMMA_3_1B_PARITY_TEMPLATE.observability,
+        BASE_COMPRESSION_TEMPLATE.observability,
         record_resource_interval_seconds=1.0,
     ),
     profiling=config_delta(
-        GEMMA_3_1B_PARITY_TEMPLATE.profiling,
+        BASE_COMPRESSION_TEMPLATE.profiling,
         cuda_timing=True,
         memory_counters=True,
         emit_span_events=True,
@@ -221,7 +223,8 @@ LARGE_MODEL_COMPRESSION_TEMPLATE = config_delta(
 
 __all__ = [
     "BASE_COMPRESSION_TEMPLATE",
-    "GEMMA_3_1B_PARITY_TEMPLATE",
+    "GEMMA_3_270M_COMPRESSION_TEMPLATE",
+    "GEMMA_3_270M_MODEL_REVISION",
     "GEMMA_3_4B_COMPRESSION_TEMPLATE",
     "GEMMA_3_4B_MODEL_REVISION",
     "LARGE_MODEL_COMPRESSION_TEMPLATE",

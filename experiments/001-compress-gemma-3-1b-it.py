@@ -1,7 +1,7 @@
 """Experiment 001: compress, export, and benchmark pinned Gemma 3 1B."""
 
 from recipes import (
-    GEMMA_3_1B_PARITY_TEMPLATE,
+    BASE_COMPRESSION_TEMPLATE,
     BaselineRef,
     ExperimentIdentity,
     define_compression_benchmark_experiment,
@@ -24,7 +24,7 @@ EXPERIMENT = define_compression_benchmark_experiment(
         baseline=BaselineRef.external("bf16-google-gemma-3-1b-it"),
         tags=("gemma-3-1b-it", "compression", "gguf", "bf16-comparison", "quality"),
     ),
-    GEMMA_3_1B_PARITY_TEMPLATE,
+    BASE_COMPRESSION_TEMPLATE,
 )
 
 

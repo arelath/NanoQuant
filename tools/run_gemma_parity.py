@@ -8,7 +8,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import _paths  # noqa: F401
-from recipes import GEMMA_3_1B_PARITY_TEMPLATE
+from recipes import BASE_COMPRESSION_TEMPLATE
 
 from nanoquant.config.schema import (
     ActivationRetention,
@@ -29,8 +29,8 @@ from nanoquant.resident_workflow import (
     resident_request_from_config,
 )
 
-MODEL_REVISION = str(GEMMA_3_1B_PARITY_TEMPLATE.model.revision)
-CALIBRATION_ARTIFACT = str(GEMMA_3_1B_PARITY_TEMPLATE.dataset.prepared_artifact)
+MODEL_REVISION = str(BASE_COMPRESSION_TEMPLATE.model.revision)
+CALIBRATION_ARTIFACT = str(BASE_COMPRESSION_TEMPLATE.dataset.prepared_artifact)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -109,7 +109,7 @@ def main() -> None:
         args.calibration,
         ArtifactRef("calibration-dataset-manifest", CALIBRATION_ARTIFACT, 1),
     )
-    base = GEMMA_3_1B_PARITY_TEMPLATE
+    base = BASE_COMPRESSION_TEMPLATE
     factorized_loop = replace(
         base.block_tuning.factorized.loop,
         enabled=args.factorized_tuning_epochs > 0,

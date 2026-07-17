@@ -28,7 +28,7 @@ are removed; workflow tests use local fixtures where they still exercise histori
 - concrete intent is reviewed next to the command that executes it;
 - the recipe package cannot accumulate numbered campaign definitions;
 - pytest and mypy include `experiments` as an explicit source root;
-- standalone parity tools use the reusable unnumbered parity template;
+- standalone parity tools use the reusable base compression template;
 - contract tests reject a recreated `src/nanoquant/recipes` tree, library imports of `recipes`, or an
   `experiments/__init__.py` file;
 - contract tests require every numbered launcher to declare an identity and forbid concrete identities in recipes.

@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import torch
-from recipes import GEMMA_3_1B_PARITY_TEMPLATE
+from recipes import BASE_COMPRESSION_TEMPLATE
 
 from nanoquant.config.codec import to_dict
 from nanoquant.config.schema import RunConfig
@@ -35,13 +35,13 @@ def _inputs(config: RunConfig, tmp_path: Path) -> ResolvedResidentInputs:
     )
 
 
-def test_experiment001_uses_the_current_parity_compression_template(tmp_path: Path) -> None:
+def test_experiment001_uses_the_current_base_compression_template(tmp_path: Path) -> None:
     definition = load_experiment(1)
     config = definition.config
     experiment = definition.workflow
     request = resident_request_from_config(config, _inputs(config, tmp_path))
 
-    assert _diff(GEMMA_3_1B_PARITY_TEMPLATE, config) == {
+    assert _diff(BASE_COMPRESSION_TEMPLATE, config) == {
         "intent.experiment_number",
         "intent.name",
         "intent.purpose",
@@ -74,6 +74,7 @@ def test_numbered_launchers_own_their_concrete_definitions() -> None:
         "006-compress-and-benchmark-gemma-3-1b-it.py",
         "007-compress-and-benchmark-gemma-3-270m-it.py",
         "008-compress-and-benchmark-gemma-3-12b-it.py",
+        "009-compress-benchmark-and-publish-gemma-3-270m-it.py",
     ]
     for number, launcher in enumerate(launchers, start=1):
         definition = load_experiment(number)

@@ -2,15 +2,14 @@
 
 Numbered compression experiments start from an unnumbered reusable template in
 `experiments/recipes/base_compression.py`. The package exposes `BASE_COMPRESSION_TEMPLATE`,
-`GEMMA_3_1B_PARITY_TEMPLATE`, `GEMMA_3_4B_COMPRESSION_TEMPLATE`, and
+`GEMMA_3_270M_COMPRESSION_TEMPLATE`, `GEMMA_3_4B_COMPRESSION_TEMPLATE`, and
 `LARGE_MODEL_COMPRESSION_TEMPLATE`. Concrete identities and experiment-specific deltas live in the numbered
 launchers in `experiments/`, not in `recipes`.
 
 The base allocation promotes every `self_attn.v_proj` and `self_attn.k_proj` layer to its physical maximum rank and
 adds 25% to each `self_attn.q_proj` packed-factor budget. Promotions happen after ordinary sensitivity allocation,
 so other layers retain their target-BPW ranks and reported physical BPW includes the additional projection storage.
-Numbered experiments whose results or resumable state predate these decisions explicitly pin empty overrides;
-newly authored compression experiments inherit both policies.
+All compression templates inherit both policies; there is no compatibility template that clears them for old runs.
 
 Every recipe definition uses `config_delta(parent, ...)` at each nested dataclass boundary. The shared compression
 recipe is itself a delta from the canonical schema defaults, standalone benchmark recipes use the same schema

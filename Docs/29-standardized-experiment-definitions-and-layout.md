@@ -59,7 +59,8 @@ import the research-side `recipes` package or define concrete experiments.
 ### `ExperimentIdentity`
 
 `ExperimentIdentity` is the only place a launcher states its number and descriptive name. Callers provide a name
-such as `compress-gemma-3-1b-it`; the value object derives `009-compress-gemma-3-1b-it`.
+such as `compress-gemma-3-270m-it`; for Experiment 042 the value object derives
+`042-compress-gemma-3-270m-it`.
 
 Construction fails when:
 
@@ -139,23 +140,24 @@ parent quality   Results/NNN/NNN-<name>-quality.json
 
 ## Current experiment inventory
 
-All eight active launchers now own their concrete definitions:
+All nine active launchers now own their concrete definitions:
 
 | Experiment | Workflow | Reusable template | Explicit semantic choices |
 | --- | --- | --- | --- |
-| 001 | compression + export + benchmark | `GEMMA_3_1B_PARITY_TEMPLATE` | BF16 baseline and common benchmark protocol |
-| 002 | standalone quality evaluation | local unnumbered evaluation template | accepted candidate run and evaluation protocol |
+| 001 | compression + export + benchmark | `BASE_COMPRESSION_TEMPLATE` | BF16 baseline and common benchmark protocol |
+| 002 | standalone quality evaluation | local delta of `BASE_COMPRESSION_TEMPLATE` | accepted candidate run and evaluation protocol |
 | 003 | compression + export + quality | `GEMMA_3_4B_COMPRESSION_TEMPLATE` | 34 blocks, dense quality, WDDM guard |
 | 004 | v_proj rank expansion | `GEMMA_3_4B_COMPRESSION_TEMPLATE` | parent 003, +30% bits, release name |
 | 005 | v_proj rank expansion | `GEMMA_3_4B_COMPRESSION_TEMPLATE` | parent 003, doubled request, release name |
 | 006 | compression + export + quality | `BASE_COMPRESSION_TEMPLATE` | 26 blocks and factorized quality |
-| 007 | compression + export + quality | local delta of `BASE_COMPRESSION_TEMPLATE` | 270M model pin and 18 blocks |
+| 007 | compression + export + quality | `GEMMA_3_270M_COMPRESSION_TEMPLATE` | 270M model pin and 18 blocks |
 | 008 | large-model compression + quality | local delta of `LARGE_MODEL_COMPRESSION_TEMPLATE` | 12B model pin, 48 blocks, CPU-offload guards |
+| 009 | compression + quality + Hugging Face publication | `GEMMA_3_270M_COMPRESSION_TEMPLATE` | 18 blocks, factorized quality, public GGUF repository |
 
 The reusable recipe package exports four unnumbered templates:
 
 - `BASE_COMPRESSION_TEMPLATE`;
-- `GEMMA_3_1B_PARITY_TEMPLATE`;
+- `GEMMA_3_270M_COMPRESSION_TEMPLATE`;
 - `GEMMA_3_4B_COMPRESSION_TEMPLATE`;
 - `LARGE_MODEL_COMPRESSION_TEMPLATE`.
 
@@ -229,7 +231,7 @@ Contract and unit tests enforce that:
 - `experiments/recipes` contains only the four generic Python modules;
 - no recipe module constructs a concrete `ExperimentIdentity`;
 - every numbered launcher constructs an `ExperimentIdentity`;
-- all eight launcher stems equal their canonical identity names;
+- all nine launcher stems equal their canonical identity names;
 - every active config uses the derived intent and run root;
 - templates are unnumbered;
 - derived active config hashes are distinct;

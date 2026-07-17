@@ -2,25 +2,23 @@
 
 from pathlib import Path
 
-from recipes import BaselineRef, ExperimentIdentity, define_quality_evaluation_experiment
-from recipes._delta import config_delta, run_config_defaults
+from recipes import (
+    BASE_COMPRESSION_TEMPLATE,
+    BaselineRef,
+    ExperimentIdentity,
+    define_quality_evaluation_experiment,
+)
+from recipes._delta import config_delta
 
 from nanoquant.quality_evaluation import QualityEvaluationRequest
 from nanoquant.quality_evaluation_workflow import run_quality_evaluation_experiment
 
-MODEL_REVISION = "dcc83ea841ab6100d6b47a070329e1ba4cf78752"
-
-_SCHEMA_DEFAULTS = run_config_defaults("google/gemma-3-1b-it")
+MODEL_REVISION = str(BASE_COMPRESSION_TEMPLATE.model.revision)
 
 _TEMPLATE = config_delta(
-    _SCHEMA_DEFAULTS,
-    model=config_delta(
-        _SCHEMA_DEFAULTS.model,
-        revision=MODEL_REVISION,
-        tokenizer_revision=MODEL_REVISION,
-    ),
+    BASE_COMPRESSION_TEMPLATE,
     evaluation=config_delta(
-        _SCHEMA_DEFAULTS.evaluation,
+        BASE_COMPRESSION_TEMPLATE.evaluation,
         suites=(
             "wikitext2-limited",
             "piqa",
