@@ -149,6 +149,9 @@ def test_activation_gpu_cache_does_not_invalidate_semantic_commit_identity() -> 
     )
     assert resident._activation_cache_fits(20, 100, 80)
     assert not resident._activation_cache_fits(21, 100, 80)
+    assert resident._activation_cache_reserve_bytes(20, 8, automatic=True) == 20
+    assert resident._activation_cache_reserve_bytes(4, 8, automatic=True) == 8
+    assert resident._activation_cache_reserve_bytes(20, 8, automatic=False) == 8
 
 
 def test_activation_gpu_cache_auto_falls_back_but_explicit_policy_fails(
@@ -165,7 +168,7 @@ def test_activation_gpu_cache_auto_falls_back_but_explicit_policy_fails(
         activation_gpu_reserve_bytes=8,
     )
     events = Mock()
-    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda _device: (15, 100))
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda _device: (31, 100))
 
     assert resident._cache_activation_tensor(
         value,
@@ -179,6 +182,9 @@ def test_activation_gpu_cache_auto_falls_back_but_explicit_policy_fails(
         "info",
         "activation_gpu_cache.skipped",
     )
+    assert events.emit.call_args.kwargs["configured_reserve_bytes"] == 8
+    assert events.emit.call_args.kwargs["reserve_bytes"] == 16
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda _device: (23, 100))
     with pytest.raises(RuntimeError, match="requires 16 bytes plus 8 reserved bytes"):
         resident._cache_activation_tensor(
             value,

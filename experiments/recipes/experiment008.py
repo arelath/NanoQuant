@@ -30,7 +30,7 @@ EXPERIMENT_008_CONFIG = config_delta(
     intent=config_delta(
         LARGE_MODEL_COMPRESSION_CONFIG.intent,
         experiment_number=8,
-        name="008-compress-and-benchmark-gemma-3-12b-it-forward-only-v2",
+        name="008-compress-and-benchmark-gemma-3-12b-it-forward-only-v3",
         purpose=(
             "Compress and quality-benchmark the BF16 weights corresponding to "
             "unsloth/gemma-3-12b-it-GGUF without entering WDDM shared memory."

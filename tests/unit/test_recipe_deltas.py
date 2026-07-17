@@ -55,6 +55,7 @@ def test_large_model_base_recipe_pins_bounded_memory_guards() -> None:
     assert config.runtime.executor.value == "cpu_offload"
     assert config.calibration.method.value == "forward_only"
     assert config.runtime.activations.gpu_cache.value == "auto"
+    assert config.runtime.activations.gpu_reserve_gib == 4.0
     assert not config.evaluation.inline_quality
     assert not config.distillation.enabled
 
@@ -62,7 +63,7 @@ def test_large_model_base_recipe_pins_bounded_memory_guards() -> None:
 def test_derived_recipe_hashes_are_unchanged_by_delta_only_sources() -> None:
     expected = {
         "base": "sha256:70649cdf490c4669deb3fde28820b4d2e964fc9d09f1237b935488a1c2f07d4c",
-        "large": "sha256:c8411ce5c0b6574c8700df47d086436121d3dae1356e3e92fba48da88cc4be7d",
+        "large": "sha256:86781199ee77f8f4a009d6fc9a1842fc269bf445612deaf0d9c3ca864b511a54",
         "001": "sha256:e4c71a1e4977477bdd6a835783c8de27f867ab3941169efb139bd6e14126e3ee",
         "002": "sha256:edf87371018dd3b9d2c91d85a853d9571cdc62b18b444ba68d236e4795561f6f",
         "003": "sha256:c5bb6251a490a575ced7ad12bde112561e56b65cf71de86ea7ede2248ee42c6a",
@@ -70,7 +71,7 @@ def test_derived_recipe_hashes_are_unchanged_by_delta_only_sources() -> None:
         "005": "sha256:86afa37533f4bc44c2f9339b5ba297458c2a7e14424d0c3450bed9c1583b2328",
         "006": "sha256:2886bd03dc3f65ad22f8ec319c659ce15357fa23a726f6dc739467294dbced62",
         "007": "sha256:eab1b0d3eaefaecedb4b8d66695b13f94ee592f07b6b65f2208355849da0b31d",
-        "008": "sha256:ab866a49b5a3d061875a5d2111fdee9877994e47411762896d7b93b6c3ddf93f",
+        "008": "sha256:aff7952400c926a7cd766decba6b553037dc4ddd92223598d6443c0828425b03",
         "legacy-008": "sha256:1dd444374f8c62649e025529a7f62cae570ab019ed1fdc3b2c751fca3046f335",
         "011": "sha256:aa64a6604ff724cb526a89114b377f96903739385fba83bb15eacb47b8572013",
         "013": "sha256:3335aadc2979eb74b7d0f637811920eeb741fe1c779214e65de718a572abe2b2",

@@ -20,7 +20,9 @@ their full-model forwards have streamed implementations. `auto` resource plannin
 The resident and `cpu_offload` compositions also expose an opt-in activation GPU cache through
 `runtime.activations.gpu_cache`. `inputs` retains the compressed block inputs that are reread by every tuning and loss
 pass; `both` also retains the teacher target outputs; `auto` tries those tiers in that order and falls back to pageable
-host tensors when `torch.cuda.mem_get_info` cannot preserve `gpu_reserve_gib` of free device memory. Explicit `inputs`
+host tensors when `torch.cuda.mem_get_info` cannot preserve the greater of `gpu_reserve_gib` and one activation
+stream of free device memory. The stream-sized lower bound prevents two large caches from consuming the tuning and
+factorization workspace. Explicit `inputs`
 and `both` requests fail instead of silently changing placement. Cache placement is an execution policy and therefore
 does not change resident semantic commit identity.
 

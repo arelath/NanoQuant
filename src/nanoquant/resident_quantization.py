@@ -436,6 +436,26 @@ def _activation_cache_fits(required_bytes: int, free_bytes: int, reserve_bytes: 
     return required_bytes >= 0 and reserve_bytes >= 0 and required_bytes + reserve_bytes <= free_bytes
 
 
+def _activation_cache_reserve_bytes(
+    required_bytes: int,
+    configured_reserve_bytes: int,
+    *,
+    automatic: bool,
+) -> int:
+    """Keep one activation-stream-sized workspace when automatic caching is enabled.
+
+    The configured reserve remains authoritative for explicit cache policies.  In
+    automatic mode, admitting two multi-GiB streams with only the schema's 1 GiB
+    reserve can leave no room for gradients, optimizer state, or factorization
+    workspaces.  One stream is a conservative, model-scaled lower bound that lets
+    AUTO degrade from BOTH to INPUTS before tuning starts.
+    """
+
+    if automatic:
+        return max(required_bytes, configured_reserve_bytes)
+    return configured_reserve_bytes
+
+
 def _cache_activation_tensor(
     value: torch.Tensor,
     request: ResidentQuantizationRequest,
@@ -447,8 +467,14 @@ def _cache_activation_tensor(
     if not request.device.startswith("cuda") or value.device.type == "cuda":
         return value
     required_bytes = value.numel() * value.element_size()
+    configured_reserve_bytes = request.activation_gpu_reserve_bytes
+    reserve_bytes = _activation_cache_reserve_bytes(
+        required_bytes,
+        configured_reserve_bytes,
+        automatic=not required,
+    )
     free_bytes, total_bytes = torch.cuda.mem_get_info(request.device)
-    if not _activation_cache_fits(required_bytes, int(free_bytes), request.activation_gpu_reserve_bytes):
+    if not _activation_cache_fits(required_bytes, int(free_bytes), reserve_bytes):
         cast(Any, events).emit(
             "resource",
             "warning" if required else "info",
@@ -456,14 +482,15 @@ def _cache_activation_tensor(
             role=role,
             required=required,
             required_bytes=required_bytes,
-            reserve_bytes=request.activation_gpu_reserve_bytes,
+            configured_reserve_bytes=configured_reserve_bytes,
+            reserve_bytes=reserve_bytes,
             free_bytes=int(free_bytes),
             total_bytes=int(total_bytes),
         )
         if required:
             raise RuntimeError(
                 f"activation GPU cache for {role} requires {required_bytes} bytes plus "
-                f"{request.activation_gpu_reserve_bytes} reserved bytes; only {int(free_bytes)} bytes are free"
+                f"{reserve_bytes} reserved bytes; only {int(free_bytes)} bytes are free"
             )
         return value
     cached = value.to(request.device)
@@ -473,7 +500,8 @@ def _cache_activation_tensor(
         "activation_gpu_cache.loaded",
         role=role,
         bytes=required_bytes,
-        reserve_bytes=request.activation_gpu_reserve_bytes,
+        configured_reserve_bytes=configured_reserve_bytes,
+        reserve_bytes=reserve_bytes,
         free_bytes_before=int(free_bytes),
     )
     return cached

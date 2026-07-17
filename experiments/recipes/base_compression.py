@@ -161,6 +161,7 @@ LARGE_MODEL_COMPRESSION_CONFIG = config_delta(
         activations=config_delta(
             BASE_COMPRESSION_CONFIG.runtime.activations,
             gpu_cache=ActivationGpuCacheMode.AUTO,
+            gpu_reserve_gib=4.0,
         ),
     ),
     evaluation=config_delta(

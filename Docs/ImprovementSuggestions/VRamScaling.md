@@ -72,7 +72,10 @@ artifact- and metric-equivalent; the requested 4B CUDA memory/equivalence canary
 Implemented as `runtime.activations.gpu_cache = off|inputs|both|auto` with a validated
 `runtime.activations.gpu_reserve_gib`. The production block loop caches the compressed inputs first and teacher targets
 second, logs every admission or rejection, requires explicit policies to fit, lets `auto` fall back to the existing
-pageable streaming path, and releases final-boundary aliases before evaluation/assembly. The policy is deliberately
+pageable streaming path, and releases final-boundary aliases before evaluation/assembly. Automatic admission now
+reserves at least one activation stream for tuning/factorization workspace, and the large-model base recipe declares
+a 4 GiB reserve. This prevents the 12B failure where two 3.75 GiB caches independently passed a 1 GiB-reserve check
+and left no room for the first tuning allocation. The policy is deliberately
 excluded from semantic commit identity. A CUDA wall-clock comparison remains open in step 5 below because experiment
 006 currently owns the device.
 
