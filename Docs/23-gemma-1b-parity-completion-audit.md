@@ -24,7 +24,7 @@ This decision closes the 1B legacy-parity objective. It does not claim that ever
 
 | Requirement | Authoritative evidence | Result |
 | --- | --- | --- |
-| Real pinned model and calibration | The resolved Experiment 001 input is the pinned local snapshot and the prepared calibration tensor is 256 by 2,048 tokens. `evidence/m3` retains validated calibration statistics/objective artifacts. | Proven |
+| Real pinned model and calibration | The resolved Experiment 001 input is the pinned local snapshot and a run-local calibration tensor of 256 by 2,048 tokens generated with that snapshot's tokenizer. `evidence/m3` retains historical calibration statistics/objective artifacts. | Proven |
 | Calibration behavior | M3 calibration parity, batch-partition invariance, and cached/uncached equivalence tests pass. The complete run freshly validates one calibration-statistics and one calibration-tensors artifact. | Proven |
 | Allocation and BPW | All 182 ranks match contemporary legacy, with rank sum 105,856 and zero mismatches. Effective BPW is 0.9963181446312268 over 697,761,792 quantized parameters. | Proven |
 | Factorization and scales | `evidence/m2/gemma-admm-factorization-parity.json` proves exact transposed legacy replay for latent/binary factors, scales, reconstruction, objective, and RNG state. The production native orientation is accepted by the complete composed trajectory. | Proven |

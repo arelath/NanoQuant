@@ -35,12 +35,6 @@ def validate(config: RunConfig, phase: ValidationPhase = ValidationPhase.PRE_RES
     require(config.schema_version == 1, "CFG001", "schema_version", "only schema version 1 is supported")
     require(bool(config.model.source.strip()), "CFG002", "model.source", "model source must not be empty")
     require(config.model.sequence_length > 0, "CFG003", "model.sequence_length", "must be positive")
-    require(
-        (config.dataset.prepared_artifact is None) == (config.dataset.prepared_root is None),
-        "CFG038",
-        "dataset",
-        "prepared_artifact and prepared_root must be supplied together",
-    )
     require(config.calibration.sample_count >= 0, "CFG004", "calibration.sample_count", "must not be negative")
     require(config.calibration.batch_size > 0, "CFG017", "calibration.batch_size", "must be positive")
     require(0 <= config.calibration.shrinkage <= 1, "CFG005", "calibration.shrinkage", "must be in [0, 1]")

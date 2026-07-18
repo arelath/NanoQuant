@@ -219,7 +219,7 @@ def test_combined_workflow_runs_quantization_before_distillation(
     assert transitions == [{"artifact_id": "sha256-distillation"}]
 
 
-def test_zero_argument_resolution_uses_pinned_snapshot_and_calibration(
+def test_zero_argument_resolution_generates_run_local_calibration(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     repository = tmp_path / "repository"
@@ -233,12 +233,13 @@ def test_zero_argument_resolution_uses_pinned_snapshot_and_calibration(
     tokens = torch.arange(256 * 16, dtype=torch.long).reshape(256, 16)
     observed: dict[str, object] = {}
 
-    def load_calibration(path: Path, reference: object) -> Any:
+    def load_calibration(snapshot_path: Path, path: Path, **kwargs: object) -> Any:
+        observed["snapshot"] = snapshot_path
         observed["path"] = path
-        observed["reference"] = reference
+        observed["kwargs"] = kwargs
         return type("Calibration", (), {"input_ids": tokens})()
 
-    monkeypatch.setattr(workflow, "load_pinned_calibration", load_calibration)
+    monkeypatch.setattr(workflow, "load_or_prepare_calibration", load_calibration)
     monkeypatch.setattr(
         workflow,
         "load_repository_dotenv",
@@ -259,7 +260,14 @@ def test_zero_argument_resolution_uses_pinned_snapshot_and_calibration(
     assert torch.equal(cast(torch.Tensor, resolved.quality_token_ids), tokens[:1, :8])
     assert resolved.pad_token_id == 7
     assert observed["dotenv_root"] == repository
-    assert observed["path"] == repository / ".cache/nanoquant/calibration/experiment018"
+    assert observed["snapshot"] == snapshot
+    assert observed["path"] == resolved.output
+    assert observed["kwargs"] == {
+        "sample_count": 256,
+        "sequence_length": 2048,
+        "seed": 0,
+        "preparation_id": workflow.config_hash(config),
+    }
 
 
 def test_workflow_manifest_completes_only_with_global_tuning_artifact(tmp_path: Path) -> None:

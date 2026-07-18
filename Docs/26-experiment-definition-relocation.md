@@ -19,7 +19,7 @@ Experiment definitions currently live in two places:
 Everything in `src/nanoquant/recipes` is experiment-specific, not generic library code:
 
 - pinned model and dataset revisions (`dcc83ea…`, `093f9f3…`);
-- a promoted calibration artifact rooted in the generated `.cache/nanoquant/calibration/experiment018` store;
+- a calibration tensor generated with the resolved model tokenizer in the run's own artifact store;
 - numbered output layouts (`outputs/NNN-<slug>/…`);
 - experiment intents, hypotheses, and baseline-run names;
 - a machine-local reference path (`D:\dev\research\llama.cpp`).
@@ -291,7 +291,7 @@ unaffected.
 ### Keep a thinned `nanoquant.recipes` for "generic" bases
 
 Rejected. Nothing in the package today is generic — `base_compression.py` pins a model revision, dataset
-revisions, a prepared calibration artifact, and a local llama.cpp path. Keeping an empty-but-present package
+revisions, run-local calibration generation, and a local llama.cpp path. Keeping an empty-but-present package
 invites experiment content to drift back in. Generic defaults already have a home (the schema); generic
 templates, if ever needed, should be data (YAML), not library modules.
 

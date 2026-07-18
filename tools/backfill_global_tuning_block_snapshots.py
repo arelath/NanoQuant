@@ -14,7 +14,6 @@ from torch import nn
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from nanoquant.application.block_snapshots import compare_block_snapshots, select_block_snapshot_tokens
-from nanoquant.domain.models import ArtifactRef
 from nanoquant.global_distillation import _checkpoint_dtype, _decoder_layers, _hidden_states
 from nanoquant.infrastructure.artifacts import LocalArtifactStore
 from nanoquant.infrastructure.block_snapshot_probe import capture_block_output_reference, measure_block_output_mse
@@ -26,11 +25,9 @@ from nanoquant.infrastructure.global_tuning import (
     commit_global_tuning,
     load_global_tuning,
 )
-from nanoquant.infrastructure.hf_calibration_dataset import load_pinned_calibration
+from nanoquant.infrastructure.hf_calibration_dataset import load_or_prepare_calibration
 
 MODEL_REVISION = "dcc83ea841ab6100d6b47a070329e1ba4cf78752"
-CALIBRATION_ARTIFACT = "sha256-ad1f609729f86db7598eed5c703c55aacbb9cb024cab816ca7b300d574b7a4c8"
-
 
 def _offload(model: nn.Module, device: str) -> None:
     model.cpu()
@@ -60,7 +57,6 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-output", type=Path, required=True)
     parser.add_argument("--snapshot", type=Path, required=True)
-    parser.add_argument("--calibration", type=Path, default=Path(".cache/nanoquant/calibration/experiment018"))
     parser.add_argument("--samples", type=int, default=4)
     parser.add_argument("--tokens", type=int, default=512)
     parser.add_argument("--device", default="cuda")
@@ -68,10 +64,7 @@ def main() -> None:
     args = parser.parse_args()
 
     tokenizer = AutoTokenizer.from_pretrained(args.snapshot, local_files_only=True)
-    calibration = load_pinned_calibration(
-        args.calibration,
-        ArtifactRef("calibration-dataset-manifest", CALIBRATION_ARTIFACT, 1),
-    )
+    calibration = load_or_prepare_calibration(args.snapshot, args.run_output)
     selection = select_block_snapshot_tokens(
         calibration.input_ids,
         maximum_samples=args.samples,

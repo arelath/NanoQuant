@@ -12,9 +12,8 @@ from recipes import BASE_COMPRESSION_TEMPLATE
 from transformers.models.auto.tokenization_auto import AutoTokenizer
 
 from nanoquant.config.schema import ProfilingConfig, ProfilingLevel
-from nanoquant.domain.models import ArtifactRef
 from nanoquant.global_distillation import run_global_topk_distillation
-from nanoquant.infrastructure.hf_calibration_dataset import load_pinned_calibration
+from nanoquant.infrastructure.hf_calibration_dataset import load_or_prepare_calibration
 from nanoquant.resident_workflow import (
     ResidentExecutionOptions,
     ResolvedResidentInputs,
@@ -22,14 +21,10 @@ from nanoquant.resident_workflow import (
 )
 
 MODEL_REVISION = str(BASE_COMPRESSION_TEMPLATE.model.revision)
-CALIBRATION_ARTIFACT = str(BASE_COMPRESSION_TEMPLATE.dataset.prepared_artifact)
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-output", type=Path, required=True)
     parser.add_argument("--snapshot", type=Path, required=True)
-    parser.add_argument("--calibration", type=Path, default=Path(".cache/nanoquant/calibration/experiment018"))
     parser.add_argument("--samples", type=int, default=256)
     parser.add_argument("--epochs", type=int, default=8)
     parser.add_argument("--batch-size", type=int, default=1)
@@ -74,12 +69,13 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    calibration = load_pinned_calibration(
-        args.calibration,
-        ArtifactRef("calibration-dataset-manifest", CALIBRATION_ARTIFACT, 1),
+    if args.samples <= 0:
+        raise ValueError("distillation sample count must be positive")
+    calibration = load_or_prepare_calibration(
+        args.snapshot,
+        args.run_output,
+        sample_count=args.samples,
     )
-    if args.samples <= 0 or args.samples > calibration.input_ids.shape[0]:
-        raise ValueError("distillation sample count is outside the pinned calibration dataset")
     tokenizer = AutoTokenizer.from_pretrained(args.snapshot, local_files_only=True)
     base = BASE_COMPRESSION_TEMPLATE
     config = replace(
@@ -118,7 +114,7 @@ def main() -> None:
         snapshot=args.snapshot,
         output=args.run_output,
         registry_root=args.run_output.parent,
-        token_ids=calibration.input_ids[: args.samples],
+        token_ids=calibration.input_ids,
         quality_token_ids=None,
         launcher_path=Path(__file__),
         pad_token_id=tokenizer.pad_token_id,

@@ -29,7 +29,7 @@ def test_parity_launcher_builds_request_through_canonical_recipe(monkeypatch, tm
     captured = []
     monkeypatch.setattr(
         launcher,
-        "load_pinned_calibration",
+        "load_or_prepare_calibration",
         lambda *_args, **_kwargs: SimpleNamespace(input_ids=torch.zeros((256, 8), dtype=torch.long)),
     )
 

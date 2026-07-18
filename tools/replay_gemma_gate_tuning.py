@@ -16,10 +16,9 @@ from transformers import AutoModelForCausalLM
 from nanoquant.application.layers import BlockEditor, TrainableFactorizedLinear
 from nanoquant.application.prefix_capture import capture_prefix_invocations
 from nanoquant.application.tuning import TuningRequest, tune_factorized
-from nanoquant.domain.models import ArtifactRef
 from nanoquant.domain.scale_fit import MaterializedScaleFitResult, fit_scales
 from nanoquant.infrastructure.device_lease import wait_for_device_lease
-from nanoquant.infrastructure.hf_calibration_dataset import load_pinned_calibration
+from nanoquant.infrastructure.hf_calibration_dataset import load_or_prepare_calibration
 from nanoquant.infrastructure.model_adapters import adapter_for_config
 from nanoquant.infrastructure.safetensors_source import SafetensorsModelSource
 from nanoquant.resident_quantization import (
@@ -31,7 +30,6 @@ from nanoquant.resident_quantization import (
 )
 
 MODEL_REVISION = "dcc83ea841ab6100d6b47a070329e1ba4cf78752"
-CALIBRATION_ARTIFACT = "sha256-ad1f609729f86db7598eed5c703c55aacbb9cb024cab816ca7b300d574b7a4c8"
 GATE_PATH = "mlp.gate_proj"
 
 
@@ -191,7 +189,6 @@ def _comparison(left: dict[str, torch.Tensor], right: dict[str, torch.Tensor]) -
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--snapshot", type=Path, required=True)
-    parser.add_argument("--calibration", type=Path, default=Path(".cache/nanoquant/calibration/experiment018"))
     parser.add_argument("--fisher", type=Path, required=True)
     parser.add_argument("--legacy-initial", type=Path, required=True)
     parser.add_argument("--rewrite-factor", type=Path, required=True)
@@ -231,10 +228,7 @@ def main() -> None:
     legacy = _legacy_initial(args.legacy_initial)
     rewrite = _rewrite_initial(args.rewrite_factor, args.rewrite_scales, args.rewrite_frozen)
     rewrite_pre_scale_fit = _rewrite_pre_scale_fit(args.rewrite_factor, args.rewrite_frozen)
-    calibration = load_pinned_calibration(
-        args.calibration,
-        ArtifactRef("calibration-dataset-manifest", CALIBRATION_ARTIFACT, 1),
-    )
+    calibration = load_or_prepare_calibration(args.snapshot, args.output.parent)
     if args.samples <= 0 or args.samples > calibration.input_ids.shape[0]:
         raise ValueError("sample count is outside the pinned calibration tensor")
 
@@ -261,7 +255,7 @@ def main() -> None:
         "ls_scale_fit_passes": list(ls_scale_fit_passes),
         "protocol": {
             "snapshot": str(args.snapshot.resolve()),
-            "calibration": str(args.calibration.resolve()),
+            "calibration_artifact": calibration.reference.artifact_id,
             "fisher": str(args.fisher.resolve()),
             "legacy_initial": str(args.legacy_initial.resolve()),
             "rewrite_factor": str(args.rewrite_factor.resolve()),

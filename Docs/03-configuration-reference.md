@@ -166,8 +166,6 @@ class DatasetConfig:
     shuffle: bool = True
     selection_seed: int = 0
     cache_tokenized: bool = True
-    prepared_artifact: Optional[str] = None
-    prepared_root: Optional[str] = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -179,9 +177,9 @@ class ReproducibilityConfig:
 
 The `model.source` is required instead of silently defaulting to a large remote model. Revisions may be omitted only in the input recipe; source resolution pins them in the resolved `RunConfig` before computation begins.
 
-`prepared_artifact` and `prepared_root` are paired resolved inputs for promoted experiments whose exact token tensor is
-already content-addressed. They prevent a zero-argument runfile from hiding a calibration path or artifact identity in
-launcher code. Ordinary dataset preparation leaves both fields unset.
+Calibration tokens are generated from these pinned sources with the resolved model tokenizer as part of every normal
+run. The generated tensor and a small receipt are stored in that run's output so an interrupted run can reuse its own
+validated data without depending on another run or an external calibration path.
 
 ## 4. Calibration and reconstruction objective
 

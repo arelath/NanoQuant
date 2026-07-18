@@ -16,7 +16,7 @@ from huggingface_hub import snapshot_download
 from transformers.models.auto.tokenization_auto import AutoTokenizer
 
 from nanoquant.application.distillation import DistillationMetrics, TopKDistillationConfig
-from nanoquant.config.codec import from_dict
+from nanoquant.config.codec import config_hash, from_dict
 from nanoquant.config.schema import (
     ActivationStorageConfig,
     CalibrationFallbackConfig,
@@ -41,7 +41,7 @@ from nanoquant.global_distillation import (
 from nanoquant.infrastructure.artifacts import LocalArtifactStore
 from nanoquant.infrastructure.environment import load_repository_dotenv
 from nanoquant.infrastructure.global_tuning import active_global_tuning, load_global_tuning
-from nanoquant.infrastructure.hf_calibration_dataset import load_pinned_calibration
+from nanoquant.infrastructure.hf_calibration_dataset import load_or_prepare_calibration
 from nanoquant.infrastructure.runs import RunDirectory, transition
 from nanoquant.resident_quantization import (
     ResidentQuantizationRequest,
@@ -502,7 +502,7 @@ def _transition_workflow_manifest(
 
 
 def resolve_resident_experiment_inputs(config: RunConfig, *, launcher_path: str | Path) -> ResolvedResidentInputs:
-    """Resolve a zero-argument runfile's pinned model and prepared token artifact."""
+    """Resolve a zero-argument runfile's model and run-local calibration tokens."""
 
     _validate_supported_recipe(config)
     launcher = Path(launcher_path).resolve()
@@ -513,37 +513,33 @@ def resolve_resident_experiment_inputs(config: RunConfig, *, launcher_path: str 
         snapshot = model_path.resolve()
     else:
         snapshot = Path(snapshot_download(repo_id=config.model.source, revision=str(config.model.revision))).resolve()
-    prepared_root = config.dataset.prepared_root
-    prepared_artifact = config.dataset.prepared_artifact
-    if prepared_root is None or prepared_artifact is None:
-        raise ValueError("resident experiments require a pinned prepared dataset artifact")
-    calibration_root = Path(prepared_root)
-    if not calibration_root.is_absolute():
-        calibration_root = repository_root / calibration_root
-    calibration = load_pinned_calibration(
-        calibration_root,
-        ArtifactRef("calibration-dataset-manifest", prepared_artifact, 1),
+    registry_root = Path(config.output.run_root)
+    if not registry_root.is_absolute():
+        registry_root = repository_root / registry_root
+    output = registry_root / config.intent.name
+    calibration = load_or_prepare_calibration(
+        snapshot,
+        output,
+        sample_count=config.calibration.sample_count,
+        sequence_length=config.model.sequence_length,
+        seed=config.dataset.selection_seed,
+        preparation_id=config_hash(config),
     )
-    if config.calibration.sample_count > calibration.input_ids.shape[0]:
-        raise ValueError("calibration sample count is outside the prepared dataset")
-    tokens = calibration.input_ids[: config.calibration.sample_count]
+    tokens = calibration.input_ids
     quality_tokens = None
     if config.evaluation.inline_quality:
         quality_samples = config.evaluation.inline_quality_samples
         quality_length = config.evaluation.inline_quality_tokens
         if quality_samples > tokens.shape[0] or quality_length > tokens.shape[1]:
-            raise ValueError("inline quality selection is outside the prepared calibration tokens")
+            raise ValueError("inline quality selection is outside the generated calibration tokens")
         quality_tokens = tokens[:quality_samples, :quality_length]
     pad_token_id = None
     if config.distillation.enabled:
         tokenizer = AutoTokenizer.from_pretrained(snapshot, local_files_only=True)
         pad_token_id = tokenizer.pad_token_id
-    registry_root = Path(config.output.run_root)
-    if not registry_root.is_absolute():
-        registry_root = repository_root / registry_root
     return ResolvedResidentInputs(
         snapshot=snapshot,
-        output=registry_root / config.intent.name,
+        output=output,
         registry_root=registry_root,
         token_ids=tokens,
         quality_token_ids=quality_tokens,

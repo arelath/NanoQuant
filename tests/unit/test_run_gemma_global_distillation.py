@@ -12,7 +12,7 @@ def test_global_distillation_launcher_uses_canonical_recipe(monkeypatch, tmp_pat
     captured = []
     monkeypatch.setattr(
         launcher,
-        "load_pinned_calibration",
+        "load_or_prepare_calibration",
         lambda *_args, **_kwargs: SimpleNamespace(input_ids=torch.zeros((256, 8), dtype=torch.long)),
     )
     monkeypatch.setattr(

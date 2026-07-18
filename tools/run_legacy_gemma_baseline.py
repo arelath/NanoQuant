@@ -24,7 +24,6 @@ from typing import Any
 from safetensors import safe_open
 
 MODEL_REVISION = "dcc83ea841ab6100d6b47a070329e1ba4cf78752"
-CALIBRATION_ARTIFACT = "sha256-ad1f609729f86db7598eed5c703c55aacbb9cb024cab816ca7b300d574b7a4c8"
 EXPECTED_CALIBRATION_SHAPE = (256, 2048)
 
 
@@ -46,8 +45,8 @@ def _load_module(name: str, path: Path) -> ModuleType:
     return module
 
 
-def _calibration_tensor_path(root: Path) -> tuple[Path, dict[str, Any]]:
-    manifest_root = root / "artifacts" / CALIBRATION_ARTIFACT[7:9] / CALIBRATION_ARTIFACT
+def _calibration_tensor_path(root: Path, artifact_id: str) -> tuple[Path, dict[str, Any]]:
+    manifest_root = root / "artifacts" / artifact_id[7:9] / artifact_id
     manifest_path = manifest_root / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     tensor_artifact = str(manifest["tensor_artifact"])
@@ -200,7 +199,9 @@ def _worker(args: argparse.Namespace) -> int:
             torch.cuda.reset_peak_memory_stats()
             legacy = _load_module("_nanoquant_legacy_experiment018", args.legacy_launcher)
             _configure_legacy_outputs(legacy, output)
-            _patch_legacy_inputs(legacy, args.snapshot, args.calibration_tensors)
+            receipt = json.loads((output / "calibration-input.json").read_text(encoding="utf-8"))
+            calibration_tensors, _ = _calibration_tensor_path(output, str(receipt["artifact_id"]))
+            _patch_legacy_inputs(legacy, args.snapshot, calibration_tensors)
             if args.probe:
                 print(
                     json.dumps(
@@ -208,7 +209,7 @@ def _worker(args: argparse.Namespace) -> int:
                             "cuda": torch.cuda.get_device_name(0),
                             "legacy_launcher": str(args.legacy_launcher),
                             "snapshot": str(args.snapshot),
-                            "calibration_tensors": str(args.calibration_tensors),
+                            "calibration_tensors": str(calibration_tensors),
                         },
                         sort_keys=True,
                     )
@@ -259,7 +260,6 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--legacy-root", type=Path, required=True)
     parser.add_argument("--snapshot", type=Path, required=True)
-    parser.add_argument("--calibration", type=Path, default=Path(".cache/nanoquant/calibration/experiment018"))
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--validate-only", action="store_true")
@@ -268,35 +268,38 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--probe", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--rewrite-root", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--legacy-launcher", type=Path, help=argparse.SUPPRESS)
-    parser.add_argument("--calibration-tensors", type=Path, help=argparse.SUPPRESS)
     return parser
 
 
 def main() -> int:
     args = _parser().parse_args()
     if args.worker:
-        required = (args.rewrite_root, args.legacy_launcher, args.calibration_tensors)
+        required = (args.rewrite_root, args.legacy_launcher)
         if any(value is None for value in required):
             raise ValueError("worker arguments are incomplete")
         return _worker(args)
     if args.detach:
         return _detach(args.output)
 
+    from nanoquant.infrastructure.hf_calibration_dataset import load_or_prepare_calibration
+
     rewrite_root = Path(__file__).resolve().parents[1]
     legacy_root = args.legacy_root.resolve()
     legacy_launcher = legacy_root / "018-compress-gemma-3-1b-it-phase1-no-hessian.py"
     legacy_python = legacy_root / ".venv" / "Scripts" / "python.exe"
     snapshot = args.snapshot.resolve()
-    calibration = args.calibration.resolve()
     for path in (legacy_launcher, legacy_python, snapshot / "config.json"):
         if not path.exists():
             raise FileNotFoundError(path)
-    calibration_tensors, calibration_manifest = _calibration_tensor_path(calibration)
-
     output = args.output.resolve()
     if output.exists() and any(output.iterdir()):
         raise FileExistsError(f"refusing to overwrite non-empty evidence directory: {output}")
     output.mkdir(parents=True, exist_ok=True)
+    generated = load_or_prepare_calibration(snapshot, output)
+    calibration_tensors, calibration_manifest = _calibration_tensor_path(
+        output,
+        generated.reference.artifact_id,
+    )
     manifest = {
         "schema_version": 1,
         "protocol": "legacy018-contemporary-pinned-direct-v1",
@@ -309,7 +312,7 @@ def main() -> int:
         "rewrite_commit": _git_value(rewrite_root, "rev-parse", "HEAD"),
         "snapshot": str(snapshot),
         "model_revision": MODEL_REVISION,
-        "calibration_artifact": CALIBRATION_ARTIFACT,
+        "calibration_artifact": generated.reference.artifact_id,
         "calibration_fingerprint": calibration_manifest["fingerprint"],
         "calibration_tensors": str(calibration_tensors),
         "calibration_loader_override": "pinned-direct-v1",
@@ -325,8 +328,6 @@ def main() -> int:
         str(legacy_root),
         "--snapshot",
         str(snapshot),
-        "--calibration",
-        str(calibration),
         "--output",
         str(output),
         "--device",
@@ -335,8 +336,6 @@ def main() -> int:
         str(rewrite_root),
         "--legacy-launcher",
         str(legacy_launcher),
-        "--calibration-tensors",
-        str(calibration_tensors),
     ]
     if args.validate_only:
         command.append("--probe")

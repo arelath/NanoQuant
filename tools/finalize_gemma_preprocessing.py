@@ -27,18 +27,17 @@ from nanoquant.config.schema import (
     ResidualProbeConfig,
     RetryThresholdConfig,
 )
-from nanoquant.domain.models import ArtifactRef, BlockId, DatasetIdentity, LayerId
+from nanoquant.domain.models import BlockId, DatasetIdentity, LayerId
 from nanoquant.infrastructure.artifacts import LocalArtifactStore
 from nanoquant.infrastructure.calibration_checkpoint import load_causal_calibration_state
 from nanoquant.infrastructure.device_lease import acquire_device_lease
-from nanoquant.infrastructure.hf_calibration_dataset import load_pinned_calibration
+from nanoquant.infrastructure.hf_calibration_dataset import load_or_prepare_calibration
 from nanoquant.infrastructure.model_adapters import adapter_for_config
 from nanoquant.infrastructure.safetensors_source import SafetensorsModelSource
 from nanoquant.infrastructure.tensor_store import LocalTensorStore
 from nanoquant.resident_quantization import _legacy_sensitivity_profile
 
 MODEL_REVISION = "dcc83ea841ab6100d6b47a070329e1ba4cf78752"
-CALIBRATION_ARTIFACT = "sha256-ad1f609729f86db7598eed5c703c55aacbb9cb024cab816ca7b300d574b7a4c8"
 LAYER_ORDER = (
     "mlp.gate_proj",
     "mlp.up_proj",
@@ -100,7 +99,6 @@ def main() -> None:
     parser.add_argument("--snapshot", type=Path, required=True)
     parser.add_argument("--state", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--calibration", type=Path, default=Path(".cache/nanoquant/calibration/experiment018"))
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--shrinkage", type=float, default=0.6)
     parser.add_argument(
@@ -113,10 +111,7 @@ def main() -> None:
         raise ValueError("shrinkage must be in [0, 1]")
 
     state = load_causal_calibration_state(args.state)
-    dataset_values = load_pinned_calibration(
-        args.calibration,
-        ArtifactRef("calibration-dataset-manifest", CALIBRATION_ARTIFACT, 1),
-    )
+    dataset_values = load_or_prepare_calibration(args.snapshot, args.state)
     if state.sample_count != dataset_values.input_ids.shape[0]:
         raise ValueError("Fisher checkpoint is not complete")
     source = SafetensorsModelSource(

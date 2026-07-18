@@ -138,8 +138,6 @@ class DatasetConfig:
     shuffle: bool = True
     selection_seed: int = 0
     cache_tokenized: bool = True
-    prepared_artifact: str | None = None
-    prepared_root: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

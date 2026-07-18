@@ -12,33 +12,26 @@ from torch import nn
 from transformers import AutoModelForCausalLM
 
 from nanoquant.application.calibration import CausalOnlineCalibrationState, calibrate_causal_model
-from nanoquant.domain.models import ArtifactRef
 from nanoquant.infrastructure.calibration_checkpoint import (
     load_causal_calibration_state,
     save_causal_calibration_state,
 )
 from nanoquant.infrastructure.device_lease import acquire_device_lease
-from nanoquant.infrastructure.hf_calibration_dataset import load_pinned_calibration
+from nanoquant.infrastructure.hf_calibration_dataset import load_or_prepare_calibration
 from nanoquant.infrastructure.resource_usage import peak_device_memory_bytes, peak_process_memory_bytes
-
-CALIBRATION_ARTIFACT = "sha256-ad1f609729f86db7598eed5c703c55aacbb9cb024cab816ca7b300d574b7a4c8"
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--snapshot", type=Path, required=True)
     parser.add_argument("--state", type=Path, required=True)
-    parser.add_argument("--calibration", type=Path, default=Path(".cache/nanoquant/calibration/experiment018"))
     parser.add_argument("--count", type=int, default=24)
     parser.add_argument("--device", default="cuda")
     args = parser.parse_args()
     if args.count <= 0:
         raise ValueError("calibration chunk count must be positive")
 
-    calibration = load_pinned_calibration(
-        args.calibration,
-        ArtifactRef("calibration-dataset-manifest", CALIBRATION_ARTIFACT, 1),
-    )
+    calibration = load_or_prepare_calibration(args.snapshot, args.state)
     state = load_causal_calibration_state(args.state) if (args.state / "manifest.json").exists() else None
     start = 0 if state is None else state.sample_count
     end = min(start + args.count, calibration.input_ids.shape[0])

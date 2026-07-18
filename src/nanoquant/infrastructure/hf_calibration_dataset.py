@@ -16,11 +16,13 @@ from safetensors import safe_open
 from transformers.models.auto.tokenization_auto import AutoTokenizer
 
 from nanoquant.domain.models import ArtifactRef
-from nanoquant.infrastructure.artifacts import LocalArtifactStore
+from nanoquant.infrastructure.artifacts import ArtifactCorruptionError, LocalArtifactStore
+from nanoquant.infrastructure.io_utils import atomic_write_json
 from nanoquant.infrastructure.tensor_store import LocalTensorStore
 
 ULTRACHAT_REVISION = "8049631c405ae6576f93f445c6b8166f76f5505a"
 WIKITEXT_REVISION = "b08601e04326c79dfdd32d625aee71d232d685c3"
+CALIBRATION_RECEIPT_NAME = "calibration-input.json"
 
 
 @dataclass(frozen=True, slots=True)
@@ -197,3 +199,60 @@ def prepare_experiment018_calibration(
             ("Salesforce/wikitext", WIKITEXT_REVISION),
         ),
     )
+
+
+def load_or_prepare_calibration(
+    snapshot: str | Path,
+    output: str | Path,
+    *,
+    sample_count: int = 256,
+    sequence_length: int = 2048,
+    seed: int = 0,
+    preparation_id: str | None = None,
+) -> PinnedCalibrationDataset:
+    """Load this run's generated calibration tokens, or create them when needed."""
+
+    output = Path(output)
+    receipt_path = output / CALIBRATION_RECEIPT_NAME
+    requested = {
+        "sample_count": sample_count,
+        "sequence_length": sequence_length,
+        "seed": seed,
+        "preparation_id": preparation_id,
+    }
+    try:
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        if not isinstance(receipt, dict) or any(receipt.get(key) != value for key, value in requested.items()):
+            raise ValueError("calibration receipt does not match this run")
+        reference = ArtifactRef(
+            "calibration-dataset-manifest",
+            str(receipt["artifact_id"]),
+            1,
+        )
+        calibration = load_pinned_calibration(output, reference)
+        if tuple(calibration.input_ids.shape) != (sample_count, sequence_length):
+            raise ValueError("generated calibration tensor has the wrong shape")
+        if tuple(calibration.attention_mask.shape) != (sample_count, sequence_length):
+            raise ValueError("generated calibration mask has the wrong shape")
+        return calibration
+    except (ArtifactCorruptionError, KeyError, OSError, TypeError, ValueError):
+        pass
+
+    calibration = prepare_experiment018_calibration(
+        snapshot,
+        output,
+        sample_count=sample_count,
+        sequence_length=sequence_length,
+        seed=seed,
+    )
+    atomic_write_json(
+        receipt_path,
+        {
+            "schema_version": 1,
+            **requested,
+            "artifact_id": calibration.reference.artifact_id,
+            "fingerprint": calibration.fingerprint,
+            "source_revisions": dict(calibration.source_revisions),
+        },
+    )
+    return calibration

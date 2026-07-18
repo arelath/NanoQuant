@@ -9,11 +9,12 @@ import torch
 from safetensors.torch import save_file
 
 from tools.run_legacy_gemma_baseline import (
-    CALIBRATION_ARTIFACT,
     _atomic_json,
     _calibration_tensor_path,
     _detach,
 )
+
+CALIBRATION_ARTIFACT = "sha256-" + "2" * 64
 
 
 def _calibration_fixture(root: Path, shape: tuple[int, int] = (256, 2048)) -> Path:
@@ -33,7 +34,7 @@ def _calibration_fixture(root: Path, shape: tuple[int, int] = (256, 2048)) -> Pa
 def test_calibration_tensor_path_validates_pinned_shape(tmp_path: Path) -> None:
     expected = _calibration_fixture(tmp_path)
 
-    actual, manifest = _calibration_tensor_path(tmp_path)
+    actual, manifest = _calibration_tensor_path(tmp_path, CALIBRATION_ARTIFACT)
 
     assert actual == expected.resolve()
     assert manifest["fingerprint"] == "fixture"
@@ -43,7 +44,7 @@ def test_calibration_tensor_path_rejects_wrong_shape(tmp_path: Path) -> None:
     _calibration_fixture(tmp_path, (2, 3))
 
     with pytest.raises(ValueError, match="pinned calibration shape"):
-        _calibration_tensor_path(tmp_path)
+        _calibration_tensor_path(tmp_path, CALIBRATION_ARTIFACT)
 
 
 def test_atomic_json_replaces_existing_payload(tmp_path: Path) -> None:

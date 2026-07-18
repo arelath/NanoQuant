@@ -18,8 +18,6 @@ LLAMA_CPP_REPOSITORY="${NANOQUANT_LLAMA_CPP_REPOSITORY:-https://github.com/ggml-
 LLAMA_CPP_REVISION="${NANOQUANT_LLAMA_CPP_REVISION:-68a521b591edd2f36a456809230d63aa81003dfc}"
 VENDORED_CONVERTER="${REPOSITORY_ROOT}/tools/llamacpp/convert_nanoquant_to_gguf.py"
 VENDORED_CONVERTER_SHA256="3ee6ccd976445b8e5669d34080067b0e36bac6166cd109c5f8cf7bc20893690c"
-CALIBRATION_ROOT="${REPOSITORY_ROOT}/.cache/nanoquant/calibration/experiment018"
-CALIBRATION_ID="sha256-ad1f609729f86db7598eed5c703c55aacbb9cb024cab816ca7b300d574b7a4c8"
 
 case "${EXPERIMENT}" in
   001)
@@ -168,29 +166,6 @@ PY
 )"
 export NANOQUANT_BOOTSTRAP_MODEL_SNAPSHOT="${MODEL_SNAPSHOT}"
 echo "==> Model snapshot: ${MODEL_SNAPSHOT}"
-
-# The prepared calibration data is intentionally excluded from Git. Recreate and
-# hash-check it on a fresh persistent volume.
-if [[ ! -f "${CALIBRATION_ROOT}/artifacts/ad/${CALIBRATION_ID}/descriptor.json" ]]; then
-  echo "==> Preparing pinned 256x2048 calibration artifact"
-  export NANOQUANT_BOOTSTRAP_CALIBRATION_ROOT="${CALIBRATION_ROOT}"
-  "${VENV}/bin/python" - <<'PY'
-import os
-from nanoquant.infrastructure.hf_calibration_dataset import prepare_experiment018_calibration
-result = prepare_experiment018_calibration(
-    os.environ["NANOQUANT_BOOTSTRAP_MODEL_SNAPSHOT"],
-    os.environ["NANOQUANT_BOOTSTRAP_CALIBRATION_ROOT"],
-)
-expected = "sha256-ad1f609729f86db7598eed5c703c55aacbb9cb024cab816ca7b300d574b7a4c8"
-if result.reference.artifact_id != expected:
-    raise SystemExit(
-        f"prepared calibration identity differs: {result.reference.artifact_id} != {expected}"
-    )
-print(result.reference.artifact_id)
-PY
-else
-  echo "==> Reusing pinned calibration artifact"
-fi
 
 # Quality launchers deliberately run offline. Populate every pinned evaluation
 # dataset while networking is still allowed during setup.

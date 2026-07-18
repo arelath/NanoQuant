@@ -17,7 +17,7 @@ from nanoquant.config.schema import (
     ProfilingLevel,
 )
 from nanoquant.domain.models import ArtifactRef, ArtifactTypes
-from nanoquant.infrastructure.hf_calibration_dataset import load_pinned_calibration
+from nanoquant.infrastructure.hf_calibration_dataset import load_or_prepare_calibration
 from nanoquant.infrastructure.resource_usage import peak_device_memory_bytes
 from nanoquant.resident_quantization import (
     run_resident_factorization_slice,
@@ -30,15 +30,11 @@ from nanoquant.resident_workflow import (
 )
 
 MODEL_REVISION = str(BASE_COMPRESSION_TEMPLATE.model.revision)
-CALIBRATION_ARTIFACT = str(BASE_COMPRESSION_TEMPLATE.dataset.prepared_artifact)
-
-
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--run-root", type=Path, default=Path("runs"))
     parser.add_argument("--snapshot", type=Path, required=True)
-    parser.add_argument("--calibration", type=Path, default=Path(".cache/nanoquant/calibration/experiment018"))
     parser.add_argument("--factorized-tuning-epochs", type=int, default=0)
     parser.add_argument("--factorized-tuning-batch-size", type=int, default=8)
     parser.add_argument("--factorized-tuning-epoch-cooldown-seconds", type=float, default=0.0)
@@ -105,9 +101,11 @@ def main() -> None:
         int(value.strip()) for value in args.nonfactorized_tuning_schedule.split(",") if value.strip()
     )
 
-    calibration = load_pinned_calibration(
-        args.calibration,
-        ArtifactRef("calibration-dataset-manifest", CALIBRATION_ARTIFACT, 1),
+    calibration = load_or_prepare_calibration(
+        args.snapshot,
+        args.output,
+        sample_count=args.samples,
+        seed=args.seed,
     )
     base = BASE_COMPRESSION_TEMPLATE
     factorized_loop = replace(
@@ -187,7 +185,7 @@ def main() -> None:
         snapshot=args.snapshot,
         output=args.output,
         registry_root=args.run_root,
-        token_ids=calibration.input_ids[: args.samples],
+        token_ids=calibration.input_ids,
         quality_token_ids=calibration.input_ids[:1, :8],
         launcher_path=Path(__file__),
         precomputed_calibration=(
