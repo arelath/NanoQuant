@@ -11,8 +11,10 @@ import pytest
 import nanoquant.compression_export_workflow as workflow
 from nanoquant.compression_export_workflow import (
     CompressionExportRecipe,
+    CompressionExportResult,
     HuggingFaceUploadConfig,
     HuggingFaceUploadResult,
+    complete_deferred_huggingface_upload,
     execute_compression_export,
     resolve_compression_export_recipe,
 )
@@ -91,24 +93,11 @@ def test_complete_compression_export_runs_validated_stages_in_order(
             ),
         ),
     )
-    uploaded = []
-
-    def upload(config, artifacts, *, receipt_output):  # type: ignore[no-untyped-def]
-        material = tuple(artifacts)
-        calls.append("huggingface")
-        uploaded.append((config, material, receipt_output))
-        return HuggingFaceUploadResult(
-            "owner/model",
-            "https://huggingface.co/owner/model",
-            "c" * 40,
-            f"https://huggingface.co/owner/model/commit/{'c' * 40}",
-            None,
-            config.commit_message,
-            (),
-            receipt_output,
-        )
-
-    monkeypatch.setattr(workflow, "upload_validated_model_artifacts", upload)
+    monkeypatch.setattr(
+        workflow,
+        "upload_validated_model_artifacts",
+        lambda *_args, **_kwargs: pytest.fail("local export must not contact Hugging Face"),
+    )
 
     result = execute_compression_export(
         _CONFIG,
@@ -119,13 +108,7 @@ def test_complete_compression_export_runs_validated_stages_in_order(
         expected_blocks=34,
     )
 
-    assert calls == [("logical", True), "packed", ("gguf", "q8_0"), "huggingface"]
-    assert [artifact.source for artifact in uploaded[0][1]] == [
-        resolved.gguf_output,
-        resolved.gguf_output.parent / "mmproj-BF16.gguf",
-    ]
-    assert [artifact.sha256 for artifact in uploaded[0][1]] == ["a" * 64, "b" * 64]
-    assert uploaded[0][2] == resolved.gguf_output.with_suffix(".gguf.huggingface.json")
+    assert calls == [("logical", True), "packed", ("gguf", "q8_0")]
     assert result.logical == {"exact": True}
     assert result.packed == {"exact": True}
     assert result.gguf.output == resolved.gguf_output
@@ -139,7 +122,91 @@ def test_complete_compression_export_runs_validated_stages_in_order(
     assert summary["schema_version"] == 4
     assert summary["mmproj"]["output"] == str(resolved.gguf_output.parent / "mmproj-BF16.gguf")
     assert summary["mmproj"]["sha256"] == "b" * 64
-    assert summary["huggingface"]["commit_oid"] == "c" * 40
+    assert summary["huggingface"] is None
+    assert result.huggingface is None
+
+
+def test_deferred_huggingface_upload_includes_quality_documents_and_refreshes_summary(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    gguf = tmp_path / "Results" / "009" / "model.gguf"
+    mmproj = gguf.parent / "mmproj-BF16.gguf"
+    quality_markdown = gguf.parent / "quality.md"
+    quality_json = tmp_path / "outputs" / "009" / "quality.json"
+    summary = gguf.with_suffix(".export-summary.json")
+    for path, content in (
+        (gguf, b"model"),
+        (mmproj, b"projector"),
+        (quality_markdown, b"# Quality\n"),
+        (quality_json, b'{"passed":true}\n'),
+    ):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+    summary.write_text('{"schema_version":4,"huggingface":null}\n', encoding="utf-8")
+    result = CompressionExportResult(
+        {},
+        {},
+        GgufExportResult(
+            gguf,
+            tmp_path / "checkpoint",
+            tmp_path / "converter.py",
+            gguf.stat().st_size,
+            "a" * 64,
+            True,
+            mmproj=MmprojExportResult(
+                mmproj,
+                tmp_path / "mmproj-converter.py",
+                mmproj.stat().st_size,
+                "b" * 64,
+                1,
+                ("bf16",),
+                True,
+            ),
+        ),
+        summary,
+    )
+    captured = []
+
+    def upload(config, artifacts, *, receipt_output):  # type: ignore[no-untyped-def]
+        captured.append((config, tuple(artifacts), receipt_output))
+        return HuggingFaceUploadResult(
+            "owner/model",
+            "https://huggingface.co/owner/model",
+            "c" * 40,
+            f"https://huggingface.co/owner/model/commit/{'c' * 40}",
+            False,
+            config.commit_message,
+            (),
+            receipt_output,
+        )
+
+    monkeypatch.setattr(workflow, "upload_validated_model_artifacts", upload)
+
+    completed = complete_deferred_huggingface_upload(
+        result,
+        HuggingFaceUploadConfig("owner/model", private=False),
+        (
+            (quality_markdown, "README.md"),
+            (quality_json, "quality.json"),
+        ),
+    )
+
+    artifacts = captured[0][1]
+    assert [artifact.source for artifact in artifacts] == [
+        gguf,
+        mmproj,
+        quality_markdown,
+        quality_json,
+    ]
+    assert [artifact.path_in_repo for artifact in artifacts] == [
+        "model.gguf",
+        "mmproj-BF16.gguf",
+        "README.md",
+        "quality.json",
+    ]
+    assert completed.huggingface is not None
+    assert json.loads(summary.read_text(encoding="utf-8"))["huggingface"]["commit_oid"] == "c" * 40
 
 
 def test_base_compression_requires_export_after_resident_completion(

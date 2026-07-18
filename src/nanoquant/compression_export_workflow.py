@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import os
-from dataclasses import dataclass
+from collections.abc import Iterable
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -22,7 +24,7 @@ from nanoquant.infrastructure.huggingface_upload import (
     huggingface_upload_summary,
     upload_validated_model_artifacts,
 )
-from nanoquant.infrastructure.io_utils import atomic_write_json
+from nanoquant.infrastructure.io_utils import atomic_write_json, hash_file
 from nanoquant.infrastructure.live_reconstruction import initialize_live_weight_error_report
 from nanoquant.infrastructure.model_adapters import adapter_for_config
 from nanoquant.infrastructure.runtime_export import (
@@ -271,6 +273,7 @@ def _ensure_packed_export(resolved: ResolvedCompressionExportRecipe) -> dict[str
 def _upload_huggingface_model(
     gguf: GgufExportResult,
     config: HuggingFaceUploadConfig | None,
+    supplemental_artifacts: Iterable[tuple[Path, str]] = (),
 ) -> HuggingFaceUploadResult | None:
     if config is None:
         return None
@@ -283,11 +286,49 @@ def _upload_huggingface_model(
                 gguf.mmproj.sha256,
             )
         )
+    for source, path_in_repo in supplemental_artifacts:
+        resolved = source.resolve(strict=True)
+        artifacts.append(
+            ValidatedModelArtifact(
+                resolved,
+                resolved.stat().st_size,
+                hash_file(resolved),
+                path_in_repo,
+            )
+        )
     return upload_validated_model_artifacts(
         config,
         artifacts,
         receipt_output=gguf.output.with_suffix(gguf.output.suffix + ".huggingface.json"),
     )
+
+
+def complete_deferred_huggingface_upload(
+    result: CompressionExportResult,
+    config: HuggingFaceUploadConfig | None,
+    supplemental_artifacts: Iterable[tuple[Path, str]] = (),
+) -> CompressionExportResult:
+    """Upload a local export plus completed quality artifacts and refresh its summary."""
+
+    if config is None:
+        return result
+    try:
+        summary = cast(
+            dict[str, Any],
+            json.loads(result.summary_output.read_text(encoding="utf-8")),
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError("compression export summary is invalid") from exc
+    huggingface = _upload_huggingface_model(
+        result.gguf,
+        config,
+        supplemental_artifacts,
+    )
+    if huggingface is None:
+        raise AssertionError("configured Hugging Face upload returned no result")
+    summary["huggingface"] = huggingface_upload_summary(huggingface)
+    atomic_write_json(result.summary_output, summary)
+    return replace(result, huggingface=huggingface)
 
 
 def execute_compression_export(
@@ -326,7 +367,7 @@ def execute_compression_export(
         resolved.llama_cpp_root,
         token_embedding_type=resolved.token_embedding_type,
     )
-    huggingface = _upload_huggingface_model(gguf, resolved.huggingface)
+    huggingface = None
     summary_output = resolved.gguf_output.with_suffix(".export-summary.json")
     atomic_write_json(
         summary_output,
@@ -420,6 +461,7 @@ __all__ = [
     "HuggingFaceUploadConfig",
     "HuggingFaceUploadResult",
     "ResolvedCompressionExportRecipe",
+    "complete_deferred_huggingface_upload",
     "execute_compression_export",
     "execute_complete_compression",
     "resolve_compression_export_recipe",

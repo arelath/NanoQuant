@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -21,7 +22,10 @@ from nanoquant.compression_export_workflow import (
 )
 from nanoquant.infrastructure.commits import CommitIdentity
 from nanoquant.infrastructure.gguf_export import GgufExportResult
-from nanoquant.infrastructure.huggingface_upload import HuggingFaceUploadResult
+from nanoquant.infrastructure.huggingface_upload import (
+    HuggingFaceUploadConfig,
+    HuggingFaceUploadResult,
+)
 from nanoquant.quality_evaluation import QualityEvaluationRequest
 from nanoquant.resident_workflow import ResolvedResidentInputs
 from tests.support.experiments import load_experiment
@@ -110,11 +114,16 @@ def test_compression_benchmark_executes_export_before_shared_quality_comparison(
     calls: list[str] = []
     requests: list[QualityEvaluationRequest] = []
 
-    monkeypatch.setattr(
-        workflow,
-        "execute_complete_compression",
-        lambda *_args, **_kwargs: calls.append("complete")
-        or CompleteCompressionResult(
+    upload_config = HuggingFaceUploadConfig("owner/model")
+    experiment = replace(
+        _EXPERIMENT,
+        export=replace(_EXPERIMENT.export, huggingface=upload_config),
+    )
+
+    def complete(*_args, **kwargs):  # type: ignore[no-untyped-def]
+        assert "defer_huggingface" not in kwargs
+        calls.append("complete")
+        return CompleteCompressionResult(
             resident_result,
             CompressionExportResult(
                 {"exact": True},
@@ -128,19 +137,10 @@ def test_compression_benchmark_executes_export_before_shared_quality_comparison(
                     False,
                 ),
                 tmp_path / "export-summary.json",
-                HuggingFaceUploadResult(
-                    "owner/model",
-                    "https://huggingface.co/owner/model",
-                    "a" * 40,
-                    f"https://huggingface.co/owner/model/commit/{'a' * 40}",
-                    True,
-                    "Upload validated NanoQuant GGUF",
-                    (),
-                    tmp_path / "model.gguf.huggingface.json",
-                ),
             ),
-        ),
-    )
+        )
+
+    monkeypatch.setattr(workflow, "execute_complete_compression", complete)
 
     def quality(request: QualityEvaluationRequest) -> dict[str, object]:
         calls.append("quality")
@@ -148,6 +148,28 @@ def test_compression_benchmark_executes_export_before_shared_quality_comparison(
         return {"passed": True, "comparison": {}}
 
     monkeypatch.setattr(workflow, "execute_quality_evaluation", quality)
+
+    def upload(result, config, artifacts):  # type: ignore[no-untyped-def]
+        calls.append("upload")
+        assert config is upload_config
+        quality_output = resolved.benchmark_output.with_suffix(".quality.json")
+        assert tuple(artifacts) == ((quality_output, "quality.json"),)
+        assert json.loads(quality_output.read_text(encoding="utf-8"))["passed"] is True
+        return replace(
+            result,
+            huggingface=HuggingFaceUploadResult(
+                "owner/model",
+                "https://huggingface.co/owner/model",
+                "a" * 40,
+                f"https://huggingface.co/owner/model/commit/{'a' * 40}",
+                True,
+                config.commit_message,
+                (),
+                tmp_path / "model.gguf.huggingface.json",
+            ),
+        )
+
+    monkeypatch.setattr(workflow, "complete_deferred_huggingface_upload", upload)
     published = []
     monkeypatch.setattr(
         workflow,
@@ -157,11 +179,11 @@ def test_compression_benchmark_executes_export_before_shared_quality_comparison(
 
     payload = execute_compression_benchmark_experiment(
         _CONFIG,
-        _EXPERIMENT,
+        experiment,
         resolved,
     )
 
-    assert calls == ["complete", "quality"]
+    assert calls == ["complete", "quality", "upload"]
     assert requests[0].wikitext_samples == 64
     assert requests[0].task_names == (
         "piqa",

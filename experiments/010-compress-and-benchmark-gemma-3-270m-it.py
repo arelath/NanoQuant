@@ -10,17 +10,6 @@ from recipes._delta import config_delta
 
 from nanoquant.compression_quality_workflow import run_compression_quality_experiment
 
-_TEMPLATE = config_delta(
-    GEMMA_3_270M_COMPRESSION_TEMPLATE,
-    factorization=config_delta(
-        GEMMA_3_270M_COMPRESSION_TEMPLATE.factorization,
-        admm=config_delta(
-            GEMMA_3_270M_COMPRESSION_TEMPLATE.factorization.admm,
-            outer_iterations=1600,
-        ),
-    ),
-)
-
 EXPERIMENT = define_compression_quality_experiment(
     ExperimentIdentity(
         number=10,
@@ -45,7 +34,7 @@ EXPERIMENT = define_compression_quality_experiment(
             "ultrachat",
         ),
     ),
-    _TEMPLATE,
+    GEMMA_3_270M_COMPRESSION_TEMPLATE,
     expected_blocks=18,
     maximum_wddm_shared_gib=0.75,
 )

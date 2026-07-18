@@ -49,9 +49,12 @@ complete until all of these stages succeed:
 5. when the source snapshot declares a non-empty `vision_config`, the pinned upstream converter exports the vision
    tower and projector as `mmproj-BF16.gguf`, verifies `general.type=mmproj`, `MOSTLY_BF16`, a non-empty tensor
    inventory, and a receipt bound to the source config and converter;
-6. when the export recipe declares a Hugging Face destination, the validated language GGUF and optional mmproj are
-   uploaded in one model-repository commit and a local token-free receipt records its exact commit and file hashes;
-7. final GGUFs, export summaries, and export/upload receipts already reside in `Results/NNN`; remaining validated
+6. workflows with a quality protocol complete that protocol and write its machine-readable JSON and rendered
+   Markdown before any external publication;
+7. when the export recipe declares a Hugging Face destination, the validated language GGUF, optional mmproj, and
+   completed quality artifacts are uploaded in one model-repository commit, and a local token-free receipt records
+   its exact commit and file hashes;
+8. final GGUFs, export summaries, and export/upload receipts already reside in `Results/NNN`; remaining validated
    experiment statistics are hard-linked there without copying large artifacts.
 
 The embedding level is part of `CompressionExportPolicy` and receipt identity. Set
@@ -93,13 +96,18 @@ export = CompressionExportPolicy(
 )
 ```
 
+The low-level compression export never contacts Hugging Face. Quality and benchmark workflows defer the configured
+upload until evaluation succeeds and its document exists. Compression-quality commits expose the rendered report as
+`README.md` and its machine-readable measurements as `quality.json`; benchmark workflows also provide their
+machine-readable measurements as `quality.json`.
+The GGUF, optional mmproj, and quality files therefore share one commit identity.
+
 Do not put a token in the recipe. The shared resident launcher loads the repository-root `.env` with override
 semantics before resolving Hugging Face inputs, so a corrected local `HF_TOKEN` takes precedence over an inherited
 token; the uploader also supports the standard cached Hugging Face login. Environment capture continues to exclude
-that secret. Before making any Hub request, it opens each exported model file, verifies
-the byte count and SHA-256 from the GGUF export result, rewinds the same open handle, and gives that handle to the Hub
-client. The language GGUF and optional mmproj therefore enter one commit without a save or conversion step that could
-change numerical content.
+that secret. Before making any Hub request, it opens every model and quality file, verifies its byte count and
+SHA-256, rewinds the same open handle, and gives that handle to the Hub client. No save or conversion step can change
+the validated content between evaluation and upload.
 
 On success, `<model>.gguf.huggingface.json` records the canonical repository ID and URL, commit OID and URL, requested
 visibility, commit message, and each uploaded filename, byte count, and SHA-256. High-level compression experiments
@@ -109,10 +117,10 @@ recompressing. Experiments whose export policy omits `huggingface` remain fully 
 
 ## Exporting an older completed run
 
-`execute_compression_export` performs only stages 2–6 and never recompresses the model. This is the supported
-backfill path for a resident run that predates the mandatory export contract. Its GGUF and receipt are written
-directly to the experiment's Results directory; use `tools/publish_results.py` to add remaining summaries and
-statistics.
+`execute_compression_export` performs only stages 2–5, never recompresses the model, and never contacts Hugging Face.
+This is the supported local backfill path for a resident run that predates the mandatory export contract. Its GGUF
+and receipt are written directly to the experiment's Results directory; complete the quality workflow before Hub
+publication, and use `tools/publish_results.py` to add remaining summaries and statistics.
 
 Experiment 003 v5 was the first backfill through this contract. Its 34-block globally tuned state passed validation.
 The initial export incorrectly retained `token_embd.weight` as BF16; it was superseded by the verified Q8_0 export

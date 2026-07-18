@@ -8,7 +8,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from nanoquant.compression_export_workflow import CompressionExportRecipe, execute_complete_compression
+from nanoquant.compression_export_workflow import (
+    CompressionExportRecipe,
+    complete_deferred_huggingface_upload,
+    execute_complete_compression,
+)
 from nanoquant.config.codec import config_hash, to_dict
 from nanoquant.config.schema import ExecutorKind, RunConfig
 from nanoquant.config.validation import ValidationPhase, raise_for_issues, validate
@@ -176,6 +180,14 @@ def execute_compression_quality_experiment(
     }
     atomic_write_json(resolved.quality_output, quality_payload)
     atomic_write_text(resolved.quality_markdown_output, render_quality_evaluation_markdown(quality_payload))
+    exports = complete_deferred_huggingface_upload(
+        exports,
+        experiment.export.huggingface,
+        (
+            (resolved.quality_markdown_output, "README.md"),
+            (resolved.quality_output, "quality.json"),
+        ),
+    )
     profiles = tuple(
         str(path.resolve())
         for path in sorted(resolved.inputs.output.glob("profile*.json"))

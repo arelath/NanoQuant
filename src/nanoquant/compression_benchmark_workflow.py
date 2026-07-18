@@ -9,6 +9,7 @@ from typing import Any
 from nanoquant.compression_export_workflow import (
     CompressionExportRecipe,
     ResolvedCompressionExportRecipe,
+    complete_deferred_huggingface_upload,
     execute_complete_compression,
     resolve_compression_export_recipe,
 )
@@ -133,6 +134,13 @@ def execute_compression_benchmark_experiment(
             packed_artifact=resolved.export.packed_output,
         )
     )
+    quality_output = resolved.benchmark_output.with_suffix(".quality.json")
+    atomic_write_json(quality_output, quality)
+    exports = complete_deferred_huggingface_upload(
+        exports,
+        experiment.export.huggingface,
+        ((quality_output, "quality.json"),),
+    )
     publication_directory = repository_root / "Results" / f"{experiment_number:03d}"
     payload = {
         "schema_version": 2,
@@ -226,6 +234,7 @@ def execute_compression_benchmark_experiment(
                 )
             ),
             PublishableArtifact(resolved.benchmark_output, PublishableArtifactKind.STATISTICS),
+            PublishableArtifact(quality_output, PublishableArtifactKind.STATISTICS),
             *(PublishableArtifact(path, PublishableArtifactKind.STATISTICS) for path in profile_json),
             *(PublishableArtifact(path, PublishableArtifactKind.REPORT) for path in profile_markdown),
         ),
