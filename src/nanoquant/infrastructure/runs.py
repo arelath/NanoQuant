@@ -230,7 +230,7 @@ def transition(
         RunStatus.CREATED: {RunStatus.RUNNING, RunStatus.INTERRUPTED},
         RunStatus.RUNNING: {RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.INTERRUPTED},
         RunStatus.INTERRUPTED: {RunStatus.RUNNING, RunStatus.FAILED},
-        RunStatus.FAILED: set(),
+        RunStatus.FAILED: {RunStatus.RUNNING},
         RunStatus.COMPLETED: set(),
     }
     if status not in allowed[manifest.status]:

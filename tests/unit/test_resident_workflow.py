@@ -295,3 +295,22 @@ def test_workflow_manifest_completes_only_with_global_tuning_artifact(tmp_path: 
     completed = from_dict(RunManifest, directory.read_manifest(), path="manifest")
     assert completed.status is RunStatus.COMPLETED
     assert completed.artifacts == ("sha256-resident", "sha256-distillation")
+
+
+def test_resident_manifest_reopens_failed_run_with_current_inputs(tmp_path: Path) -> None:
+    config = _resident_config()
+    request = resident_request_from_config(config, _inputs(tmp_path))
+    current = resident._resident_manifest(request, "resident-quantization")
+    failed = transition(
+        transition(current, RunStatus.RUNNING),
+        RunStatus.FAILED,
+        artifacts=("sha256-durable",),
+        failure={"type": "RuntimeError", "message": "injected"},
+    )
+
+    resumed = resident._start_resident_manifest(failed, current)
+
+    assert resumed.status is RunStatus.RUNNING
+    assert resumed.run_id == failed.run_id
+    assert resumed.artifacts == ("sha256-durable",)
+    assert resumed.failure is None

@@ -1138,7 +1138,7 @@ def _resident_manifest(request: ResidentQuantizationRequest, component: str) -> 
 
 
 def _start_resident_manifest(manifest: RunManifest, current: RunManifest) -> RunManifest:
-    if manifest.status in {RunStatus.CREATED, RunStatus.INTERRUPTED}:
+    if manifest.status in {RunStatus.CREATED, RunStatus.INTERRUPTED, RunStatus.FAILED}:
         started = transition(manifest, RunStatus.RUNNING)
     elif manifest.status is RunStatus.RUNNING:
         started = manifest

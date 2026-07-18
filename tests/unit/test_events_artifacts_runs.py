@@ -132,6 +132,31 @@ def test_run_manifest_lifecycle_and_atomic_replacement(tmp_path: Path) -> None:
         transition(completed, RunStatus.RUNNING)
 
 
+def test_failed_run_can_return_to_running_without_losing_identity(tmp_path: Path) -> None:
+    launcher_path = tmp_path / "001_test.py"
+    launcher_path.write_text("# fixture\n", encoding="utf-8")
+    launcher = launcher_provenance(launcher_path, 1)
+    manifest = initial_manifest(
+        RunConfig(ModelConfig("x")),
+        launcher,
+        {},
+        run_id="run_fixture",
+    )
+    running = transition(manifest, RunStatus.RUNNING)
+    failed = transition(
+        running,
+        RunStatus.FAILED,
+        artifacts=("artifact",),
+        failure={"type": "RuntimeError", "message": "injected"},
+    )
+
+    resumed = transition(failed, RunStatus.RUNNING)
+
+    assert resumed.run_id == failed.run_id
+    assert resumed.artifacts == ("artifact",)
+    assert resumed.failure is None
+
+
 def test_launcher_number_validation() -> None:
     config = RunConfig(ModelConfig("x"), intent=IntentConfig(experiment_number=19))
     validate_launcher_number(config, "019_baseline.py")
