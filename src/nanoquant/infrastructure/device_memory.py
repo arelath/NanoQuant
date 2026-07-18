@@ -64,7 +64,12 @@ class SharedDeviceMemoryGuard:
         with self._lock:
             measured = self._violation_bytes
             metric_seen = self._metric_seen
-        if require_available and bool(getattr(torch.cuda, "_initialized", False)) and not metric_seen:
+        if (
+            require_available
+            and os.name == "nt"
+            and bool(getattr(torch.cuda, "_initialized", False))
+            and not metric_seen
+        ):
             raise RuntimeError("VRAM002 WDDM shared-memory meter is unavailable after CUDA initialization")
         if measured is not None:
             raise SharedDeviceMemoryLimitExceeded(

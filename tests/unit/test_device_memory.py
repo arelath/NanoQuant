@@ -223,6 +223,27 @@ def test_first_post_cuda_event_establishes_wddm_baseline(
     assert [name for _severity, name, _fields in sink.events] == ["phase.started"]
 
 
+def test_missing_wddm_meter_is_allowed_on_non_windows_cuda(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    guard = SharedDeviceMemoryGuard(100)
+    monkeypatch.setattr(device_memory_module.os, "name", "posix")
+    monkeypatch.setattr(torch.cuda, "_initialized", True)
+
+    guard.raise_if_violated(require_available=True)
+
+
+def test_missing_wddm_meter_remains_fail_closed_on_windows_cuda(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    guard = SharedDeviceMemoryGuard(100)
+    monkeypatch.setattr(device_memory_module.os, "name", "nt")
+    monkeypatch.setattr(torch.cuda, "_initialized", True)
+
+    with pytest.raises(RuntimeError, match="VRAM002"):
+        guard.raise_if_violated(require_available=True)
+
+
 def test_shared_device_memory_monitor_fails_at_safe_point_after_transient_spill() -> None:
     readings = iter((10, 150, 20, 20))
 
