@@ -19,7 +19,7 @@ Experiment definitions currently live in two places:
 Everything in `src/nanoquant/recipes` is experiment-specific, not generic library code:
 
 - pinned model and dataset revisions (`dcc83ea…`, `093f9f3…`);
-- a promoted calibration artifact rooted at `evidence/m3/experiment018-calibration`;
+- a promoted calibration artifact rooted in the generated `.cache/nanoquant/calibration/experiment018` store;
 - numbered output layouts (`outputs/NNN-<slug>/…`);
 - experiment intents, hypotheses, and baseline-run names;
 - a machine-local reference path (`D:\dev\research\llama.cpp`).

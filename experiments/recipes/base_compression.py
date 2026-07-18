@@ -43,7 +43,7 @@ BASE_COMPRESSION_TEMPLATE = config_delta(
         ),
         formatting="gemma-chat-plus-raw-text-v1",
         prepared_artifact="sha256-ad1f609729f86db7598eed5c703c55aacbb9cb024cab816ca7b300d574b7a4c8",
-        prepared_root="evidence/m3/experiment018-calibration",
+        prepared_root=".cache/nanoquant/calibration/experiment018",
     ),
     calibration=config_delta(
         _SCHEMA_DEFAULTS.calibration,

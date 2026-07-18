@@ -38,7 +38,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--run-root", type=Path, default=Path("runs"))
     parser.add_argument("--snapshot", type=Path, required=True)
-    parser.add_argument("--calibration", type=Path, default=Path("evidence/m3/experiment018-calibration"))
+    parser.add_argument("--calibration", type=Path, default=Path(".cache/nanoquant/calibration/experiment018"))
     parser.add_argument("--factorized-tuning-epochs", type=int, default=0)
     parser.add_argument("--factorized-tuning-batch-size", type=int, default=8)
     parser.add_argument("--factorized-tuning-epoch-cooldown-seconds", type=float, default=0.0)

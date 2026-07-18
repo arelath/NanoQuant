@@ -191,7 +191,7 @@ def _comparison(left: dict[str, torch.Tensor], right: dict[str, torch.Tensor]) -
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--snapshot", type=Path, required=True)
-    parser.add_argument("--calibration", type=Path, default=Path("evidence/m3/experiment018-calibration"))
+    parser.add_argument("--calibration", type=Path, default=Path(".cache/nanoquant/calibration/experiment018"))
     parser.add_argument("--fisher", type=Path, required=True)
     parser.add_argument("--legacy-initial", type=Path, required=True)
     parser.add_argument("--rewrite-factor", type=Path, required=True)

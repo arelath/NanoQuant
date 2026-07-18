@@ -18,7 +18,7 @@ LLAMA_CPP_REPOSITORY="${NANOQUANT_LLAMA_CPP_REPOSITORY:-https://github.com/ggml-
 LLAMA_CPP_REVISION="${NANOQUANT_LLAMA_CPP_REVISION:-68a521b591edd2f36a456809230d63aa81003dfc}"
 VENDORED_CONVERTER="${REPOSITORY_ROOT}/tools/llamacpp/convert_nanoquant_to_gguf.py"
 VENDORED_CONVERTER_SHA256="3ee6ccd976445b8e5669d34080067b0e36bac6166cd109c5f8cf7bc20893690c"
-CALIBRATION_ROOT="${REPOSITORY_ROOT}/evidence/m3/experiment018-calibration"
+CALIBRATION_ROOT="${REPOSITORY_ROOT}/.cache/nanoquant/calibration/experiment018"
 CALIBRATION_ID="sha256-ad1f609729f86db7598eed5c703c55aacbb9cb024cab816ca7b300d574b7a4c8"
 
 case "${EXPERIMENT}" in
@@ -125,7 +125,7 @@ echo "==> Persistent environment: ${VENV}"
 # shellcheck disable=SC1091
 source "${VENV}/bin/activate"
 python -m pip install --upgrade pip setuptools wheel
-python -m pip install -e ".[dev,evaluation]" \
+python -m pip install -e ".[dev,evaluation]" "huggingface-hub[hf_transfer]>=0.30,<1" \
   --constraint <(printf 'torch==%s\n' "${IMAGE_TORCH_BASE_VERSION}")
 if ! venv_uses_image_torch; then
   echo "Dependency installation replaced image PyTorch ${IMAGE_TORCH_VERSION}; refusing to continue." >&2
@@ -173,20 +173,20 @@ echo "==> Model snapshot: ${MODEL_SNAPSHOT}"
 # hash-check it on a fresh persistent volume.
 if [[ ! -f "${CALIBRATION_ROOT}/artifacts/ad/${CALIBRATION_ID}/descriptor.json" ]]; then
   echo "==> Preparing pinned 256x2048 calibration artifact"
-  rm -rf "${CALIBRATION_ROOT}"
+  export NANOQUANT_BOOTSTRAP_CALIBRATION_ROOT="${CALIBRATION_ROOT}"
   "${VENV}/bin/python" - <<'PY'
 import os
 from nanoquant.infrastructure.hf_calibration_dataset import prepare_experiment018_calibration
 result = prepare_experiment018_calibration(
     os.environ["NANOQUANT_BOOTSTRAP_MODEL_SNAPSHOT"],
-    "evidence/m3/experiment018-calibration",
+    os.environ["NANOQUANT_BOOTSTRAP_CALIBRATION_ROOT"],
 )
 expected = "sha256-ad1f609729f86db7598eed5c703c55aacbb9cb024cab816ca7b300d574b7a4c8"
-if result.artifact.artifact_id != expected:
+if result.reference.artifact_id != expected:
     raise SystemExit(
-        f"prepared calibration identity differs: {result.artifact.artifact_id} != {expected}"
+        f"prepared calibration identity differs: {result.reference.artifact_id} != {expected}"
     )
-print(result.artifact.artifact_id)
+print(result.reference.artifact_id)
 PY
 else
   echo "==> Reusing pinned calibration artifact"

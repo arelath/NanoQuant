@@ -28,7 +28,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--snapshot", type=Path, required=True)
     parser.add_argument("--state", type=Path, required=True)
-    parser.add_argument("--calibration", type=Path, default=Path("evidence/m3/experiment018-calibration"))
+    parser.add_argument("--calibration", type=Path, default=Path(".cache/nanoquant/calibration/experiment018"))
     parser.add_argument("--count", type=int, default=24)
     parser.add_argument("--device", default="cuda")
     args = parser.parse_args()

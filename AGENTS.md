@@ -66,7 +66,7 @@ represented without weakening the real path.
 - Revision: `dcc83ea841ab6100d6b47a070329e1ba4cf78752`
 - Normal local snapshot:
   `C:\Users\pdykstra\.cache\huggingface\hub\models--google--gemma-3-1b-it\snapshots\dcc83ea841ab6100d6b47a070329e1ba4cf78752`
-- Pinned calibration dataset: `evidence/m3/experiment018-calibration`
+- Generated pinned calibration cache: `.cache/nanoquant/calibration/experiment018`
 - Full Fisher state and preprocessing references are documented in `evidence/m4/README.md` and
   `evidence/m4/gemma-full-fisher-quantization/preprocessing.json`.
 - The full tuned resumable run is under `evidence/m4/gemma-full-fisher-tuned-canary`.

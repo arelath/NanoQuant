@@ -60,7 +60,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-output", type=Path, required=True)
     parser.add_argument("--snapshot", type=Path, required=True)
-    parser.add_argument("--calibration", type=Path, default=Path("evidence/m3/experiment018-calibration"))
+    parser.add_argument("--calibration", type=Path, default=Path(".cache/nanoquant/calibration/experiment018"))
     parser.add_argument("--samples", type=int, default=4)
     parser.add_argument("--tokens", type=int, default=512)
     parser.add_argument("--device", default="cuda")

@@ -259,7 +259,7 @@ def test_zero_argument_resolution_uses_pinned_snapshot_and_calibration(
     assert torch.equal(cast(torch.Tensor, resolved.quality_token_ids), tokens[:1, :8])
     assert resolved.pad_token_id == 7
     assert observed["dotenv_root"] == repository
-    assert observed["path"] == repository / "evidence/m3/experiment018-calibration"
+    assert observed["path"] == repository / ".cache/nanoquant/calibration/experiment018"
 
 
 def test_workflow_manifest_completes_only_with_global_tuning_artifact(tmp_path: Path) -> None:
