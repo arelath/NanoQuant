@@ -94,6 +94,8 @@ def test_live_reconstruction_report_renders_partial_and_block_final_states(tmp_p
     assert "| 1 | 0.1000 |" in partial
     assert "layer commit" in partial
     assert "| 2 | — |" in partial
+    assert "Actual bits per parameter excluding token embeddings" in partial
+    assert "| Quantized linear weights | 1 | 4 | 24 | 6.000000 |" in partial
     assert "Status: **compression complete**" in final
     assert "block final" in final
     assert "Completed block error before model-level KD" in final

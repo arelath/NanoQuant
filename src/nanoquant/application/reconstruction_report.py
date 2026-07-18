@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 from nanoquant.domain.models import BlockResult, GlobalTuningResult, LayerResult
 
 
@@ -67,6 +69,29 @@ def render_live_weight_error_report(
                 else _number(cell_layer.final_reconstruction.export_weighted_normalized_error)
             )
         lines.append(f"| {block_index + 1} | " + " | ".join(values) + " |")
+    actual_bits = sum(layer.actual_bit_cost.total for layer in layer_map.values())
+    source_parameters = sum(math.prod(layer.plan.source_weight.spec.shape) for layer in layer_map.values())
+    actual_bpw = actual_bits / source_parameters if source_parameters else None
+    lines.extend(
+        [
+            "",
+            "## Actual bits per parameter excluding token embeddings",
+            "",
+            (
+                "Actual BPW is the final representation cost of durable quantized linear weights divided by "
+                "their original source-weight parameter count. It includes binary factors, scales, outlier "
+                "values and indices, and packing padding. Token embeddings, the output head, norms, and "
+                "container overhead are excluded."
+            ),
+            "",
+            "| Scope | Durable layers | Source parameters | Actual bits | Actual BPW |",
+            "| --- | ---: | ---: | ---: | ---: |",
+            (
+                f"| Quantized linear weights | {durable_layer_count} | {source_parameters} | "
+                f"{actual_bits} | {_number(actual_bpw, 6)} |"
+            ),
+        ]
+    )
     lines.extend(
         [
             "",

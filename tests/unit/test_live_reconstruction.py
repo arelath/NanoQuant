@@ -41,7 +41,10 @@ def test_live_report_is_published_early_and_updates_through_the_same_link(tmp_pa
     assert source.is_file()
     assert destination.is_file()
     assert os.path.samefile(source, destination)
-    assert "Status: **running**" in destination.read_text(encoding="utf-8")
+    report = destination.read_text(encoding="utf-8")
+    assert "Status: **running**" in report
+    assert "Actual bits per parameter excluding token embeddings" in report
+    assert "| Quantized linear weights | 0 | 0 | 0 | n/a |" in report
     assert published.results_directory == tmp_path / "Results" / "006"
     manifest = json.loads(published.manifest.read_text(encoding="utf-8"))
     assert manifest["artifacts"][0]["published"] == "Results/006/weight-errors.md"

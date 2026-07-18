@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Bootstrap a persistent RunPod workspace and run one complete NanoQuant experiment.
-# Defaults to the smaller Gemma 3 270M experiment for fast environment validation.
+# Defaults to the publishable Gemma 3 270M compression and quality experiment.
 set -Eeuo pipefail
 
 REPOSITORY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORKSPACE_ROOT="${NANOQUANT_WORKSPACE_ROOT:-/workspace}"
 VENV="${NANOQUANT_VENV:-${WORKSPACE_ROOT}/nanoquant-venv}"
-EXPERIMENT="${NANOQUANT_EXPERIMENT:-007}"
+EXPERIMENT="${NANOQUANT_EXPERIMENT:-009}"
 export HF_HOME="${HF_HOME:-${WORKSPACE_ROOT}/huggingface}"
 export NANOQUANT_LLAMA_CPP_ROOT="${NANOQUANT_LLAMA_CPP_ROOT:-${WORKSPACE_ROOT}/llama.cpp}"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
@@ -45,8 +45,13 @@ case "${EXPERIMENT}" in
     MODEL_REVISION="9478e665381f42974aa06177b019352fb6291876"
     LAUNCHER="experiments/008-compress-and-benchmark-gemma-3-12b-it.py"
     ;;
+  009)
+    MODEL_ID="unsloth/gemma-3-270m-it"
+    MODEL_REVISION="23cf460f6bb16954176b3ddcc8d4f250501458a9"
+    LAUNCHER="experiments/009-compress-benchmark-and-publish-gemma-3-270m-it.py"
+    ;;
   *)
-    echo "Unsupported NANOQUANT_EXPERIMENT=${EXPERIMENT}; choose 001, 003, 006, 007, or 008." >&2
+    echo "Unsupported NANOQUANT_EXPERIMENT=${EXPERIMENT}; choose 001, 003, 006, 007, 008, or 009." >&2
     exit 2
     ;;
 esac
