@@ -24,7 +24,12 @@ from nanoquant.infrastructure.publication import (
     publish_experiment_artifacts,
 )
 from nanoquant.infrastructure.runs import launcher_provenance, validate_launcher_number
-from nanoquant.quality_evaluation import QualityEvaluationRequest, execute_quality_evaluation
+from nanoquant.quality_evaluation import (
+    DEFAULT_QUALITY_TASK_BATCH_SIZE,
+    DEFAULT_QUALITY_WIKITEXT_BATCH_SIZE,
+    QualityEvaluationRequest,
+    execute_quality_evaluation,
+)
 from nanoquant.quality_evaluation_workflow import render_quality_evaluation_markdown
 from nanoquant.resident_workflow import (
     ResidentExecutionOptions,
@@ -42,7 +47,7 @@ class CompressionQualityExperiment:
     expected_blocks: int
     wikitext_samples: int = 64
     wikitext_sequence_length: int = 128
-    wikitext_batch_size: int = 1
+    wikitext_batch_size: int = DEFAULT_QUALITY_WIKITEXT_BATCH_SIZE
     task_names: tuple[str, ...] = (
         "piqa",
         "arc_easy",
@@ -52,7 +57,7 @@ class CompressionQualityExperiment:
         "boolq",
     )
     task_limit: int = 200
-    task_batch_size: int = 1
+    task_batch_size: int = DEFAULT_QUALITY_TASK_BATCH_SIZE
     local_files_only: bool = True
     maximum_wddm_shared_gib: float | None = None
     restore_completed_blocks: bool = True

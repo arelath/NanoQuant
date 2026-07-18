@@ -38,7 +38,7 @@ def test_experiment002_uses_the_full_common_quality_protocol() -> None:
 
     assert request.wikitext_samples == 64
     assert request.wikitext_sequence_length == 128
-    assert request.wikitext_batch_size == 1
+    assert request.wikitext_batch_size == 8
     assert request.task_names == (
         "piqa",
         "arc_easy",
@@ -48,7 +48,7 @@ def test_experiment002_uses_the_full_common_quality_protocol() -> None:
         "boolq",
     )
     assert request.task_limit == 200
-    assert request.task_batch_size == 1
+    assert request.task_batch_size == 4
     assert request.backend == "factorized"
     assert request.use_global_tuning
     assert _EVALUATION.markdown_path == Path(

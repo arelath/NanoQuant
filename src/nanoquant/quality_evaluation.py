@@ -7,6 +7,7 @@ import hashlib
 import json
 import math
 import time
+from collections.abc import Callable, Mapping
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
@@ -35,6 +36,7 @@ from nanoquant.infrastructure.frozen_model_loader import LoadedFrozenModel, load
 from nanoquant.infrastructure.hf_language_model import load_causal_language_model
 from nanoquant.infrastructure.hf_task_evaluation import (
     hash_hf_tokenizer_snapshot,
+    load_pinned_dataset_split,
     prepare_pinned_hf_multiple_choice_inputs,
 )
 from nanoquant.infrastructure.model_adapters import adapter_for_config
@@ -47,7 +49,20 @@ from nanoquant.infrastructure.streamed_language_model import BlockStreamedCausal
 
 WIKITEXT_DATASET = "Salesforce/wikitext"
 WIKITEXT_CONFIG = "wikitext-2-raw-v1"
+DEFAULT_QUALITY_WIKITEXT_BATCH_SIZE = 8
+DEFAULT_QUALITY_TASK_BATCH_SIZE = 4
 WIKITEXT_REVISION = "b08601e04326c79dfdd32d625aee71d232d685c3"
+
+QualityProgressCallback = Callable[[str, Mapping[str, object]], None]
+
+
+def _emit_progress(
+    progress: QualityProgressCallback | None,
+    event: str,
+    **fields: object,
+) -> None:
+    if progress is not None:
+        progress(event, fields)
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,10 +76,10 @@ class QualityEvaluationRequest:
     use_global_tuning: bool = True
     wikitext_samples: int = 16
     wikitext_sequence_length: int = 128
-    wikitext_batch_size: int = 1
+    wikitext_batch_size: int = DEFAULT_QUALITY_WIKITEXT_BATCH_SIZE
     task_names: tuple[str, ...] = ("piqa", "arc_easy", "boolq")
     task_limit: int = 25
-    task_batch_size: int = 1
+    task_batch_size: int = DEFAULT_QUALITY_TASK_BATCH_SIZE
     local_files_only: bool = True
     maximum_wddm_shared_bytes: int | None = None
     packed_artifact: Path | None = None
@@ -114,16 +129,21 @@ def _wikitext_tokens(
     samples: int,
     sequence_length: int,
     local_files_only: bool,
+    progress: QualityProgressCallback | None = None,
 ) -> tuple[torch.Tensor, str, int]:
-    # Evaluation data support is optional for non-evaluation package users.
-    from datasets import DownloadConfig, load_dataset  # type: ignore[import-untyped]
-
-    dataset = load_dataset(
+    _emit_progress(progress, "wikitext_input_dataset_started", dataset=WIKITEXT_DATASET)
+    dataset = load_pinned_dataset_split(
         WIKITEXT_DATASET,
         WIKITEXT_CONFIG,
-        revision=WIKITEXT_REVISION,
-        split="test",
-        download_config=DownloadConfig(local_files_only=local_files_only),
+        WIKITEXT_REVISION,
+        "test",
+        local_files_only=local_files_only,
+    )
+    _emit_progress(
+        progress,
+        "wikitext_input_dataset_completed",
+        dataset=WIKITEXT_DATASET,
+        rows=len(dataset),
     )
     tokenizer = AutoTokenizer.from_pretrained(snapshot, local_files_only=True)
     payload = sequence_length - 1
@@ -133,12 +153,14 @@ def _wikitext_tokens(
     # entire WikiText test split as one apparent model input.  Explicit
     # truncation both preserves the historical token prefix and prevents
     # Transformers from warning that the full corpus exceeds model context.
+    _emit_progress(progress, "wikitext_input_tokenization_started")
     encoded = tokenizer(
         "\n\n".join(dataset["text"]),
         return_tensors="pt",
         truncation=True,
         max_length=required,
     ).input_ids
+    _emit_progress(progress, "wikitext_input_tokenization_completed", tokens=encoded.shape[1])
     bos_id = tokenizer.bos_token_id
     if bos_id is None:
         raise ValueError("Gemma WikiText protocol requires a BOS token")
@@ -157,7 +179,10 @@ def _wikitext_tokens(
     return torch.cat(rows, dim=0), str(getattr(dataset, "_fingerprint", "unknown")), int(bos_id)
 
 
-def prepare_quality_inputs(request: QualityEvaluationRequest) -> PreparedQualityInputs:
+def prepare_quality_inputs(
+    request: QualityEvaluationRequest,
+    progress: QualityProgressCallback | None = None,
+) -> PreparedQualityInputs:
     """Materialize the exact shared input partitions before claiming the GPU lease."""
 
     tokens, fingerprint, bos_id = _wikitext_tokens(
@@ -165,15 +190,28 @@ def prepare_quality_inputs(request: QualityEvaluationRequest) -> PreparedQuality
         samples=request.wikitext_samples,
         sequence_length=request.wikitext_sequence_length,
         local_files_only=request.local_files_only,
+        progress=progress,
     )
+    _emit_progress(progress, "tokenizer_load_started")
     tokenizer = AutoTokenizer.from_pretrained(request.snapshot, local_files_only=True)
+    _emit_progress(progress, "tokenizer_load_completed")
     pad_token_id = tokenizer.pad_token_id
     if pad_token_id is None:
         raise ValueError("quality evaluation tokenizer contains no pad token ID")
+    _emit_progress(progress, "tokenizer_hash_started")
     tokenizer_hash = hash_hf_tokenizer_snapshot(request.snapshot)
+    _emit_progress(progress, "tokenizer_hash_completed", tokenizer_hash=tokenizer_hash)
     by_name = {task.task_name: task for task in pinned_legacy_multiple_choice_tasks()}
-    tasks = tuple(
-        prepare_pinned_hf_multiple_choice_inputs(
+    tasks = []
+    for task_index, name in enumerate(request.task_names, start=1):
+        _emit_progress(
+            progress,
+            "task_input_started",
+            task=name,
+            task_index=task_index,
+            task_count=len(request.task_names),
+        )
+        prepared = prepare_pinned_hf_multiple_choice_inputs(
             by_name[name],
             tokenizer,
             tokenizer_name=request.source,
@@ -182,9 +220,21 @@ def prepare_quality_inputs(request: QualityEvaluationRequest) -> PreparedQuality
             maximum_samples=request.task_limit,
             local_files_only=request.local_files_only,
         )
-        for name in request.task_names
+        tasks.append(prepared)
+        _emit_progress(
+            progress,
+            "task_input_completed",
+            task=name,
+            examples=len(prepared.examples),
+        )
+    return PreparedQualityInputs(
+        tokens,
+        fingerprint,
+        bos_id,
+        int(pad_token_id),
+        tokenizer_hash,
+        tuple(tasks),
     )
-    return PreparedQualityInputs(tokens, fingerprint, bos_id, int(pad_token_id), tokenizer_hash, tasks)
 
 
 def _release_device_memory() -> None:
@@ -199,8 +249,10 @@ def _evaluate_model(
     request: QualityEvaluationRequest,
     inputs: PreparedQualityInputs,
     monitor: SharedDeviceMemoryMonitor | None = None,
+    progress: QualityProgressCallback | None = None,
 ) -> dict[str, Any]:
     started = time.perf_counter()
+    _emit_progress(progress, "model_evaluation_started", model=label)
     if request.device.startswith("cuda"):
         torch.cuda.reset_peak_memory_stats(request.device)
     cast(Any, model).config.use_cache = False
@@ -214,6 +266,7 @@ def _evaluate_model(
         return logits
 
     wikitext_started = time.perf_counter()
+    _emit_progress(progress, "wikitext_started", model=label)
     causal = evaluate_causal_nll(
         CausalEvaluationRequest(
             inputs.wikitext_tokens.to(request.device),
@@ -224,9 +277,24 @@ def _evaluate_model(
         guarded_logits,
     )
     wikitext_seconds = time.perf_counter() - wikitext_started
+    _emit_progress(
+        progress,
+        "wikitext_completed",
+        model=label,
+        elapsed_seconds=wikitext_seconds,
+        perplexity=causal.perplexity,
+    )
     tasks = []
-    for prepared in inputs.tasks:
+    for task_index, prepared in enumerate(inputs.tasks, start=1):
         task_started = time.perf_counter()
+        _emit_progress(
+            progress,
+            "task_started",
+            model=label,
+            task=prepared.task.task_name,
+            task_index=task_index,
+            task_count=len(inputs.tasks),
+        )
         result = evaluate_multiple_choice(
             MultipleChoiceEvaluationRequest(
                 prepared.task,
@@ -246,7 +314,16 @@ def _evaluate_model(
                 "elapsed_seconds": time.perf_counter() - task_started,
             }
         )
-    return {
+        _emit_progress(
+            progress,
+            "task_completed",
+            model=label,
+            task=prepared.task.task_name,
+            elapsed_seconds=tasks[-1]["elapsed_seconds"],
+            metric=result.primary_metric,
+            value=result.primary_value,
+        )
+    payload = {
         "label": label,
         "wikitext": to_dict(causal),
         "wikitext_elapsed_seconds": wikitext_seconds,
@@ -255,6 +332,13 @@ def _evaluate_model(
         "peak_device_bytes": peak_device_memory_bytes(request.device),
         "peak_host_bytes": peak_process_memory_bytes(),
     }
+    _emit_progress(
+        progress,
+        "model_evaluation_completed",
+        model=label,
+        elapsed_seconds=payload["elapsed_seconds"],
+    )
+    return payload
 
 
 def _number(value: object, field: str) -> float:
@@ -306,12 +390,17 @@ def execute_quality_evaluation(
     request: QualityEvaluationRequest,
     *,
     prepared: PreparedQualityInputs | None = None,
+    progress: QualityProgressCallback | None = None,
 ) -> dict[str, Any]:
     """Evaluate the base and committed frozen models on identical pinned inputs."""
 
-    inputs = prepare_quality_inputs(request) if prepared is None else prepared
+    _emit_progress(progress, "input_preparation_started", reused=prepared is not None)
+    inputs = prepare_quality_inputs(request, progress) if prepared is None else prepared
+    _emit_progress(progress, "input_preparation_completed", task_count=len(inputs.tasks))
     wall_started = time.perf_counter()
+    _emit_progress(progress, "device_lease_started", device=request.device)
     with acquire_device_lease(request.device):
+        _emit_progress(progress, "device_lease_acquired", device=request.device)
         monitor_context = (
             SharedDeviceMemoryMonitor(request.maximum_wddm_shared_bytes)
             if request.maximum_wddm_shared_bytes is not None
@@ -322,6 +411,7 @@ def execute_quality_evaluation(
             model_type = str(getattr(model_config, "model_type", "")).lower()
             attention_implementation = "eager" if model_type.startswith("gemma") else "sdpa"
             base_load_started = time.perf_counter()
+            _emit_progress(progress, "model_load_started", model="base")
             source_model = load_causal_language_model(
                 request.snapshot,
                 torch_dtype=_checkpoint_dtype(request.snapshot),
@@ -339,8 +429,14 @@ def execute_quality_evaluation(
             if monitor is not None:
                 monitor.check()
             base_load_seconds = time.perf_counter() - base_load_started
+            _emit_progress(
+                progress,
+                "model_load_completed",
+                model="base",
+                elapsed_seconds=base_load_seconds,
+            )
             try:
-                base_result = _evaluate_model("base", base, request, inputs, monitor)
+                base_result = _evaluate_model("base", base, request, inputs, monitor, progress)
                 base_result["model_load_seconds"] = base_load_seconds
                 base_result["execution"] = "block_streamed" if request.stream_base_model else "resident"
             finally:
@@ -350,6 +446,7 @@ def execute_quality_evaluation(
             packed_descriptor_sha256 = None
             try:
                 frozen_load_started = time.perf_counter()
+                _emit_progress(progress, "model_load_started", model="frozen")
                 loaded = (
                     load_frozen_run(
                         request.run_output,
@@ -375,7 +472,20 @@ def execute_quality_evaluation(
                 if monitor is not None:
                     monitor.check()
                 frozen_load_seconds = time.perf_counter() - frozen_load_started
-                frozen_result = _evaluate_model("frozen", loaded.model, request, inputs, monitor)
+                _emit_progress(
+                    progress,
+                    "model_load_completed",
+                    model="frozen",
+                    elapsed_seconds=frozen_load_seconds,
+                )
+                frozen_result = _evaluate_model(
+                    "frozen",
+                    loaded.model,
+                    request,
+                    inputs,
+                    monitor,
+                    progress,
+                )
                 frozen_result["model_load_seconds"] = frozen_load_seconds
                 frozen_identity = to_dict(loaded.identity)
                 global_tuning = None if loaded.global_tuning is None else to_dict(loaded.global_tuning)
@@ -435,11 +545,15 @@ def execute_quality_evaluation(
             "peak_wddm_shared_bytes": None if monitor is None else monitor.guard.peak_bytes,
         },
     }
+    _emit_progress(progress, "quality_evaluation_completed", wall_seconds=payload["wall_seconds"])
     return payload
 
 
 __all__ = [
+    "DEFAULT_QUALITY_TASK_BATCH_SIZE",
+    "DEFAULT_QUALITY_WIKITEXT_BATCH_SIZE",
     "PreparedQualityInputs",
+    "QualityProgressCallback",
     "QualityEvaluationRequest",
     "execute_quality_evaluation",
     "prepare_quality_inputs",

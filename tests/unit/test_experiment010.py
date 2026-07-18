@@ -16,7 +16,7 @@ def _diff(left: object, right: object, prefix: str = "") -> set[str]:
     return set() if left == right else {prefix}
 
 
-def test_experiment010_doubles_cubic_admm_without_huggingface_publication() -> None:
+def test_experiment010_uses_baseline_rank_and_admm_policy_without_huggingface_publication() -> None:
     previous = load_experiment(9)
     definition = load_experiment(10)
     config = definition.config
@@ -29,7 +29,6 @@ def test_experiment010_doubles_cubic_admm_without_huggingface_publication() -> N
         "intent.hypothesis",
         "intent.tags",
         "output.run_root",
-        "factorization.admm.outer_iterations",
     }
     assert definition.identity.canonical_name == (
         "010-compress-and-benchmark-gemma-3-270m-it"
@@ -37,8 +36,9 @@ def test_experiment010_doubles_cubic_admm_without_huggingface_publication() -> N
     assert config.model.source == "unsloth/gemma-3-270m-it"
     assert config.model.revision == "23cf460f6bb16954176b3ddcc8d4f250501458a9"
     assert config.output.run_root == "evidence/010"
-    assert config.factorization.admm.outer_iterations == 1600
-    assert previous.config.factorization.admm.outer_iterations == 800
+    assert config.factorization.admm.outer_iterations == (
+        previous.config.factorization.admm.outer_iterations
+    ) == 800
     assert config.factorization.admm.penalty_schedule == (
         previous.config.factorization.admm.penalty_schedule
     ) == "cubic"
@@ -46,8 +46,10 @@ def test_experiment010_doubles_cubic_admm_without_huggingface_publication() -> N
     assert experiment.maximum_wddm_shared_gib == previous.workflow.maximum_wddm_shared_gib == 0.75
     assert experiment.quality_backend == previous.workflow.quality_backend == "factorized"
     assert experiment.wikitext_samples == previous.workflow.wikitext_samples
+    assert experiment.wikitext_batch_size == previous.workflow.wikitext_batch_size == 8
     assert experiment.task_names == previous.workflow.task_names
     assert experiment.task_limit == previous.workflow.task_limit
+    assert experiment.task_batch_size == previous.workflow.task_batch_size == 4
     assert experiment.summary_output == Path(
         "outputs/010/010-compress-and-benchmark-gemma-3-270m-it-summary.json"
     )

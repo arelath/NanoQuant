@@ -52,7 +52,6 @@ EXPERIMENT = define_quality_evaluation_experiment(
         use_global_tuning=True,
         wikitext_samples=64,
         wikitext_sequence_length=128,
-        wikitext_batch_size=1,
         task_names=(
             "piqa",
             "arc_easy",
@@ -62,7 +61,6 @@ EXPERIMENT = define_quality_evaluation_experiment(
             "boolq",
         ),
         task_limit=200,
-        task_batch_size=1,
         local_files_only=True,
     ),
     resolve_model_from_config=True,

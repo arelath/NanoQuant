@@ -22,7 +22,12 @@ from nanoquant.infrastructure.publication import (
     PublishableArtifactKind,
     publish_experiment_artifacts,
 )
-from nanoquant.quality_evaluation import QualityEvaluationRequest, execute_quality_evaluation
+from nanoquant.quality_evaluation import (
+    DEFAULT_QUALITY_TASK_BATCH_SIZE,
+    DEFAULT_QUALITY_WIKITEXT_BATCH_SIZE,
+    QualityEvaluationRequest,
+    execute_quality_evaluation,
+)
 from nanoquant.resident_workflow import (
     ResolvedResidentInputs,
     resolve_resident_experiment_inputs,
@@ -47,10 +52,10 @@ class CompressionBenchmarkExperiment:
     expected_blocks: int = 26
     wikitext_samples: int = 64
     wikitext_sequence_length: int = 128
-    wikitext_batch_size: int = 1
+    wikitext_batch_size: int = DEFAULT_QUALITY_WIKITEXT_BATCH_SIZE
     task_names: tuple[str, ...] = LEGACY_007_TASKS
     task_limit: int = 200
-    task_batch_size: int = 1
+    task_batch_size: int = DEFAULT_QUALITY_TASK_BATCH_SIZE
     local_files_only: bool = True
 
     def __post_init__(self) -> None:

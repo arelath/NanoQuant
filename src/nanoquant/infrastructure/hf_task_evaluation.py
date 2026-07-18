@@ -83,6 +83,42 @@ def hash_hf_tokenizer_snapshot(snapshot: str | Path) -> str:
     return "sha256:" + digest.hexdigest()
 
 
+def load_pinned_dataset_split(
+    dataset_name: str,
+    dataset_config: str | None,
+    revision: str,
+    split: str,
+    *,
+    local_files_only: bool,
+) -> Any:
+    """Load an exact cached Arrow split without asking the Hub to resolve it."""
+
+    # `datasets` is an evaluation extra. Import lazily so the core package and
+    # non-evaluation commands do not require it.
+    from datasets import Dataset, DownloadConfig, config, load_dataset  # type: ignore[import-untyped]
+
+    if not local_files_only:
+        arguments = (dataset_name,) if dataset_config is None else (dataset_name, dataset_config)
+        return load_dataset(
+            *arguments,
+            revision=revision,
+            split=split,
+            download_config=DownloadConfig(local_files_only=False),
+        )
+
+    dataset_directory = dataset_name.replace("/", "___")
+    configuration_directory = "default" if dataset_config is None else dataset_config
+    cache_root = Path(config.HF_DATASETS_CACHE) / dataset_directory / configuration_directory
+    candidates = tuple(sorted(cache_root.glob(f"*/{revision}/*-{split}.arrow")))
+    if len(candidates) != 1:
+        raise FileNotFoundError(
+            "pinned local dataset split requires exactly one cached Arrow file: "
+            f"dataset={dataset_name!r}, config={dataset_config!r}, revision={revision!r}, "
+            f"split={split!r}, matches={tuple(str(path) for path in candidates)!r}"
+        )
+    return Dataset.from_file(str(candidates[0]))
+
+
 def load_pinned_multiple_choice_documents(
     task: MultipleChoiceTaskSpec,
     *,
@@ -91,16 +127,12 @@ def load_pinned_multiple_choice_documents(
 ) -> tuple[Mapping[str, object], ...]:
     if maximum_samples is not None and (type(maximum_samples) is not int or maximum_samples <= 0):
         raise ValueError("multiple-choice maximum samples must be a positive integer")
-    # `datasets` is an evaluation extra. Import lazily so the core package and
-    # non-evaluation commands do not require it.
-    from datasets import DownloadConfig, load_dataset  # type: ignore[import-untyped]
-
-    arguments = (task.dataset_name,) if task.dataset_config is None else (task.dataset_name, task.dataset_config)
-    dataset = load_dataset(
-        *arguments,
-        revision=task.dataset_revision,
-        split=task.split,
-        download_config=DownloadConfig(local_files_only=local_files_only),
+    dataset = load_pinned_dataset_split(
+        task.dataset_name,
+        task.dataset_config,
+        task.dataset_revision,
+        task.split,
+        local_files_only=local_files_only,
     )
     count = len(dataset) if maximum_samples is None else min(maximum_samples, len(dataset))
     return tuple(cast(Mapping[str, object], dict(dataset[index])) for index in range(count))
