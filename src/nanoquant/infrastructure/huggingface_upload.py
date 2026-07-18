@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from collections.abc import Iterable
 from contextlib import ExitStack
 from dataclasses import dataclass
@@ -10,7 +11,7 @@ from pathlib import Path
 from typing import BinaryIO
 
 from huggingface_hub import CommitOperationAdd, HfApi
-from huggingface_hub.errors import HFValidationError
+from huggingface_hub.errors import HfHubHTTPError, HFValidationError
 from huggingface_hub.utils import validate_repo_id  # type: ignore[attr-defined]
 
 from nanoquant.infrastructure.io_utils import atomic_write_json
@@ -129,6 +130,43 @@ def _measure_open_file(source: BinaryIO) -> tuple[int, str]:
     return byte_count, digest.hexdigest()
 
 
+def _authenticated_api(api: HfApi | None) -> HfApi:
+    if api is not None:
+        return api
+    token = os.environ.get("HF_TOKEN", "").strip()
+    if not token:
+        suffix = (
+            " Environment variable names are case-sensitive; use HF_TOKEN, not HF_Token."
+            if os.environ.get("HF_Token")
+            else ""
+        )
+        raise RuntimeError(f"Hugging Face publication requires the HF_TOKEN environment variable.{suffix}")
+    return HfApi(token=token)
+
+
+def ensure_huggingface_model_repository(
+    config: HuggingFaceUploadConfig,
+    *,
+    api: HfApi | None = None,
+) -> str:
+    """Verify explicit-token write access and create the model repository if needed."""
+
+    client = _authenticated_api(api)
+    try:
+        repo_url = client.create_repo(
+            config.repo_id,
+            repo_type="model",
+            private=config.private,
+            exist_ok=True,
+        )
+    except HfHubHTTPError as exc:
+        raise RuntimeError(
+            f"HF_TOKEN cannot create or access model repository {config.repo_id!r}; "
+            "use a token with write permission for the destination namespace"
+        ) from exc
+    return repo_url.repo_id
+
+
 def upload_validated_model_artifacts(
     config: HuggingFaceUploadConfig,
     artifacts: Iterable[ValidatedModelArtifact],
@@ -148,7 +186,7 @@ def upload_validated_model_artifacts(
     receipt = Path(receipt_output).resolve()
     if receipt.exists() and not receipt.is_file():
         raise ValueError("Hugging Face receipt output must be a regular file")
-    client = HfApi() if api is None else api
+    client = _authenticated_api(api)
     with ExitStack() as opened:
         operations: list[CommitOperationAdd] = []
         uploaded: list[UploadedModelArtifact] = []
@@ -183,22 +221,17 @@ def upload_validated_model_artifacts(
                 )
             )
 
-        repo_url = client.create_repo(
-            config.repo_id,
-            repo_type="model",
-            private=config.private,
-            exist_ok=True,
-        )
+        repo_id = ensure_huggingface_model_repository(config, api=client)
         commit = client.create_commit(
-            repo_url.repo_id,
+            repo_id,
             operations,
             repo_type="model",
             commit_message=config.commit_message,
         )
 
     result = HuggingFaceUploadResult(
-        repo_url.repo_id,
-        str(repo_url),
+        repo_id,
+        f"https://huggingface.co/{repo_id}",
         commit.oid,
         commit.commit_url,
         config.private,
@@ -222,6 +255,7 @@ __all__ = [
     "HuggingFaceUploadResult",
     "UploadedModelArtifact",
     "ValidatedModelArtifact",
+    "ensure_huggingface_model_repository",
     "huggingface_upload_summary",
     "upload_validated_model_artifacts",
 ]

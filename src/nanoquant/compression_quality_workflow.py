@@ -16,7 +16,10 @@ from nanoquant.compression_export_workflow import (
 from nanoquant.config.codec import config_hash, to_dict
 from nanoquant.config.schema import ExecutorKind, RunConfig
 from nanoquant.config.validation import ValidationPhase, raise_for_issues, validate
-from nanoquant.infrastructure.huggingface_upload import huggingface_upload_summary
+from nanoquant.infrastructure.huggingface_upload import (
+    ensure_huggingface_model_repository,
+    huggingface_upload_summary,
+)
 from nanoquant.infrastructure.io_utils import atomic_write_json, atomic_write_text
 from nanoquant.infrastructure.publication import (
     PublishableArtifact,
@@ -123,6 +126,9 @@ def execute_compression_quality_experiment(
             raise ValueError("large-model compression requires inline quality to be disabled")
         if config.distillation.enabled:
             raise ValueError("large-model compression requires distillation to remain disabled until teacher streaming")
+
+    if experiment.export.huggingface is not None:
+        ensure_huggingface_model_repository(experiment.export.huggingface)
 
     wall_started = time.perf_counter()
     compression_started = time.perf_counter()

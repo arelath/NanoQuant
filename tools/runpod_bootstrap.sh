@@ -217,6 +217,10 @@ PY
 cp "${VENDORED_CONVERTER}" "${NANOQUANT_LLAMA_CPP_ROOT}/convert_nanoquant_to_gguf.py"
 
 echo "==> Using repository-vendored NanoQuant GGUF converter"
+python - <<'PY'
+import sentencepiece
+PY
+python "${NANOQUANT_LLAMA_CPP_ROOT}/convert_nanoquant_to_gguf.py" --help >/dev/null
 if [[ ! -x "${NANOQUANT_LLAMA_CPP_ROOT}/build/bin/llama-quantize" ]]; then
   echo "==> Building upstream llama.cpp token-embedding quantizer"
   cmake -S "${NANOQUANT_LLAMA_CPP_ROOT}" -B "${NANOQUANT_LLAMA_CPP_ROOT}/build" \
