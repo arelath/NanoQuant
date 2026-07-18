@@ -24,10 +24,22 @@ from nanoquant.application.distillation import (
     cache_topk_teacher_epoch,
     distill_topk,
 )
-from nanoquant.application.layers import BlockEditor, LayerFreezer, TrainableFactorizedLinear
+from nanoquant.application.layers import (
+    BlockEditor,
+    LayerFreezer,
+    SharedInputGroupFreezer,
+    TrainableFactorizedLinear,
+    TrainableSharedInputFactorGroup,
+)
 from nanoquant.config.codec import canonical_json, to_dict
 from nanoquant.config.schema import ProfilingConfig, ProfilingLevel
-from nanoquant.domain.models import ArtifactRef, FrozenBlockState, FrozenNanoQuantState, GlobalTuningResult
+from nanoquant.domain.models import (
+    ArtifactRef,
+    FrozenBlockState,
+    FrozenNanoQuantState,
+    FrozenSharedInputGroupState,
+    GlobalTuningResult,
+)
 from nanoquant.domain.profiling import NULL_RECORDER, PhaseRecorder
 from nanoquant.infrastructure.artifacts import LocalArtifactStore
 from nanoquant.infrastructure.block_snapshot_probe import (
@@ -187,6 +199,35 @@ def _thaw_frozen_layers(
             )
             editor.install_trainable_layer(block, state.layer.path, module)
             trainable[(state.layer.block.index, state.layer.path)] = module
+        for group_state in block_result.frozen_state.shared_input_groups:
+            frozen_group = SharedInputGroupFreezer().load(
+                group_state,
+                tensors,
+                device="cpu",
+                dtype=torch.bfloat16,
+                backend="factorized",
+            )
+            owner = frozen_group.owner
+            module = TrainableSharedInputFactorGroup(
+                owner.left_binary,
+                owner.right_binary,
+                owner.scale_pre,
+                owner.scale_mid,
+                owner.scale_post,
+                bias=owner.bias,
+                outlier_indices=owner.outlier_indices,
+                outlier_values=owner.outlier_values,
+                outlier_scales=owner.outlier_scales,
+                immutable_binary_factors=True,
+            )
+            editor.install_trainable_group(
+                block,
+                group_state.name,
+                tuple(member.layer for member in group_state.members),
+                tuple(member.row_end - member.row_start for member in group_state.members),
+                module,
+            )
+            trainable[(group_state.block.index, group_state.name)] = module
     return trainable
 
 
@@ -210,7 +251,10 @@ def _selected_parameters(
     return selected, tuple(auxiliary)
 
 
-def _restore_storage_dtype(module: TrainableFactorizedLinear, state: FrozenNanoQuantState) -> None:
+def _restore_storage_dtype(
+    module: TrainableFactorizedLinear,
+    state: FrozenNanoQuantState | FrozenSharedInputGroupState,
+) -> None:
     with torch.no_grad():
         module.scale_pre.data = module.scale_pre.data.to(_storage_dtype(state.scales.pre.spec.dtype))
         if state.scales.mid is None:
@@ -231,17 +275,35 @@ def _freeze_tuned_blocks(
     freezer = LayerFreezer()
     result = []
     for block_result in loaded.blocks:
-        states = []
+        states: list[FrozenNanoQuantState] = []
+        groups: list[FrozenSharedInputGroupState] = []
         for state in block_result.frozen_state.quantized_layers:
             module = trainable[(state.layer.block.index, state.layer.path)].cpu()
             _restore_storage_dtype(module, state)
             states.append(freezer.freeze(state.layer, module, tensors, outliers=state.outliers).state)
+        for group_state in block_result.frozen_state.shared_input_groups:
+            module = trainable[(group_state.block.index, group_state.name)].cpu()
+            _restore_storage_dtype(module, group_state)
+            if not isinstance(module, TrainableSharedInputFactorGroup):
+                raise TypeError("shared-input global tuning owner has an incompatible type")
+            groups.append(
+                SharedInputGroupFreezer()
+                .freeze(
+                    tuple(member.layer for member in group_state.members),
+                    group_state.name,
+                    tuple(member.row_end - member.row_start for member in group_state.members),
+                    module,
+                    tensors,
+                )
+                .state
+            )
         result.append(
             FrozenBlockState(
                 block_result.block,
                 tuple(states),
                 block_result.frozen_state.passthrough_tensors,
                 block_result.frozen_state.auxiliary_parameters,
+                tuple(groups),
             )
         )
     return tuple(result)

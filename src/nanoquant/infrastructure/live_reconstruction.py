@@ -8,10 +8,22 @@ from typing import Any, cast
 
 from nanoquant.application.reconstruction_report import render_live_weight_error_report
 from nanoquant.config.codec import from_dict, to_dict
-from nanoquant.domain.models import ArtifactRef, ArtifactTypes, BlockResult, LayerResult, QuantizationPlan
+from nanoquant.domain.models import (
+    ArtifactRef,
+    ArtifactTypes,
+    BlockResult,
+    LayerResult,
+    QuantizationPlan,
+    SharedInputGroupResult,
+)
 
 from .artifacts import LocalArtifactStore
-from .commits import CommitIdentity, load_committed_block, load_committed_layer
+from .commits import (
+    CommitIdentity,
+    load_committed_block,
+    load_committed_layer,
+    load_committed_shared_input_group,
+)
 from .io_utils import atomic_write_text, rewrite_linked_text
 from .publication import (
     PublicationResult,
@@ -21,6 +33,22 @@ from .publication import (
 )
 
 LIVE_WEIGHT_ERROR_REPORT = "weight-errors.md"
+
+
+def _logical_layer_order(plan: QuantizationPlan) -> tuple[str, ...]:
+    if not plan.blocks:
+        return ()
+    block = plan.blocks[0]
+    groups = {group.name: group for group in block.shared_input_groups}
+    paths: list[str] = []
+    unit_order = block.unit_order or tuple(layer.layer.path for layer in block.layers)
+    for unit in unit_order:
+        group = groups.get(unit)
+        if group is None:
+            paths.append(unit)
+        else:
+            paths.extend(member.layer.path for member in group.members)
+    return tuple(paths)
 
 
 def live_weight_error_path(run_output: str | Path) -> Path:
@@ -61,6 +89,7 @@ def update_live_weight_error_report(
     layers: tuple[LayerResult, ...],
     blocks: tuple[BlockResult, ...],
     *,
+    groups: tuple[SharedInputGroupResult, ...] = (),
     expected_blocks: int,
     layer_order: tuple[str, ...],
     status: str = "running",
@@ -73,6 +102,7 @@ def update_live_weight_error_report(
         render_live_weight_error_report(
             layers,
             blocks,
+            groups=groups,
             expected_blocks=expected_blocks,
             layer_order=layer_order,
             status=status,
@@ -97,7 +127,7 @@ def rebuild_live_weight_error_report(
         for line in journal_path.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
-    durable = [item for item in payloads if item.get("kind") in {"layer", "block"}]
+    durable = [item for item in payloads if item.get("kind") in {"layer", "group", "block"}]
     if not durable:
         raise ValueError("run journal contains no durable layer or block records")
     identity = from_dict(CommitIdentity, cast(dict[str, Any], durable[-1]["identity"]), path="identity")
@@ -105,11 +135,10 @@ def rebuild_live_weight_error_report(
     active = [item for item in durable if item.get("identity") == identity_payload]
     artifacts = LocalArtifactStore(run / "artifacts")
     artifacts.validate(identity.plan_hash)
-    plan_payload = json.loads(
-        (artifacts.path_for(identity.plan_hash) / "plan.json").read_text(encoding="utf-8")
-    )
+    plan_payload = json.loads((artifacts.path_for(identity.plan_hash) / "plan.json").read_text(encoding="utf-8"))
     plan = from_dict(QuantizationPlan, cast(dict[str, Any], plan_payload), path="plan")
     layer_records: dict[tuple[int, str], dict[str, Any]] = {}
+    group_records: dict[tuple[int, str], dict[str, Any]] = {}
     block_records: dict[int, dict[str, Any]] = {}
     for item in active:
         block = int(item["block"])
@@ -119,7 +148,10 @@ def rebuild_live_weight_error_report(
         layer = item.get("layer")
         if not isinstance(layer, str):
             raise ValueError("layer journal record is missing its layer path")
-        layer_records[(block, layer)] = item
+        if item["kind"] == "group":
+            group_records[(block, layer)] = item
+        else:
+            layer_records[(block, layer)] = item
     blocks = tuple(
         load_committed_block(
             ArtifactRef(ArtifactTypes.BLOCK_RESULT, str(item["artifact_id"]), 1),
@@ -139,7 +171,17 @@ def rebuild_live_weight_error_report(
         for (block, _path), item in sorted(layer_records.items())
         if block not in completed
     )
-    layer_order = tuple(layer.layer.path for layer in plan.blocks[0].layers) if plan.blocks else ()
+    groups = [group for block in blocks for group in block.shared_input_groups]
+    groups.extend(
+        load_committed_shared_input_group(
+            ArtifactRef(ArtifactTypes.SHARED_INPUT_GROUP_RESULT, str(item["artifact_id"]), 1),
+            artifacts,
+            identity,
+        ).result
+        for (block, _path), item in sorted(group_records.items())
+        if block not in completed
+    )
+    layer_order = _logical_layer_order(plan)
     initialize_live_weight_error_report(
         repository_root,
         experiment_number,
@@ -151,6 +193,7 @@ def rebuild_live_weight_error_report(
         run,
         tuple(layers),
         blocks,
+        groups=tuple(groups),
         expected_blocks=len(plan.blocks),
         layer_order=layer_order,
         status=status,

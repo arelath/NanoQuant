@@ -8,7 +8,7 @@ from typing import cast
 import torch
 from torch import nn
 
-from nanoquant.domain.models import BlockId, LayerId
+from nanoquant.domain.models import BlockId, LayerId, SharedInputGroupCandidate
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,6 +101,15 @@ class TinyModelAdapter:
                 "mlp.up_proj",
                 "mlp.down_proj",
             )
+        )
+
+    def shared_input_group_candidates(self, block_id: BlockId) -> tuple[SharedInputGroupCandidate, ...]:
+        return (
+            SharedInputGroupCandidate(
+                block_id,
+                "self_attn.attn_qkv",
+                tuple(LayerId(block_id, path) for path in ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj")),
+            ),
         )
 
     def construct_block(self, source: object, block_id: BlockId, device: str) -> TinyBlock:

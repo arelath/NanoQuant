@@ -11,12 +11,20 @@ from transformers.models.gemma3.configuration_gemma3 import Gemma3TextConfig
 from transformers.models.gemma3.modeling_gemma3 import Gemma3ForCausalLM
 
 import nanoquant.resident_quantization as resident
-from nanoquant.config.schema import ADMMConfig, ExecutorKind, ProfilingConfig, ProfilingLevel
+from nanoquant.config.schema import (
+    ADMMConfig,
+    ExecutorKind,
+    ProfilingConfig,
+    ProfilingLevel,
+    SharedInputGroupConfig,
+)
 from nanoquant.infrastructure.artifacts import ArtifactCorruptionError, LocalArtifactStore
 from nanoquant.infrastructure.commits import load_block_activations
 from nanoquant.infrastructure.frozen_model_loader import load_frozen_run
+from nanoquant.infrastructure.packed_model_loader import load_packed_model
 from nanoquant.infrastructure.progress import ProgressJournal
 from nanoquant.infrastructure.run_registry import select_run
+from nanoquant.infrastructure.runtime_export import export_frozen_run_logical, validate_frozen_run_logical
 from nanoquant.resident_quantization import (
     ResidentQuantizationRequest,
     _clone_forward_metadata,
@@ -26,6 +34,7 @@ from nanoquant.resident_quantization import (
     run_resident_quantization,
 )
 from nanoquant.resident_replay import capture_and_replay_resident_layer
+from nanoquant.runtime import RuntimeModelMetadata, convert_logical_to_packed
 
 
 def test_resident_quantization_commits_complete_transformers_model(tmp_path: Path) -> None:
@@ -103,9 +112,7 @@ def test_resident_quantization_commits_complete_transformers_model(tmp_path: Pat
     assert run_started["fields"]["component"] == "resident-quantization"
     assert run_started["fields"]["device"] == "cpu"
     assert run_started["fields"]["calibration_samples"] == 1
-    progress_initialized = next(
-        event for event in events if event["name"] == "compression.progress_initialized"
-    )
+    progress_initialized = next(event for event in events if event["name"] == "compression.progress_initialized")
     assert progress_initialized["fields"] == {
         "completed_blocks": 0,
         "completed_wall_seconds": 0,
@@ -117,16 +124,13 @@ def test_resident_quantization_commits_complete_transformers_model(tmp_path: Pat
     assert completed_event["fields"]["host_peak_bytes"] > 0
     assert completed_event["fields"]["target_weighted_mean_square"] > 0
     assert completed_event["fields"]["entry_normalized_error"] == pytest.approx(
-        completed_event["fields"]["entry_loss"]
-        / completed_event["fields"]["target_weighted_mean_square"]
+        completed_event["fields"]["entry_loss"] / completed_event["fields"]["target_weighted_mean_square"]
     )
     assert completed_event["fields"]["final_normalized_error"] == pytest.approx(
-        completed_event["fields"]["final_loss"]
-        / completed_event["fields"]["target_weighted_mean_square"]
+        completed_event["fields"]["final_loss"] / completed_event["fields"]["target_weighted_mean_square"]
     )
     outlier_attempts = sum(
-        event["name"] == "stage.completed" and event["stage"] == "select-outliers"
-        for event in events
+        event["name"] == "stage.completed" and event["stage"] == "select-outliers" for event in events
     )
     assert outlier_attempts == sum(len(layer.attempts) for layer in result.blocks[0].layers)
     for layer in retried_layers:
@@ -231,10 +235,7 @@ def test_resident_quantization_commits_complete_transformers_model(tmp_path: Pat
     assert (resumed_output / "profile.2.json").is_file()
     resumed_profile = json.loads((resumed_output / "profile.2.json").read_text(encoding="utf-8"))
     assert resumed_profile["coverage"]["fraction"] >= 0.90
-    assert any(
-        phase["path"].endswith("/factorize/attempt")
-        for phase in resumed_profile["phases"]
-    )
+    assert any(phase["path"].endswith("/factorize/attempt") for phase in resumed_profile["phases"])
 
     assert resumed.reused_commit_count == 3
     assert resumed.plan == result.plan
@@ -284,6 +285,130 @@ def test_resident_quantization_commits_complete_transformers_model(tmp_path: Pat
     } <= replay_paths
 
 
+def test_resident_quantization_factorizes_qkv_as_one_shared_input_group(tmp_path: Path) -> None:
+    snapshot = tmp_path / "snapshot"
+    config = Gemma3TextConfig(
+        vocab_size=24,
+        hidden_size=8,
+        intermediate_size=16,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=4,
+    )
+    Gemma3ForCausalLM(config).save_pretrained(snapshot, safe_serialization=True)
+    request = ResidentQuantizationRequest(
+        snapshot,
+        tmp_path / "run",
+        "fixture/gemma3",
+        "pinned-test-revision",
+        ((1, 2, 3, 4),),
+        device="cpu",
+        target_bpw=8.0,
+        rank_multiple=1,
+        admm=ADMMConfig(outer_iterations=1, inner_iterations=1),
+        factorized_tuning_epochs=1,
+        factorized_tuning_batch_size=1,
+        post_block_refit_epochs=1,
+        post_block_refit_batch_size=1,
+        layer_order=(
+            "mlp.gate_proj",
+            "mlp.up_proj",
+            "mlp.down_proj",
+            "self_attn.v_proj",
+            "self_attn.o_proj",
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+        ),
+        shared_input_groups=(
+            SharedInputGroupConfig(
+                "self_attn.attn_qkv",
+                ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"),
+            ),
+        ),
+        profiling=ProfilingConfig(level=ProfilingLevel.OFF),
+    )
+
+    with pytest.raises(InterruptedError, match="physical-unit commits"):
+        run_resident_quantization(replace(request, interrupt_after_layer_commits=4))
+    interrupted_journal = [
+        json.loads(line) for line in (request.output / "state" / "journal.jsonl").read_text().splitlines()
+    ]
+    assert [(record["kind"], record["layer"]) for record in interrupted_journal] == [
+        ("layer", "mlp.gate_proj"),
+        ("layer", "mlp.up_proj"),
+        ("layer", "mlp.down_proj"),
+        ("group", "self_attn.attn_qkv"),
+    ]
+
+    result = run_resident_quantization(request)
+
+    assert result.plan.schema_version == 2
+    assert len(result.plan.blocks[0].layers) == 4
+    assert len(result.plan.blocks[0].shared_input_groups) == 1
+    assert result.plan.blocks[0].unit_order == (
+        "mlp.gate_proj",
+        "mlp.up_proj",
+        "mlp.down_proj",
+        "self_attn.attn_qkv",
+        "self_attn.o_proj",
+    )
+    assert len(result.blocks[0].layers) == 4
+    assert len(result.blocks[0].shared_input_groups) == 1
+    group = result.blocks[0].shared_input_groups[0]
+    assert group.name == "self_attn.attn_qkv"
+    assert tuple(layer.path for layer, _metrics in group.member_reconstruction) == (
+        "self_attn.q_proj",
+        "self_attn.k_proj",
+        "self_attn.v_proj",
+    )
+    assert result.frozen_model.actual_total_bits == (
+        sum(layer.actual_bit_cost.total for layer in result.blocks[0].layers) + group.actual_bit_cost.total
+    )
+    loaded = load_frozen_run(
+        request.output,
+        snapshot,
+        source_name=request.source,
+        revision=request.revision,
+        device="cpu",
+    )
+    with torch.no_grad():
+        logits = cast(Any, loaded.model)(input_ids=torch.tensor(request.token_ids), use_cache=False).logits
+    assert torch.isfinite(logits).all()
+    events = [json.loads(line) for line in (request.output / "events.jsonl").read_text().splitlines()]
+    names = [event["name"] for event in events]
+    assert names.count("shared_input_group.started") == 2
+    assert names.count("shared_input_group.committed") == 1
+    assert names.count("shared_input_group.completed") == 1
+    metadata = RuntimeModelMetadata(
+        request.source,
+        request.revision,
+        "gemma",
+        result.identity.model_hash,
+        "fixture-tokenizer",
+    )
+    logical = export_frozen_run_logical(request.output, tmp_path / "logical", metadata, 1)
+    validation = validate_frozen_run_logical(request.output, logical.output, 1)
+    packed = convert_logical_to_packed(logical.output, tmp_path / "packed")
+    group_entry = next(entry for entry in packed.manifest.blocks[0].layers if entry.spec.name.endswith("attn_qkv"))
+    assert len(group_entry.spec.members) == 3
+    assert logical.layer_count == 5
+    assert validation.exact is True
+    loaded_packed = load_packed_model(
+        packed.root,
+        request.output,
+        snapshot,
+        source_name=request.source,
+        revision=request.revision,
+        device="cpu",
+    )
+    with torch.no_grad():
+        packed_logits = cast(Any, loaded_packed.model)(
+            input_ids=torch.tensor(request.token_ids), use_cache=False
+        ).logits
+    assert torch.isfinite(packed_logits).all()
+
+
 def test_resident_tuning_recipe_refits_blocks_and_resumes_exactly(tmp_path: Path) -> None:
     snapshot = tmp_path / "snapshot"
     config = Gemma3TextConfig(
@@ -329,15 +454,11 @@ def test_resident_tuning_recipe_refits_blocks_and_resumes_exactly(tmp_path: Path
     assert all(event["fields"]["target_weighted_mean_square"] > 0 for event in epoch_summaries)
     assert all(
         event["fields"]["normalized_loss"]
-        == pytest.approx(
-            event["fields"]["loss"] / event["fields"]["target_weighted_mean_square"]
-        )
+        == pytest.approx(event["fields"]["loss"] / event["fields"]["target_weighted_mean_square"])
         for event in epoch_summaries
     )
     factorized_summaries = [
-        event
-        for event in tuning_events
-        if event["name"] == "factorized_tuning.epoch_checkpoint_committed"
+        event for event in tuning_events if event["name"] == "factorized_tuning.epoch_checkpoint_committed"
     ]
     assert factorized_summaries
     assert all(event["fields"]["normalized_loss"] is not None for event in factorized_summaries)
@@ -373,13 +494,10 @@ def test_resident_tuning_recipe_refits_blocks_and_resumes_exactly(tmp_path: Path
         abs=1e-7,
     )
     resumed_events = [
-        json.loads(line)
-        for line in (resumed_request.output / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        json.loads(line) for line in (resumed_request.output / "events.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     assert sum(event["name"] == "calibration_persist.started" for event in resumed_events) == 1
-    preprocessing_events = [
-        event for event in resumed_events if event["name"] == "preprocessing.selected"
-    ]
+    preprocessing_events = [event for event in resumed_events if event["name"] == "preprocessing.selected"]
     assert [event["fields"]["source"] for event in preprocessing_events] == [
         "computed",
         "journal_recovery",
@@ -389,9 +507,7 @@ def test_resident_tuning_recipe_refits_blocks_and_resumes_exactly(tmp_path: Path
 
     epoch_output = tmp_path / "epoch-resumed"
     with pytest.raises(InterruptedError, match="after 1"):
-        run_resident_quantization(
-            replace(base, output=epoch_output, interrupt_after_layer_commits=1)
-        )
+        run_resident_quantization(replace(base, output=epoch_output, interrupt_after_layer_commits=1))
     epoch_request = replace(
         base,
         output=epoch_output,
@@ -412,10 +528,7 @@ def test_resident_tuning_recipe_refits_blocks_and_resumes_exactly(tmp_path: Path
     )
 
     assert epoch_resumed.compressed_nll == pytest.approx(control.compressed_nll, rel=1e-6, abs=1e-7)
-    assert (
-        epoch_resumed.blocks[0].frozen_state.quantized_layers
-        == control.blocks[0].frozen_state.quantized_layers
-    )
+    assert epoch_resumed.blocks[0].frozen_state.quantized_layers == control.blocks[0].frozen_state.quantized_layers
     assert not (epoch_request.output / "state" / "tuning-checkpoint").exists()
 
 
@@ -431,9 +544,7 @@ def test_numerical_batch_shapes_invalidate_resume_identity(tmp_path: Path) -> No
 
     assert _resident_config_hash(replace(request, tuning_microbatch_size=2)) != _resident_config_hash(request)
     assert _resident_config_hash(replace(request, block_forward_batch_size=2)) != _resident_config_hash(request)
-    assert _resident_config_hash(
-        replace(request, restore_best_tuning_state=False)
-    ) != _resident_config_hash(request)
+    assert _resident_config_hash(replace(request, restore_best_tuning_state=False)) != _resident_config_hash(request)
     assert _resident_config_hash(
         replace(request, factorized_tuning_epoch_cooldown_seconds=5.0)
     ) == _resident_config_hash(request)
@@ -569,9 +680,7 @@ def test_cuda_multiblock_run_keeps_complete_activation_streams_pageable(
     observed_source_pinning: list[bool] = []
     original = resident.iter_device_batches
 
-    def recording_batches(
-        values: tuple[torch.Tensor, ...], batch_size: int, device: torch.device
-    ):  # type: ignore[no-untyped-def]
+    def recording_batches(values: tuple[torch.Tensor, ...], batch_size: int, device: torch.device):  # type: ignore[no-untyped-def]
         if device.type == "cuda" and all(value.device.type == "cpu" for value in values):
             observed_source_pinning.extend(value.is_pinned() for value in values)
         yield from original(values, batch_size, device)

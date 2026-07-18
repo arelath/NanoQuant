@@ -22,10 +22,11 @@ LLAMACPP_CHECKPOINT_SCHEMA_VERSION = 1
 LLAMACPP_CHECKPOINT_FORMAT = "nanoquant-llamacpp-checkpoint"
 _GEMMA_LAYER = re.compile(
     r"blocks\.(?P<block>[0-9]+)\."
-    r"(?P<path>self_attn\.(?:q_proj|k_proj|v_proj|o_proj)|"
+    r"(?P<path>self_attn\.(?:attn_qkv|q_proj|k_proj|v_proj|o_proj)|"
     r"mlp\.(?:gate_proj|up_proj|down_proj))\Z"
 )
 _GEMMA_GGUF_BASES = {
+    "self_attn.attn_qkv": "attn_qkv",
     "self_attn.q_proj": "attn_q",
     "self_attn.k_proj": "attn_k",
     "self_attn.v_proj": "attn_v",
@@ -157,18 +158,12 @@ def llamacpp_checkpoint_tensors(
     if not checkpoint_prefix or checkpoint_prefix.startswith(".") or checkpoint_prefix.endswith("."):
         raise ValueError("llama.cpp checkpoint prefix must be a canonical dotted name")
     if state.bias is not None:
-        raise ValueError(
-            "llama.cpp NanoQuant sidecars do not carry bias; model-shell bias export is required"
-        )
+        raise ValueError("llama.cpp NanoQuant sidecars do not carry bias; model-shell bias export is required")
     tensors = {
         f"{checkpoint_prefix}.V_packed": state.right_words.detach().cpu().contiguous(),
-        f"{checkpoint_prefix}.V_shape": torch.tensor(
-            (state.spec.rank, state.spec.in_features), dtype=torch.int64
-        ),
+        f"{checkpoint_prefix}.V_shape": torch.tensor((state.spec.rank, state.spec.in_features), dtype=torch.int64),
         f"{checkpoint_prefix}.U_packed": state.left_words.detach().cpu().contiguous(),
-        f"{checkpoint_prefix}.U_shape": torch.tensor(
-            (state.spec.out_features, state.spec.rank), dtype=torch.int64
-        ),
+        f"{checkpoint_prefix}.U_shape": torch.tensor((state.spec.out_features, state.spec.rank), dtype=torch.int64),
         f"{checkpoint_prefix}.scale_pre": state.scale_pre.detach().cpu().contiguous(),
         f"{checkpoint_prefix}.scale_mid": state.scale_mid.detach().cpu().contiguous(),
         f"{checkpoint_prefix}.scale_post": state.scale_post.detach().cpu().contiguous(),
@@ -181,6 +176,19 @@ def llamacpp_checkpoint_tensors(
     for suffix, value in optional:
         if value is not None:
             tensors[f"{checkpoint_prefix}.{suffix}"] = value.detach().cpu().contiguous()
+    if state.spec.members:
+        expected_suffixes = (
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj",
+        )
+        actual_suffixes = tuple(member.name.split("blocks.", 1)[-1].split(".", 1)[-1] for member in state.spec.members)
+        if actual_suffixes != expected_suffixes:
+            raise ValueError("llama.cpp fused attention export requires ordered q_proj, k_proj, v_proj members")
+        tensors[f"{checkpoint_prefix}.member_rows"] = torch.tensor(
+            tuple(member.row_end - member.row_start for member in state.spec.members),
+            dtype=torch.int64,
+        )
     return tensors
 
 
@@ -192,10 +200,7 @@ def export_llamacpp_checkpoint(
 
     packed = open_packed_artifact(packed_root, verify_hashes=True)
     if packed.manifest.model.family != "gemma3":
-        raise ValueError(
-            f"llama.cpp checkpoint export does not support model family: "
-            f"{packed.manifest.model.family}"
-        )
+        raise ValueError(f"llama.cpp checkpoint export does not support model family: {packed.manifest.model.family}")
     destination = Path(output)
     if destination.exists():
         raise FileExistsError(f"llama.cpp checkpoint output already exists: {destination}")

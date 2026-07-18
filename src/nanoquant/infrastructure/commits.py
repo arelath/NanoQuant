@@ -21,6 +21,7 @@ from nanoquant.domain.models import (
     BlockResult,
     FrozenBlockState,
     LayerResult,
+    SharedInputGroupResult,
 )
 
 from .artifacts import LocalArtifactStore
@@ -36,6 +37,12 @@ def _no_failure(point: str) -> None:
 class CommittedLayer:
     reference: ArtifactRef
     result: LayerResult
+
+
+@dataclass(frozen=True, slots=True)
+class CommittedSharedInputGroup:
+    reference: ArtifactRef
+    result: SharedInputGroupResult
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,6 +72,20 @@ def load_committed_layer(
     return CommittedLayer(reference, result)
 
 
+def load_committed_shared_input_group(
+    reference: ArtifactRef, artifacts: LocalArtifactStore, identity: CommitIdentity
+) -> CommittedSharedInputGroup:
+    payload = _payload(reference, artifacts, "shared-input-group-result.json")
+    if from_dict(CommitIdentity, payload["identity"], path="identity") != identity:
+        raise ValueError("committed shared-input group identity does not match the active run")
+    result = from_dict(
+        SharedInputGroupResult,
+        payload["result"],
+        path="shared_input_group_result",
+    )
+    return CommittedSharedInputGroup(reference, result)
+
+
 def load_committed_block(
     reference: ArtifactRef, artifacts: LocalArtifactStore, identity: CommitIdentity
 ) -> CommittedBlock:
@@ -74,6 +95,10 @@ def load_committed_block(
     block = from_dict(BlockId, payload["block"], path="block")
     layers = tuple(
         from_dict(LayerResult, item, path=f"layers[{index}]") for index, item in enumerate(payload["layers"])
+    )
+    groups = tuple(
+        from_dict(SharedInputGroupResult, item, path=f"shared_input_groups[{index}]")
+        for index, item in enumerate(payload.get("shared_input_groups", ()))
     )
     frozen_state = from_dict(FrozenBlockState, payload["frozen_state"], path="frozen_state")
     losses = from_dict(BlockLossMetrics, payload["losses"], path="losses")
@@ -112,6 +137,7 @@ def load_committed_block(
         int(payload["peak_gpu_bytes"]),
         int(payload["peak_host_bytes"]),
         tuple(str(value) for value in payload["warnings"]),
+        groups,
     )
     return CommittedBlock(reference, result)
 
@@ -138,9 +164,7 @@ def load_block_activations(
         generation_root = artifacts.path_for(generation.artifact_id)
         with safe_open(generation_root / "teacher-activations.safetensors", framework="pt", device="cpu") as handle:
             teacher = handle.get_tensor("teacher_outputs")
-        with safe_open(
-            generation_root / "compressed-activations.safetensors", framework="pt", device="cpu"
-        ) as handle:
+        with safe_open(generation_root / "compressed-activations.safetensors", framework="pt", device="cpu") as handle:
             compressed = handle.get_tensor("compressed_outputs")
     if device != "cpu":
         teacher = teacher.to(device)
@@ -197,6 +221,32 @@ def commit_layer(
     return CommittedLayer(reference, result)
 
 
+def commit_shared_input_group(
+    result: SharedInputGroupResult,
+    artifacts: LocalArtifactStore,
+    identity: CommitIdentity,
+    inject: FailureInjector = _no_failure,
+) -> CommittedSharedInputGroup:
+    inject("before_shared_input_group_commit")
+    with artifacts.begin_write(ArtifactTypes.SHARED_INPUT_GROUP_RESULT) as writer:
+        with artifacts.recorder.phase("serialize"):
+            payload = {"identity": to_dict(identity), "result": to_dict(result)}
+            encoded = json.dumps(payload, sort_keys=True, indent=2)
+        with artifacts.recorder.phase("write"):
+            (writer.path / "shared-input-group-result.json").write_text(
+                encoded,
+                encoding="utf-8",
+            )
+        descriptor = writer.commit()
+    reference = ArtifactRef(
+        ArtifactTypes.SHARED_INPUT_GROUP_RESULT,
+        descriptor.artifact_id,
+        1,
+    )
+    inject("after_shared_input_group_commit")
+    return CommittedSharedInputGroup(reference, result)
+
+
 def commit_block(
     block: BlockId,
     layers: tuple[LayerResult, ...],
@@ -213,6 +263,7 @@ def commit_block(
     peak_gpu_bytes: int = 0,
     peak_host_bytes: int = 0,
     warnings: tuple[str, ...] = (),
+    shared_input_groups: tuple[SharedInputGroupResult, ...] = (),
 ) -> CommittedBlock:
     if teacher_outputs.shape != compressed_outputs.shape:
         raise ValueError("teacher/compressed activation shapes differ")
@@ -252,6 +303,7 @@ def commit_block(
             "identity": to_dict(identity),
             "block": to_dict(block),
             "layers": to_dict(layers),
+            "shared_input_groups": to_dict(shared_input_groups),
             "frozen_state": to_dict(frozen_state),
             "losses": to_dict(losses),
             "extra_bits_used": extra_bits_used,
@@ -298,6 +350,7 @@ def commit_block(
         peak_gpu_bytes,
         peak_host_bytes,
         warnings,
+        shared_input_groups,
     )
     inject("after_block_commit")
     return CommittedBlock(reference, result)

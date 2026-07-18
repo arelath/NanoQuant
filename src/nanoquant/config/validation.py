@@ -90,8 +90,7 @@ def validate(config: RunConfig, phase: ValidationPhase = ValidationPhase.PRE_RES
         config.runtime.block_forward_batch_size > 0, "CFG011", "runtime.block_forward_batch_size", "must be positive"
     )
     require(
-        math.isfinite(config.runtime.activations.gpu_reserve_gib)
-        and config.runtime.activations.gpu_reserve_gib >= 0,
+        math.isfinite(config.runtime.activations.gpu_reserve_gib) and config.runtime.activations.gpu_reserve_gib >= 0,
         "CFG044",
         "runtime.activations.gpu_reserve_gib",
         "must be finite and non-negative",
@@ -101,6 +100,33 @@ def validate(config: RunConfig, phase: ValidationPhase = ValidationPhase.PRE_RES
         "CFG012",
         "factorization.admm.outer_iterations",
         "must be positive",
+    )
+    shared = config.factorization.shared_input
+    group_names = tuple(group.name for group in shared.groups)
+    require(
+        shared.enabled == bool(shared.groups),
+        "CFG045",
+        "factorization.shared_input",
+        "enabled grouping requires at least one group and configured groups require enabled=true",
+    )
+    require(
+        len(group_names) == len(set(group_names)) and all(bool(name.strip()) for name in group_names),
+        "CFG046",
+        "factorization.shared_input.groups",
+        "group names must be non-empty and unique",
+    )
+    group_members = [member for group in shared.groups for member in group.members]
+    require(
+        all(len(group.members) >= 2 and len(group.members) == len(set(group.members)) for group in shared.groups),
+        "CFG047",
+        "factorization.shared_input.groups",
+        "each group requires at least two unique members",
+    )
+    require(
+        len(group_members) == len(set(group_members)) and all(bool(member.strip()) for member in group_members),
+        "CFG048",
+        "factorization.shared_input.groups",
+        "member paths must be non-empty and may belong to only one group",
     )
     require(config.profiling.cuda_sample_every > 0, "CFG015", "profiling.cuda_sample_every", "must be positive")
     require(

@@ -16,7 +16,7 @@ import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
 
-from nanoquant.runtime.backend import DeviceLike, QuantizedLinearSpec
+from nanoquant.runtime.backend import DeviceLike, ProjectionMemberSpec, QuantizedLinearSpec
 from nanoquant.runtime.logical import LogicalLayerState, canonical_torch_dtype
 
 DESCRIPTOR_SCHEMA_VERSION = 1
@@ -104,9 +104,7 @@ class LogicalLayerEntry:
         if self.spec.has_outlier_scales:
             expected.add("outlier_scales")
         if set(roles) != expected:
-            raise ValueError(
-                f"logical layer tensor inventory differs from its specification: {self.spec.name}"
-            )
+            raise ValueError(f"logical layer tensor inventory differs from its specification: {self.spec.name}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,9 +145,7 @@ class LogicalModelManifest:
         if self.artifact_format != "nanoquant-logical-model":
             raise ValueError(f"unsupported logical artifact format: {self.artifact_format}")
         if self.minimum_runtime_version != MINIMUM_RUNTIME_VERSION:
-            raise ValueError(
-                f"unsupported minimum runtime version: {self.minimum_runtime_version}"
-            )
+            raise ValueError(f"unsupported minimum runtime version: {self.minimum_runtime_version}")
         if self.logical_format != LOGICAL_FORMAT_VERSION:
             raise ValueError(f"unsupported logical format: {self.logical_format}")
         if not self.blocks:
@@ -162,11 +158,7 @@ class LogicalModelManifest:
             raise ValueError("logical artifact layer count or uniqueness is inconsistent")
         if sum(block.bytes for block in self.blocks) != self.weight_bytes:
             raise ValueError("logical artifact weight byte count is inconsistent")
-        if any(
-            layer.spec.logical_format != self.logical_format
-            for block in self.blocks
-            for layer in block.layers
-        ):
+        if any(layer.spec.logical_format != self.logical_format for block in self.blocks for layer in block.layers):
             raise ValueError("logical artifact contains a layer with a different format")
 
 
@@ -177,10 +169,7 @@ class OpenLogicalArtifact:
 
     def load_layer(self, name: str, device: DeviceLike = "cpu") -> LogicalLayerState:
         matches = [
-            (block, layer)
-            for block in self.manifest.blocks
-            for layer in block.layers
-            if layer.spec.name == name
+            (block, layer) for block in self.manifest.blocks for layer in block.layers if layer.spec.name == name
         ]
         if len(matches) != 1:
             raise KeyError(f"logical artifact layer not found: {name}")
@@ -265,9 +254,7 @@ def _write_block_shard(
                 raise ValueError(f"logical artifact tensor key is duplicated: {key}")
             copied = value.detach().cpu().contiguous()
             tensors[key] = copied
-            entries.append(
-                LogicalTensorEntry(role, key, tuple(copied.shape), canonical_torch_dtype(copied.dtype))
-            )
+            entries.append(LogicalTensorEntry(role, key, tuple(copied.shape), canonical_torch_dtype(copied.dtype)))
         layer_entries.append(LogicalLayerEntry(state.spec, tuple(entries)))
     relative = f"weights/block-{index:05d}.safetensors"
     shard = temporary / relative
@@ -399,6 +386,16 @@ def _optional_string(value: object, path: str) -> str | None:
 
 def _spec_from_payload(payload: object, path: str) -> QuantizedLinearSpec:
     value = _mapping(payload, path)
+    members_payload = value.get("members", [])
+    members = tuple(
+        ProjectionMemberSpec(
+            _string(member.get("name"), f"{path}.members[{index}].name"),
+            _integer(member.get("row_start"), f"{path}.members[{index}].row_start"),
+            _integer(member.get("row_end"), f"{path}.members[{index}].row_end"),
+        )
+        for index, raw_member in enumerate(_sequence(members_payload, f"{path}.members"))
+        for member in (_mapping(raw_member, f"{path}.members[{index}]"),)
+    )
     return QuantizedLinearSpec(
         _string(value.get("name"), f"{path}.name"),
         _string(value.get("logical_format"), f"{path}.logical_format"),
@@ -411,6 +408,7 @@ def _spec_from_payload(payload: object, path: str) -> QuantizedLinearSpec:
         _optional_string(value.get("outlier_value_dtype"), f"{path}.outlier_value_dtype"),
         _boolean(value.get("has_outlier_scales"), f"{path}.has_outlier_scales"),
         _boolean(value.get("has_bias"), f"{path}.has_bias"),
+        members,
     )
 
 
@@ -458,9 +456,7 @@ def _manifest_from_payload(payload: object) -> LogicalModelManifest:
                     ),
                     tuple(
                         _tensor_from_payload(item, f"{tensor_path}[{tensor_index}]")
-                        for tensor_index, item in enumerate(
-                            _sequence(layer_value.get("tensors"), tensor_path)
-                        )
+                        for tensor_index, item in enumerate(_sequence(layer_value.get("tensors"), tensor_path))
                     ),
                 )
             )
@@ -529,15 +525,11 @@ def open_logical_artifact(
             with safe_open(shard, framework="pt", device="cpu") as handle:
                 keys = set(handle.keys())
                 if keys != set(declared):
-                    raise LogicalArtifactError(
-                        f"logical artifact shard tensor inventory differs: {block.path}"
-                    )
+                    raise LogicalArtifactError(f"logical artifact shard tensor inventory differs: {block.path}")
                 for key, tensor in declared.items():
                     view = handle.get_slice(key)
                     if tuple(view.get_shape()) != tensor.shape or _header_dtype(view.get_dtype()) != tensor.dtype:
-                        raise LogicalArtifactError(
-                            f"logical artifact tensor header differs: {block.path}:{key}"
-                        )
+                        raise LogicalArtifactError(f"logical artifact tensor header differs: {block.path}:{key}")
         except LogicalArtifactError:
             raise
         except Exception as error:

@@ -11,6 +11,7 @@ import torch
 from torch import nn
 
 from nanoquant.application.device_batches import iter_device_batches
+from nanoquant.application.layers import TrainableFactorizedLinear
 from nanoquant.application.parity_adamw import (
     ParityAdamW,
     ParityAdamWState,
@@ -169,9 +170,7 @@ class _PinnedBatchStager:
             input_batch.record_stream(self.compute_stream)
             target_batch.record_stream(self.compute_stream)
             following = (
-                (*self._schedule(indexes[next_index], next_slot), next_slot)
-                if next_index < len(indexes)
-                else None
+                (*self._schedule(indexes[next_index], next_slot), next_slot) if next_index < len(indexes) else None
             )
             next_slot = (next_slot + 1) % len(self.ready_events)
             yield _StagedTrainingBatch(input_batch, target_batch, slot)
@@ -195,11 +194,7 @@ class _PinnedBatchStager:
 def _pinned_batch_stager(
     request: TuningRequest, device: torch.device, maximum_batch_size: int
 ) -> _PinnedBatchStager | None:
-    if (
-        device.type != "cuda"
-        or request.inputs.device.type != "cpu"
-        or request.targets.device.type != "cpu"
-    ):
+    if device.type != "cuda" or request.inputs.device.type != "cpu" or request.targets.device.type != "cpu":
         return None
     return _PinnedBatchStager(request.inputs, request.targets, maximum_batch_size, device)
 
@@ -384,9 +379,7 @@ def tune(
                 parameter.copy_(value.to(device=parameter.device, dtype=parameter.dtype))
         before_value = resume.epoch_losses[0]
         observed_losses: list[tuple[int, float]] = [
-            (index, value)
-            for index, value in enumerate(resume.epoch_losses)
-            if value is not None
+            (index, value) for index, value in enumerate(resume.epoch_losses) if value is not None
         ]
         if not observed_losses:
             raise ValueError("tuning resume contains no observed loss")
@@ -467,9 +460,7 @@ def tune(
                 break
             with recorder.phase("epoch", epoch=epoch):
                 epoch_loss_sum = (
-                    torch.zeros((), device=device)
-                    if request.epoch_loss_mode == "legacy_training"
-                    else None
+                    torch.zeros((), device=device) if request.epoch_loss_mode == "legacy_training" else None
                 )
                 order = torch.randperm(request.inputs.shape[0], generator=generator)
                 microbatches = _training_microbatches(order, request.batch_size, request.microbatch_size)
@@ -577,10 +568,7 @@ def tune(
                             recorder.add("tuning.best_state_clones", 1)
                     if (
                         request.early_stop_relative_tolerance is not None
-                        and (
-                            request.epoch_loss_mode != "legacy_training"
-                            or previous_epoch_loss is not None
-                        )
+                        and (request.epoch_loss_mode != "legacy_training" or previous_epoch_loss is not None)
                         and improvement < request.early_stop_relative_tolerance
                     ):
                         stopped_early = True
@@ -605,8 +593,7 @@ def tune(
                                     ()
                                     if best_state is None
                                     else tuple(
-                                        (name, value.detach().cpu().clone())
-                                        for name, value in best_state.items()
+                                        (name, value.detach().cpu().clone()) for name, value in best_state.items()
                                     )
                                 ),
                                 optimizer_states,
@@ -668,7 +655,7 @@ def tune_non_factorized(
     checkpoint_sink: TuningCheckpointSink | None = None,
 ) -> TuningMetrics:
     factorized_prefixes = {
-        name for name, module in model.named_modules() if module.__class__.__name__ == "TrainableFactorizedLinear"
+        name for name, module in model.named_modules() if isinstance(module, TrainableFactorizedLinear)
     }
     return tune(
         model,

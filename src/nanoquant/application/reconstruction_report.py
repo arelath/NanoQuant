@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import math
 
-from nanoquant.domain.models import BlockResult, GlobalTuningResult, LayerResult
+from nanoquant.domain.models import (
+    BlockResult,
+    GlobalTuningResult,
+    LayerResult,
+    SharedInputGroupResult,
+)
 
 
 def _number(value: float | None, precision: int = 4) -> str:
@@ -23,6 +28,7 @@ def render_live_weight_error_report(
     layers: tuple[LayerResult, ...],
     blocks: tuple[BlockResult, ...],
     *,
+    groups: tuple[SharedInputGroupResult, ...] = (),
     expected_blocks: int,
     layer_order: tuple[str, ...],
     status: str,
@@ -35,25 +41,41 @@ def render_live_weight_error_report(
         raise ValueError("live reconstruction status is required")
     block_map = {block.block.index: block for block in blocks}
     layer_map = {(layer.layer.block.index, layer.layer.path): layer for layer in layers}
+    group_map = {(group.block.index, group.name): group for group in groups}
     for block in blocks:
         for layer in block.layers:
             layer_map[(block.block.index, layer.layer.path)] = layer
-    paths = layer_order or tuple(sorted({path for _block, path in layer_map}))
-    durable_layer_count = len(layer_map)
-    expected_layer_count = expected_blocks * len(paths)
+        for group in block.shared_input_groups:
+            group_map[(block.block.index, group.name)] = group
+    member_metrics = {
+        (group.block.index, member.path): metrics
+        for group in group_map.values()
+        for member, metrics in group.member_reconstruction
+    }
+    paths = layer_order or tuple(
+        sorted({path for _block, path in layer_map} | {path for _block, path in member_metrics})
+    )
+    durable_unit_count = len(layer_map) + len(group_map)
+    group_excess_by_block: dict[int, int] = {}
+    for group in group_map.values():
+        group_excess_by_block[group.block.index] = group_excess_by_block.get(group.block.index, 0) + (
+            len(group.member_reconstruction) - 1
+        )
+    expected_unit_count = expected_blocks * (len(paths) - max(group_excess_by_block.values(), default=0))
+    progress_noun = "physical units" if group_map else "layers"
     lines = [
         "# Live Weight Reconstruction Errors",
         "",
         f"Status: **{status}**",
         "",
         (
-            f"Durable progress: **{durable_layer_count}/{expected_layer_count} layers**, "
+            f"Durable progress: **{durable_unit_count}/{expected_unit_count} {progress_noun}**, "
             f"**{len(block_map)}/{expected_blocks} blocks**."
         ),
         "",
         (
             "Cells are final objective-weighted normalized reconstruction error. Rows update after each durable "
-            "layer commit; a completed block replaces its cells with post-refit final values."
+            "physical-unit commit; grouped projection cells show their member-specific errors."
         ),
         "",
         "| Block | " + " | ".join(path.rsplit(".", 1)[-1] for path in paths) + " |",
@@ -63,14 +85,19 @@ def render_live_weight_error_report(
         values = []
         for path in paths:
             cell_layer = layer_map.get((block_index, path))
-            values.append(
-                "—"
-                if cell_layer is None
-                else _number(cell_layer.final_reconstruction.export_weighted_normalized_error)
-            )
+            cell_group_metric = member_metrics.get((block_index, path))
+            if cell_layer is not None:
+                value = cell_layer.final_reconstruction.export_weighted_normalized_error
+            elif cell_group_metric is not None:
+                value = cell_group_metric.export_weighted_normalized_error
+            else:
+                value = None
+            values.append("—" if value is None else _number(value))
         lines.append(f"| {block_index + 1} | " + " | ".join(values) + " |")
     actual_bits = sum(layer.actual_bit_cost.total for layer in layer_map.values())
+    actual_bits += sum(group.actual_bit_cost.total for group in group_map.values())
     source_parameters = sum(math.prod(layer.plan.source_weight.spec.shape) for layer in layer_map.values())
+    source_parameters += sum(group.plan.in_features * group.plan.out_features for group in group_map.values())
     actual_bpw = actual_bits / source_parameters if source_parameters else None
     lines.extend(
         [
@@ -84,10 +111,10 @@ def render_live_weight_error_report(
                 "container overhead are excluded."
             ),
             "",
-            "| Scope | Durable layers | Source parameters | Actual bits | Actual BPW |",
+            "| Scope | Durable physical units | Source parameters | Actual bits | Actual BPW |",
             "| --- | ---: | ---: | ---: | ---: |",
             (
-                f"| Quantized linear weights | {durable_layer_count} | {source_parameters} | "
+                f"| Quantized linear weights | {durable_unit_count} | {source_parameters} | "
                 f"{actual_bits} | {_number(actual_bpw, 6)} |"
             ),
         ]
@@ -112,7 +139,15 @@ def render_live_weight_error_report(
             f"{_number(metrics.export_weighted_normalized_error, 6)} | "
             f"{_number(metrics.raw_normalized_error, 6)} | {layer.actual_bit_cost.total} |"
         )
-    if not layer_map:
+    for (block_index, name), group in sorted(group_map.items()):
+        state = "block final" if block_index in block_map else "group commit"
+        metrics = group.final_reconstruction
+        lines.append(
+            f"| {block_index + 1} | `{name}` | {state} | {group.frozen_state.rank} | "
+            f"{_number(metrics.export_weighted_normalized_error, 6)} | "
+            f"{_number(metrics.raw_normalized_error, 6)} | {group.actual_bit_cost.total} |"
+        )
+    if not layer_map and not group_map:
         lines.append("| — | — | awaiting first durable layer commit | — | — | — | — |")
     lines.extend(
         [
@@ -151,6 +186,19 @@ def render_reconstruction_tables(
         "| ---: | --- | ---: | ---: | ---: | ---: |",
     ]
     for block in blocks:
+        for group in block.shared_input_groups:
+            metrics = group.final_reconstruction
+            lines.append(
+                f"| {block.block.index} | `{group.name}` | {group.frozen_state.rank} | "
+                f"{_number(metrics.export_weighted_normalized_error, 6)} | "
+                f"{_number(metrics.raw_normalized_error, 6)} | {group.actual_bit_cost.total} |"
+            )
+            for member, member_metrics in group.member_reconstruction:
+                lines.append(
+                    f"| {block.block.index} | `↳ {member.path}` | {group.frozen_state.rank} | "
+                    f"{_number(member_metrics.export_weighted_normalized_error, 6)} | "
+                    f"{_number(member_metrics.raw_normalized_error, 6)} | — |"
+                )
         for layer in block.layers:
             metrics = layer.final_reconstruction
             lines.append(

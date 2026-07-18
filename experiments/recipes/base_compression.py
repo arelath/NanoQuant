@@ -1,4 +1,5 @@
 """Visible unnumbered templates shared by NanoQuant compression experiments."""
+
 from nanoquant.config.schema import (
     ActivationGpuCacheMode,
     AllocationStrategy,
@@ -7,6 +8,8 @@ from nanoquant.config.schema import (
     ExecutorKind,
     LayerRankBudgetConfig,
     OutlierSelector,
+    SharedInputFactorizationConfig,
+    SharedInputGroupConfig,
     TuningEpochLossMode,
 )
 
@@ -124,6 +127,41 @@ BASE_COMPRESSION_TEMPLATE = config_delta(
 )
 
 
+STACKED_QKV_COMPRESSION_TEMPLATE = config_delta(
+    BASE_COMPRESSION_TEMPLATE,
+    allocation=config_delta(
+        BASE_COMPRESSION_TEMPLATE.allocation,
+        maximum_rank_layer_patterns=(),
+        layer_budget_multipliers=(),
+        retry=config_delta(
+            BASE_COMPRESSION_TEMPLATE.allocation.retry,
+            enabled=False,
+        ),
+    ),
+    factorization=config_delta(
+        BASE_COMPRESSION_TEMPLATE.factorization,
+        shared_input=SharedInputFactorizationConfig(
+            enabled=True,
+            groups=(
+                SharedInputGroupConfig(
+                    "self_attn.attn_qkv",
+                    ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"),
+                ),
+            ),
+        ),
+    ),
+    block_tuning=config_delta(
+        BASE_COMPRESSION_TEMPLATE.block_tuning,
+        non_factorized=config_delta(
+            BASE_COMPRESSION_TEMPLATE.block_tuning.non_factorized,
+            # The group replaces V/Q/K as one physical unit. Preserve the
+            # baseline's total six dense-tuning epochs across those members.
+            epochs_by_layer_position=(8, 4, 3, 6, 2),
+        ),
+    ),
+)
+
+
 GEMMA_3_270M_COMPRESSION_TEMPLATE = config_delta(
     BASE_COMPRESSION_TEMPLATE,
     model=config_delta(
@@ -132,6 +170,12 @@ GEMMA_3_270M_COMPRESSION_TEMPLATE = config_delta(
         revision=GEMMA_3_270M_MODEL_REVISION,
         tokenizer_revision=GEMMA_3_270M_MODEL_REVISION,
     ),
+)
+
+
+GEMMA_3_270M_STACKED_QKV_COMPRESSION_TEMPLATE = config_delta(
+    STACKED_QKV_COMPRESSION_TEMPLATE,
+    model=GEMMA_3_270M_COMPRESSION_TEMPLATE.model,
 )
 
 
@@ -223,8 +267,10 @@ __all__ = [
     "BASE_COMPRESSION_TEMPLATE",
     "GEMMA_3_270M_COMPRESSION_TEMPLATE",
     "GEMMA_3_270M_MODEL_REVISION",
+    "GEMMA_3_270M_STACKED_QKV_COMPRESSION_TEMPLATE",
     "GEMMA_3_4B_COMPRESSION_TEMPLATE",
     "GEMMA_3_4B_MODEL_REVISION",
     "LARGE_MODEL_COMPRESSION_TEMPLATE",
     "MODEL_REVISION",
+    "STACKED_QKV_COMPRESSION_TEMPLATE",
 ]

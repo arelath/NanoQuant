@@ -251,12 +251,25 @@ class ScaleFitConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class SharedInputGroupConfig:
+    name: str
+    members: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class SharedInputFactorizationConfig:
+    enabled: bool = False
+    groups: tuple[SharedInputGroupConfig, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class FactorizationConfig:
     implementation: str = "nanoquant_admm"
     compute_dtype: DType = DType.BFLOAT16
     solve_dtype: DType = DType.FLOAT32
     admm: ADMMConfig = field(default_factory=ADMMConfig)
     scale_fit: ScaleFitConfig = field(default_factory=ScaleFitConfig)
+    shared_input: SharedInputFactorizationConfig = field(default_factory=SharedInputFactorizationConfig)
 
 
 @dataclass(frozen=True, slots=True)

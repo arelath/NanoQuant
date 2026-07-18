@@ -125,7 +125,21 @@ def load_packed_model(
                     None if state.outlier_values is None else state.outlier_values.to(device=device, dtype=block_dtype),
                     None if state.outlier_scales is None else state.outlier_scales.to(device),
                 )
-            editor.install_frozen_layer(block, entry.spec.name.split(f"blocks.{packed_block.index}.", 1)[1], module)
+            prefix = f"blocks.{packed_block.index}."
+            relative_name = entry.spec.name.split(prefix, 1)[1]
+            if entry.spec.members:
+                editor.install_runtime_group(
+                    block,
+                    relative_name,
+                    packed_block.index,
+                    tuple(
+                        (member.name.split(prefix, 1)[1], member.row_start, member.row_end)
+                        for member in entry.spec.members
+                    ),
+                    module,
+                )
+            else:
+                editor.install_frozen_layer(block, relative_name, module)
             del state, module
         gc.collect()
         if torch.cuda.is_available() and device.startswith("cuda"):

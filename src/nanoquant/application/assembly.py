@@ -18,7 +18,9 @@ def assemble_frozen_model(
     indexes = [result.block.index for _, result in blocks]
     if indexes != list(range(len(blocks))):
         raise ValueError(f"block results are not complete and contiguous: {indexes}")
-    total_bits = sum(layer.actual_bit_cost.total for _, block in blocks for layer in block.layers)
+    total_bits = sum(layer.actual_bit_cost.total for _, block in blocks for layer in block.layers) + sum(
+        group.actual_bit_cost.total for _, block in blocks for group in block.shared_input_groups
+    )
     return FrozenModelResult(
         1,
         model,

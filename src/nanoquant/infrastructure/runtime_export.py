@@ -11,7 +11,13 @@ from typing import Any
 
 import torch
 
-from nanoquant.domain.models import ArtifactRef, ArtifactTypes, FrozenBlockState, FrozenNanoQuantState
+from nanoquant.domain.models import (
+    ArtifactRef,
+    ArtifactTypes,
+    FrozenBlockState,
+    FrozenNanoQuantState,
+    FrozenSharedInputGroupState,
+)
 from nanoquant.infrastructure.artifacts import LocalArtifactStore
 from nanoquant.infrastructure.commits import CommitIdentity, latest_complete_identity, load_committed_block
 from nanoquant.infrastructure.global_tuning import active_global_tuning, load_global_tuning
@@ -25,6 +31,7 @@ from nanoquant.runtime import (
     open_logical_artifact,
     write_logical_artifact_stream,
 )
+from nanoquant.runtime.backend import ProjectionMemberSpec
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,9 +109,7 @@ def _validate_run_manifest(run_root: Path, model: RuntimeModelMetadata) -> None:
     for field, expected in (("source", model.source), ("revision", model.revision)):
         actual = resolved.get(field)
         if actual != expected:
-            raise ValueError(
-                f"runtime model {field} does not match the frozen run: {expected!r} != {actual!r}"
-            )
+            raise ValueError(f"runtime model {field} does not match the frozen run: {expected!r} != {actual!r}")
 
 
 def _runtime_state(
@@ -118,9 +123,7 @@ def _runtime_state(
             f"block {frozen.layer.block.index} {frozen.layer.path}"
         )
     if frozen.scales.mid is None:
-        raise ValueError(
-            f"frozen layer has no middle scale: block {frozen.layer.block.index} {frozen.layer.path}"
-        )
+        raise ValueError(f"frozen layer has no middle scale: block {frozen.layer.block.index} {frozen.layer.path}")
     left = stack.enter_context(tensors.read(frozen.left_binary))
     right = stack.enter_context(tensors.read(frozen.right_binary))
     scale_pre = stack.enter_context(tensors.read(frozen.scales.pre))
@@ -173,6 +176,59 @@ def _runtime_state(
     )
 
 
+def _runtime_group_state(
+    frozen: FrozenSharedInputGroupState,
+    tensors: LocalTensorStore,
+    stack: ExitStack,
+) -> LogicalLayerState:
+    if frozen.scales.mid is None:
+        raise ValueError(f"frozen shared-input group has no middle scale: {frozen.name}")
+    left = stack.enter_context(tensors.read(frozen.left_binary))
+    right = stack.enter_context(tensors.read(frozen.right_binary))
+    scale_pre = stack.enter_context(tensors.read(frozen.scales.pre))
+    scale_mid = stack.enter_context(tensors.read(frozen.scales.mid))
+    scale_post = stack.enter_context(tensors.read(frozen.scales.post))
+    bias = None if frozen.bias is None else stack.enter_context(tensors.read(frozen.bias))
+    indices = values = outlier_scales = None
+    if frozen.outliers is not None:
+        indices = stack.enter_context(tensors.read(frozen.outliers.indices))
+        values = stack.enter_context(tensors.read(frozen.outliers.values))
+        if frozen.outliers.scales is not None:
+            outlier_scales = stack.enter_context(tensors.read(frozen.outliers.scales))
+    factor_dtype = canonical_torch_dtype(left.dtype)
+    scale_dtype = canonical_torch_dtype(scale_pre.dtype)
+    prefix = f"blocks.{frozen.block.index}."
+    spec = QuantizedLinearSpec(
+        name=prefix + frozen.name,
+        logical_format=frozen.logical_format,
+        in_features=int(right.shape[1]),
+        out_features=int(left.shape[0]),
+        rank=frozen.rank,
+        factor_dtype=factor_dtype,
+        scale_dtype=scale_dtype,
+        outlier_count=0 if indices is None else int(indices.numel()),
+        outlier_value_dtype=None if values is None else canonical_torch_dtype(values.dtype),
+        has_outlier_scales=outlier_scales is not None,
+        has_bias=bias is not None,
+        members=tuple(
+            ProjectionMemberSpec(prefix + member.layer.path, member.row_start, member.row_end)
+            for member in frozen.members
+        ),
+    )
+    return LogicalLayerState(
+        spec,
+        left,
+        right,
+        scale_pre,
+        scale_mid,
+        scale_post,
+        bias,
+        indices,
+        values,
+        outlier_scales,
+    )
+
+
 def _stream_logical_blocks(
     blocks: Sequence[FrozenBlockState],
     tensors: LocalTensorStore,
@@ -185,7 +241,10 @@ def _stream_logical_blocks(
         with ExitStack() as stack:
             if any(state.layer.block != block.block for state in block.quantized_layers):
                 raise ValueError(f"frozen block {expected_index} contains a layer from another block")
-            states = [_runtime_state(state, tensors, stack) for state in block.quantized_layers]
+            states = [
+                *[_runtime_state(state, tensors, stack) for state in block.quantized_layers],
+                *[_runtime_group_state(state, tensors, stack) for state in block.shared_input_groups],
+            ]
             yield expected_index, states
             del states
 
@@ -218,21 +277,15 @@ def _resolve_frozen_run(
         for index in range(expected_blocks)
     )
     global_reference = active_global_tuning(run_root) if use_global_tuning else None
-    global_result = (
-        None if global_reference is None else load_global_tuning(global_reference, artifacts).result
-    )
+    global_result = None if global_reference is None else load_global_tuning(global_reference, artifacts).result
     source_blocks = tuple(block.teacher_outputs.artifact for block in committed)
     if global_result is not None:
         if global_result.source_blocks != source_blocks:
             raise ValueError("global tuning result does not match the run's committed blocks")
-        if tuple(state.block.index for state in global_result.tuned_blocks) != tuple(
-            range(expected_blocks)
-        ):
+        if tuple(state.block.index for state in global_result.tuned_blocks) != tuple(range(expected_blocks)):
             raise ValueError("global tuning result does not contain complete contiguous block states")
     frozen_blocks = (
-        tuple(block.frozen_state for block in committed)
-        if global_result is None
-        else global_result.tuned_blocks
+        tuple(block.frozen_state for block in committed) if global_result is None else global_result.tuned_blocks
     )
     return _ResolvedFrozenRun(identity, global_reference, frozen_blocks, tensors)
 
@@ -353,40 +406,36 @@ def validate_frozen_run_logical(
     if artifact.manifest.model.config_hash != resolved.identity.model_hash:
         raise ValueError("logical artifact model config hash differs from the committed run")
     expected_names = [
-        f"blocks.{block.block.index}.{state.layer.path}"
+        name
         for block in resolved.blocks
-        for state in block.quantized_layers
+        for name in (
+            *(f"blocks.{block.block.index}.{state.layer.path}" for state in block.quantized_layers),
+            *(f"blocks.{block.block.index}.{state.name}" for state in block.shared_input_groups),
+        )
     ]
-    actual_names = [
-        layer.spec.name for block in artifact.manifest.blocks for layer in block.layers
-    ]
+    actual_names = [layer.spec.name for block in artifact.manifest.blocks for layer in block.layers]
     if actual_names != expected_names:
         raise ValueError("logical artifact layer inventory or ordering differs from the frozen run")
     tensor_count = 0
     tensor_bytes = 0
     for block in resolved.blocks:
         with ExitStack() as stack:
-            expected_states = tuple(
-                _runtime_state(state, resolved.tensors, stack) for state in block.quantized_layers
+            expected_states = (
+                *(_runtime_state(state, resolved.tensors, stack) for state in block.quantized_layers),
+                *(_runtime_group_state(state, resolved.tensors, stack) for state in block.shared_input_groups),
             )
             for expected in expected_states:
                 actual = artifact.load_layer(expected.spec.name)
                 if actual.spec != expected.spec:
-                    raise ValueError(
-                        f"logical artifact layer specification differs: {expected.spec.name}"
-                    )
+                    raise ValueError(f"logical artifact layer specification differs: {expected.spec.name}")
                 actual_values = dict(_logical_values(actual))
                 for role, expected_value in _logical_values(expected):
                     actual_value = actual_values[role]
                     if (expected_value is None) != (actual_value is None):
-                        raise ValueError(
-                            f"logical artifact tensor presence differs: {expected.spec.name}:{role}"
-                        )
+                        raise ValueError(f"logical artifact tensor presence differs: {expected.spec.name}:{role}")
                     if expected_value is not None and actual_value is not None:
                         if not torch.equal(expected_value, actual_value):
-                            raise ValueError(
-                                f"logical artifact tensor differs: {expected.spec.name}:{role}"
-                            )
+                            raise ValueError(f"logical artifact tensor differs: {expected.spec.name}:{role}")
                         tensor_count += 1
                         tensor_bytes += expected_value.numel() * expected_value.element_size()
             del actual, actual_value, actual_values, expected, expected_states, expected_value
