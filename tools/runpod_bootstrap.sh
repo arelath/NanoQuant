@@ -5,7 +5,9 @@ set -Eeuo pipefail
 
 REPOSITORY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORKSPACE_ROOT="${NANOQUANT_WORKSPACE_ROOT:-/workspace}"
-VENV="${NANOQUANT_VENV:-${WORKSPACE_ROOT}/nanoquant-venv}"
+VENV_OVERRIDE="${NANOQUANT_VENV:-}"
+VENV="${VENV_OVERRIDE:-${WORKSPACE_ROOT}/nanoquant-venv}"
+SYSTEM_PYTHON="${NANOQUANT_SYSTEM_PYTHON:-python3}"
 EXPERIMENT="${NANOQUANT_EXPERIMENT:-009}"
 export HF_HOME="${HF_HOME:-${WORKSPACE_ROOT}/huggingface}"
 export NANOQUANT_LLAMA_CPP_ROOT="${NANOQUANT_LLAMA_CPP_ROOT:-${WORKSPACE_ROOT}/llama.cpp}"
@@ -71,15 +73,64 @@ fi
 
 echo "==> Repository: ${REPOSITORY_ROOT}"
 echo "==> Experiment: ${EXPERIMENT} (${MODEL_ID}@${MODEL_REVISION})"
-echo "==> Persistent environment: ${VENV}"
 
-if [[ ! -x "${VENV}/bin/python" ]]; then
-  python3 -m venv "${VENV}"
+if ! IMAGE_TORCH_VERSION="$("${SYSTEM_PYTHON}" -c 'import torch; print(torch.__version__)')"; then
+  echo "The RunPod image must provide a CUDA-enabled PyTorch installation." >&2
+  exit 1
 fi
+IMAGE_TORCH_CUDA="$("${SYSTEM_PYTHON}" -c 'import torch; print(torch.version.cuda or "none")')"
+IMAGE_TORCH_BASE_VERSION="${IMAGE_TORCH_VERSION%%+*}"
+if ! "${SYSTEM_PYTHON}" -c 'import torch; raise SystemExit(0 if torch.cuda.is_available() else 1)'; then
+  echo "Image PyTorch ${IMAGE_TORCH_VERSION} (CUDA ${IMAGE_TORCH_CUDA}) cannot initialize CUDA." >&2
+  echo "Check that the pod's NVIDIA driver supports the image's CUDA major version." >&2
+  exit 1
+fi
+
+venv_uses_image_torch() {
+  "${VENV}/bin/python" - "${IMAGE_TORCH_VERSION}" "${IMAGE_TORCH_CUDA}" <<'PY'
+import sys
+try:
+    import torch
+except ImportError:
+    raise SystemExit(1)
+expected_version, expected_cuda = sys.argv[1:]
+raise SystemExit(
+    0
+    if torch.__version__ == expected_version and (torch.version.cuda or "none") == expected_cuda
+    else 1
+)
+PY
+}
+
+if [[ -x "${VENV}/bin/python" ]] && ! venv_uses_image_torch; then
+  if [[ -n "${VENV_OVERRIDE}" ]]; then
+    echo "Existing NANOQUANT_VENV=${VENV} does not use image PyTorch ${IMAGE_TORCH_VERSION}." >&2
+    echo "Choose a new empty NANOQUANT_VENV so the image installation can be reused." >&2
+    exit 1
+  fi
+  VENV="${WORKSPACE_ROOT}/nanoquant-venv-torch-${IMAGE_TORCH_BASE_VERSION}-cu${IMAGE_TORCH_CUDA//./}"
+  echo "==> Existing default environment has a different PyTorch; preserving it and using ${VENV}"
+fi
+if [[ ! -x "${VENV}/bin/python" ]]; then
+  "${SYSTEM_PYTHON}" -m venv --system-site-packages "${VENV}"
+fi
+if ! venv_uses_image_torch; then
+  echo "Virtual environment ${VENV} does not expose image PyTorch ${IMAGE_TORCH_VERSION}." >&2
+  echo "Remove that environment or select a new NANOQUANT_VENV path." >&2
+  exit 1
+fi
+
+echo "==> Image PyTorch: ${IMAGE_TORCH_VERSION} (CUDA ${IMAGE_TORCH_CUDA})"
+echo "==> Persistent environment: ${VENV}"
 # shellcheck disable=SC1091
 source "${VENV}/bin/activate"
 python -m pip install --upgrade pip setuptools wheel
-python -m pip install -e ".[dev,evaluation]"
+python -m pip install -e ".[dev,evaluation]" \
+  --constraint <(printf 'torch==%s\n' "${IMAGE_TORCH_BASE_VERSION}")
+if ! venv_uses_image_torch; then
+  echo "Dependency installation replaced image PyTorch ${IMAGE_TORCH_VERSION}; refusing to continue." >&2
+  exit 1
+fi
 
 if [[ "${NANOQUANT_RUN_TESTS:-1}" == "1" ]]; then
   echo "==> Running fast recipe preflight tests"
