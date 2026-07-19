@@ -183,29 +183,6 @@ def test_tuning_marks_each_staged_batch_consumed_and_closes_stager(
     assert stager.closed is True
 
 
-def test_tuning_synchronizes_gradient_handoff_before_each_optimizer_step(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    model = Hybrid()
-    inputs = torch.randn(8, 3, generator=torch.Generator().manual_seed(43))
-    targets = torch.randn(8, 2, generator=torch.Generator().manual_seed(44))
-    synchronized: list[torch.device] = []
-    monkeypatch.setattr(
-        tuning_module,
-        "_synchronize_gradient_handoff",
-        synchronized.append,
-    )
-
-    tune_factorized(
-        model,
-        "quant",
-        TuningRequest(inputs, targets, 1, 4, 0.01, seed=45, microbatch_size=2),
-        _forward,
-    )
-
-    assert synchronized == [torch.device("cpu"), torch.device("cpu")]
-
-
 def test_nonfactorized_tuning_is_independent_and_restores_best_state() -> None:
     model = Hybrid()
     inputs = torch.randn(16, 3, generator=torch.Generator().manual_seed(1))
@@ -500,6 +477,34 @@ def test_micro_profiling_preserves_tuning_result_and_records_hot_loop_phases() -
     assert counters["tuning.tokens"]["total"] == 16
     assert counters["tuning.steps"]["total"] == 4
     assert counters["tuning.best_state_clones"]["total"] >= 1
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="bounded tuning staging requires a GPU")
+def test_cuda_tuning_does_not_explicitly_host_synchronize_each_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = Hybrid().cuda().to(torch.bfloat16)
+    inputs = torch.randn(4, 3, device="cuda", dtype=torch.bfloat16)
+    targets = torch.randn(4, 2, device="cuda", dtype=torch.bfloat16)
+
+    def fail_current_stream(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("tuning must not host-synchronize the compute stream per optimizer step")
+
+    monkeypatch.setattr(torch.cuda, "current_stream", fail_current_stream)
+    tune_factorized(
+        model,
+        "quant",
+        TuningRequest(
+            inputs,
+            targets,
+            epochs=1,
+            batch_size=2,
+            learning_rate=0.01,
+            restore_best_state=False,
+            epoch_loss_mode="legacy_training",
+        ),
+        _forward,
+    )
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="bounded tuning staging requires a GPU")

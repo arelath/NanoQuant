@@ -176,9 +176,12 @@ This stalls the host, prevents useful queueing/prefetch across the boundary, and
 more visible. However, the barrier fixed a real run where asynchronously handed-off gradients did not follow the
 legacy objective trajectory. It is a correctness boundary, not dead code.
 
-Recommended action: use CUDA-event/stream dependency analysis to find the narrowest sufficient handoff, then prove
-the replacement against the retained exact tuning trajectory and interruption/resume tests. Do not remove it based
-only on a timing result.
+Completed (2026-07-19): a bounded PyTorch CUDA trace on the pinned block-0 gate showed that every compute,
+backward, loss, and foreach-optimizer kernel used the same CUDA stream; only the already-event-fenced pinned H2D
+copies used the copy stream. The explicit host barrier therefore added no device dependency. Removing it preserved
+all 16 epoch losses and final tensor-derived metrics exactly in the eight-epoch legacy/rewrite replay while reducing
+mean tuning wall time from 19.328 seconds to 18.074 seconds (6.5%). Resident algorithm v38 records the execution-path
+change. The full resident parity run remains the model-level quality/performance gate.
 
 ### P1: per-epoch durable tuning checkpoints have no legacy equivalent
 

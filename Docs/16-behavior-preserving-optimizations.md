@@ -636,6 +636,21 @@ avoids copying and writing about **16.3 MiB** of redundant best parameters per e
 full schedule this eliminates 364 block evaluations (14 per block, 17.7% of the non-refit dataset-pass
 count); the gate timing projects to roughly a 2.5–3% full-run saving, pending a complete v29 measurement.
 
+### [x] 3.21 Remove the obsolete per-step CUDA host barrier (S1)
+
+**Where.** `application/tuning.py::tune` synchronized the current CUDA stream after every completed backward
+accumulation and before every `ParityAdamW` step. The barrier was introduced after a real resident Gemma run
+corrupted its tuning trajectory, so it could not be removed from static reasoning or timing alone.
+
+**Done (2026-07-19).** A bounded Kineto trace of the pinned block-0 gate on PyTorch 2.12.1+cu130 recorded all
+5,750 compute, backward, loss, and foreach-optimizer kernels on one CUDA stream. Only the 64 double-buffered
+pinned H2D copies used the copy stream, whose ready events were already consumed by the compute stream. Current
+PyTorch therefore provides the required backward-to-gradient-use ordering without a host fence. An eight-epoch
+no-barrier replay preserved all 16 legacy/rewrite epoch losses, final block losses, weighted reconstruction
+metrics, peak allocations, and retained tensor-derived comparisons exactly. Mean tuning wall time fell from
+19.328 seconds to 18.074 seconds across the two initializations, a **6.5% reduction**. The execution-path identity
+advances to resident algorithm v38 so older commits are not silently adopted under the changed scheduling path.
+
 ### Parity corrections discovered by performance profiling (not S0)
 
 The global-KD profile exposed two rewrite/legacy differences, so these are correctness fixes rather than

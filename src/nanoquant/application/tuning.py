@@ -232,11 +232,6 @@ def _release_cuda_cache_under_pressure(device: torch.device) -> None:
         torch.cuda.empty_cache()
 
 
-def _synchronize_gradient_handoff(device: torch.device) -> None:
-    if device.type == "cuda":
-        torch.cuda.current_stream(device).synchronize()
-
-
 def _loss_sum(prediction: torch.Tensor, target: torch.Tensor, importance: torch.Tensor | None) -> torch.Tensor:
     if prediction.shape != target.shape:
         raise ValueError("tuning prediction and target shapes differ")
@@ -521,11 +516,6 @@ def tune(
                         stager.mark_consumed(staged_batch.slot)
                     del staged_batch
                     if item.finishes_step:
-                        # The production Gemma backward can still be completing
-                        # asynchronously when the custom foreach optimizer starts.
-                        # Materializing a loss happened to hide this race; make the
-                        # required gradient handoff explicit instead.
-                        _synchronize_gradient_handoff(device)
                         if recorder is NULL_RECORDER:
                             optimizer.step()
                             scheduler.step()
