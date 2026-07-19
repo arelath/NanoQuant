@@ -44,7 +44,7 @@ def test_large_model_template_pins_bounded_memory_guards() -> None:
     assert not config.distillation.enabled
 
 
-def test_templates_are_unnumbered_and_concrete_configs_are_numbered() -> None:
+def test_first_generation_experiments_inherit_the_attention_rank_policy() -> None:
     assert BASE_COMPRESSION_TEMPLATE.intent.experiment_number is None
     assert BASE_COMPRESSION_TEMPLATE.intent.name == "unnamed-run"
 

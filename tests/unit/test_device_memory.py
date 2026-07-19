@@ -99,6 +99,7 @@ def test_release_cached_host_memory_uses_accelerator_cache_api(monkeypatch: pyte
     assert calls == 1
 
 
+@pytest.mark.cuda
 @pytest.mark.skipif(os.name != "nt" or not torch.cuda.is_available(), reason="WDDM CUDA counters require Windows")
 def test_wddm_shared_usage_exposes_and_releases_pinned_host_cache() -> None:
     torch.zeros(1, device="cuda")

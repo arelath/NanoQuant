@@ -215,6 +215,7 @@ def test_runtime_bundle_rejects_member_corruption(runtime_bundle: Path) -> None:
         open_runtime_bundle(runtime_bundle)
 
 
+@pytest.mark.subprocess
 def test_runtime_import_does_not_load_research_packages(tmp_path: Path) -> None:
     source = Path(__file__).resolve().parents[2] / "src"
     script = (

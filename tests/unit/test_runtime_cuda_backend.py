@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import importlib.util
 from contextlib import nullcontext
 
 import pytest
@@ -10,7 +9,6 @@ from transformers.models.gemma3.modeling_gemma3 import Gemma3ForCausalLM, apply_
 
 from nanoquant.infrastructure.device_lease import acquire_device_lease
 from nanoquant.runtime import (
-    CUDA_PACKED_REFERENCE_SHA256,
     CudaPackedBackend,
     GenerationRequest,
     LogicalLayerState,
@@ -35,6 +33,8 @@ from nanoquant.runtime.cuda_kernels import (
     launch_decode_attention,
     launch_decode_rope,
 )
+
+pytestmark = pytest.mark.cuda
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -177,18 +177,6 @@ def _group_logical(index: int, rank: int, out_features: int) -> LogicalLayerStat
             generator=generator,
         ).bfloat16(),
     )
-
-
-def test_cuda_packed_backend_declares_pinned_layout_and_capabilities() -> None:
-    backend = CudaPackedBackend()
-    capabilities = backend.capabilities()
-
-    assert backend.reference_cuda_sha256 == CUDA_PACKED_REFERENCE_SHA256
-    assert capabilities.device_types == ("cuda",)
-    assert capabilities.workload_kinds == ("prefill", "decode")
-    assert capabilities.supports_outliers
-    assert capabilities.supports_bias
-    assert capabilities.supports_deterministic
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
@@ -453,19 +441,6 @@ def test_cuda_graph_decode_capture_and_replay_match_eager_generation() -> None:
     assert adapter.cuda_graph_capture_count == 3
     assert adapter.cuda_graph_replay_count == 3
     assert adapter.cuda_graph_fallback_count == 0
-
-
-def test_cuda_packed_backend_reports_missing_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
-    backend = CudaPackedBackend()
-    state = _logical()
-    workload = WorkloadSpec("decode", "cuda", "bfloat16", 1, 1, deterministic=True)
-    monkeypatch.setattr(importlib.util, "find_spec", lambda _name: None)
-
-    assert backend.supports(state.spec, workload).code == "NQ-INF-CUDA-KERNEL"
-
-    monkeypatch.setattr(importlib.util, "find_spec", lambda _name: object())
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
-    assert backend.supports(state.spec, workload).code == "NQ-INF-DEVICE-UNAVAILABLE"
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")

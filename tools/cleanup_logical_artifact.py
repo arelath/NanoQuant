@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import stat
+from collections.abc import Sequence
 from pathlib import Path
 
 from nanoquant.runtime import open_logical_artifact
@@ -26,12 +27,12 @@ def _tree_bytes(root: Path) -> int:
     return sum(path.stat().st_size for path in root.rglob("*") if path.is_file())
 
 
-def main() -> None:
+def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--artifact", type=Path, required=True)
     parser.add_argument("--expected-descriptor-sha256")
     parser.add_argument("--apply", action="store_true", help="Delete after validation; omission is a dry run.")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     candidate = args.artifact
     attributes = getattr(candidate.lstat(), "st_file_attributes", 0) if candidate.exists() else 0
     reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
@@ -66,7 +67,8 @@ def main() -> None:
         shutil.rmtree(root)
         payload["deleted"] = True
     print(json.dumps(payload, sort_keys=True, indent=2))
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

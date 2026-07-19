@@ -58,19 +58,24 @@ def _hash(value: object) -> str:
     return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
 
 
+@pytest.mark.external_data
 def test_local_pinned_datasets_and_gemma_tokenizer_match_retained_legacy_samples() -> None:
     snapshot = _snapshot()
     if not snapshot.is_dir():
         pytest.skip("pinned Gemma tokenizer snapshot is not available locally")
-    tokenizer = AutoTokenizer.from_pretrained(snapshot, local_files_only=False)
+    tokenizer = AutoTokenizer.from_pretrained(snapshot, local_files_only=True)
     encode_pair = HFCausalPairTokenizer(tokenizer, add_special_tokens=True)
 
     assert tokenizer.add_bos_token is True
     assert hash_hf_tokenizer_snapshot(snapshot) == TOKENIZER_CONTENT_HASH
     for task in pinned_legacy_multiple_choice_tasks():
         try:
-            document = load_pinned_multiple_choice_documents(task, maximum_samples=1)[0]
-        except Exception as exc:  # pragma: no cover - depends on an optional local cache
+            document = load_pinned_multiple_choice_documents(
+                task,
+                maximum_samples=1,
+                local_files_only=True,
+            )[0]
+        except FileNotFoundError as exc:  # pragma: no cover - depends on an optional local cache
             pytest.skip(f"pinned {task.task_name} dataset is not available locally: {exc}")
         text = render_pinned_task_document(task, document, sample_id="retained-0")
         tokenized = tokenize_multiple_choice_example(text, encode_pair)

@@ -14,6 +14,8 @@ from nanoquant.runtime import (
     pack_logical_layer,
 )
 
+pytestmark = [pytest.mark.cuda, pytest.mark.slow]
+
 _FLOAT_DTYPES = (torch.float16, torch.bfloat16, torch.float32)
 _OUTLIER_DTYPES = (None, torch.float16, torch.bfloat16, torch.float32, torch.int8)
 

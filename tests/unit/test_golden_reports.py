@@ -28,7 +28,7 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _experiment_019_block_one() -> BlockResult:
+def _legacy_phase_one_block_one() -> BlockResult:
     weight_path = EXPERIMENT_019 / "golden" / "019-phase1-weight-errors.csv"
     rank_path = EXPERIMENT_019 / "golden" / "019-phase1-rank-utility.csv"
     manifest = json.loads((EXPERIMENT_019 / "manifest.json").read_text(encoding="utf-8"))
@@ -103,15 +103,15 @@ def _experiment_019_block_one() -> BlockResult:
     )
 
 
-def test_experiment_019_reconstruction_report_matches_golden() -> None:
-    observed = render_reconstruction_tables((_experiment_019_block_one(),))
-    expected = (GOLDEN / "experiment019-block1-reconstruction.md").read_text(encoding="utf-8")
+def test_legacy_phase_one_reconstruction_report_matches_golden() -> None:
+    observed = render_reconstruction_tables((_legacy_phase_one_block_one(),))
+    expected = (GOLDEN / "legacy-phase1-block1-reconstruction.md").read_text(encoding="utf-8")
 
     assert observed == expected
 
 
 def test_near_zero_loss_denominators_match_golden_na_rendering() -> None:
-    block = _experiment_019_block_one()
+    block = _legacy_phase_one_block_one()
     recorder = BlockLossRecorder(denominator_floor=1e-6)
     recorder.record_source_reference(0.0000005)
     recorder.record_block_entry(0.0000005)

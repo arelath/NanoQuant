@@ -82,6 +82,7 @@ def test_explicit_fixture_root_cannot_redirect_cuda(
     assert _lease_root("cuda:0") != explicit
 
 
+@pytest.mark.subprocess
 def test_device_lease_rejects_owner_with_different_environment_roots(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -125,6 +126,7 @@ def test_device_lease_rejects_owner_with_different_environment_roots(
         child.wait(timeout=10)
 
 
+@pytest.mark.subprocess
 @pytest.mark.skipif(os.name != "nt", reason="Windows named-mutex lease")
 def test_windows_cuda_lease_rejects_cross_process_owner() -> None:
     device = f"cuda:test-{uuid.uuid4().hex}"

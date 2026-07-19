@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import importlib.util
+
 import pytest
 import torch
 
 from nanoquant.runtime import (
+    CUDA_PACKED_REFERENCE_SHA256,
     BackendCapabilities,
     BackendPlanningError,
+    CudaPackedBackend,
     DenseReferenceBackend,
     FactorizedReferenceBackend,
     LogicalLayerState,
@@ -167,6 +171,30 @@ def test_reference_backend_rejects_cuda_when_runtime_has_no_cuda(monkeypatch: py
         "NQ-INF-DEVICE-UNAVAILABLE",
         "CUDA is not available in this runtime",
     )
+
+
+def test_cuda_packed_backend_declares_pinned_layout_and_capabilities() -> None:
+    backend = CudaPackedBackend()
+    capabilities = backend.capabilities()
+
+    assert backend.reference_cuda_sha256 == CUDA_PACKED_REFERENCE_SHA256
+    assert capabilities.device_types == ("cuda",)
+    assert capabilities.workload_kinds == ("prefill", "decode")
+    assert capabilities.supports_outliers
+    assert capabilities.supports_bias
+    assert capabilities.supports_deterministic
+
+
+def test_cuda_packed_backend_reports_missing_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
+    backend = CudaPackedBackend()
+    workload = WorkloadSpec("decode", "cuda", "bfloat16", 1, 1, deterministic=True)
+    monkeypatch.setattr(importlib.util, "find_spec", lambda _name: None)
+
+    assert backend.supports(_spec(), workload).code == "NQ-INF-CUDA-KERNEL"
+
+    monkeypatch.setattr(importlib.util, "find_spec", lambda _name: object())
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    assert backend.supports(_spec(), workload).code == "NQ-INF-DEVICE-UNAVAILABLE"
 
 
 class _RejectingBackend:

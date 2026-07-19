@@ -184,6 +184,7 @@ def test_block_loss_streamed_fp32_accumulation_matches_full_tensor_formula() -> 
     assert actual == pytest.approx(expected, rel=1e-6, abs=1e-7)
 
 
+@pytest.mark.cuda
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA resident transfer requires a GPU")
 def test_cuda_block_forward_produces_bitwise_equal_pageable_host_activations() -> None:
     inputs = torch.randn(5, 4, dtype=torch.bfloat16, generator=torch.Generator().manual_seed(41))
@@ -201,6 +202,7 @@ def test_cuda_block_forward_produces_bitwise_equal_pageable_host_activations() -
     torch._C._accelerator_emptyHostCache()
 
 
+@pytest.mark.cuda
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="pinned CUDA transfer requires a GPU")
 def test_prefetched_block_loss_matches_pageable_accumulation_bitwise() -> None:
     inputs = torch.randn(7, 4, dtype=torch.bfloat16, generator=torch.Generator().manual_seed(42))

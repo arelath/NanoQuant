@@ -1,22 +1,9 @@
 from pathlib import Path
 
-from nanoquant.config.codec import to_dict
-from tests.support.experiments import load_experiment
+from tests.support.experiments import config_diff_paths, load_experiment
 
 _DEFINITION_006 = load_experiment(6)
 _DEFINITION_007 = load_experiment(7)
-
-
-def _diff(left: object, right: object, prefix: str = "") -> set[str]:
-    left = to_dict(left)
-    right = to_dict(right)
-    if isinstance(left, dict) and isinstance(right, dict):
-        paths = set()
-        for key in left.keys() | right.keys():
-            path = f"{prefix}.{key}" if prefix else key
-            paths.update(_diff(left.get(key), right.get(key), path))
-        return paths
-    return set() if left == right else {prefix}
 
 
 def test_experiment007_is_the_270m_counterpart_to_experiment006() -> None:
@@ -24,7 +11,7 @@ def test_experiment007_is_the_270m_counterpart_to_experiment006() -> None:
     previous = _DEFINITION_006.config
     experiment = _DEFINITION_007.workflow
 
-    assert _diff(previous, config) == {
+    assert config_diff_paths(previous, config) == {
         "model.source",
         "model.revision",
         "model.tokenizer_revision",

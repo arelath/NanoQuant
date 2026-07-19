@@ -43,9 +43,17 @@ nanoquant = "nanoquant.cli.main:main"
 where = ["src"]
 
 [tool.pytest.ini_options]
-addopts = "-ra"
+addopts = '-ra -m "not cuda and not external_data and not performance"'
 testpaths = ["tests"]
 pythonpath = [".", "experiments", "tools"]
+markers = [
+  "cuda: requires exclusive access to a physical CUDA device",
+  "external_data: requires optional pinned model or dataset caches and must stay offline",
+  "integration_cpu: crosses multiple production components or persisted boundaries on CPU",
+  "performance: dedicated timing or resource regression protocol",
+  "slow: intentionally expensive coverage excluded from the fastest feedback tier",
+  "subprocess: starts or coordinates a separate process",
+]
 
 [tool.ruff]
 line-length = 120

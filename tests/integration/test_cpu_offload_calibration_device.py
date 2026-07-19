@@ -12,6 +12,7 @@ from nanoquant.config.schema import ADMMConfig, ExecutorKind, ProfilingConfig, P
 from nanoquant.resident_quantization import ResidentQuantizationRequest, run_resident_quantization
 
 
+@pytest.mark.cuda
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA offload placement requires a GPU")
 def test_cpu_offload_forward_calibration_streams_each_source_block_to_cuda(tmp_path: Path) -> None:
     snapshot = tmp_path / "snapshot"

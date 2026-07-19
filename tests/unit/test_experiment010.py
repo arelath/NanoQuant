@@ -1,19 +1,6 @@
 from pathlib import Path
 
-from nanoquant.config.codec import to_dict
-from tests.support.experiments import load_experiment
-
-
-def _diff(left: object, right: object, prefix: str = "") -> set[str]:
-    left = to_dict(left)
-    right = to_dict(right)
-    if isinstance(left, dict) and isinstance(right, dict):
-        paths = set()
-        for key in left.keys() | right.keys():
-            path = f"{prefix}.{key}" if prefix else key
-            paths.update(_diff(left.get(key), right.get(key), path))
-        return paths
-    return set() if left == right else {prefix}
+from tests.support.experiments import config_diff_paths, load_experiment
 
 
 def test_experiment010_uses_baseline_rank_and_admm_policy_without_huggingface_publication() -> None:
@@ -22,7 +9,7 @@ def test_experiment010_uses_baseline_rank_and_admm_policy_without_huggingface_pu
     config = definition.config
     experiment = definition.workflow
 
-    assert _diff(previous.config, config) == {
+    assert config_diff_paths(previous.config, config) == {
         "intent.experiment_number",
         "intent.name",
         "intent.purpose",

@@ -27,6 +27,7 @@ from nanoquant.application.stages import StageContext, execute_stage
 from nanoquant.application.tuning import TuningRequest, tune_factorized
 from nanoquant.config.codec import canonical_json, to_dict
 from nanoquant.config.schema import (
+    ADMMConfig,
     AllocationStrategy,
     ObjectiveConfig,
     ObservabilityConfig,
@@ -112,6 +113,7 @@ def _run_tiny_pipeline(
     seed: int,
     recorder: PhaseRecorder,
     profiling: ProfilingConfig,
+    admm: ADMMConfig,
     events: EventSink,
     run_id: str,
 ) -> TinyPipelineResult:
@@ -248,7 +250,7 @@ def _run_tiny_pipeline(
                 input_importance=outliers.factor_input_importance,
             )
             factorized = execute_stage(
-                FactorizationAttemptStage(),
+                FactorizationAttemptStage(admm),
                 FactorizationRequest(
                     1,
                     layer_plan.layer,
@@ -395,14 +397,17 @@ def run_tiny_pipeline(
     root: str | Path,
     *,
     seed: int = 0,
+    admm: ADMMConfig | None = None,
     profiling: ProfilingConfig = _DEFAULT_PROFILING,
     observability: ObservabilityConfig = _DEFAULT_OBSERVABILITY,
     registry_root: Path | None = None,
 ) -> TinyPipelineResult:
     output = Path(root)
+    resolved_admm = admm or ADMMConfig(outer_iterations=400)
     resolved = {
         "component": "tiny-pipeline",
         "seed": seed,
+        "admm": to_dict(resolved_admm),
         "profiling": to_dict(profiling),
         "observability": to_dict(observability),
     }
@@ -432,6 +437,7 @@ def run_tiny_pipeline(
                         seed=seed,
                         recorder=recorder,
                         profiling=profiling,
+                        admm=resolved_admm,
                         events=session.events,
                         run_id=session.run_id,
                     )

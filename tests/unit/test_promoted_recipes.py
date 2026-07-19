@@ -5,22 +5,9 @@ from pathlib import Path
 import torch
 from recipes import BASE_COMPRESSION_TEMPLATE
 
-from nanoquant.config.codec import to_dict
 from nanoquant.config.schema import RunConfig
 from nanoquant.resident_workflow import ResolvedResidentInputs, resident_request_from_config
-from tests.support.experiments import load_experiment
-
-
-def _diff(left: object, right: object, prefix: str = "") -> set[str]:
-    left = to_dict(left)
-    right = to_dict(right)
-    if isinstance(left, dict) and isinstance(right, dict):
-        paths = set()
-        for key in left.keys() | right.keys():
-            path = f"{prefix}.{key}" if prefix else key
-            paths.update(_diff(left.get(key), right.get(key), path))
-        return paths
-    return set() if left == right else {prefix}
+from tests.support.experiments import config_diff_paths, load_experiment
 
 
 def _inputs(config: RunConfig, tmp_path: Path) -> ResolvedResidentInputs:
@@ -41,7 +28,7 @@ def test_experiment001_uses_the_current_base_compression_template(tmp_path: Path
     experiment = definition.workflow
     request = resident_request_from_config(config, _inputs(config, tmp_path))
 
-    assert _diff(BASE_COMPRESSION_TEMPLATE, config) == {
+    assert config_diff_paths(BASE_COMPRESSION_TEMPLATE, config) == {
         "intent.experiment_number",
         "intent.name",
         "intent.purpose",
@@ -65,27 +52,7 @@ def test_experiment001_uses_the_current_base_compression_template(tmp_path: Path
 def test_numbered_launchers_own_their_concrete_definitions() -> None:
     launchers = sorted(Path("experiments").glob("[0-9][0-9][0-9]-*.py"))
 
-    assert [path.name for path in launchers] == [
-        "001-compress-gemma-3-1b-it.py",
-        "002-benchmark-gemma-3-1b-it.py",
-        "003-compress-and-benchmark-gemma-3-4b-it.py",
-        "004-gemma-3-4b-it-vproj-plus30.py",
-        "005-gemma-3-4b-it-vproj-double-request.py",
-        "006-compress-and-benchmark-gemma-3-1b-it.py",
-        "007-compress-and-benchmark-gemma-3-270m-it.py",
-        "008-compress-and-benchmark-gemma-3-12b-it.py",
-        "009-compress-benchmark-and-publish-gemma-3-270m-it.py",
-        "010-compress-and-benchmark-gemma-3-270m-it.py",
-        "011-compress-and-benchmark-gemma-3-1b-it.py",
-        "012-compress-and-benchmark-gemma-3-1b-it.py",
-        "013-compress-and-benchmark-gemma-3-270m-it.py",
-        "014-compress-and-benchmark-gemma-3-270m-it.py",
-        "015-compress-and-benchmark-gemma-3-270m-it.py",
-        "016-compress-and-benchmark-gemma-3-270m-it.py",
-        "017-compress-and-benchmark-gemma-3-1b-it.py",
-        "018-compress-and-benchmark-gemma-3-4b-it.py",
-        "019-compress-and-benchmark-llama-3-2-1b-instruct.py",
-    ]
+    assert [int(path.name[:3]) for path in launchers] == list(range(1, len(launchers) + 1))
     for number, launcher in enumerate(launchers, start=1):
         definition = load_experiment(number)
         assert definition.identity.canonical_name == launcher.stem

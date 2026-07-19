@@ -2,29 +2,16 @@ from pathlib import Path
 
 from recipes import BASE_COMPRESSION_TEMPLATE
 
-from nanoquant.config.codec import to_dict
-from tests.support.experiments import load_experiment
+from tests.support.experiments import config_diff_paths, load_experiment
 
 _DEFINITION = load_experiment(6)
-
-
-def _diff(left: object, right: object, prefix: str = "") -> set[str]:
-    left = to_dict(left)
-    right = to_dict(right)
-    if isinstance(left, dict) and isinstance(right, dict):
-        paths = set()
-        for key in left.keys() | right.keys():
-            path = f"{prefix}.{key}" if prefix else key
-            paths.update(_diff(left.get(key), right.get(key), path))
-        return paths
-    return set() if left == right else {prefix}
 
 
 def test_experiment006_is_the_new_gemma1b_attention_rank_quality_baseline() -> None:
     config = _DEFINITION.config
     experiment = _DEFINITION.workflow
 
-    assert _diff(BASE_COMPRESSION_TEMPLATE, config) == {
+    assert config_diff_paths(BASE_COMPRESSION_TEMPLATE, config) == {
         "intent.experiment_number",
         "intent.name",
         "intent.purpose",

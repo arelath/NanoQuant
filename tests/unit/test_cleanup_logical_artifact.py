@@ -6,6 +6,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 import torch
 
 from nanoquant.runtime import (
@@ -14,6 +15,7 @@ from nanoquant.runtime import (
     RuntimeModelMetadata,
     write_logical_artifact,
 )
+from tools.cleanup_logical_artifact import main
 
 
 def _artifact(tmp_path: Path) -> Path:
@@ -33,22 +35,28 @@ def _artifact(tmp_path: Path) -> Path:
     ).root
 
 
-def _command(root: Path, expected: str, *, apply: bool = False) -> list[str]:
-    script = Path(__file__).parents[2] / "tools" / "cleanup_logical_artifact.py"
-    command = [
-        sys.executable,
-        str(script),
+def _arguments(root: Path, expected: str | None, *, apply: bool = False) -> list[str]:
+    arguments = [
         "--artifact",
         str(root),
-        "--expected-descriptor-sha256",
-        expected,
     ]
+    if expected is not None:
+        arguments.extend(("--expected-descriptor-sha256", expected))
     if apply:
-        command.append("--apply")
-    return command
+        arguments.append("--apply")
+    return arguments
 
 
-def test_logical_artifact_cleanup_is_dry_run_and_hash_guarded(tmp_path: Path) -> None:
+def _command(root: Path, expected: str | None, *, apply: bool = False) -> list[str]:
+    script = Path(__file__).parents[2] / "tools" / "cleanup_logical_artifact.py"
+    return [sys.executable, str(script), *_arguments(root, expected, apply=apply)]
+
+
+@pytest.mark.subprocess
+def test_logical_artifact_cleanup_is_dry_run_and_hash_guarded(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     root = _artifact(tmp_path)
     digest = hashlib.sha256((root / "nanoquant-model.json").read_bytes()).hexdigest()
 
@@ -56,26 +64,20 @@ def test_logical_artifact_cleanup_is_dry_run_and_hash_guarded(tmp_path: Path) ->
     assert json.loads(dry_run.stdout)["deleted"] is False
     assert root.is_dir()
 
-    mismatch = subprocess.run(_command(root, "0" * 64, apply=True), capture_output=True, text=True)
-    assert mismatch.returncode != 0
+    with pytest.raises(ValueError, match="descriptor hash differs"):
+        main(_arguments(root, "0" * 64, apply=True))
     assert root.is_dir()
 
-    applied = subprocess.run(_command(root, digest, apply=True), check=True, capture_output=True, text=True)
-    assert json.loads(applied.stdout)["deleted"] is True
+    assert main(_arguments(root, digest, apply=True)) == 0
+    assert json.loads(capsys.readouterr().out)["deleted"] is True
     assert not root.exists()
 
 
 def test_logical_artifact_cleanup_apply_requires_well_formed_expected_hash(tmp_path: Path) -> None:
     root = _artifact(tmp_path)
-    script = Path(__file__).parents[2] / "tools" / "cleanup_logical_artifact.py"
 
-    missing = subprocess.run(
-        [sys.executable, str(script), "--artifact", str(root), "--apply"],
-        capture_output=True,
-        text=True,
-    )
-    malformed = subprocess.run(_command(root, "not-a-hash", apply=True), capture_output=True, text=True)
-
-    assert missing.returncode != 0
-    assert malformed.returncode != 0
+    with pytest.raises(ValueError, match="requires --expected-descriptor-sha256"):
+        main(_arguments(root, None, apply=True))
+    with pytest.raises(ValueError, match="64 hexadecimal"):
+        main(_arguments(root, "not-a-hash", apply=True))
     assert root.is_dir()

@@ -169,6 +169,7 @@ def test_residual_probe_uses_configured_inner_iterations(tmp_path: Path, monkeyp
     assert observed == [(7, True)]
 
 
+@pytest.mark.cuda
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA resident stage requires a GPU")
 def test_factorization_stage_honors_cuda_device_and_admm_settings(tmp_path: Path) -> None:
     context, tensors = _context(tmp_path)

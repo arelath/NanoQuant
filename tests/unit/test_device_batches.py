@@ -20,6 +20,7 @@ def test_device_batches_reject_an_empty_tensor_set() -> None:
         tuple(iter_device_batches((), 2, torch.device("cpu")))
 
 
+@pytest.mark.cuda
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="bounded CUDA transfer requires a GPU")
 def test_cuda_device_batches_stage_pageable_sources_with_bounded_fixed_slots(vram_budget) -> None:
     device = torch.device("cuda")
