@@ -45,7 +45,7 @@ def main() -> None:
             torch.cuda.reset_peak_memory_stats(args.device)
         model = AutoModelForCausalLM.from_pretrained(
             args.snapshot,
-            local_files_only=True,
+            local_files_only=False,
             torch_dtype=torch.bfloat16,
             # Experiment 018 forces eager Gemma attention. SDPA changes both
             # forward rounding and the Fisher gradients accumulated here.

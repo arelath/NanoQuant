@@ -56,7 +56,7 @@ class CompressionBenchmarkExperiment:
     task_names: tuple[str, ...] = LEGACY_007_TASKS
     task_limit: int = 200
     task_batch_size: int = DEFAULT_QUALITY_TASK_BATCH_SIZE
-    local_files_only: bool = True
+    local_files_only: bool = False
 
     def __post_init__(self) -> None:
         if self.expected_blocks <= 0:

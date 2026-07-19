@@ -59,7 +59,7 @@ def main() -> int:
             "boolq",
         ),
         task_limit=200,
-        local_files_only=True,
+        local_files_only=False,
         maximum_wddm_shared_bytes=int(str(resolved["maximum_wddm_shared_bytes"])),
         packed_artifact=PACKED_ARTIFACT,
     )

@@ -322,7 +322,7 @@ def _base_model(request: ShortDecodeBenchmarkRequest, device: torch.device) -> n
         nn.Module,
         AutoModelForCausalLM.from_pretrained(
             request.snapshot,
-            local_files_only=True,
+            local_files_only=False,
             torch_dtype=_DTYPES[request.dtype],
             attn_implementation="eager",
         ),
@@ -350,7 +350,7 @@ def execute_short_decode_benchmark(request: ShortDecodeBenchmarkRequest) -> dict
     device = torch.device(request.device)
     if device.type != "cuda":
         raise ValueError("short-decode benchmark requires CUDA")
-    tokenizer = cast(_Tokenizer, AutoTokenizer.from_pretrained(request.snapshot, local_files_only=True))
+    tokenizer = cast(_Tokenizer, AutoTokenizer.from_pretrained(request.snapshot, local_files_only=False))
     prompt_tokens = force_prompt_tokens(tokenizer, request.prompt, request.prompt_tokens)
     fill_token_id = _fill_token_id(tokenizer)
     started = time.perf_counter()

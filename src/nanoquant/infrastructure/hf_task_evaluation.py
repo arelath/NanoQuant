@@ -123,7 +123,7 @@ def load_pinned_multiple_choice_documents(
     task: MultipleChoiceTaskSpec,
     *,
     maximum_samples: int | None = None,
-    local_files_only: bool = True,
+    local_files_only: bool = False,
 ) -> tuple[Mapping[str, object], ...]:
     if maximum_samples is not None and (type(maximum_samples) is not int or maximum_samples <= 0):
         raise ValueError("multiple-choice maximum samples must be a positive integer")
@@ -146,7 +146,7 @@ def prepare_pinned_hf_multiple_choice_inputs(
     tokenizer_revision: str,
     tokenizer_content_hash: str,
     maximum_samples: int | None = 200,
-    local_files_only: bool = True,
+    local_files_only: bool = False,
 ) -> PreparedMultipleChoiceInputs:
     pair_tokenizer = HFCausalPairTokenizer(tokenizer, add_special_tokens=True)
     tokenizer_object = cast(Any, tokenizer)

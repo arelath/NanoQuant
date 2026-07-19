@@ -76,7 +76,7 @@ def main() -> None:
         args.run_output,
         sample_count=args.samples,
     )
-    tokenizer = AutoTokenizer.from_pretrained(args.snapshot, local_files_only=True)
+    tokenizer = AutoTokenizer.from_pretrained(args.snapshot, local_files_only=False)
     base = BASE_COMPRESSION_TEMPLATE
     config = replace(
         base,

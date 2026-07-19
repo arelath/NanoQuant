@@ -58,7 +58,7 @@ def _validate(args: argparse.Namespace) -> dict[str, Any]:
     states = {entry.spec.name: artifact.load_layer(entry.spec.name) for entry in entries}
     specs = tuple(entry.spec for entry in entries)
 
-    tokenizer = AutoTokenizer.from_pretrained(args.model, local_files_only=True)
+    tokenizer = AutoTokenizer.from_pretrained(args.model, local_files_only=False)
     prompt_ids = (
         tuple(
             tokenizer.apply_chat_template(
@@ -117,7 +117,7 @@ def _validate(args: argparse.Namespace) -> dict[str, Any]:
     with wait_for_device_lease(str(device), args.wait_for_device_seconds):
         model = AutoModelForCausalLM.from_pretrained(
             args.model,
-            local_files_only=True,
+            local_files_only=False,
             torch_dtype=dtype,
             attn_implementation="eager",
         ).eval()

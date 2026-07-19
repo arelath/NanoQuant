@@ -84,7 +84,7 @@ def _protocol_tokens(
         if dataset_arrow is not None
         else load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1", split="test")
     )
-    tokenizer = AutoTokenizer.from_pretrained(snapshot, local_files_only=True)
+    tokenizer = AutoTokenizer.from_pretrained(snapshot, local_files_only=False)
     encoded = tokenizer("\n\n".join(dataset["text"]), return_tensors="pt").input_ids
     bos_id = tokenizer.bos_token_id
     if bos_id is None:
@@ -152,7 +152,7 @@ def _run(args: argparse.Namespace, recorder: PhaseRecorder) -> None:
                 nn.Module,
                 AutoModelForCausalLM.from_pretrained(
                     args.snapshot,
-                    local_files_only=True,
+                    local_files_only=False,
                     torch_dtype=_checkpoint_dtype(args.snapshot),
                 ),
             ).to(args.device)

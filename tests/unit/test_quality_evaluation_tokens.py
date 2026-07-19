@@ -38,7 +38,7 @@ def test_wikitext_tokenization_is_bounded_to_the_evaluated_prefix(monkeypatch: A
         tmp_path,
         samples=2,
         sequence_length=4,
-        local_files_only=True,
+        local_files_only=False,
     )
 
     assert calls == [{"return_tensors": "pt", "truncation": True, "max_length": 6}]

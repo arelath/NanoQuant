@@ -17,7 +17,7 @@ def load_causal_language_model(
     *,
     torch_dtype: torch.dtype,
     attention_implementation: str,
-    local_files_only: bool = True,
+    local_files_only: bool = False,
 ) -> nn.Module:
     """Load only the decoder language model onto CPU.
 

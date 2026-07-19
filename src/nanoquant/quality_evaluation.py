@@ -80,7 +80,7 @@ class QualityEvaluationRequest:
     task_names: tuple[str, ...] = ("piqa", "arc_easy", "boolq")
     task_limit: int = 25
     task_batch_size: int = DEFAULT_QUALITY_TASK_BATCH_SIZE
-    local_files_only: bool = True
+    local_files_only: bool = False
     maximum_wddm_shared_bytes: int | None = None
     packed_artifact: Path | None = None
     stream_base_model: bool = False
@@ -145,7 +145,7 @@ def _wikitext_tokens(
         dataset=WIKITEXT_DATASET,
         rows=len(dataset),
     )
-    tokenizer = AutoTokenizer.from_pretrained(snapshot, local_files_only=True)
+    tokenizer = AutoTokenizer.from_pretrained(snapshot, local_files_only=False)
     payload = sequence_length - 1
     required = samples * payload
     # The protocol evaluates independent, bounded windows.  Ask the tokenizer
@@ -193,7 +193,7 @@ def prepare_quality_inputs(
         progress=progress,
     )
     _emit_progress(progress, "tokenizer_load_started")
-    tokenizer = AutoTokenizer.from_pretrained(request.snapshot, local_files_only=True)
+    tokenizer = AutoTokenizer.from_pretrained(request.snapshot, local_files_only=False)
     _emit_progress(progress, "tokenizer_load_completed")
     pad_token_id = tokenizer.pad_token_id
     if pad_token_id is None:
@@ -407,7 +407,7 @@ def execute_quality_evaluation(
             else nullcontext(None)
         )
         with monitor_context as monitor:
-            model_config = AutoConfig.from_pretrained(request.snapshot, local_files_only=True)
+            model_config = AutoConfig.from_pretrained(request.snapshot, local_files_only=False)
             model_type = str(getattr(model_config, "model_type", "")).lower()
             attention_implementation = "eager" if model_type.startswith("gemma") else "sdpa"
             base_load_started = time.perf_counter()

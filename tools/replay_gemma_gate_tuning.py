@@ -281,7 +281,7 @@ def main() -> None:
             nn.Module,
             AutoModelForCausalLM.from_pretrained(
                 args.snapshot,
-                local_files_only=True,
+                local_files_only=False,
                 torch_dtype=_checkpoint_dtype(checkpoint.config),
                 attn_implementation=adapter.attention_implementation,
             ),

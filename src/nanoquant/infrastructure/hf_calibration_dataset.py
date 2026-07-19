@@ -129,7 +129,7 @@ def prepare_experiment018_calibration(
     if sample_count <= 0 or sample_count % 2:
         raise ValueError("Experiment 018 calibration requires a positive even sample count")
     snapshot = Path(snapshot)
-    tokenizer = AutoTokenizer.from_pretrained(snapshot, local_files_only=True)
+    tokenizer = AutoTokenizer.from_pretrained(snapshot, local_files_only=False)
     per_source = sample_count // 2
     chat = load_dataset(
         "HuggingFaceH4/ultrachat_200k",

@@ -178,7 +178,7 @@ class OpenRuntimeBundle:
     def load_tokenizer(self) -> object:
         from transformers.models.auto.tokenization_auto import AutoTokenizer
 
-        return AutoTokenizer.from_pretrained(self.model_assets, local_files_only=True)
+        return AutoTokenizer.from_pretrained(self.model_assets, local_files_only=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -352,7 +352,7 @@ def _derived_runtime_buffers(source: Path) -> dict[str, torch.Tensor]:
     from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
     from transformers.models.auto.configuration_auto import AutoConfig
 
-    config = AutoConfig.from_pretrained(source, local_files_only=True)
+    config = AutoConfig.from_pretrained(source, local_files_only=False)
     if getattr(config, "model_type", None) != "gemma3_text":
         raise RuntimeBundleError(
             f"runtime buffer export does not support model type {getattr(config, 'model_type', None)!r}"
@@ -588,7 +588,7 @@ def load_transformers_runtime(
     from transformers.models.auto.configuration_auto import AutoConfig
     from transformers.models.auto.modeling_auto import AutoModelForCausalLM
 
-    config = AutoConfig.from_pretrained(opened.model_assets, local_files_only=True)
+    config = AutoConfig.from_pretrained(opened.model_assets, local_files_only=False)
     dtype = _DTYPES[input_dtype]
     with torch.device("meta"):
         model = AutoModelForCausalLM.from_config(  # type: ignore[no-untyped-call]

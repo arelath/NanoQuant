@@ -366,7 +366,7 @@ def _benchmark(args: RuntimeBenchmarkRequest) -> dict[str, Any]:
     if not 0 <= args.block_index < len(artifact.manifest.blocks):
         raise ValueError("benchmark block index is outside the packed artifact")
 
-    tokenizer = AutoTokenizer.from_pretrained(args.model, local_files_only=True)
+    tokenizer = AutoTokenizer.from_pretrained(args.model, local_files_only=False)
     prompt_ids = (
         tuple(
             tokenizer.apply_chat_template(
@@ -405,7 +405,7 @@ def _benchmark(args: RuntimeBenchmarkRequest) -> dict[str, Any]:
     with wait_for_device_lease(str(device), args.wait_for_device_seconds):
         model = AutoModelForCausalLM.from_pretrained(
             args.model,
-            local_files_only=True,
+            local_files_only=False,
             torch_dtype=dtype,
             attn_implementation="eager",
         ).eval()

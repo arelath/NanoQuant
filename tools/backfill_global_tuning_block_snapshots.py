@@ -43,7 +43,7 @@ def _load_source(snapshot: Path, attention_implementation: str, device: str) -> 
         nn.Module,
         AutoModelForCausalLM.from_pretrained(
             snapshot,
-            local_files_only=True,
+            local_files_only=False,
             torch_dtype=_checkpoint_dtype(snapshot),
             attn_implementation=attention_implementation,
         ),
@@ -63,7 +63,7 @@ def main() -> None:
     parser.add_argument("--replace", action="store_true")
     args = parser.parse_args()
 
-    tokenizer = AutoTokenizer.from_pretrained(args.snapshot, local_files_only=True)
+    tokenizer = AutoTokenizer.from_pretrained(args.snapshot, local_files_only=False)
     calibration = load_or_prepare_calibration(args.snapshot, args.run_output)
     selection = select_block_snapshot_tokens(
         calibration.input_ids,

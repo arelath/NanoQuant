@@ -61,7 +61,7 @@ EXPERIMENT = define_quality_evaluation_experiment(
             "boolq",
         ),
         task_limit=200,
-        local_files_only=True,
+        local_files_only=False,
     ),
     resolve_model_from_config=True,
 )

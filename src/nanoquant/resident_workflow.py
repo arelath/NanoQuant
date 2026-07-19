@@ -531,7 +531,7 @@ def resolve_resident_experiment_inputs(config: RunConfig, *, launcher_path: str 
         quality_tokens = tokens[:quality_samples, :quality_length]
     pad_token_id = None
     if config.distillation.enabled:
-        tokenizer = AutoTokenizer.from_pretrained(snapshot, local_files_only=True)
+        tokenizer = AutoTokenizer.from_pretrained(snapshot, local_files_only=False)
         pad_token_id = tokenizer.pad_token_id
     return ResolvedResidentInputs(
         snapshot=snapshot,

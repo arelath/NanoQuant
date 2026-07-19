@@ -61,7 +61,7 @@ class CompressionQualityExperiment:
     )
     task_limit: int = 200
     task_batch_size: int = DEFAULT_QUALITY_TASK_BATCH_SIZE
-    local_files_only: bool = True
+    local_files_only: bool = False
     maximum_wddm_shared_gib: float | None = None
     restore_completed_blocks: bool = True
     quality_backend: str = "factorized"

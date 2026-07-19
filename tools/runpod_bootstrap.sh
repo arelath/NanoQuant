@@ -224,7 +224,7 @@ from cut_cross_entropy import linear_cross_entropy
 from transformers import AutoConfig
 
 snapshot = os.environ["NANOQUANT_BOOTSTRAP_MODEL_SNAPSHOT"]
-config = AutoConfig.from_pretrained(snapshot, local_files_only=True)
+config = AutoConfig.from_pretrained(snapshot, local_files_only=False)
 text_config = getattr(config, "text_config", config)
 hidden_size = int(text_config.hidden_size)
 vocab_size = int(text_config.vocab_size)
@@ -263,8 +263,8 @@ PY
   fi
 fi
 
-# Quality launchers deliberately run offline. Populate every pinned evaluation
-# dataset while networking is still allowed during setup.
+# Populate every pinned evaluation dataset during setup to avoid later network
+# latency. Launchers may still download a missing pinned file when necessary.
 if [[ "${NANOQUANT_PREFETCH_QUALITY:-1}" == "1" ]]; then
   echo "==> Caching pinned quality datasets"
   "${VENV}/bin/python" - <<'PY'

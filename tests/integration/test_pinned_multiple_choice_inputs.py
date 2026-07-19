@@ -62,7 +62,7 @@ def test_local_pinned_datasets_and_gemma_tokenizer_match_retained_legacy_samples
     snapshot = _snapshot()
     if not snapshot.is_dir():
         pytest.skip("pinned Gemma tokenizer snapshot is not available locally")
-    tokenizer = AutoTokenizer.from_pretrained(snapshot, local_files_only=True)
+    tokenizer = AutoTokenizer.from_pretrained(snapshot, local_files_only=False)
     encode_pair = HFCausalPairTokenizer(tokenizer, add_special_tokens=True)
 
     assert tokenizer.add_bos_token is True
