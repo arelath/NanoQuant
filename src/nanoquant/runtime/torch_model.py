@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import weakref
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -14,9 +15,7 @@ from torch.nn import functional as F
 from nanoquant.runtime.backend import WorkloadKind
 from nanoquant.runtime.planning import PreparedExecutionPlans
 
-_ACTIVE_WORKLOAD: ContextVar[WorkloadKind | None] = ContextVar(
-    "nanoquant_runtime_active_workload", default=None
-)
+_ACTIVE_WORKLOAD: ContextVar[WorkloadKind | None] = ContextVar("nanoquant_runtime_active_workload", default=None)
 
 
 @contextmanager
@@ -65,6 +64,30 @@ class PreparedLinear(nn.Module):
 
     def _decode_prepared_layer(self) -> Any:
         return self._plans.decode.dispatches[self._layer_index].layer
+
+
+class PreparedProjectionView(nn.Module):
+    """Parameter-free row view over one prepared shared-input projection owner."""
+
+    def __init__(
+        self,
+        owner: PreparedLinear,
+        row_start: int,
+        row_end: int,
+    ) -> None:
+        super().__init__()
+        self.__dict__["_owner_ref"] = weakref.ref(owner)
+        self.row_start = row_start
+        self.row_end = row_end
+        self.in_features = owner.in_features
+        self.out_features = row_end - row_start
+
+    def forward(self, value: torch.Tensor) -> torch.Tensor:
+        owner_ref = cast(weakref.ReferenceType[PreparedLinear], self.__dict__["_owner_ref"])
+        owner = owner_ref()
+        if owner is None:
+            raise RuntimeError("prepared shared-input projection owner was released")
+        return cast(torch.Tensor, owner(value)[..., self.row_start : self.row_end])
 
 
 class PreparedTiedEmbedding(nn.Module):
@@ -200,9 +223,7 @@ def bind_prepared_rms_norms(model: nn.Module) -> int:
         if not isinstance(weight, torch.Tensor) or not isinstance(eps, float):
             raise ValueError(f"Gemma3 RMSNorm contract differs: {path}")
         parent = model.get_submodule(parent_path)
-        replacements.append(
-            (parent, attribute, PreparedRMSNorm(weight, eps), module.training)
-        )
+        replacements.append((parent, attribute, PreparedRMSNorm(weight, eps), module.training))
     for parent, attribute, replacement, training in replacements:
         replacement.train(training)
         setattr(parent, attribute, replacement)
@@ -263,8 +284,7 @@ class PreparedGemma3Attention(nn.Module):
         self.fuse_decode_attention = fuse_decode_attention
         self._qkv_group = None
         if group_decode_qkv and all(
-            isinstance(module, PreparedLinear)
-            for module in (self.q_proj, self.k_proj, self.v_proj)
+            isinstance(module, PreparedLinear) for module in (self.q_proj, self.k_proj, self.v_proj)
         ):
             from nanoquant.runtime.cuda_backend import prepare_cuda_projection_group
 
@@ -370,10 +390,7 @@ class PreparedGemma3Attention(nn.Module):
             and value_states.is_contiguous()
             and (
                 attention_mask is None
-                or (
-                    tuple(attention_mask.shape) == (1, 1, 1, key_states.shape[2])
-                    and attention_mask.is_contiguous()
-                )
+                or (tuple(attention_mask.shape) == (1, 1, 1, key_states.shape[2]) and attention_mask.is_contiguous())
             )
         ):
             from nanoquant.runtime.cuda_kernels import launch_decode_attention
@@ -446,8 +463,7 @@ def grouped_decode_qkv_count(model: nn.Module) -> int:
     """Count attention modules with an actually prepared grouped Q/K/V payload."""
 
     return sum(
-        isinstance(module, PreparedGemma3Attention) and module._qkv_group is not None
-        for module in model.modules()
+        isinstance(module, PreparedGemma3Attention) and module._qkv_group is not None for module in model.modules()
     )
 
 
@@ -502,17 +518,13 @@ def bind_grouped_decode_mlp(model: nn.Module) -> int:
         up = getattr(module, "up_proj", None)
         if not isinstance(gate, PreparedLinear) or not isinstance(up, PreparedLinear):
             continue
-        group = prepare_cuda_projection_group(
-            (gate._decode_prepared_layer(), up._decode_prepared_layer())
-        )
+        group = prepare_cuda_projection_group((gate._decode_prepared_layer(), up._decode_prepared_layer()))
         if group is None:
             continue
         parent_path, separator, attribute = path.rpartition(".")
         if not separator or not parent_path or not attribute:
             raise ValueError(f"Gemma3 MLP module path must be dotted: {path!r}")
-        replacements.append(
-            (model.get_submodule(parent_path), attribute, PreparedGemma3MLP(module, group))
-        )
+        replacements.append((model.get_submodule(parent_path), attribute, PreparedGemma3MLP(module, group)))
     for parent, attribute, replacement in replacements:
         setattr(parent, attribute, replacement)
     return len(replacements)
@@ -625,9 +637,7 @@ class PreparedGemma3DecoderLayer(nn.Module):
         )
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
-        position_embeddings = (
-            position_embeddings_local if self.self_attn.is_sliding else position_embeddings_global
-        )
+        position_embeddings = position_embeddings_local if self.self_attn.is_sliding else position_embeddings_global
         hidden_states, self_attn_weights = self.self_attn(
             hidden_states=hidden_states,
             position_embeddings=position_embeddings,
@@ -660,17 +670,12 @@ def bind_short_sliding_masks(model: nn.Module) -> int:
         if module.__class__.__name__ != "Gemma3DecoderLayer":
             continue
         config = getattr(module, "config", None)
-        if (
-            not getattr(module, "is_sliding", False)
-            or getattr(config, "_attn_implementation", None) != "eager"
-        ):
+        if not getattr(module, "is_sliding", False) or getattr(config, "_attn_implementation", None) != "eager":
             continue
         parent_path, separator, attribute = path.rpartition(".")
         if not separator or not parent_path or not attribute:
             raise ValueError(f"Gemma3 decoder layer path must be dotted: {path!r}")
-        replacements.append(
-            (model.get_submodule(parent_path), attribute, PreparedGemma3DecoderLayer(module))
-        )
+        replacements.append((model.get_submodule(parent_path), attribute, PreparedGemma3DecoderLayer(module)))
     for parent, attribute, replacement in replacements:
         setattr(parent, attribute, replacement)
     return len(replacements)
@@ -696,8 +701,45 @@ def bind_prepared_linears(
     if len(set(resolved_paths)) != len(resolved_paths):
         raise ValueError("runtime model module paths must be unique")
 
-    replacements: list[tuple[nn.Module, str, PreparedLinear]] = []
+    replacements: list[tuple[nn.Module, str, nn.Module]] = []
+    group_owners: list[tuple[nn.Module, str, PreparedLinear]] = []
     for index, (name, path) in enumerate(zip(names, resolved_paths, strict=True)):
+        spec = plans.prefill.dispatches[index].layer.spec
+        if spec.members:
+            block_path, separator, group_relative = path.partition(".self_attn.")
+            if not separator or not block_path or not group_relative:
+                raise ValueError(f"runtime projection group path is invalid for {name}: {path}")
+            try:
+                block = model.get_submodule(block_path)
+            except (AttributeError, KeyError) as error:
+                raise ValueError(f"runtime projection group block is unavailable for {name}: {path}") from error
+            owner = PreparedLinear(plans, index, output_dtype=output_dtype)
+            for member in spec.members:
+                member_path = transformers_decoder_module_paths((member.name,))[member.name]
+                parent_path, member_separator, attribute = member_path.rpartition(".")
+                if not member_separator or not parent_path or not attribute:
+                    raise ValueError(f"runtime projection member path must be dotted: {member_path!r}")
+                try:
+                    parent = model.get_submodule(parent_path)
+                    existing = getattr(parent, attribute)
+                except (AttributeError, KeyError) as error:
+                    raise ValueError(f"runtime projection member is unavailable for {name}: {member_path}") from error
+                if not isinstance(existing, nn.Linear):
+                    raise ValueError(f"runtime projection member is not linear for {name}: {member_path}")
+                if (existing.in_features, existing.out_features) != (
+                    spec.in_features,
+                    member.row_end - member.row_start,
+                ):
+                    raise ValueError(f"runtime projection member dimensions differ for {name}: {member_path}")
+                replacements.append(
+                    (
+                        parent,
+                        attribute,
+                        PreparedProjectionView(owner, member.row_start, member.row_end),
+                    )
+                )
+            group_owners.append((block, group_relative.replace(".", "__"), owner))
+            continue
         parent_path, separator, attribute = path.rpartition(".")
         if not separator or not parent_path or not attribute:
             raise ValueError(f"runtime model module path must be dotted: {path!r}")
@@ -708,15 +750,22 @@ def bind_prepared_linears(
             raise ValueError(f"runtime model module is unavailable for {name}: {path}") from error
         if not isinstance(existing, nn.Linear):
             raise ValueError(f"runtime model target is not a linear module for {name}: {path}")
-        spec = plans.prefill.dispatches[index].layer.spec
         if (existing.in_features, existing.out_features) != (spec.in_features, spec.out_features):
             raise ValueError(f"runtime model linear dimensions differ for {name}: {path}")
         replacements.append((parent, attribute, PreparedLinear(plans, index, output_dtype=output_dtype)))
 
     # Resolve and validate the entire inventory before mutating the model.
+    for block, key, owner in group_owners:
+        registry = getattr(block, "_nanoquant_shared_input_groups", None)
+        if registry is None:
+            registry = nn.ModuleDict()
+            block.add_module("_nanoquant_shared_input_groups", registry)
+        if not isinstance(registry, nn.ModuleDict) or key in registry:
+            raise ValueError("runtime projection group owner registry conflicts with the model")
+        registry[key] = owner
     for parent, attribute, replacement in replacements:
         setattr(parent, attribute, replacement)
-    return len(replacements)
+    return len(names)
 
 
 def transformers_decoder_module_paths(layer_names: tuple[str, ...]) -> dict[str, str]:

@@ -65,13 +65,25 @@ class _LayerMetrics:
 
     def __post_init__(self) -> None:
         if not self.actual_bit_cost or any(
-            not isinstance(name, str)
-            or not name
-            or type(value) is not int
-            or value < 0
+            not isinstance(name, str) or not name or type(value) is not int or value < 0
             for name, value in self.actual_bit_cost.items()
         ):
             raise ValueError("actual bit costs must be named non-negative integers")
+
+
+@dataclass(frozen=True, slots=True)
+class _GroupPlanMetrics:
+    in_features: int
+    out_features: int
+
+
+@dataclass(frozen=True, slots=True)
+class _GroupMetrics:
+    actual_bit_cost: dict[str, int]
+    frozen_state: _FrozenLayerMetrics
+    block: BlockId
+    name: str
+    plan: _GroupPlanMetrics
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,6 +100,7 @@ class _BlockMetrics:
     identity: CommitIdentity
     block: BlockId
     layers: tuple[_LayerMetrics, ...]
+    shared_input_groups: tuple[_GroupMetrics, ...]
     losses: _BlockLossMetrics
     wall_seconds: float
     peak_gpu_bytes: int
@@ -95,8 +108,8 @@ class _BlockMetrics:
     activation_generation: ArtifactRef | None = None
 
     def __post_init__(self) -> None:
-        if not self.layers:
-            raise ValueError("committed block must contain layers")
+        if not self.layers and not self.shared_input_groups:
+            raise ValueError("committed block must contain quantized units")
         if not math.isfinite(self.wall_seconds) or self.wall_seconds < 0:
             raise ValueError("block wall time must be finite and non-negative")
         if self.peak_gpu_bytes < 0 or self.peak_host_bytes < 0:
@@ -182,6 +195,41 @@ def _project_layer_metrics(value: object) -> dict[str, Any]:
     }
 
 
+def _project_group_metrics(value: object) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ConfigDecodeError("block.shared_input_groups", "expected an object")
+    frozen = value["frozen_state"]
+    plan = value["plan"]
+    if not isinstance(frozen, dict) or not isinstance(plan, dict):
+        raise ConfigDecodeError("block.shared_input_groups", "expected nested metric objects")
+    members = plan["members"]
+    if not isinstance(members, list) or not members:
+        raise ConfigDecodeError("block.shared_input_groups.plan.members", "expected a non-empty list")
+    try:
+        input_widths = {member["in_features"] for member in members}
+        output_width = sum(member["out_features"] for member in members)
+    except (KeyError, TypeError) as exc:
+        raise ConfigDecodeError(
+            "block.shared_input_groups.plan.members",
+            "expected member feature dimensions",
+        ) from exc
+    if len(input_widths) != 1:
+        raise ConfigDecodeError(
+            "block.shared_input_groups.plan.members",
+            "members must share one input width",
+        )
+    return {
+        "actual_bit_cost": value["actual_bit_cost"],
+        "frozen_state": {"rank": frozen["rank"]},
+        "block": value["block"],
+        "name": value["name"],
+        "plan": {
+            "in_features": input_widths.pop(),
+            "out_features": output_width,
+        },
+    }
+
+
 def _decode_block_metrics(payload: dict[str, Any], artifact_id: str) -> _BlockMetrics:
     try:
         losses = payload["losses"]
@@ -191,6 +239,7 @@ def _decode_block_metrics(payload: dict[str, Any], artifact_id: str) -> _BlockMe
             "identity": payload["identity"],
             "block": payload["block"],
             "layers": [_project_layer_metrics(value) for value in payload["layers"]],
+            "shared_input_groups": [_project_group_metrics(value) for value in payload.get("shared_input_groups", ())],
             "losses": {"final_frozen_pre_kd": losses["final_frozen_pre_kd"]},
             "wall_seconds": payload["wall_seconds"],
             "peak_gpu_bytes": payload["peak_gpu_bytes"],
@@ -230,7 +279,7 @@ def _journal_records(path: Path) -> list[dict[str, Any]]:
             raise ValueError(f"invalid journal JSON at sequence {sequence}") from exc
         if not isinstance(value, dict) or value.get("sequence") != sequence:
             raise ValueError(f"journal sequence is not contiguous at record {sequence}")
-        if value.get("kind") not in {"layer", "block"}:
+        if value.get("kind") not in {"layer", "group", "block"}:
             raise ValueError(f"unsupported journal record kind at sequence {sequence}")
         records.append(value)
     if not records:
@@ -244,13 +293,11 @@ def _commit_payload(
 ) -> tuple[dict[str, Any], ArtifactReference | None, _BlockMetrics | None]:
     artifact_id = str(record["artifact_id"])
     kind = str(record["kind"])
-    expected_type = f"{kind}-result"
+    expected_type = ArtifactTypes.SHARED_INPUT_GROUP_RESULT if kind == "group" else f"{kind}-result"
     descriptor = store.validate(artifact_id)
     if descriptor.artifact_type != expected_type:
-        raise ValueError(
-            f"journal {kind} artifact has type {descriptor.artifact_type!r}: {artifact_id}"
-        )
-    filename = f"{kind}-result.json"
+        raise ValueError(f"journal {kind} artifact has type {descriptor.artifact_type!r}: {artifact_id}")
+    filename = "shared-input-group-result.json" if kind == "group" else f"{kind}-result.json"
     payload = _read_json(store.path_for(artifact_id) / filename)
     if not isinstance(payload, dict):
         raise ValueError(f"committed {kind} payload is not an object: {artifact_id}")
@@ -260,6 +307,16 @@ def _commit_payload(
             raise ValueError(f"journal identity does not match committed layer: {artifact_id}")
         if position.layer.block.index != record.get("block") or position.layer.path != record.get("layer"):
             raise ValueError(f"journal position does not match committed layer: {artifact_id}")
+        return payload, None, None
+    if kind == "group":
+        result = payload.get("result")
+        if not isinstance(result, dict):
+            raise ValueError(f"committed shared-input group is malformed: {artifact_id}")
+        identity = from_dict(CommitIdentity, payload["identity"], path="group.identity")
+        if identity != from_dict(CommitIdentity, record["identity"], path="journal.identity"):
+            raise ValueError(f"journal identity does not match committed group: {artifact_id}")
+        if result.get("block", {}).get("index") != record.get("block") or result.get("name") != record.get("layer"):
+            raise ValueError(f"journal position does not match committed group: {artifact_id}")
         return payload, None, None
     metrics = _decode_block_metrics(payload, artifact_id)
     if metrics.identity != from_dict(CommitIdentity, record["identity"], path="journal.identity"):
@@ -300,6 +357,14 @@ def _committed_metrics(
             ranks += layer_metrics.frozen_state.rank
             parameters += math.prod(layer_metrics.plan.source_weight.spec.shape)
             bit_costs.update(layer_metrics.actual_bit_cost)
+        for group_metrics in metrics.shared_input_groups:
+            key = (group_metrics.block.index, group_metrics.name)
+            if group_metrics.block.index != block or key in seen_layers:
+                raise ValueError(f"committed group metrics are invalid: {record['artifact_id']}")
+            seen_layers.add(key)
+            ranks += group_metrics.frozen_state.rank
+            parameters += group_metrics.plan.in_features * group_metrics.plan.out_features
+            bit_costs.update(group_metrics.actual_bit_cost)
         losses.append(metrics.losses.final_frozen_pre_kd)
         wall_seconds += metrics.wall_seconds
         peak_gpu_bytes = max(peak_gpu_bytes, metrics.peak_gpu_bytes)
@@ -344,9 +409,7 @@ def validate_resident_run(
         raise ValueError("resident journal identity is invalid")
     active_identity = json.dumps(identity_value, sort_keys=True)
     records = [
-        record
-        for record in all_records
-        if json.dumps(record.get("identity"), sort_keys=True) == active_identity
+        record for record in all_records if json.dumps(record.get("identity"), sort_keys=True) == active_identity
     ]
 
     commit_payloads: list[tuple[dict[str, Any], dict[str, Any], _BlockMetrics | None]] = []
@@ -365,13 +428,14 @@ def validate_resident_run(
         raise ValueError("resident block commits are not a contiguous zero-based prefix")
     complete = completed_blocks == tuple(range(expected_blocks))
     if require_complete and not complete:
-        raise ValueError(
-            f"resident run is incomplete: {len(completed_blocks)}/{expected_blocks} blocks committed"
-        )
+        raise ValueError(f"resident run is incomplete: {len(completed_blocks)}/{expected_blocks} blocks committed")
 
     latest_activation = activation_by_block.get(completed_blocks[-1]) if completed_blocks else None
     pending: deque[ArtifactReference] = deque(
-        ArtifactReference(str(record["artifact_id"]), f"{record['kind']}-result")
+        ArtifactReference(
+            str(record["artifact_id"]),
+            ArtifactTypes.SHARED_INPUT_GROUP_RESULT if record["kind"] == "group" else f"{record['kind']}-result",
+        )
         for record in records
     )
     plan_hash = identity_value.get("plan_hash")
@@ -392,9 +456,8 @@ def validate_resident_run(
             continue
         path = store.path_for(reference.artifact_id)
         if not path.exists():
-            if (
-                reference.artifact_type == ArtifactTypes.ACTIVATION_GENERATION
-                and (latest_activation is None or reference.artifact_id != latest_activation.artifact_id)
+            if reference.artifact_type == ArtifactTypes.ACTIVATION_GENERATION and (
+                latest_activation is None or reference.artifact_id != latest_activation.artifact_id
             ):
                 retired.add(reference.artifact_id)
                 continue
@@ -432,7 +495,7 @@ def validate_resident_run(
         len(records),
         len(all_records) - len(records),
         len(identities),
-        sum(record["kind"] == "layer" for record in records),
+        sum(record["kind"] in {"layer", "group"} for record in records),
         len(block_records),
         completed_blocks,
         complete,

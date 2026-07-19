@@ -18,6 +18,7 @@ from transformers.models.gemma3.modeling_gemma3 import Gemma3ForCausalLM
 from nanoquant.runtime.backend import (
     BackendCapabilities,
     PreparedLayer,
+    ProjectionMemberSpec,
     QuantizedLinearSpec,
     SupportResult,
     WorkloadSpec,
@@ -53,8 +54,16 @@ class Backend:
 
     def capabilities(self) -> BackendCapabilities:
         return BackendCapabilities(
-            ("nanoquant-v1",), ("cpu",), ("float32",), ("float32",), ("float32",), (),
-            ("prefill", "decode"), False, False, True,
+            ("nanoquant-v1",),
+            ("cpu",),
+            ("float32",),
+            ("float32",),
+            ("float32",),
+            (),
+            ("prefill", "decode"),
+            False,
+            False,
+            True,
         )
 
     def supports(self, op: QuantizedLinearSpec, workload: WorkloadSpec) -> SupportResult:
@@ -64,7 +73,11 @@ class Backend:
         return PreparedLayer(self.name, self.version, state.spec, None)
 
     def linear(self, value: torch.Tensor, layer: PreparedLayer) -> torch.Tensor:
-        return value[..., : layer.spec.out_features] + 1
+        return torch.ones(
+            (*value.shape[:-1], layer.spec.out_features),
+            dtype=value.dtype,
+            device=value.device,
+        )
 
 
 class Shell(nn.Module):
@@ -141,6 +154,33 @@ def _plans():
     return prepare_execution_workloads(plans, {spec.name: State(spec)}, (backend,), "cpu")
 
 
+def _group_plans():
+    spec = QuantizedLinearSpec(
+        "blocks.0.self_attn.attn_qkv",
+        "nanoquant-v1",
+        3,
+        6,
+        2,
+        "float32",
+        "float32",
+        members=(
+            ProjectionMemberSpec("blocks.0.self_attn.q_proj", 0, 2),
+            ProjectionMemberSpec("blocks.0.self_attn.k_proj", 2, 4),
+            ProjectionMemberSpec("blocks.0.self_attn.v_proj", 4, 6),
+        ),
+    )
+    backend = Backend()
+    plans = plan_execution_workloads(
+        (spec,),
+        prefill=WorkloadSpec("prefill", "cpu", "float32", 2, 3, True),
+        decode=WorkloadSpec("decode", "cpu", "float32", 2, 1, True),
+        prefill_backends=(backend,),
+        decode_backends=(backend,),
+        strict=True,
+    )
+    return prepare_execution_workloads(plans, {spec.name: State(spec)}, (backend,), "cpu")
+
+
 def test_prepared_model_linear_selects_prefill_and_decode_plans() -> None:
     shell = Shell()
     plans = _plans()
@@ -154,6 +194,27 @@ def test_prepared_model_linear_selects_prefill_and_decode_plans() -> None:
         assert torch.equal(shell(torch.zeros(2, 1, 3)), torch.ones(2, 1, 2))
     with pytest.raises(RuntimeError, match="execution_workload"):
         shell(torch.zeros(2, 1, 3))
+
+
+def test_prepared_shared_input_group_binds_one_owner_and_projection_views() -> None:
+    shell = nn.Module()
+    shell.model = nn.Module()
+    shell.model.layers = nn.ModuleList([nn.Module()])
+    shell.model.layers[0].self_attn = nn.Module()
+    for name in ("q_proj", "k_proj", "v_proj"):
+        setattr(shell.model.layers[0].self_attn, name, nn.Linear(3, 2, bias=False))
+    plans = _group_plans()
+    paths = transformers_decoder_module_paths(("blocks.0.self_attn.attn_qkv",))
+
+    assert bind_prepared_linears(shell, plans, paths) == 1
+    registry = shell.model.layers[0]._nanoquant_shared_input_groups
+    assert tuple(registry) == ("attn_qkv",)
+    assert not tuple(shell.parameters())
+    value = torch.zeros(2, 3, 3)
+    with execution_workload("prefill"):
+        assert shell.model.layers[0].self_attn.q_proj(value).shape == (2, 3, 2)
+        assert shell.model.layers[0].self_attn.k_proj(value).shape == (2, 3, 2)
+        assert shell.model.layers[0].self_attn.v_proj(value).shape == (2, 3, 2)
 
 
 def test_binding_validates_every_target_before_mutation() -> None:
@@ -188,9 +249,7 @@ def test_native_bfloat16_tied_binding_preserves_embedding_values_and_alias() -> 
     )
     model = Gemma3ForCausalLM(config).eval()
     with torch.no_grad():
-        model.model.embed_tokens.weight.copy_(
-            model.model.embed_tokens.weight.bfloat16().float()
-        )
+        model.model.embed_tokens.weight.copy_(model.model.embed_tokens.weight.bfloat16().float())
     input_ids = torch.tensor(((2, 4, 5),), dtype=torch.int64)
     expected = model.model.embed_tokens(input_ids)
 
@@ -334,9 +393,7 @@ def test_short_sliding_mask_only_elides_identity_region() -> None:
         head_dim=4,
         sliding_window=8,
     )
-    prepared = PreparedGemma3DecoderLayer(
-        TransformersGemma3DecoderLayer(config, layer_idx=0)
-    )
+    prepared = PreparedGemma3DecoderLayer(TransformersGemma3DecoderLayer(config, layer_idx=0))
     short = torch.zeros(1, 1, 3, 8)
     assert prepared._prepare_attention_mask(short, torch.arange(3), 3) is short
 

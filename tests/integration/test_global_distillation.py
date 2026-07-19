@@ -10,7 +10,7 @@ from transformers.models.gemma3.modeling_gemma3 import Gemma3ForCausalLM
 
 import nanoquant.global_distillation as global_distillation_module
 from nanoquant.application.distillation import TopKDistillationConfig
-from nanoquant.config.schema import ADMMConfig
+from nanoquant.config.schema import ADMMConfig, SharedInputGroupConfig
 from nanoquant.global_distillation import GlobalDistillationRequest, run_global_topk_distillation
 from nanoquant.infrastructure.artifacts import LocalArtifactStore
 from nanoquant.infrastructure.distillation_checkpoint import (
@@ -79,6 +79,12 @@ def test_complete_frozen_run_can_be_distilled_committed_and_reloaded(
             target_bpw=8.0,
             rank_multiple=1,
             admm=ADMMConfig(outer_iterations=1, inner_iterations=1),
+            shared_input_groups=(
+                SharedInputGroupConfig(
+                    "self_attn.attn_qkv",
+                    ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"),
+                ),
+            ),
         )
     )
     before = load_frozen_run(
@@ -160,6 +166,7 @@ def test_complete_frozen_run_can_be_distilled_committed_and_reloaded(
     assert distilled.metrics.epoch_losses[-1] <= distilled.metrics.epoch_losses[0]
     assert distilled.result.source_blocks == tuple(block.teacher_outputs.artifact for block in before.blocks)
     assert len(distilled.result.tuned_blocks) == 1
+    assert len(distilled.result.tuned_blocks[0].shared_input_groups) == 1
     assert distilled.result.auxiliary_parameters
     assert distilled.result.schema_version == 2
     assert distilled.result.block_snapshot_protocol_hash is not None

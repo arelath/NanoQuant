@@ -21,7 +21,7 @@ upstream llama.cpp alone:
 | Git HEAD | `da52148384591f4b0d87d58c12862e30f43014f1` |
 | Binary dirty-diff Git object | `cf463b9266db4e1f162ad8970e8ddcc1abfb5fbd` |
 | `ggml/src/ggml-cuda/nanoquant.cu` SHA-256 | `5c87336c2b6b8fb33805c6ee6a8752d4bd364beed63fd4cca03c2b36be966619` |
-| `convert_nanoquant_to_gguf.py` SHA-256 | `3ee6ccd976445b8e5669d34080067b0e36bac6166cd109c5f8cf7bc20893690c` |
+| `convert_nanoquant_to_gguf.py` SHA-256 | `c2e1fd064bbd46f38e9e3c5f739865d198ca75bd0bb9db16f72530d378d11304` |
 | `docs/development/nanoquant.md` SHA-256 | `12c46863a480a04b1ba449bb7bcb2f637419b677678b60f93522c531bd3f9ac8` |
 | `src/llama-model.cpp` SHA-256 | `11175fca67ecd8b97f6d6ffa7d2e8b848839d768669d63f7ec629a69d8d704aa` |
 | `ggml/src/ggml-cpu/ops.cpp` SHA-256 | `f51195610b4c533e4f606f984c7083bb542e4c3b3c8e740fdc647f8a5b0eff1c` |

@@ -9,9 +9,13 @@ class ArtifactTypes:
     """Canonical content-addressed artifact schema identities."""
 
     LAYER_RESULT = "layer-result"
+    SHARED_INPUT_GROUP_RESULT = "shared-input-group-result"
     BLOCK_RESULT = "block-result"
     ACTIVATION_GENERATION = "activation-generation"
     QUANTIZATION_PLAN = "quantization-plan"
+    RANK_PROBE_PLAN = "rank-probe-plan"
+    RANK_PROBE_RESULT = "rank-probe-result"
+    RECONSTRUCTION_RANK_PROFILE = "reconstruction-rank-profile"
     EVALUATION_TASK_INPUTS = "evaluation-task-inputs"
     EVALUATION_RESULT = "evaluation-result"
 
@@ -33,6 +37,25 @@ class LayerId:
     def __post_init__(self) -> None:
         if not self.path or self.path.startswith("/") or ".." in self.path.split("."):
             raise ValueError("layer path must be a non-empty canonical module path")
+
+
+@dataclass(frozen=True, slots=True)
+class SharedInputGroupCandidate:
+    """Adapter-declared logical projections that consume the same activation."""
+
+    block: BlockId
+    name: str
+    members: tuple[LayerId, ...]
+
+    def __post_init__(self) -> None:
+        if not self.name or self.name.startswith("/") or ".." in self.name.split("."):
+            raise ValueError("shared-input group name must be a canonical dotted path")
+        if len(self.members) < 2:
+            raise ValueError("shared-input group requires at least two members")
+        if len(set(self.members)) != len(self.members):
+            raise ValueError("shared-input group members must be unique")
+        if any(member.block != self.block for member in self.members):
+            raise ValueError("shared-input group members must belong to its block")
 
 
 @dataclass(frozen=True, slots=True, order=True)
@@ -294,11 +317,59 @@ class LayerPlan:
 
 
 @dataclass(frozen=True, slots=True)
+class SharedInputGroupPlan:
+    schema_version: int
+    block: BlockId
+    name: str
+    members: tuple[LayerInventory, ...]
+    rank: int
+    rank_multiple: int
+    allocator_cap: int
+    objectives: tuple[ObjectiveSpec, ...]
+    outliers: OutlierPlan
+    retry: RetryPolicy
+    estimated_cost: BitCost
+
+    def __post_init__(self) -> None:
+        if len(self.members) < 2 or len(self.members) != len(self.objectives):
+            raise ValueError("shared-input plan requires aligned member objectives")
+        if any(member.layer.block != self.block for member in self.members):
+            raise ValueError("shared-input plan contains a member from another block")
+        if len({member.in_features for member in self.members}) != 1:
+            raise ValueError("shared-input plan members must have equal input width")
+        if tuple(objective.layer for objective in self.objectives) != tuple(member.layer for member in self.members):
+            raise ValueError("shared-input plan objectives must follow member order")
+
+    @property
+    def unit_id(self) -> str:
+        return f"{self.block.index}:{self.name}"
+
+    @property
+    def in_features(self) -> int:
+        return self.members[0].in_features
+
+    @property
+    def out_features(self) -> int:
+        return sum(member.out_features for member in self.members)
+
+
+@dataclass(frozen=True, slots=True)
 class BlockPlan:
     block: BlockId
     layer_order: tuple[LayerId, ...]
     layers: tuple[LayerPlan, ...]
     estimated_workspace_bytes: int
+    shared_input_groups: tuple[SharedInputGroupPlan, ...] = ()
+    unit_order: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        ordinary = {layer.layer.path for layer in self.layers}
+        grouped = [member.layer.path for group in self.shared_input_groups for member in group.members]
+        if ordinary.intersection(grouped) or len(grouped) != len(set(grouped)):
+            raise ValueError("block plan units must partition logical layers")
+        expected = {*ordinary, *(group.name for group in self.shared_input_groups)}
+        if self.unit_order and (set(self.unit_order) != expected or len(self.unit_order) != len(expected)):
+            raise ValueError("block plan unit order must contain every unit exactly once")
 
 
 @dataclass(frozen=True, slots=True)
@@ -310,6 +381,26 @@ class QuantizationPlan:
     blocks: tuple[BlockPlan, ...]
     target_bpw: float
     planned_cost: BitCost
+    reconstruction_profile: ArtifactRef | None = None
+    reconstruction_decisions: tuple[ReconstructionRankDecision, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class ReconstructionRankDecision:
+    unit_id: str
+    members: tuple[LayerId, ...]
+    baseline_rank: int
+    planned_rank: int
+    baseline_squared_error: float
+    predicted_squared_error: float
+    sensitivity: float
+    protected_members: tuple[LayerId, ...]
+
+    def __post_init__(self) -> None:
+        if not self.unit_id or not self.members:
+            raise ValueError("reconstruction decision requires a unit and members")
+        if self.baseline_rank <= 0 or self.planned_rank <= 0:
+            raise ValueError("reconstruction decision ranks must be positive")
 
 
 @dataclass(frozen=True, slots=True)
@@ -487,6 +578,40 @@ class FrozenNanoQuantState:
 
 
 @dataclass(frozen=True, slots=True)
+class SharedInputMemberSlice:
+    layer: LayerId
+    row_start: int
+    row_end: int
+
+    def __post_init__(self) -> None:
+        if self.row_start < 0 or self.row_end <= self.row_start:
+            raise ValueError("shared-input member slice must be a non-empty forward interval")
+
+
+@dataclass(frozen=True, slots=True)
+class FrozenSharedInputGroupState:
+    block: BlockId
+    name: str
+    members: tuple[SharedInputMemberSlice, ...]
+    rank: int
+    left_binary: TensorRef
+    right_binary: TensorRef
+    scales: ScaleState
+    outliers: FrozenOutlierState | None
+    bias: TensorRef | None
+    logical_format: str
+
+    def __post_init__(self) -> None:
+        if len(self.members) < 2 or any(member.layer.block != self.block for member in self.members):
+            raise ValueError("frozen shared-input group has invalid members")
+        cursor = 0
+        for member in self.members:
+            if member.row_start != cursor:
+                raise ValueError("frozen shared-input member slices must be contiguous")
+            cursor = member.row_end
+
+
+@dataclass(frozen=True, slots=True)
 class LayerResult:
     schema_version: int
     layer: LayerId
@@ -498,6 +623,25 @@ class LayerResult:
     tuning: TuningMetrics | None
     frozen_state: FrozenNanoQuantState
     final_reconstruction: ReconstructionMetrics
+    actual_bit_cost: BitCost
+    extra_retry_bits: int
+    warnings: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class SharedInputGroupResult:
+    schema_version: int
+    block: BlockId
+    name: str
+    plan: SharedInputGroupPlan
+    attempts: tuple[AttemptSummary, ...]
+    accepted_attempt: int
+    factorization: ArtifactRef
+    scale_fit: ScaleFitResult | None
+    tuning: TuningMetrics | None
+    frozen_state: FrozenSharedInputGroupState
+    final_reconstruction: ReconstructionMetrics
+    member_reconstruction: tuple[tuple[LayerId, ReconstructionMetrics], ...]
     actual_bit_cost: BitCost
     extra_retry_bits: int
     warnings: tuple[str, ...]
@@ -543,6 +687,7 @@ class FrozenBlockState:
     quantized_layers: tuple[FrozenNanoQuantState, ...]
     passthrough_tensors: tuple[TensorRef, ...]
     auxiliary_parameters: tuple[tuple[str, TensorRef], ...] = ()
+    shared_input_groups: tuple[FrozenSharedInputGroupState, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -559,6 +704,7 @@ class BlockResult:
     peak_gpu_bytes: int
     peak_host_bytes: int
     warnings: tuple[str, ...]
+    shared_input_groups: tuple[SharedInputGroupResult, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

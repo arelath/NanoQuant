@@ -33,6 +33,7 @@ from nanoquant.domain.models import (
     LayerInventory,
     ModelIdentity,
     ModelInventory,
+    SharedInputGroupCandidate,
     SourceTensor,
     TensorId,
 )
@@ -52,6 +53,7 @@ class AdapterDefinition:
     config_factory: Callable[[dict[str, object]], Any]
     block_factory: Callable[[Any, int], nn.Module]
     block_count_field: str = "num_hidden_layers"
+    shared_input_groups: tuple[tuple[str, tuple[str, ...]], ...] = ()
 
 
 def _config(cls: type[PretrainedConfig]) -> Callable[[dict[str, object]], PretrainedConfig]:
@@ -104,6 +106,7 @@ DEFINITIONS = (
         ),
         _config(GemmaConfig),
         lambda config, index: GemmaDecoderLayer(config, index),
+        shared_input_groups=(("self_attn.attn_qkv", ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj")),),
     ),
     AdapterDefinition(
         "gemma",
@@ -120,6 +123,7 @@ DEFINITIONS = (
         ),
         _config(Gemma2Config),
         lambda config, index: Gemma2DecoderLayer(config, index),
+        shared_input_groups=(("self_attn.attn_qkv", ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj")),),
     ),
     AdapterDefinition(
         "gemma",
@@ -136,6 +140,7 @@ DEFINITIONS = (
         ),
         _config(Gemma3TextConfig),
         lambda config, index: Gemma3DecoderLayer(config, index),
+        shared_input_groups=(("self_attn.attn_qkv", ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj")),),
     ),
     AdapterDefinition(
         "gemma",
@@ -152,6 +157,7 @@ DEFINITIONS = (
         ),
         _gemma3_wrapper_text_config,
         lambda config, index: Gemma3DecoderLayer(config, index),
+        shared_input_groups=(("self_attn.attn_qkv", ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj")),),
     ),
     AdapterDefinition(
         "qwen",
@@ -341,6 +347,16 @@ class TransformersModelAdapter:
         if missing:
             raise UnsupportedModelVariant(f"SRC001 block lacks expected linear modules: {missing}")
         return tuple(LayerId(block_id, path) for path in self.definition.layer_paths)
+
+    def shared_input_group_candidates(self, block_id: BlockId) -> tuple[SharedInputGroupCandidate, ...]:
+        return tuple(
+            SharedInputGroupCandidate(
+                block_id,
+                name,
+                tuple(LayerId(block_id, path) for path in members),
+            )
+            for name, members in self.definition.shared_input_groups
+        )
 
     def get_decoder_layers(self, model: nn.Module) -> nn.ModuleList:
         base = getattr(model, "model", None)

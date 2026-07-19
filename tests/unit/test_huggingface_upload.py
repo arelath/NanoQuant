@@ -8,10 +8,12 @@ from types import SimpleNamespace
 import pytest
 from huggingface_hub import RepoUrl
 
+import nanoquant.infrastructure.huggingface_upload as upload_module
 from nanoquant.infrastructure.huggingface_upload import (
     HUGGINGFACE_UPLOAD_SCHEMA_VERSION,
     HuggingFaceUploadConfig,
     ValidatedModelArtifact,
+    ensure_huggingface_model_repository,
     upload_validated_model_artifacts,
 )
 
@@ -131,3 +133,10 @@ def test_huggingface_upload_configuration_and_paths_fail_closed(tmp_path: Path) 
             receipt_output=model,
             api=_FakeHfApi(),  # type: ignore[arg-type]
         )
+
+
+def test_huggingface_preflight_requires_exact_token_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(upload_module.os, "environ", {"HF_Token": "wrong-case"})
+
+    with pytest.raises(RuntimeError, match="use HF_TOKEN, not HF_Token"):
+        ensure_huggingface_model_repository(HuggingFaceUploadConfig("owner/model"))

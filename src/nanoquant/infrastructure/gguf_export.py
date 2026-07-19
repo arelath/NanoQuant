@@ -138,9 +138,7 @@ def _require_bfloat16_nanoquant_scales(
     expected_scale_count: int,
 ) -> None:
     if scale_count != expected_scale_count:
-        raise ValueError(
-            f"GGUF NanoQuant scale tensor count differs: {scale_count} != {expected_scale_count}"
-        )
+        raise ValueError(f"GGUF NanoQuant scale tensor count differs: {scale_count} != {expected_scale_count}")
     if scale_types != ("bf16",):
         rendered = ", ".join(scale_types) or "none"
         raise ValueError(f"GGUF NanoQuant scale tensors must all be BF16, found: {rendered}")
@@ -206,9 +204,7 @@ def _reuse_existing(
         receipt = cast(dict[str, Any], json.loads(receipt_path.read_text(encoding="utf-8")))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise ValueError("GGUF export receipt is invalid") from exc
-    actual_type, scale_count, scale_types = _inspect_gguf_tensor_contract(
-        output, reference, python_executable
-    )
+    actual_type, scale_count, scale_types = _inspect_gguf_tensor_contract(output, reference, python_executable)
     _require_bfloat16_nanoquant_scales(scale_count, scale_types, expected_scale_count)
     expected = {
         "schema_version": GGUF_EXPORT_SCHEMA_VERSION,
@@ -228,8 +224,7 @@ def _reuse_existing(
         raise ValueError("GGUF export receipt checkpoint path differs")
     if actual_type != token_embedding_type:
         raise ValueError(
-            "GGUF token embedding tensor type differs from export recipe: "
-            f"{actual_type} != {token_embedding_type}"
+            f"GGUF token embedding tensor type differs from export recipe: {actual_type} != {token_embedding_type}"
         )
     return GgufExportResult(
         output.resolve(),
@@ -252,6 +247,7 @@ def export_llamacpp_gguf(
     *,
     python_executable: str | Path = sys.executable,
     token_embedding_type: str = DEFAULT_TOKEN_EMBEDDING_TYPE,
+    converter_path: str | Path | None = None,
 ) -> GgufExportResult:
     """Export one packed artifact to GGUF and bind it to a durable receipt.
 
@@ -266,7 +262,7 @@ def export_llamacpp_gguf(
     if not source.is_dir():
         raise FileNotFoundError(f"GGUF source model snapshot is missing: {source}")
     reference = Path(reference_root).resolve()
-    converter = reference / "convert_nanoquant_to_gguf.py"
+    converter = reference / "convert_nanoquant_to_gguf.py" if converter_path is None else Path(converter_path).resolve()
     if not converter.is_file():
         raise FileNotFoundError(f"modified llama.cpp converter is missing: {converter}")
     converter_hash = hash_file(converter)
@@ -330,6 +326,18 @@ def export_llamacpp_gguf(
         "bf16",
         "--no-lazy",
     )
+    converter_environment = None
+    if converter.parent != reference:
+        converter_environment = os.environ.copy()
+        python_paths = (reference, reference / "gguf-py")
+        existing_python_path = converter_environment.get("PYTHONPATH")
+        converter_environment["PYTHONPATH"] = os.pathsep.join(
+            (
+                *(str(path) for path in python_paths),
+                *((existing_python_path,) if existing_python_path else ()),
+            )
+        )
+        converter_environment["NO_LOCAL_GGUF"] = "1"
     # COPY disables llama.cpp's per-tensor overrides. F16 is intentional here:
     # the converter's NanoQuant sidecars are already BF16/F16/I32/F32, so this base
     # type leaves them alone while allowing token_embd.weight to be overridden.
@@ -342,10 +350,17 @@ def export_llamacpp_gguf(
         "F16",
     )
     try:
-        with converter_stdout_path.open("w", encoding="utf-8", newline="\n") as stdout, converter_stderr_path.open(
-            "w", encoding="utf-8", newline="\n"
-        ) as stderr:
-            completed = subprocess.run(converter_command, stdout=stdout, stderr=stderr, check=False)
+        with (
+            converter_stdout_path.open("w", encoding="utf-8", newline="\n") as stdout,
+            converter_stderr_path.open("w", encoding="utf-8", newline="\n") as stderr,
+        ):
+            completed = subprocess.run(
+                converter_command,
+                stdout=stdout,
+                stderr=stderr,
+                check=False,
+                env=converter_environment,
+            )
         if completed.returncode != 0:
             raise RuntimeError(
                 f"modified llama.cpp GGUF converter failed with exit code {completed.returncode}; "
@@ -353,9 +368,10 @@ def export_llamacpp_gguf(
             )
         if not converted.is_file() or converted.stat().st_size == 0:
             raise RuntimeError("modified llama.cpp converter did not produce a non-empty GGUF")
-        with quantizer_stdout_path.open("w", encoding="utf-8", newline="\n") as stdout, quantizer_stderr_path.open(
-            "w", encoding="utf-8", newline="\n"
-        ) as stderr:
+        with (
+            quantizer_stdout_path.open("w", encoding="utf-8", newline="\n") as stdout,
+            quantizer_stderr_path.open("w", encoding="utf-8", newline="\n") as stderr,
+        ):
             completed = subprocess.run(quantizer_command, stdout=stdout, stderr=stderr, check=False)
         if completed.returncode != 0:
             raise RuntimeError(
@@ -364,9 +380,7 @@ def export_llamacpp_gguf(
             )
         if not quantized.is_file() or quantized.stat().st_size == 0:
             raise RuntimeError("llama.cpp quantizer did not produce a non-empty GGUF")
-        actual_type, scale_count, scale_types = _inspect_gguf_tensor_contract(
-            quantized, reference, python_executable
-        )
+        actual_type, scale_count, scale_types = _inspect_gguf_tensor_contract(quantized, reference, python_executable)
         if actual_type != embedding_type:
             raise RuntimeError(
                 "GGUF token embedding quantization did not produce the requested tensor type: "

@@ -10,7 +10,12 @@ from typing import Any, cast
 import torch
 from torch import nn
 
-from nanoquant.application.layers import BlockEditor, LayerFreezer, restore_block_auxiliary_parameters
+from nanoquant.application.layers import (
+    BlockEditor,
+    LayerFreezer,
+    SharedInputGroupFreezer,
+    restore_block_auxiliary_parameters,
+)
 from nanoquant.domain.models import ArtifactRef, ArtifactTypes, BlockResult
 from nanoquant.domain.profiling import NULL_RECORDER, PhaseRecorder
 from nanoquant.infrastructure.artifacts import LocalArtifactStore
@@ -110,9 +115,7 @@ def load_frozen_run(
     freezer = LayerFreezer()
     editor = BlockEditor()
     block_states = (
-        tuple(block.frozen_state for block in committed)
-        if global_tuning is None
-        else global_tuning.tuned_blocks
+        tuple(block.frozen_state for block in committed) if global_tuning is None else global_tuning.tuned_blocks
     )
     for block_state, block in zip(block_states, decoder_layers, strict=True):
         with recorder.phase("install_block", block=block_state.block.index):
@@ -128,6 +131,16 @@ def load_frozen_run(
                         compact_dense=backend == "dense",
                     )
                     editor.install_frozen_layer(block, state.layer.path, frozen.module)
+            for group_state in block_state.shared_input_groups:
+                with recorder.phase("install_group", layer=group_state.name):
+                    frozen_group = SharedInputGroupFreezer().load(
+                        group_state,
+                        tensors,
+                        device=device,
+                        dtype=block_dtype,
+                        backend="factorized",
+                    )
+                    editor.install_frozen_group(block, frozen_group)
                 recorder.add("replay.layers", 1)
             with recorder.phase("auxiliary"):
                 restore_block_auxiliary_parameters(

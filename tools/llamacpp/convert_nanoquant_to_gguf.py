@@ -6,9 +6,10 @@ import argparse
 import logging
 import os
 import sys
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 import numpy as np
 import torch
@@ -16,7 +17,6 @@ import torch
 if "NO_LOCAL_GGUF" not in os.environ:
     sys.path.insert(1, str(Path(__file__).parent / "gguf-py"))
 import gguf
-
 from conversion import (
     ModelBase,
     ModelType,
@@ -25,7 +25,6 @@ from conversion import (
     logger,
 )
 from convert_hf_to_gguf import split_str_to_n_bytes
-
 
 SUPPORTED_GGUF_WEIGHT_SUFFIXES = (
     ".attn_q.weight",
@@ -48,6 +47,7 @@ class NanoQuantSidecar:
     salient_idx: np.ndarray | None = None
     salient_weight: np.ndarray | None = None
     salient_scale: np.ndarray | None = None
+    member_rows: tuple[int, int, int] | None = None
 
 
 @dataclass
@@ -59,7 +59,9 @@ class Int8Embedding:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Convert a Hugging Face model plus NanoQuant checkpoint to GGUF")
     parser.add_argument("model", type=Path, help="directory containing the base Hugging Face model")
-    parser.add_argument("--nanoquant-checkpoint", type=Path, required=True, help="NanoQuant checkpoint file or directory")
+    parser.add_argument(
+        "--nanoquant-checkpoint", type=Path, required=True, help="NanoQuant checkpoint file or directory"
+    )
     parser.add_argument("--outfile", type=Path, help="path to write to; default: based on input")
     parser.add_argument(
         "--outtype",
@@ -186,12 +188,12 @@ def pack_q8_0_from_rowwise_int8(weight: np.ndarray, scale: np.ndarray, name: str
         raise ValueError(f"{name}: Q8_0 requires embedding width to be a multiple of 32, got {weight.shape[1]}")
 
     n_rows, n_cols = weight.shape
-    n_blocks = n_cols//32
+    n_blocks = n_cols // 32
 
     d = scale.astype(np.float16, copy=False).reshape(n_rows, 1).view(np.uint8).reshape(n_rows, 1, 2)
     d = np.repeat(d, n_blocks, axis=1)
     q = weight.reshape(n_rows, n_blocks, 32).view(np.uint8)
-    return np.concatenate([d, q], axis=2).reshape(n_rows, n_blocks*34)
+    return np.concatenate([d, q], axis=2).reshape(n_rows, n_blocks * 34)
 
 
 def packed_to_numpy(tensor: torch.Tensor) -> np.ndarray:
@@ -209,13 +211,13 @@ def pack_binary_matrix(tensor: torch.Tensor) -> np.ndarray:
     # GGUF stores the canonical NanoQuant bit layout: a cleared bit means +1,
     # a set bit means -1, packed least-significant bit first in each word.
     n_rows, n_cols = data.shape
-    n_words = (n_cols + 31)//32
-    padded = np.zeros((n_rows, n_words*32), dtype=np.uint8)
+    n_words = (n_cols + 31) // 32
+    padded = np.zeros((n_rows, n_words * 32), dtype=np.uint8)
     padded[:, :n_cols] = data < 0
 
     bits = padded.reshape(n_rows, n_words, 32).astype(np.uint32, copy=False)
     powers = (np.uint32(1) << np.arange(32, dtype=np.uint32)).reshape(1, 1, 32)
-    packed = np.sum(bits*powers, axis=2, dtype=np.uint32)
+    packed = np.sum(bits * powers, axis=2, dtype=np.uint32)
     return packed.view(np.int32)
 
 
@@ -254,6 +256,7 @@ def build_sidecars(state: dict[str, torch.Tensor]) -> dict[str, NanoQuantSidecar
         salient_idx_t = get_tensor(state, prefix, (".salient_idx", ".nq_salient_idx"))
         salient_weight_t = get_tensor(state, prefix, (".salient_weight", ".nq_salient_weight"))
         salient_scale_t = get_tensor(state, prefix, (".salient_scale", ".nq_salient_scale"))
+        member_rows_t = get_tensor(state, prefix, (".member_rows",))
 
         if scale_pre_t is None or scale_post_t is None:
             continue
@@ -290,7 +293,7 @@ def build_sidecars(state: dict[str, torch.Tensor]) -> dict[str, NanoQuantSidecar
             if u_shape is not None:
                 n_out, rank_u = u_shape
             else:
-                n_out, rank_u = u_packed.shape[0], scale_mid.size
+                n_out, rank_u = u_packed.shape[0], rank
 
         if rank != rank_u:
             raise ValueError(f"{prefix}: V rank {rank} does not match U rank {rank_u}")
@@ -298,8 +301,8 @@ def build_sidecars(state: dict[str, torch.Tensor]) -> dict[str, NanoQuantSidecar
         if scale_pre.size != n_in or scale_mid.size != rank or scale_post.size != n_out:
             raise ValueError(f"{prefix}: scale lengths do not match NanoQuant factor shapes")
 
-        expected_v = (rank, (n_in + 31)//32)
-        expected_u = (n_out, (rank + 31)//32)
+        expected_v = (rank, (n_in + 31) // 32)
+        expected_u = (n_out, (rank + 31) // 32)
         if tuple(v_packed.shape) != expected_v:
             raise ValueError(f"{prefix}: V packed shape {v_packed.shape} does not match {expected_v}")
         if tuple(u_packed.shape) != expected_u:
@@ -319,7 +322,9 @@ def build_sidecars(state: dict[str, torch.Tensor]) -> dict[str, NanoQuantSidecar
             else:
                 expected_salient = (n_out, k)
                 if tuple(salient_weight.shape) != expected_salient:
-                    raise ValueError(f"{prefix}: salient_weight shape {salient_weight.shape} does not match {expected_salient}")
+                    raise ValueError(
+                        f"{prefix}: salient_weight shape {salient_weight.shape} does not match {expected_salient}"
+                    )
                 if np.any(salient_idx < 0) or np.any(salient_idx >= n_in):
                     raise ValueError(f"{prefix}: salient_idx values must be in [0, {n_in})")
                 if salient_weight.dtype == np.int8 and salient_scale_t is None:
@@ -331,6 +336,13 @@ def build_sidecars(state: dict[str, torch.Tensor]) -> dict[str, NanoQuantSidecar
                     if salient_scale.size != k:
                         raise ValueError(f"{prefix}: salient_scale length {salient_scale.size} does not match {k}")
 
+        member_rows = tensor_shape(member_rows_t)
+        if member_rows is not None:
+            if len(member_rows) != 3 or any(rows <= 0 for rows in member_rows):
+                raise ValueError(f"{prefix}: member_rows must contain three positive row counts")
+            if sum(member_rows) != n_out:
+                raise ValueError(f"{prefix}: member_rows do not cover the output rows")
+
         sidecars[prefix] = NanoQuantSidecar(
             v_packed=np.ascontiguousarray(v_packed, dtype=np.int32),
             u_packed=np.ascontiguousarray(u_packed, dtype=np.int32),
@@ -340,6 +352,7 @@ def build_sidecars(state: dict[str, torch.Tensor]) -> dict[str, NanoQuantSidecar
             salient_idx=None if salient_idx is None else np.ascontiguousarray(salient_idx, dtype=np.int32),
             salient_weight=None if salient_weight is None else np.ascontiguousarray(salient_weight),
             salient_scale=None if salient_scale is None else np.ascontiguousarray(salient_scale),
+            member_rows=member_rows,
         )
 
     if not sidecars:
@@ -410,7 +423,7 @@ def find_int8_embedding(embeddings: dict[str, Int8Embedding], name: str) -> tupl
 def maybe_permute_output_rows(model: Any, hf_weight_name: str, sidecar: NanoQuantSidecar) -> NanoQuantSidecar:
     if not getattr(model, "undo_permute", False) or not hasattr(model, "permute"):
         return sidecar
-    if not hf_weight_name.endswith(("q_proj.weight", "k_proj.weight")):
+    if sidecar.member_rows is None and not hf_weight_name.endswith(("q_proj.weight", "k_proj.weight")):
         return sidecar
 
     # The base converter may undo attention row permutation.  Apply the same row
@@ -418,12 +431,24 @@ def maybe_permute_output_rows(model: Any, hf_weight_name: str, sidecar: NanoQuan
     n_head = model.find_hparam(["n_heads", "num_attention_heads"], optional=True)
     if n_head is None:
         return sidecar
-    n_kv_head = n_head
-    if hf_weight_name.endswith("k_proj.weight"):
+    if sidecar.member_rows is None:
+        n_kv_head = n_head
+        if hf_weight_name.endswith("k_proj.weight"):
+            n_kv_head = model.find_hparam(["n_kv_heads", "num_key_value_heads"], optional=True)
+        order_t = torch.arange(sidecar.u_packed.shape[0], dtype=torch.int64)
+        order = model.permute(order_t.reshape(-1, 1), n_head, n_kv_head).reshape(-1).cpu().numpy()
+    else:
+        q_rows, k_rows, v_rows = sidecar.member_rows
         n_kv_head = model.find_hparam(["n_kv_heads", "num_key_value_heads"], optional=True)
-
-    order = torch.arange(sidecar.u_packed.shape[0], dtype=torch.int64).reshape(sidecar.u_packed.shape[0], 1)
-    order = model.permute(order, n_head, n_kv_head).reshape(-1).cpu().numpy()
+        if n_kv_head is None:
+            n_kv_head = n_head
+        q_order = model.permute(torch.arange(q_rows, dtype=torch.int64).reshape(-1, 1), n_head, n_head).reshape(-1)
+        k_order = (
+            model.permute(torch.arange(k_rows, dtype=torch.int64).reshape(-1, 1), n_head, n_kv_head).reshape(-1)
+            + q_rows
+        )
+        v_order = torch.arange(v_rows, dtype=torch.int64) + q_rows + k_rows
+        order = torch.cat((q_order, k_order, v_order)).cpu().numpy()
 
     return NanoQuantSidecar(
         v_packed=sidecar.v_packed,
@@ -434,6 +459,7 @@ def maybe_permute_output_rows(model: Any, hf_weight_name: str, sidecar: NanoQuan
         salient_idx=sidecar.salient_idx,
         salient_weight=None if sidecar.salient_weight is None else np.ascontiguousarray(sidecar.salient_weight[order]),
         salient_scale=sidecar.salient_scale,
+        member_rows=sidecar.member_rows,
     )
 
 
@@ -455,7 +481,7 @@ def write_sidecar(model: Any, base_name: str, hf_weight_name: str, sidecar: Nano
             writer.add_tensor(base_name + ".nq_salient_scale", sidecar.salient_scale)
         outliers = sidecar.salient_idx.size
 
-    logger.info(f"{base_name + '.nq_*,' :<30} NanoQuant rank = {sidecar.scale_mid.size}, outliers = {outliers}")
+    logger.info(f"{base_name + '.nq_*,':<30} NanoQuant rank = {sidecar.scale_mid.size}, outliers = {outliers}")
 
 
 def write_int8_embedding(model: Any, new_name: str, mapped_tensor: torch.Tensor, embedding: Int8Embedding) -> None:
@@ -465,9 +491,13 @@ def write_int8_embedding(model: Any, new_name: str, mapped_tensor: torch.Tensor,
 
     n_rows, n_cols = expected_shape
     if embedding.weight.shape[1] != n_cols:
-        raise ValueError(f"{new_name}: int8 embedding width {embedding.weight.shape[1]} does not match mapped width {n_cols}")
+        raise ValueError(
+            f"{new_name}: int8 embedding width {embedding.weight.shape[1]} does not match mapped width {n_cols}"
+        )
     if embedding.weight.shape[0] < n_rows:
-        raise ValueError(f"{new_name}: int8 embedding has {embedding.weight.shape[0]} rows, mapped tensor needs {n_rows}")
+        raise ValueError(
+            f"{new_name}: int8 embedding has {embedding.weight.shape[0]} rows, mapped tensor needs {n_rows}"
+        )
 
     weight = embedding.weight[:n_rows]
     scale = embedding.scale[:n_rows]
@@ -481,9 +511,9 @@ def write_int8_embedding(model: Any, new_name: str, mapped_tensor: torch.Tensor,
 
 
 def install_nanoquant_hooks(
-        model: Any,
-        sidecars: dict[str, NanoQuantSidecar],
-        int8_embeddings: dict[str, Int8Embedding],
+    model: Any,
+    sidecars: dict[str, NanoQuantSidecar],
+    int8_embeddings: dict[str, Int8Embedding],
 ) -> tuple[set[str], set[str]]:
     original_modify_tensors = model.modify_tensors
     original_prepare_metadata = model.prepare_metadata
@@ -511,6 +541,26 @@ def install_nanoquant_hooks(
             return
 
         match = find_sidecar(sidecars, name.removesuffix(".weight"))
+        group_match = None
+        if name.endswith(("q_proj.weight", "k_proj.weight", "v_proj.weight")):
+            group_prefix = name.rsplit(".", 2)[0] + ".attn_qkv"
+            group_match = find_sidecar(sidecars, group_prefix)
+        if match is not None and group_match is not None:
+            raise ValueError(f"{name}: separate and fused NanoQuant attention sidecars conflict")
+        if group_match is not None:
+            prefix, sidecar = group_match
+            if sidecar.member_rows is None:
+                raise ValueError(f"{prefix}: fused attention sidecar is missing member_rows")
+            if name.endswith(("k_proj.weight", "v_proj.weight")):
+                return
+            mapped = list(original_modify_tensors(data_torch, name, bid))
+            if len(mapped) != 1 or not mapped[0][0].endswith(".attn_q.weight"):
+                raise ValueError(f"{name}: converter did not produce one canonical attention-Q tensor")
+            new_name, _mapped_tensor = mapped[0]
+            fused_base = new_name.removesuffix(".attn_q.weight") + ".attn_qkv"
+            write_sidecar(model, fused_base, name, sidecar)
+            written.add(prefix)
+            return
         if match is None:
             yield from original_modify_tensors(data_torch, name, bid)
             return

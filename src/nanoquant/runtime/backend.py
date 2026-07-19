@@ -12,6 +12,19 @@ WorkloadKind: TypeAlias = Literal["prefill", "decode"]
 
 
 @dataclass(frozen=True, slots=True)
+class ProjectionMemberSpec:
+    name: str
+    row_start: int
+    row_end: int
+
+    def __post_init__(self) -> None:
+        if not self.name or self.name.startswith("/") or ".." in self.name.split("."):
+            raise ValueError("runtime projection member name must be canonical")
+        if self.row_start < 0 or self.row_end <= self.row_start:
+            raise ValueError("runtime projection member slice must be non-empty")
+
+
+@dataclass(frozen=True, slots=True)
 class QuantizedLinearSpec:
     """Backend-independent description of one frozen NanoQuant linear."""
 
@@ -26,6 +39,7 @@ class QuantizedLinearSpec:
     outlier_value_dtype: str | None = None
     has_outlier_scales: bool = False
     has_bias: bool = False
+    members: tuple[ProjectionMemberSpec, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.name or self.name.startswith("/") or ".." in self.name.split("."):
@@ -38,6 +52,16 @@ class QuantizedLinearSpec:
             raise ValueError("runtime outlier dtype must be present exactly when outliers are present")
         if self.has_outlier_scales and self.outlier_count == 0:
             raise ValueError("runtime outlier scales require outlier values")
+        if self.members:
+            if len(self.members) < 2 or len({member.name for member in self.members}) != len(self.members):
+                raise ValueError("runtime projection group members must be unique")
+            cursor = 0
+            for member in self.members:
+                if member.row_start != cursor:
+                    raise ValueError("runtime projection group slices must be contiguous")
+                cursor = member.row_end
+            if cursor != self.out_features:
+                raise ValueError("runtime projection group slices must cover the output")
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,8 +205,7 @@ def evaluate_capabilities(
             "salient outliers are not supported",
         ),
         (
-            op.outlier_value_dtype is None
-            or op.outlier_value_dtype in capabilities.outlier_value_dtypes,
+            op.outlier_value_dtype is None or op.outlier_value_dtype in capabilities.outlier_value_dtypes,
             "NQ-INF-OUTLIER-DTYPE",
             f"outlier dtype {op.outlier_value_dtype!r} is not supported",
         ),
@@ -207,14 +230,12 @@ def evaluate_capabilities(
             f"rank must be aligned to {capabilities.rank_alignment}",
         ),
         (
-            capabilities.maximum_batch_size is None
-            or workload.batch_size <= capabilities.maximum_batch_size,
+            capabilities.maximum_batch_size is None or workload.batch_size <= capabilities.maximum_batch_size,
             "NQ-INF-BATCH",
             f"batch size {workload.batch_size} exceeds the backend maximum",
         ),
         (
-            capabilities.maximum_token_count is None
-            or workload.token_count <= capabilities.maximum_token_count,
+            capabilities.maximum_token_count is None or workload.token_count <= capabilities.maximum_token_count,
             "NQ-INF-TOKENS",
             f"token count {workload.token_count} exceeds the backend maximum",
         ),

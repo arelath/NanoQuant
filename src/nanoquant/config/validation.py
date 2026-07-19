@@ -8,7 +8,7 @@ from enum import Enum
 
 from nanoquant.ports.event_sink import Severity
 
-from .schema import ObjectiveKind, OutlierSelector, RunConfig
+from .schema import AllocationStrategy, ObjectiveKind, OutlierSelector, RunConfig
 
 
 class ValidationPhase(str, Enum):
@@ -79,6 +79,164 @@ def validate(config: RunConfig, phase: ValidationPhase = ValidationPhase.PRE_RES
         "allocation.bounds",
         "floor must not exceed ceiling",
     )
+    reconstruction = config.allocation.reconstruction
+    reconstruction_selected = config.allocation.strategy is AllocationStrategy.RECONSTRUCTION_AWARE
+    require(
+        reconstruction.enabled == reconstruction_selected,
+        "CFG049",
+        "allocation.reconstruction.enabled",
+        "must be enabled exactly when strategy is reconstruction_aware",
+    )
+    require(
+        0 <= reconstruction.sensitivity_strength <= 1,
+        "CFG050",
+        "allocation.reconstruction.sensitivity_strength",
+        "must be in [0, 1]",
+    )
+    require(
+        0 <= reconstruction.protected_sensitivity_quantile <= 1,
+        "CFG051",
+        "allocation.reconstruction.protected_sensitivity_quantile",
+        "must be in [0, 1]",
+    )
+    require(
+        math.isfinite(reconstruction.protected_rank_floor_fraction)
+        and reconstruction.protected_rank_floor_fraction >= 1,
+        "CFG052",
+        "allocation.reconstruction.protected_rank_floor_fraction",
+        "must be finite and at least one",
+    )
+    require(
+        0 <= reconstruction.target_protected_error_reduction_fraction < 1,
+        "CFG053",
+        "allocation.reconstruction.target_protected_error_reduction_fraction",
+        "must be in [0, 1)",
+    )
+    importance = reconstruction.importance
+    importance_patterns = tuple(item.pattern for item in importance.layer_multipliers)
+    require(
+        all(bool(pattern.strip()) for pattern in importance_patterns),
+        "CFG065",
+        "allocation.reconstruction.importance.layer_multipliers",
+        "patterns must not be empty",
+    )
+    require(
+        len(set(importance_patterns)) == len(importance_patterns),
+        "CFG066",
+        "allocation.reconstruction.importance.layer_multipliers",
+        "patterns must be unique",
+    )
+    require(
+        all(math.isfinite(item.multiplier) and item.multiplier >= 1 for item in importance.layer_multipliers),
+        "CFG067",
+        "allocation.reconstruction.importance.layer_multipliers",
+        "multipliers must be finite and at least one",
+    )
+    protected_patterns = importance.protected_layer_patterns
+    require(
+        all(bool(pattern.strip()) for pattern in protected_patterns),
+        "CFG068",
+        "allocation.reconstruction.importance.protected_layer_patterns",
+        "patterns must not be empty",
+    )
+    require(
+        len(set(protected_patterns)) == len(protected_patterns),
+        "CFG069",
+        "allocation.reconstruction.importance.protected_layer_patterns",
+        "patterns must be unique",
+    )
+    require(
+        math.isfinite(importance.edge_block_multiplier) and importance.edge_block_multiplier >= 1,
+        "CFG070",
+        "allocation.reconstruction.importance.edge_block_multiplier",
+        "must be finite and at least one",
+    )
+    require(
+        importance.protected_edge_block_count >= 0,
+        "CFG071",
+        "allocation.reconstruction.importance.protected_edge_block_count",
+        "must not be negative",
+    )
+    curve_patterns = tuple(curve.unit_pattern for curve in reconstruction.response_curves)
+    require(
+        len(curve_patterns) == len(set(curve_patterns)) and all(bool(pattern.strip()) for pattern in curve_patterns),
+        "CFG054",
+        "allocation.reconstruction.response_curves",
+        "unit patterns must be non-empty and unique",
+    )
+    for index, curve in enumerate(reconstruction.response_curves):
+        curve_path = f"allocation.reconstruction.response_curves[{index}]"
+        require(
+            0 < curve.calibrated_rank_floor_fraction <= 1 <= curve.calibrated_rank_ceiling_fraction,
+            "CFG055",
+            curve_path,
+            "calibrated rank range must contain baseline fraction one",
+        )
+        boundaries = tuple(segment.maximum_rank_fraction for segment in curve.segments)
+        require(
+            bool(boundaries)
+            and all(math.isfinite(value) for value in boundaries)
+            and all(left < right for left, right in zip(boundaries, boundaries[1:], strict=False)),
+            "CFG056",
+            f"{curve_path}.segments",
+            "segment boundaries must be finite and strictly increasing",
+        )
+        require(
+            bool(boundaries)
+            and boundaries[-1] == curve.calibrated_rank_ceiling_fraction
+            and boundaries[0] > curve.calibrated_rank_floor_fraction,
+            "CFG057",
+            f"{curve_path}.segments",
+            "segments must cover the complete calibrated rank range",
+        )
+        require(
+            all(math.isfinite(segment.beta_per_rank) and segment.beta_per_rank > 0 for segment in curve.segments),
+            "CFG058",
+            f"{curve_path}.segments",
+            "response slopes must be finite and positive",
+        )
+    if reconstruction_selected:
+        require(
+            reconstruction.objective_mode == "unit_frobenius",
+            "CFG059",
+            "allocation.reconstruction.objective_mode",
+            "only unit_frobenius is implemented",
+        )
+        require(
+            reconstruction.probe_admm is not None,
+            "CFG060",
+            "allocation.reconstruction.probe_admm",
+            "an explicit full probe protocol is required",
+        )
+        require(
+            bool(reconstruction.response_curves),
+            "CFG061",
+            "allocation.reconstruction.response_curves",
+            "at least one measured response curve is required",
+        )
+        require(
+            bool(reconstruction.response_profile_provenance.strip()),
+            "CFG062",
+            "allocation.reconstruction.response_profile_provenance",
+            "measured response provenance is required",
+        )
+        for index, curve in enumerate(reconstruction.response_curves):
+            require(
+                config.allocation.bounds.floor_fraction_of_uniform >= curve.calibrated_rank_floor_fraction
+                and config.allocation.bounds.ceiling_fraction_of_uniform <= curve.calibrated_rank_ceiling_fraction,
+                "CFG063",
+                f"allocation.reconstruction.response_curves[{index}]",
+                "allocation bounds must stay within the calibrated response range",
+            )
+        if reconstruction.probe_admm is not None:
+            require(
+                reconstruction.probe_admm.outer_iterations > 0
+                and reconstruction.probe_admm.inner_iterations > 0
+                and reconstruction.probe_admm.convergence_check_interval > 0,
+                "CFG064",
+                "allocation.reconstruction.probe_admm",
+                "probe iteration settings must be positive",
+            )
     require(0 <= config.outliers.fraction < 1, "CFG009", "outliers.fraction", "must be in [0, 1)")
     require(
         not (config.outliers.selector is OutlierSelector.NONE and config.outliers.fraction > 0),
@@ -90,8 +248,7 @@ def validate(config: RunConfig, phase: ValidationPhase = ValidationPhase.PRE_RES
         config.runtime.block_forward_batch_size > 0, "CFG011", "runtime.block_forward_batch_size", "must be positive"
     )
     require(
-        math.isfinite(config.runtime.activations.gpu_reserve_gib)
-        and config.runtime.activations.gpu_reserve_gib >= 0,
+        math.isfinite(config.runtime.activations.gpu_reserve_gib) and config.runtime.activations.gpu_reserve_gib >= 0,
         "CFG044",
         "runtime.activations.gpu_reserve_gib",
         "must be finite and non-negative",
@@ -101,6 +258,33 @@ def validate(config: RunConfig, phase: ValidationPhase = ValidationPhase.PRE_RES
         "CFG012",
         "factorization.admm.outer_iterations",
         "must be positive",
+    )
+    shared = config.factorization.shared_input
+    group_names = tuple(group.name for group in shared.groups)
+    require(
+        shared.enabled == bool(shared.groups),
+        "CFG045",
+        "factorization.shared_input",
+        "enabled grouping requires at least one group and configured groups require enabled=true",
+    )
+    require(
+        len(group_names) == len(set(group_names)) and all(bool(name.strip()) for name in group_names),
+        "CFG046",
+        "factorization.shared_input.groups",
+        "group names must be non-empty and unique",
+    )
+    group_members = [member for group in shared.groups for member in group.members]
+    require(
+        all(len(group.members) >= 2 and len(group.members) == len(set(group.members)) for group in shared.groups),
+        "CFG047",
+        "factorization.shared_input.groups",
+        "each group requires at least two unique members",
+    )
+    require(
+        len(group_members) == len(set(group_members)) and all(bool(member.strip()) for member in group_members),
+        "CFG048",
+        "factorization.shared_input.groups",
+        "member paths must be non-empty and may belong to only one group",
     )
     require(config.profiling.cuda_sample_every > 0, "CFG015", "profiling.cuda_sample_every", "must be positive")
     require(

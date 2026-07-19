@@ -94,6 +94,11 @@ def test_compression_quality_runs_quality_before_huggingface_upload_and_publicat
         _EXPERIMENT,
         export=replace(_EXPERIMENT.export, huggingface=upload_config),
     )
+    monkeypatch.setattr(
+        workflow,
+        "ensure_huggingface_model_repository",
+        lambda config: calls.append("preflight") or config.repo_id,
+    )
 
     def complete(*_args, **kwargs):  # type: ignore[no-untyped-def]
         assert "defer_huggingface" not in kwargs
@@ -146,7 +151,7 @@ def test_compression_quality_runs_quality_before_huggingface_upload_and_publicat
         resolved,
     )
 
-    assert calls == ["complete", "quality", "upload"]
+    assert calls == ["preflight", "complete", "quality", "upload"]
     assert quality_requests[0].packed_artifact == tmp_path / "repo" / "outputs/003/packed"
     assert not quality_requests[0].stream_base_model
     assert payload["exports"]["gguf"]["output"] == str(gguf)

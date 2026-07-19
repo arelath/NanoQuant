@@ -119,20 +119,14 @@ class PackedLayerEntry:
             raise ValueError(f"packed layer tensor roles are duplicated: {self.spec.name}")
         expected = _expected_tensor_metadata(self.spec)
         if set(by_role) != set(expected):
-            raise ValueError(
-                f"packed layer tensor inventory differs from its specification: {self.spec.name}"
-            )
+            raise ValueError(f"packed layer tensor inventory differs from its specification: {self.spec.name}")
         for role, (shape, dtype) in expected.items():
             tensor = by_role[role]
             expected_key = f"{PACKED_TENSOR_NAMESPACE}.{self.spec.name}.{role}"
             if tensor.key != expected_key:
-                raise ValueError(
-                    f"packed layer tensor key differs: {self.spec.name}:{role}"
-                )
+                raise ValueError(f"packed layer tensor key differs: {self.spec.name}:{role}")
             if tensor.shape != shape or tensor.dtype != dtype:
-                raise ValueError(
-                    f"packed layer tensor metadata differs: {self.spec.name}:{role}"
-                )
+                raise ValueError(f"packed layer tensor metadata differs: {self.spec.name}:{role}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,9 +142,7 @@ class PackedBlockEntry:
             raise ValueError("packed block index must be non-negative")
         if self.bytes <= 0:
             raise ValueError("packed block shard must be non-empty")
-        if len(self.sha256) != 64 or any(
-            character not in "0123456789abcdef" for character in self.sha256
-        ):
+        if len(self.sha256) != 64 or any(character not in "0123456789abcdef" for character in self.sha256):
             raise ValueError("packed block hash must be a lowercase SHA-256 digest")
         _validate_relative_path(self.path)
         names = [layer.spec.name for layer in self.layers]
@@ -176,12 +168,9 @@ class PackedModelManifest:
         if self.artifact_format != PACKED_ARTIFACT_FORMAT:
             raise ValueError(f"unsupported packed artifact format: {self.artifact_format}")
         if self.minimum_runtime_version != MINIMUM_RUNTIME_VERSION:
-            raise ValueError(
-                f"unsupported packed minimum runtime version: {self.minimum_runtime_version}"
-            )
+            raise ValueError(f"unsupported packed minimum runtime version: {self.minimum_runtime_version}")
         if len(self.logical_descriptor_sha256) != 64 or any(
-            character not in "0123456789abcdef"
-            for character in self.logical_descriptor_sha256
+            character not in "0123456789abcdef" for character in self.logical_descriptor_sha256
         ):
             raise ValueError("packed source descriptor hash must be lowercase SHA-256")
         indexes = [block.index for block in self.blocks]
@@ -201,10 +190,7 @@ class OpenPackedArtifact:
 
     def load_layer(self, name: str, device: DeviceLike = "cpu") -> PackedLayerState:
         matches = [
-            (block, layer)
-            for block in self.manifest.blocks
-            for layer in block.layers
-            if layer.spec.name == name
+            (block, layer) for block in self.manifest.blocks for layer in block.layers if layer.spec.name == name
         ]
         if len(matches) != 1:
             raise KeyError(f"packed artifact layer not found: {name}")
@@ -465,9 +451,7 @@ def _manifest_from_payload(payload: object) -> PackedModelManifest:
         block_path = f"manifest.blocks[{block_index}]"
         block_value = _mapping(block_payload, block_path)
         layers = []
-        for layer_index, layer_payload in enumerate(
-            _sequence(block_value.get("layers"), f"{block_path}.layers")
-        ):
+        for layer_index, layer_payload in enumerate(_sequence(block_value.get("layers"), f"{block_path}.layers")):
             layer_path = f"{block_path}.layers[{layer_index}]"
             layer_value = _mapping(layer_payload, layer_path)
             layers.append(
@@ -535,18 +519,11 @@ def open_packed_artifact(
         try:
             with safe_open(shard, framework="pt", device="cpu") as handle:
                 if set(handle.keys()) != set(declared):
-                    raise PackedArtifactError(
-                        f"packed artifact shard tensor inventory differs: {block.path}"
-                    )
+                    raise PackedArtifactError(f"packed artifact shard tensor inventory differs: {block.path}")
                 for key, tensor in declared.items():
                     view = handle.get_slice(key)
-                    if (
-                        tuple(view.get_shape()) != tensor.shape
-                        or _header_dtype(view.get_dtype()) != tensor.dtype
-                    ):
-                        raise PackedArtifactError(
-                            f"packed artifact tensor header differs: {block.path}:{key}"
-                        )
+                    if tuple(view.get_shape()) != tensor.shape or _header_dtype(view.get_dtype()) != tensor.dtype:
+                        raise PackedArtifactError(f"packed artifact tensor header differs: {block.path}:{key}")
         except PackedArtifactError:
             raise
         except Exception as error:
@@ -679,12 +656,16 @@ def validate_packed_reference_parity(
             for entry in block.layers:
                 source = logical.load_layer(entry.spec.name)
                 packed_state = packed.load_layer(entry.spec.name)
-                value = torch.linspace(
-                    -0.5,
-                    0.5,
-                    source.spec.in_features,
-                    dtype=torch.float32,
-                ).to(_input_dtype(source.spec.scale_dtype)).reshape(1, -1)
+                value = (
+                    torch.linspace(
+                        -0.5,
+                        0.5,
+                        source.spec.in_features,
+                        dtype=torch.float32,
+                    )
+                    .to(_input_dtype(source.spec.scale_dtype))
+                    .reshape(1, -1)
+                )
                 expected = logical_backend.linear(
                     value,
                     logical_backend.prepare(source, "cpu"),
@@ -702,8 +683,7 @@ def validate_packed_reference_parity(
                 output_elements += actual.numel()
     if maximum_error > absolute_tolerance:
         raise ValueError(
-            f"packed reference differs beyond tolerance: {maximum_error} > "
-            f"{absolute_tolerance} at {maximum_layer}"
+            f"packed reference differs beyond tolerance: {maximum_error} > {absolute_tolerance} at {maximum_layer}"
         )
     return PackedReferenceParityResult(
         logical.root,

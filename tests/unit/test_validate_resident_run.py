@@ -50,6 +50,19 @@ def test_validate_resident_run_follows_artifact_graph_and_allows_retired_activat
             },
         },
     )
+    group = _artifact(
+        store,
+        "shared-input-group-result",
+        "shared-input-group-result.json",
+        {
+            "identity": IDENTITY,
+            "result": {
+                "block": {"index": 0},
+                "name": "self_attn.attn_qkv",
+                "frozen": _reference(frozen, "frozen-layer"),
+            },
+        },
+    )
     block0 = _artifact(
         store,
         "block-result",
@@ -63,6 +76,20 @@ def test_validate_resident_run_follows_artifact_graph_and_allows_retired_activat
                     "frozen_state": {"rank": 2},
                     "layer": {"block": {"index": 0}, "path": "mlp.gate_proj"},
                     "plan": {"source_weight": {"spec": {"shape": [2, 3]}}},
+                }
+            ],
+            "shared_input_groups": [
+                {
+                    "actual_bit_cost": {"binary_factor_bits": 12, "scale_bits": 3},
+                    "frozen_state": {"rank": 4},
+                    "block": {"index": 0},
+                    "name": "self_attn.attn_qkv",
+                    "plan": {
+                        "members": [
+                            {"in_features": 3, "out_features": 2},
+                            {"in_features": 3, "out_features": 3},
+                        ]
+                    },
                 }
             ],
             "losses": {"final_frozen_pre_kd": 1.5},
@@ -108,12 +135,20 @@ def test_validate_resident_run_follows_artifact_graph_and_allows_retired_activat
                 "timestamp": "1",
             },
             {
+                "kind": "group",
+                "block": 0,
+                "layer": "self_attn.attn_qkv",
+                "artifact_id": group,
+                "identity": IDENTITY,
+                "timestamp": "2",
+            },
+            {
                 "kind": "block",
                 "block": 0,
                 "layer": None,
                 "artifact_id": block0,
                 "identity": IDENTITY,
-                "timestamp": "2",
+                "timestamp": "3",
             },
             {
                 "kind": "block",
@@ -121,7 +156,7 @@ def test_validate_resident_run_follows_artifact_graph_and_allows_retired_activat
                 "layer": None,
                 "artifact_id": block1,
                 "identity": IDENTITY,
-                "timestamp": "3",
+                "timestamp": "4",
             },
         ],
     )
@@ -133,25 +168,26 @@ def test_validate_resident_run_follows_artifact_graph_and_allows_retired_activat
 
     assert result.complete is True
     assert result.completed_blocks == (0, 1)
-    assert result.journal_records == 3
-    assert result.active_journal_records == 3
+    assert result.journal_records == 4
+    assert result.active_journal_records == 4
     assert result.inactive_journal_records == 0
     assert result.journal_identity_count == 1
-    assert result.layer_records == 1
+    assert result.layer_records == 2
     assert result.block_records == 2
-    assert result.artifacts_validated == 5
+    assert result.artifacts_validated == 6
     assert result.artifacts_by_type == {
         "activation-generation": 1,
         "block-result": 2,
         "frozen-layer": 1,
         "layer-result": 1,
+        "shared-input-group-result": 1,
     }
     assert result.retired_activation_generations == (old_activation,)
-    assert result.committed_layer_count == 2
-    assert result.rank_sum == 5
-    assert result.quantized_parameters == 18
-    assert result.bit_cost_by_category == {"binary_factor_bits": 30, "scale_bits": 6}
-    assert result.effective_bpw == 2.0
+    assert result.committed_layer_count == 3
+    assert result.rank_sum == 9
+    assert result.quantized_parameters == 33
+    assert result.bit_cost_by_category == {"binary_factor_bits": 42, "scale_bits": 9}
+    assert result.effective_bpw == pytest.approx(51 / 33)
     assert result.block_wall_seconds == 7.0
     assert result.peak_gpu_bytes == 150
     assert result.peak_host_bytes == 200

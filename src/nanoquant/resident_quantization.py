@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import statistics
 import time
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any, cast
 
@@ -28,7 +30,9 @@ from nanoquant.application.device_batches import iter_device_batches
 from nanoquant.application.layers import (
     BlockEditor,
     LayerFreezer,
+    SharedInputGroupFreezer,
     TrainableFactorizedLinear,
+    TrainableSharedInputFactorGroup,
     freeze_block_auxiliary_parameters,
     restore_block_auxiliary_parameters,
 )
@@ -66,11 +70,16 @@ from nanoquant.config.schema import (
     ProfilingLevel,
     RankAllocationConfig,
     RankBoundsConfig,
+    RankResponseCurveConfig,
     RankRetryConfig,
+    ReconstructionImportanceConfig,
+    ReconstructionRankPlanningConfig,
     RetryThresholdConfig,
     RunConfig,
     ScaleFitConfig,
+    SharedInputGroupConfig,
 )
+from nanoquant.domain.factorization import factorize_admm
 from nanoquant.domain.metrics import reconstruction_metrics
 from nanoquant.domain.models import (
     ArtifactRef,
@@ -86,7 +95,9 @@ from nanoquant.domain.models import (
     FrozenModelResult,
     FrozenNanoQuantState,
     FrozenOutlierState,
+    FrozenSharedInputGroupState,
     LayerId,
+    LayerInventory,
     LayerPlan,
     LayerResult,
     ModelInventory,
@@ -94,11 +105,23 @@ from nanoquant.domain.models import (
     OutlierSelectionRequest,
     OutlierSelectionResult,
     QuantizationPlan,
+    ReconstructionRankDecision,
     ScaleFitRequest,
     ScaleFitResult,
+    SharedInputGroupCandidate,
+    SharedInputGroupPlan,
+    SharedInputGroupResult,
+    SourceTensor,
+    TensorId,
     TensorRef,
+    TensorSpec,
 )
 from nanoquant.domain.outliers import reconstruct_with_outliers
+from nanoquant.domain.planning import (
+    RankResponseSegment,
+    ReconstructionAllocationUnit,
+    allocate_reconstruction_rank_budget,
+)
 from nanoquant.domain.profiling import NULL_RECORDER, PhaseRecorder
 from nanoquant.domain.runs import BudgetState, RunManifest, RunStatus
 from nanoquant.domain.scale_fit import reconstruct
@@ -108,10 +131,12 @@ from nanoquant.infrastructure.commits import (
     CommitIdentity,
     commit_block,
     commit_layer,
+    commit_shared_input_group,
     latest_complete_identity,
     load_block_activations,
     load_committed_block,
     load_committed_layer,
+    load_committed_shared_input_group,
     retire_block_activations,
 )
 from nanoquant.infrastructure.device_lease import acquire_device_lease
@@ -143,7 +168,7 @@ from nanoquant.infrastructure.tuning_checkpoint import (
 from nanoquant.ports.event_sink import EventSink
 from nanoquant.ports.model_adapter import ModelAdapter
 
-RESIDENT_ALGORITHM_VERSION = 32
+RESIDENT_ALGORITHM_VERSION = 36
 
 
 @dataclass(frozen=True, slots=True)
@@ -263,7 +288,9 @@ class ResidentQuantizationRequest:
     maximum_rank_layer_patterns: tuple[str, ...] = ()
     layer_budget_multipliers: tuple[LayerRankBudgetConfig, ...] = ()
     rank_retry: RankRetryConfig = _DEFAULT_RESIDENT_RANK_RETRY
+    reconstruction_rank_planning: ReconstructionRankPlanningConfig = ReconstructionRankPlanningConfig()
     layer_order: tuple[str, ...] = ()
+    shared_input_groups: tuple[SharedInputGroupConfig, ...] = ()
     admm: ADMMConfig = ADMMConfig(outer_iterations=1, inner_iterations=1)
     outliers: OutlierConfig = OutlierConfig()
     scale_fit: ScaleFitConfig = ScaleFitConfig(enabled=False)
@@ -290,6 +317,7 @@ class ResidentQuantizationRequest:
     seed: int = 0
     verify_hashes: bool = True
     interrupt_after_layer_commits: int | None = None
+    interrupt_after_rank_probe_commits: int | None = None
     interrupt_after_block_commits: int | None = None
     interrupt_after_factorized_tuning_epoch_commits: int | None = None
     block_forward_batch_size: int = 8
@@ -580,8 +608,7 @@ def _block_loss(
                     if inputs.device.type == "cpu" and device.type == "cuda":
                         recorder.add(
                             "transfer.h2d_bytes",
-                            input_batch.numel() * input_batch.element_size()
-                            + target.numel() * target.element_size(),
+                            input_batch.numel() * input_batch.element_size() + target.numel() * target.element_size(),
                         )
                 with recorder.phase("forward"):
                     prediction = adapter.run_block(block, input_batch, **metadata)
@@ -785,6 +812,63 @@ def _layer_type_multiplier(path: str) -> float:
     return 1.0
 
 
+def _reconstruction_importance_policy(
+    member_layers: tuple[LayerId, ...],
+    importance: ReconstructionImportanceConfig,
+) -> tuple[dict[LayerId, float], frozenset[LayerId], frozenset[int]]:
+    multiplier_matches = {
+        layer: tuple(rule for rule in importance.layer_multipliers if fnmatchcase(layer.path, rule.pattern))
+        for layer in member_layers
+    }
+    ambiguous = {layer: matches for layer, matches in multiplier_matches.items() if len(matches) > 1}
+    if ambiguous:
+        raise ValueError(
+            "multiple reconstruction importance patterns matched logical members: "
+            + ", ".join(f"{layer}={tuple(rule.pattern for rule in matches)!r}" for layer, matches in ambiguous.items())
+        )
+    matched_multiplier_patterns = {matches[0].pattern for matches in multiplier_matches.values() if matches}
+    unmatched_multiplier_patterns = {
+        rule.pattern for rule in importance.layer_multipliers
+    } - matched_multiplier_patterns
+    if unmatched_multiplier_patterns:
+        raise ValueError(
+            "reconstruction importance patterns matched no logical member: "
+            f"{sorted(unmatched_multiplier_patterns)}"
+        )
+    matched_protected_patterns = {
+        pattern
+        for pattern in importance.protected_layer_patterns
+        if any(fnmatchcase(layer.path, pattern) for layer in member_layers)
+    }
+    unmatched_protected_patterns = set(importance.protected_layer_patterns) - matched_protected_patterns
+    if unmatched_protected_patterns:
+        raise ValueError(
+            "reconstruction protected patterns matched no logical member: "
+            f"{sorted(unmatched_protected_patterns)}"
+        )
+    ordered_blocks = sorted({layer.block.index for layer in member_layers})
+    edge_count = min(importance.protected_edge_block_count, len(ordered_blocks))
+    edge_blocks = (
+        frozenset((*ordered_blocks[:edge_count], *ordered_blocks[-edge_count:]))
+        if edge_count
+        else frozenset()
+    )
+    multipliers = {
+        layer: (
+            (multiplier_matches[layer][0].multiplier if multiplier_matches[layer] else 1.0)
+            * (importance.edge_block_multiplier if layer.block.index in edge_blocks else 1.0)
+        )
+        for layer in member_layers
+    }
+    protected = frozenset(
+        layer
+        for layer in member_layers
+        if layer.block.index in edge_blocks
+        or any(fnmatchcase(layer.path, pattern) for pattern in importance.protected_layer_patterns)
+    )
+    return multipliers, protected, edge_blocks
+
+
 def _module_at_path(module: nn.Module, path: str) -> nn.Module:
     current = module
     for part in path.split("."):
@@ -866,6 +950,113 @@ def _rehydrate_trainable_layer(
         outlier_values=frozen.outlier_values,
         outlier_scales=frozen.outlier_scales,
     ).to(device=device, dtype=dtype)
+
+
+def _rehydrate_trainable_group(
+    state: FrozenSharedInputGroupState,
+    tensors: LocalTensorStore,
+    *,
+    device: str,
+    dtype: torch.dtype,
+) -> TrainableSharedInputFactorGroup:
+    frozen = (
+        SharedInputGroupFreezer()
+        .load(
+            state,
+            tensors,
+            device=device,
+            dtype=dtype,
+            backend="factorized",
+        )
+        .owner
+    )
+    return TrainableSharedInputFactorGroup(
+        frozen.left_binary,
+        frozen.right_binary,
+        frozen.scale_pre,
+        frozen.scale_mid,
+        frozen.scale_post,
+        bias=frozen.bias,
+        outlier_indices=frozen.outlier_indices,
+        outlier_values=frozen.outlier_values,
+        outlier_scales=frozen.outlier_scales,
+    ).to(device=device, dtype=dtype)
+
+
+def _materialize_shared_input_plan(
+    group: SharedInputGroupPlan,
+    working_block: nn.Module,
+    tensors: LocalTensorStore,
+    *,
+    device: str,
+) -> tuple[LayerPlan, TensorRef, tuple[TensorRef, ...]]:
+    """Create one transient stacked source/objective without persisting factors."""
+
+    source_values: list[torch.Tensor] = []
+    source_refs: list[TensorRef] = []
+    input_values: list[torch.Tensor] = []
+    output_values: list[torch.Tensor] = []
+    for member, objective in zip(group.members, group.objectives, strict=True):
+        module = _module_at_path(working_block, member.layer.path)
+        weight = getattr(module, "weight", None)
+        if not isinstance(weight, torch.Tensor):
+            raise TypeError(f"shared-input member has no materialized weight: {member.layer.path}")
+        source_values.append(weight.detach().cpu())
+        source_refs.append(tensors.put("source-layer", {"weight": weight.detach().cpu()})["weight"])
+        with (
+            tensors.read(objective.input_importance, device) as input_importance,
+            tensors.read(objective.output_importance, device) as output_importance,
+        ):
+            input_values.append(input_importance.detach().float().cpu())
+            output_values.append(output_importance.detach().float().cpu())
+    canonical_input = input_values[0]
+    for member, value in zip(group.members[1:], input_values[1:], strict=True):
+        left = canonical_input / canonical_input.mean().clamp_min(1e-12)
+        right = value / value.mean().clamp_min(1e-12)
+        if not torch.allclose(left, right, rtol=1e-4, atol=1e-6):
+            raise ValueError(f"shared-input calibration differs for group {group.name}: {member.layer.path}")
+    stacked = torch.cat(source_values, dim=0).contiguous()
+    objective_refs = tensors.put(
+        "shared-input-objective",
+        {
+            "input_importance": canonical_input.contiguous(),
+            "output_importance": torch.cat(output_values, dim=0).contiguous(),
+        },
+    )
+    source_ref = tensors.put("source-shared-input-group", {"weight": stacked})["weight"]
+    pseudo_layer = LayerId(group.block, group.name)
+    objective = replace(
+        group.objectives[0],
+        layer=pseudo_layer,
+        input_importance=objective_refs["input_importance"],
+        output_importance=objective_refs["output_importance"],
+        covariance=None,
+        target_weighted_norm_squared=None,
+    )
+    source = SourceTensor(
+        TensorId(pseudo_layer, "weight"),
+        "+".join(member.weight.source_key for member in group.members),
+        "+".join(sorted({member.weight.shard for member in group.members})),
+        TensorSpec(tuple(stacked.shape), group.members[0].weight.spec.dtype),
+        "sha256:"
+        + hashlib.sha256("|".join(member.weight.content_hash for member in group.members).encode()).hexdigest(),
+    )
+    return (
+        LayerPlan(
+            group.schema_version,
+            pseudo_layer,
+            source,
+            group.rank,
+            group.rank_multiple,
+            group.allocator_cap,
+            objective,
+            group.outliers,
+            group.retry,
+            group.estimated_cost,
+        ),
+        source_ref,
+        tuple(source_refs),
+    )
 
 
 def _run_resident_factorization_attempts(
@@ -1060,7 +1251,9 @@ def _resident_config_hash(request: ResidentQuantizationRequest) -> str:
         "rank_edge_boost": request.rank_edge_boost,
         "maximum_rank_layer_patterns": request.maximum_rank_layer_patterns,
         "layer_budget_multipliers": request.layer_budget_multipliers,
+        "reconstruction_rank_planning": request.reconstruction_rank_planning,
         "layer_order": request.layer_order,
+        "shared_input_groups": request.shared_input_groups,
         "admm": request.admm,
         "outliers": request.outliers,
         "scale_fit": request.scale_fit,
@@ -1092,12 +1285,7 @@ def _resident_config_hash(request: ResidentQuantizationRequest) -> str:
     # A non-default retry policy is new semantic input and must invalidate it.
     if request.rank_retry != _DEFAULT_RESIDENT_RANK_RETRY:
         semantic_config["rank_retry"] = request.rank_retry
-    return (
-        "sha256:"
-        + hashlib.sha256(
-            canonical_json(semantic_config).encode()
-        ).hexdigest()
-    )
+    return "sha256:" + hashlib.sha256(canonical_json(semantic_config).encode()).hexdigest()
 
 
 def _manifest_tensor_identity(value: torch.Tensor | tuple[tuple[int, ...], ...] | None) -> object:
@@ -1248,6 +1436,524 @@ def _legacy_sensitivity_profile(
     return tuple(result)
 
 
+def _resolve_shared_input_groups(
+    adapter: ModelAdapter,
+    inventory: ModelInventory,
+    configured: tuple[SharedInputGroupConfig, ...],
+) -> tuple[SharedInputGroupCandidate, ...]:
+    if not configured:
+        return ()
+    resolved: list[SharedInputGroupCandidate] = []
+    for block in inventory.blocks:
+        candidates = {candidate.name: candidate for candidate in adapter.shared_input_group_candidates(block.block)}
+        for group in configured:
+            candidate = candidates.get(group.name)
+            if candidate is None:
+                raise ValueError(
+                    f"adapter does not declare shared-input group {group.name!r} for block {block.block.index}"
+                )
+            actual_members = tuple(member.path for member in candidate.members)
+            if actual_members != group.members:
+                raise ValueError(
+                    f"configured members differ from adapter topology for {group.name!r}: "
+                    f"{group.members!r} != {actual_members!r}"
+                )
+            resolved.append(candidate)
+    return tuple(resolved)
+
+
+@dataclass(frozen=True, slots=True)
+class _RankProbeEvidence:
+    schema_version: int
+    probe_plan: ArtifactRef
+    unit_id: str
+    block: int
+    name: str
+    members: tuple[LayerId, ...]
+    source_weight_hashes: tuple[str, ...]
+    baseline_rank: int
+    response_curve: RankResponseCurveConfig
+    raw_squared_error: float
+    normalized_squared_error: float
+    relative_frobenius_error: float
+    member_squared_errors: tuple[float, ...]
+    member_normalized_squared_errors: tuple[float, ...]
+    member_sensitivity_energies: tuple[float, ...]
+    member_weight_norms_squared: tuple[float, ...]
+    logical_seed: int
+    wall_seconds: float
+    peak_workspace_bytes: int
+
+
+def _rank_probe_units(
+    plan: QuantizationPlan,
+) -> tuple[tuple[str, LayerPlan | SharedInputGroupPlan], ...]:
+    units: list[tuple[str, LayerPlan | SharedInputGroupPlan]] = []
+    for block in plan.blocks:
+        layers = {layer.layer.path: layer for layer in block.layers}
+        groups = {group.name: group for group in block.shared_input_groups}
+        schedule = block.unit_order or (*groups, *layers)
+        for name in schedule:
+            unit = groups.get(name) or layers.get(name)
+            if unit is None:
+                raise ValueError(f"rank probe schedule refers to an absent unit: {block.block.index}:{name}")
+            units.append((f"{block.block.index}:{name}", unit))
+    return tuple(units)
+
+
+def _matched_rank_response_curve(
+    name: str,
+    curves: tuple[RankResponseCurveConfig, ...],
+) -> RankResponseCurveConfig:
+    matches = tuple(curve for curve in curves if fnmatchcase(name, curve.unit_pattern))
+    if len(matches) != 1:
+        raise ValueError(f"quantization unit {name!r} must match exactly one reconstruction response curve")
+    return matches[0]
+
+
+def _persist_rank_probe_plan(
+    request: ResidentQuantizationRequest,
+    baseline_plan: QuantizationPlan,
+    artifacts: LocalArtifactStore,
+) -> ArtifactRef:
+    reconstruction = request.reconstruction_rank_planning
+    payload = {
+        "schema_version": 1,
+        "resident_config_hash": _resident_config_hash(request),
+        "objective_mode": reconstruction.objective_mode,
+        "probe_admm": to_dict(reconstruction.probe_admm),
+        "response_curves": to_dict(reconstruction.response_curves),
+        "response_profile_provenance": reconstruction.response_profile_provenance,
+        "baseline_plan": to_dict(baseline_plan),
+    }
+    with artifacts.begin_write(ArtifactTypes.RANK_PROBE_PLAN) as writer:
+        (writer.path / "rank-probe-plan.json").write_text(
+            json.dumps(payload, sort_keys=True, indent=2),
+            encoding="utf-8",
+        )
+        descriptor = writer.commit()
+    return ArtifactRef(ArtifactTypes.RANK_PROBE_PLAN, descriptor.artifact_id, 1)
+
+
+def _rank_probe_journal_path(output: Path) -> Path:
+    return output / "state" / "rank-probe-journal.jsonl"
+
+
+def _load_rank_probe_results(
+    request: ResidentQuantizationRequest,
+    probe_plan: ArtifactRef,
+    artifacts: LocalArtifactStore,
+) -> dict[str, tuple[ArtifactRef, _RankProbeEvidence]]:
+    path = _rank_probe_journal_path(request.output)
+    if not path.exists():
+        return {}
+    results: dict[str, tuple[ArtifactRef, _RankProbeEvidence]] = {}
+    for sequence, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        try:
+            record = json.loads(line)
+            if record["sequence"] != sequence:
+                raise ValueError("sequence is not contiguous")
+            if record["probe_plan_artifact"] != probe_plan.artifact_id:
+                continue
+            reference = ArtifactRef(
+                ArtifactTypes.RANK_PROBE_RESULT,
+                str(record["artifact_id"]),
+                1,
+            )
+            descriptor = artifacts.validate(reference.artifact_id)
+            if descriptor.artifact_type != ArtifactTypes.RANK_PROBE_RESULT:
+                raise ValueError("artifact type differs")
+            payload = json.loads(
+                (artifacts.path_for(reference.artifact_id) / "rank-probe-result.json").read_text(encoding="utf-8")
+            )
+            evidence = from_dict(_RankProbeEvidence, payload, path="rank_probe_result")
+            if evidence.probe_plan != probe_plan or evidence.unit_id != record["unit_id"]:
+                raise ValueError("result identity differs")
+            prior = results.get(evidence.unit_id)
+            if prior is not None and prior[0] != reference:
+                raise ValueError("duplicate rank probe results differ")
+            results[evidence.unit_id] = (reference, evidence)
+        except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ValueError(f"rank probe journal is invalid at sequence {sequence}") from exc
+    return results
+
+
+def _commit_rank_probe_result(
+    request: ResidentQuantizationRequest,
+    evidence: _RankProbeEvidence,
+    artifacts: LocalArtifactStore,
+) -> ArtifactRef:
+    with artifacts.begin_write(ArtifactTypes.RANK_PROBE_RESULT) as writer:
+        (writer.path / "rank-probe-result.json").write_text(
+            json.dumps(to_dict(evidence), sort_keys=True, indent=2),
+            encoding="utf-8",
+        )
+        descriptor = writer.commit()
+    reference = ArtifactRef(ArtifactTypes.RANK_PROBE_RESULT, descriptor.artifact_id, 1)
+    journal_path = _rank_probe_journal_path(request.output)
+    journal_path.parent.mkdir(parents=True, exist_ok=True)
+    sequence = 1
+    if journal_path.exists():
+        sequence += len(journal_path.read_text(encoding="utf-8").splitlines())
+    with journal_path.open("a", encoding="utf-8", newline="\n") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "sequence": sequence,
+                    "probe_plan_artifact": evidence.probe_plan.artifact_id,
+                    "unit_id": evidence.unit_id,
+                    "artifact_id": reference.artifact_id,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n"
+        )
+        handle.flush()
+    return reference
+
+
+def _run_reconstruction_rank_probes(
+    request: ResidentQuantizationRequest,
+    baseline_plan: QuantizationPlan,
+    probe_plan: ArtifactRef,
+    source: SafetensorsModelSource,
+    calibration: PersistedCalibration,
+    tensors: LocalTensorStore,
+    artifacts: LocalArtifactStore,
+    events: EventSink,
+    recorder: PhaseRecorder,
+) -> tuple[ArtifactRef, tuple[ReconstructionRankDecision, ...]]:
+    reconstruction = request.reconstruction_rank_planning
+    probe_admm = reconstruction.probe_admm
+    if probe_admm is None:
+        raise ValueError("reconstruction-aware planning requires resolved probe ADMM settings")
+    calibration_by_layer = {item.layer: item for item in calibration.stats.layers}
+    units = _rank_probe_units(baseline_plan)
+    persisted = _load_rank_probe_results(request, probe_plan, artifacts)
+    committed_this_execution = 0
+    for unit_id, unit in units:
+        member_inventories = (
+            unit.members
+            if isinstance(unit, SharedInputGroupPlan)
+            else tuple(layer for block in baseline_plan.blocks for layer in block.layers if layer.layer == unit.layer)
+        )
+        if unit_id in persisted:
+            evidence = persisted[unit_id][1]
+            expected_hashes = tuple(
+                member.weight.content_hash if isinstance(member, LayerInventory) else member.source_weight.content_hash
+                for member in member_inventories
+            )
+            expected_members = tuple(member.layer for member in member_inventories)
+            if (
+                evidence.members != expected_members
+                or evidence.source_weight_hashes != expected_hashes
+                or evidence.baseline_rank != unit.rank
+            ):
+                raise ValueError(f"persisted rank probe differs from current unit: {unit_id}")
+            cast(Any, events).emit(
+                "resident-quantization",
+                "info",
+                "rank_probe.unit_reused",
+                unit_id=unit_id,
+                artifact_id=persisted[unit_id][0].artifact_id,
+            )
+            continue
+        curve = _matched_rank_response_curve(
+            unit.name if isinstance(unit, SharedInputGroupPlan) else unit.layer.path, reconstruction.response_curves
+        )
+        member_layers = tuple(member.layer for member in member_inventories)
+        seed = logical_seed(
+            request.seed,
+            "rank-reconstruction-probe",
+            unit.block.index if isinstance(unit, SharedInputGroupPlan) else unit.layer.block.index,
+            unit.name if isinstance(unit, SharedInputGroupPlan) else unit.layer.path,
+            0,
+        )
+        cast(Any, events).emit(
+            "resident-quantization",
+            "info",
+            "rank_probe.unit_started",
+            unit_id=unit_id,
+            members=tuple(f"{layer.block.index}:{layer.path}" for layer in member_layers),
+            rank=unit.rank,
+        )
+        started = time.perf_counter()
+        if request.device.startswith("cuda"):
+            torch.cuda.reset_peak_memory_stats(request.device)
+        with ExitStack() as stack:
+            weights = tuple(
+                stack.enter_context(
+                    source.read_tensor(
+                        member.weight if isinstance(member, LayerInventory) else member.source_weight,
+                        device=request.device,
+                    )
+                )
+                for member in member_inventories
+            )
+            input_importances = tuple(
+                stack.enter_context(tensors.read(calibration_by_layer[layer].input_importance, request.device))
+                for layer in member_layers
+            )
+            output_importances = tuple(
+                stack.enter_context(tensors.read(calibration_by_layer[layer].output_importance, request.device))
+                for layer in member_layers
+            )
+            stacked = weights[0] if len(weights) == 1 else torch.cat(weights, dim=0)
+            generator = torch.Generator(device=request.device).manual_seed(seed)
+            with recorder.phase("rank_probe", unit=unit_id):
+                factorized = factorize_admm(
+                    stacked,
+                    torch.ones(stacked.shape[1], device=stacked.device, dtype=torch.float32),
+                    torch.ones(stacked.shape[0], device=stacked.device, dtype=torch.float32),
+                    unit.rank,
+                    generator,
+                    outer_iterations=probe_admm.outer_iterations,
+                    inner_iterations=probe_admm.inner_iterations,
+                    regularization=probe_admm.regularization,
+                    penalty_schedule=probe_admm.penalty_schedule,
+                    convergence_check_interval=probe_admm.convergence_check_interval,
+                    early_stop_tolerance=probe_admm.early_stop_tolerance,
+                    transpose_wide=probe_admm.transpose_wide,
+                )
+            difference = stacked.float() - factorized.reconstruction.float()
+            raw_error = float(difference.square().sum())
+            target_norm = float(stacked.float().square().sum())
+            member_errors: list[float] = []
+            member_normalized: list[float] = []
+            member_energies: list[float] = []
+            member_norms: list[float] = []
+            row = 0
+            for weight, input_importance, output_importance in zip(
+                weights,
+                input_importances,
+                output_importances,
+                strict=True,
+            ):
+                rows = weight.shape[0]
+                member_difference = difference[row : row + rows]
+                member_error = float(member_difference.square().sum())
+                member_norm = float(weight.float().square().sum())
+                member_errors.append(member_error)
+                member_normalized.append(member_error / max(member_norm, 1e-30))
+                member_norms.append(member_norm)
+                member_energies.append(
+                    float(
+                        (
+                            weight.float().square()
+                            * output_importance.float()[:, None].clamp_min(1e-12)
+                            * input_importance.float()[None, :].clamp_min(1e-12)
+                        )
+                        .mean()
+                        .sqrt()
+                    )
+                )
+                row += rows
+            peak = int(torch.cuda.max_memory_allocated(request.device)) if request.device.startswith("cuda") else 0
+            evidence = _RankProbeEvidence(
+                1,
+                probe_plan,
+                unit_id,
+                member_layers[0].block.index,
+                unit.name if isinstance(unit, SharedInputGroupPlan) else unit.layer.path,
+                member_layers,
+                tuple(
+                    member.weight.content_hash
+                    if isinstance(member, LayerInventory)
+                    else member.source_weight.content_hash
+                    for member in member_inventories
+                ),
+                unit.rank,
+                curve,
+                raw_error,
+                raw_error / max(target_norm, 1e-30),
+                math.sqrt(raw_error / max(target_norm, 1e-30)),
+                tuple(member_errors),
+                tuple(member_normalized),
+                tuple(member_energies),
+                tuple(member_norms),
+                seed,
+                time.perf_counter() - started,
+                peak,
+            )
+        reference = _commit_rank_probe_result(request, evidence, artifacts)
+        persisted[unit_id] = (reference, evidence)
+        committed_this_execution += 1
+        cast(Any, events).emit(
+            "resident-quantization",
+            "info",
+            "rank_probe.unit_completed",
+            unit_id=unit_id,
+            artifact_id=reference.artifact_id,
+            rank=unit.rank,
+            relative_frobenius_error=evidence.relative_frobenius_error,
+            wall_seconds=evidence.wall_seconds,
+            peak_workspace_bytes=evidence.peak_workspace_bytes,
+        )
+        del factorized
+        if request.device.startswith("cuda"):
+            torch.cuda.empty_cache()
+        if (
+            request.interrupt_after_rank_probe_commits is not None
+            and committed_this_execution >= request.interrupt_after_rank_probe_commits
+        ):
+            raise InterruptedError(
+                f"injected interruption after {committed_this_execution} reconstruction rank probe commits"
+            )
+
+    if set(persisted) != {unit_id for unit_id, _unit in units}:
+        raise ValueError("rank probe profile does not cover every quantization unit")
+    member_entries: list[tuple[LayerId, float]] = []
+    for unit_id, _unit in units:
+        evidence = persisted[unit_id][1]
+        member_entries.extend(zip(evidence.members, evidence.member_sensitivity_energies, strict=True))
+    block_medians = {
+        block: max(statistics.median(energy for layer, energy in member_entries if layer.block.index == block), 1e-12)
+        for block in {layer.block.index for layer, _energy in member_entries}
+    }
+    relative = {layer: energy / block_medians[layer.block.index] for layer, energy in member_entries}
+    type_medians = {
+        path: max(statistics.median(value for layer, value in relative.items() if layer.path == path), 1e-12)
+        for path in {layer.path for layer in relative}
+    }
+    importance = reconstruction.importance
+    member_layers = tuple(relative)
+    importance_multiplier, architecture_protected, edge_blocks = _reconstruction_importance_policy(
+        member_layers, importance
+    )
+    member_sensitivity = {
+        layer: max(value / type_medians[layer.path], 1e-12) * importance_multiplier[layer]
+        for layer, value in relative.items()
+    }
+    ordered_scores = sorted(member_sensitivity.values())
+    protected_index = min(
+        len(ordered_scores) - 1,
+        math.floor(reconstruction.protected_sensitivity_quantile * len(ordered_scores)),
+    )
+    protected_threshold = ordered_scores[protected_index]
+    allocation_units: list[ReconstructionAllocationUnit] = []
+    protected_by_unit: dict[str, tuple[LayerId, ...]] = {}
+    sensitivity_by_unit: dict[str, float] = {}
+    for unit_id, unit in units:
+        evidence = persisted[unit_id][1]
+        total_norm = sum(evidence.member_weight_norms_squared)
+        unit_sensitivity = math.exp(
+            sum(
+                norm * math.log(member_sensitivity[layer])
+                for layer, norm in zip(
+                    evidence.members,
+                    evidence.member_weight_norms_squared,
+                    strict=True,
+                )
+            )
+            / max(total_norm, 1e-30)
+        )
+        protected_members = tuple(
+            layer
+            for layer in evidence.members
+            if (
+                member_sensitivity[layer] >= protected_threshold
+                or layer in architecture_protected
+            )
+        )
+        protected_by_unit[unit_id] = protected_members
+        sensitivity_by_unit[unit_id] = unit_sensitivity
+        out_features = unit.out_features if isinstance(unit, SharedInputGroupPlan) else unit.source_weight.spec.shape[0]
+        in_features = unit.in_features if isinstance(unit, SharedInputGroupPlan) else unit.source_weight.spec.shape[1]
+        fixed_bits = 0
+        if unit.outliers.charge_to_budget:
+            fixed_bits = unit.estimated_cost.outlier_value_bits + unit.estimated_cost.outlier_index_bits
+        allocation_units.append(
+            ReconstructionAllocationUnit(
+                unit_id,
+                out_features,
+                in_features,
+                evidence.baseline_rank,
+                evidence.raw_squared_error,
+                unit_sensitivity,
+                bool(protected_members),
+                evidence.response_curve.calibrated_rank_floor_fraction,
+                evidence.response_curve.calibrated_rank_ceiling_fraction,
+                tuple(
+                    RankResponseSegment(segment.maximum_rank_fraction, segment.beta_per_rank)
+                    for segment in evidence.response_curve.segments
+                ),
+                fixed_bits,
+            )
+        )
+    original_elements = sum(
+        math.prod(layer.source_weight.spec.shape) for block in baseline_plan.blocks for layer in block.layers
+    ) + sum(
+        member.in_features * member.out_features
+        for block in baseline_plan.blocks
+        for group in block.shared_input_groups
+        for member in group.members
+    )
+    allocated = allocate_reconstruction_rank_budget(
+        tuple(allocation_units),
+        math.floor(original_elements * request.target_bpw),
+        multiple=request.rank_multiple,
+        floor_fraction=request.rank_floor_fraction,
+        ceiling_fraction=request.rank_ceiling_fraction,
+        sensitivity_strength=reconstruction.sensitivity_strength,
+        protected_rank_floor_fraction=reconstruction.protected_rank_floor_fraction,
+        target_protected_error_reduction_fraction=(reconstruction.target_protected_error_reduction_fraction),
+    )
+    allocation_by_unit = {decision.unit_id: decision for decision in allocated.decisions}
+    decisions = tuple(
+        ReconstructionRankDecision(
+            unit_id,
+            persisted[unit_id][1].members,
+            allocation_by_unit[unit_id].baseline_rank,
+            allocation_by_unit[unit_id].planned_rank,
+            allocation_by_unit[unit_id].baseline_squared_error,
+            allocation_by_unit[unit_id].predicted_squared_error,
+            sensitivity_by_unit[unit_id],
+            protected_by_unit[unit_id],
+        )
+        for unit_id, _unit in units
+    )
+    profile_payload = {
+        "schema_version": 1,
+        "producer": {"name": "reconstruction-rank-planner", "version": "1"},
+        "probe_plan": to_dict(probe_plan),
+        "unit_results": [to_dict(persisted[unit_id][0]) for unit_id, _unit in units],
+        "decisions": to_dict(decisions),
+        "allocation": {
+            "spent_bits": allocated.spent_bits,
+            "remaining_bits": allocated.remaining_bits,
+            "protected_baseline_objective": allocated.protected_baseline_objective,
+            "protected_planned_objective": allocated.protected_planned_objective,
+        },
+        "importance": {
+            "policy": to_dict(importance),
+            "edge_blocks": sorted(edge_blocks),
+            "member_multipliers": {
+                f"{layer.block.index}:{layer.path}": importance_multiplier[layer] for layer in member_layers
+            },
+        },
+    }
+    with artifacts.begin_write(ArtifactTypes.RECONSTRUCTION_RANK_PROFILE) as writer:
+        (writer.path / "reconstruction-rank-profile.json").write_text(
+            json.dumps(profile_payload, sort_keys=True, indent=2),
+            encoding="utf-8",
+        )
+        descriptor = writer.commit()
+    profile = ArtifactRef(ArtifactTypes.RECONSTRUCTION_RANK_PROFILE, descriptor.artifact_id, 1)
+    cast(Any, events).emit(
+        "resident-quantization",
+        "info",
+        "rank_probe.profile_committed",
+        artifact_id=profile.artifact_id,
+        unit_count=len(units),
+        spent_bits=allocated.spent_bits,
+        remaining_bits=allocated.remaining_bits,
+        protected_baseline_objective=allocated.protected_baseline_objective,
+        protected_planned_objective=allocated.protected_planned_objective,
+    )
+    return profile, decisions
+
+
 def _active_preprocessing_path(output: Path) -> Path:
     return output / "state" / "preprocessing.json"
 
@@ -1374,9 +2080,7 @@ def _load_precomputed_preprocessing(
         return None
     if any(reference is None for reference in selected_references):
         raise ValueError("precomputed calibration, objectives, and plan must be supplied together")
-    calibration_ref, objectives_ref, plan_ref = cast(
-        tuple[ArtifactRef, ArtifactRef, ArtifactRef], selected_references
-    )
+    calibration_ref, objectives_ref, plan_ref = cast(tuple[ArtifactRef, ArtifactRef, ArtifactRef], selected_references)
     for reference in selected_references:
         artifacts.validate(cast(ArtifactRef, reference).artifact_id)
     calibration_payload = json.loads(
@@ -1397,6 +2101,33 @@ def _load_precomputed_preprocessing(
     )
     plan_payload = json.loads((artifacts.path_for(plan_ref.artifact_id) / "plan.json").read_text(encoding="utf-8"))
     persisted_plan = PersistedPlan(plan_ref, from_dict(QuantizationPlan, plan_payload, path="plan"))
+    profile_reference = persisted_plan.plan.reconstruction_profile
+    if request.allocation_strategy is AllocationStrategy.RECONSTRUCTION_AWARE and profile_reference is None:
+        raise ValueError("reconstruction-aware precomputed plan has no rank profile")
+    if profile_reference is not None:
+        descriptor = artifacts.validate(profile_reference.artifact_id)
+        if descriptor.artifact_type != ArtifactTypes.RECONSTRUCTION_RANK_PROFILE:
+            raise ValueError("reconstruction rank profile has the wrong artifact type")
+        profile_payload = json.loads(
+            (artifacts.path_for(profile_reference.artifact_id) / "reconstruction-rank-profile.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        probe_plan_payload = profile_payload.get("probe_plan")
+        unit_results_payload = profile_payload.get("unit_results")
+        if not isinstance(probe_plan_payload, dict) or not isinstance(unit_results_payload, list):
+            raise ValueError("reconstruction rank profile is malformed")
+        probe_plan_reference = from_dict(ArtifactRef, probe_plan_payload, path="profile.probe_plan")
+        probe_descriptor = artifacts.validate(probe_plan_reference.artifact_id)
+        if probe_descriptor.artifact_type != ArtifactTypes.RANK_PROBE_PLAN:
+            raise ValueError("rank probe plan has the wrong artifact type")
+        for index, value in enumerate(unit_results_payload):
+            if not isinstance(value, dict):
+                raise ValueError("rank probe result reference is malformed")
+            result_reference = from_dict(ArtifactRef, value, path=f"profile.unit_results[{index}]")
+            result_descriptor = artifacts.validate(result_reference.artifact_id)
+            if result_descriptor.artifact_type != ArtifactTypes.RANK_PROBE_RESULT:
+                raise ValueError("rank probe result has the wrong artifact type")
     if calibration.stats.model != inventory.model or calibration.stats.dataset != dataset:
         raise ValueError("precomputed calibration identity does not match the requested model/dataset")
     if calibration.stats.method != request.calibration_method or calibration.stats.total_tokens != total_tokens:
@@ -1593,6 +2324,7 @@ class _ResidentResumeState:
     completed_block_indexes: set[int]
     layer_container: nn.ModuleList
     partial_layer_records: dict[tuple[int, str | None], JournalRecord]
+    partial_group_records: dict[tuple[int, str | None], JournalRecord]
 
 
 @dataclass(frozen=True, slots=True)
@@ -1742,8 +2474,12 @@ def _restore_committed_state(
     if request.activation_retention == "rolling":
         for _reference, old_block in committed_blocks[:-1]:
             retire_block_activations(old_block, artifacts)
-    accepted_bits = sum(layer.actual_bit_cost.total for _, block in committed_blocks for layer in block.layers)
-    retry_bits_spent = sum(layer.extra_retry_bits for _, block in committed_blocks for layer in block.layers)
+    accepted_bits = sum(layer.actual_bit_cost.total for _, block in committed_blocks for layer in block.layers) + sum(
+        group.actual_bit_cost.total for _, block in committed_blocks for group in block.shared_input_groups
+    )
+    retry_bits_spent = sum(layer.extra_retry_bits for _, block in committed_blocks for layer in block.layers) + sum(
+        group.extra_retry_bits for _, block in committed_blocks for group in block.shared_input_groups
+    )
     budget = BudgetState(plan.planned_cost.total, accepted_bits, retry_bits_spent)
     with _logged_operation(
         events,
@@ -1781,6 +2517,15 @@ def _restore_committed_state(
                                 state.layer.path,
                                 frozen.module,
                             )
+                        for group_state in completed_block.frozen_state.shared_input_groups:
+                            frozen_group = SharedInputGroupFreezer().load(
+                                group_state,
+                                tensors,
+                                device=request.device,
+                                dtype=compressed_inputs.dtype,
+                                backend="factorized",
+                            )
+                            BlockEditor().install_frozen_group(restored_block, frozen_group)
                         restore_block_auxiliary_parameters(
                             restored_block,
                             completed_block.frozen_state.auxiliary_parameters,
@@ -1805,6 +2550,11 @@ def _restore_committed_state(
         for record in discovered_records
         if record.kind == "layer" and record.block not in completed_block_indexes
     }
+    partial_group_records = {
+        (record.block, record.layer): record
+        for record in discovered_records
+        if record.kind == "group" and record.block not in completed_block_indexes
+    }
     return _ResidentResumeState(
         config_hash,
         identity,
@@ -1817,6 +2567,7 @@ def _restore_committed_state(
         completed_block_indexes,
         layer_container,
         partial_layer_records,
+        partial_group_records,
     )
 
 
@@ -1846,7 +2597,8 @@ def _process_resident_block(
         "info",
         "block.started",
         block=block_index,
-        layers=len(block_plan.layers),
+        layers=len(block_plan.layer_order),
+        factor_owners=len(block_plan.layers) + len(block_plan.shared_input_groups),
         completed_blocks=len(completed_block_indexes),
     )
 
@@ -1855,9 +2607,7 @@ def _process_resident_block(
 
     with _logged_operation(events, "block_prepare", block=block_index, device=request.device):
         with _profile_block_phase(recorder, block_index, "prepare"):
-            working_block = environment.adapter.load_block(
-                environment.source, block_plan.block, request.device
-            )
+            working_block = environment.adapter.load_block(environment.source, block_plan.block, request.device)
             working_block.eval()
     with _logged_operation(
         events,
@@ -2014,9 +2764,7 @@ def _run_resident_quantization_impl(
                     checkpoint.tokenizer_hash,
                     "raw-token-ids-v1",
                 )
-                preprocessing_references, preprocessing_source = _resolve_preprocessing_references(
-                    request
-                )
+                preprocessing_references, preprocessing_source = _resolve_preprocessing_references(request)
                 preprocessed = _load_precomputed_preprocessing(
                     request,
                     artifacts,
@@ -2041,12 +2789,8 @@ def _run_resident_quantization_impl(
                 key = f"block.{block_inventory.block.index}.{layer.path}"
                 causal_layers.append((key, module))
                 causal_ids[key] = layer
-        causal_batch_count = (
-            tokens.shape[0] + request.calibration_batch_size - 1
-        ) // request.calibration_batch_size
-        causal_progress_total = causal_batch_count * (
-            2 if request.calibration_method == "two_phase_fisher" else 1
-        )
+        causal_batch_count = (tokens.shape[0] + request.calibration_batch_size - 1) // request.calibration_batch_size
+        causal_progress_total = causal_batch_count * (2 if request.calibration_method == "two_phase_fisher" else 1)
         cast(Any, events).emit(
             "resident-quantization",
             "info",
@@ -2260,7 +3004,9 @@ def _run_resident_quantization_impl(
                 edge_block_boost=request.rank_edge_boost,
             ),
             retry=request.rank_retry,
+            reconstruction=request.reconstruction_rank_planning,
         )
+        resolved_groups = _resolve_shared_input_groups(adapter, inventory, request.shared_input_groups)
         with _logged_operation(
             events,
             "rank_planning",
@@ -2272,6 +3018,52 @@ def _run_resident_quantization_impl(
         ):
             with recorder.phase("plan"):
                 with recorder.phase("ranks"):
+                    reconstruction_profile = None
+                    reconstruction_decisions: tuple[ReconstructionRankDecision, ...] = ()
+                    if request.allocation_strategy is AllocationStrategy.RECONSTRUCTION_AWARE:
+                        baseline_allocation = replace(
+                            allocation,
+                            strategy=AllocationStrategy.UNIFORM,
+                            maximum_rank_layer_patterns=(),
+                            layer_budget_multipliers=(),
+                            retry=replace(allocation.retry, enabled=False),
+                            reconstruction=ReconstructionRankPlanningConfig(),
+                        )
+                        baseline_plan = build_quantization_plan(
+                            PlanningRequest(
+                                inventory,
+                                calibration.stats,
+                                calibration.reference,
+                                objectives.objectives,
+                                baseline_allocation,
+                                request.outliers,
+                                (),
+                                resolved_groups,
+                            )
+                        )
+                        probe_plan = _persist_rank_probe_plan(
+                            request,
+                            baseline_plan,
+                            artifacts,
+                        )
+                        cast(Any, events).emit(
+                            "resident-quantization",
+                            "info",
+                            "rank_probe.plan_committed",
+                            artifact_id=probe_plan.artifact_id,
+                            unit_count=len(_rank_probe_units(baseline_plan)),
+                        )
+                        reconstruction_profile, reconstruction_decisions = _run_reconstruction_rank_probes(
+                            request,
+                            baseline_plan,
+                            probe_plan,
+                            source,
+                            calibration,
+                            tensors,
+                            artifacts,
+                            events,
+                            recorder,
+                        )
                     plan = build_quantization_plan(
                         PlanningRequest(
                             inventory,
@@ -2281,6 +3073,9 @@ def _run_resident_quantization_impl(
                             allocation,
                             request.outliers,
                             sensitivity_profile,
+                            resolved_groups,
+                            reconstruction_profile,
+                            reconstruction_decisions,
                         )
                     )
                     persisted_plan = persist_plan(plan, artifacts)
@@ -2328,6 +3123,7 @@ def _run_resident_quantization_impl(
     completed_block_indexes = resume.completed_block_indexes
     layer_container = resume.layer_container
     partial_layer_records = resume.partial_layer_records
+    partial_group_records = resume.partial_group_records
     completed_wall_seconds = sum(block.wall_seconds for _reference, block in committed_blocks)
     cast(Any, events).emit(
         "resident-quantization",
@@ -2336,30 +3132,58 @@ def _run_resident_quantization_impl(
         total_blocks=len(plan.blocks),
         completed_blocks=len(completed_block_indexes),
         completed_wall_seconds=completed_wall_seconds,
-        mean_block_seconds=(
-            completed_wall_seconds / len(committed_blocks) if committed_blocks else None
-        ),
+        mean_block_seconds=(completed_wall_seconds / len(committed_blocks) if committed_blocks else None),
     )
     live_layers = {
         (layer.layer.block.index, layer.layer.path): layer
         for _reference, block in committed_blocks
         for layer in block.layers
     }
+    live_groups = {
+        (group.block.index, group.name): group
+        for _reference, block in committed_blocks
+        for group in block.shared_input_groups
+    }
     for (partial_block, partial_path), partial_record in partial_layer_records.items():
         if partial_path is None:
             raise ValueError("partial layer journal record is missing its layer path")
-        partial = load_committed_layer(
+        partial_layer = load_committed_layer(
             ArtifactRef(ArtifactTypes.LAYER_RESULT, partial_record.artifact_id, 1),
             artifacts,
             identity,
         ).result
-        live_layers[(partial_block, partial_path)] = partial
+        live_layers[(partial_block, partial_path)] = partial_layer
+    for (partial_block, partial_name), partial_record in partial_group_records.items():
+        if partial_name is None:
+            raise ValueError("partial shared-input group journal record is missing its name")
+        partial_group = load_committed_shared_input_group(
+            ArtifactRef(
+                ArtifactTypes.SHARED_INPUT_GROUP_RESULT,
+                partial_record.artifact_id,
+                1,
+            ),
+            artifacts,
+            identity,
+        ).result
+        live_groups[(partial_block, partial_name)] = partial_group
     live_blocks = {block.block.index: block for _reference, block in committed_blocks}
-    live_layer_order = tuple(layer.layer.path for layer in plan.blocks[0].layers) if plan.blocks else ()
+    live_layer_order: tuple[str, ...] = ()
+    if plan.blocks:
+        first_block_groups = {group.name: group for group in plan.blocks[0].shared_input_groups}
+        ordered_paths: list[str] = []
+        unit_order = plan.blocks[0].unit_order or tuple(layer.layer.path for layer in plan.blocks[0].layers)
+        for unit in unit_order:
+            group = first_block_groups.get(unit)
+            if group is None:
+                ordered_paths.append(unit)
+            else:
+                ordered_paths.extend(member.layer.path for member in group.members)
+        live_layer_order = tuple(ordered_paths)
     update_live_weight_error_report(
         request.output,
         tuple(live_layers.values()),
         tuple(live_blocks.values()),
+        groups=tuple(live_groups.values()),
         expected_blocks=len(plan.blocks),
         layer_order=live_layer_order,
     )
@@ -2416,8 +3240,11 @@ def _run_resident_quantization_impl(
         if block_target_weighted_mean_square is None:
             raise AssertionError("resident block is missing teacher activation power")
         layer_results: list[LayerResult] = []
-        frozen_states = []
+        group_results: list[SharedInputGroupResult] = []
+        frozen_states: list[FrozenNanoQuantState] = []
+        frozen_group_states: list[FrozenSharedInputGroupState] = []
         quantization_targets: dict[str, TensorRef] = {}
+        group_member_targets: dict[str, tuple[TensorRef, ...]] = {}
         tuning_recorder = micro_recorder
         del block_work
         # Admit caches only after the active source/working block and its
@@ -2448,38 +3275,30 @@ def _run_resident_quantization_impl(
                 required=request.activation_gpu_cache is ActivationGpuCacheMode.BOTH,
             )
 
-        for layer_position, layer_plan in enumerate(block_plan.layers):
-            layer_started = time.perf_counter()
-            nonfactorized_epochs = _nonfactorized_epochs(request, layer_position)
-            events.emit(
-                "resident-quantization",
-                "info",
-                "layer.started",
-                block=block_index,
-                layer=layer_plan.layer.path,
-                position=layer_position,
-                planned_rank=layer_plan.rank,
-                outlier_columns=layer_plan.outliers.count,
-                nonfactorized_tuning_epochs=nonfactorized_epochs,
-                factorized_tuning_epochs=request.factorized_tuning_epochs,
-            )
-            if nonfactorized_epochs > 0:
-                with _logged_operation(
-                    events,
-                    "nonfactorized_tuning",
+        unit_schedule = block_plan.unit_order or (
+            tuple(group.name for group in block_plan.shared_input_groups)
+            + tuple(layer.layer.path for layer in block_plan.layers)
+        )
+        for unit_position, unit_name in enumerate(unit_schedule):
+            for group_plan in block_plan.shared_input_groups:
+                if group_plan.name != unit_name:
+                    continue
+                group_started = time.perf_counter()
+                group_position = unit_position
+                nonfactorized_epochs = _nonfactorized_epochs(request, group_position)
+                events.emit(
+                    "resident-quantization",
+                    "info",
+                    "shared_input_group.started",
                     block=block_index,
-                    layer=layer_plan.layer.path,
-                    epochs=nonfactorized_epochs,
-                    batch_size=request.nonfactorized_tuning_batch_size,
-                    microbatch_size=request.tuning_microbatch_size,
-                    learning_rate=request.nonfactorized_tuning_learning_rate,
-                ):
-                    with _profile_layer_phase(
-                        recorder,
-                        block_index,
-                        layer_plan.layer.path,
-                        "nonfactorized_tuning",
-                    ):
+                    group=group_plan.name,
+                    members=tuple(member.layer.path for member in group_plan.members),
+                    position=group_position,
+                    planned_rank=group_plan.rank,
+                    outlier_columns=group_plan.outliers.count,
+                )
+                if nonfactorized_epochs > 0:
+                    with _profile_layer_phase(recorder, block_index, group_plan.name, "nonfactorized_tuning"):
                         tune_non_factorized(
                             working_block,
                             TuningRequest(
@@ -2488,72 +3307,54 @@ def _run_resident_quantization_impl(
                                 nonfactorized_epochs,
                                 request.nonfactorized_tuning_batch_size,
                                 request.nonfactorized_tuning_learning_rate,
-                                early_stop_relative_tolerance=(
-                                    request.nonfactorized_tuning_early_stop_relative_tolerance
-                                ),
+                                early_stop_relative_tolerance=request.nonfactorized_tuning_early_stop_relative_tolerance,
                                 output_importance=block_output_importance,
-                                seed=_tuning_seed(
-                                    request,
-                                    "nonfactorized-tuning",
-                                    block_index,
-                                    layer_plan.layer.path,
-                                ),
+                                seed=_tuning_seed(request, "nonfactorized-tuning", block_index, group_plan.name),
                                 microbatch_size=request.tuning_microbatch_size,
-                                epoch_observer=_epoch_cooldown_observer(
-                                    request.nonfactorized_tuning_epoch_cooldown_seconds,
-                                    events,
-                                    tuning_kind="nonfactorized",
-                                    block=block_index,
-                                    layer=layer_plan.layer.path,
-                                    target_weighted_mean_square=block_target_weighted_mean_square,
-                                ),
                                 restore_best_state=request.restore_best_tuning_state,
                                 epoch_loss_mode=request.tuning_epoch_loss_mode,
                             ),
                             tuning_forward,
                             tuning_recorder,
                         )
-            with _profile_layer_phase(recorder, block_index, layer_plan.layer.path, "materialize"):
-                source_linear = _module_at_path(working_block, layer_plan.layer.path)
-                source_weight = getattr(source_linear, "weight", None)
-                if not isinstance(source_weight, torch.Tensor):
-                    raise TypeError(f"quantization target has no materialized weight: {layer_plan.layer.path}")
-                source_ref = tensors.put("source-layer", {"weight": source_weight.detach().cpu()})["weight"]
-            quantization_targets[layer_plan.layer.path] = source_ref
-            prior_record = partial_layer_records.get((block_index, layer_plan.layer.path))
-            if prior_record is not None:
-                prior = load_committed_layer(
-                    ArtifactRef(ArtifactTypes.LAYER_RESULT, prior_record.artifact_id, 1), artifacts, identity
-                ).result
-                frozen = LayerFreezer().load(
-                    prior.frozen_state,
-                    tensors,
-                    device=request.device,
-                    dtype=compressed_inputs.dtype,
-                    backend="factorized",
-                )
-                BlockEditor().install_frozen_layer(working_block, layer_plan.layer.path, frozen.module)
-                frozen_states.append(prior.frozen_state)
-                layer_results.append(prior)
-                events.emit(
-                    "resident-quantization",
-                    "info",
-                    "layer.reused",
-                    block=block_index,
-                    layer=layer_plan.layer.path,
-                    artifact_id=prior_record.artifact_id,
-                    journal_sequence=prior_record.sequence,
-                    rank=prior.frozen_state.rank,
-                )
-                budget = replace(
-                    budget,
-                    accepted_bits=budget.accepted_bits + prior.actual_bit_cost.total,
-                    retry_bits_spent=budget.retry_bits_spent + prior.extra_retry_bits,
-                )
-                if not deferred_slice:
-                    with _profile_layer_phase(recorder, block_index, layer_plan.layer.path, "loss_snapshot"):
+                with _profile_layer_phase(recorder, block_index, group_plan.name, "materialize"):
+                    synthetic_plan, source_ref, member_source_refs = _materialize_shared_input_plan(
+                        group_plan,
+                        working_block,
+                        tensors,
+                        device=request.device,
+                    )
+                    quantization_targets[group_plan.name] = source_ref
+                    group_member_targets[group_plan.name] = member_source_refs
+                prior_record = partial_group_records.get((block_index, group_plan.name))
+                if prior_record is not None:
+                    prior_group = load_committed_shared_input_group(
+                        ArtifactRef(
+                            ArtifactTypes.SHARED_INPUT_GROUP_RESULT,
+                            prior_record.artifact_id,
+                            1,
+                        ),
+                        artifacts,
+                        identity,
+                    ).result
+                    frozen_group = SharedInputGroupFreezer().load(
+                        prior_group.frozen_state,
+                        tensors,
+                        device=request.device,
+                        dtype=compressed_inputs.dtype,
+                        backend="factorized",
+                    )
+                    BlockEditor().install_frozen_group(working_block, frozen_group)
+                    frozen_group_states.append(prior_group.frozen_state)
+                    group_results.append(prior_group)
+                    budget = replace(
+                        budget,
+                        accepted_bits=budget.accepted_bits + prior_group.actual_bit_cost.total,
+                        retry_bits_spent=budget.retry_bits_spent + prior_group.extra_retry_bits,
+                    )
+                    if not deferred_slice:
                         loss_recorder.record_after_layer(
-                            layer_plan.layer,
+                            LayerId(block_plan.block, group_plan.name),
                             _block_loss(
                                 adapter,
                                 working_block,
@@ -2565,44 +3366,42 @@ def _run_resident_quantization_impl(
                                 micro_recorder,
                             ),
                         )
-                events.emit(
-                    "resident-quantization",
-                    "info",
-                    "layer.completed",
-                    block=block_index,
-                    layer=layer_plan.layer.path,
-                    status="reused",
-                    rank=prior.frozen_state.rank,
-                    accepted_bits=budget.accepted_bits,
-                    retry_bits_spent=budget.retry_bits_spent,
-                    wall_seconds=time.perf_counter() - layer_started,
-                )
-                continue
-            with _profile_layer_phase(recorder, block_index, layer_plan.layer.path, "factorize"):
-                accepted, outliers, fitted = _run_resident_factorization_attempts(
-                    layer_plan,
-                    source_ref,
-                    request,
-                    budget,
-                    context,
-                    config_hash,
-                    factor_stage,
-                    outlier_stage,
-                    scale_stage,
-                    recorder,
-                )
-            with _profile_layer_phase(recorder, block_index, layer_plan.layer.path, "materialize"):
+                    events.emit(
+                        "resident-quantization",
+                        "info",
+                        "shared_input_group.completed",
+                        block=block_index,
+                        group=group_plan.name,
+                        status="reused",
+                        artifact_id=prior_record.artifact_id,
+                        journal_sequence=prior_record.sequence,
+                        rank=prior_group.frozen_state.rank,
+                        accepted_bits=budget.accepted_bits,
+                        retry_bits_spent=budget.retry_bits_spent,
+                        wall_seconds=time.perf_counter() - group_started,
+                    )
+                    continue
+                with _profile_layer_phase(recorder, block_index, group_plan.name, "factorize"):
+                    accepted, outliers, fitted = _run_resident_factorization_attempts(
+                        synthetic_plan,
+                        source_ref,
+                        request,
+                        budget,
+                        context,
+                        config_hash,
+                        factor_stage,
+                        outlier_stage,
+                        scale_stage,
+                        recorder,
+                    )
                 factorized = accepted.result
                 peak_device_bytes = max(peak_device_bytes, accepted.peak_workspace_bytes)
                 factorization_wall_seconds += accepted.wall_seconds
                 scales = factorized.factors.scales
-                mid_ref = scales.mid
-                if mid_ref is None:
-                    raise AssertionError("factorizer omitted required mid scale")
-                outlier_indices = None
-                outlier_values = None
-                outlier_scales = None
-                if layer_plan.outliers.count:
+                if scales.mid is None:
+                    raise AssertionError("shared-input factorizer omitted required mid scale")
+                outlier_indices = outlier_values = outlier_scales = None
+                if group_plan.outliers.count:
                     with (
                         tensors.read(outliers.indices, request.device) as indices,
                         tensors.read(outliers.values, request.device) as values,
@@ -2626,10 +3425,10 @@ def _run_resident_quantization_impl(
                     tensors.read(left_initial, request.device) as left,
                     tensors.read(right_initial, request.device) as right,
                     tensors.read(scales.pre, request.device) as scale_pre,
-                    tensors.read(mid_ref, request.device) as scale_mid,
+                    tensors.read(scales.mid, request.device) as scale_mid,
                     tensors.read(scales.post, request.device) as scale_post,
                 ):
-                    trainable = TrainableFactorizedLinear(
+                    trainable_group = TrainableSharedInputFactorGroup(
                         left,
                         right,
                         scale_pre,
@@ -2639,96 +3438,23 @@ def _run_resident_quantization_impl(
                         outlier_values=outlier_values,
                         outlier_scales=outlier_scales,
                     ).to(device=request.device, dtype=compressed_inputs.dtype)
-            tuning = None
-            if request.factorized_tuning_epochs > 0:
-                BlockEditor().install_trainable_layer(working_block, layer_plan.layer.path, trainable)
-                tuning_checkpoint_identity = TuningCheckpointIdentity(
-                    identity.config_hash,
-                    identity.model_hash,
-                    identity.plan_hash,
-                    block_index,
-                    layer_plan.layer.path,
-                    "factorized",
+                member_ids = tuple(member.layer for member in group_plan.members)
+                member_widths = tuple(member.out_features for member in group_plan.members)
+                editor = BlockEditor()
+                editor.install_trainable_group(
+                    working_block,
+                    group_plan.name,
+                    member_ids,
+                    member_widths,
+                    trainable_group,
                 )
-                active_checkpoint = active_tuning_checkpoint(request.output, tuning_checkpoint_identity)
-                events.emit(
-                    "resident-quantization",
-                    "info",
-                    "factorized_tuning.resume_checkpoint",
-                    block=block_index,
-                    layer=layer_plan.layer.path,
-                    found=active_checkpoint is not None,
-                    completed_epochs=(
-                        None if active_checkpoint is None else active_checkpoint.state.completed_epochs
-                    ),
-                )
-
-                def checkpoint_sink(
-                    state: TuningResumeState,
-                    *,
-                    checkpoint_identity: TuningCheckpointIdentity = tuning_checkpoint_identity,
-                    checkpoint_block: int = block_index,
-                    checkpoint_layer: str = layer_plan.layer.path,
-                    checkpoint_target_power: float = block_target_weighted_mean_square,
-                ) -> None:
-                    nonlocal new_factorized_tuning_epoch_commits
-                    stored = save_tuning_checkpoint(request.output, state, checkpoint_identity)
-                    new_factorized_tuning_epoch_commits += 1
-                    events.emit(
-                        "resident-quantization",
-                        "info",
-                        "factorized_tuning.epoch_checkpoint_committed",
-                        block=checkpoint_block,
-                        layer=checkpoint_layer,
-                        completed_epochs=stored.state.completed_epochs,
-                        generation=stored.generation,
-                        loss=(stored.state.epoch_losses[-1] if stored.state.epoch_losses else None),
-                        normalized_loss=(
-                            None
-                            if not stored.state.epoch_losses or stored.state.epoch_losses[-1] is None
-                            else normalized_activation_error(
-                                stored.state.epoch_losses[-1],
-                                checkpoint_target_power,
-                            )
-                        ),
-                        target_weighted_mean_square=checkpoint_target_power,
-                        best_epoch=stored.state.best_epoch,
-                        stopped_early=stored.state.stopped_early,
-                    )
-                    if request.factorized_tuning_epoch_cooldown_seconds:
-                        time.sleep(request.factorized_tuning_epoch_cooldown_seconds)
-                    if (
-                        request.interrupt_after_factorized_tuning_epoch_commits is not None
-                        and new_factorized_tuning_epoch_commits
-                        >= request.interrupt_after_factorized_tuning_epoch_commits
-                    ):
-                        raise InterruptedError(
-                            "injected interruption after "
-                            f"{new_factorized_tuning_epoch_commits} factorized tuning epoch checkpoint(s)"
-                        )
-
-                with _logged_operation(
-                    events,
-                    "factorized_tuning",
-                    block=block_index,
-                    layer=layer_plan.layer.path,
-                    epochs=request.factorized_tuning_epochs,
-                    completed_epochs=(
-                        0 if active_checkpoint is None else active_checkpoint.state.completed_epochs
-                    ),
-                    batch_size=request.factorized_tuning_batch_size,
-                    microbatch_size=request.tuning_microbatch_size,
-                    learning_rate=request.factorized_tuning_learning_rate,
-                ):
-                    with _profile_layer_phase(
-                        recorder,
-                        block_index,
-                        layer_plan.layer.path,
-                        "factorized_tuning",
-                    ):
+                tuning = None
+                if request.factorized_tuning_epochs > 0:
+                    owner_path = "_nanoquant_shared_input_groups." + BlockEditor._group_key(group_plan.name)
+                    with _profile_layer_phase(recorder, block_index, group_plan.name, "factorized_tuning"):
                         tuning = tune_factorized(
                             working_block,
-                            layer_plan.layer.path,
+                            owner_path,
                             TuningRequest(
                                 compressed_inputs,
                                 teacher_outputs,
@@ -2736,146 +3462,598 @@ def _run_resident_quantization_impl(
                                 request.factorized_tuning_batch_size,
                                 request.factorized_tuning_learning_rate,
                                 output_importance=block_output_importance,
-                                seed=_tuning_seed(
-                                    request,
-                                    "factorized-tuning",
-                                    block_index,
-                                    layer_plan.layer.path,
-                                ),
+                                seed=_tuning_seed(request, "factorized-tuning", block_index, group_plan.name),
                                 microbatch_size=request.tuning_microbatch_size,
                                 restore_best_state=request.restore_best_tuning_state,
                                 epoch_loss_mode=request.tuning_epoch_loss_mode,
                             ),
                             tuning_forward,
                             tuning_recorder,
-                            resume=None if active_checkpoint is None else active_checkpoint.state,
-                            checkpoint_sink=checkpoint_sink,
                         )
-            with _profile_layer_phase(recorder, block_index, layer_plan.layer.path, "freeze"):
-                frozen_outliers = (
-                    None
-                    if layer_plan.outliers.count == 0
-                    else FrozenOutlierState(outliers.indices, outliers.values, outliers.scales)
-                )
-                frozen = LayerFreezer().freeze(
-                    layer_plan.layer,
-                    trainable,
-                    tensors,
-                    outliers=frozen_outliers,
-                    backend="factorized",
-                )
-                with (
-                    tensors.read(source_ref, request.device) as source_value,
-                    tensors.read(layer_plan.objective.input_importance, request.device) as input_importance,
-                    tensors.read(layer_plan.objective.output_importance, request.device) as output_importance,
+                with _profile_layer_phase(recorder, block_index, group_plan.name, "freeze"):
+                    frozen_group = SharedInputGroupFreezer().freeze(
+                        member_ids,
+                        group_plan.name,
+                        member_widths,
+                        trainable_group,
+                        tensors,
+                        backend="factorized",
+                    )
+                    editor.install_frozen_group(working_block, frozen_group)
+                    frozen_group_states.append(frozen_group.state)
+                    with (
+                        tensors.read(source_ref, request.device) as source_value,
+                        tensors.read(synthetic_plan.objective.input_importance, request.device) as input_importance,
+                        tensors.read(synthetic_plan.objective.output_importance, request.device) as output_importance,
+                    ):
+                        dense_group = frozen_group.owner.dense_weight()
+                        final_metrics = reconstruction_metrics(
+                            source_value,
+                            dense_group,
+                            input_importance,
+                            output_importance,
+                        )
+                        member_metrics = []
+                        row_start = 0
+                        for member, member_source, objective in zip(
+                            group_plan.members,
+                            member_source_refs,
+                            group_plan.objectives,
+                            strict=True,
+                        ):
+                            row_end = row_start + member.out_features
+                            with (
+                                tensors.read(member_source, request.device) as member_value,
+                                tensors.read(objective.input_importance, request.device) as member_input,
+                                tensors.read(objective.output_importance, request.device) as member_output,
+                            ):
+                                member_metrics.append(
+                                    (
+                                        member.layer,
+                                        reconstruction_metrics(
+                                            member_value,
+                                            dense_group[row_start:row_end],
+                                            member_input,
+                                            member_output,
+                                        ),
+                                    )
+                                )
+                            row_start = row_end
+                    accepted_attempt = next(
+                        index for index, attempt in enumerate(accepted.attempts) if attempt.accepted
+                    )
+                    group_result = SharedInputGroupResult(
+                        1,
+                        group_plan.block,
+                        group_plan.name,
+                        group_plan,
+                        accepted.attempts,
+                        accepted_attempt,
+                        factorized.factors.left_binary.artifact,
+                        fitted,
+                        tuning,
+                        frozen_group.state,
+                        final_metrics,
+                        tuple(member_metrics),
+                        accepted.actual_bit_cost,
+                        accepted.extra_retry_bits,
+                        (),
+                    )
+                with _logged_operation(
+                    events,
+                    "shared_input_group_commit",
+                    block=block_index,
+                    group=group_plan.name,
+                    rank=group_result.frozen_state.rank,
                 ):
-                    final_metrics = reconstruction_metrics(
-                        source_value,
-                        frozen.module.dense_weight(),
-                        input_importance,
-                        output_importance,
+                    with _profile_layer_phase(recorder, block_index, group_plan.name, "commit"):
+                        committed_group = commit_shared_input_group(
+                            group_result,
+                            artifacts,
+                            identity,
+                        )
+                        group_journal_record = journal.append(
+                            "group",
+                            block_index,
+                            group_plan.name,
+                            committed_group.reference.artifact_id,
+                            identity,
+                        )
+                        clear_tuning_checkpoint(request.output)
+                        events.emit(
+                            "resident-quantization",
+                            "info",
+                            "shared_input_group.committed",
+                            block=block_index,
+                            group=group_plan.name,
+                            artifact_id=committed_group.reference.artifact_id,
+                            journal_sequence=group_journal_record.sequence,
+                            rank=group_result.frozen_state.rank,
+                            accepted_attempt=group_result.accepted_attempt,
+                            actual_bits=group_result.actual_bit_cost.total,
+                            extra_retry_bits=group_result.extra_retry_bits,
+                            weighted_error=(group_result.final_reconstruction.export_weighted_normalized_error),
+                            raw_error=group_result.final_reconstruction.raw_normalized_error,
+                        )
+                        live_groups[(block_index, group_plan.name)] = group_result
+                        update_live_weight_error_report(
+                            request.output,
+                            tuple(live_layers.values()),
+                            tuple(live_blocks.values()),
+                            groups=tuple(live_groups.values()),
+                            expected_blocks=len(plan.blocks),
+                            layer_order=live_layer_order,
+                        )
+                new_layer_commits += 1
+                if (
+                    request.interrupt_after_layer_commits is not None
+                    and new_layer_commits >= request.interrupt_after_layer_commits
+                ):
+                    raise InterruptedError(f"injected interruption after {new_layer_commits} new physical-unit commits")
+                group_results.append(group_result)
+                budget = accepted.budget
+                if not deferred_slice:
+                    loss_recorder.record_after_layer(
+                        LayerId(block_plan.block, group_plan.name),
+                        _block_loss(
+                            adapter,
+                            working_block,
+                            compressed_inputs,
+                            teacher_outputs,
+                            block_output_importance,
+                            metadata,
+                            request.block_forward_batch_size,
+                            micro_recorder,
+                        ),
                     )
-                frozen_module = frozen.module.to(device=request.device, dtype=compressed_inputs.dtype)
-                BlockEditor().install_frozen_layer(working_block, layer_plan.layer.path, frozen_module)
-                frozen_states.append(frozen.state)
-                accepted_attempt = next(index for index, attempt in enumerate(accepted.attempts) if attempt.accepted)
-                layer_result = LayerResult(
-                    1,
-                    layer_plan.layer,
-                    layer_plan,
-                    accepted.attempts,
-                    accepted_attempt,
-                    factorized.factors.left_binary.artifact,
-                    fitted,
-                    tuning,
-                    frozen.state,
-                    final_metrics,
-                    accepted.actual_bit_cost,
-                    accepted.extra_retry_bits,
-                    ()
-                    if request.factorized_tuning_epochs > 0 and request.scale_fit.enabled
-                    else (
-                        ("tuning_disabled",) if request.scale_fit.enabled else ("scale_fit_disabled", "tuning_disabled")
-                    ),
+                events.emit(
+                    "resident-quantization",
+                    "info",
+                    "shared_input_group.completed",
+                    block=block_index,
+                    group=group_plan.name,
+                    rank=frozen_group.state.rank,
+                    actual_bits=group_result.actual_bit_cost.total,
+                    weighted_error=group_result.final_reconstruction.export_weighted_normalized_error,
+                    raw_error=group_result.final_reconstruction.raw_normalized_error,
+                    wall_seconds=time.perf_counter() - group_started,
                 )
-            with _logged_operation(
-                events,
-                "layer_commit",
-                block=block_index,
-                layer=layer_plan.layer.path,
-                rank=layer_result.frozen_state.rank,
-            ):
-                with _profile_layer_phase(recorder, block_index, layer_plan.layer.path, "commit"):
-                    committed_layer = commit_layer(layer_result, artifacts, identity)
-                    layer_journal_record = journal.append(
-                        "layer",
-                        block_index,
-                        layer_plan.layer.path,
-                        committed_layer.reference.artifact_id,
-                        identity,
+
+            for layer_position, layer_plan in enumerate(block_plan.layers):
+                if layer_plan.layer.path != unit_name:
+                    continue
+                layer_position = unit_position
+                layer_started = time.perf_counter()
+                nonfactorized_epochs = _nonfactorized_epochs(request, layer_position)
+                events.emit(
+                    "resident-quantization",
+                    "info",
+                    "layer.started",
+                    block=block_index,
+                    layer=layer_plan.layer.path,
+                    position=layer_position,
+                    planned_rank=layer_plan.rank,
+                    outlier_columns=layer_plan.outliers.count,
+                    nonfactorized_tuning_epochs=nonfactorized_epochs,
+                    factorized_tuning_epochs=request.factorized_tuning_epochs,
+                )
+                if nonfactorized_epochs > 0:
+                    with _logged_operation(
+                        events,
+                        "nonfactorized_tuning",
+                        block=block_index,
+                        layer=layer_plan.layer.path,
+                        epochs=nonfactorized_epochs,
+                        batch_size=request.nonfactorized_tuning_batch_size,
+                        microbatch_size=request.tuning_microbatch_size,
+                        learning_rate=request.nonfactorized_tuning_learning_rate,
+                    ):
+                        with _profile_layer_phase(
+                            recorder,
+                            block_index,
+                            layer_plan.layer.path,
+                            "nonfactorized_tuning",
+                        ):
+                            tune_non_factorized(
+                                working_block,
+                                TuningRequest(
+                                    compressed_inputs,
+                                    teacher_outputs,
+                                    nonfactorized_epochs,
+                                    request.nonfactorized_tuning_batch_size,
+                                    request.nonfactorized_tuning_learning_rate,
+                                    early_stop_relative_tolerance=(
+                                        request.nonfactorized_tuning_early_stop_relative_tolerance
+                                    ),
+                                    output_importance=block_output_importance,
+                                    seed=_tuning_seed(
+                                        request,
+                                        "nonfactorized-tuning",
+                                        block_index,
+                                        layer_plan.layer.path,
+                                    ),
+                                    microbatch_size=request.tuning_microbatch_size,
+                                    epoch_observer=_epoch_cooldown_observer(
+                                        request.nonfactorized_tuning_epoch_cooldown_seconds,
+                                        events,
+                                        tuning_kind="nonfactorized",
+                                        block=block_index,
+                                        layer=layer_plan.layer.path,
+                                        target_weighted_mean_square=block_target_weighted_mean_square,
+                                    ),
+                                    restore_best_state=request.restore_best_tuning_state,
+                                    epoch_loss_mode=request.tuning_epoch_loss_mode,
+                                ),
+                                tuning_forward,
+                                tuning_recorder,
+                            )
+                with _profile_layer_phase(recorder, block_index, layer_plan.layer.path, "materialize"):
+                    source_linear = _module_at_path(working_block, layer_plan.layer.path)
+                    source_weight = getattr(source_linear, "weight", None)
+                    if not isinstance(source_weight, torch.Tensor):
+                        raise TypeError(f"quantization target has no materialized weight: {layer_plan.layer.path}")
+                    source_ref = tensors.put("source-layer", {"weight": source_weight.detach().cpu()})["weight"]
+                quantization_targets[layer_plan.layer.path] = source_ref
+                prior_record = partial_layer_records.get((block_index, layer_plan.layer.path))
+                if prior_record is not None:
+                    prior = load_committed_layer(
+                        ArtifactRef(ArtifactTypes.LAYER_RESULT, prior_record.artifact_id, 1), artifacts, identity
+                    ).result
+                    frozen = LayerFreezer().load(
+                        prior.frozen_state,
+                        tensors,
+                        device=request.device,
+                        dtype=compressed_inputs.dtype,
+                        backend="factorized",
                     )
-                    clear_tuning_checkpoint(request.output)
+                    BlockEditor().install_frozen_layer(working_block, layer_plan.layer.path, frozen.module)
+                    frozen_states.append(prior.frozen_state)
+                    layer_results.append(prior)
                     events.emit(
                         "resident-quantization",
                         "info",
-                        "layer.committed",
+                        "layer.reused",
                         block=block_index,
                         layer=layer_plan.layer.path,
-                        artifact_id=committed_layer.reference.artifact_id,
-                        journal_sequence=layer_journal_record.sequence,
-                        rank=layer_result.frozen_state.rank,
-                        accepted_attempt=layer_result.accepted_attempt,
-                        actual_bits=layer_result.actual_bit_cost.total,
-                        extra_retry_bits=layer_result.extra_retry_bits,
-                        weighted_error=layer_result.final_reconstruction.export_weighted_normalized_error,
-                        raw_error=layer_result.final_reconstruction.raw_normalized_error,
+                        artifact_id=prior_record.artifact_id,
+                        journal_sequence=prior_record.sequence,
+                        rank=prior.frozen_state.rank,
                     )
-                    live_layers[(block_index, layer_plan.layer.path)] = layer_result
-                    update_live_weight_error_report(
-                        request.output,
-                        tuple(live_layers.values()),
-                        tuple(live_blocks.values()),
-                        expected_blocks=len(plan.blocks),
-                        layer_order=live_layer_order,
+                    budget = replace(
+                        budget,
+                        accepted_bits=budget.accepted_bits + prior.actual_bit_cost.total,
+                        retry_bits_spent=budget.retry_bits_spent + prior.extra_retry_bits,
                     )
-            new_layer_commits += 1
-            if (
-                request.interrupt_after_layer_commits is not None
-                and new_layer_commits >= request.interrupt_after_layer_commits
-            ):
-                raise InterruptedError(f"injected interruption after {new_layer_commits} new layer commits")
-            layer_results.append(layer_result)
-            budget = accepted.budget
-            with _profile_layer_phase(recorder, block_index, layer_plan.layer.path, "loss_snapshot"):
-                loss_recorder.record_after_layer(
-                    layer_plan.layer,
-                    _block_loss(
-                        adapter,
-                        working_block,
-                        compressed_inputs,
-                        teacher_outputs,
-                        block_output_importance,
-                        metadata,
-                        request.block_forward_batch_size,
-                        micro_recorder,
-                    ),
+                    if not deferred_slice:
+                        with _profile_layer_phase(recorder, block_index, layer_plan.layer.path, "loss_snapshot"):
+                            loss_recorder.record_after_layer(
+                                layer_plan.layer,
+                                _block_loss(
+                                    adapter,
+                                    working_block,
+                                    compressed_inputs,
+                                    teacher_outputs,
+                                    block_output_importance,
+                                    metadata,
+                                    request.block_forward_batch_size,
+                                    micro_recorder,
+                                ),
+                            )
+                    events.emit(
+                        "resident-quantization",
+                        "info",
+                        "layer.completed",
+                        block=block_index,
+                        layer=layer_plan.layer.path,
+                        status="reused",
+                        rank=prior.frozen_state.rank,
+                        accepted_bits=budget.accepted_bits,
+                        retry_bits_spent=budget.retry_bits_spent,
+                        wall_seconds=time.perf_counter() - layer_started,
+                    )
+                    continue
+                with _profile_layer_phase(recorder, block_index, layer_plan.layer.path, "factorize"):
+                    accepted, outliers, fitted = _run_resident_factorization_attempts(
+                        layer_plan,
+                        source_ref,
+                        request,
+                        budget,
+                        context,
+                        config_hash,
+                        factor_stage,
+                        outlier_stage,
+                        scale_stage,
+                        recorder,
+                    )
+                with _profile_layer_phase(recorder, block_index, layer_plan.layer.path, "materialize"):
+                    factorized = accepted.result
+                    peak_device_bytes = max(peak_device_bytes, accepted.peak_workspace_bytes)
+                    factorization_wall_seconds += accepted.wall_seconds
+                    scales = factorized.factors.scales
+                    mid_ref = scales.mid
+                    if mid_ref is None:
+                        raise AssertionError("factorizer omitted required mid scale")
+                    outlier_indices = None
+                    outlier_values = None
+                    outlier_scales = None
+                    if layer_plan.outliers.count:
+                        with (
+                            tensors.read(outliers.indices, request.device) as indices,
+                            tensors.read(outliers.values, request.device) as values,
+                        ):
+                            outlier_indices = indices.clone()
+                            outlier_values = values.clone()
+                        if outliers.scales is not None:
+                            with tensors.read(outliers.scales, request.device) as values:
+                                outlier_scales = values.clone()
+                    left_initial = (
+                        factorized.factors.left_latent
+                        if request.factorized_tuning_epochs > 0
+                        else factorized.factors.left_binary
+                    )
+                    right_initial = (
+                        factorized.factors.right_latent
+                        if request.factorized_tuning_epochs > 0
+                        else factorized.factors.right_binary
+                    )
+                    with (
+                        tensors.read(left_initial, request.device) as left,
+                        tensors.read(right_initial, request.device) as right,
+                        tensors.read(scales.pre, request.device) as scale_pre,
+                        tensors.read(mid_ref, request.device) as scale_mid,
+                        tensors.read(scales.post, request.device) as scale_post,
+                    ):
+                        trainable = TrainableFactorizedLinear(
+                            left,
+                            right,
+                            scale_pre,
+                            scale_mid,
+                            scale_post,
+                            outlier_indices=outlier_indices,
+                            outlier_values=outlier_values,
+                            outlier_scales=outlier_scales,
+                        ).to(device=request.device, dtype=compressed_inputs.dtype)
+                tuning = None
+                if request.factorized_tuning_epochs > 0:
+                    BlockEditor().install_trainable_layer(working_block, layer_plan.layer.path, trainable)
+                    tuning_checkpoint_identity = TuningCheckpointIdentity(
+                        identity.config_hash,
+                        identity.model_hash,
+                        identity.plan_hash,
+                        block_index,
+                        layer_plan.layer.path,
+                        "factorized",
+                    )
+                    active_checkpoint = active_tuning_checkpoint(request.output, tuning_checkpoint_identity)
+                    events.emit(
+                        "resident-quantization",
+                        "info",
+                        "factorized_tuning.resume_checkpoint",
+                        block=block_index,
+                        layer=layer_plan.layer.path,
+                        found=active_checkpoint is not None,
+                        completed_epochs=(
+                            None if active_checkpoint is None else active_checkpoint.state.completed_epochs
+                        ),
+                    )
+
+                    def checkpoint_sink(
+                        state: TuningResumeState,
+                        *,
+                        checkpoint_identity: TuningCheckpointIdentity = tuning_checkpoint_identity,
+                        checkpoint_block: int = block_index,
+                        checkpoint_layer: str = layer_plan.layer.path,
+                        checkpoint_target_power: float = block_target_weighted_mean_square,
+                    ) -> None:
+                        nonlocal new_factorized_tuning_epoch_commits
+                        stored = save_tuning_checkpoint(request.output, state, checkpoint_identity)
+                        new_factorized_tuning_epoch_commits += 1
+                        events.emit(
+                            "resident-quantization",
+                            "info",
+                            "factorized_tuning.epoch_checkpoint_committed",
+                            block=checkpoint_block,
+                            layer=checkpoint_layer,
+                            completed_epochs=stored.state.completed_epochs,
+                            generation=stored.generation,
+                            loss=(stored.state.epoch_losses[-1] if stored.state.epoch_losses else None),
+                            normalized_loss=(
+                                None
+                                if not stored.state.epoch_losses or stored.state.epoch_losses[-1] is None
+                                else normalized_activation_error(
+                                    stored.state.epoch_losses[-1],
+                                    checkpoint_target_power,
+                                )
+                            ),
+                            target_weighted_mean_square=checkpoint_target_power,
+                            best_epoch=stored.state.best_epoch,
+                            stopped_early=stored.state.stopped_early,
+                        )
+                        if request.factorized_tuning_epoch_cooldown_seconds:
+                            time.sleep(request.factorized_tuning_epoch_cooldown_seconds)
+                        if (
+                            request.interrupt_after_factorized_tuning_epoch_commits is not None
+                            and new_factorized_tuning_epoch_commits
+                            >= request.interrupt_after_factorized_tuning_epoch_commits
+                        ):
+                            raise InterruptedError(
+                                "injected interruption after "
+                                f"{new_factorized_tuning_epoch_commits} factorized tuning epoch checkpoint(s)"
+                            )
+
+                    with _logged_operation(
+                        events,
+                        "factorized_tuning",
+                        block=block_index,
+                        layer=layer_plan.layer.path,
+                        epochs=request.factorized_tuning_epochs,
+                        completed_epochs=(0 if active_checkpoint is None else active_checkpoint.state.completed_epochs),
+                        batch_size=request.factorized_tuning_batch_size,
+                        microbatch_size=request.tuning_microbatch_size,
+                        learning_rate=request.factorized_tuning_learning_rate,
+                    ):
+                        with _profile_layer_phase(
+                            recorder,
+                            block_index,
+                            layer_plan.layer.path,
+                            "factorized_tuning",
+                        ):
+                            tuning = tune_factorized(
+                                working_block,
+                                layer_plan.layer.path,
+                                TuningRequest(
+                                    compressed_inputs,
+                                    teacher_outputs,
+                                    request.factorized_tuning_epochs,
+                                    request.factorized_tuning_batch_size,
+                                    request.factorized_tuning_learning_rate,
+                                    output_importance=block_output_importance,
+                                    seed=_tuning_seed(
+                                        request,
+                                        "factorized-tuning",
+                                        block_index,
+                                        layer_plan.layer.path,
+                                    ),
+                                    microbatch_size=request.tuning_microbatch_size,
+                                    restore_best_state=request.restore_best_tuning_state,
+                                    epoch_loss_mode=request.tuning_epoch_loss_mode,
+                                ),
+                                tuning_forward,
+                                tuning_recorder,
+                                resume=None if active_checkpoint is None else active_checkpoint.state,
+                                checkpoint_sink=checkpoint_sink,
+                            )
+                with _profile_layer_phase(recorder, block_index, layer_plan.layer.path, "freeze"):
+                    frozen_outliers = (
+                        None
+                        if layer_plan.outliers.count == 0
+                        else FrozenOutlierState(outliers.indices, outliers.values, outliers.scales)
+                    )
+                    frozen = LayerFreezer().freeze(
+                        layer_plan.layer,
+                        trainable,
+                        tensors,
+                        outliers=frozen_outliers,
+                        backend="factorized",
+                    )
+                    with (
+                        tensors.read(source_ref, request.device) as source_value,
+                        tensors.read(layer_plan.objective.input_importance, request.device) as input_importance,
+                        tensors.read(layer_plan.objective.output_importance, request.device) as output_importance,
+                    ):
+                        final_metrics = reconstruction_metrics(
+                            source_value,
+                            frozen.module.dense_weight(),
+                            input_importance,
+                            output_importance,
+                        )
+                    frozen_module = frozen.module.to(device=request.device, dtype=compressed_inputs.dtype)
+                    BlockEditor().install_frozen_layer(working_block, layer_plan.layer.path, frozen_module)
+                    frozen_states.append(frozen.state)
+                    accepted_attempt = next(
+                        index for index, attempt in enumerate(accepted.attempts) if attempt.accepted
+                    )
+                    layer_result = LayerResult(
+                        1,
+                        layer_plan.layer,
+                        layer_plan,
+                        accepted.attempts,
+                        accepted_attempt,
+                        factorized.factors.left_binary.artifact,
+                        fitted,
+                        tuning,
+                        frozen.state,
+                        final_metrics,
+                        accepted.actual_bit_cost,
+                        accepted.extra_retry_bits,
+                        ()
+                        if request.factorized_tuning_epochs > 0 and request.scale_fit.enabled
+                        else (
+                            ("tuning_disabled",)
+                            if request.scale_fit.enabled
+                            else ("scale_fit_disabled", "tuning_disabled")
+                        ),
+                    )
+                with _logged_operation(
+                    events,
+                    "layer_commit",
+                    block=block_index,
+                    layer=layer_plan.layer.path,
+                    rank=layer_result.frozen_state.rank,
+                ):
+                    with _profile_layer_phase(recorder, block_index, layer_plan.layer.path, "commit"):
+                        committed_layer = commit_layer(layer_result, artifacts, identity)
+                        layer_journal_record = journal.append(
+                            "layer",
+                            block_index,
+                            layer_plan.layer.path,
+                            committed_layer.reference.artifact_id,
+                            identity,
+                        )
+                        clear_tuning_checkpoint(request.output)
+                        events.emit(
+                            "resident-quantization",
+                            "info",
+                            "layer.committed",
+                            block=block_index,
+                            layer=layer_plan.layer.path,
+                            artifact_id=committed_layer.reference.artifact_id,
+                            journal_sequence=layer_journal_record.sequence,
+                            rank=layer_result.frozen_state.rank,
+                            accepted_attempt=layer_result.accepted_attempt,
+                            actual_bits=layer_result.actual_bit_cost.total,
+                            extra_retry_bits=layer_result.extra_retry_bits,
+                            weighted_error=layer_result.final_reconstruction.export_weighted_normalized_error,
+                            raw_error=layer_result.final_reconstruction.raw_normalized_error,
+                        )
+                        live_layers[(block_index, layer_plan.layer.path)] = layer_result
+                        update_live_weight_error_report(
+                            request.output,
+                            tuple(live_layers.values()),
+                            tuple(live_blocks.values()),
+                            groups=tuple(live_groups.values()),
+                            expected_blocks=len(plan.blocks),
+                            layer_order=live_layer_order,
+                        )
+                new_layer_commits += 1
+                if (
+                    request.interrupt_after_layer_commits is not None
+                    and new_layer_commits >= request.interrupt_after_layer_commits
+                ):
+                    raise InterruptedError(f"injected interruption after {new_layer_commits} new layer commits")
+                layer_results.append(layer_result)
+                budget = accepted.budget
+                with _profile_layer_phase(recorder, block_index, layer_plan.layer.path, "loss_snapshot"):
+                    loss_recorder.record_after_layer(
+                        layer_plan.layer,
+                        _block_loss(
+                            adapter,
+                            working_block,
+                            compressed_inputs,
+                            teacher_outputs,
+                            block_output_importance,
+                            metadata,
+                            request.block_forward_batch_size,
+                            micro_recorder,
+                        ),
+                    )
+                events.emit(
+                    "resident-quantization",
+                    "info",
+                    "layer.completed",
+                    block=block_index,
+                    layer=layer_plan.layer.path,
+                    status="committed",
+                    rank=layer_result.frozen_state.rank,
+                    accepted_attempt=layer_result.accepted_attempt,
+                    attempts=len(layer_result.attempts),
+                    accepted_bits=budget.accepted_bits,
+                    retry_bits_spent=budget.retry_bits_spent,
+                    wall_seconds=time.perf_counter() - layer_started,
                 )
-            events.emit(
-                "resident-quantization",
-                "info",
-                "layer.completed",
-                block=block_index,
-                layer=layer_plan.layer.path,
-                status="committed",
-                rank=layer_result.frozen_state.rank,
-                accepted_attempt=layer_result.accepted_attempt,
-                attempts=len(layer_result.attempts),
-                accepted_bits=budget.accepted_bits,
-                retry_bits_spent=budget.retry_bits_spent,
-                wall_seconds=time.perf_counter() - layer_started,
-            )
         if request.post_block_refit_epochs > 0:
             trainable_by_path: dict[str, TrainableFactorizedLinear] = {}
+            trainable_groups: dict[str, TrainableSharedInputFactorGroup] = {}
             for state in frozen_states:
                 trainable = _rehydrate_trainable_layer(
                     state,
@@ -2885,6 +4063,21 @@ def _run_resident_quantization_impl(
                 )
                 BlockEditor().install_trainable_layer(working_block, state.layer.path, trainable)
                 trainable_by_path[state.layer.path] = trainable
+            for group_state in frozen_group_states:
+                trainable_group = _rehydrate_trainable_group(
+                    group_state,
+                    tensors,
+                    device=request.device,
+                    dtype=compressed_inputs.dtype,
+                )
+                BlockEditor().install_trainable_group(
+                    working_block,
+                    group_state.name,
+                    tuple(member.layer for member in group_state.members),
+                    tuple(member.row_end - member.row_start for member in group_state.members),
+                    trainable_group,
+                )
+                trainable_groups[group_state.name] = trainable_group
             with _logged_operation(
                 events,
                 "post_block_refit",
@@ -2947,6 +4140,63 @@ def _run_resident_quantization_impl(
                 )
             frozen_states = refitted_states
             layer_results = refitted_results
+            refitted_group_states: list[FrozenSharedInputGroupState] = []
+            refitted_group_results: list[SharedInputGroupResult] = []
+            for group_result in group_results:
+                refitted_group = SharedInputGroupFreezer().freeze(
+                    tuple(member.layer for member in group_result.frozen_state.members),
+                    group_result.name,
+                    tuple(member.row_end - member.row_start for member in group_result.frozen_state.members),
+                    trainable_groups[group_result.name],
+                    tensors,
+                    backend="factorized",
+                )
+                BlockEditor().install_frozen_group(working_block, refitted_group)
+                with (
+                    tensors.read(quantization_targets[group_result.name], request.device) as source_value,
+                    tensors.read(group_result.plan.objectives[0].input_importance, request.device) as input_importance,
+                ):
+                    output_importances = []
+                    for objective in group_result.plan.objectives:
+                        with tensors.read(objective.output_importance, request.device) as value:
+                            output_importances.append(value.clone())
+                    merged_output = torch.cat(output_importances)
+                    dense_group = refitted_group.owner.dense_weight()
+                    metrics = reconstruction_metrics(source_value, dense_group, input_importance, merged_output)
+                member_metrics = []
+                for member_slice, member_source, objective in zip(
+                    refitted_group.state.members,
+                    group_member_targets[group_result.name],
+                    group_result.plan.objectives,
+                    strict=True,
+                ):
+                    with (
+                        tensors.read(member_source, request.device) as member_value,
+                        tensors.read(objective.input_importance, request.device) as member_input,
+                        tensors.read(objective.output_importance, request.device) as member_output,
+                    ):
+                        member_metrics.append(
+                            (
+                                member_slice.layer,
+                                reconstruction_metrics(
+                                    member_value,
+                                    dense_group[member_slice.row_start : member_slice.row_end],
+                                    member_input,
+                                    member_output,
+                                ),
+                            )
+                        )
+                refitted_group_states.append(refitted_group.state)
+                refitted_group_results.append(
+                    replace(
+                        group_result,
+                        frozen_state=refitted_group.state,
+                        final_reconstruction=metrics,
+                        member_reconstruction=tuple(member_metrics),
+                    )
+                )
+            frozen_group_states = refitted_group_states
+            group_results = refitted_group_results
             loss_recorder.record_post_block_refit(
                 _block_loss(
                     adapter,
@@ -2988,6 +4238,7 @@ def _run_resident_quantization_impl(
                 tuple(frozen_states),
                 (),
                 auxiliary_parameters,
+                tuple(frozen_group_states),
             )
             block_window.finish()
             block_peak = max(
@@ -3020,10 +4271,9 @@ def _run_resident_quantization_impl(
                     warnings=()
                     if request.factorized_tuning_epochs > 0 and request.scale_fit.enabled
                     else (
-                        ("tuning_disabled",)
-                        if request.scale_fit.enabled
-                        else ("scale_fit_disabled", "tuning_disabled")
+                        ("tuning_disabled",) if request.scale_fit.enabled else ("scale_fit_disabled", "tuning_disabled")
                     ),
+                    shared_input_groups=tuple(group_results),
                 )
                 block_journal_record = journal.append(
                     "block", block_index, None, committed.reference.artifact_id, identity
@@ -3034,10 +4284,13 @@ def _run_resident_quantization_impl(
         live_blocks[block_index] = committed.result
         for final_layer in committed.result.layers:
             live_layers[(block_index, final_layer.layer.path)] = final_layer
+        for final_group in committed.result.shared_input_groups:
+            live_groups[(block_index, final_group.name)] = final_group
         update_live_weight_error_report(
             request.output,
             tuple(live_layers.values()),
             tuple(live_blocks.values()),
+            groups=tuple(live_groups.values()),
             expected_blocks=len(plan.blocks),
             layer_order=live_layer_order,
         )
@@ -3164,6 +4417,7 @@ def _run_resident_quantization_impl(
         request.output,
         tuple(live_layers.values()),
         tuple(live_blocks.values()),
+        groups=tuple(live_groups.values()),
         expected_blocks=len(plan.blocks),
         layer_order=live_layer_order,
         status="compression complete",
@@ -3187,7 +4441,10 @@ def _run_resident_quantization_impl(
         with recorder.phase("report_prepare"):
             elapsed = time.perf_counter() - started
             peak_host_bytes = peak_process_memory_bytes()
-            ranks = [layer.rank for block in plan.blocks for layer in block.layers]
+            ranks = [
+                *[layer.rank for block in plan.blocks for layer in block.layers],
+                *[group.rank for block in plan.blocks for group in block.shared_input_groups],
+            ]
             artifact_bytes_before_report = _artifact_bytes(artifacts.root)
             report_payload = {
                 "schema_version": 1,
@@ -3196,7 +4453,13 @@ def _run_resident_quantization_impl(
                 "model": to_dict(inventory.model),
                 "plan": persisted_plan.reference.artifact_id,
                 "block_count": len(committed_blocks),
-                "layer_count": sum(len(block.layers) for _, block in committed_blocks),
+                "layer_count": sum(
+                    len(block.layers) + sum(len(group.plan.members) for group in block.shared_input_groups)
+                    for _, block in committed_blocks
+                ),
+                "factor_owner_count": sum(
+                    len(block.layers) + len(block.shared_input_groups) for _, block in committed_blocks
+                ),
                 "target_bpw": request.target_bpw,
                 "effective_bpw": frozen_model.effective_bpw,
                 "actual_total_bits": frozen_model.actual_total_bits,
@@ -3226,7 +4489,10 @@ def _run_resident_quantization_impl(
         events,
         "report_write",
         blocks=len(committed_blocks),
-        layers=sum(len(block.layers) for _, block in committed_blocks),
+        layers=sum(
+            len(block.layers) + sum(len(group.plan.members) for group in block.shared_input_groups)
+            for _, block in committed_blocks
+        ),
     ):
         with recorder.phase("finalize"):
             with recorder.phase("report"):
@@ -3293,6 +4559,8 @@ def _run_resident_factorization_slice_impl(
         raise ValueError("factor-only slices require precomputed calibration, objectives, and plan")
     _calibration, _objectives, persisted_plan = preprocessed
     plan = persisted_plan.plan
+    if any(block.shared_input_groups for block in plan.blocks):
+        raise ValueError("factor-only slices do not yet support shared-input groups; use the block-resident workflow")
     config_hash = _resident_config_hash(request)
     identity = CommitIdentity(config_hash, inventory.model.config_hash, persisted_plan.reference.artifact_id)
     journal = ProgressJournal(request.output / "state", run_id, artifacts)
@@ -3300,16 +4568,12 @@ def _run_resident_factorization_slice_impl(
     records = (*discovery.valid_records, *discovery.orphan_records)
     complete_blocks = {record.block for record in records if record.kind == "block"}
     completed_results = [
-        load_committed_block(
-            ArtifactRef(ArtifactTypes.BLOCK_RESULT, record.artifact_id, 1), artifacts, identity
-        ).result
+        load_committed_block(ArtifactRef(ArtifactTypes.BLOCK_RESULT, record.artifact_id, 1), artifacts, identity).result
         for record in records
         if record.kind == "block"
     ]
     partial_results = [
-        load_committed_layer(
-            ArtifactRef(ArtifactTypes.LAYER_RESULT, record.artifact_id, 1), artifacts, identity
-        ).result
+        load_committed_layer(ArtifactRef(ArtifactTypes.LAYER_RESULT, record.artifact_id, 1), artifacts, identity).result
         for record in records
         if record.kind == "layer" and record.block not in complete_blocks
     ]
@@ -3523,9 +4787,7 @@ def _run_resident_factorization_slice(request: ResidentQuantizationRequest) -> R
                     else type(exc.__cause__ or exc.__context__).__name__
                 ),
                 cause=(
-                    None
-                    if exc.__cause__ is None and exc.__context__ is None
-                    else str(exc.__cause__ or exc.__context__)
+                    None if exc.__cause__ is None and exc.__context__ is None else str(exc.__cause__ or exc.__context__)
                 ),
             )
             manifest = transition(
@@ -3608,9 +4870,7 @@ def load_completed_resident_quantization(
     plan_descriptor = artifacts.validate(identity.plan_hash)
     if plan_descriptor.artifact_type != ArtifactTypes.QUANTIZATION_PLAN:
         raise ValueError("completed resident plan reference is not a quantization plan")
-    plan_payload = json.loads(
-        (artifacts.path_for(identity.plan_hash) / "plan.json").read_text(encoding="utf-8")
-    )
+    plan_payload = json.loads((artifacts.path_for(identity.plan_hash) / "plan.json").read_text(encoding="utf-8"))
     plan = from_dict(QuantizationPlan, plan_payload, path="plan")
     if plan.model != inventory.model or len(plan.blocks) != len(inventory.blocks):
         raise ValueError("completed resident plan does not match the current model inventory")
@@ -3632,9 +4892,7 @@ def load_completed_resident_quantization(
         for index in range(len(inventory.blocks))
     )
     original_elements = sum(
-        layer.in_features * layer.out_features
-        for block in inventory.blocks
-        for layer in block.quantizable_layers
+        layer.in_features * layer.out_features for block in inventory.blocks for layer in block.quantizable_layers
     )
     frozen_model = assemble_frozen_model(
         inventory.model,
@@ -3648,9 +4906,7 @@ def load_completed_resident_quantization(
     for artifact_id in manifest.artifacts:
         descriptor = artifacts.validate(artifact_id)
         if descriptor.artifact_type == "resident-quantization-report":
-            report_references.append(
-                ArtifactRef(descriptor.artifact_type, artifact_id, descriptor.schema_version)
-            )
+            report_references.append(ArtifactRef(descriptor.artifact_type, artifact_id, descriptor.schema_version))
     if len(report_references) != 1:
         raise ValueError("completed resident manifest must reference exactly one quantization report")
     report_reference = report_references[0]

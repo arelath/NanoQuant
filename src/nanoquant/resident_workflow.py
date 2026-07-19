@@ -299,11 +299,7 @@ def resident_request_from_config(
         token_ids=inputs.token_ids,
         quality_token_ids=inputs.quality_token_ids if config.evaluation.inline_quality else None,
         device=config.runtime.compute_device,
-        executor=(
-            ExecutorKind.RESIDENT
-            if config.runtime.executor is ExecutorKind.AUTO
-            else config.runtime.executor
-        ),
+        executor=(ExecutorKind.RESIDENT if config.runtime.executor is ExecutorKind.AUTO else config.runtime.executor),
         verify_hashes=config.runtime.source_streaming.verify_tensor_hashes,
         target_bpw=config.allocation.target_bpw,
         rank_multiple=config.allocation.bounds.multiple,
@@ -315,7 +311,9 @@ def resident_request_from_config(
         maximum_rank_layer_patterns=config.allocation.maximum_rank_layer_patterns,
         layer_budget_multipliers=config.allocation.layer_budget_multipliers,
         rank_retry=config.allocation.retry,
+        reconstruction_rank_planning=config.allocation.reconstruction,
         layer_order=config.block_tuning.layer_order,
+        shared_input_groups=config.factorization.shared_input.groups,
         admm=config.factorization.admm,
         outliers=config.outliers,
         scale_fit=config.factorization.scale_fit,
@@ -462,9 +460,7 @@ def load_completed_resident_workflow(
     manifest = from_dict(RunManifest, directory.read_manifest(), path="manifest")
     if manifest.status is not RunStatus.COMPLETED:
         return None
-    quantization = load_completed_resident_quantization(
-        resident_request_from_config(config, inputs, options)
-    )
+    quantization = load_completed_resident_quantization(resident_request_from_config(config, inputs, options))
     distillation = None
     if config.distillation.enabled:
         reference = active_global_tuning(inputs.output)

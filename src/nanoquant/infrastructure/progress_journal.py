@@ -97,29 +97,44 @@ class ProgressJournal:
                 artifact_id = descriptor["artifact_id"]
                 if artifact_id in known or descriptor["artifact_type"] not in {
                     ArtifactTypes.LAYER_RESULT,
+                    ArtifactTypes.SHARED_INPUT_GROUP_RESULT,
                     ArtifactTypes.BLOCK_RESULT,
                 }:
                     continue
                 self.artifacts.validate(artifact_id)
-                filename = (
-                    "layer-result.json"
-                    if descriptor["artifact_type"] == ArtifactTypes.LAYER_RESULT
-                    else "block-result.json"
-                )
+                result_type = descriptor["artifact_type"]
+                filename = {
+                    ArtifactTypes.LAYER_RESULT: "layer-result.json",
+                    ArtifactTypes.SHARED_INPUT_GROUP_RESULT: "shared-input-group-result.json",
+                    ArtifactTypes.BLOCK_RESULT: "block-result.json",
+                }[result_type]
                 payload = json.loads((descriptor_path.parent / filename).read_text(encoding="utf-8"))
                 if CommitIdentity(**payload["identity"]) != identity:
                     continue
-                result = payload["result"] if descriptor["artifact_type"] == ArtifactTypes.LAYER_RESULT else payload
+                result = payload["result"] if result_type != ArtifactTypes.BLOCK_RESULT else payload
                 block = int(
                     result["layer"]["block"]["index"]
-                    if descriptor["artifact_type"] == ArtifactTypes.LAYER_RESULT
+                    if result_type == ArtifactTypes.LAYER_RESULT
                     else result["block"]["index"]
                 )
-                layer = result["layer"]["path"] if descriptor["artifact_type"] == ArtifactTypes.LAYER_RESULT else None
+                layer = (
+                    result["layer"]["path"]
+                    if result_type == ArtifactTypes.LAYER_RESULT
+                    else result["name"]
+                    if result_type == ArtifactTypes.SHARED_INPUT_GROUP_RESULT
+                    else None
+                )
+                kind = (
+                    "layer"
+                    if result_type == ArtifactTypes.LAYER_RESULT
+                    else "group"
+                    if result_type == ArtifactTypes.SHARED_INPUT_GROUP_RESULT
+                    else "block"
+                )
                 found.append(
                     JournalRecord(
                         0,
-                        "layer" if layer else "block",
+                        kind,
                         block,
                         layer,
                         artifact_id,
@@ -137,10 +152,17 @@ class ProgressJournal:
         all_records = [*valid, *orphans]
         completed_blocks = {record.block for record in all_records if record.kind == "block"}
         completed_layers = {(record.block, record.layer) for record in all_records if record.kind == "layer"}
+        completed_groups = {(record.block, record.layer) for record in all_records if record.kind == "group"}
         first = None
         for block in plan.blocks:
             if block.block.index in completed_blocks:
                 continue
+            for group in block.shared_input_groups:
+                if (block.block.index, group.name) not in completed_groups:
+                    first = ProgressCursor("quantize-blocks", block.block.index, group.name, 0)
+                    break
+            if first is not None:
+                break
             for layer in block.layers:
                 if (block.block.index, layer.layer.path) not in completed_layers:
                     first = ProgressCursor("quantize-blocks", block.block.index, layer.layer.path, 0)

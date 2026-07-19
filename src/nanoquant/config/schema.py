@@ -63,6 +63,7 @@ class AllocationStrategy(StringEnum):
     UNIFORM = "uniform"
     SENSITIVITY = "sensitivity"
     UTILITY_PROFILE = "utility_profile"
+    RECONSTRUCTION_AWARE = "reconstruction_aware"
 
 
 class OutlierSelector(StringEnum):
@@ -219,6 +220,42 @@ class LayerRankBudgetConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class RankResponseSegmentConfig:
+    maximum_rank_fraction: float
+    beta_per_rank: float
+
+
+@dataclass(frozen=True, slots=True)
+class RankResponseCurveConfig:
+    unit_pattern: str
+    calibrated_rank_floor_fraction: float
+    calibrated_rank_ceiling_fraction: float
+    segments: tuple[RankResponseSegmentConfig, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ReconstructionImportanceConfig:
+    layer_multipliers: tuple[LayerRankBudgetConfig, ...] = ()
+    protected_layer_patterns: tuple[str, ...] = ()
+    edge_block_multiplier: float = 1.0
+    protected_edge_block_count: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class ReconstructionRankPlanningConfig:
+    enabled: bool = False
+    objective_mode: str = "unit_frobenius"
+    probe_admm: ADMMConfig | None = None
+    response_curves: tuple[RankResponseCurveConfig, ...] = ()
+    response_profile_provenance: str = ""
+    importance: ReconstructionImportanceConfig = field(default_factory=ReconstructionImportanceConfig)
+    sensitivity_strength: float = 0.75
+    protected_sensitivity_quantile: float = 0.80
+    protected_rank_floor_fraction: float = 1.0
+    target_protected_error_reduction_fraction: float = 0.01
+
+
+@dataclass(frozen=True, slots=True)
 class RankAllocationConfig:
     target_bpw: float = 1.0
     strategy: AllocationStrategy = AllocationStrategy.UNIFORM
@@ -228,6 +265,7 @@ class RankAllocationConfig:
     layer_budget_multipliers: tuple[LayerRankBudgetConfig, ...] = ()
     bounds: RankBoundsConfig = field(default_factory=RankBoundsConfig)
     retry: RankRetryConfig = field(default_factory=RankRetryConfig)
+    reconstruction: ReconstructionRankPlanningConfig = field(default_factory=ReconstructionRankPlanningConfig)
 
 
 @dataclass(frozen=True, slots=True)
@@ -251,12 +289,25 @@ class ScaleFitConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class SharedInputGroupConfig:
+    name: str
+    members: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class SharedInputFactorizationConfig:
+    enabled: bool = False
+    groups: tuple[SharedInputGroupConfig, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class FactorizationConfig:
     implementation: str = "nanoquant_admm"
     compute_dtype: DType = DType.BFLOAT16
     solve_dtype: DType = DType.FLOAT32
     admm: ADMMConfig = field(default_factory=ADMMConfig)
     scale_fit: ScaleFitConfig = field(default_factory=ScaleFitConfig)
+    shared_input: SharedInputFactorizationConfig = field(default_factory=SharedInputFactorizationConfig)
 
 
 @dataclass(frozen=True, slots=True)

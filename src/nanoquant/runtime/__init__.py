@@ -18,6 +18,7 @@ from nanoquant.runtime.artifact import (
 from nanoquant.runtime.backend import (
     BackendCapabilities,
     PreparedLayer,
+    ProjectionMemberSpec,
     QuantizedLinearSpec,
     RuntimeBackend,
     SupportResult,
@@ -213,6 +214,7 @@ __all__ = [
     "PreparedGemma3DecoderLayer",
     "PreparedRMSNorm",
     "QuantizedLinearSpec",
+    "ProjectionMemberSpec",
     "ReferenceParityError",
     "ReferenceParityResult",
     "RUNTIME_BUNDLE_DESCRIPTOR",

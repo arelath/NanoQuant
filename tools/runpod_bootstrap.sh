@@ -17,7 +17,7 @@ export PIP_CACHE_DIR="${PIP_CACHE_DIR:-${WORKSPACE_ROOT}/pip-cache}"
 LLAMA_CPP_REPOSITORY="${NANOQUANT_LLAMA_CPP_REPOSITORY:-https://github.com/ggml-org/llama.cpp.git}"
 LLAMA_CPP_REVISION="${NANOQUANT_LLAMA_CPP_REVISION:-68a521b591edd2f36a456809230d63aa81003dfc}"
 VENDORED_CONVERTER="${REPOSITORY_ROOT}/tools/llamacpp/convert_nanoquant_to_gguf.py"
-VENDORED_CONVERTER_SHA256="3ee6ccd976445b8e5669d34080067b0e36bac6166cd109c5f8cf7bc20893690c"
+VENDORED_CONVERTER_SHA256="c2e1fd064bbd46f38e9e3c5f739865d198ca75bd0bb9db16f72530d378d11304"
 
 case "${EXPERIMENT}" in
   001)
@@ -217,6 +217,10 @@ PY
 cp "${VENDORED_CONVERTER}" "${NANOQUANT_LLAMA_CPP_ROOT}/convert_nanoquant_to_gguf.py"
 
 echo "==> Using repository-vendored NanoQuant GGUF converter"
+python - <<'PY'
+import sentencepiece
+PY
+python "${NANOQUANT_LLAMA_CPP_ROOT}/convert_nanoquant_to_gguf.py" --help >/dev/null
 if [[ ! -x "${NANOQUANT_LLAMA_CPP_ROOT}/build/bin/llama-quantize" ]]; then
   echo "==> Building upstream llama.cpp token-embedding quantizer"
   cmake -S "${NANOQUANT_LLAMA_CPP_ROOT}" -B "${NANOQUANT_LLAMA_CPP_ROOT}/build" \

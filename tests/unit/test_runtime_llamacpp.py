@@ -10,6 +10,7 @@ from safetensors import safe_open
 
 from nanoquant.runtime import (
     LogicalLayerState,
+    ProjectionMemberSpec,
     QuantizedLinearSpec,
     RuntimeModelMetadata,
     convert_logical_to_packed,
@@ -56,11 +57,7 @@ def _state(name: str, *, outliers: bool, bias: bool = False) -> LogicalLayerStat
         torch.linspace(1.0, 1.5, 3),
         bias=torch.zeros(3) if bias else None,
         outlier_indices=torch.tensor([1, 34], dtype=torch.int32) if outliers else None,
-        outlier_values=(
-            torch.tensor([[1, -2], [3, -4], [5, -6]], dtype=torch.float16)
-            if outliers
-            else None
-        ),
+        outlier_values=(torch.tensor([[1, -2], [3, -4], [5, -6]], dtype=torch.float16) if outliers else None),
     )
 
 
@@ -78,12 +75,10 @@ def _export(tmp_path: Path):  # type: ignore[no-untyped-def]
 
 
 def test_gemma_checkpoint_prefix_maps_only_supported_layers() -> None:
-    assert (
-        gemma_hf_checkpoint_prefix("blocks.12.self_attn.q_proj")
-        == "model.layers.12.self_attn.q_proj"
-    )
+    assert gemma_hf_checkpoint_prefix("blocks.12.self_attn.q_proj") == "model.layers.12.self_attn.q_proj"
     assert gemma_gguf_tensor_prefix("blocks.12.self_attn.q_proj") == "blk.12.attn_q"
     assert gemma_gguf_tensor_prefix("blocks.3.mlp.down_proj") == "blk.3.ffn_down"
+    assert gemma_gguf_tensor_prefix("blocks.3.self_attn.attn_qkv") == "blk.3.attn_qkv"
     with pytest.raises(ValueError, match="unsupported Gemma runtime layer name"):
         gemma_hf_checkpoint_prefix("blocks.0.self_attn.q_norm")
 
@@ -127,12 +122,48 @@ def test_llamacpp_checkpoint_tensors_reject_unmapped_bias(tmp_path: Path) -> Non
         )
 
 
+def test_llamacpp_fused_attention_checkpoint_includes_member_rows(tmp_path: Path) -> None:
+    base = _state("blocks.0.self_attn.attn_qkv", outliers=False)
+    spec = QuantizedLinearSpec(
+        base.spec.name,
+        base.spec.logical_format,
+        base.spec.in_features,
+        base.spec.out_features,
+        base.spec.rank,
+        base.spec.factor_dtype,
+        base.spec.scale_dtype,
+        members=(
+            ProjectionMemberSpec("blocks.0.self_attn.q_proj", 0, 1),
+            ProjectionMemberSpec("blocks.0.self_attn.k_proj", 1, 2),
+            ProjectionMemberSpec("blocks.0.self_attn.v_proj", 2, 3),
+        ),
+    )
+    state = LogicalLayerState(
+        spec,
+        base.left_binary,
+        base.right_binary,
+        base.scale_pre,
+        base.scale_mid,
+        base.scale_post,
+    )
+    logical = write_logical_artifact(
+        tmp_path / "logical",
+        RuntimeModelMetadata("fixture/model", "revision", "gemma3", "config", "tokenizer"),
+        {0: (state,)},
+    )
+    packed = convert_logical_to_packed(logical.root, tmp_path / "packed")
+    tensors = llamacpp_checkpoint_tensors(
+        packed.load_layer(spec.name),
+        "model.layers.0.self_attn.attn_qkv",
+    )
+
+    assert tensors["model.layers.0.self_attn.attn_qkv.member_rows"].tolist() == [1, 1, 1]
+
+
 def test_llamacpp_checkpoint_export_is_block_sharded_and_source_bound(tmp_path: Path) -> None:
     packed, manifest, root = _export(tmp_path)
 
-    packed_hash = hashlib.sha256(
-        (packed.root / "nanoquant-packed-model.json").read_bytes()
-    ).hexdigest()
+    packed_hash = hashlib.sha256((packed.root / "nanoquant-packed-model.json").read_bytes()).hexdigest()
     assert manifest.source_packed_descriptor_sha256 == packed_hash
     assert manifest.layer_count == 2
     assert manifest.tensor_count == 16
@@ -142,7 +173,7 @@ def test_llamacpp_checkpoint_export_is_block_sharded_and_source_bound(tmp_path: 
     ]
     descriptor = json.loads((root / "nanoquant-llamacpp-checkpoint.json").read_text())
     assert descriptor["reference"]["converter_sha256"] == (
-        "3ee6ccd976445b8e5669d34080067b0e36bac6166cd109c5f8cf7bc20893690c"
+        "c2e1fd064bbd46f38e9e3c5f739865d198ca75bd0bb9db16f72530d378d11304"
     )
     with safe_open(root / manifest.shards[0].path, framework="pt", device="cpu") as handle:
         assert set(handle.keys()) == {

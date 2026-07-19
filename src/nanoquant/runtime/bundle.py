@@ -139,17 +139,11 @@ class RuntimeBundleManifest:
 
     def __post_init__(self) -> None:
         if self.schema_version != RUNTIME_BUNDLE_SCHEMA_VERSION:
-            raise RuntimeBundleError(
-                f"unsupported runtime bundle schema: {self.schema_version}"
-            )
+            raise RuntimeBundleError(f"unsupported runtime bundle schema: {self.schema_version}")
         if self.artifact_format != RUNTIME_BUNDLE_FORMAT:
-            raise RuntimeBundleError(
-                f"unsupported runtime bundle format: {self.artifact_format}"
-            )
+            raise RuntimeBundleError(f"unsupported runtime bundle format: {self.artifact_format}")
         if self.minimum_runtime_version != MINIMUM_RUNTIME_VERSION:
-            raise RuntimeBundleError(
-                f"unsupported runtime bundle minimum version: {self.minimum_runtime_version}"
-            )
+            raise RuntimeBundleError(f"unsupported runtime bundle minimum version: {self.minimum_runtime_version}")
         _member_path(self.packed_path)
         _digest(self.packed_descriptor_sha256, "packed descriptor hash")
         paths = tuple(member.path for member in self.members)
@@ -168,9 +162,7 @@ class RuntimeBundleManifest:
             or len(self.excluded_linear_modules) != len(set(self.excluded_linear_modules))
             or tuple(sorted(self.excluded_linear_modules)) != self.excluded_linear_modules
         ):
-            raise RuntimeBundleError(
-                "runtime bundle excluded linear modules must be non-empty, unique, and sorted"
-            )
+            raise RuntimeBundleError("runtime bundle excluded linear modules must be non-empty, unique, and sorted")
 
 
 @dataclass(frozen=True, slots=True)
@@ -252,18 +244,14 @@ def _manifest(payload: object) -> RuntimeBundleManifest:
             )
         )
     tensors = []
-    for index, item in enumerate(
-        _sequence(value.get("shell_tensors"), "manifest.shell_tensors")
-    ):
+    for index, item in enumerate(_sequence(value.get("shell_tensors"), "manifest.shell_tensors")):
         tensor = _mapping(item, f"manifest.shell_tensors[{index}]")
         tensors.append(
             RuntimeShellTensor(
                 _string(tensor.get("name"), f"manifest.shell_tensors[{index}].name"),
                 tuple(
                     _integer(dimension, f"manifest.shell_tensors[{index}].shape")
-                    for dimension in _sequence(
-                        tensor.get("shape"), f"manifest.shell_tensors[{index}].shape"
-                    )
+                    for dimension in _sequence(tensor.get("shape"), f"manifest.shell_tensors[{index}].shape")
                 ),
                 _string(tensor.get("dtype"), f"manifest.shell_tensors[{index}].dtype"),
                 _string(tensor.get("shard"), f"manifest.shell_tensors[{index}].shard"),
@@ -351,9 +339,7 @@ def _checkpoint_files(source: Path) -> dict[Path, tuple[str, ...]]:
 
 
 def _module_paths(packed: OpenPackedArtifact) -> dict[str, str]:
-    names = tuple(
-        layer.spec.name for block in packed.manifest.blocks for layer in block.layers
-    )
+    names = tuple(layer.spec.name for block in packed.manifest.blocks for layer in block.layers)
     return transformers_decoder_module_paths(names)
 
 
@@ -372,11 +358,7 @@ def _derived_runtime_buffers(source: Path) -> dict[str, torch.Tensor]:
             f"runtime buffer export does not support model type {getattr(config, 'model_type', None)!r}"
         )
     rope_scaling = getattr(config, "rope_scaling", None)
-    rope_type = (
-        rope_scaling.get("rope_type", rope_scaling.get("type"))
-        if isinstance(rope_scaling, dict)
-        else "default"
-    )
+    rope_type = rope_scaling.get("rope_type", rope_scaling.get("type")) if isinstance(rope_scaling, dict) else "default"
     if not isinstance(rope_type, str) or rope_type not in ROPE_INIT_FUNCTIONS:
         raise RuntimeBundleError(f"runtime buffer export has unsupported RoPE type: {rope_type!r}")
     cpu = torch.device("cpu")
@@ -411,43 +393,54 @@ def write_runtime_bundle(
         if not (source / required).is_file():
             raise RuntimeBundleError(f"source model asset is missing: {required}")
     module_paths = _module_paths(packed)
-    excluded_modules = tuple(sorted(module_paths.values()))
+    member_paths: dict[str, str] = {}
+    for block in packed.manifest.blocks:
+        for layer in block.layers:
+            if layer.spec.members:
+                member_paths.update(
+                    transformers_decoder_module_paths(tuple(member.name for member in layer.spec.members))
+                )
+            else:
+                member_paths[layer.spec.name] = module_paths[layer.spec.name]
+    excluded_modules = tuple(sorted(member_paths.values()))
     excluded_weights = {f"{path}.weight" for path in excluded_modules}
     excluded_biases = {
-        f"{module_paths[layer.spec.name]}.bias"
+        f"{member_paths[layer.spec.name]}.bias"
         for block in packed.manifest.blocks
         for layer in block.layers
-        if layer.spec.has_bias
+        if layer.spec.has_bias and not layer.spec.members
     }
     checkpoint_files = _checkpoint_files(source)
     source_keys = {name for names in checkpoint_files.values() for name in names}
     missing_weights = sorted(excluded_weights - source_keys)
     if missing_weights:
-        raise RuntimeBundleError(
-            f"source model is missing packed linear weights: {missing_weights[:3]}"
-        )
+        raise RuntimeBundleError(f"source model is missing packed linear weights: {missing_weights[:3]}")
     unexpected_biases = sorted(excluded_biases - source_keys)
     if unexpected_biases:
-        raise RuntimeBundleError(
-            f"source model is missing packed linear biases: {unexpected_biases[:3]}"
-        )
+        raise RuntimeBundleError(f"source model is missing packed linear biases: {unexpected_biases[:3]}")
     shell_names = source_keys - excluded_weights - excluded_biases
     if not shell_names:
         raise RuntimeBundleError("source model has no ordinary shell tensors")
-    expected_linear_shapes: dict[str, tuple[int, ...]] = {
-        f"{module_paths[layer.spec.name]}.weight": (
-            layer.spec.out_features,
-            layer.spec.in_features,
-        )
-        for block in packed.manifest.blocks
-        for layer in block.layers
-    }
+    expected_linear_shapes: dict[str, tuple[int, ...]] = {}
+    for block in packed.manifest.blocks:
+        for layer in block.layers:
+            if layer.spec.members:
+                for member in layer.spec.members:
+                    expected_linear_shapes[f"{member_paths[member.name]}.weight"] = (
+                        member.row_end - member.row_start,
+                        layer.spec.in_features,
+                    )
+            else:
+                expected_linear_shapes[f"{module_paths[layer.spec.name]}.weight"] = (
+                    layer.spec.out_features,
+                    layer.spec.in_features,
+                )
     expected_linear_shapes.update(
         {
-            f"{module_paths[layer.spec.name]}.bias": (layer.spec.out_features,)
+            f"{member_paths[layer.spec.name]}.bias": (layer.spec.out_features,)
             for block in packed.manifest.blocks
             for layer in block.layers
-            if layer.spec.has_bias
+            if layer.spec.has_bias and not layer.spec.members
         }
     )
     for source_shard, names in checkpoint_files.items():
@@ -455,13 +448,9 @@ def write_runtime_bundle(
             for name in names:
                 expected_shape = expected_linear_shapes.get(name)
                 if expected_shape is not None and tuple(handle.get_slice(name).get_shape()) != expected_shape:
-                    raise RuntimeBundleError(
-                        f"source packed linear tensor shape differs: {name}"
-                    )
+                    raise RuntimeBundleError(f"source packed linear tensor shape differs: {name}")
 
-    temporary = Path(
-        tempfile.mkdtemp(prefix=f".{destination.name}-", dir=str(destination.parent))
-    )
+    temporary = Path(tempfile.mkdtemp(prefix=f".{destination.name}-", dir=str(destination.parent)))
     try:
         shutil.copytree(packed.root, temporary / "packed")
         model_root = temporary / "model"
@@ -480,10 +469,7 @@ def write_runtime_bundle(
             shard_number += 1
             shard_path = model_root / f"nanoquant-shell-{shard_number:05d}.safetensors"
             with safe_open(source_shard, framework="pt", device="cpu") as handle:
-                values = {
-                    name: handle.get_tensor(name).detach().cpu().contiguous()
-                    for name in selected
-                }
+                values = {name: handle.get_tensor(name).detach().cpu().contiguous() for name in selected}
             save_file(values, shard_path, metadata={"format": "pt"})
             relative = shard_path.relative_to(temporary).as_posix()
             shell_entries.extend(
@@ -515,11 +501,7 @@ def write_runtime_bundle(
 
         members = tuple(
             sorted(
-                (
-                    _member(temporary, path)
-                    for path in temporary.rglob("*")
-                    if path.is_file()
-                ),
+                (_member(temporary, path) for path in temporary.rglob("*") if path.is_file()),
                 key=lambda value: value.path,
             )
         )
@@ -581,38 +563,20 @@ def load_transformers_runtime(
 
     if input_dtype not in _DTYPES:
         raise RuntimeBundleError(f"runtime bundle input dtype is unsupported: {input_dtype}")
-    opened = (
-        bundle
-        if isinstance(bundle, OpenRuntimeBundle)
-        else open_runtime_bundle(bundle, verify_hashes=True)
-    )
+    opened = bundle if isinstance(bundle, OpenRuntimeBundle) else open_runtime_bundle(bundle, verify_hashes=True)
     target = torch.device(device)
     use_native_bfloat16_tied_projection = (
-        native_bfloat16_tied_projection
-        and target.type == "cuda"
-        and input_dtype == "float32"
+        native_bfloat16_tied_projection and target.type == "cuda" and input_dtype == "float32"
     )
-    use_fused_decode_attention = (
-        fuse_decode_attention and target.type == "cuda" and input_dtype == "float32"
-    )
-    use_group_decode_qkv = (
-        group_decode_qkv and target.type == "cuda" and input_dtype == "float32"
-    )
-    use_group_decode_mlp = (
-        group_decode_mlp and target.type == "cuda" and input_dtype == "float32"
-    )
-    entries = tuple(
-        layer for block in opened.packed.manifest.blocks for layer in block.layers
-    )
+    use_fused_decode_attention = fuse_decode_attention and target.type == "cuda" and input_dtype == "float32"
+    use_group_decode_qkv = group_decode_qkv and target.type == "cuda" and input_dtype == "float32"
+    use_group_decode_mlp = group_decode_mlp and target.type == "cuda" and input_dtype == "float32"
+    entries = tuple(layer for block in opened.packed.manifest.blocks for layer in block.layers)
     specs = tuple(entry.spec for entry in entries)
     plans = plan_execution_workloads(
         specs,
-        prefill=WorkloadSpec(
-            "prefill", target.type, input_dtype, batch_size, prefill_tokens, deterministic=True
-        ),
-        decode=WorkloadSpec(
-            "decode", target.type, input_dtype, batch_size, 1, deterministic=True
-        ),
+        prefill=WorkloadSpec("prefill", target.type, input_dtype, batch_size, prefill_tokens, deterministic=True),
+        decode=WorkloadSpec("decode", target.type, input_dtype, batch_size, 1, deterministic=True),
         prefill_backends=(backend,),
         decode_backends=(backend,),
         strict=True,
@@ -638,19 +602,13 @@ def load_transformers_runtime(
         transformers_decoder_module_paths(tuple(entry.spec.name for entry in entries)),
     )
     native_bfloat16_tied_projection_count = (
-        bind_native_bfloat16_tied_projection(model)
-        if use_native_bfloat16_tied_projection
-        else 0
+        bind_native_bfloat16_tied_projection(model) if use_native_bfloat16_tied_projection else 0
     )
     model.to_empty(device=target)
     model.tie_weights()
     state = model.state_dict()
-    expected = {
-        tensor.name for tensor in opened.manifest.shell_tensors if tensor.kind == "state"
-    }
-    expected_buffers = {
-        tensor.name for tensor in opened.manifest.shell_tensors if tensor.kind == "buffer"
-    }
+    expected = {tensor.name for tensor in opened.manifest.shell_tensors if tensor.kind == "state"}
+    expected_buffers = {tensor.name for tensor in opened.manifest.shell_tensors if tensor.kind == "buffer"}
     if not expected <= set(state):
         raise RuntimeBundleError(
             f"runtime shell tensors are absent from the model: {sorted(expected - set(state))[:3]}"
@@ -670,17 +628,11 @@ def load_transformers_runtime(
             with safe_open(opened.root / shard, framework="pt", device="cpu") as handle:
                 for tensor in tensors:
                     value = handle.get_tensor(tensor.name)
-                    target_value = (
-                        state[tensor.name] if tensor.kind == "state" else buffers[tensor.name]
-                    )
+                    target_value = state[tensor.name] if tensor.kind == "state" else buffers[tensor.name]
                     if tuple(value.shape) != tensor.shape or canonical_torch_dtype(value.dtype) != tensor.dtype:
-                        raise RuntimeBundleError(
-                            f"runtime shell tensor metadata differs: {tensor.name}"
-                        )
+                        raise RuntimeBundleError(f"runtime shell tensor metadata differs: {tensor.name}")
                     if tuple(target_value.shape) != tensor.shape:
-                        raise RuntimeBundleError(
-                            f"runtime model shell tensor shape differs: {tensor.name}"
-                        )
+                        raise RuntimeBundleError(f"runtime model shell tensor shape differs: {tensor.name}")
                     target_value.copy_(value.to(device=target, dtype=target_value.dtype))
     model.tie_weights()
     for name in expected_buffers:
@@ -693,14 +645,10 @@ def load_transformers_runtime(
     state = model.state_dict()
     loaded_pointers = {state[name].data_ptr() for name in expected}
     uninitialized = sorted(
-        name
-        for name, value in state.items()
-        if name not in expected and value.data_ptr() not in loaded_pointers
+        name for name, value in state.items() if name not in expected and value.data_ptr() not in loaded_pointers
     )
     if uninitialized:
-        raise RuntimeBundleError(
-            f"runtime model shell has uninitialized tensors: {uninitialized[:3]}"
-        )
+        raise RuntimeBundleError(f"runtime model shell has uninitialized tensors: {uninitialized[:3]}")
     if any(parameter.is_meta for parameter in model.parameters()):
         raise RuntimeBundleError("runtime model retained meta parameters after shell loading")
     fused_rms_norm_count = bind_prepared_rms_norms(model) if fuse_rms_norm else 0
@@ -714,13 +662,9 @@ def load_transformers_runtime(
         if fuse_decode_rope
         else 0
     )
-    fused_decode_attention_count = (
-        fused_decode_rope_count if use_fused_decode_attention else 0
-    )
+    fused_decode_attention_count = fused_decode_rope_count if use_fused_decode_attention else 0
     grouped_qkv_count = grouped_decode_qkv_count(model)
-    short_sliding_mask_count = (
-        bind_short_sliding_masks(model) if optimize_short_sliding_masks else 0
-    )
+    short_sliding_mask_count = bind_short_sliding_masks(model) if optimize_short_sliding_masks else 0
     model.eval()
     return LoadedTransformersRuntime(
         opened,
