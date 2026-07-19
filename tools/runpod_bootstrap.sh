@@ -13,12 +13,17 @@ export HF_HOME="${HF_HOME:-${WORKSPACE_ROOT}/huggingface}"
 export NANOQUANT_LLAMA_CPP_ROOT="${NANOQUANT_LLAMA_CPP_ROOT:-${WORKSPACE_ROOT}/llama.cpp}"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 export PIP_CACHE_DIR="${PIP_CACHE_DIR:-${WORKSPACE_ROOT}/pip-cache}"
+export PYTHONUNBUFFERED="${PYTHONUNBUFFERED:-1}"
+export TORCHINDUCTOR_CACHE_DIR="${TORCHINDUCTOR_CACHE_DIR:-${WORKSPACE_ROOT}/torchinductor-cache}"
+export TRITON_CACHE_DIR="${TRITON_CACHE_DIR:-${WORKSPACE_ROOT}/triton-cache}"
+export CCE_AUTOTUNE="${CCE_AUTOTUNE:-0}"
 
 LLAMA_CPP_REPOSITORY="${NANOQUANT_LLAMA_CPP_REPOSITORY:-https://github.com/ggml-org/llama.cpp.git}"
 LLAMA_CPP_REVISION="${NANOQUANT_LLAMA_CPP_REVISION:-68a521b591edd2f36a456809230d63aa81003dfc}"
 VENDORED_CONVERTER="${REPOSITORY_ROOT}/tools/llamacpp/convert_nanoquant_to_gguf.py"
 VENDORED_CONVERTER_SHA256="c2e1fd064bbd46f38e9e3c5f739865d198ca75bd0bb9db16f72530d378d11304"
 REQUIRES_HF_WRITE=0
+PREFLIGHT_CCE=0
 
 case "${EXPERIMENT}" in
   001)
@@ -57,12 +62,14 @@ case "${EXPERIMENT}" in
     MODEL_REVISION="dcc83ea841ab6100d6b47a070329e1ba4cf78752"
     LAUNCHER="experiments/017-compress-and-benchmark-gemma-3-1b-it.py"
     REQUIRES_HF_WRITE=1
+    PREFLIGHT_CCE=1
     ;;
   018)
     MODEL_ID="google/gemma-3-4b-it"
     MODEL_REVISION="093f9f388b31de276ce2de164bdc2081324b9767"
     LAUNCHER="experiments/018-compress-and-benchmark-gemma-3-4b-it.py"
     REQUIRES_HF_WRITE=1
+    PREFLIGHT_CCE=1
     ;;
   *)
     echo "Unsupported NANOQUANT_EXPERIMENT=${EXPERIMENT}; choose 001, 003, 006, 007, 008, 009, 017, or 018." >&2
@@ -76,7 +83,13 @@ if [[ ${REQUIRES_HF_WRITE} -eq 1 && -z "${HF_TOKEN:-}" ]]; then
   exit 2
 fi
 
-mkdir -p "${WORKSPACE_ROOT}" "${HF_HOME}" "${PIP_CACHE_DIR}" "${REPOSITORY_ROOT}/outputs/runpod-logs"
+mkdir -p \
+  "${WORKSPACE_ROOT}" \
+  "${HF_HOME}" \
+  "${PIP_CACHE_DIR}" \
+  "${TORCHINDUCTOR_CACHE_DIR}" \
+  "${TRITON_CACHE_DIR}" \
+  "${REPOSITORY_ROOT}/outputs/runpod-logs"
 cd "${REPOSITORY_ROOT}"
 
 if ! command -v cmake >/dev/null || ! command -v c++ >/dev/null; then
@@ -189,6 +202,66 @@ PY
 )"
 export NANOQUANT_BOOTSTRAP_MODEL_SNAPSHOT="${MODEL_SNAPSHOT}"
 echo "==> Model snapshot: ${MODEL_SNAPSHOT}"
+
+# Compile and execute the exact-size causal-loss kernels in a disposable,
+# time-bounded process. A bad Torch/Triton/image combination must fail during
+# setup instead of appearing to hang forever on calibration batch zero.
+if [[ ${PREFLIGHT_CCE} -eq 1 && "${NANOQUANT_PREFLIGHT_CCE:-1}" == "1" ]]; then
+  if ! command -v timeout >/dev/null; then
+    echo "GNU timeout is required for the bounded cut-cross-entropy preflight." >&2
+    exit 1
+  fi
+  CCE_TIMEOUT_SECONDS="${NANOQUANT_CCE_PREFLIGHT_TIMEOUT_SECONDS:-300}"
+  echo "==> Preflighting cut-cross-entropy kernels (timeout: ${CCE_TIMEOUT_SECONDS}s)"
+  set +e
+  timeout --signal=TERM --kill-after=30s "${CCE_TIMEOUT_SECONDS}s" \
+    "${VENV}/bin/python" - <<'PY'
+import os
+import time
+
+import torch
+from cut_cross_entropy import linear_cross_entropy
+from transformers import AutoConfig
+
+snapshot = os.environ["NANOQUANT_BOOTSTRAP_MODEL_SNAPSHOT"]
+config = AutoConfig.from_pretrained(snapshot, local_files_only=True)
+text_config = getattr(config, "text_config", config)
+hidden_size = int(text_config.hidden_size)
+vocab_size = int(text_config.vocab_size)
+sequence_length = 2048
+
+hidden = torch.randn(
+    (1, sequence_length, hidden_size),
+    device="cuda",
+    dtype=torch.bfloat16,
+    requires_grad=True,
+)
+weight = torch.randn((vocab_size, hidden_size), device="cuda", dtype=torch.bfloat16)
+targets = torch.randint(0, vocab_size, (1, sequence_length), device="cuda")
+torch.cuda.synchronize()
+started = time.monotonic()
+loss = linear_cross_entropy(hidden, weight, targets, shift=True, filter_eps=None)
+loss.backward()
+torch.cuda.synchronize()
+print(
+    "cut-cross-entropy preflight completed "
+    f"for hidden={hidden_size}, vocab={vocab_size}, sequence={sequence_length} "
+    f"in {time.monotonic() - started:.1f}s",
+    flush=True,
+)
+PY
+  cce_status=$?
+  set -e
+  if [[ ${cce_status} -eq 124 || ${cce_status} -eq 137 ]]; then
+    echo "Cut-cross-entropy preflight exceeded ${CCE_TIMEOUT_SECONDS}s; refusing to start calibration." >&2
+    echo "Use a compatible CUDA PyTorch image or inspect TorchInductor/Triton compiler processes and logs." >&2
+    exit 1
+  fi
+  if [[ ${cce_status} -ne 0 ]]; then
+    echo "Cut-cross-entropy preflight failed with status ${cce_status}; refusing to start calibration." >&2
+    exit "${cce_status}"
+  fi
+fi
 
 # Quality launchers deliberately run offline. Populate every pinned evaluation
 # dataset while networking is still allowed during setup.
