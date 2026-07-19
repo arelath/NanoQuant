@@ -72,6 +72,8 @@ copy that hash-pinned file into the pinned upstream llama.cpp conversion toolcha
 not required to create a GGUF. Upstream `conversion.py`, `convert_hf_to_gguf.py`, `gguf-py`, and the standard
 `llama-quantize` executable are still required, so vendoring this converter does not make GGUF export independent of
 all llama.cpp tooling. The modified fork remains the reference implementation for llama.cpp NanoQuant inference.
+The checkpoint bridge supports the shared canonical projection layout used by Gemma 3 and Llama model families;
+the upstream converter selects the final GGUF architecture from the pinned Hugging Face model configuration.
 
 Each stage is resumable. Existing logical, packed, checkpoint, language GGUF, and mmproj outputs are hash-validated
 and reused. A complete pre-convention GGUF under `outputs/NNN` is validated and hard-linked into `Results/NNN` on

@@ -149,6 +149,20 @@ def test_unsupported_variant_is_explicit() -> None:
         adapter_for_config({"model_type": "mixtral"})
 
 
+def test_llama_exposes_the_configured_shared_input_qkv_candidate() -> None:
+    adapter = adapter_for_config({"model_type": "llama"})
+
+    candidates = adapter.shared_input_group_candidates(BlockId(3))
+
+    assert len(candidates) == 1
+    assert candidates[0].name == "self_attn.attn_qkv"
+    assert tuple(member.path for member in candidates[0].members) == (
+        "self_attn.q_proj",
+        "self_attn.k_proj",
+        "self_attn.v_proj",
+    )
+
+
 def test_gemma3_multimodal_wrapper_maps_only_language_model_tensors(tmp_path: Path) -> None:
     text_config = Gemma3TextConfig(
         vocab_size=32,

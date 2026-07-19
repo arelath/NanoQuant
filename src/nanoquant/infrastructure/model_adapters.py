@@ -90,6 +90,7 @@ DEFINITIONS = (
         ),
         _config(LlamaConfig),
         lambda config, index: LlamaDecoderLayer(config, index),
+        shared_input_groups=(("self_attn.attn_qkv", ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj")),),
     ),
     AdapterDefinition(
         "gemma",

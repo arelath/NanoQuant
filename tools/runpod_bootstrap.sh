@@ -364,3 +364,7 @@ if [[ ${status} -ne 0 ]]; then
   exit "${status}"
 fi
 echo "==> Experiment ${EXPERIMENT} complete"
+if [[ ${REQUIRES_HF_WRITE} -eq 1 ]]; then
+  echo "==> Hugging Face upload complete; stopping RunPod pod ${RUNPOD_POD_ID}"
+  runpodctl pod stop "${RUNPOD_POD_ID}"
+fi

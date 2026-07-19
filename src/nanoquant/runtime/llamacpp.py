@@ -35,6 +35,7 @@ _GEMMA_GGUF_BASES = {
     "mlp.up_proj": "ffn_up",
     "mlp.down_proj": "ffn_down",
 }
+_SUPPORTED_CHECKPOINT_FAMILIES = frozenset(("gemma3", "llama"))
 
 
 @dataclass(frozen=True, slots=True)
@@ -199,7 +200,7 @@ def export_llamacpp_checkpoint(
     """Write block shards consumable by the pinned modified llama.cpp converter."""
 
     packed = open_packed_artifact(packed_root, verify_hashes=True)
-    if packed.manifest.model.family != "gemma3":
+    if packed.manifest.model.family not in _SUPPORTED_CHECKPOINT_FAMILIES:
         raise ValueError(f"llama.cpp checkpoint export does not support model family: {packed.manifest.model.family}")
     destination = Path(output)
     if destination.exists():
