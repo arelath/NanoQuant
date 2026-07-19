@@ -232,6 +232,40 @@ def test_console_renders_bounded_calibration_progress_for_captured_output() -> N
     assert "2/2" in output
 
 
+def test_console_reports_long_calibration_liveness_for_tee_output() -> None:
+    stream = io.StringIO()
+    console = ConsoleEventDestination(Severity.INFO, stream)
+    timestamp = "2026-01-01T00:00:00+00:00"
+
+    for sequence, name, fields in (
+        (1, "calibration.progress_initialized", {"total_batches": 256}),
+        (2, "calibration.progress_updated", {"completed_batches": 1, "total_batches": 256}),
+        (3, "calibration.progress_updated", {"completed_batches": 2, "total_batches": 256}),
+        (4, "calibration.progress_updated", {"completed_batches": 13, "total_batches": 256}),
+        (5, "calibration.progress_completed", {"completed_batches": 256, "total_batches": 256}),
+    ):
+        console.accept(
+            Event(
+                1,
+                timestamp,
+                "run",
+                sequence,
+                "resident",
+                "info",
+                name,
+                fields,
+            )
+        )
+
+    output = stream.getvalue()
+    assert output.count("Calibrating:") == 4
+    assert "0/256" in output
+    assert "1/256" in output
+    assert "2/256" not in output
+    assert "13/256" in output
+    assert "256/256" in output
+
+
 def test_console_uses_one_carriage_return_progress_line_for_tty() -> None:
     stream = TtyStringIO()
     console = ConsoleEventDestination(Severity.INFO, stream)

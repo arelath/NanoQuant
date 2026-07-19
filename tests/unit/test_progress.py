@@ -73,6 +73,26 @@ def test_progress_tracks_calibration_batches_before_compression() -> None:
     assert "Compressing Layers:" in progress.render()
 
 
+def test_progress_promotes_bounded_checkpoints_for_long_calibration() -> None:
+    clock = Clock()
+    progress = CompressionProgress(clock)
+
+    assert progress.observe(_event("calibration.progress_initialized", total_batches=256)) == "checkpoint"
+    clock.now = 2.0
+    assert progress.observe(
+        _event("calibration.progress_updated", completed_batches=1, total_batches=256)
+    ) == "checkpoint"
+    clock.now = 3.0
+    assert progress.observe(
+        _event("calibration.progress_updated", completed_batches=2, total_batches=256)
+    ) == "refresh"
+    clock.now = 15.0
+    assert progress.observe(
+        _event("calibration.progress_updated", completed_batches=13, total_batches=256)
+    ) == "checkpoint"
+    assert "13/256" in progress.render()
+
+
 def test_progress_initialization_seeds_resume_eta() -> None:
     progress = CompressionProgress(lambda: 0.0)
 

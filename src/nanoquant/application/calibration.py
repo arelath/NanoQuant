@@ -20,7 +20,7 @@ from nanoquant.domain.calibration_math import (
 from nanoquant.domain.profiling import NULL_RECORDER, PhaseRecorder
 from nanoquant.ports.activation_store import ActivationStore
 
-CAUSAL_CALIBRATION_ALGORITHM_VERSION = 2
+CAUSAL_CALIBRATION_ALGORITHM_VERSION = 3
 
 TensorUpdate = Callable[[str, torch.Tensor], None]
 
@@ -166,6 +166,32 @@ def causal_language_model_loss(logits: torch.Tensor, token_ids: torch.Tensor) ->
     )
 
 
+def memory_efficient_causal_language_model_loss(
+    hidden_states: torch.Tensor,
+    output_weight: torch.Tensor,
+    token_ids: torch.Tensor,
+) -> torch.Tensor:
+    """Return exact CCE loss without its TorchInductor vocabulary-filtering pass.
+
+    CCE's ``filter_eps`` optimization sorts the full vocabulary through a
+    ``torch.compile`` helper on the first backward pass. Some fresh Linux CUDA
+    images can remain in that compilation before the first calibration batch
+    completes. Disabling filtering keeps the Triton linear-cross-entropy path
+    and its bounded memory behavior while computing the unfiltered gradient.
+    """
+
+    return cast(
+        torch.Tensor,
+        linear_cross_entropy(
+            hidden_states,
+            output_weight,
+            token_ids,
+            shift=True,
+            filter_eps=None,
+        ),
+    )
+
+
 def calibrate_causal_model(
     model: nn.Module,
     batches: tuple[torch.Tensor, ...],
@@ -246,14 +272,13 @@ def calibrate_causal_model(
                 and lm_head_weight.is_cuda
             ):
                 with recorder.phase("loss"):
-                    loss = linear_cross_entropy(
+                    loss = memory_efficient_causal_language_model_loss(
                         hidden,
                         lm_head_weight,
                         batch.to(hidden.device),
-                        shift=1,
                     )
                 with recorder.phase("backward"):
-                    loss.backward()
+                    torch.autograd.backward(loss)
                 return
             hidden_gradient = torch.zeros_like(hidden)
             target_count = batch.shape[0] * (batch.shape[1] - 1)

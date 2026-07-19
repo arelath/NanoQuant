@@ -13,6 +13,7 @@ ProgressAction = Literal["none", "refresh", "checkpoint", "finish"]
 
 _BAR_WIDTH = 24
 _EMA_ALPHA = 0.3
+_CALIBRATION_CHECKPOINT_COUNT = 20
 
 
 def _integer_field(event: Event, name: str) -> int | None:
@@ -110,6 +111,19 @@ class CompressionProgress:
                 self._calibration_completed_batches,
                 completed,
             )
+            # Pipes such as ``python ... | tee`` are non-TTY streams. The
+            # console prints checkpoints but deliberately suppresses refreshes,
+            # so promote a bounded number of calibration updates to checkpoints
+            # to make long Fisher passes visibly live in RunPod logs.
+            checkpoint_stride = math.ceil(
+                self._calibration_total_batches / _CALIBRATION_CHECKPOINT_COUNT
+            )
+            if (
+                checkpoint_stride > 1
+                and completed < self._calibration_total_batches
+                and (completed == 1 or completed % checkpoint_stride == 0)
+            ):
+                return "checkpoint"
             return "refresh"
 
         if event.name == "calibration.progress_completed" and self._phase == "calibration":

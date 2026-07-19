@@ -13,6 +13,7 @@ from nanoquant.application.calibration import (
     calibrate_causal_model,
     causal_language_model_loss,
     materialize_causal_online_state,
+    memory_efficient_causal_language_model_loss,
 )
 from nanoquant.config.schema import ProfilingConfig, ProfilingLevel
 from nanoquant.domain.calibration_math import activation_square_mean, robust_tau, shrink_importance
@@ -174,6 +175,32 @@ def test_causal_loss_applies_exact_next_token_shift() -> None:
     tokens = torch.tensor([[0, 1, 2]])
     expected = torch.nn.functional.cross_entropy(logits[:, :-1].reshape(-1, 3), tokens[:, 1:].reshape(-1))
     assert torch.equal(causal_language_model_loss(logits, tokens), expected)
+
+
+def test_memory_efficient_causal_loss_disables_compiled_vocabulary_filter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict[str, object]]] = []
+    expected = torch.tensor(2.5)
+
+    def fake_linear_cross_entropy(
+        hidden: torch.Tensor,
+        weight: torch.Tensor,
+        tokens: torch.Tensor,
+        **kwargs: object,
+    ) -> torch.Tensor:
+        calls.append((hidden, weight, tokens, kwargs))
+        return expected
+
+    monkeypatch.setattr("nanoquant.application.calibration.linear_cross_entropy", fake_linear_cross_entropy)
+    hidden = torch.randn(1, 4, 3)
+    weight = torch.randn(7, 3)
+    tokens = torch.tensor([[0, 1, 2, 3]])
+
+    actual = memory_efficient_causal_language_model_loss(hidden, weight, tokens)
+
+    assert actual is expected
+    assert calls == [(hidden, weight, tokens, {"shift": True, "filter_eps": None})]
 
 
 @pytest.mark.parametrize("method", ["online_fisher", "two_phase_fisher"])

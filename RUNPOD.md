@@ -103,6 +103,12 @@ run through a CUDA-enabled inference executable.
 | `NANOQUANT_VENV` | `/workspace/nanoquant-venv` | Persistent Python virtual environment. |
 | `HF_HOME` | `/workspace/huggingface` | Persistent Hugging Face model and dataset cache. |
 | `PIP_CACHE_DIR` | `/workspace/pip-cache` | Persistent pip download/build cache. |
+| `PYTHONUNBUFFERED` | `1` | Flush Python output promptly through the bootstrap's `tee` logging pipeline. |
+| `TORCHINDUCTOR_CACHE_DIR` | `/workspace/torchinductor-cache` | Persistent TorchInductor compilation cache, including calibration helper graphs. |
+| `TRITON_CACHE_DIR` | `/workspace/triton-cache` | Persistent Triton kernel cache used by cut-cross-entropy and runtime kernels. |
+| `CCE_AUTOTUNE` | `0` | Keep cut-cross-entropy on its deterministic built-in kernel configuration. |
+| `NANOQUANT_PREFLIGHT_CCE` | `1` | Compile and run exact-size causal-loss kernels before Experiments 017/018. |
+| `NANOQUANT_CCE_PREFLIGHT_TIMEOUT_SECONDS` | `300` | Abort setup if the disposable causal-loss kernel preflight stalls. |
 | `NANOQUANT_LLAMA_CPP_ROOT` | `/workspace/llama.cpp` | Pinned upstream llama.cpp conversion-tool checkout and quantizer build. |
 | `PYTORCH_CUDA_ALLOC_CONF` | `expandable_segments:True` | PyTorch allocator policy used to reduce fragmentation. |
 
