@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import statistics
 import time
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any, cast
 
@@ -68,12 +70,16 @@ from nanoquant.config.schema import (
     ProfilingLevel,
     RankAllocationConfig,
     RankBoundsConfig,
+    RankResponseCurveConfig,
     RankRetryConfig,
+    ReconstructionImportanceConfig,
+    ReconstructionRankPlanningConfig,
     RetryThresholdConfig,
     RunConfig,
     ScaleFitConfig,
     SharedInputGroupConfig,
 )
+from nanoquant.domain.factorization import factorize_admm
 from nanoquant.domain.metrics import reconstruction_metrics
 from nanoquant.domain.models import (
     ArtifactRef,
@@ -91,6 +97,7 @@ from nanoquant.domain.models import (
     FrozenOutlierState,
     FrozenSharedInputGroupState,
     LayerId,
+    LayerInventory,
     LayerPlan,
     LayerResult,
     ModelInventory,
@@ -98,6 +105,7 @@ from nanoquant.domain.models import (
     OutlierSelectionRequest,
     OutlierSelectionResult,
     QuantizationPlan,
+    ReconstructionRankDecision,
     ScaleFitRequest,
     ScaleFitResult,
     SharedInputGroupCandidate,
@@ -109,6 +117,11 @@ from nanoquant.domain.models import (
     TensorSpec,
 )
 from nanoquant.domain.outliers import reconstruct_with_outliers
+from nanoquant.domain.planning import (
+    RankResponseSegment,
+    ReconstructionAllocationUnit,
+    allocate_reconstruction_rank_budget,
+)
 from nanoquant.domain.profiling import NULL_RECORDER, PhaseRecorder
 from nanoquant.domain.runs import BudgetState, RunManifest, RunStatus
 from nanoquant.domain.scale_fit import reconstruct
@@ -155,7 +168,7 @@ from nanoquant.infrastructure.tuning_checkpoint import (
 from nanoquant.ports.event_sink import EventSink
 from nanoquant.ports.model_adapter import ModelAdapter
 
-RESIDENT_ALGORITHM_VERSION = 33
+RESIDENT_ALGORITHM_VERSION = 35
 
 
 @dataclass(frozen=True, slots=True)
@@ -275,6 +288,7 @@ class ResidentQuantizationRequest:
     maximum_rank_layer_patterns: tuple[str, ...] = ()
     layer_budget_multipliers: tuple[LayerRankBudgetConfig, ...] = ()
     rank_retry: RankRetryConfig = _DEFAULT_RESIDENT_RANK_RETRY
+    reconstruction_rank_planning: ReconstructionRankPlanningConfig = ReconstructionRankPlanningConfig()
     layer_order: tuple[str, ...] = ()
     shared_input_groups: tuple[SharedInputGroupConfig, ...] = ()
     admm: ADMMConfig = ADMMConfig(outer_iterations=1, inner_iterations=1)
@@ -303,6 +317,7 @@ class ResidentQuantizationRequest:
     seed: int = 0
     verify_hashes: bool = True
     interrupt_after_layer_commits: int | None = None
+    interrupt_after_rank_probe_commits: int | None = None
     interrupt_after_block_commits: int | None = None
     interrupt_after_factorized_tuning_epoch_commits: int | None = None
     block_forward_batch_size: int = 8
@@ -797,6 +812,63 @@ def _layer_type_multiplier(path: str) -> float:
     return 1.0
 
 
+def _reconstruction_importance_policy(
+    member_layers: tuple[LayerId, ...],
+    importance: ReconstructionImportanceConfig,
+) -> tuple[dict[LayerId, float], frozenset[LayerId], frozenset[int]]:
+    multiplier_matches = {
+        layer: tuple(rule for rule in importance.layer_multipliers if fnmatchcase(layer.path, rule.pattern))
+        for layer in member_layers
+    }
+    ambiguous = {layer: matches for layer, matches in multiplier_matches.items() if len(matches) > 1}
+    if ambiguous:
+        raise ValueError(
+            "multiple reconstruction importance patterns matched logical members: "
+            + ", ".join(f"{layer}={tuple(rule.pattern for rule in matches)!r}" for layer, matches in ambiguous.items())
+        )
+    matched_multiplier_patterns = {matches[0].pattern for matches in multiplier_matches.values() if matches}
+    unmatched_multiplier_patterns = {
+        rule.pattern for rule in importance.layer_multipliers
+    } - matched_multiplier_patterns
+    if unmatched_multiplier_patterns:
+        raise ValueError(
+            "reconstruction importance patterns matched no logical member: "
+            f"{sorted(unmatched_multiplier_patterns)}"
+        )
+    matched_protected_patterns = {
+        pattern
+        for pattern in importance.protected_layer_patterns
+        if any(fnmatchcase(layer.path, pattern) for layer in member_layers)
+    }
+    unmatched_protected_patterns = set(importance.protected_layer_patterns) - matched_protected_patterns
+    if unmatched_protected_patterns:
+        raise ValueError(
+            "reconstruction protected patterns matched no logical member: "
+            f"{sorted(unmatched_protected_patterns)}"
+        )
+    ordered_blocks = sorted({layer.block.index for layer in member_layers})
+    edge_count = min(importance.protected_edge_block_count, len(ordered_blocks))
+    edge_blocks = (
+        frozenset((*ordered_blocks[:edge_count], *ordered_blocks[-edge_count:]))
+        if edge_count
+        else frozenset()
+    )
+    multipliers = {
+        layer: (
+            (multiplier_matches[layer][0].multiplier if multiplier_matches[layer] else 1.0)
+            * (importance.edge_block_multiplier if layer.block.index in edge_blocks else 1.0)
+        )
+        for layer in member_layers
+    }
+    protected = frozenset(
+        layer
+        for layer in member_layers
+        if layer.block.index in edge_blocks
+        or any(fnmatchcase(layer.path, pattern) for pattern in importance.protected_layer_patterns)
+    )
+    return multipliers, protected, edge_blocks
+
+
 def _module_at_path(module: nn.Module, path: str) -> nn.Module:
     current = module
     for part in path.split("."):
@@ -1179,6 +1251,7 @@ def _resident_config_hash(request: ResidentQuantizationRequest) -> str:
         "rank_edge_boost": request.rank_edge_boost,
         "maximum_rank_layer_patterns": request.maximum_rank_layer_patterns,
         "layer_budget_multipliers": request.layer_budget_multipliers,
+        "reconstruction_rank_planning": request.reconstruction_rank_planning,
         "layer_order": request.layer_order,
         "shared_input_groups": request.shared_input_groups,
         "admm": request.admm,
@@ -1389,6 +1462,498 @@ def _resolve_shared_input_groups(
     return tuple(resolved)
 
 
+@dataclass(frozen=True, slots=True)
+class _RankProbeEvidence:
+    schema_version: int
+    probe_plan: ArtifactRef
+    unit_id: str
+    block: int
+    name: str
+    members: tuple[LayerId, ...]
+    source_weight_hashes: tuple[str, ...]
+    baseline_rank: int
+    response_curve: RankResponseCurveConfig
+    raw_squared_error: float
+    normalized_squared_error: float
+    relative_frobenius_error: float
+    member_squared_errors: tuple[float, ...]
+    member_normalized_squared_errors: tuple[float, ...]
+    member_sensitivity_energies: tuple[float, ...]
+    member_weight_norms_squared: tuple[float, ...]
+    logical_seed: int
+    wall_seconds: float
+    peak_workspace_bytes: int
+
+
+def _rank_probe_units(
+    plan: QuantizationPlan,
+) -> tuple[tuple[str, LayerPlan | SharedInputGroupPlan], ...]:
+    units: list[tuple[str, LayerPlan | SharedInputGroupPlan]] = []
+    for block in plan.blocks:
+        layers = {layer.layer.path: layer for layer in block.layers}
+        groups = {group.name: group for group in block.shared_input_groups}
+        schedule = block.unit_order or (*groups, *layers)
+        for name in schedule:
+            unit = groups.get(name) or layers.get(name)
+            if unit is None:
+                raise ValueError(f"rank probe schedule refers to an absent unit: {block.block.index}:{name}")
+            units.append((f"{block.block.index}:{name}", unit))
+    return tuple(units)
+
+
+def _matched_rank_response_curve(
+    name: str,
+    curves: tuple[RankResponseCurveConfig, ...],
+) -> RankResponseCurveConfig:
+    matches = tuple(curve for curve in curves if fnmatchcase(name, curve.unit_pattern))
+    if len(matches) != 1:
+        raise ValueError(f"quantization unit {name!r} must match exactly one reconstruction response curve")
+    return matches[0]
+
+
+def _persist_rank_probe_plan(
+    request: ResidentQuantizationRequest,
+    baseline_plan: QuantizationPlan,
+    artifacts: LocalArtifactStore,
+) -> ArtifactRef:
+    reconstruction = request.reconstruction_rank_planning
+    payload = {
+        "schema_version": 1,
+        "resident_config_hash": _resident_config_hash(request),
+        "objective_mode": reconstruction.objective_mode,
+        "probe_admm": to_dict(reconstruction.probe_admm),
+        "response_curves": to_dict(reconstruction.response_curves),
+        "response_profile_provenance": reconstruction.response_profile_provenance,
+        "baseline_plan": to_dict(baseline_plan),
+    }
+    with artifacts.begin_write(ArtifactTypes.RANK_PROBE_PLAN) as writer:
+        (writer.path / "rank-probe-plan.json").write_text(
+            json.dumps(payload, sort_keys=True, indent=2),
+            encoding="utf-8",
+        )
+        descriptor = writer.commit()
+    return ArtifactRef(ArtifactTypes.RANK_PROBE_PLAN, descriptor.artifact_id, 1)
+
+
+def _rank_probe_journal_path(output: Path) -> Path:
+    return output / "state" / "rank-probe-journal.jsonl"
+
+
+def _load_rank_probe_results(
+    request: ResidentQuantizationRequest,
+    probe_plan: ArtifactRef,
+    artifacts: LocalArtifactStore,
+) -> dict[str, tuple[ArtifactRef, _RankProbeEvidence]]:
+    path = _rank_probe_journal_path(request.output)
+    if not path.exists():
+        return {}
+    results: dict[str, tuple[ArtifactRef, _RankProbeEvidence]] = {}
+    for sequence, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        try:
+            record = json.loads(line)
+            if record["sequence"] != sequence:
+                raise ValueError("sequence is not contiguous")
+            if record["probe_plan_artifact"] != probe_plan.artifact_id:
+                continue
+            reference = ArtifactRef(
+                ArtifactTypes.RANK_PROBE_RESULT,
+                str(record["artifact_id"]),
+                1,
+            )
+            descriptor = artifacts.validate(reference.artifact_id)
+            if descriptor.artifact_type != ArtifactTypes.RANK_PROBE_RESULT:
+                raise ValueError("artifact type differs")
+            payload = json.loads(
+                (artifacts.path_for(reference.artifact_id) / "rank-probe-result.json").read_text(encoding="utf-8")
+            )
+            evidence = from_dict(_RankProbeEvidence, payload, path="rank_probe_result")
+            if evidence.probe_plan != probe_plan or evidence.unit_id != record["unit_id"]:
+                raise ValueError("result identity differs")
+            prior = results.get(evidence.unit_id)
+            if prior is not None and prior[0] != reference:
+                raise ValueError("duplicate rank probe results differ")
+            results[evidence.unit_id] = (reference, evidence)
+        except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ValueError(f"rank probe journal is invalid at sequence {sequence}") from exc
+    return results
+
+
+def _commit_rank_probe_result(
+    request: ResidentQuantizationRequest,
+    evidence: _RankProbeEvidence,
+    artifacts: LocalArtifactStore,
+) -> ArtifactRef:
+    with artifacts.begin_write(ArtifactTypes.RANK_PROBE_RESULT) as writer:
+        (writer.path / "rank-probe-result.json").write_text(
+            json.dumps(to_dict(evidence), sort_keys=True, indent=2),
+            encoding="utf-8",
+        )
+        descriptor = writer.commit()
+    reference = ArtifactRef(ArtifactTypes.RANK_PROBE_RESULT, descriptor.artifact_id, 1)
+    journal_path = _rank_probe_journal_path(request.output)
+    journal_path.parent.mkdir(parents=True, exist_ok=True)
+    sequence = 1
+    if journal_path.exists():
+        sequence += len(journal_path.read_text(encoding="utf-8").splitlines())
+    with journal_path.open("a", encoding="utf-8", newline="\n") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "sequence": sequence,
+                    "probe_plan_artifact": evidence.probe_plan.artifact_id,
+                    "unit_id": evidence.unit_id,
+                    "artifact_id": reference.artifact_id,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n"
+        )
+        handle.flush()
+    return reference
+
+
+def _run_reconstruction_rank_probes(
+    request: ResidentQuantizationRequest,
+    baseline_plan: QuantizationPlan,
+    probe_plan: ArtifactRef,
+    source: SafetensorsModelSource,
+    calibration: PersistedCalibration,
+    tensors: LocalTensorStore,
+    artifacts: LocalArtifactStore,
+    events: EventSink,
+    recorder: PhaseRecorder,
+) -> tuple[ArtifactRef, tuple[ReconstructionRankDecision, ...]]:
+    reconstruction = request.reconstruction_rank_planning
+    probe_admm = reconstruction.probe_admm
+    if probe_admm is None:
+        raise ValueError("reconstruction-aware planning requires resolved probe ADMM settings")
+    calibration_by_layer = {item.layer: item for item in calibration.stats.layers}
+    units = _rank_probe_units(baseline_plan)
+    persisted = _load_rank_probe_results(request, probe_plan, artifacts)
+    committed_this_execution = 0
+    for unit_id, unit in units:
+        member_inventories = (
+            unit.members
+            if isinstance(unit, SharedInputGroupPlan)
+            else tuple(layer for block in baseline_plan.blocks for layer in block.layers if layer.layer == unit.layer)
+        )
+        if unit_id in persisted:
+            evidence = persisted[unit_id][1]
+            expected_hashes = tuple(
+                member.weight.content_hash if isinstance(member, LayerInventory) else member.source_weight.content_hash
+                for member in member_inventories
+            )
+            expected_members = tuple(member.layer for member in member_inventories)
+            if (
+                evidence.members != expected_members
+                or evidence.source_weight_hashes != expected_hashes
+                or evidence.baseline_rank != unit.rank
+            ):
+                raise ValueError(f"persisted rank probe differs from current unit: {unit_id}")
+            cast(Any, events).emit(
+                "resident-quantization",
+                "info",
+                "rank_probe.unit_reused",
+                unit_id=unit_id,
+                artifact_id=persisted[unit_id][0].artifact_id,
+            )
+            continue
+        curve = _matched_rank_response_curve(
+            unit.name if isinstance(unit, SharedInputGroupPlan) else unit.layer.path, reconstruction.response_curves
+        )
+        member_layers = tuple(member.layer for member in member_inventories)
+        seed = logical_seed(
+            request.seed,
+            "rank-reconstruction-probe",
+            unit.block.index if isinstance(unit, SharedInputGroupPlan) else unit.layer.block.index,
+            unit.name if isinstance(unit, SharedInputGroupPlan) else unit.layer.path,
+            0,
+        )
+        cast(Any, events).emit(
+            "resident-quantization",
+            "info",
+            "rank_probe.unit_started",
+            unit_id=unit_id,
+            members=tuple(f"{layer.block.index}:{layer.path}" for layer in member_layers),
+            rank=unit.rank,
+        )
+        started = time.perf_counter()
+        if request.device.startswith("cuda"):
+            torch.cuda.reset_peak_memory_stats(request.device)
+        with ExitStack() as stack:
+            weights = tuple(
+                stack.enter_context(
+                    source.read_tensor(
+                        member.weight if isinstance(member, LayerInventory) else member.source_weight,
+                        device=request.device,
+                    )
+                )
+                for member in member_inventories
+            )
+            input_importances = tuple(
+                stack.enter_context(tensors.read(calibration_by_layer[layer].input_importance, request.device))
+                for layer in member_layers
+            )
+            output_importances = tuple(
+                stack.enter_context(tensors.read(calibration_by_layer[layer].output_importance, request.device))
+                for layer in member_layers
+            )
+            stacked = weights[0] if len(weights) == 1 else torch.cat(weights, dim=0)
+            generator = torch.Generator(device=request.device).manual_seed(seed)
+            with recorder.phase("rank_probe", unit=unit_id):
+                factorized = factorize_admm(
+                    stacked,
+                    torch.ones(stacked.shape[1], device=stacked.device, dtype=torch.float32),
+                    torch.ones(stacked.shape[0], device=stacked.device, dtype=torch.float32),
+                    unit.rank,
+                    generator,
+                    outer_iterations=probe_admm.outer_iterations,
+                    inner_iterations=probe_admm.inner_iterations,
+                    regularization=probe_admm.regularization,
+                    penalty_schedule=probe_admm.penalty_schedule,
+                    convergence_check_interval=probe_admm.convergence_check_interval,
+                    early_stop_tolerance=probe_admm.early_stop_tolerance,
+                    transpose_wide=probe_admm.transpose_wide,
+                )
+            difference = stacked.float() - factorized.reconstruction.float()
+            raw_error = float(difference.square().sum())
+            target_norm = float(stacked.float().square().sum())
+            member_errors: list[float] = []
+            member_normalized: list[float] = []
+            member_energies: list[float] = []
+            member_norms: list[float] = []
+            row = 0
+            for weight, input_importance, output_importance in zip(
+                weights,
+                input_importances,
+                output_importances,
+                strict=True,
+            ):
+                rows = weight.shape[0]
+                member_difference = difference[row : row + rows]
+                member_error = float(member_difference.square().sum())
+                member_norm = float(weight.float().square().sum())
+                member_errors.append(member_error)
+                member_normalized.append(member_error / max(member_norm, 1e-30))
+                member_norms.append(member_norm)
+                member_energies.append(
+                    float(
+                        (
+                            weight.float().square()
+                            * output_importance.float()[:, None].clamp_min(1e-12)
+                            * input_importance.float()[None, :].clamp_min(1e-12)
+                        )
+                        .mean()
+                        .sqrt()
+                    )
+                )
+                row += rows
+            peak = int(torch.cuda.max_memory_allocated(request.device)) if request.device.startswith("cuda") else 0
+            evidence = _RankProbeEvidence(
+                1,
+                probe_plan,
+                unit_id,
+                member_layers[0].block.index,
+                unit.name if isinstance(unit, SharedInputGroupPlan) else unit.layer.path,
+                member_layers,
+                tuple(
+                    member.weight.content_hash
+                    if isinstance(member, LayerInventory)
+                    else member.source_weight.content_hash
+                    for member in member_inventories
+                ),
+                unit.rank,
+                curve,
+                raw_error,
+                raw_error / max(target_norm, 1e-30),
+                math.sqrt(raw_error / max(target_norm, 1e-30)),
+                tuple(member_errors),
+                tuple(member_normalized),
+                tuple(member_energies),
+                tuple(member_norms),
+                seed,
+                time.perf_counter() - started,
+                peak,
+            )
+        reference = _commit_rank_probe_result(request, evidence, artifacts)
+        persisted[unit_id] = (reference, evidence)
+        committed_this_execution += 1
+        cast(Any, events).emit(
+            "resident-quantization",
+            "info",
+            "rank_probe.unit_completed",
+            unit_id=unit_id,
+            artifact_id=reference.artifact_id,
+            rank=unit.rank,
+            relative_frobenius_error=evidence.relative_frobenius_error,
+            wall_seconds=evidence.wall_seconds,
+            peak_workspace_bytes=evidence.peak_workspace_bytes,
+        )
+        del factorized
+        if request.device.startswith("cuda"):
+            torch.cuda.empty_cache()
+        if (
+            request.interrupt_after_rank_probe_commits is not None
+            and committed_this_execution >= request.interrupt_after_rank_probe_commits
+        ):
+            raise InterruptedError(
+                f"injected interruption after {committed_this_execution} reconstruction rank probe commits"
+            )
+
+    if set(persisted) != {unit_id for unit_id, _unit in units}:
+        raise ValueError("rank probe profile does not cover every quantization unit")
+    member_entries: list[tuple[LayerId, float]] = []
+    for unit_id, _unit in units:
+        evidence = persisted[unit_id][1]
+        member_entries.extend(zip(evidence.members, evidence.member_sensitivity_energies, strict=True))
+    block_medians = {
+        block: max(statistics.median(energy for layer, energy in member_entries if layer.block.index == block), 1e-12)
+        for block in {layer.block.index for layer, _energy in member_entries}
+    }
+    relative = {layer: energy / block_medians[layer.block.index] for layer, energy in member_entries}
+    type_medians = {
+        path: max(statistics.median(value for layer, value in relative.items() if layer.path == path), 1e-12)
+        for path in {layer.path for layer in relative}
+    }
+    importance = reconstruction.importance
+    member_layers = tuple(relative)
+    importance_multiplier, architecture_protected, edge_blocks = _reconstruction_importance_policy(
+        member_layers, importance
+    )
+    member_sensitivity = {
+        layer: max(value / type_medians[layer.path], 1e-12) * importance_multiplier[layer]
+        for layer, value in relative.items()
+    }
+    ordered_scores = sorted(member_sensitivity.values())
+    protected_index = min(
+        len(ordered_scores) - 1,
+        math.floor(reconstruction.protected_sensitivity_quantile * len(ordered_scores)),
+    )
+    protected_threshold = ordered_scores[protected_index]
+    allocation_units: list[ReconstructionAllocationUnit] = []
+    protected_by_unit: dict[str, tuple[LayerId, ...]] = {}
+    sensitivity_by_unit: dict[str, float] = {}
+    for unit_id, unit in units:
+        evidence = persisted[unit_id][1]
+        total_norm = sum(evidence.member_weight_norms_squared)
+        unit_sensitivity = math.exp(
+            sum(
+                norm * math.log(member_sensitivity[layer])
+                for layer, norm in zip(
+                    evidence.members,
+                    evidence.member_weight_norms_squared,
+                    strict=True,
+                )
+            )
+            / max(total_norm, 1e-30)
+        )
+        protected_members = tuple(
+            layer
+            for layer in evidence.members
+            if (
+                member_sensitivity[layer] >= protected_threshold
+                or layer in architecture_protected
+            )
+        )
+        protected_by_unit[unit_id] = protected_members
+        sensitivity_by_unit[unit_id] = unit_sensitivity
+        out_features = unit.out_features if isinstance(unit, SharedInputGroupPlan) else unit.source_weight.spec.shape[0]
+        in_features = unit.in_features if isinstance(unit, SharedInputGroupPlan) else unit.source_weight.spec.shape[1]
+        fixed_bits = 0
+        if unit.outliers.charge_to_budget:
+            fixed_bits = unit.estimated_cost.outlier_value_bits + unit.estimated_cost.outlier_index_bits
+        allocation_units.append(
+            ReconstructionAllocationUnit(
+                unit_id,
+                out_features,
+                in_features,
+                evidence.baseline_rank,
+                evidence.raw_squared_error,
+                unit_sensitivity,
+                bool(protected_members),
+                evidence.response_curve.calibrated_rank_floor_fraction,
+                evidence.response_curve.calibrated_rank_ceiling_fraction,
+                tuple(
+                    RankResponseSegment(segment.maximum_rank_fraction, segment.beta_per_rank)
+                    for segment in evidence.response_curve.segments
+                ),
+                fixed_bits,
+            )
+        )
+    original_elements = sum(
+        math.prod(layer.source_weight.spec.shape) for block in baseline_plan.blocks for layer in block.layers
+    ) + sum(
+        member.in_features * member.out_features
+        for block in baseline_plan.blocks
+        for group in block.shared_input_groups
+        for member in group.members
+    )
+    allocated = allocate_reconstruction_rank_budget(
+        tuple(allocation_units),
+        math.floor(original_elements * request.target_bpw),
+        multiple=request.rank_multiple,
+        floor_fraction=request.rank_floor_fraction,
+        ceiling_fraction=request.rank_ceiling_fraction,
+        sensitivity_strength=reconstruction.sensitivity_strength,
+        protected_rank_floor_fraction=reconstruction.protected_rank_floor_fraction,
+        target_protected_error_reduction_fraction=(reconstruction.target_protected_error_reduction_fraction),
+    )
+    allocation_by_unit = {decision.unit_id: decision for decision in allocated.decisions}
+    decisions = tuple(
+        ReconstructionRankDecision(
+            unit_id,
+            persisted[unit_id][1].members,
+            allocation_by_unit[unit_id].baseline_rank,
+            allocation_by_unit[unit_id].planned_rank,
+            allocation_by_unit[unit_id].baseline_squared_error,
+            allocation_by_unit[unit_id].predicted_squared_error,
+            sensitivity_by_unit[unit_id],
+            protected_by_unit[unit_id],
+        )
+        for unit_id, _unit in units
+    )
+    profile_payload = {
+        "schema_version": 1,
+        "producer": {"name": "reconstruction-rank-planner", "version": "1"},
+        "probe_plan": to_dict(probe_plan),
+        "unit_results": [to_dict(persisted[unit_id][0]) for unit_id, _unit in units],
+        "decisions": to_dict(decisions),
+        "allocation": {
+            "spent_bits": allocated.spent_bits,
+            "remaining_bits": allocated.remaining_bits,
+            "protected_baseline_objective": allocated.protected_baseline_objective,
+            "protected_planned_objective": allocated.protected_planned_objective,
+        },
+        "importance": {
+            "policy": to_dict(importance),
+            "edge_blocks": sorted(edge_blocks),
+            "member_multipliers": {
+                f"{layer.block.index}:{layer.path}": importance_multiplier[layer] for layer in member_layers
+            },
+        },
+    }
+    with artifacts.begin_write(ArtifactTypes.RECONSTRUCTION_RANK_PROFILE) as writer:
+        (writer.path / "reconstruction-rank-profile.json").write_text(
+            json.dumps(profile_payload, sort_keys=True, indent=2),
+            encoding="utf-8",
+        )
+        descriptor = writer.commit()
+    profile = ArtifactRef(ArtifactTypes.RECONSTRUCTION_RANK_PROFILE, descriptor.artifact_id, 1)
+    cast(Any, events).emit(
+        "resident-quantization",
+        "info",
+        "rank_probe.profile_committed",
+        artifact_id=profile.artifact_id,
+        unit_count=len(units),
+        spent_bits=allocated.spent_bits,
+        remaining_bits=allocated.remaining_bits,
+        protected_baseline_objective=allocated.protected_baseline_objective,
+        protected_planned_objective=allocated.protected_planned_objective,
+    )
+    return profile, decisions
+
+
 def _active_preprocessing_path(output: Path) -> Path:
     return output / "state" / "preprocessing.json"
 
@@ -1536,6 +2101,33 @@ def _load_precomputed_preprocessing(
     )
     plan_payload = json.loads((artifacts.path_for(plan_ref.artifact_id) / "plan.json").read_text(encoding="utf-8"))
     persisted_plan = PersistedPlan(plan_ref, from_dict(QuantizationPlan, plan_payload, path="plan"))
+    profile_reference = persisted_plan.plan.reconstruction_profile
+    if request.allocation_strategy is AllocationStrategy.RECONSTRUCTION_AWARE and profile_reference is None:
+        raise ValueError("reconstruction-aware precomputed plan has no rank profile")
+    if profile_reference is not None:
+        descriptor = artifacts.validate(profile_reference.artifact_id)
+        if descriptor.artifact_type != ArtifactTypes.RECONSTRUCTION_RANK_PROFILE:
+            raise ValueError("reconstruction rank profile has the wrong artifact type")
+        profile_payload = json.loads(
+            (artifacts.path_for(profile_reference.artifact_id) / "reconstruction-rank-profile.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        probe_plan_payload = profile_payload.get("probe_plan")
+        unit_results_payload = profile_payload.get("unit_results")
+        if not isinstance(probe_plan_payload, dict) or not isinstance(unit_results_payload, list):
+            raise ValueError("reconstruction rank profile is malformed")
+        probe_plan_reference = from_dict(ArtifactRef, probe_plan_payload, path="profile.probe_plan")
+        probe_descriptor = artifacts.validate(probe_plan_reference.artifact_id)
+        if probe_descriptor.artifact_type != ArtifactTypes.RANK_PROBE_PLAN:
+            raise ValueError("rank probe plan has the wrong artifact type")
+        for index, value in enumerate(unit_results_payload):
+            if not isinstance(value, dict):
+                raise ValueError("rank probe result reference is malformed")
+            result_reference = from_dict(ArtifactRef, value, path=f"profile.unit_results[{index}]")
+            result_descriptor = artifacts.validate(result_reference.artifact_id)
+            if result_descriptor.artifact_type != ArtifactTypes.RANK_PROBE_RESULT:
+                raise ValueError("rank probe result has the wrong artifact type")
     if calibration.stats.model != inventory.model or calibration.stats.dataset != dataset:
         raise ValueError("precomputed calibration identity does not match the requested model/dataset")
     if calibration.stats.method != request.calibration_method or calibration.stats.total_tokens != total_tokens:
@@ -2412,7 +3004,9 @@ def _run_resident_quantization_impl(
                 edge_block_boost=request.rank_edge_boost,
             ),
             retry=request.rank_retry,
+            reconstruction=request.reconstruction_rank_planning,
         )
+        resolved_groups = _resolve_shared_input_groups(adapter, inventory, request.shared_input_groups)
         with _logged_operation(
             events,
             "rank_planning",
@@ -2424,6 +3018,52 @@ def _run_resident_quantization_impl(
         ):
             with recorder.phase("plan"):
                 with recorder.phase("ranks"):
+                    reconstruction_profile = None
+                    reconstruction_decisions: tuple[ReconstructionRankDecision, ...] = ()
+                    if request.allocation_strategy is AllocationStrategy.RECONSTRUCTION_AWARE:
+                        baseline_allocation = replace(
+                            allocation,
+                            strategy=AllocationStrategy.UNIFORM,
+                            maximum_rank_layer_patterns=(),
+                            layer_budget_multipliers=(),
+                            retry=replace(allocation.retry, enabled=False),
+                            reconstruction=ReconstructionRankPlanningConfig(),
+                        )
+                        baseline_plan = build_quantization_plan(
+                            PlanningRequest(
+                                inventory,
+                                calibration.stats,
+                                calibration.reference,
+                                objectives.objectives,
+                                baseline_allocation,
+                                request.outliers,
+                                (),
+                                resolved_groups,
+                            )
+                        )
+                        probe_plan = _persist_rank_probe_plan(
+                            request,
+                            baseline_plan,
+                            artifacts,
+                        )
+                        cast(Any, events).emit(
+                            "resident-quantization",
+                            "info",
+                            "rank_probe.plan_committed",
+                            artifact_id=probe_plan.artifact_id,
+                            unit_count=len(_rank_probe_units(baseline_plan)),
+                        )
+                        reconstruction_profile, reconstruction_decisions = _run_reconstruction_rank_probes(
+                            request,
+                            baseline_plan,
+                            probe_plan,
+                            source,
+                            calibration,
+                            tensors,
+                            artifacts,
+                            events,
+                            recorder,
+                        )
                     plan = build_quantization_plan(
                         PlanningRequest(
                             inventory,
@@ -2433,7 +3073,9 @@ def _run_resident_quantization_impl(
                             allocation,
                             request.outliers,
                             sensitivity_profile,
-                            _resolve_shared_input_groups(adapter, inventory, request.shared_input_groups),
+                            resolved_groups,
+                            reconstruction_profile,
+                            reconstruction_decisions,
                         )
                     )
                     persisted_plan = persist_plan(plan, artifacts)

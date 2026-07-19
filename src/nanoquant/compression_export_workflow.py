@@ -141,8 +141,7 @@ def _require_results_gguf_output(
     expected_directory = _numbered_results_directory(config, repository_root)
     if gguf_output.parent != expected_directory:
         raise ValueError(
-            "compression export GGUF must be written directly to the numbered Results directory: "
-            f"{expected_directory}"
+            f"compression export GGUF must be written directly to the numbered Results directory: {expected_directory}"
         )
 
 
@@ -155,9 +154,7 @@ def _link_validated_export_member(source: Path, destination: Path) -> None:
     try:
         os.link(source, destination)
     except OSError as exc:
-        raise OSError(
-            f"cannot adopt validated legacy export into Results: {source} -> {destination}"
-        ) from exc
+        raise OSError(f"cannot adopt validated legacy export into Results: {source} -> {destination}") from exc
 
 
 def _adopt_legacy_gguf_export(
@@ -175,9 +172,7 @@ def _adopt_legacy_gguf_export(
     experiment_number = config.intent.experiment_number
     if experiment_number is None:
         return
-    legacy_output = (
-        repository_root / "outputs" / f"{experiment_number:03d}" / destination.name
-    ).resolve()
+    legacy_output = (repository_root / "outputs" / f"{experiment_number:03d}" / destination.name).resolve()
     legacy_receipt = legacy_output.with_suffix(legacy_output.suffix + ".export.json")
     if not legacy_output.is_file() or not legacy_receipt.is_file():
         return
@@ -189,6 +184,7 @@ def _adopt_legacy_gguf_export(
         legacy_output,
         resolved.llama_cpp_root,
         token_embedding_type=resolved.token_embedding_type,
+        converter_path=repository_root / "tools" / "llamacpp" / "convert_nanoquant_to_gguf.py",
     )
     _link_validated_export_member(legacy.output, destination)
     _link_validated_export_member(legacy_receipt, destination_receipt)
@@ -366,6 +362,7 @@ def execute_compression_export(
         resolved.gguf_output,
         resolved.llama_cpp_root,
         token_embedding_type=resolved.token_embedding_type,
+        converter_path=root / "tools" / "llamacpp" / "convert_nanoquant_to_gguf.py",
     )
     huggingface = None
     summary_output = resolved.gguf_output.with_suffix(".export-summary.json")
@@ -398,14 +395,10 @@ def execute_compression_export(
                     "tensor_count": gguf.mmproj.tensor_count,
                     "tensor_types": gguf.mmproj.tensor_types,
                     "reused": gguf.mmproj.reused,
-                    "receipt": str(
-                        gguf.mmproj.output.with_suffix(gguf.mmproj.output.suffix + ".export.json")
-                    ),
+                    "receipt": str(gguf.mmproj.output.with_suffix(gguf.mmproj.output.suffix + ".export.json")),
                 }
             ),
-            "huggingface": (
-                None if huggingface is None else huggingface_upload_summary(huggingface)
-            ),
+            "huggingface": (None if huggingface is None else huggingface_upload_summary(huggingface)),
         },
     )
     return CompressionExportResult(logical, packed, gguf, summary_output, huggingface)

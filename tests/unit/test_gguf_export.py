@@ -60,7 +60,8 @@ def test_gguf_export_is_converter_pinned_and_resumable(
     )
     reference = tmp_path / "llama.cpp"
     reference.mkdir()
-    converter = reference / "convert_nanoquant_to_gguf.py"
+    converter = tmp_path / "vendored" / "convert_nanoquant_to_gguf.py"
+    converter.parent.mkdir()
     converter.write_text(
         """from pathlib import Path
 import argparse
@@ -87,10 +88,12 @@ Path(a.outfile).write_bytes(b'GGUF-fixture')
 
     monkeypatch.setattr(gguf_export, "hash_file", pinned_hash)
     commands: list[tuple[str, ...]] = []
+    command_environments: list[dict[str, str] | None] = []
 
-    def fake_run(command, **_kwargs):  # type: ignore[no-untyped-def]
+    def fake_run(command, **kwargs):  # type: ignore[no-untyped-def]
         command = tuple(command)
         commands.append(command)
+        command_environments.append(kwargs.get("env"))
         if command[1] == str(converter):
             Path(command[command.index("--outfile") + 1]).write_bytes(b"GGUF-converted")
         else:
@@ -122,8 +125,22 @@ Path(a.outfile).write_bytes(b'GGUF-fixture')
     output = tmp_path / "output" / "model.gguf"
     checkpoint = tmp_path / "output" / "checkpoint"
 
-    first = export_llamacpp_gguf(packed, source, checkpoint, output, reference)
-    second = export_llamacpp_gguf(packed, source, checkpoint, output, reference)
+    first = export_llamacpp_gguf(
+        packed,
+        source,
+        checkpoint,
+        output,
+        reference,
+        converter_path=converter,
+    )
+    second = export_llamacpp_gguf(
+        packed,
+        source,
+        checkpoint,
+        output,
+        reference,
+        converter_path=converter,
+    )
 
     assert output.read_bytes() == b"GGUF-q8_0"
     assert not first.reused
@@ -140,6 +157,11 @@ Path(a.outfile).write_bytes(b'GGUF-fixture')
     assert receipt["nanoquant_scale_tensor_count"] == 3
     assert receipt["quantizer_sha256"] == real_hash_file(quantizer)
     assert len(commands) == 2
+    converter_environment = command_environments[0]
+    assert converter_environment is not None
+    assert converter_environment["NO_LOCAL_GGUF"] == "1"
+    assert str(reference) in converter_environment["PYTHONPATH"]
+    assert str(reference / "gguf-py") in converter_environment["PYTHONPATH"]
     assert commands[1][1:3] == ("--token-embedding-type", "Q8_0")
     assert commands[1][-1] == "F16"
 

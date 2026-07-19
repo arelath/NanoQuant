@@ -13,6 +13,9 @@ class ArtifactTypes:
     BLOCK_RESULT = "block-result"
     ACTIVATION_GENERATION = "activation-generation"
     QUANTIZATION_PLAN = "quantization-plan"
+    RANK_PROBE_PLAN = "rank-probe-plan"
+    RANK_PROBE_RESULT = "rank-probe-result"
+    RECONSTRUCTION_RANK_PROFILE = "reconstruction-rank-profile"
     EVALUATION_TASK_INPUTS = "evaluation-task-inputs"
     EVALUATION_RESULT = "evaluation-result"
 
@@ -378,6 +381,26 @@ class QuantizationPlan:
     blocks: tuple[BlockPlan, ...]
     target_bpw: float
     planned_cost: BitCost
+    reconstruction_profile: ArtifactRef | None = None
+    reconstruction_decisions: tuple[ReconstructionRankDecision, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class ReconstructionRankDecision:
+    unit_id: str
+    members: tuple[LayerId, ...]
+    baseline_rank: int
+    planned_rank: int
+    baseline_squared_error: float
+    predicted_squared_error: float
+    sensitivity: float
+    protected_members: tuple[LayerId, ...]
+
+    def __post_init__(self) -> None:
+        if not self.unit_id or not self.members:
+            raise ValueError("reconstruction decision requires a unit and members")
+        if self.baseline_rank <= 0 or self.planned_rank <= 0:
+            raise ValueError("reconstruction decision ranks must be positive")
 
 
 @dataclass(frozen=True, slots=True)

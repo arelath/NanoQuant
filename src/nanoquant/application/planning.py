@@ -22,6 +22,7 @@ from nanoquant.domain.models import (
     ObjectiveSpec,
     OutlierPlan,
     QuantizationPlan,
+    ReconstructionRankDecision,
     RetryPolicy,
     SharedInputGroupCandidate,
     SharedInputGroupPlan,
@@ -40,6 +41,8 @@ class PlanningRequest:
     outliers: OutlierConfig
     utility_profile: tuple[tuple[str, float], ...] = ()
     shared_input_groups: tuple[SharedInputGroupCandidate, ...] = ()
+    reconstruction_profile: ArtifactRef | None = None
+    reconstruction_decisions: tuple[ReconstructionRankDecision, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,7 +59,7 @@ def _add_costs(costs: list[BitCost]) -> BitCost:
 
 
 def build_quantization_plan(request: PlanningRequest) -> QuantizationPlan:
-    if request.shared_input_groups:
+    if request.shared_input_groups or request.allocation.strategy.value == "reconstruction_aware":
         return _build_grouped_quantization_plan(request)
     layers = [layer for block in request.inventory.blocks for layer in block.quantizable_layers]
     if not layers:
@@ -500,20 +503,39 @@ def _build_grouped_quantization_plan(request: PlanningRequest) -> QuantizationPl
     spent = sum(budget_cost(unit, ranks[unit.key]) for unit in units)
     if spent > target_bits:
         raise ValueError(f"minimum rank/outlier plan costs {spent} bits, exceeding target {target_bits}")
-    while True:
-        candidates: list[tuple[float, int, str, _PlanningUnit, int]] = []
+    if request.allocation.strategy.value == "reconstruction_aware":
+        if request.reconstruction_profile is None:
+            raise ValueError("reconstruction-aware planning requires a persisted profile")
+        decision_map = {decision.unit_id: decision for decision in request.reconstruction_decisions}
+        if set(decision_map) != {unit.key for unit in units}:
+            raise ValueError("reconstruction decisions do not exactly cover quantization units")
         for unit in units:
-            rank = ranks[unit.key]
-            if rank + multiple > caps[unit.key]:
-                continue
-            marginal = budget_cost(unit, rank + multiple) - budget_cost(unit, rank)
-            if spent + marginal <= target_bits:
-                candidates.append((utilities[unit.key] / marginal, -unit.block_index, unit.name, unit, marginal))
-        if not candidates:
-            break
-        *_, selected_unit, marginal = max(candidates, key=lambda item: item[:3])
-        ranks[selected_unit.key] += multiple
-        spent += marginal
+            decision = decision_map[unit.key]
+            if decision.baseline_rank != base_ranks[unit.key]:
+                raise ValueError(f"reconstruction baseline rank differs for {unit.key}")
+            if decision.planned_rank % multiple or not multiple <= decision.planned_rank <= caps[unit.key]:
+                raise ValueError(f"reconstruction planned rank is outside aligned bounds for {unit.key}")
+            if decision.members != tuple(member.layer for member in unit.members):
+                raise ValueError(f"reconstruction decision members differ for {unit.key}")
+            ranks[unit.key] = decision.planned_rank
+        spent = sum(budget_cost(unit, ranks[unit.key]) for unit in units)
+        if spent > target_bits:
+            raise ValueError("reconstruction-aware plan exceeds exact target bit budget")
+    else:
+        while True:
+            candidates: list[tuple[float, int, str, _PlanningUnit, int]] = []
+            for unit in units:
+                rank = ranks[unit.key]
+                if rank + multiple > caps[unit.key]:
+                    continue
+                marginal = budget_cost(unit, rank + multiple) - budget_cost(unit, rank)
+                if spent + marginal <= target_bits:
+                    candidates.append((utilities[unit.key] / marginal, -unit.block_index, unit.name, unit, marginal))
+            if not candidates:
+                break
+            *_, selected_unit, marginal = max(candidates, key=lambda item: item[:3])
+            ranks[selected_unit.key] += multiple
+            spent += marginal
 
     matched_budget_patterns: set[str] = set()
     for unit in units:
@@ -623,6 +645,8 @@ def _build_grouped_quantization_plan(request: PlanningRequest) -> QuantizationPl
         tuple(blocks),
         request.allocation.target_bpw,
         _add_costs(all_costs),
+        request.reconstruction_profile,
+        request.reconstruction_decisions,
     )
 
 

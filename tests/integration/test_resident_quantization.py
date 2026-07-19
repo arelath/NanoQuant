@@ -13,9 +13,14 @@ from transformers.models.gemma3.modeling_gemma3 import Gemma3ForCausalLM
 import nanoquant.resident_quantization as resident
 from nanoquant.config.schema import (
     ADMMConfig,
+    AllocationStrategy,
     ExecutorKind,
     ProfilingConfig,
     ProfilingLevel,
+    RankResponseCurveConfig,
+    RankResponseSegmentConfig,
+    RankRetryConfig,
+    ReconstructionRankPlanningConfig,
     SharedInputGroupConfig,
 )
 from nanoquant.infrastructure.artifacts import ArtifactCorruptionError, LocalArtifactStore
@@ -407,6 +412,93 @@ def test_resident_quantization_factorizes_qkv_as_one_shared_input_group(tmp_path
             input_ids=torch.tensor(request.token_ids), use_cache=False
         ).logits
     assert torch.isfinite(packed_logits).all()
+
+
+def test_reconstruction_rank_probe_covers_every_physical_unit_before_fitting(tmp_path: Path) -> None:
+    snapshot = tmp_path / "snapshot"
+    config = Gemma3TextConfig(
+        vocab_size=24,
+        hidden_size=8,
+        intermediate_size=16,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=4,
+    )
+    Gemma3ForCausalLM(config).save_pretrained(snapshot, safe_serialization=True)
+    curves = tuple(
+        RankResponseCurveConfig(
+            name,
+            0.5,
+            1.0,
+            (RankResponseSegmentConfig(1.0, 0.01),),
+        )
+        for name in (
+            "mlp.gate_proj",
+            "mlp.up_proj",
+            "mlp.down_proj",
+            "self_attn.attn_qkv",
+            "self_attn.o_proj",
+        )
+    )
+    request = ResidentQuantizationRequest(
+        snapshot,
+        tmp_path / "run",
+        "fixture/gemma3",
+        "pinned-test-revision",
+        ((1, 2, 3, 4),),
+        device="cpu",
+        target_bpw=8.0,
+        rank_multiple=1,
+        allocation_strategy=AllocationStrategy.RECONSTRUCTION_AWARE,
+        rank_floor_fraction=0.5,
+        rank_ceiling_fraction=1.0,
+        rank_retry=RankRetryConfig(enabled=False),
+        reconstruction_rank_planning=ReconstructionRankPlanningConfig(
+            enabled=True,
+            probe_admm=ADMMConfig(outer_iterations=1, inner_iterations=1),
+            response_curves=curves,
+            response_profile_provenance="tiny-full-iteration-test",
+            target_protected_error_reduction_fraction=0,
+        ),
+        admm=ADMMConfig(outer_iterations=1, inner_iterations=1),
+        shared_input_groups=(
+            SharedInputGroupConfig(
+                "self_attn.attn_qkv",
+                ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"),
+            ),
+        ),
+        profiling=ProfilingConfig(level=ProfilingLevel.OFF),
+    )
+
+    with pytest.raises(InterruptedError, match="2 reconstruction rank probe commits"):
+        run_resident_quantization(replace(request, interrupt_after_rank_probe_commits=2))
+    probe_journal = (request.output / "state" / "rank-probe-journal.jsonl").read_text().splitlines()
+    assert len(probe_journal) == 2
+
+    result = run_resident_quantization(request)
+
+    assert result.plan.reconstruction_profile is not None
+    assert len(result.plan.reconstruction_decisions) == 5
+    assert {decision.unit_id for decision in result.plan.reconstruction_decisions} == {
+        "0:mlp.gate_proj",
+        "0:mlp.up_proj",
+        "0:mlp.down_proj",
+        "0:self_attn.attn_qkv",
+        "0:self_attn.o_proj",
+    }
+    events = [json.loads(line) for line in (request.output / "events.jsonl").read_text().splitlines()]
+    names = [event["name"] for event in events]
+    assert names.count("rank_probe.unit_completed") == 5
+    assert names.count("rank_probe.unit_reused") == 2
+    assert names.index("rank_probe.profile_committed") < names.index("compression.progress_initialized")
+    artifacts = LocalArtifactStore(request.output / "artifacts")
+    profile = result.plan.reconstruction_profile
+    assert artifacts.validate(profile.artifact_id).artifact_type == "reconstruction-rank-profile"
+    profile_payload = json.loads(
+        (artifacts.path_for(profile.artifact_id) / "reconstruction-rank-profile.json").read_text()
+    )
+    assert len(profile_payload["unit_results"]) == 5
 
 
 def test_resident_tuning_recipe_refits_blocks_and_resumes_exactly(tmp_path: Path) -> None:

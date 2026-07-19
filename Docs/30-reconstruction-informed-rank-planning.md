@@ -1,6 +1,6 @@
 # Reconstruction-Informed Rank Planning
 
-**Status:** Proposed design
+**Status:** Implemented; architecture-protected Gemma-3-270M validation in progress
 
 **Primary evidence:** [Reconstruction Headroom](ImprovementSuggestions/ReconstructionHeadroom.md) and
 [Stacked Factorization](ImprovementSuggestions/StackedFactorization.md)
@@ -131,12 +131,23 @@ class RankResponseCurveConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class ReconstructionImportanceConfig:
+    layer_multipliers: tuple[LayerRankBudgetConfig, ...] = ()
+    protected_layer_patterns: tuple[str, ...] = ()
+    edge_block_multiplier: float = 1.0
+    protected_edge_block_count: int = 0
+
+
+@dataclass(frozen=True, slots=True)
 class ReconstructionRankPlanningConfig:
     enabled: bool = False
     objective_mode: str = "unit_frobenius"
     probe_admm: ADMMConfig | None = None
     response_curves: tuple[RankResponseCurveConfig, ...] = ()
     response_profile_provenance: str = ""
+    importance: ReconstructionImportanceConfig = field(
+        default_factory=ReconstructionImportanceConfig
+    )
     sensitivity_strength: float = 0.25
     protected_sensitivity_quantile: float = 0.80
     protected_rank_floor_fraction: float = 1.0
@@ -198,6 +209,10 @@ Initial validation rules:
 - `0 <= protected_sensitivity_quantile <= 1`;
 - `protected_rank_floor_fraction >= 1` and finite;
 - `0 <= target_protected_error_reduction_fraction < 1`;
+- importance and protection patterns are non-empty, unique, and match at least one logical member;
+- a logical member matches at most one importance multiplier;
+- importance and edge-block multipliers are finite and at least one;
+- `protected_edge_block_count >= 0`;
 - every segment boundary is finite and strictly increasing and every slope is finite and positive;
 - curve patterns are non-empty, unique, cover every selected unit exactly once, and do not overlap;
 - a group curve matches the complete canonical group identity, never one of its member paths;
@@ -370,6 +385,30 @@ unit baseline/planned error. Group member-slice errors are reported as measured 
 not invent an unsupported per-member rank-response curve.
 The full-run report must later show actual final reconstruction metrics for the same cohort. Promotion is based on
 actual metrics, not the predicted 1% gate.
+
+### 8.1 Architectural importance priors
+
+Measured calibration sensitivity is useful but is not the complete functional-importance policy. In particular, the
+first Gemma-3-270M reconstruction-aware run allowed every `down_proj` to fall from its baseline rank to 288 and
+regressed WikiText-2 perplexity from Experiment 013's 1409.14 to 2018.48. The planner therefore also accepts explicit,
+versioned architectural priors rather than hiding type preferences in resident code.
+
+For the corrected Gemma policy:
+
+- `q_proj`, `k_proj`, `v_proj`, `o_proj`, and `down_proj` logical members receive a 1.25 importance multiplier and
+  are always members of the protected cohort;
+- every unit in the first and last transformer block receives a further 1.25 multiplier and is protected;
+- a selected Q/K/V shared-input group is protected when any member matches, because its physical rank cannot be
+  changed per member;
+- architecture protection is unioned with the measured top-sensitivity cohort;
+- the architecture multiplier is applied to the normalized member sensitivity exactly once, before group geometric
+  aggregation; the allocator's existing `sensitivity_strength` then tempers the combined score;
+- protected units retain the baseline-rank floor and participate in the aggregate predicted-error-improvement gate.
+
+The rank profile persists the resolved policy, exact edge-block indices, and effective per-member multipliers. Pattern
+rules that match no logical member or overlap ambiguously fail before production fitting. The legacy
+`_layer_type_multiplier` remains confined to the legacy sensitivity allocator; reconstruction-aware planning no longer
+inherits its former Q/K downweighting.
 
 ## 9. Overrides, outliers, and retries
 

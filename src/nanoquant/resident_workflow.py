@@ -311,6 +311,7 @@ def resident_request_from_config(
         maximum_rank_layer_patterns=config.allocation.maximum_rank_layer_patterns,
         layer_budget_multipliers=config.allocation.layer_budget_multipliers,
         rank_retry=config.allocation.retry,
+        reconstruction_rank_planning=config.allocation.reconstruction,
         layer_order=config.block_tuning.layer_order,
         shared_input_groups=config.factorization.shared_input.groups,
         admm=config.factorization.admm,

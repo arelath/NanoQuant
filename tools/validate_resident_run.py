@@ -195,6 +195,41 @@ def _project_layer_metrics(value: object) -> dict[str, Any]:
     }
 
 
+def _project_group_metrics(value: object) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ConfigDecodeError("block.shared_input_groups", "expected an object")
+    frozen = value["frozen_state"]
+    plan = value["plan"]
+    if not isinstance(frozen, dict) or not isinstance(plan, dict):
+        raise ConfigDecodeError("block.shared_input_groups", "expected nested metric objects")
+    members = plan["members"]
+    if not isinstance(members, list) or not members:
+        raise ConfigDecodeError("block.shared_input_groups.plan.members", "expected a non-empty list")
+    try:
+        input_widths = {member["in_features"] for member in members}
+        output_width = sum(member["out_features"] for member in members)
+    except (KeyError, TypeError) as exc:
+        raise ConfigDecodeError(
+            "block.shared_input_groups.plan.members",
+            "expected member feature dimensions",
+        ) from exc
+    if len(input_widths) != 1:
+        raise ConfigDecodeError(
+            "block.shared_input_groups.plan.members",
+            "members must share one input width",
+        )
+    return {
+        "actual_bit_cost": value["actual_bit_cost"],
+        "frozen_state": {"rank": frozen["rank"]},
+        "block": value["block"],
+        "name": value["name"],
+        "plan": {
+            "in_features": input_widths.pop(),
+            "out_features": output_width,
+        },
+    }
+
+
 def _decode_block_metrics(payload: dict[str, Any], artifact_id: str) -> _BlockMetrics:
     try:
         losses = payload["losses"]
@@ -204,19 +239,7 @@ def _decode_block_metrics(payload: dict[str, Any], artifact_id: str) -> _BlockMe
             "identity": payload["identity"],
             "block": payload["block"],
             "layers": [_project_layer_metrics(value) for value in payload["layers"]],
-            "shared_input_groups": [
-                {
-                    "actual_bit_cost": value["actual_bit_cost"],
-                    "frozen_state": {"rank": value["frozen_state"]["rank"]},
-                    "block": value["block"],
-                    "name": value["name"],
-                    "plan": {
-                        "in_features": value["plan"]["in_features"],
-                        "out_features": value["plan"]["out_features"],
-                    },
-                }
-                for value in payload.get("shared_input_groups", ())
-            ],
+            "shared_input_groups": [_project_group_metrics(value) for value in payload.get("shared_input_groups", ())],
             "losses": {"final_frozen_pre_kd": losses["final_frozen_pre_kd"]},
             "wall_seconds": payload["wall_seconds"],
             "peak_gpu_bytes": payload["peak_gpu_bytes"],

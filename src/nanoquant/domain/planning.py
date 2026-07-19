@@ -3,8 +3,189 @@
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 
 from .models import AttemptSummary, BitCost, RetryDecision
+
+
+@dataclass(frozen=True, slots=True)
+class RankResponseSegment:
+    maximum_rank_fraction: float
+    beta_per_rank: float
+
+
+@dataclass(frozen=True, slots=True)
+class ReconstructionAllocationUnit:
+    unit_id: str
+    out_features: int
+    in_features: int
+    baseline_rank: int
+    baseline_squared_error: float
+    sensitivity: float
+    protected: bool
+    calibrated_rank_floor_fraction: float
+    calibrated_rank_ceiling_fraction: float
+    segments: tuple[RankResponseSegment, ...]
+    fixed_bits: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class ReconstructionAllocationDecision:
+    unit_id: str
+    baseline_rank: int
+    planned_rank: int
+    baseline_squared_error: float
+    predicted_squared_error: float
+
+
+@dataclass(frozen=True, slots=True)
+class ReconstructionAllocationResult:
+    decisions: tuple[ReconstructionAllocationDecision, ...]
+    spent_bits: int
+    remaining_bits: int
+    protected_baseline_objective: float
+    protected_planned_objective: float
+
+
+def integrated_rank_response(
+    baseline_rank: int,
+    rank: int,
+    calibrated_floor_fraction: float,
+    segments: tuple[RankResponseSegment, ...],
+) -> float:
+    """Integrate a piecewise per-rank beta curve from baseline to ``rank``."""
+
+    if baseline_rank <= 0 or not segments:
+        raise ValueError("rank response requires a positive baseline and segments")
+    lower = calibrated_floor_fraction * baseline_rank
+    upper = segments[-1].maximum_rank_fraction * baseline_rank
+    if rank < math.ceil(lower - 1e-9) or rank > math.floor(upper + 1e-9):
+        raise ValueError("rank lies outside the calibrated response range")
+    start = float(baseline_rank)
+    end = float(rank)
+    sign = 1.0
+    if end < start:
+        start, end = end, start
+        sign = -1.0
+    integral = 0.0
+    segment_floor = lower
+    for segment in segments:
+        segment_ceiling = segment.maximum_rank_fraction * baseline_rank
+        overlap = max(0.0, min(end, segment_ceiling) - max(start, segment_floor))
+        integral += overlap * segment.beta_per_rank
+        segment_floor = segment_ceiling
+    return sign * integral
+
+
+def predicted_squared_error(unit: ReconstructionAllocationUnit, rank: int) -> float:
+    integral = integrated_rank_response(
+        unit.baseline_rank,
+        rank,
+        unit.calibrated_rank_floor_fraction,
+        unit.segments,
+    )
+    return unit.baseline_squared_error * math.exp(-2.0 * integral)
+
+
+def allocate_reconstruction_rank_budget(
+    units: tuple[ReconstructionAllocationUnit, ...],
+    target_bits: int,
+    *,
+    multiple: int,
+    floor_fraction: float,
+    ceiling_fraction: float,
+    sensitivity_strength: float,
+    protected_rank_floor_fraction: float,
+    target_protected_error_reduction_fraction: float,
+) -> ReconstructionAllocationResult:
+    """Allocate exact aligned factor ranks by diminishing predicted error reduction per bit."""
+
+    if not units or target_bits <= 0 or multiple <= 0:
+        raise ValueError("reconstruction allocation inputs are invalid")
+    if not 0 <= sensitivity_strength <= 1:
+        raise ValueError("sensitivity strength must be in [0, 1]")
+    baseline_weights = [
+        factor_bit_cost(unit.out_features, unit.in_features, unit.baseline_rank).total for unit in units
+    ]
+    if any(unit.baseline_squared_error <= 0 or unit.sensitivity <= 0 for unit in units):
+        raise ValueError("reconstruction evidence must contain positive errors and sensitivities")
+    log_mean = sum(bits * math.log(unit.sensitivity) for unit, bits in zip(units, baseline_weights, strict=True)) / sum(
+        baseline_weights
+    )
+    sensitivity_weights = {
+        unit.unit_id: math.exp(sensitivity_strength * (math.log(unit.sensitivity) - log_mean)) for unit in units
+    }
+    floors: dict[str, int] = {}
+    caps: dict[str, int] = {}
+    ranks: dict[str, int] = {}
+    for unit in units:
+        effective_floor = max(floor_fraction, unit.calibrated_rank_floor_fraction)
+        if unit.protected:
+            effective_floor = max(effective_floor, protected_rank_floor_fraction)
+        effective_ceiling = min(ceiling_fraction, unit.calibrated_rank_ceiling_fraction)
+        floor_rank = math.ceil(unit.baseline_rank * effective_floor / multiple) * multiple
+        cap_rank = math.floor(unit.baseline_rank * effective_ceiling / multiple) * multiple
+        physical_cap = math.floor(min(unit.in_features, unit.out_features) / multiple) * multiple
+        cap_rank = min(cap_rank, physical_cap)
+        if floor_rank > cap_rank:
+            raise ValueError(f"reconstruction rank floor exceeds cap for {unit.unit_id}")
+        floors[unit.unit_id] = floor_rank
+        caps[unit.unit_id] = cap_rank
+        ranks[unit.unit_id] = floor_rank
+
+    def cost(unit: ReconstructionAllocationUnit, rank: int) -> int:
+        return factor_bit_cost(unit.out_features, unit.in_features, rank).total + unit.fixed_bits
+
+    spent = sum(cost(unit, ranks[unit.unit_id]) for unit in units)
+    if spent > target_bits:
+        raise ValueError("protected reconstruction rank floors exceed target bit budget")
+    by_id = {unit.unit_id: unit for unit in units}
+    while True:
+        candidates: list[tuple[float, int, str, int]] = []
+        for index, unit in enumerate(units):
+            current = ranks[unit.unit_id]
+            proposed = current + multiple
+            if proposed > caps[unit.unit_id]:
+                continue
+            marginal = cost(unit, proposed) - cost(unit, current)
+            if spent + marginal > target_bits:
+                continue
+            gain = sensitivity_weights[unit.unit_id] * (
+                predicted_squared_error(unit, current) - predicted_squared_error(unit, proposed)
+            )
+            candidates.append((gain / marginal, -index, unit.unit_id, marginal))
+        if not candidates:
+            break
+        _priority, _tie, selected, marginal = max(candidates)
+        ranks[selected] += multiple
+        spent += marginal
+
+    decisions = tuple(
+        ReconstructionAllocationDecision(
+            unit.unit_id,
+            unit.baseline_rank,
+            ranks[unit.unit_id],
+            unit.baseline_squared_error,
+            predicted_squared_error(unit, ranks[unit.unit_id]),
+        )
+        for unit in units
+    )
+    protected = [unit for unit in units if unit.protected]
+    protected_baseline = sum(sensitivity_weights[unit.unit_id] * unit.baseline_squared_error for unit in protected)
+    protected_planned = sum(
+        sensitivity_weights[unit.unit_id] * predicted_squared_error(unit, ranks[unit.unit_id]) for unit in protected
+    )
+    if protected and protected_planned > protected_baseline * (1 - target_protected_error_reduction_fraction):
+        raise ValueError("requested protected reconstruction improvement is infeasible")
+    if set(ranks) != set(by_id):
+        raise AssertionError("reconstruction allocator lost a planning unit")
+    return ReconstructionAllocationResult(
+        decisions,
+        spent,
+        target_bits - spent,
+        protected_baseline,
+        protected_planned,
+    )
 
 
 def factor_bit_cost(
