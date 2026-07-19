@@ -82,6 +82,8 @@ def test_numbered_launchers_own_their_concrete_definitions() -> None:
         "014-compress-and-benchmark-gemma-3-270m-it.py",
         "015-compress-and-benchmark-gemma-3-270m-it.py",
         "016-compress-and-benchmark-gemma-3-270m-it.py",
+        "017-compress-and-benchmark-gemma-3-1b-it.py",
+        "018-compress-and-benchmark-gemma-3-4b-it.py",
     ]
     for number, launcher in enumerate(launchers, start=1):
         definition = load_experiment(number)

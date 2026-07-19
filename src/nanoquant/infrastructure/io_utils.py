@@ -20,6 +20,13 @@ def hash_file(path: str | Path) -> str:
     return digest.hexdigest()
 
 
+def hash_canonical_text_file(path: str | Path) -> str:
+    """Hash text source with checkout-specific line endings normalized to LF."""
+
+    content = Path(path).read_bytes().replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    return hashlib.sha256(content).hexdigest()
+
+
 def safe_replace(
     source: str | Path,
     destination: str | Path,

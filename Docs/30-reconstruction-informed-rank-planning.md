@@ -1,6 +1,6 @@
 # Reconstruction-Informed Rank Planning
 
-**Status:** Implemented; architecture-protected Gemma-3-270M validation in progress
+**Status:** Implemented and validated on Gemma-3-270M; reconstruction gate passed, end-quality promotion not met
 
 **Primary evidence:** [Reconstruction Headroom](ImprovementSuggestions/ReconstructionHeadroom.md) and
 [Stacked Factorization](ImprovementSuggestions/StackedFactorization.md)
@@ -423,6 +423,29 @@ raising the underfunded last-block QKV/O ranks. Strength 1.00 was materially mor
 uses 0.75, while historical experiments retain their original explicit 0.25 for reproducibility. There are no
 per-layer or edge minimum-rank configuration fields: the configured importance multipliers and the single tempered
 sensitivity strength remain the only architectural-prior adjustment to marginal allocation value.
+
+### 8.2 Gemma-3-270M validation outcome
+
+Experiment 016 completed the full 90-unit probe, 18-block compression, export, strict transitive validation, and
+matched quality protocol at 1.025280 effective BPW. Relative to Experiment 015, the 0.75 sensitivity policy reduced
+mean final objective-weighted normalized reconstruction error for every architecturally important type:
+
+| Cohort | Experiment 015 | Experiment 016 | Relative change |
+| --- | ---: | ---: | ---: |
+| `down_proj` | 0.249978 | 0.240667 | -3.72% |
+| `q_proj` | 0.258156 | 0.245339 | -4.96% |
+| `k_proj` | 0.085717 | 0.082111 | -4.21% |
+| `v_proj` | 0.223111 | 0.209417 | -6.14% |
+| `o_proj` | 0.233211 | 0.224289 | -3.83% |
+| first/last block, all units | 0.195836 | 0.177343 | -9.44% |
+
+This met the requested reconstruction behavior. It did not meet the end-quality promotion gate: WikiText-2
+perplexity regressed from 1214.20 to 1369.49, although it remained better than stacked-only Experiment 013 at
+1409.14. Gate/up mean error rose from 0.235761/0.234650 to 0.245667/0.264450, showing the fixed-budget cost of the
+stronger architectural prior. BoolQ improved from 0.390 to 0.575, while most other limited task metrics regressed.
+The 0.75 policy is therefore the implemented generic reconstruction-priority policy, but Experiment 015 remains the
+better WikiText configuration; promotion for global quality requires a broader matched evaluation or a less costly
+tradeoff against `up_proj`.
 
 ## 9. Overrides, outliers, and retries
 

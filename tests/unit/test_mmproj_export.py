@@ -70,7 +70,7 @@ def test_mmproj_export_is_bfloat16_validated_and_resumable(
             stderr="",
         )
 
-    monkeypatch.setattr(mmproj_export, "hash_file", pinned_hash)
+    monkeypatch.setattr(mmproj_export, "hash_canonical_text_file", pinned_hash)
     monkeypatch.setattr(mmproj_export.subprocess, "run", fake_run)
 
     first = export_mmproj_bfloat16(snapshot, output, reference)

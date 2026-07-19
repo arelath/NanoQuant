@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
-from nanoquant.infrastructure.io_utils import atomic_write_json, hash_file
+from nanoquant.infrastructure.io_utils import atomic_write_json, hash_canonical_text_file, hash_file
 from nanoquant.runtime import PACKED_REFERENCE_COMMIT
 
 MMPROJ_EXPORT_SCHEMA_VERSION = 1
@@ -136,7 +136,7 @@ def export_mmproj_bfloat16(
     converter = reference / "convert_hf_to_gguf.py"
     if not converter.is_file():
         raise FileNotFoundError(f"llama.cpp multimodal converter is missing: {converter}")
-    converter_hash = hash_file(converter)
+    converter_hash = hash_canonical_text_file(converter)
     if converter_hash != MMPROJ_CONVERTER_SHA256:
         raise ValueError(
             "llama.cpp multimodal converter hash differs from pinned provenance: "

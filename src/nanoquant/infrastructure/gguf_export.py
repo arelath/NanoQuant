@@ -11,7 +11,7 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, cast
 
-from nanoquant.infrastructure.io_utils import atomic_write_json, hash_file
+from nanoquant.infrastructure.io_utils import atomic_write_json, hash_canonical_text_file, hash_file
 from nanoquant.infrastructure.mmproj_export import (
     MMPROJ_OUTPUT_NAME,
     MmprojExportResult,
@@ -209,7 +209,7 @@ def _reuse_existing(
     expected = {
         "schema_version": GGUF_EXPORT_SCHEMA_VERSION,
         "packed_descriptor_sha256": packed_descriptor_hash,
-        "converter_sha256": hash_file(converter),
+        "converter_sha256": hash_canonical_text_file(converter),
         "quantizer_sha256": hash_file(quantizer),
         "token_embedding_type": token_embedding_type,
         "nanoquant_scale_type": "bf16",
@@ -265,7 +265,7 @@ def export_llamacpp_gguf(
     converter = reference / "convert_nanoquant_to_gguf.py" if converter_path is None else Path(converter_path).resolve()
     if not converter.is_file():
         raise FileNotFoundError(f"modified llama.cpp converter is missing: {converter}")
-    converter_hash = hash_file(converter)
+    converter_hash = hash_canonical_text_file(converter)
     expected_converter_hash = packed.manifest.layout.reference.converter_sha256
     if converter_hash != expected_converter_hash:
         raise ValueError(

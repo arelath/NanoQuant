@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Bootstrap a persistent RunPod workspace and run one complete NanoQuant experiment.
-# Defaults to the publishable Gemma 3 270M compression and quality experiment.
+# Defaults to the architecture-protected Gemma 3 1B compression, quality, and publish experiment.
 set -Eeuo pipefail
 
 REPOSITORY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -8,7 +8,7 @@ WORKSPACE_ROOT="${NANOQUANT_WORKSPACE_ROOT:-/workspace}"
 VENV_OVERRIDE="${NANOQUANT_VENV:-}"
 VENV="${VENV_OVERRIDE:-${WORKSPACE_ROOT}/nanoquant-venv}"
 SYSTEM_PYTHON="${NANOQUANT_SYSTEM_PYTHON:-python3}"
-EXPERIMENT="${NANOQUANT_EXPERIMENT:-009}"
+EXPERIMENT="${NANOQUANT_EXPERIMENT:-017}"
 export HF_HOME="${HF_HOME:-${WORKSPACE_ROOT}/huggingface}"
 export NANOQUANT_LLAMA_CPP_ROOT="${NANOQUANT_LLAMA_CPP_ROOT:-${WORKSPACE_ROOT}/llama.cpp}"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
@@ -18,6 +18,7 @@ LLAMA_CPP_REPOSITORY="${NANOQUANT_LLAMA_CPP_REPOSITORY:-https://github.com/ggml-
 LLAMA_CPP_REVISION="${NANOQUANT_LLAMA_CPP_REVISION:-68a521b591edd2f36a456809230d63aa81003dfc}"
 VENDORED_CONVERTER="${REPOSITORY_ROOT}/tools/llamacpp/convert_nanoquant_to_gguf.py"
 VENDORED_CONVERTER_SHA256="c2e1fd064bbd46f38e9e3c5f739865d198ca75bd0bb9db16f72530d378d11304"
+REQUIRES_HF_WRITE=0
 
 case "${EXPERIMENT}" in
   001)
@@ -49,12 +50,31 @@ case "${EXPERIMENT}" in
     MODEL_ID="unsloth/gemma-3-270m-it"
     MODEL_REVISION="23cf460f6bb16954176b3ddcc8d4f250501458a9"
     LAUNCHER="experiments/009-compress-benchmark-and-publish-gemma-3-270m-it.py"
+    REQUIRES_HF_WRITE=1
+    ;;
+  017)
+    MODEL_ID="google/gemma-3-1b-it"
+    MODEL_REVISION="dcc83ea841ab6100d6b47a070329e1ba4cf78752"
+    LAUNCHER="experiments/017-compress-and-benchmark-gemma-3-1b-it.py"
+    REQUIRES_HF_WRITE=1
+    ;;
+  018)
+    MODEL_ID="google/gemma-3-4b-it"
+    MODEL_REVISION="093f9f388b31de276ce2de164bdc2081324b9767"
+    LAUNCHER="experiments/018-compress-and-benchmark-gemma-3-4b-it.py"
+    REQUIRES_HF_WRITE=1
     ;;
   *)
-    echo "Unsupported NANOQUANT_EXPERIMENT=${EXPERIMENT}; choose 001, 003, 006, 007, 008, or 009." >&2
+    echo "Unsupported NANOQUANT_EXPERIMENT=${EXPERIMENT}; choose 001, 003, 006, 007, 008, 009, 017, or 018." >&2
     exit 2
     ;;
 esac
+
+if [[ ${REQUIRES_HF_WRITE} -eq 1 && -z "${HF_TOKEN:-}" ]]; then
+  echo "Experiment ${EXPERIMENT} publishes its validated GGUF to Hugging Face." >&2
+  echo "Set HF_TOKEN to a token with write permission before starting this long-running workflow." >&2
+  exit 2
+fi
 
 mkdir -p "${WORKSPACE_ROOT}" "${HF_HOME}" "${PIP_CACHE_DIR}" "${REPOSITORY_ROOT}/outputs/runpod-logs"
 cd "${REPOSITORY_ROOT}"
@@ -71,6 +91,9 @@ fi
 
 echo "==> Repository: ${REPOSITORY_ROOT}"
 echo "==> Experiment: ${EXPERIMENT} (${MODEL_ID}@${MODEL_REVISION})"
+if [[ ${REQUIRES_HF_WRITE} -eq 1 ]]; then
+  echo "==> Hugging Face publication enabled; repository access will be validated by the workflow before compression"
+fi
 
 if ! IMAGE_TORCH_VERSION="$("${SYSTEM_PYTHON}" -c 'import torch; print(torch.__version__)')"; then
   echo "The RunPod image must provide a CUDA-enabled PyTorch installation." >&2

@@ -86,7 +86,7 @@ Path(a.outfile).write_bytes(b'GGUF-fixture')
             return PACKED_REFERENCE_CONVERTER_SHA256
         return real_hash_file(resolved)
 
-    monkeypatch.setattr(gguf_export, "hash_file", pinned_hash)
+    monkeypatch.setattr(gguf_export, "hash_canonical_text_file", pinned_hash)
     commands: list[tuple[str, ...]] = []
     command_environments: list[dict[str, str] | None] = []
 
