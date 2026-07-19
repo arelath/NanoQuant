@@ -253,6 +253,43 @@ def validate(config: RunConfig, phase: ValidationPhase = ValidationPhase.PRE_RES
         "runtime.activations.gpu_reserve_gib",
         "must be finite and non-negative",
     )
+    resource_limits = config.runtime.resources
+    for path, resource_value in (
+        ("gpu_memory_gib", resource_limits.gpu_memory_gib),
+        ("cpu_memory_gib", resource_limits.cpu_memory_gib),
+        ("temporary_disk_gib", resource_limits.temporary_disk_gib),
+        ("workspace_memory_gib", resource_limits.workspace_memory_gib),
+    ):
+        require(
+            resource_value is None or (math.isfinite(resource_value) and resource_value > 0),
+            "CFG072",
+            f"runtime.resources.{path}",
+            "must be finite and positive when provided",
+        )
+    require(
+        math.isfinite(resource_limits.pinned_memory_gib) and resource_limits.pinned_memory_gib >= 0,
+        "CFG073",
+        "runtime.resources.pinned_memory_gib",
+        "must be finite and non-negative",
+    )
+    memory_policy = config.runtime.memory_policy
+    for path, reserve_value in (
+        ("gpu_reserve_gib", memory_policy.gpu_reserve_gib),
+        ("host_reserve_gib", memory_policy.host_reserve_gib),
+        ("temporary_disk_reserve_gib", memory_policy.temporary_disk_reserve_gib),
+    ):
+        require(
+            math.isfinite(reserve_value) and reserve_value >= 0,
+            "CFG074",
+            f"runtime.memory_policy.{path}",
+            "must be finite and non-negative",
+        )
+    require(
+        memory_policy.maximum_stage_retries >= 0,
+        "CFG075",
+        "runtime.memory_policy.maximum_stage_retries",
+        "must not be negative",
+    )
     require(
         config.factorization.admm.outer_iterations > 0,
         "CFG012",

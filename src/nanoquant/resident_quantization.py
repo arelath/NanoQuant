@@ -123,6 +123,7 @@ from nanoquant.domain.planning import (
     allocate_reconstruction_rank_budget,
 )
 from nanoquant.domain.profiling import NULL_RECORDER, PhaseRecorder
+from nanoquant.domain.resources import ResolvedMemoryPlan, ResourceAdmissionError
 from nanoquant.domain.runs import BudgetState, RunManifest, RunStatus
 from nanoquant.domain.scale_fit import reconstruct
 from nanoquant.domain.seeds import logical_seed
@@ -140,7 +141,7 @@ from nanoquant.infrastructure.commits import (
     retire_block_activations,
 )
 from nanoquant.infrastructure.device_lease import acquire_device_lease
-from nanoquant.infrastructure.device_memory import PeakWindow, release_cached_host_memory
+from nanoquant.infrastructure.device_memory import PeakWindow, release_cached_host_memory, sample_device_memory
 from nanoquant.infrastructure.environment import capture_environment
 from nanoquant.infrastructure.hf_language_model import load_causal_language_model
 from nanoquant.infrastructure.io_utils import atomic_write_json
@@ -198,6 +199,11 @@ def _logged_operation(
     try:
         yield
     except BaseException as exc:
+        if not hasattr(exc, "nanoquant_operation"):
+            try:
+                exc.__dict__["nanoquant_operation"] = operation
+            except Exception:
+                pass
         cast(Any, events).emit(
             "resident-quantization",
             "error",
@@ -310,6 +316,7 @@ class ResidentQuantizationRequest:
     post_block_refit_learning_rate: float = 1e-5
     post_block_refit_epoch_cooldown_seconds: float = 0.0
     tuning_microbatch_size: int | None = None
+    post_block_refit_microbatch_size: int | None = None
     legacy_tuning_seed_reset: bool = False
     restore_best_tuning_state: bool = True
     tuning_epoch_loss_mode: EpochLossMode = "full_evaluation"
@@ -338,6 +345,8 @@ class ResidentQuantizationRequest:
     run_config: RunConfig | None = None
     launcher_path: Path | None = None
     defer_run_completion: bool = False
+    memory_plan: ResolvedMemoryPlan | None = None
+    memory_plan_reference: ArtifactRef | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1235,6 +1244,7 @@ def _run_resident_factorization_attempts(
 
 
 def _resident_config_hash(request: ResidentQuantizationRequest) -> str:
+    adaptive_memory = request.memory_plan is not None and request.memory_plan.mode == "adaptive"
     semantic_config = {
         "resident_algorithm_version": RESIDENT_ALGORITHM_VERSION,
         "runtime": {
@@ -1270,21 +1280,30 @@ def _resident_config_hash(request: ResidentQuantizationRequest) -> str:
         "post_block_refit_epochs": request.post_block_refit_epochs,
         "post_block_refit_batch_size": request.post_block_refit_batch_size,
         "post_block_refit_learning_rate": request.post_block_refit_learning_rate,
-        "tuning_microbatch_size": request.tuning_microbatch_size,
-        "block_forward_batch_size": request.block_forward_batch_size,
+        "tuning_microbatch_size": "adaptive" if adaptive_memory else request.tuning_microbatch_size,
+        "post_block_refit_microbatch_size": (
+            "adaptive" if adaptive_memory else request.post_block_refit_microbatch_size
+        ),
+        "block_forward_batch_size": "adaptive" if adaptive_memory else request.block_forward_batch_size,
         "legacy_tuning_seed_reset": request.legacy_tuning_seed_reset,
         "restore_best_tuning_state": request.restore_best_tuning_state,
         "tuning_epoch_loss_mode": request.tuning_epoch_loss_mode,
         "activation_retention": request.activation_retention,
         "calibration_method": request.calibration_method,
         "calibration_shrinkage": request.calibration_shrinkage,
-        "calibration_batch_size": request.calibration_batch_size,
+        "calibration_batch_size": "adaptive" if adaptive_memory else request.calibration_batch_size,
         "seed": request.seed,
     }
     # Preserve commit identity for the previously hard-coded parity policy.
     # A non-default retry policy is new semantic input and must invalidate it.
     if request.rank_retry != _DEFAULT_RESIDENT_RANK_RETRY:
         semantic_config["rank_retry"] = request.rank_retry
+    if adaptive_memory and request.run_config is not None:
+        semantic_config["adaptive_memory"] = {
+            "policy": request.run_config.runtime.memory_policy,
+            "block_forward_batch_maximum": request.run_config.runtime.block_forward_batch_size,
+            "tuning_microbatch_maximum": request.run_config.block_tuning.microbatch_size,
+        }
     return "sha256:" + hashlib.sha256(canonical_json(semantic_config).encode()).hexdigest()
 
 
@@ -1304,6 +1323,8 @@ def _resident_manifest_config(request: ResidentQuantizationRequest, component: s
     payload = cast(dict[str, object], to_dict(request))
     payload.pop("run_config")
     payload.pop("launcher_path")
+    payload.pop("memory_plan")
+    payload.pop("memory_plan_reference")
     payload["token_ids"] = _manifest_tensor_identity(request.token_ids)
     payload["quality_token_ids"] = _manifest_tensor_identity(request.quality_token_ids)
     payload["component"] = component
@@ -2169,7 +2190,60 @@ def _run_resident_quantization(request: ResidentQuantizationRequest) -> Resident
             nonfactorized_tuning_epochs=request.nonfactorized_tuning_epochs,
             post_block_refit_epochs=request.post_block_refit_epochs,
             activation_retention=request.activation_retention,
+            memory_plan_artifact=(
+                None if request.memory_plan_reference is None else request.memory_plan_reference.artifact_id
+            ),
+            memory_plan_revision=(None if request.memory_plan is None else request.memory_plan.revision),
+            memory_plan_mode=(None if request.memory_plan is None else request.memory_plan.mode),
+            planned_peak_gpu_bytes=(None if request.memory_plan is None else request.memory_plan.peak_gpu_bytes),
+            planned_peak_host_bytes=(None if request.memory_plan is None else request.memory_plan.peak_host_bytes),
         )
+        if request.memory_plan is not None:
+            cast(Any, session.events).emit(
+                "memory",
+                "info",
+                "memory.plan_created",
+                artifact_id=(
+                    None if request.memory_plan_reference is None else request.memory_plan_reference.artifact_id
+                ),
+                revision=request.memory_plan.revision,
+                mode=request.memory_plan.mode,
+                profile=request.memory_plan.profile,
+                executor=request.memory_plan.executor,
+                activation_tier=request.memory_plan.activation_tier,
+                activation_gpu_cache=request.memory_plan.activation_gpu_cache,
+                peak_gpu_bytes=request.memory_plan.peak_gpu_bytes,
+                peak_host_bytes=request.memory_plan.peak_host_bytes,
+                peak_pinned_host_bytes=request.memory_plan.peak_pinned_host_bytes,
+                peak_temporary_disk_bytes=request.memory_plan.peak_temporary_disk_bytes,
+                warnings=list(request.memory_plan.warnings),
+            )
+            if request.memory_plan.revision > 1:
+                cast(Any, session.events).emit(
+                    "memory",
+                    "warning",
+                    "memory.plan_revised",
+                    revision=request.memory_plan.revision,
+                    reason="out_of_memory",
+                    algorithm_changed=False,
+                )
+            for stage_plan in request.memory_plan.stages:
+                cast(Any, session.events).emit(
+                    "memory",
+                    "info",
+                    "memory.stage_resized" if stage_plan.resized else "memory.stage_admitted",
+                    plan_revision=request.memory_plan.revision,
+                    stage_name=stage_plan.stage,
+                    signature=stage_plan.signature,
+                    batch_size=stage_plan.batch_size,
+                    prefetch_batches=stage_plan.prefetch_batches,
+                    predicted_gpu_bytes=stage_plan.predicted_gpu_bytes,
+                    predicted_host_bytes=stage_plan.predicted_host_bytes,
+                    predicted_pinned_host_bytes=stage_plan.predicted_pinned_host_bytes,
+                    gpu_capacity_bytes=stage_plan.gpu_capacity_bytes,
+                    host_capacity_bytes=stage_plan.host_capacity_bytes,
+                    uncertainty_bytes=stage_plan.uncertainty_bytes,
+                )
         session_started = time.perf_counter()
         with profiled_run(
             request.profiling,
@@ -2282,6 +2356,8 @@ def _validate_resident_request(request: ResidentQuantizationRequest) -> None:
         raise ValueError("resident quantization post-block refit batch size must be positive")
     if request.tuning_microbatch_size is not None and request.tuning_microbatch_size <= 0:
         raise ValueError("resident quantization tuning microbatch size must be positive")
+    if request.post_block_refit_microbatch_size is not None and request.post_block_refit_microbatch_size <= 0:
+        raise ValueError("resident quantization post-block refit microbatch size must be positive")
     if request.tuning_epoch_loss_mode not in ("full_evaluation", "legacy_training"):
         raise ValueError(f"unsupported tuning epoch loss mode: {request.tuning_epoch_loss_mode}")
     if request.tuning_epoch_loss_mode == "legacy_training" and request.restore_best_tuning_state:
@@ -2406,6 +2482,25 @@ def _setup_resident_environment(
                     attention_implementation=adapter.attention_implementation,
                 ).to(model_device)
     model.eval()
+    if request.memory_plan is not None:
+        observed = sample_device_memory()
+        planned = request.memory_plan.stage("model_load")
+        cast(Any, events).emit(
+            "memory",
+            "info",
+            "memory.observation_recorded",
+            stage_name="model_load",
+            plan_revision=request.memory_plan.revision,
+            predicted_gpu_bytes=planned.predicted_gpu_bytes,
+            predicted_host_bytes=planned.predicted_host_bytes,
+            **observed,
+        )
+        allocated = observed.get("cuda.allocated_bytes", 0)
+        if allocated > planned.gpu_capacity_bytes:
+            raise ResourceAdmissionError(
+                f"RES001 model load observed {allocated} CUDA bytes but safe capacity is "
+                f"{planned.gpu_capacity_bytes}"
+            )
     return _ResidentEnvironment(
         source,
         checkpoint,
@@ -4085,7 +4180,7 @@ def _run_resident_quantization_impl(
                 layers=len(frozen_states),
                 epochs=request.post_block_refit_epochs,
                 batch_size=request.post_block_refit_batch_size,
-                microbatch_size=request.tuning_microbatch_size,
+                microbatch_size=request.post_block_refit_microbatch_size,
                 learning_rate=request.post_block_refit_learning_rate,
             ):
                 with _profile_block_phase(recorder, block_index, "refit"):
@@ -4099,7 +4194,7 @@ def _run_resident_quantization_impl(
                             request.post_block_refit_learning_rate,
                             output_importance=block_output_importance,
                             seed=_tuning_seed(request, "post-block-refit", block_index, None),
-                            microbatch_size=request.tuning_microbatch_size,
+                            microbatch_size=request.post_block_refit_microbatch_size,
                             epoch_observer=_epoch_cooldown_observer(
                                 request.post_block_refit_epoch_cooldown_seconds,
                                 events,
@@ -4309,6 +4404,15 @@ def _run_resident_quantization_impl(
             wall_seconds=committed.result.wall_seconds,
             gpu_peak_bytes=committed.result.peak_gpu_bytes,
             host_peak_bytes=committed.result.peak_host_bytes,
+            planned_device_bytes=(
+                None if request.memory_plan is None else request.memory_plan.peak_gpu_bytes
+            ),
+            budget_utilization=(
+                None
+                if request.memory_plan is None or request.memory_plan.peak_gpu_bytes <= 0
+                else block_peak / request.memory_plan.peak_gpu_bytes
+            ),
+            memory_plan_revision=(None if request.memory_plan is None else request.memory_plan.revision),
             **{
                 "cuda.window_peak_allocated_bytes": block_window.peak_allocated_bytes,
                 "cuda.window_peak_reserved_bytes": block_window.peak_reserved_bytes,

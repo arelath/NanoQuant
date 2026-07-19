@@ -16,6 +16,7 @@ class ArtifactTypes:
     RANK_PROBE_PLAN = "rank-probe-plan"
     RANK_PROBE_RESULT = "rank-probe-result"
     RECONSTRUCTION_RANK_PROFILE = "reconstruction-rank-profile"
+    MEMORY_PLAN = "memory-plan"
     EVALUATION_TASK_INPUTS = "evaluation-task-inputs"
     EVALUATION_RESULT = "evaluation-result"
 

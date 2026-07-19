@@ -57,8 +57,12 @@ def run_with_runtime_fallback(
             action = next((candidate for candidate in actions if candidate not in attempted), "fail")
             attempted.add(action)
             before = state
-            if action == "reduce_stage_batch_size" and state.batch_size > 1:
+            if action in {"reduce_stage_batch_size", "reduce_batch_size"} and state.batch_size > 1:
                 state = replace(state, batch_size=max(1, state.batch_size // 2))
+                algorithm_changed = False
+            elif action == "move_activations_down_one_tier":
+                next_tier = "ram" if state.activation_tier in {"cuda", "pinned_ram"} else "mmap"
+                state = replace(state, activation_tier=next_tier)
                 algorithm_changed = False
             elif action == "move_activation_store_to_pageable_ram":
                 state = replace(state, activation_tier="ram")

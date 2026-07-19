@@ -7,7 +7,7 @@ from typing import Protocol
 
 import torch
 
-from .schema import ActivationStoreKind, ExecutorKind, RunConfig
+from .schema import ActivationStoreKind, ExecutorKind, MemoryPolicyMode, RunConfig
 
 
 class RevisionResolver(Protocol):
@@ -19,10 +19,11 @@ def resolve_config(config: RunConfig, revisions: RevisionResolver) -> RunConfig:
     tokenizer_source = config.model.tokenizer_source or config.model.source
     tokenizer_revision = revisions.resolve(tokenizer_source, config.model.tokenizer_revision)
     executor = config.runtime.executor
-    if executor is ExecutorKind.AUTO:
+    adaptive = config.runtime.memory_policy.mode is MemoryPolicyMode.ADAPTIVE
+    if executor is ExecutorKind.AUTO and not adaptive:
         executor = ExecutorKind.RESIDENT if torch.cuda.is_available() else ExecutorKind.CPU_OFFLOAD
     activation_kind = config.runtime.activations.kind
-    if activation_kind is ActivationStoreKind.AUTO:
+    if activation_kind is ActivationStoreKind.AUTO and not adaptive:
         activation_kind = ActivationStoreKind.CUDA if executor is ExecutorKind.RESIDENT else ActivationStoreKind.RAM
     return replace(
         config,

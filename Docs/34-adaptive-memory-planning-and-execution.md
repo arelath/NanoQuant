@@ -1,6 +1,6 @@
 # Adaptive Memory Planning and Execution
 
-Status: proposed
+Status: resident adaptive core implemented; measured promotion remains gated
 
 Date: 2026-07-19
 
@@ -24,6 +24,29 @@ This is a two-level controller. A static preflight plan prevents predictable fai
 choice. A conservative online controller handles estimator error and changing external pressure. Neither layer
 mutates the canonical recipe. The resolved execution plan and every revision are persisted separately and reused on
 resume.
+
+### Implementation status (2026-07-19)
+
+The first production slice is implemented for the resident compression workflow:
+
+- `fixed` remains the compatibility default, while `adaptive` is an explicit memory-policy mode;
+- preflight builds a process-aware GPU/host/pinned/disk envelope and a metadata-only model inventory before CUDA
+  weight loading;
+- the resolved plan selects resident versus CPU-offload execution, activation caching, and separate physical batch
+  sizes for calibration, block forward, tuning, and post-block refit;
+- minimum viable configurations are admitted before work starts, and user ceilings and reserves are enforced;
+- the plan is stored as a content-addressed artifact with an active pointer and finite, journaled OOM revisions;
+- a CUDA OOM reduces only the affected scalable stage when it can be identified, then evicts optional activation
+  cache before failing; logical optimizer batches and every compression semantic remain unchanged;
+- resident events record plan admission, resize decisions, observations, revision, utilization, and per-block planned
+  memory; and
+- unit and workflow tests cover plan selection, admission failure, persistence, config resolution, stable semantic
+  identity across revisions, and OOM resume behavior.
+
+The following performance promotions remain deliberately gated by the rollout and acceptance criteria below:
+learned cross-run estimator profiles, within-run upward growth, source-prefetch resizing, adaptive model-level
+distillation/evaluation batches, streaming-mode transitions, and enabling adaptive mode in the canonical Gemma
+recipe. They require protocol-matched 1B/4B canaries rather than being enabled from synthetic fixtures alone.
 
 ## 2. Current implementation and gaps
 

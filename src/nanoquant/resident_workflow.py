@@ -18,12 +18,14 @@ from transformers.models.auto.tokenization_auto import AutoTokenizer
 from nanoquant.application.distillation import DistillationMetrics, TopKDistillationConfig
 from nanoquant.config.codec import config_hash, from_dict
 from nanoquant.config.schema import (
+    ActivationGpuCacheMode,
     ActivationStorageConfig,
     CalibrationFallbackConfig,
     CalibrationMethod,
     DistillationLoss,
     DType,
     ExecutorKind,
+    MemoryPolicyMode,
     ObjectiveConfig,
     ObjectiveKind,
     ResourceLimitsConfig,
@@ -32,6 +34,7 @@ from nanoquant.config.schema import (
 )
 from nanoquant.config.validation import ValidationPhase, raise_for_issues, validate
 from nanoquant.domain.models import ArtifactRef
+from nanoquant.domain.resources import ResolvedMemoryPlan
 from nanoquant.domain.runs import RunManifest, RunStatus
 from nanoquant.global_distillation import (
     GlobalDistillationRequest,
@@ -39,9 +42,16 @@ from nanoquant.global_distillation import (
     run_global_topk_distillation,
 )
 from nanoquant.infrastructure.artifacts import LocalArtifactStore
+from nanoquant.infrastructure.device_memory import is_cuda_oom
 from nanoquant.infrastructure.environment import load_repository_dotenv
 from nanoquant.infrastructure.global_tuning import active_global_tuning, load_global_tuning
 from nanoquant.infrastructure.hf_calibration_dataset import load_or_prepare_calibration
+from nanoquant.infrastructure.resource_planning import (
+    build_resident_memory_plan,
+    load_memory_plan,
+    persist_memory_plan,
+    revise_resident_memory_plan_after_oom,
+)
 from nanoquant.infrastructure.runs import RunDirectory, transition
 from nanoquant.resident_quantization import (
     ResidentQuantizationRequest,
@@ -85,6 +95,7 @@ class ResidentExecutionOptions:
     defer_layer_loss_snapshots: bool = False
     replace_existing_global_tuning: bool = False
     maximum_wddm_shared_bytes: int | None = None
+    replan_memory: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -215,11 +226,6 @@ def _validate_supported_recipe(config: RunConfig) -> None:
             "distillation.enabled",
             "cpu_offload requires model-level distillation to be disabled until teacher streaming is implemented",
         )
-    _require(
-        config.runtime.resources == ResourceLimitsConfig(),
-        "runtime.resources",
-        "explicit limits are not yet enforced",
-    )
     expected_activations = ActivationStorageConfig(
         gpu_cache=config.runtime.activations.gpu_cache,
         gpu_reserve_gib=config.runtime.activations.gpu_reserve_gib,
@@ -242,7 +248,26 @@ def _validate_supported_recipe(config: RunConfig) -> None:
     _require(checkpoints.commit_granularity == "layer", "runtime.checkpoints.commit_granularity", "must be layer")
     _require(not checkpoints.keep_attempt_artifacts, "runtime.checkpoints.keep_attempt_artifacts", "must be false")
     _require(checkpoints.verify_on_resume, "runtime.checkpoints.verify_on_resume", "must be true")
-    _require(config.runtime.on_cuda_oom == ("fail",), "runtime.on_cuda_oom", "automatic OOM fallback is not yet mapped")
+    supported_oom_actions = {
+        "reduce_batch_size",
+        "reduce_stage_batch_size",
+        "move_activations_down_one_tier",
+        "move_activation_store_to_pageable_ram",
+        "fail",
+    }
+    _require(
+        bool(config.runtime.on_cuda_oom)
+        and config.runtime.on_cuda_oom[-1] == "fail"
+        and set(config.runtime.on_cuda_oom) <= supported_oom_actions,
+        "runtime.on_cuda_oom",
+        "actions must be supported, finite, and terminate with fail",
+    )
+    if config.runtime.memory_policy.mode is not MemoryPolicyMode.ADAPTIVE:
+        _require(
+            config.runtime.on_cuda_oom == ("fail",),
+            "runtime.on_cuda_oom",
+            "automatic OOM recovery requires runtime.memory_policy.mode=adaptive",
+        )
     _require(config.output.artifact_root == "artifacts", "output.artifact_root", "resident artifacts are run-local")
     if config.distillation.enabled:
         _require(config.distillation.loss is DistillationLoss.TOP_K, "distillation.loss", "only top_k is implemented")
@@ -257,6 +282,9 @@ def resident_request_from_config(
     config: RunConfig,
     inputs: ResolvedResidentInputs,
     options: ResidentExecutionOptions = _DEFAULT_EXECUTION_OPTIONS,
+    *,
+    memory_plan: ResolvedMemoryPlan | None = None,
+    memory_plan_reference: ArtifactRef | None = None,
 ) -> ResidentQuantizationRequest:
     """Map one validated canonical recipe to the resident engine request."""
 
@@ -291,6 +319,47 @@ def resident_request_from_config(
     nonfactorized_epochs = 0 if nonfactorized_schedule else nonfactorized.loop.epochs
     factorized_lr = factorized.learning_rates.scale
     refit_lr = factorized_lr if refit.scale_learning_rate is None else refit.scale_learning_rate
+    executor = (
+        ExecutorKind(memory_plan.executor)
+        if memory_plan is not None
+        else (ExecutorKind.RESIDENT if config.runtime.executor is ExecutorKind.AUTO else config.runtime.executor)
+    )
+    if executor is ExecutorKind.CPU_OFFLOAD:
+        _require(
+            not options.restore_completed_blocks,
+            "runtime.executor",
+            "resolved cpu_offload execution requires restore_completed_blocks=False",
+        )
+        _require(
+            not config.evaluation.inline_quality and not config.distillation.enabled,
+            "runtime.executor",
+            "resolved cpu_offload execution cannot run inline quality or model-level distillation",
+        )
+    effective_forward_batch = (
+        config.runtime.block_forward_batch_size
+        if memory_plan is None
+        else memory_plan.stage("block_forward").batch_size
+    )
+    effective_calibration_batch = (
+        config.calibration.batch_size
+        if memory_plan is None
+        else memory_plan.stage("calibration").batch_size
+    )
+    effective_tuning_microbatch = (
+        config.block_tuning.microbatch_size
+        if memory_plan is None
+        else memory_plan.stage("tuning").batch_size
+    )
+    effective_refit_microbatch = (
+        config.block_tuning.microbatch_size
+        if memory_plan is None
+        else memory_plan.stage("post_block_refit").batch_size
+    )
+    effective_cache = (
+        config.runtime.activations.gpu_cache
+        if memory_plan is None
+        else ActivationGpuCacheMode(memory_plan.activation_gpu_cache)
+    )
     return ResidentQuantizationRequest(
         snapshot=inputs.snapshot,
         output=inputs.output,
@@ -299,7 +368,7 @@ def resident_request_from_config(
         token_ids=inputs.token_ids,
         quality_token_ids=inputs.quality_token_ids if config.evaluation.inline_quality else None,
         device=config.runtime.compute_device,
-        executor=(ExecutorKind.RESIDENT if config.runtime.executor is ExecutorKind.AUTO else config.runtime.executor),
+        executor=executor,
         verify_hashes=config.runtime.source_streaming.verify_tensor_hashes,
         target_bpw=config.allocation.target_bpw,
         rank_multiple=config.allocation.bounds.multiple,
@@ -332,21 +401,22 @@ def resident_request_from_config(
         post_block_refit_batch_size=refit.batch_size or factorized.loop.batch_size,
         post_block_refit_learning_rate=refit_lr,
         post_block_refit_epoch_cooldown_seconds=options.post_block_refit_epoch_cooldown_seconds,
-        tuning_microbatch_size=config.block_tuning.microbatch_size,
+        tuning_microbatch_size=effective_tuning_microbatch,
+        post_block_refit_microbatch_size=effective_refit_microbatch,
         legacy_tuning_seed_reset=config.block_tuning.reset_seed_each_stage,
         restore_best_tuning_state=config.block_tuning.restore_best_state,
         tuning_epoch_loss_mode=config.block_tuning.epoch_loss_mode.value,
         activation_retention=config.runtime.checkpoints.activation_retention.value,
-        activation_gpu_cache=config.runtime.activations.gpu_cache,
+        activation_gpu_cache=effective_cache,
         activation_gpu_reserve_bytes=int(config.runtime.activations.gpu_reserve_gib * 2**30),
         seed=config.reproducibility.seed,
         interrupt_after_layer_commits=options.interrupt_after_layer_commits,
         interrupt_after_block_commits=options.interrupt_after_block_commits,
         interrupt_after_factorized_tuning_epoch_commits=(options.interrupt_after_factorized_tuning_epoch_commits),
-        block_forward_batch_size=config.runtime.block_forward_batch_size,
+        block_forward_batch_size=effective_forward_batch,
         calibration_method=config.calibration.method.value,
         calibration_shrinkage=config.calibration.shrinkage,
-        calibration_batch_size=config.calibration.batch_size,
+        calibration_batch_size=effective_calibration_batch,
         precomputed_calibration=inputs.precomputed_calibration,
         precomputed_objectives=inputs.precomputed_objectives,
         precomputed_plan=inputs.precomputed_plan,
@@ -360,7 +430,48 @@ def resident_request_from_config(
         run_config=config,
         launcher_path=inputs.launcher_path,
         defer_run_completion=config.distillation.enabled,
+        memory_plan=memory_plan,
+        memory_plan_reference=memory_plan_reference,
     )
+
+
+def _token_shape(value: torch.Tensor | tuple[tuple[int, ...], ...]) -> tuple[int, int]:
+    if isinstance(value, torch.Tensor):
+        if value.ndim != 2:
+            raise ValueError("resident calibration tokens must be a rank-two tensor")
+        return int(value.shape[0]), int(value.shape[1])
+    if not value or not value[0] or any(len(row) != len(value[0]) for row in value):
+        raise ValueError("resident calibration token rows must be non-empty and rectangular")
+    return len(value), len(value[0])
+
+
+def _memory_planning_requested(config: RunConfig) -> bool:
+    return (
+        config.runtime.memory_policy.mode is MemoryPolicyMode.ADAPTIVE
+        or config.runtime.resources != ResourceLimitsConfig()
+    )
+
+
+def _resolve_workflow_memory_plan(
+    config: RunConfig,
+    inputs: ResolvedResidentInputs,
+    options: ResidentExecutionOptions,
+) -> tuple[ResolvedMemoryPlan | None, ArtifactRef | None]:
+    if not _memory_planning_requested(config):
+        return None, None
+    request_hash = config_hash(config)
+    if not options.replan_memory:
+        loaded = load_memory_plan(inputs.output, request_hash)
+        if loaded is not None:
+            return loaded
+    plan = build_resident_memory_plan(
+        config,
+        inputs.snapshot,
+        inputs.output,
+        _token_shape(inputs.token_ids),
+        retain_completed_blocks=options.restore_completed_blocks,
+    )
+    return plan, persist_memory_plan(plan, inputs.output)
 
 
 def distillation_request_from_config(
@@ -419,7 +530,37 @@ def execute_resident_workflow(
 ) -> ResidentWorkflowResult:
     """Execute quantization and, when enabled, model-level KD in legacy order."""
 
-    quantization = run_resident_quantization(resident_request_from_config(config, inputs, options))
+    memory_plan, memory_plan_reference = _resolve_workflow_memory_plan(config, inputs, options)
+    memory_retries = 0
+    while True:
+        try:
+            quantization = run_resident_quantization(
+                resident_request_from_config(
+                    config,
+                    inputs,
+                    options,
+                    memory_plan=memory_plan,
+                    memory_plan_reference=memory_plan_reference,
+                )
+            )
+            break
+        except BaseException as exc:
+            fallback_authorized = any(action != "fail" for action in config.runtime.on_cuda_oom)
+            if (
+                not is_cuda_oom(exc)
+                or memory_plan is None
+                or memory_plan.mode != "adaptive"
+                or not fallback_authorized
+                or memory_retries >= config.runtime.memory_policy.maximum_stage_retries
+            ):
+                raise
+            memory_plan, _revision, memory_plan_reference = revise_resident_memory_plan_after_oom(
+                memory_plan,
+                config,
+                inputs.output,
+                stage=getattr(exc, "nanoquant_operation", None),
+            )
+            memory_retries += 1
     distillation = None
     if config.distillation.enabled:
         try:
@@ -460,7 +601,16 @@ def load_completed_resident_workflow(
     manifest = from_dict(RunManifest, directory.read_manifest(), path="manifest")
     if manifest.status is not RunStatus.COMPLETED:
         return None
-    quantization = load_completed_resident_quantization(resident_request_from_config(config, inputs, options))
+    memory_plan, memory_plan_reference = _resolve_workflow_memory_plan(config, inputs, options)
+    quantization = load_completed_resident_quantization(
+        resident_request_from_config(
+            config,
+            inputs,
+            options,
+            memory_plan=memory_plan,
+            memory_plan_reference=memory_plan_reference,
+        )
+    )
     distillation = None
     if config.distillation.enabled:
         reference = active_global_tuning(inputs.output)

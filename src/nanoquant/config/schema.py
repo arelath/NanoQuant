@@ -44,6 +44,17 @@ class ActivationGpuCacheMode(StringEnum):
     AUTO = "auto"
 
 
+class MemoryPolicyMode(StringEnum):
+    FIXED = "fixed"
+    ADAPTIVE = "adaptive"
+
+
+class MemoryPolicyProfile(StringEnum):
+    CONSERVATIVE = "conservative"
+    BALANCED = "balanced"
+    THROUGHPUT = "throughput"
+
+
 class CalibrationMethod(StringEnum):
     ONLINE_FISHER = "online_fisher"
     TWO_PHASE_FISHER = "two_phase_fisher"
@@ -416,6 +427,17 @@ class ResourceLimitsConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class MemoryPolicyConfig:
+    mode: MemoryPolicyMode = MemoryPolicyMode.FIXED
+    profile: MemoryPolicyProfile = MemoryPolicyProfile.BALANCED
+    gpu_reserve_gib: float = 1.0
+    host_reserve_gib: float = 4.0
+    temporary_disk_reserve_gib: float = 8.0
+    maximum_stage_retries: int = 3
+    allow_growth_within_run: bool = True
+
+
+@dataclass(frozen=True, slots=True)
 class ActivationStorageConfig:
     kind: ActivationStoreKind = ActivationStoreKind.AUTO
     directory: str | None = None
@@ -447,6 +469,7 @@ class RuntimeConfig:
     compute_device: str = "cuda:0"
     block_forward_batch_size: int = 8
     resources: ResourceLimitsConfig = field(default_factory=ResourceLimitsConfig)
+    memory_policy: MemoryPolicyConfig = field(default_factory=MemoryPolicyConfig)
     activations: ActivationStorageConfig = field(default_factory=ActivationStorageConfig)
     source_streaming: SourceStreamingConfig = field(default_factory=SourceStreamingConfig)
     checkpoints: CheckpointConfig = field(default_factory=CheckpointConfig)
