@@ -185,6 +185,7 @@ def test_compression_benchmark_executes_export_before_shared_quality_comparison(
 
     assert calls == ["complete", "quality", "upload"]
     assert requests[0].wikitext_samples == 64
+    assert requests[0].local_files_only is False
     assert requests[0].task_names == (
         "piqa",
         "arc_easy",

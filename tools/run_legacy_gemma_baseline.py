@@ -339,15 +339,7 @@ def main() -> int:
     ]
     if args.validate_only:
         command.append("--probe")
-    environment = os.environ.copy()
-    environment.update(
-        {
-            "HF_HUB_OFFLINE": "1",
-            "HF_DATASETS_OFFLINE": "1",
-            "TRANSFORMERS_OFFLINE": "1",
-        }
-    )
-    completed = subprocess.run(command, cwd=rewrite_root, env=environment, check=False)
+    completed = subprocess.run(command, cwd=rewrite_root, env=os.environ.copy(), check=False)
     return completed.returncode
 
 

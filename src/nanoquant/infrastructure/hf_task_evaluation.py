@@ -91,7 +91,7 @@ def load_pinned_dataset_split(
     *,
     local_files_only: bool,
 ) -> Any:
-    """Load an exact cached Arrow split without asking the Hub to resolve it."""
+    """Load an exact pinned split, downloading it when cached-only mode is disabled."""
 
     # `datasets` is an evaluation extra. Import lazily so the core package and
     # non-evaluation commands do not require it.

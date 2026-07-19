@@ -17,6 +17,8 @@ RunPod setup and complete compression can be bootstrapped from a fresh repositor
 selection, output locations, and troubleshooting. The default is the Gemma 3 1B architecture-protected Experiment
 017; rerunning the same command resumes its durable commits and publishes the validated GGUF when complete:
 
+The RunPod image must provide CUDA-enabled PyTorch 2.6 or newer; the bootstrap preserves that image installation.
+
 ```bash
 export HF_TOKEN=<hugging-face-write-token>  # gated model access and final publication
 bash tools/runpod_bootstrap.sh
@@ -24,7 +26,7 @@ bash tools/runpod_bootstrap.sh
 
 Select the corresponding Gemma 3 4B workflow with `NANOQUANT_EXPERIMENT=018`. The script creates a persistent
 virtual environment and Hugging Face cache, recreates and verifies the ignored pinned calibration artifact,
-prefetches the offline quality datasets, installs the repository-vendored NanoQuant converter into a pinned upstream
+prefetches the pinned quality datasets, installs the repository-vendored NanoQuant converter into a pinned upstream
 llama.cpp conversion toolchain, builds its standard token-embedding quantizer, and launches the numbered experiment. Useful controls are:
 
 ```bash

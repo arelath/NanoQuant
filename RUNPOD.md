@@ -8,7 +8,7 @@ the selected experiment.
 
 For the default Gemma 3 1B compression or the optional Gemma 3 4B workflow:
 
-- a recent Ubuntu PyTorch/CUDA image;
+- a recent Ubuntu PyTorch/CUDA image with PyTorch 2.6 or newer;
 - Python 3.10 or newer;
 - an NVIDIA GPU with at least 24 GiB VRAM recommended for the 1B workflow;
 - at least 32 GiB system RAM;
@@ -78,7 +78,7 @@ tmux attach -t nanoquant
 5. Verifies that PyTorch can access the selected CUDA GPU.
 6. Downloads the exact pinned Hugging Face model snapshot.
 7. Recreates and hash-validates the pinned 256 × 2,048 calibration artifact when it is absent.
-8. Downloads the pinned quality datasets required by the launchers' offline evaluation mode.
+8. Downloads the pinned quality datasets ahead of evaluation while retaining online fallback for missing files.
 9. Fetches a pinned upstream llama.cpp conversion toolchain.
 10. Copies the repository-vendored NanoQuant GGUF converter into that toolchain and verifies its SHA-256.
 11. Builds only the CPU `llama-quantize` target used to quantize `token_embd.weight` during export.
@@ -223,6 +223,13 @@ Use a CUDA-enabled RunPod image and confirm that the pod has an attached GPU:
 nvidia-smi
 /workspace/nanoquant-venv/bin/python -c 'import torch; print(torch.cuda.is_available())'
 ```
+
+### PyTorch dependency conflict
+
+NanoQuant requires PyTorch 2.6 or newer. The bootstrap reuses and constrains the pod image's CUDA-enabled PyTorch
+instead of allowing pip to replace that foundational package. If setup reports an older version such as 2.4.1,
+select a newer CUDA-enabled PyTorch pod image and rerun the bootstrap. Existing persistent model, dataset, pip,
+TorchInductor, and Triton caches remain reusable.
 
 ### Out of memory
 

@@ -18,15 +18,17 @@ def test_multimodal_loader_detaches_language_model_without_moving_vision(
 ) -> None:
     wrapper = _Wrapper()
     expected = wrapper.language_model
+    config_calls = []
+    model_calls = []
     monkeypatch.setattr(
         loader.AutoConfig,
         "from_pretrained",
-        lambda *_args, **_kwargs: SimpleNamespace(model_type="gemma3"),
+        lambda *_args, **kwargs: config_calls.append(kwargs) or SimpleNamespace(model_type="gemma3"),
     )
     monkeypatch.setattr(
         loader.AutoModelForImageTextToText,
         "from_pretrained",
-        lambda *_args, **_kwargs: wrapper,
+        lambda *_args, **kwargs: model_calls.append(kwargs) or wrapper,
     )
 
     result = loader.load_causal_language_model(
@@ -36,5 +38,7 @@ def test_multimodal_loader_detaches_language_model_without_moving_vision(
     )
 
     assert result is expected
+    assert config_calls == [{"local_files_only": False}]
+    assert model_calls[0]["local_files_only"] is False
     assert "language_model" not in wrapper._modules
     assert "vision_tower" in wrapper._modules

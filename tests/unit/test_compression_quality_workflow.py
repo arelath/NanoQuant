@@ -154,6 +154,7 @@ def test_compression_quality_runs_quality_before_huggingface_upload_and_publicat
     assert calls == ["preflight", "complete", "quality", "upload"]
     assert quality_requests[0].packed_artifact == tmp_path / "repo" / "outputs/003/packed"
     assert not quality_requests[0].stream_base_model
+    assert quality_requests[0].local_files_only is False
     assert payload["exports"]["gguf"]["output"] == str(gguf)
     assert payload["exports"]["mmproj"]["output"] == str(mmproj)
     assert payload["exports"]["huggingface"]["commit_oid"] == "a" * 40

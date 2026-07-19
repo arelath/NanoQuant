@@ -9,6 +9,7 @@ VENV_OVERRIDE="${NANOQUANT_VENV:-}"
 VENV="${VENV_OVERRIDE:-${WORKSPACE_ROOT}/nanoquant-venv}"
 SYSTEM_PYTHON="${NANOQUANT_SYSTEM_PYTHON:-python3}"
 EXPERIMENT="${NANOQUANT_EXPERIMENT:-017}"
+MINIMUM_TORCH_VERSION="2.6"
 export HF_HOME="${HF_HOME:-${WORKSPACE_ROOT}/huggingface}"
 export NANOQUANT_LLAMA_CPP_ROOT="${NANOQUANT_LLAMA_CPP_ROOT:-${WORKSPACE_ROOT}/llama.cpp}"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
@@ -114,6 +115,27 @@ if ! IMAGE_TORCH_VERSION="$("${SYSTEM_PYTHON}" -c 'import torch; print(torch.__v
 fi
 IMAGE_TORCH_CUDA="$("${SYSTEM_PYTHON}" -c 'import torch; print(torch.version.cuda or "none")')"
 IMAGE_TORCH_BASE_VERSION="${IMAGE_TORCH_VERSION%%+*}"
+if ! "${SYSTEM_PYTHON}" - "${IMAGE_TORCH_BASE_VERSION}" "${MINIMUM_TORCH_VERSION}" <<'PY'
+import re
+import sys
+
+
+def major_minor(value: str) -> tuple[int, int]:
+    match = re.match(r"^(\d+)\.(\d+)", value)
+    if match is None:
+        raise SystemExit(2)
+    return int(match.group(1)), int(match.group(2))
+
+
+installed, minimum = sys.argv[1:]
+raise SystemExit(0 if major_minor(installed) >= major_minor(minimum) else 1)
+PY
+then
+  echo "RunPod image PyTorch ${IMAGE_TORCH_VERSION} is unsupported; NanoQuant requires PyTorch >=${MINIMUM_TORCH_VERSION}." >&2
+  echo "Select a newer CUDA-enabled PyTorch image and rerun the bootstrap." >&2
+  echo "The bootstrap intentionally preserves the image's tested CUDA/PyTorch stack instead of replacing it with pip." >&2
+  exit 1
+fi
 if ! "${SYSTEM_PYTHON}" -c 'import torch; raise SystemExit(0 if torch.cuda.is_available() else 1)'; then
   echo "Image PyTorch ${IMAGE_TORCH_VERSION} (CUDA ${IMAGE_TORCH_CUDA}) cannot initialize CUDA." >&2
   echo "Check that the pod's NVIDIA driver supports the image's CUDA major version." >&2

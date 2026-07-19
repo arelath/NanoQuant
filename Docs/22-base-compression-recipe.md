@@ -113,7 +113,8 @@ On success, `<model>.gguf.huggingface.json` records the canonical repository ID 
 visibility, commit message, and each uploaded filename, byte count, and SHA-256. High-level compression experiments
 also publish this receipt under `Results/NNN` and include it in their schema-2 summary. Upload failures propagate, but
 the completed local compression and validated exports remain reusable; rerunning retries publication without
-recompressing. Experiments whose export policy omits `huggingface` remain fully offline.
+recompressing. Experiments whose export policy omits `huggingface` do not publish; source-model and evaluation
+resolution may still contact the Hub when a pinned local file is missing.
 
 ## Exporting an older completed run
 

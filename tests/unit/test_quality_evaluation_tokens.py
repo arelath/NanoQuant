@@ -25,7 +25,9 @@ def test_wikitext_tokenization_is_bounded_to_the_evaluated_prefix(monkeypatch: A
             return SimpleNamespace(input_ids=torch.tensor([[10, 11, 12, 13, 14, 15]]))
 
     datasets = ModuleType("datasets")
+    datasets.Dataset = object  # type: ignore[attr-defined]
     datasets.DownloadConfig = lambda **_kwargs: object()  # type: ignore[attr-defined]
+    datasets.config = SimpleNamespace(HF_DATASETS_CACHE=tmp_path)  # type: ignore[attr-defined]
     datasets.load_dataset = lambda *_args, **_kwargs: FakeDataset(text=["first", "second"])  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "datasets", datasets)
     monkeypatch.setattr(
