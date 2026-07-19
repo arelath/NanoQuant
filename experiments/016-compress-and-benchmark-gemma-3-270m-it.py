@@ -1,10 +1,10 @@
-"""Experiment 014: reconstruction-informed stacked-QKV Gemma 3 270M compression."""
+"""Experiment 016: refined down/edge reconstruction priorities for Gemma 3 270M."""
 
 from dataclasses import replace
 
 from recipes import (
+    ARCHITECTURE_PROTECTED_RECONSTRUCTION_COMPRESSION_TEMPLATE,
     GEMMA_3_270M_COMPRESSION_TEMPLATE,
-    RECONSTRUCTION_AWARE_STACKED_QKV_COMPRESSION_TEMPLATE,
     BaselineRef,
     ExperimentIdentity,
     ExperimentRef,
@@ -13,32 +13,25 @@ from recipes import (
 
 from nanoquant.compression_quality_workflow import run_compression_quality_experiment
 
-PARENT = ExperimentRef(13, "compress-and-benchmark-gemma-3-270m-it")
+PARENT = ExperimentRef(15, "compress-and-benchmark-gemma-3-270m-it")
 
-HISTORICAL_CONFIG = replace(
-    RECONSTRUCTION_AWARE_STACKED_QKV_COMPRESSION_TEMPLATE,
+CONFIG = replace(
+    ARCHITECTURE_PROTECTED_RECONSTRUCTION_COMPRESSION_TEMPLATE,
     model=GEMMA_3_270M_COMPRESSION_TEMPLATE.model,
-    allocation=replace(
-        RECONSTRUCTION_AWARE_STACKED_QKV_COMPRESSION_TEMPLATE.allocation,
-        reconstruction=replace(
-            RECONSTRUCTION_AWARE_STACKED_QKV_COMPRESSION_TEMPLATE.allocation.reconstruction,
-            sensitivity_strength=0.25,
-        ),
-    ),
 )
 
 EXPERIMENT = define_compression_quality_experiment(
     ExperimentIdentity(
-        number=14,
+        number=16,
         name="compress-and-benchmark-gemma-3-270m-it",
         purpose=(
-            "Probe every stacked-QKV/ordinary physical unit before fitting, allocate the fixed "
-            "Gemma 3 270M rank budget from measured reconstruction error, and run the complete "
-            "quality benchmark."
+            "Refine the architecture-protected fixed-budget allocation by increasing only "
+            "down-projection importance and slightly increasing first/last-block importance."
         ),
         hypothesis=(
-            "Reconstruction-informed fixed-budget ranks reduce error in the protected sensitive "
-            "cohort and improve quality relative to Experiment 013."
+            "A 1.50 down-projection weight, 1.30 edge-block weight, and 0.75 sensitivity "
+            "strength allocate more rank to the remaining high-error protected units and improve "
+            "quality relative to Experiment 015."
         ),
         baseline=BaselineRef.experiment(PARENT),
         tags=(
@@ -47,13 +40,14 @@ EXPERIMENT = define_compression_quality_experiment(
             "quality",
             "shared-input-qkv",
             "reconstruction-aware-ranks",
-            "full-model-rank-probe",
-            "fixed-rank-plan",
+            "architecture-protected-ranks",
+            "down-projection-priority",
+            "edge-block-protection",
             "wikitext2",
             "ultrachat",
         ),
     ),
-    HISTORICAL_CONFIG,
+    CONFIG,
     expected_blocks=18,
     maximum_wddm_shared_gib=0.75,
 )

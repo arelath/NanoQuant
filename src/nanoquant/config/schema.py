@@ -249,7 +249,7 @@ class ReconstructionRankPlanningConfig:
     response_curves: tuple[RankResponseCurveConfig, ...] = ()
     response_profile_provenance: str = ""
     importance: ReconstructionImportanceConfig = field(default_factory=ReconstructionImportanceConfig)
-    sensitivity_strength: float = 0.25
+    sensitivity_strength: float = 0.75
     protected_sensitivity_quantile: float = 0.80
     protected_rank_floor_fraction: float = 1.0
     target_protected_error_reduction_fraction: float = 0.01

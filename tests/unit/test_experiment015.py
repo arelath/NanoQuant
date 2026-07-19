@@ -1,4 +1,4 @@
-from recipes import GEMMA_3_270M_ARCHITECTURE_PROTECTED_RECONSTRUCTION_COMPRESSION_TEMPLATE
+from recipes import GEMMA_3_270M_COMPRESSION_TEMPLATE
 
 from nanoquant.config.schema import AllocationStrategy
 from tests.support.experiments import load_experiment
@@ -10,7 +10,7 @@ def test_experiment015_protects_important_layers_and_edge_blocks() -> None:
     reconstruction = config.allocation.reconstruction
     importance = reconstruction.importance
 
-    assert config.model == GEMMA_3_270M_ARCHITECTURE_PROTECTED_RECONSTRUCTION_COMPRESSION_TEMPLATE.model
+    assert config.model == GEMMA_3_270M_COMPRESSION_TEMPLATE.model
     assert config.allocation.strategy is AllocationStrategy.RECONSTRUCTION_AWARE
     assert importance.protected_layer_patterns == (
         "self_attn.q_proj",
@@ -24,5 +24,6 @@ def test_experiment015_protects_important_layers_and_edge_blocks() -> None:
     }
     assert importance.edge_block_multiplier == 1.25
     assert importance.protected_edge_block_count == 1
+    assert reconstruction.sensitivity_strength == 0.25
     assert config.factorization.shared_input.enabled is True
     assert experiment.workflow.expected_blocks == 18

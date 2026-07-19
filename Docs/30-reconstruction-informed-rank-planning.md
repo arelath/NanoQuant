@@ -148,7 +148,7 @@ class ReconstructionRankPlanningConfig:
     importance: ReconstructionImportanceConfig = field(
         default_factory=ReconstructionImportanceConfig
     )
-    sensitivity_strength: float = 0.25
+    sensitivity_strength: float = 0.75
     protected_sensitivity_quantile: float = 0.80
     protected_rank_floor_fraction: float = 1.0
     target_protected_error_reduction_fraction: float = 0.01
@@ -393,7 +393,7 @@ first Gemma-3-270M reconstruction-aware run allowed every `down_proj` to fall fr
 regressed WikiText-2 perplexity from Experiment 013's 1409.14 to 2018.48. The planner therefore also accepts explicit,
 versioned architectural priors rather than hiding type preferences in resident code.
 
-For the corrected Gemma policy:
+For the model-agnostic transformer policy:
 
 - `q_proj`, `k_proj`, `v_proj`, `o_proj`, and `down_proj` logical members receive a 1.25 importance multiplier and
   are always members of the protected cohort;
@@ -409,6 +409,20 @@ The rank profile persists the resolved policy, exact edge-block indices, and eff
 rules that match no logical member or overlap ambiguously fail before production fitting. The legacy
 `_layer_type_multiplier` remains confined to the legacy sensitivity allocator; reconstruction-aware planning no longer
 inherits its former Q/K downweighting.
+
+Experiment 015 confirmed that the first protected policy did not hit the down-projection response ceiling: all
+`down_proj` units remained at protected baseline rank 448 while their aligned legal ceiling was 608. The follow-up
+policy therefore does not widen a non-binding limit. It increases only the `down_proj` importance multiplier from
+1.25 to 1.50 and nudges the edge-block multiplier from 1.25 to 1.30. These remain fixed-budget marginal-utility
+weights; they move rank from competing units rather than silently adding physical BPW.
+
+That weight-only refinement retained the exact Experiment 015 aligned rank plan at `sensitivity_strength=0.25`:
+neither change crossed a 32-rank priority boundary. Exact replay of the completed 90-unit profile showed no down-rank
+change through strength 0.60; 0.75 was the first tested value to move down projections above baseline while also
+raising the underfunded last-block QKV/O ranks. Strength 1.00 was materially more aggressive. The generic policy now
+uses 0.75, while historical experiments retain their original explicit 0.25 for reproducibility. There are no
+per-layer or edge minimum-rank configuration fields: the configured importance multipliers and the single tempered
+sensitivity strength remain the only architectural-prior adjustment to marginal allocation value.
 
 ## 9. Overrides, outliers, and retries
 

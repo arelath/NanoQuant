@@ -226,7 +226,7 @@ RECONSTRUCTION_AWARE_STACKED_QKV_COMPRESSION_TEMPLATE = config_delta(
                 "Docs/ImprovementSuggestions/ReconstructionHeadroom.md#8;"
                 "Docs/ImprovementSuggestions/StackedFactorization.md"
             ),
-            sensitivity_strength=0.25,
+            sensitivity_strength=0.75,
             protected_sensitivity_quantile=0.80,
             protected_rank_floor_fraction=1.0,
             target_protected_error_reduction_fraction=0.01,
@@ -252,25 +252,19 @@ GEMMA_3_270M_STACKED_QKV_COMPRESSION_TEMPLATE = config_delta(
 )
 
 
-GEMMA_3_270M_RECONSTRUCTION_AWARE_STACKED_QKV_COMPRESSION_TEMPLATE = config_delta(
+ARCHITECTURE_PROTECTED_RECONSTRUCTION_COMPRESSION_TEMPLATE = config_delta(
     RECONSTRUCTION_AWARE_STACKED_QKV_COMPRESSION_TEMPLATE,
-    model=GEMMA_3_270M_COMPRESSION_TEMPLATE.model,
-)
-
-
-GEMMA_3_270M_ARCHITECTURE_PROTECTED_RECONSTRUCTION_COMPRESSION_TEMPLATE = config_delta(
-    GEMMA_3_270M_RECONSTRUCTION_AWARE_STACKED_QKV_COMPRESSION_TEMPLATE,
     allocation=config_delta(
-        GEMMA_3_270M_RECONSTRUCTION_AWARE_STACKED_QKV_COMPRESSION_TEMPLATE.allocation,
+        RECONSTRUCTION_AWARE_STACKED_QKV_COMPRESSION_TEMPLATE.allocation,
         reconstruction=config_delta(
-            GEMMA_3_270M_RECONSTRUCTION_AWARE_STACKED_QKV_COMPRESSION_TEMPLATE.allocation.reconstruction,
+            RECONSTRUCTION_AWARE_STACKED_QKV_COMPRESSION_TEMPLATE.allocation.reconstruction,
             importance=ReconstructionImportanceConfig(
                 layer_multipliers=(
                     LayerRankBudgetConfig("self_attn.q_proj", 1.25),
                     LayerRankBudgetConfig("self_attn.k_proj", 1.25),
                     LayerRankBudgetConfig("self_attn.v_proj", 1.25),
                     LayerRankBudgetConfig("self_attn.o_proj", 1.25),
-                    LayerRankBudgetConfig("mlp.down_proj", 1.25),
+                    LayerRankBudgetConfig("mlp.down_proj", 1.50),
                 ),
                 protected_layer_patterns=(
                     "self_attn.q_proj",
@@ -279,7 +273,7 @@ GEMMA_3_270M_ARCHITECTURE_PROTECTED_RECONSTRUCTION_COMPRESSION_TEMPLATE = config
                     "self_attn.o_proj",
                     "mlp.down_proj",
                 ),
-                edge_block_multiplier=1.25,
+                edge_block_multiplier=1.30,
                 protected_edge_block_count=1,
             ),
         ),
@@ -372,10 +366,10 @@ LARGE_MODEL_COMPRESSION_TEMPLATE = config_delta(
 
 
 __all__ = [
+    "ARCHITECTURE_PROTECTED_RECONSTRUCTION_COMPRESSION_TEMPLATE",
     "BASE_COMPRESSION_TEMPLATE",
     "GEMMA_3_270M_COMPRESSION_TEMPLATE",
     "GEMMA_3_270M_MODEL_REVISION",
-    "GEMMA_3_270M_RECONSTRUCTION_AWARE_STACKED_QKV_COMPRESSION_TEMPLATE",
     "GEMMA_3_270M_STACKED_QKV_COMPRESSION_TEMPLATE",
     "GEMMA_3_4B_COMPRESSION_TEMPLATE",
     "GEMMA_3_4B_MODEL_REVISION",

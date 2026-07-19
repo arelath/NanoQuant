@@ -1,4 +1,4 @@
-from recipes import GEMMA_3_270M_RECONSTRUCTION_AWARE_STACKED_QKV_COMPRESSION_TEMPLATE
+from recipes import GEMMA_3_270M_COMPRESSION_TEMPLATE
 
 from nanoquant.config.schema import AllocationStrategy
 from tests.support.experiments import load_experiment
@@ -9,12 +9,13 @@ def test_experiment014_runs_full_reconstruction_planning_before_stacked_compress
     config = experiment.config
     reconstruction = config.allocation.reconstruction
 
-    assert config.model == GEMMA_3_270M_RECONSTRUCTION_AWARE_STACKED_QKV_COMPRESSION_TEMPLATE.model
+    assert config.model == GEMMA_3_270M_COMPRESSION_TEMPLATE.model
     assert config.allocation.strategy is AllocationStrategy.RECONSTRUCTION_AWARE
     assert reconstruction.enabled is True
     assert reconstruction.probe_admm is not None
     assert reconstruction.probe_admm.outer_iterations == 400
     assert reconstruction.probe_admm.transpose_wide is True
+    assert reconstruction.sensitivity_strength == 0.25
     assert {curve.unit_pattern for curve in reconstruction.response_curves} == {
         "mlp.down_proj",
         "mlp.gate_proj",
