@@ -56,6 +56,8 @@ _PACKED_TENSOR_ROLES = (
     "outlier_indices",
     "outlier_values",
     "outlier_scales",
+    "patch_left",
+    "patch_right",
 )
 
 
@@ -96,7 +98,7 @@ def _expected_tensor_metadata(spec: QuantizedLinearSpec) -> dict[str, tuple[tupl
         "scale_post": ((spec.out_features,), spec.scale_dtype),
     }
     if spec.has_bias:
-        expected["bias"] = ((spec.out_features,), spec.scale_dtype)
+        expected["bias"] = ((spec.out_features,), spec.bias_dtype or spec.scale_dtype)
     if spec.outlier_count:
         expected["outlier_indices"] = ((spec.outlier_count,), "int32")
         expected["outlier_values"] = (
@@ -105,6 +107,15 @@ def _expected_tensor_metadata(spec: QuantizedLinearSpec) -> dict[str, tuple[tupl
         )
     if spec.has_outlier_scales:
         expected["outlier_scales"] = ((spec.outlier_count,), spec.scale_dtype)
+    if spec.patch_rank:
+        expected["patch_left"] = (
+            (spec.out_features, spec.patch_rank),
+            cast(str, spec.patch_value_dtype),
+        )
+        expected["patch_right"] = (
+            (spec.patch_rank, spec.in_features),
+            cast(str, spec.patch_value_dtype),
+        )
     return expected
 
 
@@ -215,6 +226,8 @@ class OpenPackedArtifact:
             by_role.get("outlier_indices"),
             by_role.get("outlier_values"),
             by_role.get("outlier_scales"),
+            by_role.get("patch_left"),
+            by_role.get("patch_right"),
         )
 
 
@@ -255,6 +268,8 @@ def _state_tensors(state: PackedLayerState) -> tuple[tuple[str, torch.Tensor], .
         ("outlier_indices", state.outlier_indices),
         ("outlier_values", state.outlier_values),
         ("outlier_scales", state.outlier_scales),
+        ("patch_left", state.patch_left),
+        ("patch_right", state.patch_right),
     )
     values.extend((role, value) for role, value in optional if value is not None)
     return tuple(values)
@@ -564,6 +579,8 @@ def _logical_values(state: LogicalLayerState) -> tuple[torch.Tensor | None, ...]
         state.outlier_indices,
         state.outlier_values,
         state.outlier_scales,
+        state.patch_left,
+        state.patch_right,
     )
 
 

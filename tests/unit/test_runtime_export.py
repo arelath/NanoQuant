@@ -7,23 +7,44 @@ from pathlib import Path
 import pytest
 import torch
 
+from nanoquant.application.layers import LayerFreezer
 from nanoquant.application.loss_snapshots import BlockLossRecorder
+from nanoquant.config.codec import to_dict
 from nanoquant.domain.models import (
+    ArtifactTypes,
+    AttemptSummary,
+    BitCost,
     BlockId,
+    BlockPlan,
+    ComponentRef,
     FrozenBlockState,
     FrozenNanoQuantState,
     FrozenOutlierState,
     GlobalTuningResult,
     LayerId,
+    LayerPlan,
+    LayerResult,
+    ModelIdentity,
+    ObjectiveSpec,
+    OutlierPlan,
+    QuantizationPlan,
+    ReconstructionMetrics,
+    RetryPolicy,
     ScaleState,
+    SourceTensor,
+    TensorId,
+    TensorSpec,
 )
 from nanoquant.infrastructure.artifacts import LocalArtifactStore
 from nanoquant.infrastructure.commits import CommitIdentity, commit_block
 from nanoquant.infrastructure.global_tuning import activate_global_tuning, commit_global_tuning
+from nanoquant.infrastructure.kl_splice import load_splice_reconstructions_from_run
 from nanoquant.infrastructure.progress import ProgressJournal
 from nanoquant.infrastructure.runtime_export import (
     export_frozen_run_logical,
     load_frozen_run_auxiliary,
+    load_frozen_run_planning_reference,
+    load_frozen_run_rank_inventory,
     validate_frozen_run_logical,
 )
 from nanoquant.infrastructure.tensor_store import LocalTensorStore
@@ -48,6 +69,8 @@ def _frozen_block(
             "mid": torch.full((2,), scale + 0.25),
             "post": torch.full((3,), scale + 0.5),
             "bias": torch.tensor([0.1, -0.2, 0.3]),
+            "patch_left": torch.full((3, 1), scale + 0.6, dtype=torch.float16),
+            "patch_right": torch.full((1, 4), scale + 0.7, dtype=torch.float16),
             "indices": torch.tensor([1], dtype=torch.int32),
             "values": torch.tensor([[2], [-1], [3]], dtype=torch.int8),
             "outlier_scales": torch.tensor([0.125]),
@@ -67,6 +90,8 @@ def _frozen_block(
         ),
         references["bias"],
         "nanoquant-v1",
+        references["patch_left"],
+        references["patch_right"],
     )
     auxiliary = tensors.put(
         "frozen-block-auxiliary",
@@ -88,6 +113,71 @@ def _losses():  # type: ignore[no-untyped-def]
     return recorder.finalize()
 
 
+def _layer_result(state: FrozenNanoQuantState) -> LayerResult:
+    layer = state.layer
+    artifact = state.left_binary.artifact
+    source = SourceTensor(
+        TensorId(layer, "weight"),
+        f"{layer.path}.weight",
+        "fixture",
+        TensorSpec((3, 4), "float32"),
+        "source-hash",
+    )
+    objective = ObjectiveSpec(
+        1,
+        layer,
+        "diagonal",
+        state.scales.pre,
+        state.scales.post,
+        None,
+        0.01,
+        "target_weighted_norm_squared",
+        None,
+        artifact,
+    )
+    cost = BitCost(binary_factor_bits=14, scale_bits=18)
+    plan = LayerPlan(
+        1,
+        layer,
+        source,
+        state.rank,
+        state.rank,
+        2,
+        objective,
+        OutlierPlan("none", 0, "float16", True),
+        RetryPolicy(1, 0.25, 1.0, None, state.rank, 0),
+        cost,
+    )
+    metrics = ReconstructionMetrics(
+        "diagonal",
+        1.0,
+        None,
+        None,
+        0.2,
+        0.2,
+        0.25,
+        0.25,
+        0.3,
+        0.3,
+    )
+    attempt = AttemptSummary(0, state.rank, artifact, 0.25, 0.25, cost, 0.1, True, "accepted")
+    return LayerResult(
+        1,
+        layer,
+        plan,
+        (attempt,),
+        0,
+        artifact,
+        None,
+        None,
+        state,
+        metrics,
+        cost,
+        0,
+        (),
+    )
+
+
 def _run(tmp_path: Path) -> tuple[Path, tuple[FrozenBlockState, ...], tuple[FrozenBlockState, ...]]:
     run = tmp_path / "run"
     run.mkdir()
@@ -97,13 +187,39 @@ def _run(tmp_path: Path) -> tuple[Path, tuple[FrozenBlockState, ...], tuple[Froz
     )
     artifacts = LocalArtifactStore(run / "artifacts")
     tensors = LocalTensorStore(artifacts)
-    identity = CommitIdentity("run-config", "model-config", "plan")
-    journal = ProgressJournal(run / "state", "run", artifacts)
     committed_states = tuple(_frozen_block(index, 1.0 + index, tensors) for index in range(2))
+    layer_results = tuple(_layer_result(state.quantized_layers[0]) for state in committed_states)
+    plan = QuantizationPlan(
+        1,
+        ComponentRef("fixture-planner", "1"),
+        ModelIdentity(
+            "fixture/model",
+            "revision",
+            "model-config",
+            "fixture/model",
+            "revision",
+            ComponentRef("fixture", "1"),
+        ),
+        committed_states[0].quantized_layers[0].left_binary.artifact,
+        tuple(
+            BlockPlan(result.layer.block, (result.layer,), (result.plan,), 32)
+            for result in layer_results
+        ),
+        1.0,
+        BitCost(binary_factor_bits=28, scale_bits=36),
+    )
+    with artifacts.begin_write(ArtifactTypes.QUANTIZATION_PLAN) as writer:
+        (writer.path / "plan.json").write_text(
+            json.dumps(to_dict(plan), sort_keys=True),
+            encoding="utf-8",
+        )
+        plan_descriptor = writer.commit()
+    identity = CommitIdentity("run-config", "model-config", plan_descriptor.artifact_id)
+    journal = ProgressJournal(run / "state", "run", artifacts)
     committed = tuple(
         commit_block(
             state.block,
-            (),
+            (result,),
             state,
             _losses(),
             torch.ones(1, 2, 3),
@@ -112,7 +228,7 @@ def _run(tmp_path: Path) -> tuple[Path, tuple[FrozenBlockState, ...], tuple[Froz
             artifacts,
             identity,
         )
-        for state in committed_states
+        for state, result in zip(committed_states, layer_results, strict=True)
     )
     for value in committed:
         journal.append("block", value.result.block.index, None, value.reference.artifact_id, identity)
@@ -149,7 +265,9 @@ def test_load_frozen_run_auxiliary_uses_named_global_overrides(tmp_path: Path) -
     selected = load_frozen_run_auxiliary(run, 2)
     parameters = dict(selected.parameters)
 
-    assert selected.identity == CommitIdentity("run-config", "model-config", "plan")
+    assert selected.identity.config_hash == "run-config"
+    assert selected.identity.model_hash == "model-config"
+    assert selected.identity.plan_hash.startswith("sha256-")
     assert selected.global_tuning is not None
     assert tuple(parameters) == (
         "model.layers.0.input_layernorm.weight",
@@ -175,6 +293,99 @@ def test_load_frozen_run_auxiliary_can_select_pre_tuning_state(tmp_path: Path) -
     )
     assert torch.equal(parameters["model.layers.0.input_layernorm.weight"], torch.full((4,), 1.75))
     assert torch.equal(parameters["model.layers.1.input_layernorm.weight"], torch.full((4,), 2.75))
+
+
+def test_load_frozen_run_rank_inventory_uses_validated_committed_states(tmp_path: Path) -> None:
+    run, _committed, _tuned = _run(tmp_path)
+
+    inventory = load_frozen_run_rank_inventory(run, 2)
+
+    assert tuple(entry.unit_id for entry in inventory) == ("0:linear", "1:linear")
+    assert all(entry.rank == 2 for entry in inventory)
+    assert all(entry.factor_bits == 2 * (3 + 4) for entry in inventory)
+
+    reference = load_frozen_run_planning_reference(run, 2)
+    assert reference.ranks == inventory
+    assert reference.total_bits == 2 * (14 + 18)
+
+
+def test_load_splice_reconstructions_selects_committed_and_tuned_states(tmp_path: Path) -> None:
+    run, committed, tuned = _run(tmp_path)
+    tensors = LocalTensorStore(LocalArtifactStore(run / "artifacts"))
+
+    static = load_splice_reconstructions_from_run(
+        run,
+        2,
+        device="cpu",
+        source="fixture/model",
+        revision="revision",
+        model_config_hash="model-config",
+        use_global_tuning=False,
+    )
+    selected = load_splice_reconstructions_from_run(
+        run,
+        2,
+        device="cpu",
+        source="fixture/model",
+        revision="revision",
+        model_config_hash="model-config",
+        use_global_tuning=True,
+    )
+
+    assert static.identity.config_hash == "run-config"
+    assert static.identity.model_hash == "model-config"
+    assert static.identity.plan_hash.startswith("sha256-")
+    assert static.global_tuning is None
+    assert selected.global_tuning is not None
+    assert tuple(item.layer for item in static.reconstructions.layers) == (
+        LayerId(BlockId(0), "linear"),
+        LayerId(BlockId(1), "linear"),
+    )
+    assert static.reconstructions.unit_members == (
+        ("0:linear", (LayerId(BlockId(0), "linear"),)),
+        ("1:linear", (LayerId(BlockId(1), "linear"),)),
+    )
+    for index in range(2):
+        expected_static = LayerFreezer().load(
+            committed[index].quantized_layers[0],
+            tensors,
+            backend="dense",
+            compact_dense=True,
+        )
+        expected_tuned = LayerFreezer().load(
+            tuned[index].quantized_layers[0],
+            tensors,
+            backend="dense",
+            compact_dense=True,
+        )
+        assert torch.equal(
+            static.reconstructions.layers[index].weight,
+            expected_static.module.dense_weight(),
+        )
+        assert torch.equal(
+            selected.reconstructions.layers[index].weight,
+            expected_tuned.module.dense_weight(),
+        )
+        assert static.reconstructions.layers[index].weighted_squared_error == pytest.approx(0.25)
+
+    with pytest.raises(ValueError, match="different model config"):
+        load_splice_reconstructions_from_run(
+            run,
+            2,
+            device="cpu",
+            source="fixture/model",
+            revision="revision",
+            model_config_hash="wrong-model-config",
+        )
+    with pytest.raises(ValueError, match="different model or block inventory"):
+        load_splice_reconstructions_from_run(
+            run,
+            2,
+            device="cpu",
+            source="wrong/model",
+            revision="revision",
+            model_config_hash="model-config",
+        )
 
 
 def test_export_frozen_run_streams_active_global_tuning_into_runtime_artifact(tmp_path: Path) -> None:
@@ -206,6 +417,8 @@ def test_export_frozen_run_streams_active_global_tuning_into_runtime_artifact(tm
         source_tensors.read(expected_state.scales.mid) as scale_mid,
         source_tensors.read(expected_state.scales.post) as scale_post,
         source_tensors.read(expected_state.bias) as bias,
+        source_tensors.read(expected_state.patch_left) as patch_left,
+        source_tensors.read(expected_state.patch_right) as patch_right,
         source_tensors.read(expected_state.outliers.indices) as indices,
         source_tensors.read(expected_state.outliers.values) as values,
         source_tensors.read(expected_state.outliers.scales) as outlier_scales,
@@ -216,16 +429,19 @@ def test_export_frozen_run_streams_active_global_tuning_into_runtime_artifact(tm
         assert torch.equal(loaded.scale_mid, scale_mid)
         assert torch.equal(loaded.scale_post, scale_post)
         assert torch.equal(loaded.bias, bias)
+        assert torch.equal(loaded.patch_left, patch_left)
+        assert torch.equal(loaded.patch_right, patch_right)
         assert torch.equal(loaded.outlier_indices, indices)
         assert torch.equal(loaded.outlier_values, values)
         assert torch.equal(loaded.outlier_scales, outlier_scales)
     assert loaded.spec.rank == expected_state.rank
+    assert loaded.spec.patch_rank == 1
     assert actual.shape == (1, 3)
     assert bool(torch.all(torch.isfinite(actual)))
     validation = validate_frozen_run_logical(run, result.output, 2)
     assert validation.block_count == 2
     assert validation.layer_count == 2
-    assert validation.tensor_count == 18
+    assert validation.tensor_count == 22
     assert validation.tensor_bytes > 0
     assert validation.global_tuning == result.global_tuning
     assert validation.exact
@@ -294,7 +510,9 @@ def test_export_uses_latest_complete_identity_instead_of_newer_partial_run(tmp_p
 
     result = export_frozen_run_logical(run, tmp_path / "logical", _metadata(), 2)
 
-    assert result.identity == CommitIdentity("run-config", "model-config", "plan")
+    assert result.identity.config_hash == "run-config"
+    assert result.identity.model_hash == "model-config"
+    assert result.identity.plan_hash.startswith("sha256-")
 
 
 def test_export_rejects_global_tuning_from_different_committed_blocks(tmp_path: Path) -> None:

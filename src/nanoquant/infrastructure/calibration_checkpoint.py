@@ -39,8 +39,11 @@ def save_causal_calibration_state(path: str | Path, state: CausalOnlineCalibrati
                 "percentile": snapshot.percentile,
             }
         layers.append(layer_manifest)
+        if layer.input_sum is not None and layer.input_row_count > 0:
+            tensors[f"layer_{index}.input_sum"] = layer.input_sum.detach().cpu().contiguous()
+            layer_manifest["input_row_count"] = layer.input_row_count
     manifest = {
-        "schema_version": 2,
+        "schema_version": 3 if all(layer.input_sum is not None for layer in state.layers) else 2,
         "algorithm_version": state.algorithm_version,
         "sample_count": state.sample_count,
         "layers": layers,
@@ -56,7 +59,7 @@ def save_causal_calibration_state(path: str | Path, state: CausalOnlineCalibrati
 def load_causal_calibration_state(path: str | Path) -> CausalOnlineCalibrationState:
     root = Path(path)
     manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
-    if manifest.get("schema_version") not in {1, 2}:
+    if manifest.get("schema_version") not in {1, 2, 3}:
         raise ValueError("unsupported causal calibration checkpoint schema")
     layers = []
     with safe_open(root / "state.safetensors", framework="pt", device="cpu") as handle:
@@ -76,7 +79,20 @@ def load_causal_calibration_state(path: str | Path) -> CausalOnlineCalibrationSt
                         float(values["percentile"]),
                     )
                 )
-            layers.append(CausalOnlineLayerSnapshot(str(layer["path"]), snapshots[0], snapshots[1]))
+            input_sum = (
+                handle.get_tensor(f"layer_{index}.input_sum")
+                if manifest.get("schema_version") == 3
+                else None
+            )
+            layers.append(
+                CausalOnlineLayerSnapshot(
+                    str(layer["path"]),
+                    snapshots[0],
+                    snapshots[1],
+                    input_sum,
+                    int(layer.get("input_row_count", 0)),
+                )
+            )
     state = CausalOnlineCalibrationState(
         tuple(layers),
         int(manifest["sample_count"]),

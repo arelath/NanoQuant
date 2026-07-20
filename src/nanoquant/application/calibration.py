@@ -13,6 +13,7 @@ from torch import nn
 
 from nanoquant.domain.calibration_math import (
     FixedClippedAccumulator,
+    MeanAccumulator,
     OnlineClippedAccumulator,
     robust_tau,
     shrink_importance,
@@ -20,7 +21,7 @@ from nanoquant.domain.calibration_math import (
 from nanoquant.domain.profiling import NULL_RECORDER, PhaseRecorder
 from nanoquant.ports.activation_store import ActivationStore
 
-CAUSAL_CALIBRATION_ALGORITHM_VERSION = 3
+CAUSAL_CALIBRATION_ALGORITHM_VERSION = 4
 
 TensorUpdate = Callable[[str, torch.Tensor], None]
 
@@ -100,6 +101,24 @@ def _threshold_updater(
     return update
 
 
+def _input_accumulator_updater(
+    accumulators: dict[str, Accumulator],
+    means: dict[str, MeanAccumulator],
+    recorder: PhaseRecorder,
+) -> TensorUpdate:
+    def update(path: str, value: torch.Tensor) -> None:
+        if recorder is NULL_RECORDER:
+            accumulators[path].update(value)
+            means[path].update(value)
+        else:
+            with recorder.phase("accumulate", direction="input"):
+                accumulators[path].update(value)
+                means[path].update(value)
+            recorder.add("calibration.accumulator_updates", 1, direction="input")
+
+    return update
+
+
 @dataclass(frozen=True, slots=True)
 class MaterializedLayerCalibration:
     path: str
@@ -107,6 +126,7 @@ class MaterializedLayerCalibration:
     output_importance: torch.Tensor
     sample_count: int
     method: str
+    input_mean: torch.Tensor | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,6 +144,8 @@ class CausalOnlineLayerSnapshot:
     path: str
     inputs: OnlineAccumulatorSnapshot
     outputs: OnlineAccumulatorSnapshot
+    input_sum: torch.Tensor | None = None
+    input_row_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -309,11 +331,13 @@ def calibrate_causal_model(
             torch.autograd.backward(loss)
 
     def execute(
-        input_accumulators: dict[str, Accumulator], output_accumulators: dict[str, Accumulator]
+        input_accumulators: dict[str, Accumulator],
+        output_accumulators: dict[str, Accumulator],
+        means: dict[str, MeanAccumulator],
     ) -> None:
         with _apply_calibration_hooks(
             layers,
-            _accumulator_updater(input_accumulators, recorder, "input"),
+            _input_accumulator_updater(input_accumulators, means, recorder),
             _accumulator_updater(output_accumulators, recorder, "output"),
         ):
             for batch in batches:
@@ -362,7 +386,14 @@ def calibrate_causal_model(
                 )
                 for path, module in layers
             }
-        execute(inputs, outputs)
+        means = {
+            path: _restore_mean_accumulator(
+                module.in_features,
+                None if initial_state is None else state_by_path[path],
+            )
+            for path, module in layers
+        }
+        execute(inputs, outputs, means)
         logical_sample_count = (0 if initial_state is None else initial_state.sample_count) + sum(
             batch.shape[0] for batch in batches
         )
@@ -374,6 +405,8 @@ def calibrate_causal_model(
                             path,
                             _snapshot_online_accumulator(cast(OnlineClippedAccumulator, inputs[path])),
                             _snapshot_online_accumulator(cast(OnlineClippedAccumulator, outputs[path])),
+                            means[path].total.detach().clone(),
+                            means[path].row_count,
                         )
                         for path, _module in layers
                     ),
@@ -389,6 +422,7 @@ def calibrate_causal_model(
                     shrink_importance(cast(Any, outputs[path]).total / logical_sample_count, shrinkage),
                     logical_sample_count,
                     method,
+                    means[path].finalize(),
                 )
                 for path, _module in layers
             )
@@ -439,6 +473,22 @@ def _snapshot_online_accumulator(accumulator: OnlineClippedAccumulator) -> Onlin
     )
 
 
+def _restore_mean_accumulator(
+    width: int,
+    snapshot: CausalOnlineLayerSnapshot | None,
+) -> MeanAccumulator:
+    accumulator = MeanAccumulator(width)
+    if snapshot is None:
+        return accumulator
+    if snapshot.input_sum is None or snapshot.input_row_count <= 0:
+        raise ValueError("online calibration checkpoint is missing input-mean state")
+    if snapshot.input_sum.shape != (width,):
+        raise ValueError("online calibration input-mean width changed")
+    accumulator.total.copy_(snapshot.input_sum.double())
+    accumulator.row_count = snapshot.input_row_count
+    return accumulator
+
+
 def materialize_causal_online_state(
     state: CausalOnlineCalibrationState,
     *,
@@ -454,9 +504,19 @@ def materialize_causal_online_state(
             shrink_importance(layer.outputs.total / sample_count, shrinkage),
             sample_count,
             "online_fisher",
+            _materialized_snapshot_mean(layer),
         )
         for layer in state.layers
     )
+
+
+def _materialized_snapshot_mean(layer: CausalOnlineLayerSnapshot) -> torch.Tensor | None:
+    if layer.input_sum is None or layer.input_row_count <= 0:
+        # Calibration states written before bias production do not carry this
+        # optional statistic. They remain valid for recipes that leave bias
+        # correction disabled; the producer fails closed when bias is enabled.
+        return None
+    return (layer.input_sum.double() / layer.input_row_count).float()
 
 
 def _linears(block: nn.Module, paths: tuple[str, ...]) -> dict[str, nn.Linear]:
@@ -498,10 +558,14 @@ def calibrate_block(
         if progress_callback is not None:
             progress_callback(completed_progress_batches, total_progress_batches)
 
-    def execute(input_accumulators: dict[str, Accumulator], output_accumulators: dict[str, Accumulator]) -> None:
+    def execute(
+        input_accumulators: dict[str, Accumulator],
+        output_accumulators: dict[str, Accumulator],
+        means: dict[str, MeanAccumulator],
+    ) -> None:
         with _apply_calibration_hooks(
             linears.items(),
-            _accumulator_updater(input_accumulators, recorder, "input"),
+            _input_accumulator_updater(input_accumulators, means, recorder),
             _accumulator_updater(output_accumulators, recorder, "output") if requires_backward else None,
         ):
             for batch in batches:
@@ -556,7 +620,8 @@ def calibrate_block(
             if requires_backward
             else {}
         )
-    execute(inputs, outputs)
+    means = {path: MeanAccumulator(module.in_features) for path, module in linears.items()}
+    execute(inputs, outputs, means)
     with recorder.phase("shrinkage"):
         return tuple(
             MaterializedLayerCalibration(
@@ -567,6 +632,7 @@ def calibrate_block(
                 else torch.ones(module.out_features),
                 sum(batch.shape[0] for batch in batches),
                 method,
+                means[path].finalize(),
             )
             for path, module in linears.items()
         )

@@ -120,6 +120,8 @@ def _packed_tensors(state: PackedLayerState) -> dict[str, torch.Tensor]:
         ("outlier_indices", state.outlier_indices),
         ("outlier_values", state.outlier_values),
         ("outlier_scales", state.outlier_scales),
+        ("patch_left", state.patch_left),
+        ("patch_right", state.patch_right),
     ):
         if value is not None:
             result[name] = value
@@ -231,6 +233,8 @@ def _load_expanded_checkpoint(
         values.get("outlier_indices"),
         values.get("outlier_values"),
         values.get("outlier_scales"),
+        values.get("patch_left"),
+        values.get("patch_right"),
     )
     return state, result
 
@@ -347,6 +351,8 @@ def _expand_layer(
             logical.outlier_indices,
             logical.outlier_values,
             logical.outlier_scales,
+            logical.patch_left,
+            logical.patch_right,
         )
     result = {
         "schema_version": 1,

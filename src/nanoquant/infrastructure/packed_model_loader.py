@@ -110,6 +110,8 @@ def load_packed_model(
                     None if state.outlier_indices is None else state.outlier_indices.to(device),
                     None if state.outlier_values is None else state.outlier_values.to(device),
                     None if state.outlier_scales is None else state.outlier_scales.to(device),
+                    None if state.patch_left is None else state.patch_left.to(device),
+                    None if state.patch_right is None else state.patch_right.to(device),
                 ).to(block_dtype)
                 bias = None if state.bias is None else state.bias.to(device=device, dtype=block_dtype)
                 module: FrozenReferenceLinear = DenseWeightReferenceLinear(weight, bias)
@@ -124,6 +126,8 @@ def load_packed_model(
                     None if state.outlier_indices is None else state.outlier_indices.to(device),
                     None if state.outlier_values is None else state.outlier_values.to(device=device, dtype=block_dtype),
                     None if state.outlier_scales is None else state.outlier_scales.to(device),
+                    None if state.patch_left is None else state.patch_left.to(device=device, dtype=block_dtype),
+                    None if state.patch_right is None else state.patch_right.to(device=device, dtype=block_dtype),
                 )
             prefix = f"blocks.{packed_block.index}."
             relative_name = entry.spec.name.split(prefix, 1)[1]

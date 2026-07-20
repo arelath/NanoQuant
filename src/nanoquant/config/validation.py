@@ -8,7 +8,14 @@ from enum import Enum
 
 from nanoquant.ports.event_sink import Severity
 
-from .schema import AllocationStrategy, ObjectiveKind, OutlierSelector, RunConfig
+from .schema import (
+    AllocationStrategy,
+    DType,
+    KlSensitivityGranularity,
+    ObjectiveKind,
+    OutlierSelector,
+    RunConfig,
+)
 
 
 class ValidationPhase(str, Enum):
@@ -40,6 +47,27 @@ def validate(config: RunConfig, phase: ValidationPhase = ValidationPhase.PRE_RES
     require(0 <= config.calibration.shrinkage <= 1, "CFG005", "calibration.shrinkage", "must be in [0, 1]")
     require(config.allocation.target_bpw > 0, "CFG006", "allocation.target_bpw", "must be positive")
     require(config.allocation.bounds.multiple > 0, "CFG007", "allocation.bounds.multiple", "must be positive")
+    kl_selected = config.allocation.strategy is AllocationStrategy.KL_CALIBRATED
+    require(
+        kl_selected == bool(config.allocation.kl_profile_artifact),
+        "CFG076",
+        "allocation.kl_profile_artifact",
+        "must be set exactly when strategy is kl_calibrated",
+    )
+    require(
+        kl_selected == bool(config.allocation.kl_profile_key),
+        "CFG086",
+        "allocation.kl_profile_key",
+        "must be set exactly when strategy is kl_calibrated",
+    )
+    require(
+        kl_selected
+        or config.allocation.kl_sensitivity_granularity
+        is KlSensitivityGranularity.EXACT_OR_TYPE_BLOCK,
+        "CFG087",
+        "allocation.kl_sensitivity_granularity",
+        "a non-default KL sensitivity granularity requires strategy kl_calibrated",
+    )
     maximum_rank_patterns = config.allocation.maximum_rank_layer_patterns
     require(
         all(bool(pattern.strip()) for pattern in maximum_rank_patterns),
@@ -80,12 +108,15 @@ def validate(config: RunConfig, phase: ValidationPhase = ValidationPhase.PRE_RES
         "floor must not exceed ceiling",
     )
     reconstruction = config.allocation.reconstruction
-    reconstruction_selected = config.allocation.strategy is AllocationStrategy.RECONSTRUCTION_AWARE
+    reconstruction_selected = config.allocation.strategy in {
+        AllocationStrategy.RECONSTRUCTION_AWARE,
+        AllocationStrategy.KL_CALIBRATED,
+    }
     require(
         reconstruction.enabled == reconstruction_selected,
         "CFG049",
         "allocation.reconstruction.enabled",
-        "must be enabled exactly when strategy is reconstruction_aware",
+        "must be enabled exactly when strategy is reconstruction_aware or kl_calibrated",
     )
     require(
         0 <= reconstruction.sensitivity_strength <= 1,
@@ -111,6 +142,32 @@ def validate(config: RunConfig, phase: ValidationPhase = ValidationPhase.PRE_RES
         "CFG053",
         "allocation.reconstruction.target_protected_error_reduction_fraction",
         "must be in [0, 1)",
+    )
+    require(
+        math.isfinite(reconstruction.rank_trust_fraction)
+        and 0 <= reconstruction.rank_trust_fraction <= 1,
+        "CFG088",
+        "allocation.reconstruction.rank_trust_fraction",
+        "must be finite and in [0, 1]",
+    )
+    trust_reference = reconstruction.rank_trust_reference_run
+    require(
+        trust_reference is None or bool(trust_reference.strip()),
+        "CFG089",
+        "allocation.reconstruction.rank_trust_reference_run",
+        "must be null or a non-empty run path",
+    )
+    require(
+        (reconstruction.rank_trust_fraction == 1) == (trust_reference is None),
+        "CFG090",
+        "allocation.reconstruction.rank_trust_reference_run",
+        "must be set exactly when rank_trust_fraction is below one",
+    )
+    require(
+        kl_selected or trust_reference is None,
+        "CFG091",
+        "allocation.reconstruction.rank_trust_reference_run",
+        "rank trust regions currently require strategy kl_calibrated",
     )
     importance = reconstruction.importance
     importance_patterns = tuple(item.pattern for item in importance.layer_multipliers)
@@ -322,6 +379,64 @@ def validate(config: RunConfig, phase: ValidationPhase = ValidationPhase.PRE_RES
         "CFG048",
         "factorization.shared_input.groups",
         "member paths must be non-empty and may belong to only one group",
+    )
+    multiplier_entries = [entry for group in shared.groups for entry in group.member_multipliers]
+    require(
+        all(
+            len({entry.member for entry in group.member_multipliers}) == len(group.member_multipliers)
+            and all(entry.member in group.members for entry in group.member_multipliers)
+            for group in shared.groups
+        ),
+        "CFG077",
+        "factorization.shared_input.groups.member_multipliers",
+        "multiplier members must be unique members of their configured group",
+    )
+    require(
+        all(math.isfinite(entry.multiplier) and entry.multiplier > 0 for entry in multiplier_entries),
+        "CFG078",
+        "factorization.shared_input.groups.member_multipliers",
+        "multipliers must be finite and positive",
+    )
+    bias = config.factorization.bias_correction
+    require(
+        bias.storage_dtype in {DType.FLOAT16, DType.BFLOAT16},
+        "CFG079",
+        "factorization.bias_correction.storage_dtype",
+        "must be float16 or bfloat16",
+    )
+    patch = config.factorization.low_rank_patch
+    require(patch.rank > 0, "CFG080", "factorization.low_rank_patch.rank", "must be positive")
+    require(
+        bool(patch.layer_patterns)
+        and len(set(patch.layer_patterns)) == len(patch.layer_patterns)
+        and all(bool(pattern.strip()) for pattern in patch.layer_patterns),
+        "CFG081",
+        "factorization.low_rank_patch.layer_patterns",
+        "must contain unique non-empty patterns",
+    )
+    require(
+        patch.storage_dtype in {DType.FLOAT16, DType.BFLOAT16},
+        "CFG082",
+        "factorization.low_rank_patch.storage_dtype",
+        "must be float16 or bfloat16",
+    )
+    require(
+        math.isfinite(patch.ridge_fraction) and patch.ridge_fraction > 0,
+        "CFG083",
+        "factorization.low_rank_patch.ridge_fraction",
+        "must be finite and positive",
+    )
+    require(
+        patch.fit_tokens > 0,
+        "CFG084",
+        "factorization.low_rank_patch.fit_tokens",
+        "must be positive",
+    )
+    require(
+        patch.held_out_tokens > 0,
+        "CFG085",
+        "factorization.low_rank_patch.held_out_tokens",
+        "must be positive",
     )
     require(config.profiling.cuda_sample_every > 0, "CFG015", "profiling.cuda_sample_every", "must be positive")
     require(

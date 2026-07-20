@@ -33,6 +33,8 @@ _TENSOR_ROLES = (
     "outlier_indices",
     "outlier_values",
     "outlier_scales",
+    "patch_left",
+    "patch_right",
 )
 _SAFE_DTYPE_NAMES = {
     "F16": "float16",
@@ -103,6 +105,8 @@ class LogicalLayerEntry:
             expected.update(("outlier_indices", "outlier_values"))
         if self.spec.has_outlier_scales:
             expected.add("outlier_scales")
+        if self.spec.patch_rank:
+            expected.update(("patch_left", "patch_right"))
         if set(roles) != expected:
             raise ValueError(f"logical layer tensor inventory differs from its specification: {self.spec.name}")
 
@@ -189,6 +193,8 @@ class OpenLogicalArtifact:
             by_role.get("outlier_indices"),
             by_role.get("outlier_values"),
             by_role.get("outlier_scales"),
+            by_role.get("patch_left"),
+            by_role.get("patch_right"),
         )
 
 
@@ -234,6 +240,8 @@ def _state_tensors(state: LogicalLayerState) -> tuple[tuple[str, torch.Tensor], 
         ("outlier_indices", state.outlier_indices),
         ("outlier_values", state.outlier_values),
         ("outlier_scales", state.outlier_scales),
+        ("patch_left", state.patch_left),
+        ("patch_right", state.patch_right),
     )
     values.extend((role, value) for role, value in optional if value is not None)
     return tuple(values)
@@ -409,6 +417,9 @@ def _spec_from_payload(payload: object, path: str) -> QuantizedLinearSpec:
         _boolean(value.get("has_outlier_scales"), f"{path}.has_outlier_scales"),
         _boolean(value.get("has_bias"), f"{path}.has_bias"),
         members,
+        _integer(value.get("patch_rank", 0), f"{path}.patch_rank"),
+        _optional_string(value.get("patch_value_dtype"), f"{path}.patch_value_dtype"),
+        _optional_string(value.get("bias_dtype"), f"{path}.bias_dtype"),
     )
 
 

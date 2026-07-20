@@ -14,6 +14,71 @@ from nanoquant.domain.objectives import (
 from nanoquant.ports.tensor_store import TensorStore
 
 
+class DenseCovarianceAccumulator:
+    """Bounded streaming first/second moments for one activation feature axis."""
+
+    def __init__(self, width: int, maximum_rows: int, *, device: str | torch.device) -> None:
+        if width <= 0 or maximum_rows <= 0:
+            raise ValueError("dense covariance dimensions and row limit must be positive")
+        self.width = width
+        self.maximum_rows = maximum_rows
+        self.row_count = 0
+        self.total = torch.zeros(width, dtype=torch.float32, device=device)
+        self.gram = torch.zeros(width, width, dtype=torch.float32, device=device)
+
+    @property
+    def remaining(self) -> int:
+        return self.maximum_rows - self.row_count
+
+    def update(self, value: torch.Tensor) -> int:
+        if value.shape[-1] != self.width:
+            raise ValueError("activation width differs from covariance accumulator")
+        rows = value.detach().reshape(-1, self.width)
+        take = min(self.remaining, rows.shape[0])
+        if take <= 0:
+            return 0
+        selected = rows[:take].to(device=self.total.device, dtype=torch.float32)
+        self.total.add_(selected.sum(dim=0))
+        self.gram.addmm_(selected.mT, selected)
+        self.row_count += take
+        return take
+
+    def materialize(self) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.row_count != self.maximum_rows:
+            raise ValueError(
+                f"covariance accumulator is incomplete: {self.row_count} != {self.maximum_rows}"
+            )
+        return (
+            (self.gram / self.row_count).detach().cpu().contiguous(),
+            (self.total / self.row_count).detach().cpu().contiguous(),
+        )
+
+
+class SplitDenseCovarianceAccumulator:
+    """Route a stream into disjoint fit and held-out covariance windows."""
+
+    def __init__(
+        self,
+        width: int,
+        fit_rows: int,
+        held_out_rows: int,
+        *,
+        device: str | torch.device,
+    ) -> None:
+        self.fit = DenseCovarianceAccumulator(width, fit_rows, device=device)
+        self.held_out = DenseCovarianceAccumulator(width, held_out_rows, device=device)
+
+    @property
+    def complete(self) -> bool:
+        return self.fit.remaining == 0 and self.held_out.remaining == 0
+
+    def update(self, value: torch.Tensor) -> None:
+        rows = value.detach().reshape(-1, value.shape[-1])
+        consumed = self.fit.update(rows)
+        if consumed < rows.shape[0]:
+            self.held_out.update(rows[consumed:])
+
+
 class DenseHessianWorkspaceError(MemoryError):
     code = "HES001"
 

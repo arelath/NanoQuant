@@ -691,7 +691,15 @@ def post_block_refit(
     resume: TuningResumeState | None = None,
     checkpoint_sink: TuningCheckpointSink | None = None,
 ) -> TuningMetrics:
-    tunable_suffixes = ("scale_pre", "scale_mid", "scale_post", "outlier_values", "bias")
+    tunable_suffixes = (
+        "scale_pre",
+        "scale_mid",
+        "scale_post",
+        "outlier_values",
+        "bias",
+        "patch_left",
+        "patch_right",
+    )
     return tune(
         model,
         request,

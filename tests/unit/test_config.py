@@ -10,8 +10,10 @@ from nanoquant.config.schema import (
     ActivationGpuCacheMode,
     ActivationStorageConfig,
     ActivationStoreKind,
+    AllocationStrategy,
     DatasetSourceConfig,
     DType,
+    KlSensitivityGranularity,
     LayerRankBudgetConfig,
     ModelConfig,
     ObjectiveKind,
@@ -28,7 +30,8 @@ def test_round_trip_decodes_nested_enums_tuples_and_optionals() -> None:
         "model": {"source": "local/tiny", "load_dtype": "float16"},
         "dataset": {"sources": [{"name": "fixture", "revision": None}], "shuffle": False},
         "allocation": {
-            "layer_budget_multipliers": [{"pattern": "self_attn.q_proj", "multiplier": 1.25}]
+            "layer_budget_multipliers": [{"pattern": "self_attn.q_proj", "multiplier": 1.25}],
+            "kl_sensitivity_granularity": "type_block",
         },
         "runtime": {"activations": {"kind": "mmap", "gpu_cache": "auto", "gpu_reserve_gib": 1.5}},
         "calibration": {"objective": {"kind": "low_rank_diagonal", "low_rank": 4}},
@@ -40,6 +43,7 @@ def test_round_trip_decodes_nested_enums_tuples_and_optionals() -> None:
     assert config.allocation.layer_budget_multipliers == (
         LayerRankBudgetConfig("self_attn.q_proj", 1.25),
     )
+    assert config.allocation.kl_sensitivity_granularity is KlSensitivityGranularity.TYPE_BLOCK
     assert config.runtime.activations.kind is ActivationStoreKind.MMAP
     assert config.runtime.activations.gpu_cache is ActivationGpuCacheMode.AUTO
     assert config.runtime.activations.gpu_reserve_gib == 1.5
@@ -124,6 +128,68 @@ def test_layer_budget_multipliers_must_be_valid_and_unique() -> None:
     )
 
     assert {issue.code for issue in validate(invalid)} == {"CFG041", "CFG042", "CFG043"}
+
+
+def test_kl_calibrated_allocation_requires_both_profile_path_and_exact_key() -> None:
+    base = RunConfig(ModelConfig("x"))
+    missing = replace(
+        base,
+        allocation=replace(base.allocation, strategy=AllocationStrategy.KL_CALIBRATED),
+    )
+    complete = replace(
+        base,
+        allocation=replace(
+            base.allocation,
+            strategy=AllocationStrategy.KL_CALIBRATED,
+            kl_profile_artifact="evidence/profile",
+            kl_profile_key="sha256:profile",
+        ),
+    )
+    unexpected = replace(
+        base,
+        allocation=replace(
+            base.allocation,
+            kl_profile_artifact="evidence/profile",
+            kl_profile_key="sha256:profile",
+        ),
+    )
+
+    missing_codes = {issue.code for issue in validate(missing)}
+    complete_codes = {issue.code for issue in validate(complete)}
+    assert {"CFG076", "CFG086"}.issubset(missing_codes)
+    assert "CFG076" not in complete_codes
+    assert "CFG086" not in complete_codes
+    assert {issue.code for issue in validate(unexpected)} == {"CFG076", "CFG086"}
+
+
+def test_type_block_kl_granularity_requires_kl_calibrated_allocation() -> None:
+    base = RunConfig(ModelConfig("x"))
+    invalid = replace(
+        base,
+        allocation=replace(
+            base.allocation,
+            kl_sensitivity_granularity=KlSensitivityGranularity.TYPE_BLOCK,
+        ),
+    )
+
+    assert {issue.code for issue in validate(invalid)} == {"CFG087"}
+
+
+def test_low_rank_patch_fit_and_held_out_windows_must_be_positive() -> None:
+    base = RunConfig(ModelConfig("x"))
+    invalid = replace(
+        base,
+        factorization=replace(
+            base.factorization,
+            low_rank_patch=replace(
+                base.factorization.low_rank_patch,
+                fit_tokens=0,
+                held_out_tokens=0,
+            ),
+        ),
+    )
+
+    assert {issue.code for issue in validate(invalid)} == {"CFG084", "CFG085"}
 
 
 def test_observability_levels_are_validated_without_changing_schema() -> None:

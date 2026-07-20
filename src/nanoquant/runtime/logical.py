@@ -38,6 +38,8 @@ class LogicalLayerState:
     outlier_indices: torch.Tensor | None = None
     outlier_values: torch.Tensor | None = None
     outlier_scales: torch.Tensor | None = None
+    patch_left: torch.Tensor | None = None
+    patch_right: torch.Tensor | None = None
 
     def __post_init__(self) -> None:
         spec = self.spec
@@ -78,8 +80,8 @@ class LogicalLayerState:
             raise ValueError("runtime bias presence differs from its specification")
         if self.bias is not None and tuple(self.bias.shape) != (spec.out_features,):
             raise ValueError("runtime bias shape differs from the output dimension")
-        if self.bias is not None and canonical_torch_dtype(self.bias.dtype) != spec.scale_dtype:
-            raise ValueError("runtime bias dtype differs from the scale dtype")
+        if self.bias is not None and canonical_torch_dtype(self.bias.dtype) != (spec.bias_dtype or spec.scale_dtype):
+            raise ValueError("runtime bias dtype differs from its specification")
         if self.bias is not None and not bool(torch.all(torch.isfinite(self.bias))):
             raise ValueError("runtime bias contains a non-finite value")
         has_outliers = self.outlier_indices is not None or self.outlier_values is not None
@@ -116,3 +118,21 @@ class LogicalLayerState:
             raise ValueError("runtime outlier scale dtype differs from the scale dtype")
         if self.outlier_scales is not None and not bool(torch.all(torch.isfinite(self.outlier_scales))):
             raise ValueError("runtime outlier scale contains a non-finite value")
+        if (self.patch_left is None) != (self.patch_right is None):
+            raise ValueError("runtime low-rank patch tensors must be paired")
+        if (self.patch_left is None) != (spec.patch_rank == 0):
+            raise ValueError("runtime patch presence differs from its specification")
+        if self.patch_left is not None and self.patch_right is not None:
+            if tuple(self.patch_left.shape) != (spec.out_features, spec.patch_rank):
+                raise ValueError("runtime patch-left shape differs from its specification")
+            if tuple(self.patch_right.shape) != (spec.patch_rank, spec.in_features):
+                raise ValueError("runtime patch-right shape differs from its specification")
+            if not self.patch_left.is_contiguous() or not self.patch_right.is_contiguous():
+                raise ValueError("runtime low-rank patch tensors must be contiguous")
+            if any(
+                canonical_torch_dtype(value.dtype) != spec.patch_value_dtype
+                for value in (self.patch_left, self.patch_right)
+            ):
+                raise ValueError("runtime patch dtype differs from its specification")
+            if any(not bool(torch.all(torch.isfinite(value))) for value in (self.patch_left, self.patch_right)):
+                raise ValueError("runtime low-rank patch contains a non-finite value")

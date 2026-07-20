@@ -8,14 +8,18 @@ from dataclasses import dataclass
 import torch
 
 from nanoquant.application.stages import StageContext
-from nanoquant.config.schema import ADMMConfig, ScaleFitConfig
+from nanoquant.config.schema import ADMMConfig, BiasCorrectionConfig, LowRankPatchConfig, ScaleFitConfig
 from nanoquant.domain.factorization import ADMMTracePoint, factorize_admm
+from nanoquant.domain.linear_math import functional_dense_reconstruction
 from nanoquant.domain.metrics import reconstruction_metrics
 from nanoquant.domain.models import (
+    BiasCorrectionResult,
     ComponentRef,
     ConvergenceMetrics,
     FactorizationRequest,
     FactorizationResult,
+    LayerId,
+    LowRankPatchResult,
     OutlierSelectionRequest,
     OutlierSelectionResult,
     ScaleFitRequest,
@@ -32,7 +36,7 @@ from nanoquant.domain.outliers import (
     select_top_columns,
     store_outlier_values,
 )
-from nanoquant.domain.planning import outlier_bit_cost
+from nanoquant.domain.planning import bias_bit_cost, outlier_bit_cost, patch_bit_cost
 from nanoquant.domain.profiling import NULL_RECORDER, PhaseRecorder
 from nanoquant.domain.resources import peak_device_memory_bytes
 from nanoquant.domain.scale_fit import fit_scales, reconstruct
@@ -344,6 +348,36 @@ class MaterializedScaleFitStageRequest:
     output_importance: TensorRef
 
 
+@dataclass(frozen=True, slots=True)
+class BiasCorrectionStageRequest:
+    layer: LayerId
+    target_weight: TensorRef
+    left_binary: TensorRef
+    right_binary: TensorRef
+    scales: ScaleState
+    input_mean: TensorRef
+    outlier_indices: TensorRef | None = None
+    outlier_values: TensorRef | None = None
+    outlier_scales: TensorRef | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class LowRankPatchStageRequest:
+    layer: LayerId
+    target_weight: TensorRef
+    left_binary: TensorRef
+    right_binary: TensorRef
+    scales: ScaleState
+    fit_covariance: TensorRef
+    held_out_covariance: TensorRef
+    fit_input_mean: TensorRef
+    held_out_input_mean: TensorRef
+    bias: TensorRef | None = None
+    outlier_indices: TensorRef | None = None
+    outlier_values: TensorRef | None = None
+    outlier_scales: TensorRef | None = None
+
+
 class ScaleFitStage:
     name = "fit-scales"
     version = "2"
@@ -427,3 +461,248 @@ class ScaleFitStage:
         if result.accepted and result.after.export_weighted_error > result.before.export_weighted_error:
             return ValidationReport((ValidationFinding("SCL001", "accepted scale fit regressed"),))
         return ValidationReport()
+
+
+class BiasCorrectionStage:
+    name = "fit-output-bias"
+    version = "1"
+
+    def __init__(self, config: BiasCorrectionConfig | None = None, *, device: str = "cpu") -> None:
+        self.config = config or BiasCorrectionConfig()
+        self.device = device
+
+    def estimate(self, request: BiasCorrectionStageRequest, host: HostInventory) -> ResourceEstimate:
+        output, inputs = request.target_weight.spec.shape
+        return ResourceEstimate(peak_cpu_bytes=(output * inputs + output + inputs) * 4)
+
+    def execute(self, request: BiasCorrectionStageRequest, context: StageContext) -> BiasCorrectionResult:
+        if request.scales.mid is None:
+            raise ValueError("bias correction requires an explicit mid scale")
+        with context.executor.device_scope(self.device):
+            with (
+                context.tensor_store.read(request.target_weight, self.device) as target,
+                context.tensor_store.read(request.left_binary, self.device) as left,
+                context.tensor_store.read(request.right_binary, self.device) as right,
+                context.tensor_store.read(request.scales.pre, self.device) as scale_pre,
+                context.tensor_store.read(request.scales.mid, self.device) as scale_mid,
+                context.tensor_store.read(request.scales.post, self.device) as scale_post,
+                context.tensor_store.read(request.input_mean, self.device) as input_mean,
+            ):
+                indices = values = scales = None
+                if request.outlier_indices is not None and request.outlier_values is not None:
+                    with (
+                        context.tensor_store.read(request.outlier_indices, self.device) as stored_indices,
+                        context.tensor_store.read(request.outlier_values, self.device) as stored_values,
+                    ):
+                        indices = stored_indices.clone()
+                        values = stored_values.clone()
+                    if request.outlier_scales is not None:
+                        with context.tensor_store.read(request.outlier_scales, self.device) as stored_scales:
+                            scales = stored_scales.clone()
+                reconstruction = functional_dense_reconstruction(
+                    left,
+                    right,
+                    scale_pre,
+                    scale_mid,
+                    scale_post,
+                    indices,
+                    values,
+                    scales,
+                ).float()
+                mean_error = (target.float() - reconstruction) @ input_mean.float().reshape(-1)
+                stored_dtype = {
+                    "float16": torch.float16,
+                    "bfloat16": torch.bfloat16,
+                }[self.config.storage_dtype.value]
+                stored_bias = mean_error.to(stored_dtype)
+                reference = context.tensor_store.put("bias-correction", {"bias": stored_bias})["bias"]
+                residual = mean_error - stored_bias.float()
+                before = float(mean_error.square().sum())
+                after = float(residual.square().sum())
+        cost = bias_bit_cost(stored_bias.numel(), value_bits=stored_bias.element_size() * 8)
+        layer = request.layer
+        context.events.emit(
+            self.name,
+            "info",
+            "bias_correction.completed",
+            block=getattr(getattr(layer, "block", None), "index", None),
+            layer=getattr(layer, "path", str(layer)),
+            before_mean_output_error_squared=before,
+            after_mean_output_error_squared=after,
+            bits=cost.total,
+        )
+        return BiasCorrectionResult(reference, before, after, cost)
+
+    def validate(self, result: BiasCorrectionResult, context: StageContext) -> ValidationReport:
+        if result.mean_output_error_after_squared > result.mean_output_error_before_squared + 1e-12:
+            return ValidationReport((ValidationFinding("BIA001", "output bias correction regressed mean error"),))
+        return ValidationReport()
+
+
+def _activation_error(
+    residual: torch.Tensor,
+    covariance: torch.Tensor,
+    input_mean: torch.Tensor,
+    bias: torch.Tensor | None,
+) -> float:
+    value = ((residual @ covariance) * residual).sum()
+    if bias is not None:
+        output_mean = residual @ input_mean
+        value = value - 2 * torch.dot(bias, output_mean) + bias.square().sum()
+    return max(0.0, float(value))
+
+
+class LowRankPatchStage:
+    name = "fit-low-rank-patch"
+    version = "1"
+
+    def __init__(self, config: LowRankPatchConfig | None = None, *, device: str = "cpu") -> None:
+        self.config = config or LowRankPatchConfig()
+        self.device = device
+
+    def estimate(self, request: LowRankPatchStageRequest, host: HostInventory) -> ResourceEstimate:
+        output, inputs = request.target_weight.spec.shape
+        return ResourceEstimate(peak_cpu_bytes=(inputs * inputs * 3 + output * inputs * 3) * 4)
+
+    def execute(self, request: LowRankPatchStageRequest, context: StageContext) -> LowRankPatchResult:
+        if request.scales.mid is None:
+            raise ValueError("low-rank patch requires an explicit mid scale")
+        with context.executor.device_scope(self.device):
+            with (
+                context.tensor_store.read(request.target_weight, self.device) as target,
+                context.tensor_store.read(request.left_binary, self.device) as left,
+                context.tensor_store.read(request.right_binary, self.device) as right,
+                context.tensor_store.read(request.scales.pre, self.device) as scale_pre,
+                context.tensor_store.read(request.scales.mid, self.device) as scale_mid,
+                context.tensor_store.read(request.scales.post, self.device) as scale_post,
+                context.tensor_store.read(request.fit_covariance, self.device) as fit_covariance,
+                context.tensor_store.read(request.held_out_covariance, self.device) as held_out_covariance,
+                context.tensor_store.read(request.fit_input_mean, self.device) as fit_input_mean,
+                context.tensor_store.read(request.held_out_input_mean, self.device) as held_out_input_mean,
+            ):
+                indices = values = outlier_scales = bias = None
+                if request.outlier_indices is not None and request.outlier_values is not None:
+                    with (
+                        context.tensor_store.read(request.outlier_indices, self.device) as stored_indices,
+                        context.tensor_store.read(request.outlier_values, self.device) as stored_values,
+                    ):
+                        indices = stored_indices.clone()
+                        values = stored_values.clone()
+                    if request.outlier_scales is not None:
+                        with context.tensor_store.read(request.outlier_scales, self.device) as stored_scales:
+                            outlier_scales = stored_scales.clone()
+                if request.bias is not None:
+                    with context.tensor_store.read(request.bias, self.device) as stored_bias:
+                        bias = stored_bias.detach().float().clone()
+                reconstruction = functional_dense_reconstruction(
+                    left,
+                    right,
+                    scale_pre,
+                    scale_mid,
+                    scale_post,
+                    indices,
+                    values,
+                    outlier_scales,
+                ).float()
+                residual = target.float() - reconstruction
+                covariance = fit_covariance.float()
+                width = covariance.shape[0]
+                ridge = self.config.ridge_fraction * float(torch.trace(covariance)) / width
+                damped = covariance + torch.eye(
+                    width,
+                    dtype=covariance.dtype,
+                    device=covariance.device,
+                ) * ridge
+                cholesky = torch.linalg.cholesky(damped)
+                transformed = cholesky.mT @ residual.mT
+                singular_left, singular_values, singular_right = torch.linalg.svd(
+                    transformed,
+                    full_matrices=False,
+                )
+                rank = min(self.config.rank, singular_values.numel())
+                patch_left = singular_right[:rank].mT * singular_values[:rank]
+                solved = torch.linalg.solve_triangular(
+                    cholesky.mT,
+                    singular_left[:, :rank],
+                    upper=True,
+                )
+                patch_right = solved.mT
+                stored_dtype = {
+                    "float16": torch.float16,
+                    "bfloat16": torch.bfloat16,
+                }[self.config.storage_dtype.value]
+                stored_left = patch_left.to(stored_dtype)
+                stored_right = patch_right.to(stored_dtype)
+                stored_patch = stored_left.float() @ stored_right.float()
+                fit_before = _activation_error(residual, covariance, fit_input_mean.float(), bias)
+                fit_after = _activation_error(residual - stored_patch, covariance, fit_input_mean.float(), bias)
+                held_before = _activation_error(
+                    residual,
+                    held_out_covariance.float(),
+                    held_out_input_mean.float(),
+                    bias,
+                )
+                held_after = _activation_error(
+                    residual - stored_patch,
+                    held_out_covariance.float(),
+                    held_out_input_mean.float(),
+                    bias,
+                )
+                accepted = fit_after < fit_before and (
+                    not self.config.require_held_out_acceptance or held_after < held_before
+                )
+                reason = None if accepted else (
+                    "held_out_error_did_not_improve"
+                    if held_after >= held_before
+                    else "fit_error_did_not_improve"
+                )
+                refs = context.tensor_store.put(
+                    "low-rank-patch",
+                    {"patch_left": stored_left, "patch_right": stored_right},
+                )
+        cost = patch_bit_cost(
+            stored_left.shape[0],
+            stored_right.shape[1],
+            rank,
+            value_bits=stored_left.element_size() * 8,
+        )
+        result = LowRankPatchResult(
+            refs["patch_left"],
+            refs["patch_right"],
+            rank,
+            fit_before,
+            fit_after,
+            held_before,
+            held_after,
+            accepted,
+            reason,
+            cost,
+        )
+        context.events.emit(
+            self.name,
+            "info",
+            "low_rank_patch.completed",
+            block=request.layer.block.index,
+            layer=request.layer.path,
+            rank=rank,
+            accepted=accepted,
+            rejection_reason=reason,
+            fit_error_before=fit_before,
+            fit_error_after=fit_after,
+            held_out_error_before=held_before,
+            held_out_error_after=held_after,
+            bits=cost.total,
+        )
+        return result
+
+    def validate(self, result: LowRankPatchResult, context: StageContext) -> ValidationReport:
+        findings = []
+        if result.accepted and result.fit_error_after >= result.fit_error_before:
+            findings.append(ValidationFinding("PAT001", "accepted patch did not improve fit error"))
+        if (
+            result.accepted
+            and self.config.require_held_out_acceptance
+            and result.held_out_error_after >= result.held_out_error_before
+        ):
+            findings.append(ValidationFinding("PAT002", "accepted patch did not improve held-out error"))
+        return ValidationReport(tuple(findings))

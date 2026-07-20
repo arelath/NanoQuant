@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 import torch
@@ -110,6 +111,32 @@ class FixedClippedAccumulator:
         return self.total / self.batch_count
 
 
+@dataclass(slots=True)
+class MeanAccumulator:
+    """Unbiased feature mean over all activation rows."""
+
+    width: int
+    total: torch.Tensor = field(init=False)
+    row_count: int = field(init=False, default=0)
+
+    def __post_init__(self) -> None:
+        if self.width <= 0:
+            raise ValueError("mean accumulator width must be positive")
+        self.total = torch.zeros(self.width, dtype=torch.float64)
+
+    def update(self, tensor: torch.Tensor) -> None:
+        rows = tensor.detach().reshape(-1, tensor.shape[-1])
+        if rows.shape[-1] != self.width or rows.shape[0] == 0:
+            raise ValueError("mean accumulator received an incompatible activation batch")
+        self.total.add_(rows.double().sum(dim=0).cpu())
+        self.row_count += rows.shape[0]
+
+    def finalize(self) -> torch.Tensor:
+        if self.row_count == 0:
+            raise ValueError("mean accumulator has no rows")
+        return (self.total / self.row_count).float()
+
+
 def shrink_importance(value: torch.Tensor, shrinkage: float) -> torch.Tensor:
     if not 0 <= shrinkage <= 1:
         raise ValueError("shrinkage must be in [0, 1]")
@@ -118,3 +145,25 @@ def shrink_importance(value: torch.Tensor, shrinkage: float) -> torch.Tensor:
         mean = result.mean()
         result.mul_(1 - shrinkage).add_(mean * shrinkage)
     return result
+
+
+def weighted_group_output_importance(
+    member_values: tuple[torch.Tensor, ...],
+    member_multipliers: tuple[float, ...],
+) -> torch.Tensor:
+    """Apply squared member weights while preserving the stacked objective mean."""
+
+    if not member_values or len(member_values) != len(member_multipliers):
+        raise ValueError("group output importance requires aligned member values and multipliers")
+    if any(value.ndim != 1 or value.numel() == 0 for value in member_values):
+        raise ValueError("group output importance members must be non-empty vectors")
+    if any(not math.isfinite(multiplier) or multiplier <= 0 for multiplier in member_multipliers):
+        raise ValueError("group output importance multipliers must be finite and positive")
+    baseline = torch.cat(member_values).contiguous()
+    weighted = torch.cat(
+        tuple(value * (multiplier**2) for value, multiplier in zip(member_values, member_multipliers, strict=True))
+    ).contiguous()
+    weighted_mean = weighted.mean()
+    if not torch.isfinite(weighted_mean) or float(weighted_mean) <= 0:
+        raise ValueError("group output importance weighted mean must be finite and positive")
+    return weighted * (baseline.mean() / weighted_mean)

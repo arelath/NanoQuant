@@ -68,11 +68,14 @@ def persist_calibration(
         if (
             not torch.isfinite(layer_stats.input_importance).all()
             or not torch.isfinite(layer_stats.output_importance).all()
+            or (layer_stats.input_mean is not None and not torch.isfinite(layer_stats.input_mean).all())
         ):
             raise ValueError(f"non-finite calibration statistics for {layer}")
         prefix = f"block_{layer.block.index}.{layer.path}"
         values[f"{prefix}.input_importance"] = layer_stats.input_importance
         values[f"{prefix}.output_importance"] = layer_stats.output_importance
+        if layer_stats.input_mean is not None:
+            values[f"{prefix}.input_mean"] = layer_stats.input_mean
     references = tensors.put("calibration-tensors", values)
     layers = tuple(
         LayerCalibrationStats(
@@ -82,6 +85,8 @@ def persist_calibration(
             None,
             _summary(layer_stats.input_importance),
             _summary(layer_stats.output_importance),
+            (),
+            references.get(f"block_{layer.block.index}.{layer.path}.input_mean"),
         )
         for layer, layer_stats in materialized
     )
@@ -120,6 +125,7 @@ def build_objectives(
             "target_weighted_norm_squared",
             None,
             calibration.reference,
+            layer.input_mean,
         )
         for layer in calibration.stats.layers
     )

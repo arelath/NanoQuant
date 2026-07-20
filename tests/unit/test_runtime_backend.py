@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+from dataclasses import replace
 
 import pytest
 import torch
@@ -68,6 +69,37 @@ def test_deployment_reference_backends_match_with_bias_and_quantized_outliers() 
     factorized_output = factorized.linear(value, factorized.prepare(state, "cpu"))
 
     torch.testing.assert_close(factorized_output, dense_output, rtol=1e-6, atol=1e-6)
+
+
+def test_reference_backends_execute_low_rank_patch_as_two_thin_linears() -> None:
+    source = _state(outliers=False)
+    patch_left = torch.tensor([[1.0, 0.5], [-0.25, 2.0], [0.75, -1.0]])
+    patch_right = torch.tensor([[0.5, 0.25, -0.5, 1.0], [-1.0, 0.5, 0.0, 0.25]])
+    state = LogicalLayerState(
+        replace(source.spec, patch_rank=2, patch_value_dtype="float32"),
+        source.left_binary,
+        source.right_binary,
+        source.scale_pre,
+        source.scale_mid,
+        source.scale_post,
+        source.bias,
+        patch_left=patch_left,
+        patch_right=patch_right,
+    )
+    value = torch.tensor([[[0.25, -0.5, 1.0, 0.75]]])
+    dense = DenseReferenceBackend()
+    factorized = FactorizedReferenceBackend()
+
+    dense_output = dense.linear(value, dense.prepare(state, "cpu"))
+    factorized_output = factorized.linear(value, factorized.prepare(state, "cpu"))
+    baseline = factorized.linear(value, factorized.prepare(source, "cpu"))
+    expected_patch = torch.nn.functional.linear(
+        torch.nn.functional.linear(value, patch_right),
+        patch_left,
+    )
+
+    torch.testing.assert_close(factorized_output, dense_output)
+    torch.testing.assert_close(factorized_output - baseline, expected_patch)
 
 
 def test_logical_layer_state_rejects_noncanonical_binary_and_outlier_inventory() -> None:

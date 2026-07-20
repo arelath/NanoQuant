@@ -14,6 +14,7 @@ import torch
 from nanoquant.domain.models import (
     ArtifactRef,
     ArtifactTypes,
+    BlockResult,
     FrozenBlockState,
     FrozenNanoQuantState,
     FrozenSharedInputGroupState,
@@ -67,9 +68,25 @@ class FrozenRunAuxiliaryState:
 
 
 @dataclass(frozen=True, slots=True)
+class FrozenRunRankEntry:
+    unit_id: str
+    block: int
+    name: str
+    rank: int
+    factor_bits: int
+
+
+@dataclass(frozen=True, slots=True)
+class FrozenRunPlanningReference:
+    ranks: tuple[FrozenRunRankEntry, ...]
+    total_bits: int
+
+
+@dataclass(frozen=True, slots=True)
 class _ResolvedFrozenRun:
     identity: CommitIdentity
     global_tuning: ArtifactRef | None
+    committed: tuple[BlockResult, ...]
     blocks: tuple[FrozenBlockState, ...]
     tensors: LocalTensorStore
 
@@ -130,6 +147,8 @@ def _runtime_state(
     scale_mid = stack.enter_context(tensors.read(frozen.scales.mid))
     scale_post = stack.enter_context(tensors.read(frozen.scales.post))
     bias = None if frozen.bias is None else stack.enter_context(tensors.read(frozen.bias))
+    patch_left = None if frozen.patch_left is None else stack.enter_context(tensors.read(frozen.patch_left))
+    patch_right = None if frozen.patch_right is None else stack.enter_context(tensors.read(frozen.patch_right))
     indices = None
     values = None
     outlier_scales = None
@@ -161,6 +180,9 @@ def _runtime_state(
         outlier_value_dtype=None if values is None else canonical_torch_dtype(values.dtype),
         has_outlier_scales=outlier_scales is not None,
         has_bias=bias is not None,
+        bias_dtype=None if bias is None else canonical_torch_dtype(bias.dtype),
+        patch_rank=0 if patch_left is None else int(patch_left.shape[1]),
+        patch_value_dtype=None if patch_left is None else canonical_torch_dtype(patch_left.dtype),
     )
     return LogicalLayerState(
         spec,
@@ -173,6 +195,8 @@ def _runtime_state(
         indices,
         values,
         outlier_scales,
+        patch_left,
+        patch_right,
     )
 
 
@@ -210,6 +234,7 @@ def _runtime_group_state(
         outlier_value_dtype=None if values is None else canonical_torch_dtype(values.dtype),
         has_outlier_scales=outlier_scales is not None,
         has_bias=bias is not None,
+        bias_dtype=None if bias is None else canonical_torch_dtype(bias.dtype),
         members=tuple(
             ProjectionMemberSpec(prefix + member.layer.path, member.row_start, member.row_end)
             for member in frozen.members
@@ -287,7 +312,7 @@ def _resolve_frozen_run(
     frozen_blocks = (
         tuple(block.frozen_state for block in committed) if global_result is None else global_result.tuned_blocks
     )
-    return _ResolvedFrozenRun(identity, global_reference, frozen_blocks, tensors)
+    return _ResolvedFrozenRun(identity, global_reference, committed, frozen_blocks, tensors)
 
 
 def load_frozen_run_auxiliary(
@@ -379,7 +404,82 @@ def _logical_values(state: LogicalLayerState) -> tuple[tuple[str, torch.Tensor |
         ("outlier_indices", state.outlier_indices),
         ("outlier_values", state.outlier_values),
         ("outlier_scales", state.outlier_scales),
+        ("patch_left", state.patch_left),
+        ("patch_right", state.patch_right),
     )
+
+
+def _rank_inventory(resolved: _ResolvedFrozenRun) -> tuple[FrozenRunRankEntry, ...]:
+    entries: list[FrozenRunRankEntry] = []
+
+    def append_entry(
+        block_index: int,
+        name: str,
+        state: FrozenNanoQuantState | FrozenSharedInputGroupState,
+    ) -> None:
+        left_shape = state.left_binary.spec.shape
+        right_shape = state.right_binary.spec.shape
+        if left_shape[1] != state.rank or right_shape[0] != state.rank:
+            raise ValueError(f"frozen rank inventory has inconsistent factor shapes: {block_index}:{name}")
+        entries.append(
+            FrozenRunRankEntry(
+                f"{block_index}:{name}",
+                block_index,
+                name,
+                state.rank,
+                left_shape[0] * left_shape[1] + right_shape[0] * right_shape[1],
+            )
+        )
+
+    for block in resolved.blocks:
+        for layer_state in block.quantized_layers:
+            append_entry(block.block.index, layer_state.layer.path, layer_state)
+        for group_state in block.shared_input_groups:
+            append_entry(block.block.index, group_state.name, group_state)
+    return tuple(entries)
+
+
+def load_frozen_run_planning_reference(
+    run_output: str | Path,
+    expected_blocks: int,
+    *,
+    fresh_validation: bool = True,
+) -> FrozenRunPlanningReference:
+    """Load exact ranks and total logical bit cost from a validated frozen run."""
+
+    if expected_blocks <= 0:
+        raise ValueError("expected block count must be positive")
+    resolved = _resolve_frozen_run(
+        Path(run_output),
+        expected_blocks,
+        use_global_tuning=False,
+        fresh_validation=fresh_validation,
+    )
+    total_bits = sum(
+        result.actual_bit_cost.total
+        for block in resolved.committed
+        for result in block.layers
+    ) + sum(
+        result.actual_bit_cost.total
+        for block in resolved.committed
+        for result in block.shared_input_groups
+    )
+    return FrozenRunPlanningReference(_rank_inventory(resolved), total_bits)
+
+
+def load_frozen_run_rank_inventory(
+    run_output: str | Path,
+    expected_blocks: int,
+    *,
+    fresh_validation: bool = True,
+) -> tuple[FrozenRunRankEntry, ...]:
+    """Load rank and binary-factor cost directly from validated committed states."""
+
+    return load_frozen_run_planning_reference(
+        run_output,
+        expected_blocks,
+        fresh_validation=fresh_validation,
+    ).ranks
 
 
 def validate_frozen_run_logical(

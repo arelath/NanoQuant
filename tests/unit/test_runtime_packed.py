@@ -131,6 +131,31 @@ def test_packed_layer_roundtrip_preserves_logical_state(factor_dtype: torch.dtyp
         assert torch.equal(expected, actual)
 
 
+def test_packed_layer_roundtrip_preserves_low_rank_patch() -> None:
+    source = _logical(factor_dtype=torch.float32)
+    patch_left = torch.tensor([[1.0, 2.0], [0.5, -1.0], [3.0, 0.25]], dtype=torch.float16)
+    patch_right = torch.arange(70, dtype=torch.float16).reshape(2, 35) / 100
+    logical = LogicalLayerState(
+        replace(source.spec, patch_rank=2, patch_value_dtype="float16"),
+        source.left_binary,
+        source.right_binary,
+        source.scale_pre,
+        source.scale_mid,
+        source.scale_post,
+        source.bias,
+        source.outlier_indices,
+        source.outlier_values,
+        source.outlier_scales,
+        patch_left,
+        patch_right,
+    )
+
+    restored = pack_logical_layer(logical).to_logical()
+
+    assert torch.equal(restored.patch_left, patch_left)
+    assert torch.equal(restored.patch_right, patch_right)
+
+
 def test_packed_layer_rejects_salient_scales_for_non_int8_values() -> None:
     logical = _logical()
     packed = pack_logical_layer(logical)

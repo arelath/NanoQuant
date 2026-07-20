@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
+import pytest
 import torch
 from torch import nn
 
@@ -12,6 +14,7 @@ from nanoquant.application.layers import (
 )
 from nanoquant.application.planning import PlanningRequest, build_quantization_plan
 from nanoquant.config.schema import OutlierConfig, RankAllocationConfig, RankBoundsConfig
+from nanoquant.domain.calibration_math import weighted_group_output_importance
 from nanoquant.domain.models import (
     ArtifactRef,
     BlockId,
@@ -148,6 +151,25 @@ def test_group_planning_owns_one_factor_cost_and_partitions_members() -> None:
     assert group.out_features == 10
     assert group.estimated_cost == plan.planned_cost
     assert group.estimated_cost.total <= 8 * sum(member.in_features * member.out_features for member in group.members)
+
+
+def test_group_member_multiplier_is_persisted_and_squared_then_mean_normalized() -> None:
+    request = _planning_request()
+    candidate = request.shared_input_groups[0]
+    weighted_request = replace(
+        request,
+        shared_input_groups=(replace(candidate, objective_multipliers=(1.0, 1.0, 2.0)),),
+    )
+    group = build_quantization_plan(weighted_request).blocks[0].shared_input_groups[0]
+    values = (torch.tensor([2.0, 4.0]), torch.tensor([6.0]), torch.tensor([8.0]))
+
+    weighted = weighted_group_output_importance(values, group.objective_multipliers)
+
+    assert group.objective_multipliers == (1.0, 1.0, 2.0)
+    assert weighted.mean().item() == torch.cat(values).mean().item()
+    assert weighted[-1].item() / values[-1].item() == pytest.approx(
+        4 * weighted[0].item() / values[0][0].item()
+    )
 
 
 def test_group_owner_views_share_parameters_and_round_trip(tmp_path: Path) -> None:

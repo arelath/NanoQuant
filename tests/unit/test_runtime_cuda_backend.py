@@ -60,6 +60,7 @@ def _logical(
     outlier_dtype: torch.dtype | None = torch.bfloat16,
     outlier_count: int = 2,
     bias: bool = True,
+    patch: bool = False,
 ) -> LogicalLayerState:
     outlier_count = outlier_count if outlier_dtype is not None else 0
     spec = QuantizedLinearSpec(
@@ -74,6 +75,8 @@ def _logical(
         outlier_value_dtype=(str(outlier_dtype).removeprefix("torch.") if outlier_dtype is not None else None),
         has_outlier_scales=outlier_dtype is torch.int8,
         has_bias=bias,
+        patch_rank=2 if patch else 0,
+        patch_value_dtype=str(scale_dtype).removeprefix("torch.") if patch else None,
     )
     generator = torch.Generator().manual_seed(19)
     left = torch.where(torch.rand(17, 33, generator=generator) > 0.5, 1.0, -1.0)
@@ -109,6 +112,8 @@ def _logical(
             if outlier_dtype is torch.int8
             else None
         ),
+        patch_left=torch.randn(17, 2, generator=generator).to(scale_dtype) if patch else None,
+        patch_right=torch.randn(2, 35, generator=generator).to(scale_dtype) if patch else None,
     )
 
 
@@ -132,6 +137,11 @@ def _expected(value: torch.Tensor, state: LogicalLayerState) -> torch.Tensor:
         )
     if state.bias is not None:
         output += state.bias.float()
+    if state.patch_left is not None and state.patch_right is not None:
+        output += torch.nn.functional.linear(
+            torch.nn.functional.linear(value_float, state.patch_right.float()),
+            state.patch_left.float(),
+        )
     return output
 
 
@@ -490,6 +500,24 @@ def test_cuda_packed_backend_executes_every_declared_float_dtype(
     backend = CudaPackedBackend()
     prepared = backend.prepare(packed, "cuda")
     value = torch.linspace(-1, 1, 70, dtype=input_dtype).reshape(2, 35).cuda()
+
+    actual = backend.linear(value, prepared)
+
+    torch.testing.assert_close(actual.cpu(), _expected(value.cpu(), logical), rtol=2e-5, atol=2e-4)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_cuda_packed_backend_executes_low_rank_patch_sidecars() -> None:
+    logical = _logical(
+        factor_dtype=torch.float32,
+        scale_dtype=torch.float32,
+        outlier_dtype=None,
+        bias=True,
+        patch=True,
+    )
+    backend = CudaPackedBackend()
+    prepared = backend.prepare(pack_logical_layer(logical), "cuda")
+    value = torch.linspace(-1, 1, 70, dtype=torch.float32).reshape(2, 35).cuda()
 
     actual = backend.linear(value, prepared)
 

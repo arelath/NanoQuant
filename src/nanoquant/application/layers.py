@@ -41,6 +41,8 @@ class TrainableFactorizedLinear(nn.Module):
     outlier_indices: torch.Tensor | None
     outlier_values: nn.Parameter | None
     outlier_scales: torch.Tensor | None
+    patch_left: nn.Parameter | None
+    patch_right: nn.Parameter | None
     immutable_binary_factors: bool
 
     def __init__(
@@ -54,6 +56,8 @@ class TrainableFactorizedLinear(nn.Module):
         outlier_indices: torch.Tensor | None = None,
         outlier_values: torch.Tensor | None = None,
         outlier_scales: torch.Tensor | None = None,
+        patch_left: torch.Tensor | None = None,
+        patch_right: torch.Tensor | None = None,
         *,
         immutable_binary_factors: bool = False,
     ) -> None:
@@ -76,6 +80,17 @@ class TrainableFactorizedLinear(nn.Module):
             outlier_scales = None
         self.outlier_values = None if outlier_values is None else nn.Parameter(outlier_values.detach().clone())
         self.register_buffer("outlier_scales", None if outlier_scales is None else outlier_scales.detach().clone())
+        if (patch_left is None) != (patch_right is None):
+            raise ValueError("low-rank patch tensors must be provided together")
+        if patch_left is not None and patch_right is not None:
+            if patch_left.ndim != 2 or patch_right.ndim != 2:
+                raise ValueError("low-rank patch tensors must be matrices")
+            if patch_left.shape[0] != left_latent.shape[0] or patch_right.shape[1] != right_latent.shape[1]:
+                raise ValueError("low-rank patch dimensions differ from the linear")
+            if patch_left.shape[1] != patch_right.shape[0]:
+                raise ValueError("low-rank patch ranks do not match")
+        self.patch_left = None if patch_left is None else nn.Parameter(patch_left.detach().clone())
+        self.patch_right = None if patch_right is None else nn.Parameter(patch_right.detach().clone())
         self.immutable_binary_factors = immutable_binary_factors
 
     def dense_weight(self) -> torch.Tensor:
@@ -89,6 +104,8 @@ class TrainableFactorizedLinear(nn.Module):
             self.outlier_indices,
             self.outlier_values,
             self.outlier_scales,
+            self.patch_left,
+            self.patch_right,
         )
 
     def forward(self, value: torch.Tensor) -> torch.Tensor:
@@ -114,6 +131,8 @@ class TrainableFactorizedLinear(nn.Module):
             self.outlier_indices,
             self.outlier_values,
             self.outlier_scales,
+            self.patch_left,
+            self.patch_right,
         )
 
 
@@ -159,6 +178,8 @@ class FrozenReferenceLinear(nn.Module):
     outlier_indices: torch.Tensor | None
     outlier_values: torch.Tensor | None
     outlier_scales: torch.Tensor | None
+    patch_left: torch.Tensor | None
+    patch_right: torch.Tensor | None
     _cached_dense_weight: torch.Tensor | None
 
     def __init__(
@@ -172,6 +193,8 @@ class FrozenReferenceLinear(nn.Module):
         outlier_indices: torch.Tensor | None = None,
         outlier_values: torch.Tensor | None = None,
         outlier_scales: torch.Tensor | None = None,
+        patch_left: torch.Tensor | None = None,
+        patch_right: torch.Tensor | None = None,
         *,
         cache_dense_weight: bool = True,
     ) -> None:
@@ -185,6 +208,10 @@ class FrozenReferenceLinear(nn.Module):
         self.register_buffer("outlier_indices", None if outlier_indices is None else outlier_indices.detach().clone())
         self.register_buffer("outlier_values", None if outlier_values is None else outlier_values.detach().clone())
         self.register_buffer("outlier_scales", None if outlier_scales is None else outlier_scales.detach().clone())
+        if (patch_left is None) != (patch_right is None):
+            raise ValueError("low-rank patch tensors must be provided together")
+        self.register_buffer("patch_left", None if patch_left is None else patch_left.detach().clone())
+        self.register_buffer("patch_right", None if patch_right is None else patch_right.detach().clone())
         if (outlier_indices is None) != (outlier_values is None):
             raise ValueError("outlier indices and values must be provided together")
         if outlier_scales is not None and outlier_values is None:
@@ -205,6 +232,8 @@ class FrozenReferenceLinear(nn.Module):
             self.outlier_indices,
             self.outlier_values,
             self.outlier_scales,
+            self.patch_left,
+            self.patch_right,
         )
 
     def dense_weight(self) -> torch.Tensor:
@@ -245,6 +274,8 @@ class FactorizedReferenceLinear(FrozenReferenceLinear):
         outlier_indices: torch.Tensor | None = None,
         outlier_values: torch.Tensor | None = None,
         outlier_scales: torch.Tensor | None = None,
+        patch_left: torch.Tensor | None = None,
+        patch_right: torch.Tensor | None = None,
     ) -> None:
         super().__init__(
             left_binary,
@@ -256,6 +287,8 @@ class FactorizedReferenceLinear(FrozenReferenceLinear):
             outlier_indices,
             outlier_values,
             outlier_scales,
+            patch_left,
+            patch_right,
             cache_dense_weight=False,
         )
 
@@ -271,6 +304,8 @@ class FactorizedReferenceLinear(FrozenReferenceLinear):
             self.outlier_indices,
             self.outlier_values,
             self.outlier_scales,
+            self.patch_left,
+            self.patch_right,
             scale_left_before_linear=True,
         )
 
@@ -297,6 +332,8 @@ class LayerFreezer:
         logical_format: str = "nanoquant-v1",
         outliers: FrozenOutlierState | None = None,
         backend: str = "dense",
+        bias_storage_dtype: torch.dtype | None = None,
+        patch_storage_dtype: torch.dtype | None = None,
     ) -> FrozenLayer:
         left = torch.where(trainable.left_latent.detach() >= 0, 1.0, -1.0)
         right = torch.where(trainable.right_latent.detach() >= 0, 1.0, -1.0)
@@ -308,7 +345,14 @@ class LayerFreezer:
             "scale_post": trainable.scale_post.detach(),
         }
         if trainable.bias is not None:
-            values["bias"] = trainable.bias.detach()
+            values["bias"] = trainable.bias.detach().to(bias_storage_dtype or trainable.bias.dtype)
+        if trainable.patch_left is not None and trainable.patch_right is not None:
+            values["patch_left"] = trainable.patch_left.detach().to(
+                patch_storage_dtype or trainable.patch_left.dtype
+            )
+            values["patch_right"] = trainable.patch_right.detach().to(
+                patch_storage_dtype or trainable.patch_right.dtype
+            )
         if trainable.outlier_indices is not None and trainable.outlier_values is not None:
             values["outlier_indices"] = trainable.outlier_indices.detach()
             values["outlier_values"] = trainable.outlier_values.detach()
@@ -331,6 +375,8 @@ class LayerFreezer:
             outliers,
             refs.get("bias"),
             logical_format,
+            refs.get("patch_left"),
+            refs.get("patch_right"),
         )
         return self.load(
             state,
@@ -367,6 +413,14 @@ class LayerFreezer:
             if state.bias is not None:
                 with tensors.read(state.bias, device) as value:
                     bias = value.clone()
+            patch_left = patch_right = None
+            if state.patch_left is not None and state.patch_right is not None:
+                with (
+                    tensors.read(state.patch_left, device) as left_value,
+                    tensors.read(state.patch_right, device) as right_value,
+                ):
+                    patch_left = left_value.clone()
+                    patch_right = right_value.clone()
             outlier_indices = None
             outlier_values = None
             outlier_scales = None
@@ -392,6 +446,8 @@ class LayerFreezer:
                         outlier_indices,
                         outlier_values,
                         outlier_scales,
+                        patch_left,
+                        patch_right,
                     ),
                     bias,
                 )
@@ -407,6 +463,8 @@ class LayerFreezer:
                     outlier_indices,
                     outlier_values,
                     outlier_scales,
+                    patch_left,
+                    patch_right,
                 )
         if dtype is not None:
             module = module.to(dtype=dtype)
@@ -423,6 +481,7 @@ class SharedInputGroupFreezer:
         tensors: TensorStore,
         logical_format: str = "nanoquant-v1",
         backend: str = "factorized",
+        bias_storage_dtype: torch.dtype | None = None,
     ) -> FrozenSharedInputGroup:
         members = (block,) if isinstance(block, LayerId) else block
         if len(members) != len(member_widths) or len(members) < 2:
@@ -441,7 +500,7 @@ class SharedInputGroupFreezer:
             "scale_post": trainable.scale_post.detach(),
         }
         if trainable.bias is not None:
-            values["bias"] = trainable.bias.detach()
+            values["bias"] = trainable.bias.detach().to(bias_storage_dtype or trainable.bias.dtype)
         if trainable.outlier_indices is not None and trainable.outlier_values is not None:
             values["outlier_indices"] = trainable.outlier_indices.detach()
             values["outlier_values"] = trainable.outlier_values.detach()

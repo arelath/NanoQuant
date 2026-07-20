@@ -188,6 +188,139 @@ def allocate_reconstruction_rank_budget(
     )
 
 
+def apply_reconstruction_rank_trust_region(
+    units: tuple[ReconstructionAllocationUnit, ...],
+    unconstrained: ReconstructionAllocationResult,
+    reference_ranks: tuple[tuple[str, int], ...],
+    target_bits: int,
+    *,
+    multiple: int,
+    floor_fraction: float,
+    ceiling_fraction: float,
+    sensitivity_strength: float,
+    protected_rank_floor_fraction: float,
+    target_protected_error_reduction_fraction: float,
+    step_fraction: float,
+) -> ReconstructionAllocationResult:
+    """Project an allocation step toward a validated reference rank inventory.
+
+    KL sensitivities are measured at a particular frozen operating point.  This
+    trust region prevents an approximate large-error response model from taking
+    the entire proposed step at once.  Aligned interpolation is followed by an
+    objective-aware trim so the projected plan never exceeds the exact bit
+    budget.
+    """
+
+    if not 0 <= step_fraction < 1:
+        raise ValueError("rank trust step fraction must be in [0, 1)")
+    by_id = {unit.unit_id: unit for unit in units}
+    unconstrained_by_id = {decision.unit_id: decision for decision in unconstrained.decisions}
+    references = dict(reference_ranks)
+    if (
+        len(references) != len(reference_ranks)
+        or set(references) != set(by_id)
+        or set(unconstrained_by_id) != set(by_id)
+    ):
+        raise ValueError("rank trust inventories must exactly cover allocation units")
+
+    baseline_weights = [
+        factor_bit_cost(unit.out_features, unit.in_features, unit.baseline_rank).total
+        for unit in units
+    ]
+    log_mean = sum(
+        bits * math.log(unit.sensitivity)
+        for unit, bits in zip(units, baseline_weights, strict=True)
+    ) / sum(baseline_weights)
+    sensitivity_weights = {
+        unit.unit_id: math.exp(
+            sensitivity_strength * (math.log(unit.sensitivity) - log_mean)
+        )
+        for unit in units
+    }
+    floors: dict[str, int] = {}
+    caps: dict[str, int] = {}
+    ranks: dict[str, int] = {}
+    for unit in units:
+        calibrated_floor = max(floor_fraction, unit.calibrated_rank_floor_fraction)
+        effective_floor = calibrated_floor
+        if unit.protected:
+            effective_floor = max(effective_floor, protected_rank_floor_fraction)
+        effective_ceiling = min(ceiling_fraction, unit.calibrated_rank_ceiling_fraction)
+        floor_rank = math.ceil(unit.baseline_rank * effective_floor / multiple) * multiple
+        cap_rank = math.floor(unit.baseline_rank * effective_ceiling / multiple) * multiple
+        cap_rank = min(
+            cap_rank,
+            math.floor(min(unit.in_features, unit.out_features) / multiple) * multiple,
+        )
+        reference = references[unit.unit_id]
+        reference_floor = math.ceil(unit.baseline_rank * calibrated_floor / multiple) * multiple
+        if reference % multiple or not reference_floor <= reference <= cap_rank:
+            raise ValueError(
+                f"rank trust reference is outside aligned bounds for {unit.unit_id}"
+            )
+        proposed = unconstrained_by_id[unit.unit_id].planned_rank
+        interpolated = reference + step_fraction * (proposed - reference)
+        rank = round(interpolated / multiple) * multiple
+        floors[unit.unit_id] = min(floor_rank, reference)
+        caps[unit.unit_id] = cap_rank
+        ranks[unit.unit_id] = min(cap_rank, max(floors[unit.unit_id], rank))
+
+    def cost(unit: ReconstructionAllocationUnit, rank: int) -> int:
+        return factor_bit_cost(unit.out_features, unit.in_features, rank).total + unit.fixed_bits
+
+    spent = sum(cost(unit, ranks[unit.unit_id]) for unit in units)
+    while spent > target_bits:
+        candidates: list[tuple[float, int, str, int]] = []
+        for index, unit in enumerate(units):
+            current = ranks[unit.unit_id]
+            proposed = current - multiple
+            if proposed < floors[unit.unit_id]:
+                continue
+            saved = cost(unit, current) - cost(unit, proposed)
+            objective_loss = sensitivity_weights[unit.unit_id] * (
+                predicted_squared_error(unit, proposed)
+                - predicted_squared_error(unit, current)
+            )
+            candidates.append((objective_loss / saved, index, unit.unit_id, saved))
+        if not candidates:
+            raise ValueError("rank trust projection cannot satisfy the exact bit budget")
+        _loss, _index, selected, saved = min(candidates)
+        ranks[selected] -= multiple
+        spent -= saved
+
+    decisions = tuple(
+        ReconstructionAllocationDecision(
+            unit.unit_id,
+            unit.baseline_rank,
+            ranks[unit.unit_id],
+            unit.baseline_squared_error,
+            predicted_squared_error(unit, ranks[unit.unit_id]),
+        )
+        for unit in units
+    )
+    protected = [unit for unit in units if unit.protected]
+    protected_baseline = sum(
+        sensitivity_weights[unit.unit_id] * unit.baseline_squared_error
+        for unit in protected
+    )
+    protected_planned = sum(
+        sensitivity_weights[unit.unit_id]
+        * predicted_squared_error(unit, ranks[unit.unit_id])
+        for unit in protected
+    )
+    if protected and protected_planned > protected_baseline * (
+        1 - target_protected_error_reduction_fraction
+    ):
+        raise ValueError("rank trust projection misses protected reconstruction improvement")
+    return ReconstructionAllocationResult(
+        decisions,
+        spent,
+        target_bits - spent,
+        protected_baseline,
+        protected_planned,
+    )
+
+
 def factor_bit_cost(
     out_features: int, in_features: int, rank: int, *, scale_bits: int = 16, rank_alignment: int = 1
 ) -> BitCost:
@@ -208,6 +341,20 @@ def outlier_bit_cost(out_features: int, count: int, *, value_bits: int, index_bi
         raise ValueError("cost inputs must not be negative")
     index_width = index_bits if index_bits is not None else max(1, math.ceil(math.log2(max(2, out_features))))
     return BitCost(outlier_value_bits=out_features * count * value_bits, outlier_index_bits=count * index_width)
+
+
+def bias_bit_cost(out_features: int, *, value_bits: int = 16) -> BitCost:
+    if out_features < 0 or value_bits < 0:
+        raise ValueError("bias cost inputs must not be negative")
+    return BitCost(bias_bits=out_features * value_bits)
+
+
+def patch_bit_cost(out_features: int, in_features: int, rank: int, *, value_bits: int = 16) -> BitCost:
+    if min(out_features, in_features, rank, value_bits) < 0:
+        raise ValueError("patch cost inputs must not be negative")
+    if rank > min(out_features, in_features):
+        raise ValueError("patch rank exceeds matrix dimensions")
+    return BitCost(patch_bits=value_bits * rank * (out_features + in_features))
 
 
 def uniform_rank(

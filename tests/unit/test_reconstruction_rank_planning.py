@@ -18,8 +18,11 @@ from nanoquant.config.validation import validate
 from nanoquant.domain.models import BlockId, LayerId
 from nanoquant.domain.planning import (
     RankResponseSegment,
+    ReconstructionAllocationDecision,
+    ReconstructionAllocationResult,
     ReconstructionAllocationUnit,
     allocate_reconstruction_rank_budget,
+    apply_reconstruction_rank_trust_region,
     integrated_rank_response,
     predicted_squared_error,
 )
@@ -73,6 +76,63 @@ def test_allocator_protects_sensitive_units_and_never_exceeds_exact_budget() -> 
     assert result.spent_bits <= 14_000
     assert result.remaining_bits == 14_000 - result.spent_bits
     assert result.protected_planned_objective <= result.protected_baseline_objective
+
+
+def test_rank_trust_region_projects_and_trims_to_exact_budget() -> None:
+    segments = (RankResponseSegment(1.5, 0.01),)
+    units = (
+        ReconstructionAllocationUnit("0:a", 64, 64, 32, 100.0, 4.0, False, 0.5, 1.5, segments),
+        ReconstructionAllocationUnit("0:b", 64, 64, 32, 100.0, 1.0, False, 0.5, 1.5, segments),
+    )
+    unconstrained = ReconstructionAllocationResult(
+        (
+            ReconstructionAllocationDecision("0:a", 32, 48, 100.0, predicted_squared_error(units[0], 48)),
+            ReconstructionAllocationDecision("0:b", 32, 16, 100.0, predicted_squared_error(units[1], 16)),
+        ),
+        0,
+        0,
+        0,
+        0,
+    )
+
+    projected = apply_reconstruction_rank_trust_region(
+        units,
+        unconstrained,
+        (("0:a", 32), ("0:b", 32)),
+        13_000,
+        multiple=8,
+        floor_fraction=0.5,
+        ceiling_fraction=1.5,
+        sensitivity_strength=0.5,
+        protected_rank_floor_fraction=1.0,
+        target_protected_error_reduction_fraction=0,
+        step_fraction=0.5,
+    )
+    ranks = {decision.unit_id: decision.planned_rank for decision in projected.decisions}
+
+    assert projected.spent_bits <= 13_000
+    assert projected.remaining_bits == 13_000 - projected.spent_bits
+    assert ranks["0:a"] <= 40
+    assert ranks["0:b"] <= 32
+    assert ranks != {"0:a": 48, "0:b": 16}
+
+    fixed = apply_reconstruction_rank_trust_region(
+        units,
+        unconstrained,
+        (("0:a", 32), ("0:b", 32)),
+        13_312,
+        multiple=8,
+        floor_fraction=0.5,
+        ceiling_fraction=1.5,
+        sensitivity_strength=0.5,
+        protected_rank_floor_fraction=1.0,
+        target_protected_error_reduction_fraction=0,
+        step_fraction=0,
+    )
+    assert {decision.unit_id: decision.planned_rank for decision in fixed.decisions} == {
+        "0:a": 32,
+        "0:b": 32,
+    }
 
 
 def test_architecture_importance_protects_selected_layers_and_first_last_blocks() -> None:
@@ -137,3 +197,25 @@ def test_reconstruction_config_round_trips_and_requires_explicit_evidence() -> N
         valid, allocation=replace(valid.allocation, reconstruction=replace(reconstruction, enabled=False))
     )
     assert "CFG049" in {issue.code for issue in validate(invalid)}
+
+
+def test_rank_trust_region_requires_kl_strategy_and_reference() -> None:
+    base = RunConfig(ModelConfig("fixture"))
+    reconstruction = replace(
+        base.allocation.reconstruction,
+        rank_trust_fraction=0.25,
+    )
+    missing_reference = replace(
+        base,
+        allocation=replace(base.allocation, reconstruction=reconstruction),
+    )
+    non_kl_reference = replace(
+        missing_reference,
+        allocation=replace(
+            missing_reference.allocation,
+            reconstruction=replace(reconstruction, rank_trust_reference_run="evidence/016"),
+        ),
+    )
+
+    assert "CFG090" in {issue.code for issue in validate(missing_reference)}
+    assert "CFG091" in {issue.code for issue in validate(non_kl_reference)}

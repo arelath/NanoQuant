@@ -40,6 +40,9 @@ class QuantizedLinearSpec:
     has_outlier_scales: bool = False
     has_bias: bool = False
     members: tuple[ProjectionMemberSpec, ...] = ()
+    patch_rank: int = 0
+    patch_value_dtype: str | None = None
+    bias_dtype: str | None = None
 
     def __post_init__(self) -> None:
         if not self.name or self.name.startswith("/") or ".." in self.name.split("."):
@@ -52,6 +55,12 @@ class QuantizedLinearSpec:
             raise ValueError("runtime outlier dtype must be present exactly when outliers are present")
         if self.has_outlier_scales and self.outlier_count == 0:
             raise ValueError("runtime outlier scales require outlier values")
+        if self.patch_rank < 0 or self.patch_rank > min(self.in_features, self.out_features):
+            raise ValueError("runtime patch rank is outside the linear dimensions")
+        if (self.patch_rank == 0) != (self.patch_value_dtype is None):
+            raise ValueError("runtime patch dtype must be present exactly when a patch is present")
+        if not self.has_bias and self.bias_dtype is not None:
+            raise ValueError("runtime bias dtype requires a bias")
         if self.members:
             if len(self.members) < 2 or len({member.name for member in self.members}) != len(self.members):
                 raise ValueError("runtime projection group members must be unique")
@@ -99,6 +108,7 @@ class BackendCapabilities:
     rank_alignment: int = 1
     maximum_batch_size: int | None = None
     maximum_token_count: int | None = None
+    patch_value_dtypes: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.logical_formats or not self.device_types or not self.input_dtypes:
@@ -200,6 +210,11 @@ def evaluate_capabilities(
             "bias is not supported",
         ),
         (
+            op.bias_dtype is None or op.bias_dtype in capabilities.scale_dtypes,
+            "NQ-INF-BIAS-DTYPE",
+            f"bias dtype {op.bias_dtype!r} is not supported",
+        ),
+        (
             op.outlier_count == 0 or capabilities.supports_outliers,
             "NQ-INF-OUTLIERS",
             "salient outliers are not supported",
@@ -208,6 +223,11 @@ def evaluate_capabilities(
             op.outlier_value_dtype is None or op.outlier_value_dtype in capabilities.outlier_value_dtypes,
             "NQ-INF-OUTLIER-DTYPE",
             f"outlier dtype {op.outlier_value_dtype!r} is not supported",
+        ),
+        (
+            op.patch_value_dtype is None or op.patch_value_dtype in capabilities.patch_value_dtypes,
+            "NQ-INF-PATCH",
+            f"low-rank patch dtype {op.patch_value_dtype!r} is not supported",
         ),
         (
             not workload.deterministic or capabilities.supports_deterministic,

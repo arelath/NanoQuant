@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from fnmatch import fnmatchcase
 
 from nanoquant.config.codec import to_dict
-from nanoquant.config.schema import OutlierConfig, RankAllocationConfig
+from nanoquant.config.schema import BiasCorrectionConfig, LowRankPatchConfig, OutlierConfig, RankAllocationConfig
 from nanoquant.domain.models import (
     ArtifactRef,
     ArtifactTypes,
@@ -27,7 +27,7 @@ from nanoquant.domain.models import (
     SharedInputGroupCandidate,
     SharedInputGroupPlan,
 )
-from nanoquant.domain.planning import factor_bit_cost, outlier_bit_cost
+from nanoquant.domain.planning import bias_bit_cost, factor_bit_cost, outlier_bit_cost, patch_bit_cost
 from nanoquant.ports.artifact_store import ArtifactStore
 
 
@@ -43,6 +43,8 @@ class PlanningRequest:
     shared_input_groups: tuple[SharedInputGroupCandidate, ...] = ()
     reconstruction_profile: ArtifactRef | None = None
     reconstruction_decisions: tuple[ReconstructionRankDecision, ...] = ()
+    bias_correction: BiasCorrectionConfig = BiasCorrectionConfig()
+    low_rank_patch: LowRankPatchConfig = LowRankPatchConfig()
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,8 +60,38 @@ def _add_costs(costs: list[BitCost]) -> BitCost:
     return result
 
 
+def _storage_bits(dtype: str) -> int:
+    return {"bfloat16": 16, "float16": 16, "int8": 8}[dtype]
+
+
+def _side_cost(request: PlanningRequest, name: str, out_features: int, in_features: int) -> BitCost:
+    cost = BitCost()
+    if request.bias_correction.enabled:
+        cost += bias_bit_cost(
+            out_features,
+            value_bits=_storage_bits(request.bias_correction.storage_dtype.value),
+        )
+    if request.low_rank_patch.enabled and any(
+        fnmatchcase(name, pattern) for pattern in request.low_rank_patch.layer_patterns
+    ):
+        cost += patch_bit_cost(
+            out_features,
+            in_features,
+            request.low_rank_patch.rank,
+            value_bits=_storage_bits(request.low_rank_patch.storage_dtype.value),
+        )
+    return cost
+
+
+def _charged_side_bits(request: PlanningRequest, cost: BitCost) -> int:
+    return (
+        (cost.bias_bits if request.bias_correction.charge_to_bit_budget else 0)
+        + (cost.patch_bits if request.low_rank_patch.charge_to_bit_budget else 0)
+    )
+
+
 def build_quantization_plan(request: PlanningRequest) -> QuantizationPlan:
-    if request.shared_input_groups or request.allocation.strategy.value == "reconstruction_aware":
+    if request.shared_input_groups or request.allocation.strategy.value in {"reconstruction_aware", "kl_calibrated"}:
         return _build_grouped_quantization_plan(request)
     layers = [layer for block in request.inventory.blocks for layer in block.quantizable_layers]
     if not layers:
@@ -74,6 +106,7 @@ def build_quantization_plan(request: PlanningRequest) -> QuantizationPlan:
     utility_profile = dict(request.utility_profile)
     outlier_plans: dict[object, OutlierPlan] = {}
     outlier_costs: dict[object, BitCost] = {}
+    side_costs: dict[object, BitCost] = {}
     for layer in layers:
         count = 0
         if request.outliers.selector.value != "none" and request.outliers.fraction > 0:
@@ -91,10 +124,18 @@ def build_quantization_plan(request: PlanningRequest) -> QuantizationPlan:
         cost = outlier_bit_cost(layer.out_features, count, value_bits=bits) if count else BitCost()
         outlier_plans[layer.layer] = plan
         outlier_costs[layer.layer] = cost
+        side_costs[layer.layer] = _side_cost(
+            request,
+            layer.layer.path,
+            layer.out_features,
+            layer.in_features,
+        )
     base_ranks: dict[object, int] = {}
     for layer in layers:
         layer_target_bits = math.floor(layer.in_features * layer.out_features * request.allocation.target_bpw)
-        charged = outlier_costs[layer.layer].total if outlier_plans[layer.layer].charge_to_budget else 0
+        charged = (
+            outlier_costs[layer.layer].total if outlier_plans[layer.layer].charge_to_budget else 0
+        ) + _charged_side_bits(request, side_costs[layer.layer])
         base_rank = 0
         for candidate in range(multiple, min(layer.in_features, layer.out_features) + 1, multiple):
             if factor_bit_cost(layer.out_features, layer.in_features, candidate).total + charged > layer_target_bits:
@@ -128,7 +169,10 @@ def build_quantization_plan(request: PlanningRequest) -> QuantizationPlan:
         stats = calibration_map.get(layer.layer)
         sensitivity = 1.0 if stats is None else max(1e-12, stats.input_summary.mean * stats.output_summary.mean)
         profile_key = f"{layer.layer.block.index}:{layer.layer.path}"
-        if request.allocation.strategy.value == "utility_profile" and profile_key not in utility_profile:
+        if (
+            request.allocation.strategy.value in {"utility_profile", "kl_calibrated"}
+            and profile_key not in utility_profile
+        ):
             raise ValueError(f"utility profile is missing layer {profile_key}")
         utility = utility_profile.get(profile_key, sensitivity)
         if request.allocation.strategy.value != "uniform" and request.allocation.bounds.edge_block_boost > 0:
@@ -140,13 +184,17 @@ def build_quantization_plan(request: PlanningRequest) -> QuantizationPlan:
 
     def current_cost(layer: object, rank: int) -> BitCost:
         inventory = next(item for item in layers if item.layer == layer)
-        return factor_bit_cost(inventory.out_features, inventory.in_features, rank) + outlier_costs[layer]
+        return (
+            factor_bit_cost(inventory.out_features, inventory.in_features, rank)
+            + outlier_costs[layer]
+            + side_costs[layer]
+        )
 
     def budget_cost(layer: object, rank: int) -> int:
         inventory = next(item for item in layers if item.layer == layer)
         factor = factor_bit_cost(inventory.out_features, inventory.in_features, rank).total
         outliers = outlier_costs[layer].total if outlier_plans[layer].charge_to_budget else 0
-        return factor + outliers
+        return factor + outliers + _charged_side_bits(request, side_costs[layer])
 
     spent = sum(budget_cost(layer.layer, ranks[layer.layer]) for layer in layers)
     if spent > target_bits:
@@ -325,6 +373,7 @@ class _PlanningUnit:
     block_index: int
     name: str
     members: tuple[LayerInventory, ...]
+    objective_multipliers: tuple[float, ...] = ()
 
     @property
     def key(self) -> str:
@@ -381,7 +430,7 @@ def _build_grouped_quantization_plan(request: PlanningRequest) -> QuantizationPl
             raise ValueError(f"shared-input groups with bias are not yet supported: {candidate.name}")
         grouped_members.update(candidate.members)
         group_by_block.setdefault(candidate.block.index, []).append(
-            _PlanningUnit(candidate.block.index, candidate.name, members)
+            _PlanningUnit(candidate.block.index, candidate.name, members, candidate.objective_multipliers)
         )
 
     units: list[_PlanningUnit] = []
@@ -410,6 +459,7 @@ def _build_grouped_quantization_plan(request: PlanningRequest) -> QuantizationPl
     utility_profile = dict(request.utility_profile)
     outlier_plans: dict[str, OutlierPlan] = {}
     outlier_costs: dict[str, BitCost] = {}
+    side_costs: dict[str, BitCost] = {}
     base_ranks: dict[str, int] = {}
     for unit in units:
         count = 0
@@ -428,11 +478,14 @@ def _build_grouped_quantization_plan(request: PlanningRequest) -> QuantizationPl
         outlier_cost = outlier_bit_cost(unit.out_features, count, value_bits=value_bits) if count else BitCost()
         outlier_plans[unit.key] = outlier_plan
         outlier_costs[unit.key] = outlier_cost
+        side_costs[unit.key] = _side_cost(request, unit.name, unit.out_features, unit.in_features)
         funded_bits = sum(
             math.floor(member.in_features * member.out_features * request.allocation.target_bpw)
             for member in unit.members
         )
-        charged = outlier_cost.total if outlier_plan.charge_to_budget else 0
+        charged = (outlier_cost.total if outlier_plan.charge_to_budget else 0) + _charged_side_bits(
+            request, side_costs[unit.key]
+        )
         base_rank = 0
         for candidate_rank in range(multiple, unit.maximum_rank + 1, multiple):
             if factor_bit_cost(unit.out_features, unit.in_features, candidate_rank).total + charged > funded_bits:
@@ -472,7 +525,10 @@ def _build_grouped_quantization_plan(request: PlanningRequest) -> QuantizationPl
             weighted_sensitivity += sensitivity * elements
             weight += elements
         profile_key = unit.key
-        if request.allocation.strategy.value == "utility_profile" and profile_key not in utility_profile:
+        if (
+            request.allocation.strategy.value in {"utility_profile", "kl_calibrated"}
+            and profile_key not in utility_profile
+        ):
             raise ValueError(f"utility profile is missing unit {profile_key}")
         member_profile = [
             (utility_profile.get(f"{unit.block_index}:{member.layer.path}"), member.in_features * member.out_features)
@@ -498,12 +554,12 @@ def _build_grouped_quantization_plan(request: PlanningRequest) -> QuantizationPl
     def budget_cost(unit: _PlanningUnit, rank: int) -> int:
         factor = factor_bit_cost(unit.out_features, unit.in_features, rank).total
         outliers = outlier_costs[unit.key].total if outlier_plans[unit.key].charge_to_budget else 0
-        return factor + outliers
+        return factor + outliers + _charged_side_bits(request, side_costs[unit.key])
 
     spent = sum(budget_cost(unit, ranks[unit.key]) for unit in units)
     if spent > target_bits:
         raise ValueError(f"minimum rank/outlier plan costs {spent} bits, exceeding target {target_bits}")
-    if request.allocation.strategy.value == "reconstruction_aware":
+    if request.allocation.strategy.value in {"reconstruction_aware", "kl_calibrated"}:
         if request.reconstruction_profile is None:
             raise ValueError("reconstruction-aware planning requires a persisted profile")
         decision_map = {decision.unit_id: decision for decision in request.reconstruction_decisions}
@@ -584,7 +640,11 @@ def _build_grouped_quantization_plan(request: PlanningRequest) -> QuantizationPl
         ordinary_plans: list[LayerPlan] = []
         group_plans: list[SharedInputGroupPlan] = []
         for unit in units_by_block[inventory_block.block.index]:
-            cost = factor_bit_cost(unit.out_features, unit.in_features, ranks[unit.key]) + outlier_costs[unit.key]
+            cost = (
+                factor_bit_cost(unit.out_features, unit.in_features, ranks[unit.key])
+                + outlier_costs[unit.key]
+                + side_costs[unit.key]
+            )
             all_costs.append(cost)
             retry = RetryPolicy(
                 request.allocation.retry.maximum_attempts if request.allocation.retry.enabled else 1,
@@ -608,6 +668,7 @@ def _build_grouped_quantization_plan(request: PlanningRequest) -> QuantizationPl
                         outlier_plans[unit.key],
                         retry,
                         cost,
+                        unit.objective_multipliers,
                     )
                 )
             else:
