@@ -1,6 +1,6 @@
 # Adaptive Memory Planning and Execution
 
-Status: resident adaptive core implemented; measured promotion remains gated
+Status: resident adaptive planning and measured batch autotuning implemented; canonical promotion remains gated
 
 Date: 2026-07-19
 
@@ -34,8 +34,18 @@ The first production slice is implemented for the resident compression workflow:
   weight loading;
 - the resolved plan selects resident versus CPU-offload execution, activation caching, and separate physical batch
   sizes for calibration, block forward, tuning, and post-block refit;
+- adaptive batch search checks every integer up to semantic sample/logical-batch bounds, rather than inheriting
+  host-specific fixed batches or losing nearly half the usable capacity to power-of-two-only candidates;
+- the admitted value is a safe upper bound, not an assumption that the largest fitting batch is fastest; before
+  semantic execution, representative block-forward and tuning forward/backward probes measure a bounded geometric
+  candidate set, retain the configured baseline unless another choice is at least 5% faster, and persist the winner
+  as a new memory-plan revision;
+- throughput probes do not take an optimizer step or mutate weights, and ordinary resume reuses the persisted
+  measured choices rather than timing again;
 - minimum viable configurations are admitted before work starts, and user ceilings and reserves are enforced;
 - the plan is stored as a content-addressed artifact with an active pointer and finite, journaled OOM revisions;
+- live disk availability is resampled before every activation-generation commit, and the next largest write plus
+  the configured disk reserve must fit before serialization begins;
 - a CUDA OOM reduces only the affected scalable stage when it can be identified, then evicts optional activation
   cache before failing; logical optimizer batches and every compression semantic remain unchanged;
 - resident events record plan admission, resize decisions, observations, revision, utilization, and per-block planned
@@ -43,28 +53,40 @@ The first production slice is implemented for the resident compression workflow:
 - unit and workflow tests cover plan selection, admission failure, persistence, config resolution, stable semantic
   identity across revisions, and OOM resume behavior.
 
+`tools/benchmark_adaptive_memory.py` exercises the exact requested 270M, Gemma 1B, Llama 1B, and Gemma 4B local
+snapshots under the device lease. `tools/run_adaptive_memory_canary.py` additionally completed exact-source 270M
+and 1B base-recipe runs, including measured-plan resume and recovery from changing disk pressure. The current
+designated-host evidence and its limitations are recorded in `Docs/35-adaptive-memory-real-model-validation.md`.
+
 The following performance promotions remain deliberately gated by the rollout and acceptance criteria below:
 learned cross-run estimator profiles, within-run upward growth, source-prefetch resizing, adaptive model-level
 distillation/evaluation batches, streaming-mode transitions, and enabling adaptive mode in the canonical Gemma
 recipe. They require protocol-matched 1B/4B canaries rather than being enabled from synthetic fixtures alone.
 
+The balanced static profile is calibrated against retained real 270M, Gemma 1B, Llama 1B, and Gemma 4B execution
+events. It uses a 25% uncertainty term with a 1.25 GiB minimum because the observed allocator and loss-snapshot
+transients exceeded the shape-only model by 0.4-1.3 GiB. Resident stage models include the complete resident model
+and, when inline full-model evaluation retains completed blocks, the BF16 runtime factor representation. On the
+12 GiB reference host this correctly rejects resident Gemma 4B—the retained run reached zero CUDA free memory—and
+selects CPU offload instead.
+
 ## 2. Current implementation and gaps
 
-The repository already contains many of the necessary pieces, but they are not connected into the production
-resident workflow.
+The resident workflow now composes the core pieces. The remaining limitations are broader stage coverage and
+complete-run promotion evidence:
 
 | Existing capability | Current location | Current limitation |
 | --- | --- | --- |
-| Host/GPU/disk inventory | `infrastructure/resource_planning.py::inspect_host` | Used by tests, not the resident composition root |
-| Pure resource plan and activation-tier selection | `domain/resources.py`, `infrastructure/resource_planning.py` | Consumes caller-supplied aggregate estimates; no production model inventory builds them |
-| Resource ceilings | `config/schema.py::ResourceLimitsConfig` | The resident workflow rejects every non-default value as "not yet enforced" |
-| `auto` executor and activation resolution | `config/resolution.py` | Chooses resident whenever CUDA exists and CUDA activations for resident; it does not consider model size or free memory |
-| Stage resource estimates | typed stage `estimate()` methods | Estimates are sparse, often CPU-only, and are not calibrated against observed peaks |
-| GPU activation cache admission | `_cache_activation_tensor` in `resident_quantization.py` | Uses current free VRAM and a reserve, but considers only the cache tensor, not the next stage's complete peak |
-| Bounded pageable-to-CUDA staging | `application/device_batches.py`, `application/tuning.py` | Buffer sizes come from configured batches rather than a resource plan |
-| CUDA/host/WDDM meters and peak windows | `infrastructure/device_memory.py` | Excellent diagnostics, but measurements do not feed future sizing decisions |
-| OOM forensics | `capture_oom_forensics` and the resource event sink | Captures the failure but does not resize the resident stage |
-| Finite generic fallback helpers | `application/runtime_fallback.py`, `application/calibration_fallback.py` | Not composed into resident execution; runtime action names also differ from the schema defaults |
+| Host/GPU/disk inventory | `infrastructure/resource_planning.py` | Snapshot-based; learned time-series pressure prediction is not implemented |
+| Pure resource plan and activation-tier selection | `domain/resources.py`, `infrastructure/resource_planning.py` | Resident and CPU-offload are implemented; a distinct streaming executor is not |
+| Resource ceilings | `config/schema.py::ResourceLimitsConfig` | Enforced for resident preflight; non-resident workflows do not all consume them yet |
+| `auto` executor and activation resolution | `resident_workflow.py`, `infrastructure/resource_planning.py` | Inline quality and model KD still prevent CPU offload because teacher streaming is absent |
+| Stage resource estimates | `infrastructure/resource_planning.py` | Calibrated for the resident core; distillation/evaluation and cross-run learned residuals remain |
+| GPU activation cache admission | `_cache_activation_tensor` in `resident_quantization.py` | Complete planned peak is considered; later upward cache promotion is not implemented |
+| Bounded pageable-to-CUDA staging | `application/device_batches.py`, `application/tuning.py` | Planned sizes are used; adaptive prefetch depth is admitted but not throughput-autotuned |
+| CUDA/host/WDDM meters and peak windows | `infrastructure/device_memory.py` | Events are recorded; cross-run estimator-profile learning remains |
+| OOM forensics | resource event sink and memory-plan revision journal | Finite batch/cache revision exists; live resident-to-streaming transition does not |
+| Finite generic fallback helpers | resident workflow | Resident retries are composed; other workflows still have separate fallback surfaces |
 | Rolling activation retention | resident block-result v2 and `Docs/14` | Bounds durable disk, but is not incorporated into a complete GPU/host/disk admission plan |
 
 The production recipe therefore hard-codes values such as block-forward batch 4, tuning microbatch 1, and disabled
@@ -121,10 +143,10 @@ what mathematical work is performed. The distinction must be explicit:
 | No-gradient forward/evaluation batch or token chunk size | Sample count, token selection, rank, outliers, or BPW |
 | Prefetch depth, double buffering, cache eviction, completed-block offload | Dtype or numerical kernel with different approved tolerances |
 
-Some settings currently participate in `_resident_config_hash`, including tuning microbatch and block-forward batch.
-The first implementation should preserve that conservative identity rule: `auto` resolves to concrete values before
-the resident semantic identity is finalized. A later parity study may prove selected batching choices
-execution-only, but the memory project should not assume that result.
+In adaptive mode `_resident_config_hash` records adaptive physical batching rather than a host-specific concrete
+batch. The measured choices are nevertheless persisted before commit identity and tuning checkpoint discovery, and
+ordinary resume reuses the active plan. Fixed mode retains concrete batch identity. Causal Fisher calibration batch
+remains concrete in both modes because each batch contributes one accumulator update and is therefore semantic.
 
 ### 5.2 Optimize under a hard envelope, not up to reported free bytes
 
@@ -250,7 +272,7 @@ Persist an immutable `ResolvedMemoryPlan` artifact before model allocation. It c
 - user ceilings/reserves and policy profile;
 - executor and model/block residency policy;
 - activation tier and GPU cache policy;
-- per-stage physical batch/microbatch, token/vocabulary chunk, and prefetch depth;
+- per-stage selected physical batch/microbatch, admitted safe maximum, token/vocabulary chunk, and prefetch depth;
 - predicted GPU allocated/reserved, host, pinned-host, and disk peaks;
 - estimator confidence and safety allowance;
 - semantic versus execution-only classification for every resolved choice; and
@@ -319,26 +341,27 @@ and the periodic sampler remains read-only.
 
 ### 8.1 Deterministic bounded search
 
-For a monotone scalable setting, choose the largest candidate whose predicted peak is within the target. Use a
-bounded geometric candidate set rather than probing every integer:
+For a monotone scalable setting, first check every integer to find the largest predicted-safe upper bound. This is
+metadata-only arithmetic and avoids losing almost half the capacity between powers of two. Do not assume that upper
+bound is fastest. Measure a bounded geometric set plus the configured baseline:
 
 ```text
-candidates = configured maximum, then descending powers/factors to 1
-selected   = largest candidate with predicted_peak(candidate) <= target
+safe_max   = largest integer with predicted_peak(batch) <= target
+candidates = safe_max, repeated halves to 1, plus configured baseline
+selected   = fastest measured candidate if >=5% faster, otherwise baseline
 ```
 
-When no measured model exists and a cheap, side-effect-free probe is available, use exponential growth followed by
-binary search. Probes must use representative tensor shapes, execute under `PeakWindow`, and release all temporary
-state before the real stage. Do not probe a mutating optimizer step or a factorization attempt whose RNG/result would
-become part of the algorithm. For those stages, use static accounting plus observations from the first real minimal
-unit.
+Block-forward probes process a representative 64-sample full-sequence workload. Tuning probes run forward/backward
+over one logical tuning batch five times per candidate and compare median wall time; they do not create an optimizer
+or step weights. Probes release gradients, outputs, streamed blocks, and CUDA cache before the real stage. Do not
+probe a mutating optimizer step or a factorization attempt whose RNG/result would become part of the algorithm.
 
 ### 8.2 Hysteresis
 
 Avoid oscillation and needless reallocation:
 
 - shrink immediately when a predicted or observed hard threshold is crossed;
-- grow only at a block/stage boundary after at least two matching observations show sufficient headroom;
+- grow only before semantic execution or at a durable block/stage boundary;
 - require the next candidate to improve estimated throughput materially (for example, at least 5%);
 - never grow above the persisted configured maximum; and
 - do not grow during a resumed unit unless the user requested replanning.
@@ -458,13 +481,16 @@ runtime:
 Profiles supply reviewed defaults for target utilization, estimator confidence, growth hysteresis, and cache-release
 thresholds. Avoid exposing every controller constant as a recipe field.
 
-In adaptive mode, existing physical execution settings are maxima:
+In adaptive mode, host-specific physical batch settings no longer cap growth:
 
-- `runtime.block_forward_batch_size` is the no-gradient forward maximum;
-- `runtime.activations.batch_size` and `prefetch_batches` are staging maxima;
-- `block_tuning.microbatch_size` is the tuning physical maximum, with `None` meaning the logical batch maximum; and
-- calibration, distillation, and evaluation batch/chunk fields are maxima where their partition invariance is
-  already guaranteed.
+- block-forward admission searches up to the available calibration sample count;
+- tuning and refit admission search up to their unchanged logical optimizer batches;
+- pinned-host admission can reduce the physical batch without disabling the bounded two-slot staging path; and
+- causal online/two-phase Fisher calibration remains at its configured batch because one-sequence updates are part
+  of the pinned numerical algorithm. Forward-only calibration may share the adaptive block-forward subdivision.
+
+Resource ceilings and the policy profile remain the operator controls for constraining adaptive execution.
+Distillation and evaluation batches remain fixed until their partition invariance and retry boundaries are proven.
 
 The logical tuning `loop.batch_size` is never resized. Fixed mode preserves current behavior exactly. Adaptive mode
 should remain opt-in until tiny, 1B, and 4B parity/performance gates pass, then become the resolved default for
@@ -520,6 +546,7 @@ Add bounded structured events:
 - `memory.stage_admitted`
 - `memory.stage_resized`
 - `memory.observation_recorded`
+- `memory.throughput_autotuned`
 - `memory.pressure_detected`
 - `memory.plan_revised`
 - `memory.oom_recovery_started`
@@ -537,6 +564,8 @@ without measured estimator accuracy.
 
 ### Phase 1: make limits and plans real
 
+Implemented for the resident workflow.
+
 1. Introduce the new pure contracts and envelope math with table-driven unit tests.
 2. Build metadata-derived fixed memory estimates for the current resident Gemma path.
 3. Wire `runtime.resources` into resident preflight and persist a plan artifact.
@@ -545,6 +574,9 @@ without measured estimator accuracy.
 This phase is low-risk and immediately prevents starting known-impossible runs.
 
 ### Phase 2: adaptive forward and staging sizes
+
+Block-forward safe sizing and measured batch selection are implemented. Evaluation/distillation sizing and
+throughput-based prefetch selection remain.
 
 1. Treat block-forward, activation staging, quality, and evaluation batches/chunks as bounded adaptive controls.
 2. Use the existing peak windows to compare predictions with observations.
@@ -555,12 +587,18 @@ These are no-gradient or already streamed paths and provide the safest initial p
 
 ### Phase 3: adaptive tuning microbatch
 
+Safe upper-bound admission, non-mutating forward/backward measurement, 5% hysteresis, and pre-identity plan
+persistence are implemented. Complete-run numerical parity across selected microbatches remains a promotion gate.
+
 1. Preserve logical optimizer batch and schedule while resolving the largest safe physical microbatch.
 2. Persist the resolved value before the first tuning step and bind checkpoints to it.
 3. Prove uninterrupted/resumed equality for each supported microbatch and quantify cross-microbatch numerical spread.
 4. Add post-block-refit-specific estimation because it owns the current resident high-water.
 
 ### Phase 4: placement transitions and OOM recovery
+
+Preflight resident-to-CPU-offload choice and finite OOM batch/cache revisions are implemented. Mid-run streaming and
+activation mmap transitions remain.
 
 1. Integrate activation cache eviction, completed-block offload, pageable/mmap tiering, and cache release.
 2. Add restartable resident-to-CPU-offload/streaming transitions where stage implementations support them.
@@ -635,9 +673,9 @@ and an artificial lower ceiling). For each, compare adaptive with the best known
   it is not accepted merely because it avoids OOM.
 - The full pinned parity gates remain satisfied. Tiny fixtures or reduced-iteration probes alone are insufficient.
 
-## 17. Recommended first deliverable
+## 17. Recommended next deliverable
 
-Implement Phase 1 plus read-only sizing for post-block refit first. It connects currently dead resource limits to the
-production workflow, exposes the largest known memory peak, and produces planned-versus-actual evidence without yet
-changing numerical execution. With that baseline in place, adaptive no-gradient batches and tuning microbatch can be
-introduced as separately measurable changes rather than another set of opaque heuristics.
+Run complete adaptive Gemma 1B and 4B compression canaries on a workspace with sufficient durable disk, validate the
+committed artifacts, and compare quality, BPW, wall time, stage throughput, peak GPU/host memory, and resume behavior
+against the best fixed plans. Then retain hardware/version-keyed estimator residuals and throughput observations so
+future runs can skip or shorten local probes without weakening admission safety.

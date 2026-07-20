@@ -36,6 +36,7 @@ from nanoquant.domain.resources import (
     StageMemoryModel,
     gpu_capacity_bytes,
     revise_memory_plan_after_oom,
+    revise_memory_plan_for_throughput,
     select_stage_execution_plan,
 )
 from nanoquant.domain.stages import HostInventory
@@ -199,10 +200,14 @@ def _text_dimension(config: dict[str, object], name: str, default: int) -> int:
 
 def _policy_parameters(profile: MemoryPolicyProfile) -> tuple[float, int, float]:
     if profile is MemoryPolicyProfile.CONSERVATIVE:
-        return 0.20, 256 * 2**20, 0.50
+        return 0.35, 2 * 2**30, 0.50
     if profile is MemoryPolicyProfile.THROUGHPUT:
-        return 0.05, 32 * 2**20, 1.00
-    return 0.10, 64 * 2**20, 0.75
+        return 0.15, 768 * 2**20, 1.00
+    # Retained 270M, Gemma 1B, Llama 1B, and Gemma 4B runs show that
+    # allocator/loss-snapshot transients exceed a shape-only live-tensor model
+    # by 0.4-1.3 GiB. Keep that measured floor until stage observations have
+    # enough coverage to safely learn a narrower signature-specific margin.
+    return 0.25, 1280 * 2**20, 0.75
 
 
 def _select(
@@ -244,8 +249,9 @@ def build_resident_memory_plan(
         verify_hashes=False,
     )
     checkpoint = source.inventory()
-    inventory = adapter_for_config(checkpoint.config).model_inventory(source)
-    model_bytes, shared_bytes, active_block_bytes, largest_layer_bytes = _inventory_bytes(inventory)
+    adapter = adapter_for_config(checkpoint.config)
+    inventory = adapter.model_inventory(source)
+    model_bytes, _shared_bytes, active_block_bytes, largest_layer_bytes = _inventory_bytes(inventory)
     samples, sequence_length = token_shape
     hidden = _text_dimension(checkpoint.config, "hidden_size", 1)
     intermediate = _text_dimension(checkpoint.config, "intermediate_size", hidden * 4)
@@ -270,63 +276,27 @@ def build_resident_memory_plan(
     if cache_reserve_bytes > envelope.gpu_reserve_bytes:
         envelope = replace(envelope, gpu_reserve_bytes=cache_reserve_bytes)
 
-    # The complete model-load transient determines whether resident placement is possible.
-    setup_resident = StageMemoryModel(
-        "model_load",
-        f"model-load:{inventory.model.config_hash}:resident",
-        model_bytes,
-        0,
-        activation_stream_bytes * 2,
-        0,
-        0,
-        disk_bytes,
-        largest_layer_bytes,
-        1,
-        1,
-        "conservative",
-    )
-    setup_offload = StageMemoryModel(
-        "model_load",
-        f"model-load:{inventory.model.config_hash}:cpu-offload",
-        active_block_bytes,
-        0,
-        model_bytes + activation_stream_bytes * 2,
-        0,
-        0,
-        disk_bytes,
-        largest_layer_bytes,
-        1,
-        1,
-        "conservative",
-    )
-    requested = config.runtime.executor
-    executor = requested
-    setup: StageExecutionPlan
-    if requested in {ExecutorKind.AUTO, ExecutorKind.RESIDENT}:
-        try:
-            setup = _select(setup_resident, envelope, config.runtime.memory_policy)
-            executor = ExecutorKind.RESIDENT
-        except ResourceAdmissionError:
-            if requested is ExecutorKind.RESIDENT:
-                raise
-            setup = _select(setup_offload, envelope, config.runtime.memory_policy)
-            executor = ExecutorKind.CPU_OFFLOAD
-    elif requested is ExecutorKind.CPU_OFFLOAD:
-        setup = _select(setup_offload, envelope, config.runtime.memory_policy)
-    else:
-        raise ResourceAdmissionError(
-            f"RES001 resident workflow cannot execute planned executor {requested.value!r}"
-        )
-    if executor is ExecutorKind.CPU_OFFLOAD and (config.evaluation.inline_quality or config.distillation.enabled):
-        raise ResourceAdmissionError(
-            "RES001 available memory requires cpu_offload, but inline quality or model-level distillation "
-            "requires resident execution"
-        )
-
-    resident_fixed = (shared_bytes + active_block_bytes) if executor is ExecutorKind.RESIDENT else active_block_bytes
     # Conservative per-sample activation models. They intentionally include block internals,
     # loss temporaries, gradients, and the two-slot staging protocol.
     forward_per_sample = sequence_length * 2 * (hidden * 8 + intermediate * 3)
+    if adapter.attention_implementation == "eager":
+        resolved_model_config = adapter.definition.config_factory(checkpoint.config)
+        attention_heads = int(getattr(resolved_model_config, "num_attention_heads", 1))
+        # Eager Gemma attention materializes global FP32 attention scores and
+        # softmax/dropout temporaries. Real largest-block probes bound the base
+        # workspace at 3.125 BF16-equivalent planes, rising with GQA query
+        # expansion (q_out / hidden); 270M's 1.6x expansion requires four.
+        attention_score_bytes = attention_heads * sequence_length * sequence_length * 2
+        query_outputs = (
+            layer.weight.spec.shape[0]
+            for block in inventory.blocks
+            for layer in block.quantizable_layers
+            if layer.layer.path == "self_attn.q_proj"
+        )
+        query_output = max(query_outputs, default=hidden)
+        base_workspace = attention_score_bytes * 25 // 8
+        expanded_workspace = attention_score_bytes * 5 * query_output // (2 * hidden)
+        forward_per_sample += max(base_workspace, expanded_workspace)
     tuning_per_sample = sequence_length * 2 * (hidden * 16 + intermediate * 8)
     factor_workspace = largest_layer_bytes * 8
     workspace_limit = _gib(config.runtime.resources.workspace_memory_gib)
@@ -336,118 +306,169 @@ def build_resident_memory_plan(
             f"{workspace_limit}"
         )
     fixed_mode = config.runtime.memory_policy.mode is MemoryPolicyMode.FIXED
-    forward_max = min(samples, config.runtime.block_forward_batch_size)
     tuning_logical_max = max(
         config.block_tuning.non_factorized.loop.batch_size,
         config.block_tuning.factorized.loop.batch_size,
     )
-    tuning_max = min(samples, config.block_tuning.microbatch_size or tuning_logical_max, tuning_logical_max)
     refit_logical_batch = (
         config.block_tuning.post_block_refit.batch_size or config.block_tuning.factorized.loop.batch_size
     )
-    refit_max = min(samples, config.block_tuning.microbatch_size or refit_logical_batch, refit_logical_batch)
+    if fixed_mode:
+        forward_max = min(samples, config.runtime.block_forward_batch_size)
+        tuning_max = min(samples, config.block_tuning.microbatch_size or tuning_logical_max, tuning_logical_max)
+        refit_max = min(
+            samples,
+            config.block_tuning.microbatch_size or refit_logical_batch,
+            refit_logical_batch,
+        )
+    else:
+        # Adaptive mode replaces host-specific physical batch choices. Logical
+        # optimizer batches and the available sample count remain hard semantic
+        # bounds; the resource controller chooses the physical subdivision.
+        forward_max = samples
+        tuning_max = min(samples, tuning_logical_max)
+        refit_max = min(samples, refit_logical_batch)
     calibration_max = min(samples, config.calibration.batch_size)
-    host_fixed = (model_bytes if executor is ExecutorKind.CPU_OFFLOAD else 0) + activation_stream_bytes * 2
     # One bounded prefetch generation owns two alternating host slots, each
     # containing an input and target BF16 batch row.
-    pinned_slot_bytes = sequence_length * hidden * 8 * max(
-        forward_max,
-        tuning_max,
-        refit_max,
-        calibration_max,
-    )
+    pinned_bytes_per_row = sequence_length * hidden * 8
     largest_allocation_bytes = max(largest_layer_bytes, factor_workspace // 8)
-    required_pinned_bytes = pinned_slot_bytes * config.runtime.activations.prefetch_batches
-    if required_pinned_bytes > envelope.pinned_host_limit_bytes:
+    requested = config.runtime.executor
+    if requested not in {ExecutorKind.AUTO, ExecutorKind.RESIDENT, ExecutorKind.CPU_OFFLOAD}:
         raise ResourceAdmissionError(
-            f"RES001 bounded activation staging requires {required_pinned_bytes} pinned-host bytes but configured "
-            f"capacity is {envelope.pinned_host_limit_bytes}"
+            f"RES001 resident workflow cannot execute planned executor {requested.value!r}"
         )
-    forward_model = StageMemoryModel(
-        "block_forward",
-        f"block-forward:{inventory.model.config_hash}:{hidden}:{intermediate}:{sequence_length}",
-        resident_fixed,
-        forward_per_sample,
-        host_fixed,
-        0,
-        pinned_slot_bytes,
-        disk_bytes,
-        largest_allocation_bytes,
-        minimum_batch_size=forward_max if fixed_mode else 1,
-        maximum_batch_size=forward_max,
-        confidence="static",
+
+    def candidate_stage_plans(executor: ExecutorKind) -> tuple[StageExecutionPlan, ...]:
+        if executor is ExecutorKind.CPU_OFFLOAD and (config.evaluation.inline_quality or config.distillation.enabled):
+            raise ResourceAdmissionError(
+                "RES001 cpu_offload cannot provide inline quality or model-level distillation until teacher "
+                "streaming is implemented"
+            )
+        setup_model = StageMemoryModel(
+            "model_load",
+            f"model-load:{inventory.model.config_hash}:{executor.value}",
+            model_bytes if executor is ExecutorKind.RESIDENT else active_block_bytes,
+            0,
+            (0 if executor is ExecutorKind.RESIDENT else model_bytes) + activation_stream_bytes * 2,
+            0,
+            0,
+            disk_bytes,
+            largest_layer_bytes,
+            1,
+            1,
+            "conservative",
+        )
+        # Resident execution keeps the complete source model live. Inline full-model
+        # evaluation additionally retains dense BF16 factor tensors whose element
+        # count is approximately target_bpw times the source parameter count.
+        retained_factor_bytes = (
+            int(model_bytes * config.allocation.target_bpw)
+            if executor is ExecutorKind.RESIDENT and retain_completed_blocks
+            else 0
+        )
+        execution_fixed = (
+            model_bytes + retained_factor_bytes
+            if executor is ExecutorKind.RESIDENT
+            else active_block_bytes
+        )
+        host_fixed = (model_bytes if executor is ExecutorKind.CPU_OFFLOAD else 0) + activation_stream_bytes * 2
+        models = (
+            setup_model,
+            StageMemoryModel(
+                "calibration",
+                f"calibration:{inventory.model.config_hash}:{config.calibration.method.value}:{sequence_length}",
+                model_bytes if executor is ExecutorKind.RESIDENT else active_block_bytes,
+                tuning_per_sample * 2,
+                host_fixed,
+                0,
+                pinned_bytes_per_row,
+                disk_bytes,
+                largest_allocation_bytes,
+                minimum_batch_size=(
+                    calibration_max
+                    if fixed_mode or config.calibration.method.value in {"online_fisher", "two_phase_fisher"}
+                    else 1
+                ),
+                maximum_batch_size=calibration_max,
+                confidence="conservative",
+            ),
+            StageMemoryModel(
+                "block_forward",
+                f"block-forward:{inventory.model.config_hash}:{hidden}:{intermediate}:{sequence_length}",
+                execution_fixed,
+                forward_per_sample,
+                host_fixed,
+                0,
+                pinned_bytes_per_row,
+                disk_bytes,
+                largest_allocation_bytes,
+                minimum_batch_size=forward_max if fixed_mode else 1,
+                maximum_batch_size=forward_max,
+                confidence="static",
+            ),
+            StageMemoryModel(
+                "tuning",
+                f"tuning:{inventory.model.config_hash}:{hidden}:{intermediate}:{sequence_length}",
+                execution_fixed + factor_workspace + largest_layer_bytes * 2,
+                tuning_per_sample,
+                host_fixed,
+                0,
+                pinned_bytes_per_row,
+                disk_bytes,
+                largest_allocation_bytes,
+                minimum_batch_size=tuning_max if fixed_mode else 1,
+                maximum_batch_size=tuning_max,
+                confidence="static",
+            ),
+            StageMemoryModel(
+                "post_block_refit",
+                f"post-refit:{inventory.model.config_hash}:{hidden}:{intermediate}:{sequence_length}",
+                execution_fixed + factor_workspace + active_block_bytes,
+                int(tuning_per_sample * 1.5),
+                host_fixed,
+                0,
+                pinned_bytes_per_row,
+                disk_bytes,
+                largest_allocation_bytes,
+                minimum_batch_size=refit_max if fixed_mode else 1,
+                maximum_batch_size=refit_max,
+                confidence="static",
+            ),
+        )
+        return tuple(
+            _select(
+                model,
+                envelope,
+                config.runtime.memory_policy,
+                maximum_prefetch_batches=(
+                    0 if model.stage == "model_load" else config.runtime.activations.prefetch_batches
+                ),
+            )
+            for model in models
+        )
+
+    candidates = (
+        (ExecutorKind.RESIDENT, ExecutorKind.CPU_OFFLOAD)
+        if requested is ExecutorKind.AUTO
+        else (requested,)
     )
-    calibration_model = StageMemoryModel(
-        "calibration",
-        f"calibration:{inventory.model.config_hash}:{config.calibration.method.value}:{sequence_length}",
-        model_bytes if executor is ExecutorKind.RESIDENT else active_block_bytes,
-        tuning_per_sample * 2,
-        host_fixed,
-        0,
-        pinned_slot_bytes,
-        disk_bytes,
-        largest_allocation_bytes,
-        minimum_batch_size=calibration_max if fixed_mode else 1,
-        maximum_batch_size=calibration_max,
-        confidence="conservative",
-    )
-    tuning_model = StageMemoryModel(
-        "tuning",
-        f"tuning:{inventory.model.config_hash}:{hidden}:{intermediate}:{sequence_length}",
-        resident_fixed + factor_workspace + largest_layer_bytes * 2,
-        tuning_per_sample,
-        host_fixed,
-        0,
-        pinned_slot_bytes,
-        disk_bytes,
-        largest_allocation_bytes,
-        minimum_batch_size=tuning_max if fixed_mode else 1,
-        maximum_batch_size=tuning_max,
-        confidence="static",
-    )
-    refit_model = StageMemoryModel(
-        "post_block_refit",
-        f"post-refit:{inventory.model.config_hash}:{hidden}:{intermediate}:{sequence_length}",
-        resident_fixed + factor_workspace + active_block_bytes,
-        int(tuning_per_sample * 1.5),
-        host_fixed,
-        0,
-        pinned_slot_bytes,
-        disk_bytes,
-        largest_allocation_bytes,
-        minimum_batch_size=refit_max if fixed_mode else 1,
-        maximum_batch_size=refit_max,
-        confidence="static",
-    )
-    stage_plans = (
-        setup,
-        _select(
-            calibration_model,
-            envelope,
-            config.runtime.memory_policy,
-            maximum_prefetch_batches=config.runtime.activations.prefetch_batches,
-        ),
-        _select(
-            forward_model,
-            envelope,
-            config.runtime.memory_policy,
-            maximum_prefetch_batches=config.runtime.activations.prefetch_batches,
-        ),
-        _select(
-            tuning_model,
-            envelope,
-            config.runtime.memory_policy,
-            maximum_prefetch_batches=config.runtime.activations.prefetch_batches,
-        ),
-        _select(
-            refit_model,
-            envelope,
-            config.runtime.memory_policy,
-            maximum_prefetch_batches=config.runtime.activations.prefetch_batches,
-        ),
-    )
+    candidate_errors: list[str] = []
+    for executor in candidates:
+        try:
+            stage_plans = candidate_stage_plans(executor)
+            break
+        except ResourceAdmissionError as exc:
+            candidate_errors.append(f"{executor.value}: {exc}")
+    else:
+        raise ResourceAdmissionError("RES001 no executor is admissible; " + "; ".join(candidate_errors))
     peak_gpu = max(stage.predicted_gpu_bytes for stage in stage_plans)
-    remaining_gpu = max(0, gpu_capacity_bytes(envelope) - peak_gpu)
+    _error, _uncertainty, reusable_pool_fraction = _policy_parameters(config.runtime.memory_policy.profile)
+    safe_stage_peak = max(stage.predicted_gpu_bytes + stage.uncertainty_bytes for stage in stage_plans)
+    remaining_gpu = max(
+        0,
+        gpu_capacity_bytes(envelope, reusable_pool_fraction=reusable_pool_fraction) - safe_stage_peak,
+    )
     configured_cache = config.runtime.activations.gpu_cache
     if (
         configured_cache is ActivationGpuCacheMode.AUTO
@@ -472,10 +493,13 @@ def build_resident_memory_plan(
             f"RES001 explicit activation GPU cache requires {requested_cache_bytes} bytes but only "
             f"{remaining_gpu} planned bytes remain"
         )
-    warnings = tuple(
-        f"{stage.stage} resized from its configured maximum to batch {stage.batch_size}"
-        for stage in stage_plans
-        if stage.resized
+    warnings = (
+        *candidate_errors,
+        *(
+            f"{stage.stage} resized from its admissible maximum to batch {stage.batch_size}"
+            for stage in stage_plans
+            if stage.resized
+        ),
     )
     return ResolvedMemoryPlan(
         1,
@@ -534,6 +558,30 @@ def load_memory_plan(output: str | Path, request_hash: str) -> tuple[ResolvedMem
     return plan, reference
 
 
+def load_memory_plan_revision(output: str | Path, revision: int) -> MemoryPlanRevision | None:
+    """Load the durable provenance record for one published memory-plan revision."""
+
+    journal = Path(output) / "state" / "memory-plan-revisions.jsonl"
+    if not journal.is_file():
+        return None
+    matched: MemoryPlanRevision | None = None
+    try:
+        for line_number, line in enumerate(journal.read_text(encoding="utf-8").splitlines(), start=1):
+            if not line.strip():
+                continue
+            payload = json.loads(line)
+            record = from_dict(
+                MemoryPlanRevision,
+                payload,
+                path=f"memory_plan_revisions[{line_number}]",
+            )
+            if record.revision == revision:
+                matched = record
+    except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("memory plan revision journal is corrupt") from exc
+    return matched
+
+
 def revise_resident_memory_plan_after_oom(
     plan: ResolvedMemoryPlan,
     config: RunConfig,
@@ -559,6 +607,24 @@ def revise_resident_memory_plan_after_oom(
         minimum_uncertainty_bytes=uncertainty,
         reusable_pool_fraction=reusable,
     )
+    reference = persist_memory_plan(revised, output)
+    journal = Path(output) / "state" / "memory-plan-revisions.jsonl"
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    with journal.open("a", encoding="utf-8", newline="\n") as stream:
+        stream.write(json.dumps(to_dict(revision), sort_keys=True, separators=(",", ":")) + "\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    return revised, revision, reference
+
+
+def revise_resident_memory_plan_for_throughput(
+    plan: ResolvedMemoryPlan,
+    output: str | Path,
+    selections: tuple[tuple[str, int], ...],
+) -> tuple[ResolvedMemoryPlan, MemoryPlanRevision, ArtifactRef]:
+    """Publish empirically selected batches before semantic execution begins."""
+
+    revised, revision = revise_memory_plan_for_throughput(plan, selections)
     reference = persist_memory_plan(revised, output)
     journal = Path(output) / "state" / "memory-plan-revisions.jsonl"
     journal.parent.mkdir(parents=True, exist_ok=True)

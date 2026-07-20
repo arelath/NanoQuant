@@ -139,7 +139,7 @@ class StageMemoryModel:
     gpu_bytes_per_row: int
     fixed_host_bytes: int
     host_bytes_per_row: int
-    pinned_bytes_per_prefetch_slot: int
+    pinned_bytes_per_row_per_prefetch_slot: int
     temporary_disk_bytes: int
     largest_indivisible_gpu_allocation_bytes: int
     minimum_batch_size: int
@@ -154,7 +154,7 @@ class StageMemoryModel:
             self.gpu_bytes_per_row,
             self.fixed_host_bytes,
             self.host_bytes_per_row,
-            self.pinned_bytes_per_prefetch_slot,
+            self.pinned_bytes_per_row_per_prefetch_slot,
             self.temporary_disk_bytes,
             self.largest_indivisible_gpu_allocation_bytes,
         )
@@ -173,10 +173,11 @@ class StageMemoryModel:
         self._validate_batch(batch_size)
         return self.fixed_host_bytes + self.host_bytes_per_row * batch_size
 
-    def pinned_host_bytes(self, prefetch_batches: int) -> int:
+    def pinned_host_bytes(self, batch_size: int, prefetch_batches: int) -> int:
+        self._validate_batch(batch_size)
         if prefetch_batches < 0:
             raise ValueError("prefetch batch count cannot be negative")
-        return self.pinned_bytes_per_prefetch_slot * prefetch_batches
+        return self.pinned_bytes_per_row_per_prefetch_slot * batch_size * prefetch_batches
 
     def _validate_batch(self, batch_size: int) -> None:
         if not self.minimum_batch_size <= batch_size <= self.maximum_batch_size:
@@ -199,6 +200,7 @@ class StageExecutionPlan:
     disk_capacity_bytes: int
     uncertainty_bytes: int
     resized: bool
+    admitted_maximum_batch_size: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -253,6 +255,101 @@ def geometric_batch_candidates(maximum: int, minimum: int = 1) -> tuple[int, ...
     return tuple(dict.fromkeys(candidates))
 
 
+def throughput_batch_candidates(maximum_safe: int, preferred: int) -> tuple[int, ...]:
+    """Return a small deterministic search set within a proven-safe upper bound."""
+
+    if maximum_safe <= 0 or preferred <= 0:
+        raise ValueError("throughput batch bounds must be positive")
+    baseline = min(maximum_safe, preferred)
+    return tuple(sorted({*geometric_batch_candidates(maximum_safe), baseline}, reverse=True))
+
+
+def select_fastest_observed_batch(
+    observations: tuple[tuple[int, float], ...],
+    *,
+    baseline_batch: int,
+    minimum_improvement_fraction: float = 0.05,
+) -> int:
+    """Select a measured winner, retaining the baseline for immaterial gains."""
+
+    if not observations or baseline_batch <= 0:
+        raise ValueError("throughput selection requires observations and a positive baseline")
+    if not 0 <= minimum_improvement_fraction < 1:
+        raise ValueError("minimum throughput improvement must be in [0, 1)")
+    timings = {batch: seconds for batch, seconds in observations}
+    if len(timings) != len(observations) or any(batch <= 0 or seconds <= 0 for batch, seconds in observations):
+        raise ValueError("throughput observations must contain unique positive batches and timings")
+    if baseline_batch not in timings:
+        raise ValueError("throughput observations must include the baseline batch")
+    winner_batch, winner_seconds = min(observations, key=lambda item: (item[1], item[0]))
+    baseline_seconds = timings[baseline_batch]
+    improvement = (baseline_seconds - winner_seconds) / baseline_seconds
+    return winner_batch if improvement >= minimum_improvement_fraction else baseline_batch
+
+
+def revise_memory_plan_for_throughput(
+    plan: ResolvedMemoryPlan,
+    selections: tuple[tuple[str, int], ...],
+) -> tuple[ResolvedMemoryPlan, MemoryPlanRevision]:
+    """Persist measured physical batches while retaining conservative admission data."""
+
+    selected_by_stage = dict(selections)
+    if not selected_by_stage or len(selected_by_stage) != len(selections):
+        raise ValueError("throughput revision requires unique stage selections")
+    revised_stages = []
+    previous_batches: list[int] = []
+    next_batches: list[int] = []
+    for stage in plan.stages:
+        selected = selected_by_stage.get(stage.stage)
+        if selected is None:
+            revised_stages.append(stage)
+            continue
+        admitted_maximum = stage.admitted_maximum_batch_size or stage.batch_size
+        if not stage.model.minimum_batch_size <= selected <= admitted_maximum:
+            raise ValueError("throughput batch must remain within the admitted stage range")
+        previous_batches.append(stage.batch_size)
+        next_batches.append(selected)
+        revised_stages.append(
+            replace(
+                stage,
+                batch_size=selected,
+                predicted_gpu_bytes=stage.model.peak_gpu_bytes(selected),
+                predicted_host_bytes=stage.model.peak_host_bytes(selected),
+                predicted_pinned_host_bytes=stage.model.pinned_host_bytes(selected, stage.prefetch_batches),
+                resized=selected < stage.model.maximum_batch_size,
+                admitted_maximum_batch_size=admitted_maximum,
+            )
+        )
+    if set(selected_by_stage) - {stage.stage for stage in plan.stages}:
+        raise KeyError("throughput revision names an unknown stage")
+    original_stage_peak = max(stage.predicted_gpu_bytes for stage in plan.stages)
+    cache_bytes = max(0, plan.peak_gpu_bytes - original_stage_peak)
+    stages = tuple(revised_stages)
+    revised = replace(
+        plan,
+        revision=plan.revision + 1,
+        stages=stages,
+        peak_gpu_bytes=max(stage.predicted_gpu_bytes for stage in stages) + cache_bytes,
+        peak_host_bytes=max(stage.predicted_host_bytes for stage in stages),
+        peak_pinned_host_bytes=max(stage.predicted_pinned_host_bytes for stage in stages),
+        warnings=(
+            *plan.warnings,
+            *(f"{stage} selected measured-throughput batch {batch}" for stage, batch in selections),
+        ),
+    )
+    revision = MemoryPlanRevision(
+        revised.revision,
+        plan.revision,
+        "measured throughput autotune",
+        None,
+        "select_measured_throughput_batches",
+        False,
+        previous_batches[0] if len(previous_batches) == 1 else None,
+        next_batches[0] if len(next_batches) == 1 else None,
+    )
+    return revised, revision
+
+
 def gpu_capacity_bytes(envelope: ResourceEnvelope, *, reusable_pool_fraction: float = 0.75) -> int:
     """Return the safe total process allocation supported by the current CUDA envelope."""
 
@@ -305,24 +402,28 @@ def select_stage_execution_plan(
             f"RES001 {model.stage} requires {model.temporary_disk_bytes} temporary disk bytes "
             f"but safe capacity is {disk_capacity}"
         )
-    prefetch = min(
-        maximum_prefetch_batches,
-        envelope.pinned_host_limit_bytes // max(1, model.pinned_bytes_per_prefetch_slot),
-    )
-    if model.pinned_bytes_per_prefetch_slot == 0:
-        prefetch = maximum_prefetch_batches
-    selected: tuple[int, int, int] | None = None
-    for batch_size in geometric_batch_candidates(model.maximum_batch_size, model.minimum_batch_size):
+    selected: tuple[int, int, int, int] | None = None
+    # The memory model is monotonic, so checking every integer is cheap and
+    # avoids the almost-2x utilization loss of power-of-two-only candidates.
+    for batch_size in range(model.maximum_batch_size, model.minimum_batch_size - 1, -1):
         predicted_gpu = model.peak_gpu_bytes(batch_size)
         predicted_host = model.peak_host_bytes(batch_size)
         uncertainty = max(minimum_uncertainty_bytes, int(predicted_gpu * estimator_error_fraction))
+        pinned_per_prefetch = model.pinned_host_bytes(batch_size, 1)
+        prefetch = (
+            maximum_prefetch_batches
+            if pinned_per_prefetch == 0
+            else min(maximum_prefetch_batches, envelope.pinned_host_limit_bytes // pinned_per_prefetch)
+        )
+        pinned_admitted = maximum_prefetch_batches == 0 or prefetch > 0
         if (
             predicted_gpu + uncertainty <= gpu_capacity
             and predicted_host <= host_capacity
+            and pinned_admitted
             and model.largest_indivisible_gpu_allocation_bytes + envelope.gpu_process_allocated_bytes
             <= gpu_capacity
         ):
-            selected = batch_size, predicted_gpu, predicted_host
+            selected = batch_size, prefetch, predicted_gpu, predicted_host
             break
     if selected is None:
         minimum_gpu = model.peak_gpu_bytes(model.minimum_batch_size)
@@ -333,7 +434,7 @@ def select_stage_execution_plan(
             f"{gpu_capacity} GPU and {host_capacity} host bytes; largest indivisible CUDA allocation is "
             f"{model.largest_indivisible_gpu_allocation_bytes} bytes"
         )
-    batch_size, predicted_gpu, predicted_host = selected
+    batch_size, prefetch, predicted_gpu, predicted_host = selected
     uncertainty = max(minimum_uncertainty_bytes, int(predicted_gpu * estimator_error_fraction))
     return StageExecutionPlan(
         model.stage,
@@ -343,13 +444,14 @@ def select_stage_execution_plan(
         prefetch,
         predicted_gpu,
         predicted_host,
-        model.pinned_host_bytes(prefetch),
+        model.pinned_host_bytes(batch_size, prefetch),
         model.temporary_disk_bytes,
         gpu_capacity,
         host_capacity,
         disk_capacity,
         uncertainty,
         batch_size != model.maximum_batch_size or prefetch != maximum_prefetch_batches,
+        batch_size,
     )
 
 
@@ -398,13 +500,13 @@ def revise_memory_plan_after_oom(
         if (
             not allow_batch_reduction
             or planned_stage.stage == "model_load"
-            or current <= 1
+            or current <= planned_stage.model.minimum_batch_size
             or (selected_stage is not None and planned_stage.stage != selected_stage)
         ):
             revised_stages.append(planned_stage)
             continue
-        maximum = max(1, current // 2)
-        revised_model = replace(planned_stage.model, minimum_batch_size=1, maximum_batch_size=maximum)
+        maximum = max(planned_stage.model.minimum_batch_size, current // 2)
+        revised_model = replace(planned_stage.model, maximum_batch_size=maximum)
         revised_stages.append(
             select_stage_execution_plan(
                 revised_model,

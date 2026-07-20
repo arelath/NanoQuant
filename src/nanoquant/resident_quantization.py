@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import shutil
 import statistics
 import time
 from collections.abc import Callable, Iterator
@@ -123,7 +124,12 @@ from nanoquant.domain.planning import (
     allocate_reconstruction_rank_budget,
 )
 from nanoquant.domain.profiling import NULL_RECORDER, PhaseRecorder
-from nanoquant.domain.resources import ResolvedMemoryPlan, ResourceAdmissionError
+from nanoquant.domain.resources import (
+    ResolvedMemoryPlan,
+    ResourceAdmissionError,
+    select_fastest_observed_batch,
+    throughput_batch_candidates,
+)
 from nanoquant.domain.runs import BudgetState, RunManifest, RunStatus
 from nanoquant.domain.scale_fit import reconstruct
 from nanoquant.domain.seeds import logical_seed
@@ -141,7 +147,12 @@ from nanoquant.infrastructure.commits import (
     retire_block_activations,
 )
 from nanoquant.infrastructure.device_lease import acquire_device_lease
-from nanoquant.infrastructure.device_memory import PeakWindow, release_cached_host_memory, sample_device_memory
+from nanoquant.infrastructure.device_memory import (
+    PeakWindow,
+    is_cuda_oom,
+    release_cached_host_memory,
+    sample_device_memory,
+)
 from nanoquant.infrastructure.environment import capture_environment
 from nanoquant.infrastructure.hf_language_model import load_causal_language_model
 from nanoquant.infrastructure.io_utils import atomic_write_json
@@ -150,6 +161,10 @@ from nanoquant.infrastructure.model_adapters import TransformersModelAdapter, ad
 from nanoquant.infrastructure.profiling import profiled_run
 from nanoquant.infrastructure.progress_journal import JournalRecord, ProgressJournal
 from nanoquant.infrastructure.resident_executor import Cancellation, ResidentExecutor
+from nanoquant.infrastructure.resource_planning import (
+    load_memory_plan_revision,
+    revise_resident_memory_plan_for_throughput,
+)
 from nanoquant.infrastructure.resource_usage import peak_device_memory_bytes, peak_process_memory_bytes
 from nanoquant.infrastructure.run_session import open_run_session
 from nanoquant.infrastructure.runs import (
@@ -169,7 +184,17 @@ from nanoquant.infrastructure.tuning_checkpoint import (
 from nanoquant.ports.event_sink import EventSink
 from nanoquant.ports.model_adapter import ModelAdapter
 
-RESIDENT_ALGORITHM_VERSION = 38
+RESIDENT_ALGORITHM_VERSION = 40
+_THROUGHPUT_PROBE_REPETITIONS = 5
+
+
+def _release_throughput_probe_caches(device: str) -> None:
+    """Prevent candidate probes from accumulating allocator state across trials."""
+
+    if not device.startswith("cuda"):
+        return
+    torch.cuda.empty_cache()
+    release_cached_host_memory()
 
 
 @dataclass(frozen=True, slots=True)
@@ -694,6 +719,249 @@ def _run_block_batched(
     return result
 
 
+def _inventory_block_elements(block: Any) -> int:
+    return sum(math.prod(tensor.spec.shape) for tensor in block.source_tensors)
+
+
+@torch.no_grad()
+def _autotune_block_forward_batch(
+    request: ResidentQuantizationRequest,
+    adapter: TransformersModelAdapter,
+    source: SafetensorsModelSource,
+    inventory: ModelInventory,
+    decoder_layers: nn.ModuleList,
+    inputs: torch.Tensor,
+    captured_metadata: dict[str, object],
+    events: EventSink,
+) -> int:
+    """Benchmark safe forward candidates without changing numerical semantics."""
+
+    if (
+        request.memory_plan is None
+        or request.memory_plan.mode != "adaptive"
+        or inputs.shape[0] < 2
+        or any(
+            warning.startswith("block_forward selected measured-throughput")
+            for warning in request.memory_plan.warnings
+        )
+    ):
+        return request.block_forward_batch_size
+    maximum_safe = request.block_forward_batch_size
+    configured = (
+        maximum_safe
+        if request.run_config is None
+        else request.run_config.runtime.block_forward_batch_size
+    )
+    baseline = min(maximum_safe, configured)
+    candidates = throughput_batch_candidates(maximum_safe, baseline)
+    benchmark_samples = min(int(inputs.shape[0]), max(64, maximum_safe))
+    benchmark_inputs = inputs[:benchmark_samples]
+    streamed_block = request.executor is ExecutorKind.CPU_OFFLOAD
+    representative = max(inventory.blocks, key=_inventory_block_elements)
+    block = (
+        adapter.load_block(source, representative.block, request.device)
+        if streamed_block
+        else decoder_layers[representative.block.index]
+    )
+    metadata = _forward_metadata_to_device(_clone_forward_metadata(captured_metadata), request.device)
+    observations: list[tuple[int, float]] = []
+    failures: list[dict[str, object]] = []
+    output: torch.Tensor | None = None
+    try:
+        output = _run_block_batched(adapter, block, benchmark_inputs, metadata, baseline, "cpu")
+        if request.device.startswith("cuda"):
+            torch.cuda.synchronize(request.device)
+        output = None
+        _release_throughput_probe_caches(request.device)
+        for batch_size in candidates:
+            samples: list[float] = []
+            try:
+                for _ in range(_THROUGHPUT_PROBE_REPETITIONS):
+                    started = time.perf_counter()
+                    output = _run_block_batched(
+                        adapter,
+                        block,
+                        benchmark_inputs,
+                        metadata,
+                        batch_size,
+                        "cpu",
+                    )
+                    if request.device.startswith("cuda"):
+                        torch.cuda.synchronize(request.device)
+                    samples.append(time.perf_counter() - started)
+                    del output
+                    _release_throughput_probe_caches(request.device)
+                observations.append((batch_size, statistics.median(samples)))
+            except RuntimeError as exc:
+                if not is_cuda_oom(exc):
+                    raise
+                failures.append({"batch_size": batch_size, "error": str(exc)})
+                _release_throughput_probe_caches(request.device)
+        successful_batches = {batch for batch, _ in observations}
+        if baseline not in successful_batches:
+            raise ResourceAdmissionError(
+                f"RES001 adaptive throughput baseline batch {baseline} failed its real block-forward probe"
+            )
+        selected = select_fastest_observed_batch(
+            tuple(observations),
+            baseline_batch=baseline,
+            minimum_improvement_fraction=0.05,
+        )
+        baseline_seconds = dict(observations)[baseline]
+        selected_seconds = dict(observations)[selected]
+        cast(Any, events).emit(
+            "memory",
+            "info",
+            "memory.throughput_autotuned",
+            stage_name="block_forward",
+            maximum_safe_batch_size=maximum_safe,
+            baseline_batch_size=baseline,
+            selected_batch_size=selected,
+            benchmark_samples=benchmark_samples,
+            selected_speedup=baseline_seconds / selected_seconds,
+            observations=[{"batch_size": batch, "seconds": seconds} for batch, seconds in observations],
+            failed_candidates=failures,
+        )
+        return selected
+    finally:
+        metadata = {}
+        if streamed_block:
+            del block
+        if request.device.startswith("cuda"):
+            torch.cuda.empty_cache()
+
+
+def _autotune_tuning_microbatch(
+    request: ResidentQuantizationRequest,
+    adapter: TransformersModelAdapter,
+    source: SafetensorsModelSource,
+    inventory: ModelInventory,
+    decoder_layers: nn.ModuleList,
+    inputs: torch.Tensor,
+    captured_metadata: dict[str, object],
+    events: EventSink,
+) -> tuple[int | None, int | None]:
+    """Measure forward/backward throughput over admitted tuning microbatches."""
+
+    maximum_safe = request.tuning_microbatch_size
+    if (
+        request.memory_plan is None
+        or request.memory_plan.mode != "adaptive"
+        or maximum_safe is None
+        or inputs.shape[0] < 2
+        or not (
+            request.factorized_tuning_epochs > 0
+            or request.nonfactorized_tuning_epochs > 0
+            or any(request.nonfactorized_tuning_epochs_by_layer)
+            or request.post_block_refit_epochs > 0
+        )
+        or any(
+            warning.startswith("tuning selected measured-throughput")
+            for warning in request.memory_plan.warnings
+        )
+    ):
+        return request.tuning_microbatch_size, request.post_block_refit_microbatch_size
+    configured = (
+        maximum_safe
+        if request.run_config is None or request.run_config.block_tuning.microbatch_size is None
+        else request.run_config.block_tuning.microbatch_size
+    )
+    baseline = min(maximum_safe, configured)
+    logical_batch = max(request.factorized_tuning_batch_size, request.nonfactorized_tuning_batch_size)
+    benchmark_samples = min(int(inputs.shape[0]), max(maximum_safe, logical_batch))
+    benchmark_inputs = inputs[:benchmark_samples]
+    streamed_block = request.executor is ExecutorKind.CPU_OFFLOAD
+    representative = max(inventory.blocks, key=_inventory_block_elements)
+    block = (
+        adapter.load_block(source, representative.block, request.device)
+        if streamed_block
+        else decoder_layers[representative.block.index]
+    )
+    metadata = _forward_metadata_to_device(_clone_forward_metadata(captured_metadata), request.device)
+    observations: list[tuple[int, float]] = []
+    failures: list[dict[str, object]] = []
+    original_requires_grad = {id(parameter): parameter.requires_grad for parameter in block.parameters()}
+    for parameter in block.parameters():
+        parameter.requires_grad_(True)
+    targets: torch.Tensor | None = None
+    try:
+        targets = _run_block_batched(
+            adapter,
+            block,
+            benchmark_inputs,
+            metadata,
+            baseline,
+            "cpu",
+        ).detach()
+        benchmark_targets = targets
+
+        def benchmark_candidate(batch_size: int) -> float:
+            block.zero_grad(set_to_none=True)
+            started = time.perf_counter()
+            for start in range(0, benchmark_samples, batch_size):
+                stop = min(start + batch_size, benchmark_samples)
+                input_batch = benchmark_inputs[start:stop].to(request.device)
+                target_batch = benchmark_targets[start:stop].to(request.device)
+                prediction = adapter.run_block(block, input_batch, **metadata)
+                loss = (prediction.float() - target_batch.float()).square().mean()
+                torch.autograd.backward(loss)
+                del input_batch, target_batch, prediction, loss
+            if request.device.startswith("cuda"):
+                torch.cuda.synchronize(request.device)
+            return time.perf_counter() - started
+
+        benchmark_candidate(baseline)
+        _release_throughput_probe_caches(request.device)
+        for batch_size in throughput_batch_candidates(maximum_safe, baseline):
+            samples: list[float] = []
+            try:
+                for _ in range(_THROUGHPUT_PROBE_REPETITIONS):
+                    samples.append(benchmark_candidate(batch_size))
+                    _release_throughput_probe_caches(request.device)
+                observations.append((batch_size, statistics.median(samples)))
+            except RuntimeError as exc:
+                if not is_cuda_oom(exc):
+                    raise
+                block.zero_grad(set_to_none=True)
+                failures.append({"batch_size": batch_size, "error": str(exc)})
+                _release_throughput_probe_caches(request.device)
+        if baseline not in {batch for batch, _ in observations}:
+            raise ResourceAdmissionError(
+                f"RES001 adaptive tuning baseline microbatch {baseline} failed its real probe"
+            )
+        selected = select_fastest_observed_batch(
+            tuple(observations),
+            baseline_batch=baseline,
+            minimum_improvement_fraction=0.05,
+        )
+        timings = dict(observations)
+        cast(Any, events).emit(
+            "memory",
+            "info",
+            "memory.throughput_autotuned",
+            stage_name="tuning",
+            maximum_safe_batch_size=maximum_safe,
+            baseline_batch_size=baseline,
+            selected_batch_size=selected,
+            benchmark_samples=benchmark_samples,
+            selected_speedup=timings[baseline] / timings[selected],
+            observations=[{"batch_size": batch, "seconds": seconds} for batch, seconds in observations],
+            failed_candidates=failures,
+        )
+        refit_maximum = request.post_block_refit_microbatch_size
+        selected_refit = None if refit_maximum is None else min(refit_maximum, selected)
+        return selected, selected_refit
+    finally:
+        block.zero_grad(set_to_none=True)
+        for parameter in block.parameters():
+            parameter.requires_grad_(original_requires_grad[id(parameter)])
+        targets = None
+        if streamed_block:
+            del block
+        if request.device.startswith("cuda"):
+            torch.cuda.empty_cache()
+
+
 def _run_prefix_batched(
     adapter: Any,
     model: nn.Module,
@@ -802,6 +1070,35 @@ def _streamed_quality_metrics(
 
 def _artifact_bytes(root: Path) -> int:
     return sum(path.stat().st_size for path in root.rglob("*") if path.is_file())
+
+
+def _ensure_block_commit_disk_capacity(
+    request: ResidentQuantizationRequest,
+    teacher_outputs: torch.Tensor,
+    compressed_outputs: torch.Tensor,
+) -> tuple[int, int, int]:
+    """Recheck live disk pressure before writing a resumable activation generation."""
+
+    if request.memory_plan is None:
+        return 0, 0, 0
+    # The content-addressed writer must temporarily coexist with the current
+    # generation. Only these two tensors are additional at this boundary; add
+    # bounded metadata/filesystem slack as a largest-write guard.
+    required = (
+        teacher_outputs.numel() * teacher_outputs.element_size()
+        + compressed_outputs.numel() * compressed_outputs.element_size()
+        + 64 * 2**20
+    )
+    free = int(shutil.disk_usage(request.output.resolve()).free)
+    reserve = request.memory_plan.envelope.temporary_disk_reserve_bytes
+    safe_capacity = max(0, free - reserve)
+    if required > safe_capacity:
+        raise ResourceAdmissionError(
+            "RES001 block commit requires "
+            f"{required} additional temporary disk bytes but live safe capacity is {safe_capacity} "
+            f"({free} free minus {reserve} reserved); relocate or reclaim the artifact store before resume"
+        )
+    return required, free, reserve
 
 
 def _token_tensor(value: torch.Tensor | tuple[tuple[int, ...], ...], device: str) -> torch.Tensor:
@@ -1291,7 +1588,11 @@ def _resident_config_hash(request: ResidentQuantizationRequest) -> str:
         "activation_retention": request.activation_retention,
         "calibration_method": request.calibration_method,
         "calibration_shrinkage": request.calibration_shrinkage,
-        "calibration_batch_size": "adaptive" if adaptive_memory else request.calibration_batch_size,
+        "calibration_batch_size": (
+            "adaptive"
+            if adaptive_memory and request.calibration_method == "forward_only"
+            else request.calibration_batch_size
+        ),
         "seed": request.seed,
     }
     # Preserve commit identity for the previously hard-coded parity policy.
@@ -1330,6 +1631,24 @@ def _resident_manifest_config(request: ResidentQuantizationRequest, component: s
     payload["component"] = component
     if request.run_config is not None:
         payload["canonical_run_config"] = to_dict(request.run_config)
+    if request.memory_plan is not None and request.memory_plan.mode == "adaptive":
+        # These values are physical choices selected by the durable memory plan,
+        # not changes to the user's canonical request. Keeping their concrete
+        # values here made a throughput or OOM revision look like a reconfigured
+        # run on restart even though commit identity correctly remained stable.
+        payload.update(
+            {
+                "executor": "adaptive",
+                "activation_gpu_cache": "adaptive",
+                "block_forward_batch_size": "adaptive",
+                "tuning_microbatch_size": "adaptive",
+                "post_block_refit_microbatch_size": "adaptive",
+                "restore_completed_blocks": "adaptive",
+                "evaluate_inline_quality": "adaptive",
+            }
+        )
+        if request.calibration_method == "forward_only":
+            payload["calibration_batch_size"] = "adaptive"
     return payload
 
 
@@ -2219,13 +2538,28 @@ def _run_resident_quantization(request: ResidentQuantizationRequest) -> Resident
                 warnings=list(request.memory_plan.warnings),
             )
             if request.memory_plan.revision > 1:
+                plan_revision = load_memory_plan_revision(request.output, request.memory_plan.revision)
+                revision_reason = "persisted memory plan revision"
+                revision_fields: dict[str, object] = {}
+                if plan_revision is not None:
+                    revision_reason = plan_revision.reason
+                    revision_fields = {
+                        "parent_revision": plan_revision.parent_revision,
+                        "revised_stage": plan_revision.stage,
+                        "action": plan_revision.action,
+                        "previous_batch_size": plan_revision.previous_batch_size,
+                        "next_batch_size": plan_revision.next_batch_size,
+                    }
                 cast(Any, session.events).emit(
                     "memory",
-                    "warning",
+                    "warning" if revision_reason == "out_of_memory" else "info",
                     "memory.plan_revised",
                     revision=request.memory_plan.revision,
-                    reason="out_of_memory",
-                    algorithm_changed=False,
+                    reason=revision_reason,
+                    algorithm_changed=(
+                        False if plan_revision is None else plan_revision.algorithm_changed
+                    ),
+                    **revision_fields,
                 )
             for stage_plan in request.memory_plan.stages:
                 cast(Any, session.events).emit(
@@ -2848,6 +3182,79 @@ def _run_resident_quantization_impl(
         # Prefix capture traverses the full embedding/prefix path in large
         # no-grad batches. Its workspaces are dead once activations are on CPU.
         torch.cuda.empty_cache()
+    selected_forward_batch = _autotune_block_forward_batch(
+        request,
+        adapter,
+        source,
+        inventory,
+        decoder_layers,
+        initial_inputs,
+        captured_metadata,
+        events,
+    )
+    selected_tuning_microbatch, selected_refit_microbatch = _autotune_tuning_microbatch(
+        request,
+        adapter,
+        source,
+        inventory,
+        decoder_layers,
+        initial_inputs,
+        captured_metadata,
+        events,
+    )
+    tuning_enabled = (
+        request.factorized_tuning_epochs > 0
+        or request.nonfactorized_tuning_epochs > 0
+        or any(request.nonfactorized_tuning_epochs_by_layer)
+    )
+    throughput_selections = tuple(
+        (stage, selected)
+        for stage, selected in (
+            ("block_forward", selected_forward_batch),
+            ("tuning", selected_tuning_microbatch),
+            ("post_block_refit", selected_refit_microbatch),
+        )
+        if selected is not None
+        and (
+            stage == "block_forward"
+            or (stage == "tuning" and tuning_enabled)
+            or request.post_block_refit_epochs > 0
+        )
+        and request.memory_plan is not None
+        and request.memory_plan.mode == "adaptive"
+        and not any(
+            warning.startswith(f"{stage} selected measured-throughput")
+            for warning in request.memory_plan.warnings
+        )
+    )
+    memory_plan = request.memory_plan
+    memory_plan_reference = request.memory_plan_reference
+    if throughput_selections and memory_plan is not None:
+        memory_plan, revision, memory_plan_reference = revise_resident_memory_plan_for_throughput(
+            memory_plan,
+            request.output,
+            throughput_selections,
+        )
+        cast(Any, events).emit(
+            "memory",
+            "info",
+            "memory.plan_revised",
+            revision=revision.revision,
+            parent_revision=revision.parent_revision,
+            reason=revision.reason,
+            action=revision.action,
+            algorithm_changed=revision.algorithm_changed,
+            selections=dict(throughput_selections),
+            artifact_id=memory_plan_reference.artifact_id,
+        )
+    request = replace(
+        request,
+        block_forward_batch_size=selected_forward_batch,
+        tuning_microbatch_size=selected_tuning_microbatch,
+        post_block_refit_microbatch_size=selected_refit_microbatch,
+        memory_plan=memory_plan,
+        memory_plan_reference=memory_plan_reference,
+    )
     with _logged_operation(events, "preprocessing_lookup"):
         with recorder.phase("setup"):
             with recorder.phase("preprocessing"):
@@ -4350,6 +4757,23 @@ def _run_resident_quantization_impl(
             retention=request.activation_retention,
         ):
             with _profile_block_phase(recorder, block_index, "commit"):
+                required_disk_bytes, free_disk_bytes, reserved_disk_bytes = _ensure_block_commit_disk_capacity(
+                    request,
+                    teacher_outputs,
+                    compressed_outputs,
+                )
+                if request.memory_plan is not None:
+                    cast(Any, events).emit(
+                        "memory",
+                        "info",
+                        "memory.disk_commit_admitted",
+                        block=block_index,
+                        plan_revision=request.memory_plan.revision,
+                        required_additional_bytes=required_disk_bytes,
+                        free_bytes=free_disk_bytes,
+                        reserve_bytes=reserved_disk_bytes,
+                        safe_capacity_bytes=max(0, free_disk_bytes - reserved_disk_bytes),
+                    )
                 committed = commit_block(
                     block_plan.block,
                     tuple(layer_results),

@@ -7,6 +7,7 @@ import pytest
 import torch
 from safetensors.torch import save_file
 
+from nanoquant.config.codec import to_dict
 from nanoquant.config.resolution import resolve_config
 from nanoquant.config.schema import (
     ActivationStoreKind,
@@ -27,10 +28,24 @@ from nanoquant.domain.resources import (
     StageMemoryModel,
     geometric_batch_candidates,
     revise_memory_plan_after_oom,
+    revise_memory_plan_for_throughput,
+    select_fastest_observed_batch,
     select_stage_execution_plan,
+    throughput_batch_candidates,
 )
-from nanoquant.infrastructure.resource_planning import build_resident_memory_plan, load_memory_plan, persist_memory_plan
-from nanoquant.resident_quantization import _resident_config_hash
+from nanoquant.infrastructure.resource_planning import (
+    build_resident_memory_plan,
+    load_memory_plan,
+    load_memory_plan_revision,
+    persist_memory_plan,
+    revise_resident_memory_plan_for_throughput,
+)
+from nanoquant.resident_quantization import (
+    ResidentQuantizationRequest,
+    _ensure_block_commit_disk_capacity,
+    _resident_config_hash,
+    _resident_manifest,
+)
 from nanoquant.resident_workflow import (
     ResidentExecutionOptions,
     ResolvedResidentInputs,
@@ -69,7 +84,7 @@ def _model(stage: str = "tuning", maximum: int = 8) -> StageMemoryModel:
         gpu_bytes_per_row=100,
         fixed_host_bytes=200,
         host_bytes_per_row=10,
-        pinned_bytes_per_prefetch_slot=64,
+        pinned_bytes_per_row_per_prefetch_slot=8,
         temporary_disk_bytes=300,
         largest_indivisible_gpu_allocation_bytes=80,
         minimum_batch_size=1,
@@ -77,7 +92,7 @@ def _model(stage: str = "tuning", maximum: int = 8) -> StageMemoryModel:
     )
 
 
-def test_adaptive_stage_selects_largest_safe_geometric_batch_and_bounds_prefetch() -> None:
+def test_adaptive_stage_selects_largest_safe_integer_batch_and_bounds_prefetch() -> None:
     assert geometric_batch_candidates(8) == (8, 4, 2, 1)
 
     plan = select_stage_execution_plan(
@@ -89,11 +104,39 @@ def test_adaptive_stage_selects_largest_safe_geometric_batch_and_bounds_prefetch
         reusable_pool_fraction=0,
     )
 
-    assert plan.batch_size == 4
+    assert plan.batch_size == 6
     assert plan.prefetch_batches == 2
-    assert plan.predicted_gpu_bytes == 500
-    assert plan.predicted_pinned_host_bytes == 128
+    assert plan.predicted_gpu_bytes == 700
+    assert plan.predicted_pinned_host_bytes == 96
     assert plan.resized
+
+
+def test_throughput_selection_searches_safe_candidates_and_requires_material_gain() -> None:
+    assert throughput_batch_candidates(19, 8) == (19, 9, 8, 4, 2, 1)
+
+    assert select_fastest_observed_batch(
+        ((19, 0.90), (9, 0.80), (8, 0.82), (4, 1.10)),
+        baseline_batch=8,
+    ) == 8
+    assert select_fastest_observed_batch(
+        ((19, 0.70), (9, 0.80), (8, 0.82), (4, 1.10)),
+        baseline_batch=8,
+    ) == 19
+
+
+def test_throughput_revision_persists_measured_batch_without_algorithm_change() -> None:
+    plan = _workflow_plan("sha256:throughput", batch_size=8)
+
+    revised, revision = revise_memory_plan_for_throughput(plan, (("block_forward", 4),))
+
+    assert revised.revision == plan.revision + 1
+    assert revised.stage("block_forward").batch_size == 4
+    assert revised.stage("block_forward").admitted_maximum_batch_size == 8
+    assert revised.stage("block_forward").predicted_gpu_bytes == revised.stage(
+        "block_forward"
+    ).model.peak_gpu_bytes(4)
+    assert revision.action == "select_measured_throughput_batches"
+    assert not revision.algorithm_changed
 
 
 def test_admission_fails_with_minimum_and_indivisible_allocation_diagnostics() -> None:
@@ -198,6 +241,21 @@ def test_memory_plan_artifact_round_trip_reuses_matching_request(tmp_path: Path)
     assert load_memory_plan(tmp_path, "sha256:different") is None
 
 
+def test_measured_throughput_revision_is_durable_for_resume(tmp_path: Path) -> None:
+    plan = _workflow_plan("sha256:durable-throughput", batch_size=8)
+
+    revised, revision, reference = revise_resident_memory_plan_for_throughput(
+        plan,
+        tmp_path,
+        (("block_forward", 4),),
+    )
+
+    assert load_memory_plan(tmp_path, plan.request_hash) == (revised, reference)
+    assert revision.parent_revision == plan.revision
+    journal = (tmp_path / "state" / "memory-plan-revisions.jsonl").read_text(encoding="utf-8")
+    assert "select_measured_throughput_batches" in journal
+
+
 def test_memory_policy_and_resource_limits_validate_and_round_trip() -> None:
     base = RunConfig(ModelConfig("fixture"))
     valid = replace(
@@ -292,7 +350,7 @@ def test_metadata_only_resident_plan_sizes_real_adapter_inventory(tmp_path: Path
     )
     config = replace(
         base,
-        calibration=replace(base.calibration, sample_count=4),
+        calibration=replace(base.calibration, sample_count=9),
         evaluation=replace(base.evaluation, inline_quality=False),
         runtime=replace(
             base.runtime,
@@ -322,23 +380,36 @@ def test_metadata_only_resident_plan_sizes_real_adapter_inventory(tmp_path: Path
         config,
         snapshot,
         tmp_path / "run",
-        (4, 8),
+        (9, 8),
         retain_completed_blocks=False,
         envelope=envelope,
     )
 
     assert plan.executor == "resident"
     assert plan.stage("model_load").model.fixed_gpu_bytes > 0
-    assert plan.stage("block_forward").batch_size == 4
+    assert plan.stage("block_forward").batch_size == 9
     assert plan.stage("calibration").batch_size == 1
     assert plan.peak_temporary_disk_bytes > 0
+
+    retained = build_resident_memory_plan(
+        config,
+        snapshot,
+        tmp_path / "retained-run",
+        (9, 8),
+        retain_completed_blocks=True,
+        envelope=envelope,
+    )
+    assert (
+        retained.stage("post_block_refit").model.fixed_gpu_bytes
+        > plan.stage("post_block_refit").model.fixed_gpu_bytes
+    )
 
 
 def _workflow_plan(request_hash: str, batch_size: int, revision: int = 1) -> ResolvedMemoryPlan:
     envelope = _envelope(gpu_limit=10_000)
     stages = tuple(
         select_stage_execution_plan(
-            _model(name, 1 if name == "model_load" else batch_size),
+            _model(name, 1 if name in {"model_load", "calibration"} else batch_size),
             envelope,
             estimator_error_fraction=0,
             minimum_uncertainty_bytes=0,
@@ -390,6 +461,66 @@ def test_adaptive_plan_maps_concrete_batches_but_keeps_revision_identity_stable(
     assert revised.block_forward_batch_size == 4
     assert revised.tuning_microbatch_size == 4
     assert _resident_config_hash(first) == _resident_config_hash(revised)
+    assert _resident_manifest(first, "resident").config_hash == _resident_manifest(
+        revised,
+        "resident",
+    ).config_hash
+
+
+def test_memory_plan_revision_journal_loads_exact_revision(tmp_path: Path) -> None:
+    journal = tmp_path / "state" / "memory-plan-revisions.jsonl"
+    journal.parent.mkdir(parents=True)
+    revisions = (
+        MemoryPlanRevision(2, 1, "measured throughput autotune", None, "select_batches", False),
+        MemoryPlanRevision(3, 2, "out_of_memory", "tuning", "reduce_batch_size", False, 4, 2),
+    )
+    journal.write_text(
+        "".join(json.dumps(to_dict(revision)) + "\n" for revision in revisions),
+        encoding="utf-8",
+    )
+
+    assert load_memory_plan_revision(tmp_path, 2) == revisions[0]
+    assert load_memory_plan_revision(tmp_path, 3) == revisions[1]
+    assert load_memory_plan_revision(tmp_path, 4) is None
+
+
+def test_block_commit_rechecks_live_disk_pressure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base_plan = _workflow_plan("disk-guard", 4)
+    plan = replace(
+        base_plan,
+        envelope=replace(
+            base_plan.envelope,
+            temporary_disk_reserve_bytes=100,
+        ),
+    )
+    request = ResidentQuantizationRequest(
+        tmp_path / "snapshot",
+        tmp_path,
+        "fixture/model",
+        "revision",
+        ((1, 2),),
+        device="cpu",
+        memory_plan=plan,
+    )
+    teacher = torch.zeros((2, 4), dtype=torch.bfloat16)
+    compressed = torch.zeros_like(teacher)
+    required = teacher.numel() * teacher.element_size() * 2 + 64 * 2**20
+
+    usage = type("DiskUsage", (), {"free": required + 100})()
+    monkeypatch.setattr("nanoquant.resident_quantization.shutil.disk_usage", lambda _path: usage)
+    assert _ensure_block_commit_disk_capacity(request, teacher, compressed) == (
+        required,
+        required + 100,
+        100,
+    )
+
+    usage = type("DiskUsage", (), {"free": required + 99})()
+    monkeypatch.setattr("nanoquant.resident_quantization.shutil.disk_usage", lambda _path: usage)
+    with pytest.raises(ResourceAdmissionError, match="live safe capacity"):
+        _ensure_block_commit_disk_capacity(request, teacher, compressed)
 
 
 def test_workflow_retries_cuda_oom_with_one_persisted_lower_memory_revision(

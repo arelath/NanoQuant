@@ -326,15 +326,11 @@ def resident_request_from_config(
     )
     if executor is ExecutorKind.CPU_OFFLOAD:
         _require(
-            not options.restore_completed_blocks,
-            "runtime.executor",
-            "resolved cpu_offload execution requires restore_completed_blocks=False",
-        )
-        _require(
             not config.evaluation.inline_quality and not config.distillation.enabled,
             "runtime.executor",
             "resolved cpu_offload execution cannot run inline quality or model-level distillation",
         )
+    effective_restore_completed_blocks = options.restore_completed_blocks and executor is ExecutorKind.RESIDENT
     effective_forward_batch = (
         config.runtime.block_forward_batch_size
         if memory_plan is None
@@ -420,8 +416,8 @@ def resident_request_from_config(
         precomputed_calibration=inputs.precomputed_calibration,
         precomputed_objectives=inputs.precomputed_objectives,
         precomputed_plan=inputs.precomputed_plan,
-        restore_completed_blocks=options.restore_completed_blocks,
-        evaluate_inline_quality=config.evaluation.inline_quality and options.restore_completed_blocks,
+        restore_completed_blocks=effective_restore_completed_blocks,
+        evaluate_inline_quality=config.evaluation.inline_quality and effective_restore_completed_blocks,
         defer_layer_loss_snapshots=options.defer_layer_loss_snapshots,
         profiling=config.profiling,
         observability=config.observability,
@@ -469,7 +465,7 @@ def _resolve_workflow_memory_plan(
         inputs.snapshot,
         inputs.output,
         _token_shape(inputs.token_ids),
-        retain_completed_blocks=options.restore_completed_blocks,
+        retain_completed_blocks=config.evaluation.inline_quality and options.restore_completed_blocks,
     )
     return plan, persist_memory_plan(plan, inputs.output)
 

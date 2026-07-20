@@ -55,6 +55,93 @@ def load_pinned_calibration(output: str | Path, reference: ArtifactRef) -> Pinne
     )
 
 
+def materialize_pinned_calibration(
+    source_output: str | Path,
+    destination_output: str | Path,
+    *,
+    sample_count: int,
+    sequence_length: int,
+    seed: int,
+    preparation_id: str | None,
+    tokenizer_identity: str,
+) -> PinnedCalibrationDataset:
+    """Copy validated deterministic tokens into a run-local artifact store."""
+
+    source_output = Path(source_output)
+    receipt = json.loads((source_output / CALIBRATION_RECEIPT_NAME).read_text(encoding="utf-8"))
+    if (
+        receipt.get("sample_count") != sample_count
+        or receipt.get("sequence_length") != sequence_length
+        or receipt.get("seed") != seed
+    ):
+        raise ValueError("source calibration receipt does not match the requested deterministic protocol")
+    source_reference = ArtifactRef(
+        "calibration-dataset-manifest",
+        str(receipt["artifact_id"]),
+        1,
+    )
+    source = load_pinned_calibration(source_output, source_reference)
+    if tuple(source.input_ids.shape) != (sample_count, sequence_length):
+        raise ValueError("source calibration token tensor has the wrong shape")
+    if tuple(source.attention_mask.shape) != (sample_count, sequence_length):
+        raise ValueError("source calibration attention mask has the wrong shape")
+
+    destination_output = Path(destination_output)
+    artifacts = LocalArtifactStore(destination_output / "artifacts")
+    tensors = LocalTensorStore(artifacts)
+    refs = tensors.put(
+        "calibration-token-dataset",
+        {
+            "input_ids": source.input_ids,
+            "attention_mask": source.attention_mask,
+        },
+    )
+    manifest = {
+        "schema_version": 1,
+        "producer": "run-local-calibration-materialization-v1",
+        "sample_count": sample_count,
+        "sequence_length": sequence_length,
+        "seed": seed,
+        "valid_token_count": int(source.attention_mask.sum()),
+        "fingerprint": source.fingerprint,
+        "source_revisions": dict(source.source_revisions),
+        "tensor_artifact": refs["input_ids"].artifact.artifact_id,
+        "materialized_from": str(source_output.resolve()),
+        "source_artifact": source.reference.artifact_id,
+        "tokenizer_identity": tokenizer_identity,
+    }
+    with artifacts.begin_write("calibration-dataset-manifest") as writer:
+        (writer.path / "manifest.json").write_text(
+            json.dumps(manifest, sort_keys=True, indent=2),
+            encoding="utf-8",
+        )
+        descriptor = writer.commit()
+    reference = ArtifactRef("calibration-dataset-manifest", descriptor.artifact_id, 1)
+    atomic_write_json(
+        destination_output / CALIBRATION_RECEIPT_NAME,
+        {
+            "schema_version": 1,
+            "sample_count": sample_count,
+            "sequence_length": sequence_length,
+            "seed": seed,
+            "preparation_id": preparation_id,
+            "artifact_id": reference.artifact_id,
+            "fingerprint": source.fingerprint,
+            "source_revisions": dict(source.source_revisions),
+            "materialized_from": str(source_output.resolve()),
+            "source_artifact": source.reference.artifact_id,
+            "tokenizer_identity": tokenizer_identity,
+        },
+    )
+    return PinnedCalibrationDataset(
+        reference,
+        source.input_ids,
+        source.attention_mask,
+        source.fingerprint,
+        source.source_revisions,
+    )
+
+
 def _chat_tokens(tokenizer: Any, messages: list[dict[str, object]]) -> list[int]:
     ids = tokenizer.apply_chat_template(
         messages,

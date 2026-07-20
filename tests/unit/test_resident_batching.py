@@ -4,16 +4,35 @@ import pytest
 import torch
 from torch import nn
 
+import nanoquant.resident_quantization as resident_quantization_module
 from nanoquant.config.schema import ProfilingConfig, ProfilingLevel
 from nanoquant.infrastructure.profiling import Profiler
 from nanoquant.resident_quantization import (
     _block_loss,
     _place_completed_decoder_block,
+    _release_throughput_probe_caches,
     _release_uncompleted_decoder_blocks,
     _run_block_batched,
     _run_quality_logits_batched,
     _streamed_quality_metrics,
 )
+
+
+def test_throughput_probe_cache_release_clears_device_and_pinned_host_caches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: calls.append("device"))
+    monkeypatch.setattr(
+        resident_quantization_module,
+        "release_cached_host_memory",
+        lambda: calls.append("host") or True,
+    )
+
+    _release_throughput_probe_caches("cpu")
+    _release_throughput_probe_caches("cuda:0")
+
+    assert calls == ["device", "host"]
 
 
 class _BlockAdapter:

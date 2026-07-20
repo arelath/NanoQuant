@@ -1,3 +1,4 @@
+import json
 import random
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,6 +13,8 @@ from nanoquant.infrastructure.hf_calibration_dataset import (
     _pack_chat_records,
     _slice_wikitext,
     load_or_prepare_calibration,
+    load_pinned_calibration,
+    materialize_pinned_calibration,
 )
 
 
@@ -123,3 +126,41 @@ def test_run_local_calibration_regenerates_when_run_identity_changes(
 
     assert regenerated is second
     assert len(prepared) == 2
+
+
+def test_validated_calibration_can_be_materialized_into_a_run_local_store(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    generated = _fixture_calibration()
+    (source / "calibration-input.json").write_text(
+        json.dumps(
+            {
+                "sample_count": 3,
+                "sequence_length": 4,
+                "seed": 7,
+                "artifact_id": generated.reference.artifact_id,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(calibration_module, "load_pinned_calibration", lambda *_args: generated)
+
+    materialized = materialize_pinned_calibration(
+        source,
+        tmp_path / "destination",
+        sample_count=3,
+        sequence_length=4,
+        seed=7,
+        preparation_id="sha256:config",
+        tokenizer_identity="sha256:tokenizer",
+    )
+    loaded = load_pinned_calibration(tmp_path / "destination", materialized.reference)
+    receipt = json.loads((tmp_path / "destination" / "calibration-input.json").read_text(encoding="utf-8"))
+
+    assert torch.equal(loaded.input_ids, generated.input_ids)
+    assert torch.equal(loaded.attention_mask, generated.attention_mask)
+    assert receipt["materialized_from"] == str(source.resolve())
+    assert receipt["tokenizer_identity"] == "sha256:tokenizer"
