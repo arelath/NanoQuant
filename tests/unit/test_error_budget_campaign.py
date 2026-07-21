@@ -186,6 +186,8 @@ def test_campaign_improvement_gate_reports_absolute_and_relative_kl() -> None:
     }
     assert _material_improvement_passed(gate)
     assert not _material_improvement_passed(_improvement_gate(2.0, 1.99))
+    assert not _material_improvement_passed({**gate, "upper_relative_delta": -0.005})
+    assert _material_improvement_passed({**gate, "upper_relative_delta": -0.02})
 
     with pytest.raises(ValueError, match="threshold"):
         _material_improvement_passed(gate, 0)

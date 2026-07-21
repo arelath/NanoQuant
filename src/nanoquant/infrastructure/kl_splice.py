@@ -11,7 +11,11 @@ from typing import Any, Literal, cast
 import torch
 from torch import nn
 
-from nanoquant.application.kl_budget import KlBudgetArmResult, causal_kl_nll_from_logits
+from nanoquant.application.kl_budget import (
+    KlBudgetArmResult,
+    KlSequenceResult,
+    causal_kl_nll_per_sequence_from_logits,
+)
 from nanoquant.application.layers import (
     FrozenReferenceLinear,
     LayerFreezer,
@@ -36,14 +40,14 @@ class SpliceReconstruction:
     layer: LayerId
     weight: torch.Tensor
     bias: torch.Tensor | None
-    weighted_squared_error: float
+    weighted_normalized_squared_error: float
 
 
 @dataclass(frozen=True, slots=True)
 class SpliceReconstructionSet:
     layers: tuple[SpliceReconstruction, ...]
     unit_members: tuple[tuple[str, tuple[LayerId, ...]], ...]
-    unit_weighted_squared_errors: tuple[tuple[str, float], ...]
+    unit_weighted_normalized_squared_errors: tuple[tuple[str, float], ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,12 +92,12 @@ def collect_splice_reconstructions(loaded: LoadedFrozenModel) -> SpliceReconstru
                     layer_result.layer,
                     module.dense_weight().detach().cpu().clone(),
                     None if module.bias is None else module.bias.detach().cpu().clone(),
-                    layer_result.final_reconstruction.export_weighted_error,
+                    layer_result.final_reconstruction.export_weighted_normalized_error,
                 )
             )
             unit_id = f"{layer_result.layer.block.index}:{layer_result.layer.path}"
             unit_members.append((unit_id, (layer_result.layer,)))
-            unit_errors.append((unit_id, layer_result.final_reconstruction.export_weighted_error))
+            unit_errors.append((unit_id, layer_result.final_reconstruction.export_weighted_normalized_error))
         for group_result in block_result.shared_input_groups:
             members = tuple(member.layer for member in group_result.frozen_state.members)
             metrics = dict(group_result.member_reconstruction)
@@ -112,12 +116,12 @@ def collect_splice_reconstructions(loaded: LoadedFrozenModel) -> SpliceReconstru
                         member_slice.layer,
                         owner.dense_weight()[member_slice.row_start : member_slice.row_end].detach().cpu().clone(),
                         bias,
-                        metrics[member_slice.layer].export_weighted_error,
+                        metrics[member_slice.layer].export_weighted_normalized_error,
                     )
                 )
             unit_id = f"{group_result.block.index}:{group_result.name}"
             unit_members.append((unit_id, members))
-            unit_errors.append((unit_id, group_result.final_reconstruction.export_weighted_error))
+            unit_errors.append((unit_id, group_result.final_reconstruction.export_weighted_normalized_error))
     return SpliceReconstructionSet(tuple(reconstructions), tuple(unit_members), tuple(unit_errors))
 
 
@@ -222,12 +226,12 @@ def load_splice_reconstructions_from_run(
                         layer_result.layer,
                         frozen.module.dense_weight().detach().cpu().clone(),
                         None if frozen.module.bias is None else frozen.module.bias.detach().cpu().clone(),
-                        layer_result.final_reconstruction.export_weighted_error,
+                        layer_result.final_reconstruction.export_weighted_normalized_error,
                     )
                 )
                 unit_id = f"{layer_result.layer.block.index}:{layer_result.layer.path}"
                 unit_members.append((unit_id, (layer_result.layer,)))
-                unit_errors.append((unit_id, layer_result.final_reconstruction.export_weighted_error))
+                unit_errors.append((unit_id, layer_result.final_reconstruction.export_weighted_normalized_error))
                 del frozen
             for group_result in block_result.shared_input_groups:
                 group_state = group_states.get(group_result.name)
@@ -254,13 +258,13 @@ def load_splice_reconstructions_from_run(
                             member.layer,
                             dense[member.row_start : member.row_end].detach().cpu().clone(),
                             bias,
-                            metrics[member.layer].export_weighted_error,
+                            metrics[member.layer].export_weighted_normalized_error,
                         )
                     )
                 members = tuple(member.layer for member in group_state.members)
                 unit_id = f"{group_state.block.index}:{group_state.name}"
                 unit_members.append((unit_id, members))
-                unit_errors.append((unit_id, group_result.final_reconstruction.export_weighted_error))
+                unit_errors.append((unit_id, group_result.final_reconstruction.export_weighted_normalized_error))
                 del dense, frozen_group
             if device.startswith("cuda"):
                 torch.cuda.empty_cache()
@@ -317,7 +321,7 @@ class DenseKlSpliceEvaluator:
         self._blocks = _decoder_layers(teacher)
         self._by_layer = {item.layer: item for item in reconstructions.layers}
         self._unit_members = dict(reconstructions.unit_members)
-        self._unit_errors = dict(reconstructions.unit_weighted_squared_errors)
+        self._unit_normalized_squared_errors = dict(reconstructions.unit_weighted_normalized_squared_errors)
         self._originals: dict[LayerId, _OriginalLinear] = {}
         for layer in self._by_layer:
             module = _module_at_path(self._blocks[layer.block.index], layer.path)
@@ -471,35 +475,30 @@ class DenseKlSpliceEvaluator:
                     )
                 )
 
-    def _evaluate_cached(self, layers: tuple[LayerId, ...]) -> tuple[float, float, int]:
+    def _evaluate_cached(self, layers: tuple[LayerId, ...]) -> tuple[KlSequenceResult, ...]:
         self._install(layers)
-        total_nll = 0.0
-        total_kl = 0.0
-        total_tokens = 0
+        sequences: list[KlSequenceResult] = []
         try:
             with torch.no_grad():
                 for batch_index, start in enumerate(range(0, self.token_ids.shape[0], self.batch_size)):
                     batch = self.token_ids[start : start + self.batch_size].to(self.device)
                     logits = cast(Any, self.teacher)(input_ids=batch, use_cache=False).logits
-                    nll, kl, count = causal_kl_nll_from_logits(
-                        self._teacher_log_probs[batch_index].to(self.device),
-                        logits,
-                        batch,
-                        token_chunk_size=self.token_chunk_size,
-                        teacher_is_log_probs=True,
+                    sequences.extend(
+                        causal_kl_nll_per_sequence_from_logits(
+                            self._teacher_log_probs[batch_index].to(self.device),
+                            logits,
+                            batch,
+                            token_chunk_size=self.token_chunk_size,
+                            teacher_is_log_probs=True,
+                        )
                     )
-                    total_nll += nll * count
-                    total_kl += kl * count
-                    total_tokens += count
                     del logits
         finally:
             self._restore(layers)
-        return total_nll, total_kl, total_tokens
+        return tuple(sequences)
 
-    def _evaluate_on_the_fly(self, layers: tuple[LayerId, ...]) -> tuple[float, float, int]:
-        total_nll = 0.0
-        total_kl = 0.0
-        total_tokens = 0
+    def _evaluate_on_the_fly(self, layers: tuple[LayerId, ...]) -> tuple[KlSequenceResult, ...]:
+        sequences: list[KlSequenceResult] = []
         installed = False
         try:
             with torch.no_grad():
@@ -514,44 +513,45 @@ class DenseKlSpliceEvaluator:
                     teacher_log_probs = torch.log_softmax(teacher_logits.float(), dim=-1).to(
                         self.teacher_cache_dtype
                     )
-                    nll, kl, count = causal_kl_nll_from_logits(
-                        teacher_log_probs,
-                        student_logits,
-                        batch,
-                        token_chunk_size=self.token_chunk_size,
-                        teacher_is_log_probs=True,
+                    sequences.extend(
+                        causal_kl_nll_per_sequence_from_logits(
+                            teacher_log_probs,
+                            student_logits,
+                            batch,
+                            token_chunk_size=self.token_chunk_size,
+                            teacher_is_log_probs=True,
+                        )
                     )
-                    total_nll += nll * count
-                    total_kl += kl * count
-                    total_tokens += count
                     del teacher_logits, teacher_log_probs, student_logits
         finally:
             if installed:
                 self._restore(layers)
-        return total_nll, total_kl, total_tokens
+        return tuple(sequences)
 
     def __call__(self, arm: str) -> KlBudgetArmResult:
         layers = self._selected_layers(arm)
         if self.teacher_cache_mode == "cpu":
             if not self._teacher_log_probs:
                 self.cache_teacher()
-            total_nll, total_kl, total_tokens = self._evaluate_cached(layers)
+            sequences = self._evaluate_cached(layers)
         else:
             if math.isnan(self._baseline_nll):
                 self._baseline_nll = self._measure_baseline_nll()
-            total_nll, total_kl, total_tokens = self._evaluate_on_the_fly(layers)
+            sequences = self._evaluate_on_the_fly(layers)
         unit_id = arm[5:] if arm.startswith("unit:") else None
-        squared_error = (
-            self._unit_errors[unit_id]
-            if unit_id is not None
-            else math.fsum(self._by_layer[layer].weighted_squared_error for layer in layers)
+        normalized_squared_error = (
+            self._unit_normalized_squared_errors[unit_id] if unit_id is not None else None
         )
+        total_tokens = sum(sequence.token_count for sequence in sequences)
+        total_nll = math.fsum(sequence.negative_log_likelihood * sequence.token_count for sequence in sequences)
+        total_kl = math.fsum(sequence.kl_nats_per_token * sequence.token_count for sequence in sequences)
         return KlBudgetArmResult(
             arm,
             total_nll / total_tokens,
             max(0.0, total_kl / total_tokens),
             total_tokens,
-            math.sqrt(max(squared_error, 1e-30)),
+            normalized_squared_error,
+            sequences,
         )
 
 

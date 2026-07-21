@@ -202,7 +202,7 @@ from nanoquant.infrastructure.tuning_checkpoint import (
 from nanoquant.ports.event_sink import EventSink
 from nanoquant.ports.model_adapter import ModelAdapter
 
-RESIDENT_ALGORITHM_VERSION = 45
+RESIDENT_ALGORITHM_VERSION = 46
 _THROUGHPUT_PROBE_REPETITIONS = 5
 
 
@@ -2067,6 +2067,7 @@ class _RankProbeEvidence:
     response_curve: RankResponseCurveConfig
     raw_squared_error: float
     normalized_squared_error: float
+    weighted_normalized_squared_error: float
     relative_frobenius_error: float
     member_squared_errors: tuple[float, ...]
     member_normalized_squared_errors: tuple[float, ...]
@@ -2075,6 +2076,20 @@ class _RankProbeEvidence:
     logical_seed: int
     wall_seconds: float
     peak_workspace_bytes: int
+
+    def __post_init__(self) -> None:
+        if self.schema_version != 2:
+            raise ValueError("unsupported reconstruction rank-probe evidence schema")
+        if any(
+            not math.isfinite(value) or value <= 0
+            for value in (
+                self.raw_squared_error,
+                self.normalized_squared_error,
+                self.weighted_normalized_squared_error,
+                self.relative_frobenius_error,
+            )
+        ):
+            raise ValueError("reconstruction rank-probe errors must be finite and positive")
 
 
 def _rank_probe_units(
@@ -2316,6 +2331,8 @@ def _run_reconstruction_rank_probes(
             member_normalized: list[float] = []
             member_energies: list[float] = []
             member_norms: list[float] = []
+            weighted_error = 0.0
+            weighted_target_norm = 0.0
             row = 0
             for weight, input_importance, output_importance in zip(
                 weights,
@@ -2330,12 +2347,17 @@ def _run_reconstruction_rank_probes(
                 member_errors.append(member_error)
                 member_normalized.append(member_error / max(member_norm, 1e-30))
                 member_norms.append(member_norm)
+                member_weights = (
+                    output_importance.float()[:, None].clamp_min(1e-12)
+                    * input_importance.float()[None, :].clamp_min(1e-12)
+                )
+                weighted_error += float((member_difference.square() * member_weights).sum())
+                weighted_target_norm += float((weight.float().square() * member_weights).sum())
                 member_energies.append(
                     float(
                         (
                             weight.float().square()
-                            * output_importance.float()[:, None].clamp_min(1e-12)
-                            * input_importance.float()[None, :].clamp_min(1e-12)
+                            * member_weights
                         )
                         .mean()
                         .sqrt()
@@ -2344,7 +2366,7 @@ def _run_reconstruction_rank_probes(
                 row += rows
             peak = int(torch.cuda.max_memory_allocated(request.device)) if request.device.startswith("cuda") else 0
             evidence = _RankProbeEvidence(
-                1,
+                2,
                 probe_plan,
                 unit_id,
                 member_layers[0].block.index,
@@ -2360,6 +2382,7 @@ def _run_reconstruction_rank_probes(
                 curve,
                 raw_error,
                 raw_error / max(target_norm, 1e-30),
+                weighted_error / max(weighted_target_norm, 1e-30),
                 math.sqrt(raw_error / max(target_norm, 1e-30)),
                 tuple(member_errors),
                 tuple(member_normalized),
@@ -2482,7 +2505,11 @@ def _run_reconstruction_rank_probes(
                 out_features,
                 in_features,
                 evidence.baseline_rank,
-                evidence.raw_squared_error,
+                (
+                    evidence.weighted_normalized_squared_error
+                    if kl_sensitivity
+                    else evidence.raw_squared_error
+                ),
                 unit_sensitivity,
                 bool(protected_members),
                 evidence.response_curve.calibrated_rank_floor_fraction,
@@ -2582,8 +2609,8 @@ def _run_reconstruction_rank_probes(
         for unit_id, _unit in units
     )
     profile_payload = {
-        "schema_version": 1,
-        "producer": {"name": "reconstruction-rank-planner", "version": "1"},
+        "schema_version": 2,
+        "producer": {"name": "reconstruction-rank-planner", "version": "2"},
         "probe_plan": to_dict(probe_plan),
         "unit_results": [to_dict(persisted[unit_id][0]) for unit_id, _unit in units],
         "decisions": to_dict(decisions),
@@ -2596,6 +2623,9 @@ def _run_reconstruction_rank_probes(
         "rank_trust_region": rank_trust_region,
         "importance": {
             "sensitivity_source": "kl_budget_profile" if kl_sensitivity else "activation_weight_proxy",
+            "allocation_error_measure": (
+                "weighted_normalized_squared_error" if kl_sensitivity else "raw_squared_error"
+            ),
             "policy": to_dict(importance),
             "edge_blocks": sorted(edge_blocks),
             "member_multipliers": {

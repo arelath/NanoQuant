@@ -366,7 +366,7 @@ def test_load_splice_reconstructions_selects_committed_and_tuned_states(tmp_path
             selected.reconstructions.layers[index].weight,
             expected_tuned.module.dense_weight(),
         )
-        assert static.reconstructions.layers[index].weighted_squared_error == pytest.approx(0.25)
+        assert static.reconstructions.layers[index].weighted_normalized_squared_error == pytest.approx(0.25)
 
     with pytest.raises(ValueError, match="different model config"):
         load_splice_reconstructions_from_run(

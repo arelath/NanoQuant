@@ -95,8 +95,10 @@ Mechanics, copied from the validated session script:
 - Persist as an artifact keyed by (model revision, recipe hash, dataset slice) so planning can reject a
   stale profile — same invalidation rule as the Docs/30 probe profile.
 
-Also computed per arm while the weights are spliced (free): the unit's weighted reconstruction error
-`E_w` from the run record, so the profile stores the pair `(KL_u, E_w,u)` that D2 consumes.
+Also computed per unit arm while the weights are spliced (free): the unit's normalized weighted
+squared reconstruction error `E²_w` from the run record, so the profile stores the pair
+`(KL_u, E²_w,u)` that D2 consumes. The persisted field must be explicitly dimensionless; an absolute
+weighted-error energy is not interchangeable with this quantity.
 
 ### 2.3 Placement
 
@@ -119,7 +121,9 @@ application layer feeds it:
 - Today, [application/planning.py](../src/nanoquant/application/planning.py) line 129 derives
   `sensitivity = input_summary.mean × output_summary.mean` — an activation-magnitude proxy. Finding F/G
   showed this misranks units end-to-end.
-- New source: `s_u = KL_u / E_w,u²` from the D1 profile. The quadratic conversion is exact under the
+- New source: `s_u = KL_u / E²_w,u` from the D1 profile, where `E²_w` is the normalized weighted
+  squared-error energy (not the absolute energy and not an amplitude that must be squared again).
+  The quadratic conversion is exact under the
   small-error expansion (KL is locally quadratic in the layer perturbation) and was validated by the
   sub-additivity measurement; at the current large-error operating point it is approximate, so the
   profile must be re-measured after each phase lands (cheap, per §2.2).

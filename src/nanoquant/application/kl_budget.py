@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import random
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -15,7 +16,8 @@ from nanoquant.config.codec import canonical_json, from_dict, to_dict
 from nanoquant.domain.models import ArtifactRef, ArtifactTypes
 from nanoquant.ports.artifact_store import ArtifactStore
 
-KL_BUDGET_EVALUATOR_VERSION = 2
+KL_BUDGET_EVALUATOR_VERSION = 3
+KL_BUDGET_PROFILE_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,12 +49,28 @@ class KlBudgetProvenance:
 
 
 @dataclass(frozen=True, slots=True)
+class KlSequenceResult:
+    negative_log_likelihood: float
+    kl_nats_per_token: float
+    token_count: int
+
+    def __post_init__(self) -> None:
+        if self.token_count <= 0:
+            raise ValueError("KL sequence result requires a positive token count")
+        if not math.isfinite(self.negative_log_likelihood) or not math.isfinite(self.kl_nats_per_token):
+            raise ValueError("KL sequence metrics must be finite")
+        if self.kl_nats_per_token < 0:
+            raise ValueError("KL sequence KL must not be negative")
+
+
+@dataclass(frozen=True, slots=True)
 class KlBudgetArmResult:
     arm: str
     negative_log_likelihood: float
     kl_nats_per_token: float
     token_count: int
-    weighted_error: float | None = None
+    weighted_normalized_squared_error: float | None = None
+    sequences: tuple[KlSequenceResult, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.arm or self.token_count <= 0:
@@ -61,10 +79,19 @@ class KlBudgetArmResult:
             raise ValueError("KL budget arm metrics must be finite")
         if self.kl_nats_per_token < 0:
             raise ValueError("KL budget arm KL must not be negative")
-        if self.weighted_error is not None and (
-            not math.isfinite(self.weighted_error) or self.weighted_error <= 0
+        if self.weighted_normalized_squared_error is not None and (
+            not math.isfinite(self.weighted_normalized_squared_error)
+            or self.weighted_normalized_squared_error <= 0
         ):
-            raise ValueError("KL budget weighted error must be finite and positive")
+            raise ValueError("KL budget normalized weighted squared error must be finite and positive")
+        if not self.sequences or math.fsum(item.token_count for item in self.sequences) != self.token_count:
+            raise ValueError("KL budget arm sequence results must exactly cover its tokens")
+        sequence_nll = math.fsum(item.negative_log_likelihood * item.token_count for item in self.sequences)
+        sequence_kl = math.fsum(item.kl_nats_per_token * item.token_count for item in self.sequences)
+        if not math.isclose(sequence_nll / self.token_count, self.negative_log_likelihood, rel_tol=1e-9, abs_tol=1e-9):
+            raise ValueError("KL budget arm NLL differs from its sequence results")
+        if not math.isclose(sequence_kl / self.token_count, self.kl_nats_per_token, rel_tol=1e-9, abs_tol=1e-9):
+            raise ValueError("KL budget arm KL differs from its sequence results")
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,7 +103,7 @@ class KlBudgetProfile:
     complete: bool
 
     def __post_init__(self) -> None:
-        if self.schema_version != 1:
+        if self.schema_version != KL_BUDGET_PROFILE_SCHEMA_VERSION:
             raise ValueError("unsupported KL budget profile schema")
         if not math.isfinite(self.baseline_negative_log_likelihood):
             raise ValueError("KL budget baseline NLL must be finite")
@@ -142,7 +169,7 @@ class KlBudgetWorkflow:
                 raise ValueError("KL arm evaluator returned a different arm identity")
             completed[arm] = result
             partial = KlBudgetProfile(
-                1,
+                KL_BUDGET_PROFILE_SCHEMA_VERSION,
                 request.provenance,
                 baseline_negative_log_likelihood,
                 tuple(completed[name] for name in request.arms if name in completed),
@@ -151,7 +178,7 @@ class KlBudgetWorkflow:
             if checkpoint is not None:
                 checkpoint(partial)
         return KlBudgetProfile(
-            1,
+            KL_BUDGET_PROFILE_SCHEMA_VERSION,
             request.provenance,
             baseline_negative_log_likelihood,
             tuple(completed[name] for name in request.arms),
@@ -202,15 +229,108 @@ def causal_kl_nll_from_logits(
     return total_nll / count, total_kl / count, count
 
 
+def causal_kl_nll_per_sequence_from_logits(
+    teacher_logits: torch.Tensor,
+    student_logits: torch.Tensor,
+    token_ids: torch.Tensor,
+    *,
+    attention_mask: torch.Tensor | None = None,
+    token_chunk_size: int = 128,
+    teacher_is_log_probs: bool = False,
+) -> tuple[KlSequenceResult, ...]:
+    """Reduce each sequence independently so profile uncertainty remains recoverable."""
+
+    if teacher_logits.ndim != 3:
+        raise ValueError("KL per-sequence reduction requires rank-3 logits")
+    results = []
+    for index in range(teacher_logits.shape[0]):
+        mask = None if attention_mask is None else attention_mask[index : index + 1]
+        nll, kl, count = causal_kl_nll_from_logits(
+            teacher_logits[index : index + 1],
+            student_logits[index : index + 1],
+            token_ids[index : index + 1],
+            attention_mask=mask,
+            token_chunk_size=token_chunk_size,
+            teacher_is_log_probs=teacher_is_log_probs,
+        )
+        results.append(KlSequenceResult(nll, kl, count))
+    return tuple(results)
+
+
+@dataclass(frozen=True, slots=True)
+class KlBootstrapInterval:
+    point_delta: float
+    lower_delta: float
+    upper_delta: float
+    confidence: float
+    resamples: int
+
+
+def paired_bootstrap_kl_delta(
+    before: KlBudgetArmResult,
+    after: KlBudgetArmResult,
+    *,
+    confidence: float = 0.95,
+    resamples: int = 10_000,
+    seed: int = 0,
+) -> KlBootstrapInterval:
+    """Return a deterministic paired sequence-bootstrap interval for ``after - before`` KL."""
+
+    if not 0 < confidence < 1 or resamples <= 0:
+        raise ValueError("KL bootstrap confidence and resample count are invalid")
+    if len(before.sequences) != len(after.sequences) or tuple(
+        item.token_count for item in before.sequences
+    ) != tuple(item.token_count for item in after.sequences):
+        raise ValueError("paired KL bootstrap requires the same ordered sequence inventory")
+    count = len(before.sequences)
+    generator = random.Random(seed)
+    deltas = []
+    for _ in range(resamples):
+        indices = tuple(generator.randrange(count) for _index in range(count))
+        tokens = math.fsum(before.sequences[index].token_count for index in indices)
+        before_kl = math.fsum(
+            before.sequences[index].kl_nats_per_token * before.sequences[index].token_count
+            for index in indices
+        ) / tokens
+        after_kl = math.fsum(
+            after.sequences[index].kl_nats_per_token * after.sequences[index].token_count
+            for index in indices
+        ) / tokens
+        deltas.append(after_kl - before_kl)
+    deltas.sort()
+
+    def quantile(probability: float) -> float:
+        position = probability * (len(deltas) - 1)
+        lower = math.floor(position)
+        upper = math.ceil(position)
+        if lower == upper:
+            return deltas[lower]
+        fraction = position - lower
+        return deltas[lower] * (1 - fraction) + deltas[upper] * fraction
+
+    tail = (1 - confidence) / 2
+    return KlBootstrapInterval(
+        after.kl_nats_per_token - before.kl_nats_per_token,
+        quantile(tail),
+        quantile(1 - tail),
+        confidence,
+        resamples,
+    )
+
+
 def persist_kl_budget_profile(profile: KlBudgetProfile, artifacts: ArtifactStore) -> PersistedKlBudgetProfile:
-    with artifacts.begin_write(ArtifactTypes.KL_BUDGET_PROFILE) as writer:
+    with artifacts.begin_write(ArtifactTypes.KL_BUDGET_PROFILE, KL_BUDGET_PROFILE_SCHEMA_VERSION) as writer:
         (writer.path / "kl-budget-profile.json").write_text(
             json.dumps(to_dict(profile), sort_keys=True, indent=2),
             encoding="utf-8",
         )
         descriptor = writer.commit()
     return PersistedKlBudgetProfile(
-        ArtifactRef(ArtifactTypes.KL_BUDGET_PROFILE, descriptor.artifact_id, 1),
+        ArtifactRef(
+            ArtifactTypes.KL_BUDGET_PROFILE,
+            descriptor.artifact_id,
+            KL_BUDGET_PROFILE_SCHEMA_VERSION,
+        ),
         profile,
     )
 
@@ -219,6 +339,8 @@ def load_kl_budget_profile(path: str | Path) -> KlBudgetProfile:
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise ValueError("KL budget profile payload must be an object")
+    if payload.get("schema_version") != KL_BUDGET_PROFILE_SCHEMA_VERSION:
+        raise ValueError("unsupported KL budget profile schema")
     return from_dict(KlBudgetProfile, payload, path="kl_budget_profile")
 
 
@@ -256,9 +378,9 @@ def kl_calibrated_sensitivities(
     for unit_id in unit_ids:
         exact = arms.get(f"unit:{unit_id}") if use_exact_unit_arms else None
         if exact is not None:
-            if exact.weighted_error is None:
-                raise ValueError(f"KL unit arm is missing weighted error: {unit_id}")
-            sensitivity = exact.kl_nats_per_token / (exact.weighted_error**2)
+            if exact.weighted_normalized_squared_error is None:
+                raise ValueError(f"KL unit arm is missing normalized weighted squared error: {unit_id}")
+            sensitivity = exact.kl_nats_per_token / exact.weighted_normalized_squared_error
         else:
             try:
                 block, unit_type = unit_id.split(":", 1)
@@ -279,15 +401,20 @@ def kl_calibrated_sensitivities(
 
 __all__ = [
     "KL_BUDGET_EVALUATOR_VERSION",
+    "KL_BUDGET_PROFILE_SCHEMA_VERSION",
+    "KlBootstrapInterval",
     "KlBudgetArmResult",
     "KlBudgetProfile",
     "KlBudgetProvenance",
     "KlBudgetRequest",
     "KlBudgetWorkflow",
+    "KlSequenceResult",
     "PersistedKlBudgetProfile",
     "causal_kl_nll_from_logits",
+    "causal_kl_nll_per_sequence_from_logits",
     "kl_calibrated_sensitivities",
     "load_kl_budget_profile",
     "persist_kl_budget_profile",
+    "paired_bootstrap_kl_delta",
     "validate_kl_budget_profile",
 ]

@@ -14,7 +14,11 @@ from typing import Any, cast
 
 import _paths  # noqa: F401
 
-from nanoquant.application.kl_budget import KL_BUDGET_EVALUATOR_VERSION
+from nanoquant.application.kl_budget import (
+    KL_BUDGET_EVALUATOR_VERSION,
+    load_kl_budget_profile,
+    paired_bootstrap_kl_delta,
+)
 from nanoquant.config.schema import KlSensitivityGranularity
 from nanoquant.infrastructure.io_utils import atomic_write_json
 from nanoquant.infrastructure.runtime_export import load_frozen_run_rank_inventory
@@ -149,13 +153,43 @@ def _improvement_gate(before: float, after: float) -> dict[str, float | bool]:
     }
 
 
+def _profile_improvement_gate(before_profile: Path, after_profile: Path, arm: str) -> dict[str, float | bool]:
+    before = load_kl_budget_profile(before_profile / "kl-budget-profile.json")
+    after = load_kl_budget_profile(after_profile / "kl-budget-profile.json")
+    if (
+        before.provenance.model_source != after.provenance.model_source
+        or before.provenance.model_revision != after.provenance.model_revision
+        or before.provenance.dataset_fingerprint != after.provenance.dataset_fingerprint
+        or before.provenance.dataset_slice_hash != after.provenance.dataset_slice_hash
+    ):
+        raise ValueError("paired KL gate profiles do not share model and dataset identities")
+    before_arm = next((result for result in before.arms if result.arm == arm), None)
+    after_arm = next((result for result in after.arms if result.arm == arm), None)
+    if before_arm is None or after_arm is None:
+        raise ValueError(f"paired KL gate profiles do not both contain {arm!r}")
+    interval = paired_bootstrap_kl_delta(before_arm, after_arm)
+    gate = _improvement_gate(before_arm.kl_nats_per_token, after_arm.kl_nats_per_token)
+    gate.update(
+        {
+            "bootstrap_confidence": interval.confidence,
+            "bootstrap_resamples": float(interval.resamples),
+            "lower_delta": interval.lower_delta,
+            "upper_delta": interval.upper_delta,
+            "lower_relative_delta": interval.lower_delta / before_arm.kl_nats_per_token,
+            "upper_relative_delta": interval.upper_delta / before_arm.kl_nats_per_token,
+        }
+    )
+    return gate
+
+
 def _material_improvement_passed(
     gate: dict[str, float | bool],
     minimum_relative_improvement: float = MIN_MATERIAL_RELATIVE_KL_IMPROVEMENT,
 ) -> bool:
     if not 0 < minimum_relative_improvement < 1:
         raise ValueError("material KL improvement threshold must be between zero and one")
-    return bool(gate["improved"]) and float(gate["relative_delta"]) <= -minimum_relative_improvement
+    measured_delta = float(gate.get("upper_relative_delta", gate["relative_delta"]))
+    return bool(gate["improved"]) and measured_delta <= -minimum_relative_improvement
 
 
 def _phase_kl(phase_kls: dict[str, dict[str, object]], phase: str, arm: str) -> float:
@@ -575,10 +609,7 @@ class Campaign:
                 self.baseline_rank_inventory,
                 _rank_inventory_for_run(run, candidate_summary),
             )
-            kl_gate = _improvement_gate(
-                _arm_kl(baseline_profile, "full"),
-                _arm_kl(profile, "full"),
-            )
+            kl_gate = _profile_improvement_gate(baseline_profile, profile, "full")
             rank_gate = _rank_redistribution_gate(redistribution)
             return {
                 "run": str(run),

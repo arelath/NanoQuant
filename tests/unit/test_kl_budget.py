@@ -13,9 +13,12 @@ from nanoquant.application.kl_budget import (
     KlBudgetProvenance,
     KlBudgetRequest,
     KlBudgetWorkflow,
+    KlSequenceResult,
     causal_kl_nll_from_logits,
+    causal_kl_nll_per_sequence_from_logits,
     kl_calibrated_sensitivities,
     load_kl_budget_profile,
+    paired_bootstrap_kl_delta,
     validate_kl_budget_profile,
 )
 from nanoquant.config.codec import to_dict
@@ -34,6 +37,24 @@ from nanoquant.infrastructure.kl_teacher_cache import (
 
 def _provenance() -> KlBudgetProvenance:
     return KlBudgetProvenance("model", "revision", "recipe", "dataset", "slice", "run")
+
+
+def _arm(
+    name: str,
+    nll: float,
+    kl: float,
+    *,
+    normalized_squared_error: float | None = None,
+    token_count: int = 10,
+) -> KlBudgetArmResult:
+    return KlBudgetArmResult(
+        name,
+        nll,
+        kl,
+        token_count,
+        normalized_squared_error,
+        (KlSequenceResult(nll, kl, token_count),),
+    )
 
 
 def test_chunked_causal_kl_matches_direct_reduction() -> None:
@@ -58,16 +79,33 @@ def test_chunked_causal_kl_matches_direct_reduction() -> None:
     assert nll == pytest.approx(float(expected_nll), rel=1e-6)
 
 
+def test_per_sequence_kl_reduces_to_the_batch_result() -> None:
+    torch.manual_seed(7)
+    teacher = torch.randn(3, 5, 11)
+    student = torch.randn(3, 5, 11)
+    tokens = torch.randint(0, 11, (3, 5))
+
+    aggregate = causal_kl_nll_from_logits(teacher, student, tokens, token_chunk_size=3)
+    sequences = causal_kl_nll_per_sequence_from_logits(teacher, student, tokens, token_chunk_size=3)
+    count = sum(item.token_count for item in sequences)
+
+    assert count == aggregate[2]
+    assert sum(item.negative_log_likelihood * item.token_count for item in sequences) / count == pytest.approx(
+        aggregate[0]
+    )
+    assert sum(item.kl_nats_per_token * item.token_count for item in sequences) / count == pytest.approx(aggregate[1])
+
+
 def test_kl_budget_workflow_resumes_and_checkpoints_each_missing_arm() -> None:
     provenance = _provenance()
-    first = KlBudgetArmResult("full", 2.0, 0.5, 10, 3.0)
-    resume = KlBudgetProfile(1, provenance, 1.5, (first,), False)
+    first = _arm("full", 2.0, 0.5, normalized_squared_error=3.0)
+    resume = KlBudgetProfile(2, provenance, 1.5, (first,), False)
     calls: list[str] = []
     checkpoints: list[KlBudgetProfile] = []
 
     def evaluate(arm: str) -> KlBudgetArmResult:
         calls.append(arm)
-        return KlBudgetArmResult(arm, 2.0, 0.25, 10, 2.0)
+        return _arm(arm, 2.0, 0.25, normalized_squared_error=2.0)
 
     result = KlBudgetWorkflow().run(
         KlBudgetRequest(provenance, ("full", "type:up", "block:0")),
@@ -84,15 +122,15 @@ def test_kl_budget_workflow_resumes_and_checkpoints_each_missing_arm() -> None:
 
 def test_kl_calibrated_sensitivities_use_exact_and_type_by_block_fallback() -> None:
     profile = KlBudgetProfile(
-        1,
+        2,
         _provenance(),
         1.0,
         (
-            KlBudgetArmResult("unit:0:up", 2.0, 0.8, 10, 2.0),
-            KlBudgetArmResult("type:up", 2.0, 3.0, 10),
-            KlBudgetArmResult("type:down", 2.0, 1.0, 10),
-            KlBudgetArmResult("block:0", 2.0, 2.0, 10),
-            KlBudgetArmResult("block:1", 2.0, 6.0, 10),
+            _arm("unit:0:up", 2.0, 0.8, normalized_squared_error=4.0),
+            _arm("type:up", 2.0, 3.0),
+            _arm("type:down", 2.0, 1.0),
+            _arm("block:0", 2.0, 2.0),
+            _arm("block:1", 2.0, 6.0),
         ),
         True,
     )
@@ -105,13 +143,13 @@ def test_kl_calibrated_sensitivities_use_exact_and_type_by_block_fallback() -> N
 
 def test_kl_calibrated_sensitivities_can_force_type_by_block_granularity() -> None:
     profile = KlBudgetProfile(
-        1,
+        2,
         _provenance(),
         1.0,
         (
-            KlBudgetArmResult("unit:0:up", 2.0, 0.8, 10, 2.0),
-            KlBudgetArmResult("type:up", 2.0, 3.0, 10),
-            KlBudgetArmResult("block:0", 2.0, 2.0, 10),
+            _arm("unit:0:up", 2.0, 0.8, normalized_squared_error=4.0),
+            _arm("type:up", 2.0, 3.0),
+            _arm("block:0", 2.0, 2.0),
         ),
         True,
     )
@@ -128,7 +166,7 @@ def test_kl_calibrated_sensitivities_can_force_type_by_block_granularity() -> No
 
 
 def test_profile_key_fails_closed_when_path_content_is_stale(tmp_path: Path) -> None:
-    profile = KlBudgetProfile(1, _provenance(), 1.0, (), True)
+    profile = KlBudgetProfile(2, _provenance(), 1.0, (), True)
     path = tmp_path / "profile.json"
     atomic_write_json(path, to_dict(profile))
     loaded = load_kl_budget_profile(path)
@@ -140,6 +178,27 @@ def test_profile_key_fails_closed_when_path_content_is_stale(tmp_path: Path) -> 
             model_revision="revision",
             expected_profile_key="sha256:stale",
         )
+
+
+def test_evaluator_v2_profile_fails_closed_instead_of_reinterpreting_error_units(tmp_path: Path) -> None:
+    path = tmp_path / "profile.json"
+    atomic_write_json(path, {"schema_version": 1})
+
+    with pytest.raises(ValueError, match="unsupported KL budget profile schema"):
+        load_kl_budget_profile(path)
+
+
+def test_paired_bootstrap_uses_ordered_sequence_deltas() -> None:
+    before_sequences = tuple(KlSequenceResult(1.0, value, 10) for value in (0.9, 1.0, 1.1, 1.2))
+    after_sequences = tuple(KlSequenceResult(1.0, value - 0.2, 10) for value in (0.9, 1.0, 1.1, 1.2))
+    before = KlBudgetArmResult("full", 1.0, 1.05, 40, None, before_sequences)
+    after = KlBudgetArmResult("full", 1.0, 0.85, 40, None, after_sequences)
+
+    interval = paired_bootstrap_kl_delta(before, after, resamples=100, seed=3)
+
+    assert interval.point_delta == pytest.approx(-0.2)
+    assert interval.lower_delta == pytest.approx(-0.2)
+    assert interval.upper_delta == pytest.approx(-0.2)
 
 
 class _ToyDecoderBlock(nn.Module):
@@ -209,6 +268,7 @@ def test_dense_splice_cpu_cache_and_on_the_fly_modes_match_and_restore_weights()
     )
     assert cached_result.negative_log_likelihood == on_the_fly_result.negative_log_likelihood
     assert cached_result.kl_nats_per_token == on_the_fly_result.kl_nats_per_token
+    assert len(cached_result.sequences) == tokens.shape[0]
     assert torch.equal(cached_model.model.layers[0].proj.weight, clean_weight)
     assert torch.equal(on_the_fly_model.model.layers[0].proj.weight, clean_weight)
 
