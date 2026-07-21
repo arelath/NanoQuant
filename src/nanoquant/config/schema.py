@@ -79,8 +79,19 @@ class AllocationStrategy(StringEnum):
 
 
 class KlSensitivityGranularity(StringEnum):
+    EXACT = "exact"
     EXACT_OR_TYPE_BLOCK = "exact_or_type_block"
     TYPE_BLOCK = "type_block"
+
+
+class RankResponseSource(StringEnum):
+    CONFIGURED = "configured"
+    MEASURED = "measured"
+
+
+class KlAllocationObjective(StringEnum):
+    SENSITIVITY_PROXY = "sensitivity_proxy"
+    MEASURED_UNIT_KL = "measured_unit_kl"
 
 
 class OutlierSelector(StringEnum):
@@ -263,10 +274,13 @@ class ReconstructionRankPlanningConfig:
     enabled: bool = False
     objective_mode: str = "unit_frobenius"
     probe_admm: ADMMConfig | None = None
+    response_source: RankResponseSource = RankResponseSource.CONFIGURED
     response_curves: tuple[RankResponseCurveConfig, ...] = ()
     response_profile_provenance: str = ""
+    kl_objective: KlAllocationObjective = KlAllocationObjective.SENSITIVITY_PROXY
     importance: ReconstructionImportanceConfig = field(default_factory=ReconstructionImportanceConfig)
     sensitivity_strength: float = 0.75
+    protect_sensitive_units: bool = True
     protected_sensitivity_quantile: float = 0.80
     protected_rank_floor_fraction: float = 1.0
     target_protected_error_reduction_fraction: float = 0.01

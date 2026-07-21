@@ -1,4 +1,4 @@
-"""Experiment 021: corrected D2 allocation with an Experiment 016-matched quality run."""
+"""Experiment 021: self-measured D2 allocation with an Experiment 016-matched quality run."""
 
 from dataclasses import replace
 
@@ -11,12 +11,18 @@ from recipes import (
     define_compression_quality_experiment,
 )
 
-from nanoquant.compression_quality_workflow import run_compression_quality_experiment
-from nanoquant.config.schema import AllocationStrategy, KlSensitivityGranularity
+from nanoquant.config.schema import (
+    AllocationStrategy,
+    KlAllocationObjective,
+    KlSensitivityGranularity,
+    RankResponseSource,
+    ReconstructionImportanceConfig,
+)
+from nanoquant.experiment021_workflow import run_experiment021
 
 BASELINE = ExperimentRef(16, "compress-and-benchmark-gemma-3-270m-it")
-KL_PROFILE = "evidence/020/016-kl-budget-profile-v3"
-KL_PROFILE_KEY = "sha256:e62295bb78c07fa7435560f7ba2463e2bbb7164e36963ab61dac9972b2f5a324"
+_RUNTIME_KL_PROFILE = "runtime-kl-profile-required"
+_RUNTIME_KL_PROFILE_KEY = "runtime-kl-profile-key-required"
 
 BASE_CONFIG = replace(
     ARCHITECTURE_PROTECTED_RECONSTRUCTION_COMPRESSION_TEMPLATE,
@@ -28,13 +34,22 @@ CONFIG = replace(
     allocation=replace(
         BASE_CONFIG.allocation,
         strategy=AllocationStrategy.KL_CALIBRATED,
-        kl_profile_artifact=KL_PROFILE,
-        kl_profile_key=KL_PROFILE_KEY,
-        kl_sensitivity_granularity=KlSensitivityGranularity.EXACT_OR_TYPE_BLOCK,
+        kl_profile_artifact=_RUNTIME_KL_PROFILE,
+        kl_profile_key=_RUNTIME_KL_PROFILE_KEY,
+        kl_sensitivity_granularity=KlSensitivityGranularity.EXACT,
         reconstruction=replace(
             BASE_CONFIG.allocation.reconstruction,
-            rank_trust_reference_run=BASELINE.run_output.as_posix(),
-            rank_trust_fraction=0.25,
+            objective_mode="calibration_weighted",
+            response_source=RankResponseSource.MEASURED,
+            response_curves=(),
+            response_profile_provenance="",
+            kl_objective=KlAllocationObjective.MEASURED_UNIT_KL,
+            importance=ReconstructionImportanceConfig(),
+            sensitivity_strength=1.0,
+            protect_sensitive_units=False,
+            target_protected_error_reduction_fraction=0.0,
+            rank_trust_reference_run=None,
+            rank_trust_fraction=1.0,
         ),
     ),
     # Experiment 016 evaluated its globally distilled state. Keep distillation
@@ -47,11 +62,12 @@ EXPERIMENT = define_compression_quality_experiment(
         number=21,
         name="d2-kl-compress-and-benchmark-gemma-3-270m-it",
         purpose=(
-            "Measure corrected exact-unit D2 KL-calibrated rank allocation and compare the globally "
+            "Measure self-contained exact-unit D2 KL allocation with per-unit rank responses "
+            "measured on this model, and compare the globally "
             "distilled packed result with Experiment 016 under the same quality protocol."
         ),
         hypothesis=(
-            "A 0.25 trust-region step using evaluator-v3 normalized weighted-error sensitivities "
+            "Exact physical-unit KL anchors plus same-run calibration-weighted rank-response probes "
             "improves globally tuned WikiText quality at no greater effective BPW than Experiment 016."
         ),
         baseline=BaselineRef.experiment(BASELINE),
@@ -62,8 +78,8 @@ EXPERIMENT = define_compression_quality_experiment(
             "d2",
             "kl-calibrated",
             "exact-unit-sensitivity",
-            "normalized-weighted-error",
-            "rank-trust-region",
+            "same-run-rank-response",
+            "measured-unit-kl",
             "global-distillation",
             "experiment-016-comparison",
             "wikitext2",
@@ -77,10 +93,4 @@ EXPERIMENT = define_compression_quality_experiment(
 
 
 if __name__ == "__main__":
-    raise SystemExit(
-        run_compression_quality_experiment(
-            EXPERIMENT.config,
-            EXPERIMENT.workflow,
-            launcher_path=__file__,
-        )
-    )
+    raise SystemExit(run_experiment021(EXPERIMENT, launcher_path=__file__))

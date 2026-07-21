@@ -18,6 +18,7 @@ from nanoquant.application.kl_budget import (
     causal_kl_nll_per_sequence_from_logits,
     kl_calibrated_sensitivities,
     load_kl_budget_profile,
+    measured_unit_kl_anchors,
     paired_bootstrap_kl_delta,
     validate_kl_budget_profile,
 )
@@ -163,6 +164,37 @@ def test_kl_calibrated_sensitivities_can_force_type_by_block_granularity() -> No
     )
 
     assert values["0:up"] == pytest.approx(1.0)
+
+
+def test_measured_unit_kl_anchors_use_physical_arm_kl_without_error_denominator() -> None:
+    profile = KlBudgetProfile(
+        2,
+        _provenance(),
+        1.0,
+        (
+            _arm("unit:0:attn_qkv", 2.0, 0.8, normalized_squared_error=4.0),
+            _arm("type:attn_qkv", 2.0, 3.0),
+            _arm("block:0", 2.0, 2.0),
+        ),
+        True,
+    )
+
+    values = dict(measured_unit_kl_anchors(profile, ("0:attn_qkv",)))
+
+    assert values == {"0:attn_qkv": pytest.approx(0.8)}
+
+
+def test_measured_unit_kl_anchors_fail_without_exact_physical_arm() -> None:
+    profile = KlBudgetProfile(
+        2,
+        _provenance(),
+        1.0,
+        (_arm("type:up", 2.0, 3.0), _arm("block:0", 2.0, 2.0)),
+        True,
+    )
+
+    with pytest.raises(ValueError, match="no exact physical-unit arm"):
+        measured_unit_kl_anchors(profile, ("0:up",))
 
 
 def test_profile_key_fails_closed_when_path_content_is_stale(tmp_path: Path) -> None:

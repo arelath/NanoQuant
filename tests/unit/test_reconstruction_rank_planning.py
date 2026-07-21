@@ -6,10 +6,13 @@ import pytest
 from nanoquant.config.schema import (
     ADMMConfig,
     AllocationStrategy,
+    KlAllocationObjective,
+    KlSensitivityGranularity,
     LayerRankBudgetConfig,
     ModelConfig,
     RankResponseCurveConfig,
     RankResponseSegmentConfig,
+    RankResponseSource,
     ReconstructionImportanceConfig,
     ReconstructionRankPlanningConfig,
     RunConfig,
@@ -26,7 +29,7 @@ from nanoquant.domain.planning import (
     integrated_rank_response,
     predicted_squared_error,
 )
-from nanoquant.resident_quantization import _reconstruction_importance_policy
+from nanoquant.resident_quantization import _measured_response_curve, _RankProbePoint, _reconstruction_importance_policy
 
 
 def test_piecewise_response_is_continuous_and_uses_squared_error_slope() -> None:
@@ -162,6 +165,68 @@ def test_architecture_importance_protects_selected_layers_and_first_last_blocks(
     assert LayerId(BlockId(0), "mlp.gate_proj") in protected
     assert LayerId(BlockId(3), "mlp.gate_proj") in protected
     assert LayerId(BlockId(2), "mlp.gate_proj") not in protected
+
+
+def test_measured_response_curve_fits_current_unit_weighted_error_ratios() -> None:
+    points = (
+        _RankProbePoint(16, 30.0, 0.30, 0.36),
+        _RankProbePoint(32, 20.0, 0.20, 0.20),
+        _RankProbePoint(48, 15.0, 0.15, 0.12),
+    )
+
+    curve = _measured_response_curve("physical", 32, points)
+    segments = tuple(RankResponseSegment(item.maximum_rank_fraction, item.beta_per_rank) for item in curve.segments)
+    unit = ReconstructionAllocationUnit("0:physical", 64, 64, 32, 1.0, 2.0, False, 0.5, 1.5, segments)
+
+    assert predicted_squared_error(unit, 16) == pytest.approx(0.36 / 0.20)
+    assert predicted_squared_error(unit, 32) == pytest.approx(1.0)
+    assert predicted_squared_error(unit, 48) == pytest.approx(0.12 / 0.20)
+
+
+def test_measured_response_curve_does_not_invent_gain_from_noisy_regression() -> None:
+    points = (
+        _RankProbePoint(16, 30.0, 0.30, 0.30),
+        _RankProbePoint(32, 20.0, 0.20, 0.20),
+        _RankProbePoint(48, 21.0, 0.21, 0.21),
+    )
+
+    curve = _measured_response_curve("physical", 32, points)
+
+    assert curve.segments[-1].beta_per_rank == 0
+
+
+def test_measured_unit_kl_config_requires_exact_untempered_same_run_response() -> None:
+    base = RunConfig(ModelConfig("fixture"))
+    reconstruction = ReconstructionRankPlanningConfig(
+        enabled=True,
+        objective_mode="calibration_weighted",
+        probe_admm=ADMMConfig(outer_iterations=1, inner_iterations=1),
+        response_source=RankResponseSource.MEASURED,
+        kl_objective=KlAllocationObjective.MEASURED_UNIT_KL,
+        sensitivity_strength=1,
+        target_protected_error_reduction_fraction=0,
+    )
+    valid = replace(
+        base,
+        allocation=replace(
+            base.allocation,
+            strategy=AllocationStrategy.KL_CALIBRATED,
+            kl_profile_artifact="fresh-profile",
+            kl_profile_key="sha256:fresh",
+            kl_sensitivity_granularity=KlSensitivityGranularity.EXACT,
+            reconstruction=reconstruction,
+        ),
+    )
+
+    assert validate(valid) == ()
+    tempered = replace(
+        valid,
+        allocation=replace(
+            valid.allocation,
+            reconstruction=replace(reconstruction, sensitivity_strength=0.75),
+        ),
+    )
+    assert "CFG095" in {issue.code for issue in validate(tempered)}
 
 
 def test_reconstruction_config_round_trips_and_requires_explicit_evidence() -> None:

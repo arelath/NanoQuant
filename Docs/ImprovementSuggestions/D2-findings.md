@@ -118,12 +118,14 @@ That measurement is now complete:
 2. The corrected 0.25-trust candidate completed and freshly validated 18/18 blocks and 492 transitive
    artifacts at effective BPW `1.022967310`, below Experiment 016's `1.025280423`.
 3. Its 48-sequence paired KL gate passed, as shown above.
-4. The exact packed quality benchmark reproduced the BF16 base, proved packed/reference parity with
-   maximum absolute error `0.0`, and improved WikiText NLL from `7.222190376` to `7.171782786`.
+4. The exact packed benchmark reproduced the BF16 base and proved packed/reference parity with maximum
+   absolute error `0.0`, but its originally reported quality comparison mixed modes: the D2 candidate
+   was static while the cited Experiment 016 value was globally tuned.
 
-The pinned downstream tasks were mixed: PIQA `+0.010`, ARC Easy `−0.005`, ARC Challenge `+0.005`,
-HellaSwag `−0.010`, WinoGrande `+0.055`, and BoolQ `−0.210` (macro `−0.025833`). Corrected D2 is
-therefore a demonstrated KL/NLL improvement at lower BPW, not an across-the-board task-quality win.
+Under the matched static protocol, D2's WikiText NLL was `7.171782786` versus Experiment 016's
+`7.07910` (approximately `+1.309%`, a regression). The matched static BoolQ delta was `−0.005`, not
+`−0.210`. The retained splice KL improvement is valid, but the old document did not demonstrate a
+matched NLL or task-quality improvement. Experiment 021 is the globally tuned matched comparison.
 
 The complete human- and machine-readable records are
 [`d2-corrected-v3-summary.md`](../../evidence/020/formal/d2-corrected-v3-summary.md) and

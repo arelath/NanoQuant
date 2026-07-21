@@ -17,8 +17,12 @@ from nanoquant.config.codec import to_dict
 from nanoquant.config.schema import (
     AllocationStrategy,
     BiasCorrectionConfig,
+    KlAllocationObjective,
     KlSensitivityGranularity,
     LowRankPatchConfig,
+    RankResponseSource,
+    ReconstructionImportanceConfig,
+    ReconstructionRankPlanningConfig,
     SharedInputMemberMultiplierConfig,
 )
 from nanoquant.infrastructure.hf_calibration_dataset import materialize_pinned_calibration
@@ -36,13 +40,23 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--snapshot", type=Path, required=True)
     parser.add_argument("--calibration-source", type=Path, required=True)
-    parser.add_argument("--kl-profile", type=Path, required=True)
-    parser.add_argument("--kl-profile-key", required=True)
+    parser.add_argument("--kl-profile", type=Path)
+    parser.add_argument("--kl-profile-key")
+    parser.add_argument(
+        "--uniform-control",
+        action="store_true",
+        help="build a fresh same-campaign uniform control without KL or inherited response values",
+    )
     parser.add_argument(
         "--kl-granularity",
         type=KlSensitivityGranularity,
         choices=tuple(KlSensitivityGranularity),
-        default=KlSensitivityGranularity.EXACT_OR_TYPE_BLOCK,
+        default=KlSensitivityGranularity.EXACT,
+    )
+    parser.add_argument(
+        "--legacy-d2-proxy",
+        action="store_true",
+        help="explicitly reproduce the historical transferred-response KL/error proxy",
     )
     parser.add_argument("--v-multiplier", type=float, default=2.0)
     parser.add_argument("--patch-rank", type=int, default=0)
@@ -60,6 +74,18 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(arguments: list[str] | None = None) -> int:
     args = _parser().parse_args(arguments)
+    if args.uniform_control:
+        if args.kl_profile is not None or args.kl_profile_key is not None:
+            raise ValueError("uniform control forbids KL inputs")
+        if args.legacy_d2_proxy:
+            raise ValueError("uniform control has no D2 proxy mode")
+    elif args.kl_profile is None or args.kl_profile_key is None:
+        raise ValueError("a KL candidate requires both profile and profile key")
+    if not args.uniform_control and not args.legacy_d2_proxy:
+        if args.kl_granularity is not KlSensitivityGranularity.EXACT:
+            raise ValueError("self-measured D2 requires exact physical-unit KL arms")
+        if args.rank_trust_reference_run is not None or args.rank_trust_fraction != 1:
+            raise ValueError("self-measured D2 forbids imported rank references")
     if args.v_multiplier <= 0:
         raise ValueError("v multiplier must be positive")
     if args.patch_rank < 0:
@@ -76,44 +102,62 @@ def main(arguments: list[str] | None = None) -> int:
         model=GEMMA_3_270M_COMPRESSION_TEMPLATE.model,
     )
     shared = base.factorization.shared_input
-    weighted_groups = tuple(
-        replace(
-            group,
-            member_multipliers=(
-                SharedInputMemberMultiplierConfig("self_attn.v_proj", args.v_multiplier),
-            ),
+    weighted_groups = (
+        shared.groups
+        if args.uniform_control
+        else tuple(
+            replace(
+                group,
+                member_multipliers=(
+                    SharedInputMemberMultiplierConfig("self_attn.v_proj", args.v_multiplier),
+                ),
+            )
+            for group in shared.groups
         )
-        for group in shared.groups
     )
-    patch = LowRankPatchConfig(
-        enabled=args.patch_rank > 0,
-        rank=max(1, args.patch_rank),
+    patch = (
+        LowRankPatchConfig()
+        if args.uniform_control
+        else LowRankPatchConfig(
+            enabled=args.patch_rank > 0,
+            rank=max(1, args.patch_rank),
+        )
     )
-    config = replace(
-        base,
-        intent=replace(
-            base.intent,
-            experiment_number=None,
-            name=args.output.name,
-            purpose=(
-                "Measure KL-calibrated allocation, closed-form bias correction, and member-weighted "
-                "stacked QKV at the Experiment 016 bit budget."
-            ),
-            hypothesis=(
-                "Selected KL sensitivity granularity plus unbiased output bias and alpha_v weighting "
-                "reduce held-out NLL and KL without increasing effective BPW."
-            ),
-            baseline_run="016-compress-and-benchmark-gemma-3-270m-it",
-            tags=(*base.intent.tags, "error-budget", "kl-calibrated", "bias-correction"),
-        ),
-        allocation=replace(
+    if args.uniform_control:
+        allocation = replace(
+            base.allocation,
+            strategy=AllocationStrategy.UNIFORM,
+            kl_profile_artifact=None,
+            kl_profile_key=None,
+            reconstruction=ReconstructionRankPlanningConfig(),
+        )
+    else:
+        if args.kl_profile is None or args.kl_profile_key is None:
+            raise AssertionError("validated KL inputs disappeared")
+        reconstruction = (
+            base.allocation.reconstruction
+            if args.legacy_d2_proxy
+            else replace(
+                base.allocation.reconstruction,
+                objective_mode="calibration_weighted",
+                response_source=RankResponseSource.MEASURED,
+                response_curves=(),
+                response_profile_provenance="",
+                kl_objective=KlAllocationObjective.MEASURED_UNIT_KL,
+                importance=ReconstructionImportanceConfig(),
+                sensitivity_strength=1,
+                protect_sensitive_units=False,
+                target_protected_error_reduction_fraction=0,
+            )
+        )
+        allocation = replace(
             base.allocation,
             strategy=AllocationStrategy.KL_CALIBRATED,
             kl_profile_artifact=str(args.kl_profile.resolve()),
             kl_profile_key=args.kl_profile_key,
             kl_sensitivity_granularity=args.kl_granularity,
             reconstruction=replace(
-                base.allocation.reconstruction,
+                reconstruction,
                 rank_trust_reference_run=(
                     None
                     if args.rank_trust_reference_run is None
@@ -121,10 +165,30 @@ def main(arguments: list[str] | None = None) -> int:
                 ),
                 rank_trust_fraction=args.rank_trust_fraction,
             ),
+        )
+    config = replace(
+        base,
+        intent=replace(
+            base.intent,
+            experiment_number=None,
+            name=args.output.name,
+            purpose=(
+                "Build a fresh uniform D2 control without inherited experimental values."
+                if args.uniform_control
+                else "Measure KL-calibrated allocation, closed-form bias correction, and member-weighted "
+                "stacked QKV at the configured bit budget."
+            ),
+            hypothesis=(
+                "Selected KL sensitivity granularity plus unbiased output bias and alpha_v weighting "
+                "reduce held-out NLL and KL without increasing effective BPW."
+            ),
+            baseline_run=None if args.uniform_control else "d2-uniform-control",
+            tags=(*base.intent.tags, "error-budget", "kl-calibrated", "bias-correction"),
         ),
+        allocation=allocation,
         factorization=replace(
             base.factorization,
-            bias_correction=BiasCorrectionConfig(enabled=args.bias_correction),
+            bias_correction=BiasCorrectionConfig(enabled=args.bias_correction and not args.uniform_control),
             low_rank_patch=patch,
             shared_input=replace(shared, groups=weighted_groups),
         ),

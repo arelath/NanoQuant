@@ -32,6 +32,7 @@ from nanoquant.application.device_batches import iter_device_batches
 from nanoquant.application.kl_budget import (
     kl_calibrated_sensitivities,
     load_kl_budget_profile,
+    measured_unit_kl_anchors,
     validate_kl_budget_profile,
 )
 from nanoquant.application.layers import (
@@ -74,6 +75,7 @@ from nanoquant.config.schema import (
     AllocationStrategy,
     BiasCorrectionConfig,
     ExecutorKind,
+    KlAllocationObjective,
     KlSensitivityGranularity,
     LayerRankBudgetConfig,
     LowRankPatchConfig,
@@ -85,6 +87,8 @@ from nanoquant.config.schema import (
     RankAllocationConfig,
     RankBoundsConfig,
     RankResponseCurveConfig,
+    RankResponseSegmentConfig,
+    RankResponseSource,
     RankRetryConfig,
     ReconstructionImportanceConfig,
     ReconstructionRankPlanningConfig,
@@ -202,7 +206,7 @@ from nanoquant.infrastructure.tuning_checkpoint import (
 from nanoquant.ports.event_sink import EventSink
 from nanoquant.ports.model_adapter import ModelAdapter
 
-RESIDENT_ALGORITHM_VERSION = 46
+RESIDENT_ALGORITHM_VERSION = 47
 _THROUGHPUT_PROBE_REPETITIONS = 5
 
 
@@ -2044,14 +2048,25 @@ def _load_requested_kl_sensitivities(
         model_revision=request.revision,
         expected_profile_key=request.kl_profile_key,
     )
+    unit_ids = _planning_unit_ids(inventory, groups)
+    if request.reconstruction_rank_planning.kl_objective is KlAllocationObjective.MEASURED_UNIT_KL:
+        return measured_unit_kl_anchors(profile, unit_ids)
     return kl_calibrated_sensitivities(
         profile,
-        _planning_unit_ids(inventory, groups),
+        unit_ids,
         use_exact_unit_arms=(
             request.kl_sensitivity_granularity
-            is KlSensitivityGranularity.EXACT_OR_TYPE_BLOCK
+            is not KlSensitivityGranularity.TYPE_BLOCK
         ),
     )
+
+
+@dataclass(frozen=True, slots=True)
+class _RankProbePoint:
+    rank: int
+    raw_squared_error: float
+    normalized_squared_error: float
+    weighted_normalized_squared_error: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -2065,6 +2080,7 @@ class _RankProbeEvidence:
     source_weight_hashes: tuple[str, ...]
     baseline_rank: int
     response_curve: RankResponseCurveConfig
+    response_points: tuple[_RankProbePoint, ...]
     raw_squared_error: float
     normalized_squared_error: float
     weighted_normalized_squared_error: float
@@ -2078,8 +2094,12 @@ class _RankProbeEvidence:
     peak_workspace_bytes: int
 
     def __post_init__(self) -> None:
-        if self.schema_version != 2:
+        if self.schema_version != 3:
             raise ValueError("unsupported reconstruction rank-probe evidence schema")
+        if not self.response_points or tuple(point.rank for point in self.response_points) != tuple(
+            sorted({point.rank for point in self.response_points})
+        ):
+            raise ValueError("rank-probe response points must be non-empty, unique, and ordered")
         if any(
             not math.isfinite(value) or value <= 0
             for value in (
@@ -2118,6 +2138,65 @@ def _matched_rank_response_curve(
     return matches[0]
 
 
+def _aligned_probe_bounds(
+    baseline_rank: int,
+    physical_cap: int,
+    *,
+    multiple: int,
+    floor_fraction: float,
+    ceiling_fraction: float,
+) -> tuple[int, int]:
+    floor_rank = math.ceil(baseline_rank * floor_fraction / multiple) * multiple
+    ceiling_rank = math.floor(baseline_rank * ceiling_fraction / multiple) * multiple
+    ceiling_rank = min(ceiling_rank, math.floor(physical_cap / multiple) * multiple)
+    if not multiple <= floor_rank <= baseline_rank <= ceiling_rank:
+        raise ValueError("measured rank-response bounds do not contain the aligned baseline rank")
+    return floor_rank, ceiling_rank
+
+
+def _measured_response_curve(
+    name: str,
+    baseline_rank: int,
+    points: tuple[_RankProbePoint, ...],
+) -> RankResponseCurveConfig:
+    by_rank = {point.rank: point for point in points}
+    baseline = by_rank.get(baseline_rank)
+    if baseline is None:
+        raise ValueError("measured rank response has no baseline point")
+    lower_rank = min(by_rank)
+    upper_rank = max(by_rank)
+
+    def slope(left_rank: int, right_rank: int) -> float:
+        if left_rank == right_rank:
+            return 0.0
+        left = by_rank[left_rank].weighted_normalized_squared_error
+        right = by_rank[right_rank].weighted_normalized_squared_error
+        # ADMM noise can make a higher-rank probe slightly worse.  A monotone
+        # lower envelope treats that interval as having no demonstrated gain;
+        # it never fabricates a positive response from a regression.
+        return max(0.0, math.log(left / right) / (2.0 * (right_rank - left_rank)))
+
+    lower_beta = slope(lower_rank, baseline_rank)
+    upper_beta = slope(baseline_rank, upper_rank)
+    if lower_rank == baseline_rank:
+        lower_beta = upper_beta
+    if upper_rank == baseline_rank:
+        upper_beta = lower_beta
+    segments: list[RankResponseSegmentConfig] = []
+    if lower_rank < baseline_rank:
+        segments.append(RankResponseSegmentConfig(1.0, lower_beta))
+    if upper_rank > baseline_rank:
+        segments.append(RankResponseSegmentConfig(upper_rank / baseline_rank, upper_beta))
+    if not segments:
+        segments.append(RankResponseSegmentConfig(1.0, 0.0))
+    return RankResponseCurveConfig(
+        name,
+        lower_rank / baseline_rank,
+        upper_rank / baseline_rank,
+        tuple(segments),
+    )
+
+
 def _persist_rank_probe_plan(
     request: ResidentQuantizationRequest,
     baseline_plan: QuantizationPlan,
@@ -2125,10 +2204,11 @@ def _persist_rank_probe_plan(
 ) -> ArtifactRef:
     reconstruction = request.reconstruction_rank_planning
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "resident_config_hash": _resident_config_hash(request),
         "objective_mode": reconstruction.objective_mode,
         "probe_admm": to_dict(reconstruction.probe_admm),
+        "response_source": reconstruction.response_source.value,
         "response_curves": to_dict(reconstruction.response_curves),
         "response_profile_provenance": reconstruction.response_profile_provenance,
         "baseline_plan": to_dict(baseline_plan),
@@ -2267,8 +2347,11 @@ def _run_reconstruction_rank_probes(
                 artifact_id=persisted[unit_id][0].artifact_id,
             )
             continue
-        curve = _matched_rank_response_curve(
-            unit.name if isinstance(unit, SharedInputGroupPlan) else unit.layer.path, reconstruction.response_curves
+        unit_name = unit.name if isinstance(unit, SharedInputGroupPlan) else unit.layer.path
+        configured_curve = (
+            _matched_rank_response_curve(unit_name, reconstruction.response_curves)
+            if reconstruction.response_source is RankResponseSource.CONFIGURED
+            else None
         )
         member_layers = tuple(member.layer for member in member_inventories)
         seed = logical_seed(
@@ -2308,13 +2391,32 @@ def _run_reconstruction_rank_probes(
                 for layer in member_layers
             )
             stacked = weights[0] if len(weights) == 1 else torch.cat(weights, dim=0)
-            generator = torch.Generator(device=request.device).manual_seed(seed)
-            with recorder.phase("rank_probe", unit=unit_id):
-                factorized = factorize_admm(
-                    stacked,
-                    torch.ones(stacked.shape[1], device=stacked.device, dtype=torch.float32),
-                    torch.ones(stacked.shape[0], device=stacked.device, dtype=torch.float32),
-                    unit.rank,
+            if reconstruction.objective_mode == "calibration_weighted":
+                probe_input_importance = input_importances[0].float()
+                if any(
+                    not torch.allclose(probe_input_importance, value.float(), rtol=1e-5, atol=1e-7)
+                    for value in input_importances[1:]
+                ):
+                    raise ValueError(f"shared-input unit has inconsistent input importance: {unit_id}")
+                probe_output_importance = torch.cat(tuple(value.float() for value in output_importances))
+            else:
+                probe_input_importance = torch.ones(stacked.shape[1], device=stacked.device, dtype=torch.float32)
+                probe_output_importance = torch.ones(stacked.shape[0], device=stacked.device, dtype=torch.float32)
+
+            def factorize_probe(
+                rank: int,
+                *,
+                probe_seed: int = seed,
+                probe_weight: torch.Tensor = stacked,
+                probe_input: torch.Tensor = probe_input_importance,
+                probe_output: torch.Tensor = probe_output_importance,
+            ) -> Any:
+                generator = torch.Generator(device=request.device).manual_seed(probe_seed)
+                return factorize_admm(
+                    probe_weight,
+                    probe_input,
+                    probe_output,
+                    rank,
                     generator,
                     outer_iterations=probe_admm.outer_iterations,
                     inner_iterations=probe_admm.inner_iterations,
@@ -2324,6 +2426,9 @@ def _run_reconstruction_rank_probes(
                     early_stop_tolerance=probe_admm.early_stop_tolerance,
                     transpose_wide=probe_admm.transpose_wide,
                 )
+
+            with recorder.phase("rank_probe", unit=unit_id):
+                factorized = factorize_probe(unit.rank)
             difference = stacked.float() - factorized.reconstruction.float()
             raw_error = float(difference.square().sum())
             target_norm = float(stacked.float().square().sum())
@@ -2364,9 +2469,63 @@ def _run_reconstruction_rank_probes(
                     )
                 )
                 row += rows
+            response_points = [
+                _RankProbePoint(
+                    unit.rank,
+                    raw_error,
+                    raw_error / max(target_norm, 1e-30),
+                    weighted_error / max(weighted_target_norm, 1e-30),
+                )
+            ]
+            if reconstruction.response_source is RankResponseSource.MEASURED:
+                floor_rank, ceiling_rank = _aligned_probe_bounds(
+                    unit.rank,
+                    min(stacked.shape),
+                    multiple=request.rank_multiple,
+                    floor_fraction=request.rank_floor_fraction,
+                    ceiling_fraction=request.rank_ceiling_fraction,
+                )
+                for response_rank in (floor_rank, ceiling_rank):
+                    if response_rank == unit.rank:
+                        continue
+                    with recorder.phase("rank_probe_response", unit=unit_id, rank=response_rank):
+                        response_factorized = factorize_probe(response_rank)
+                    response_difference = stacked.float() - response_factorized.reconstruction.float()
+                    response_raw = float(response_difference.square().sum())
+                    response_weighted = 0.0
+                    response_row = 0
+                    for weight, input_importance, output_importance in zip(
+                        weights,
+                        input_importances,
+                        output_importances,
+                        strict=True,
+                    ):
+                        rows = weight.shape[0]
+                        member_difference = response_difference[response_row : response_row + rows]
+                        member_weights = (
+                            output_importance.float()[:, None].clamp_min(1e-12)
+                            * input_importance.float()[None, :].clamp_min(1e-12)
+                        )
+                        response_weighted += float((member_difference.square() * member_weights).sum())
+                        response_row += rows
+                    response_points.append(
+                        _RankProbePoint(
+                            response_rank,
+                            response_raw,
+                            response_raw / max(target_norm, 1e-30),
+                            response_weighted / max(weighted_target_norm, 1e-30),
+                        )
+                    )
+                    del response_factorized
+            ordered_response_points = tuple(sorted(response_points, key=lambda point: point.rank))
+            curve = configured_curve or _measured_response_curve(
+                unit_name,
+                unit.rank,
+                ordered_response_points,
+            )
             peak = int(torch.cuda.max_memory_allocated(request.device)) if request.device.startswith("cuda") else 0
             evidence = _RankProbeEvidence(
-                2,
+                3,
                 probe_plan,
                 unit_id,
                 member_layers[0].block.index,
@@ -2380,6 +2539,7 @@ def _run_reconstruction_rank_probes(
                 ),
                 unit.rank,
                 curve,
+                ordered_response_points,
                 raw_error,
                 raw_error / max(target_norm, 1e-30),
                 weighted_error / max(weighted_target_norm, 1e-30),
@@ -2442,6 +2602,10 @@ def _run_reconstruction_rank_probes(
         for layer, value in relative.items()
     }
     kl_sensitivity = dict(kl_sensitivities)
+    measured_kl_objective = (
+        bool(kl_sensitivity)
+        and reconstruction.kl_objective is KlAllocationObjective.MEASURED_UNIT_KL
+    )
     if kl_sensitivity and set(kl_sensitivity) != {unit_id for unit_id, _unit in units}:
         raise ValueError("KL sensitivity profile does not exactly cover reconstruction units")
     ordered_scores = sorted(kl_sensitivity.values() if kl_sensitivity else member_sensitivity.values())
@@ -2449,7 +2613,9 @@ def _run_reconstruction_rank_probes(
         len(ordered_scores) - 1,
         math.floor(reconstruction.protected_sensitivity_quantile * len(ordered_scores)),
     )
-    protected_threshold = ordered_scores[protected_index]
+    protected_threshold = (
+        ordered_scores[protected_index] if reconstruction.protect_sensitive_units else math.inf
+    )
     allocation_units: list[ReconstructionAllocationUnit] = []
     uncharged_actual_bits = 0
     protected_by_unit: dict[str, tuple[LayerId, ...]] = {}
@@ -2506,8 +2672,13 @@ def _run_reconstruction_rank_probes(
                 in_features,
                 evidence.baseline_rank,
                 (
-                    evidence.weighted_normalized_squared_error
-                    if kl_sensitivity
+                    1.0
+                    if measured_kl_objective
+                    else evidence.weighted_normalized_squared_error
+                    if (
+                        kl_sensitivity
+                        or reconstruction.response_source is RankResponseSource.MEASURED
+                    )
                     else evidence.raw_squared_error
                 ),
                 unit_sensitivity,
@@ -2624,7 +2795,19 @@ def _run_reconstruction_rank_probes(
         "importance": {
             "sensitivity_source": "kl_budget_profile" if kl_sensitivity else "activation_weight_proxy",
             "allocation_error_measure": (
-                "weighted_normalized_squared_error" if kl_sensitivity else "raw_squared_error"
+                "same_run_relative_weighted_error"
+                if measured_kl_objective
+                else "weighted_normalized_squared_error"
+                if (
+                    kl_sensitivity
+                    or reconstruction.response_source is RankResponseSource.MEASURED
+                )
+                else "raw_squared_error"
+            ),
+            "allocation_objective": (
+                "unit_kl_proportional_score"
+                if measured_kl_objective
+                else "tempered_reconstruction_proxy"
             ),
             "policy": to_dict(importance),
             "edge_blocks": sorted(edge_blocks),
@@ -3029,6 +3212,19 @@ def _validate_resident_request(request: ResidentQuantizationRequest) -> None:
         )
     if trust_reference is not None and (not kl_selected or not trust_reference.strip()):
         raise ValueError("resident rank trust reference requires KL-calibrated planning")
+    if reconstruction.kl_objective is KlAllocationObjective.MEASURED_UNIT_KL:
+        if (
+            not kl_selected
+            or request.kl_sensitivity_granularity is not KlSensitivityGranularity.EXACT
+            or reconstruction.response_source is not RankResponseSource.MEASURED
+            or reconstruction.objective_mode != "calibration_weighted"
+            or reconstruction.sensitivity_strength != 1
+            or trust_reference is not None
+        ):
+            raise ValueError(
+                "measured-unit KL requires exact arms, current weighted response probes, "
+                "untempered sensitivity, and no imported rank reference"
+            )
     if request.executor not in {ExecutorKind.RESIDENT, ExecutorKind.CPU_OFFLOAD}:
         raise ValueError(f"unsupported resident composition executor: {request.executor.value}")
     if request.executor is ExecutorKind.CPU_OFFLOAD:

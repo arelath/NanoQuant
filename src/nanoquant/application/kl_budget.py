@@ -399,6 +399,32 @@ def kl_calibrated_sensitivities(
     return tuple(result)
 
 
+def measured_unit_kl_anchors(
+    profile: KlBudgetProfile,
+    unit_ids: tuple[str, ...],
+) -> tuple[tuple[str, float], ...]:
+    """Return measured KL for complete physical-unit arms without an error proxy.
+
+    These values anchor a separately measured, same-run relative rank-response
+    curve.  They intentionally do not divide by a reconstruction error from a
+    different factorization or operating point.
+    """
+
+    if not profile.complete:
+        raise ValueError("measured-unit KL planning requires a complete profile")
+    arms = {arm.arm: arm for arm in profile.arms}
+    result: list[tuple[str, float]] = []
+    for unit_id in unit_ids:
+        arm = arms.get(f"unit:{unit_id}")
+        if arm is None:
+            raise ValueError(f"KL profile has no exact physical-unit arm: {unit_id}")
+        value = arm.kl_nats_per_token
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError(f"measured unit KL is not positive for {unit_id}")
+        result.append((unit_id, value))
+    return tuple(result)
+
+
 __all__ = [
     "KL_BUDGET_EVALUATOR_VERSION",
     "KL_BUDGET_PROFILE_SCHEMA_VERSION",
@@ -413,6 +439,7 @@ __all__ = [
     "causal_kl_nll_from_logits",
     "causal_kl_nll_per_sequence_from_logits",
     "kl_calibrated_sensitivities",
+    "measured_unit_kl_anchors",
     "load_kl_budget_profile",
     "persist_kl_budget_profile",
     "paired_bootstrap_kl_delta",

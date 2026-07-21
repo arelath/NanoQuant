@@ -116,37 +116,43 @@ a `kl-budget` run command beside the existing evaluation commands in
 ### 3.1 What changes
 
 [domain/planning.py](../src/nanoquant/domain/planning.py) needs **no change**:
-`ReconstructionAllocationUnit` (line 18) already carries `sensitivity`, and
-`allocate_reconstruction_rank_budget` (line 90) already applies geometrically-normalized sensitivity
-weights with a strength dial (`sensitivity_strength`, line 112–117). The change is entirely in what the
-application layer feeds it:
+`ReconstructionAllocationUnit` remains the allocation primitive, but the production D2 path no longer
+interprets a transferred sensitivity proxy as KL:
 
 - Today, [application/planning.py](../src/nanoquant/application/planning.py) line 129 derives
   `sensitivity = input_summary.mean × output_summary.mean` — an activation-magnitude proxy. Finding F/G
   showed this misranks units end-to-end.
-- New source: `s_u = KL_u / E²_w,u` from the D1 profile, where `E²_w` is the normalized weighted
-  squared-error energy (not the absolute energy and not an amplitude that must be squared again).
-  The quadratic conversion is exact under the
-  small-error expansion (KL is locally quadratic in the layer perturbation) and was validated by the
-  sub-additivity measurement; at the current large-error operating point it is approximate, so the
-  profile must be re-measured after each phase lands (cheap, per §2.2).
-- Granularity fallback: per-unit KL (130 arms) when available; otherwise
-  `s_u = type_share(t) × block_share(b)` from the 31-arm profile — this already encodes both measured
-  reversals (attention→MLP, deep→early).
+- The allocation anchor is the directly measured exact physical-unit `KL_u`; no reconstruction-error
+  denominator from the profile is used.
+- Every physical unit is factorized at its aligned lower bound, baseline rank, and aligned upper bound
+  in the current run. These probes use the current calibration-weighted objective. Piecewise log-error
+  slopes are fitted from those points, and a noisy interval that does not demonstrate improvement is
+  conservatively assigned zero gain.
+- The allocator uses `sensitivity_strength = 1`. Its common geometric normalization does not change
+  priorities, so the optimized score is proportional to
+  `KL_u × E_weighted,u(r) / E_weighted,u(r_baseline)` rather than a tempered pseudo-KL quantity.
+- Exact physical-unit arms are mandatory. Type×block fallback remains available only to the historical
+  sensitivity-proxy mode and cannot be used by the measured-unit-KL path.
 
 ### 3.2 Wiring
 
-- Extend the Docs/30 probe-profile assembly (application side) to join the D1 profile by
-  `unit_id`/`profile_key` — the same `f"{block}:{path}"` keys the existing `utility_profile`
-  mechanism uses (application/planning.py lines 74, 131–133).
+- Join the exact D1 arms to the physical rank-probe units by `unit_id`/`profile_key`. Shared QKV is one
+  physical arm and one rank-response curve; logical Q/K/V measurements are diagnostics only.
 - Add an allocation-strategy value `kl_calibrated` in [config/schema.py](../src/nanoquant/config/schema.py)
   beside the existing `sensitivity` / `utility_profile` strategies; selecting it without a joinable,
-  fresh D1 profile is a validation error (fail-closed, matching the Docs/30 "no plan without a complete
-  profile" rule).
+  fresh D1 profile is a validation error. Experiment 021 additionally requires both the profile and its
+  source control run under `evidence/021` and verifies the profile's source commit identity.
+- `response_source = measured`, `objective_mode = calibration_weighted`, exact KL granularity, no
+  imported rank-trust reference, and untempered sensitivity are a single fail-closed configuration
+  contract. Configured Gemma-1B response constants are not inputs to Experiment 021.
+- Experiment 021 also disables inherited architecture multipliers and protected cohorts. Rank movement
+  is determined by its current exact-unit KL anchors and current per-unit response probes, subject only
+  to the declared rank bounds and bit budget.
 - The protected-cohort logic and floors/caps in `allocate_reconstruction_rank_budget` are unchanged.
   Cross-model rank-direction expectations are diagnostics, not adoption gates. The corrected 270M
-  exact profile moved rank toward attention and still improved end-to-end KL/NLL, contradicting the
-  earlier 1B-derived expectation while validating the measured operating-point profile.
+  exact profile moved rank toward attention and improved splice KL, but its original NLL comparison
+  mixed static and tuned modes; the matched static result regressed. Experiment 021 must decide the
+  globally tuned outcome without treating historical rank direction as a gate.
 
 ### 3.3 Gate
 
@@ -264,7 +270,7 @@ for roughly 15–25% of its functional error.
 | Phase | Items | Format impact | Gate |
 |---|---|---|---|
 | 1 | D1 harness; commit evidence scripts | none | reproduces ErrorAnatomy §2 numbers from run artifacts |
-| 2 | D2 KL-calibrated allocation | none | whole-model KL < 4.675 at equal bits; re-measure profile |
+| 2 | D2 measured-unit-KL allocation | none | paired whole-model KL improves at equal/lower effective BPW; re-measure profile |
 | 3 | D3 bias + D4 v-weighting | packed bias flag only | additive KL gains on `type:o`/`type:qkv` arms; parity vs reference runtime |
 | 4 | D5 o_proj patch | side tensors | §6.4 |
 | 5 | scale-only distillation (existing) | none | end-to-end ppl vs Phase-4 static recipe |
@@ -280,9 +286,9 @@ Measurement discipline, from the anatomy findings:
 
 ## 8. Risks
 
-- **KL≈quadratic conversion is approximate at the current 4.7-nat operating point.** Mitigated by the
-  fallback granularity (type×block shares are directly measured, no conversion) and by re-measuring
-  after each phase.
+- **KL response is still an operating-point model.** The corrected path removes the cross-run error
+  denominator and transferred Frobenius slopes, but assumes local KL scales with the newly measured
+  calibration-weighted response. The paired whole-model KL and packed-quality gates remain mandatory.
 - **Dense-splice harness ≠ packed runtime.** D1 splices bf16 reconstructions; packed-runtime rounding
   (`runtime/packed.py` dtype rules) is not in the loop. Planning evidence tolerates this; phase gates
   3–5 must additionally run [infrastructure/packed_evaluation.py](../src/nanoquant/infrastructure/packed_evaluation.py).

@@ -11,9 +11,11 @@ from nanoquant.ports.event_sink import Severity
 from .schema import (
     AllocationStrategy,
     DType,
+    KlAllocationObjective,
     KlSensitivityGranularity,
     ObjectiveKind,
     OutlierSelector,
+    RankResponseSource,
     RunConfig,
 )
 
@@ -144,6 +146,13 @@ def validate(config: RunConfig, phase: ValidationPhase = ValidationPhase.PRE_RES
         "must be in [0, 1)",
     )
     require(
+        reconstruction.protect_sensitive_units
+        or reconstruction.target_protected_error_reduction_fraction == 0,
+        "CFG097",
+        "allocation.reconstruction.target_protected_error_reduction_fraction",
+        "must be zero when sensitive-unit protection is disabled",
+    )
+    require(
         math.isfinite(reconstruction.rank_trust_fraction)
         and 0 <= reconstruction.rank_trust_fraction <= 1,
         "CFG088",
@@ -254,10 +263,10 @@ def validate(config: RunConfig, phase: ValidationPhase = ValidationPhase.PRE_RES
         )
     if reconstruction_selected:
         require(
-            reconstruction.objective_mode == "unit_frobenius",
+            reconstruction.objective_mode in {"unit_frobenius", "calibration_weighted"},
             "CFG059",
             "allocation.reconstruction.objective_mode",
-            "only unit_frobenius is implemented",
+            "must be unit_frobenius or calibration_weighted",
         )
         require(
             reconstruction.probe_admm is not None,
@@ -265,25 +274,60 @@ def validate(config: RunConfig, phase: ValidationPhase = ValidationPhase.PRE_RES
             "allocation.reconstruction.probe_admm",
             "an explicit full probe protocol is required",
         )
-        require(
-            bool(reconstruction.response_curves),
-            "CFG061",
-            "allocation.reconstruction.response_curves",
-            "at least one measured response curve is required",
-        )
-        require(
-            bool(reconstruction.response_profile_provenance.strip()),
-            "CFG062",
-            "allocation.reconstruction.response_profile_provenance",
-            "measured response provenance is required",
-        )
-        for index, curve in enumerate(reconstruction.response_curves):
+        if reconstruction.response_source is RankResponseSource.CONFIGURED:
             require(
-                config.allocation.bounds.floor_fraction_of_uniform >= curve.calibrated_rank_floor_fraction
-                and config.allocation.bounds.ceiling_fraction_of_uniform <= curve.calibrated_rank_ceiling_fraction,
-                "CFG063",
-                f"allocation.reconstruction.response_curves[{index}]",
-                "allocation bounds must stay within the calibrated response range",
+                bool(reconstruction.response_curves),
+                "CFG061",
+                "allocation.reconstruction.response_curves",
+                "configured response mode requires at least one response curve",
+            )
+            require(
+                bool(reconstruction.response_profile_provenance.strip()),
+                "CFG062",
+                "allocation.reconstruction.response_profile_provenance",
+                "configured response mode requires measured provenance",
+            )
+            for index, curve in enumerate(reconstruction.response_curves):
+                require(
+                    config.allocation.bounds.floor_fraction_of_uniform >= curve.calibrated_rank_floor_fraction
+                    and config.allocation.bounds.ceiling_fraction_of_uniform <= curve.calibrated_rank_ceiling_fraction,
+                    "CFG063",
+                    f"allocation.reconstruction.response_curves[{index}]",
+                    "allocation bounds must stay within the calibrated response range",
+                )
+        else:
+            require(
+                not reconstruction.response_curves,
+                "CFG092",
+                "allocation.reconstruction.response_curves",
+                "measured response mode derives per-unit curves and forbids configured curves",
+            )
+            require(
+                reconstruction.objective_mode == "calibration_weighted",
+                "CFG093",
+                "allocation.reconstruction.objective_mode",
+                "measured response mode requires calibration_weighted probes",
+            )
+        if reconstruction.kl_objective is KlAllocationObjective.MEASURED_UNIT_KL:
+            require(
+                kl_selected and config.allocation.kl_sensitivity_granularity is KlSensitivityGranularity.EXACT,
+                "CFG094",
+                "allocation.kl_sensitivity_granularity",
+                "measured_unit_kl requires KL allocation with complete exact physical-unit arms",
+            )
+            require(
+                reconstruction.response_source is RankResponseSource.MEASURED
+                and reconstruction.sensitivity_strength == 1,
+                "CFG095",
+                "allocation.reconstruction",
+                "measured_unit_kl requires same-run measured responses and untempered sensitivity",
+            )
+            require(
+                reconstruction.rank_trust_reference_run is None
+                and reconstruction.rank_trust_fraction == 1,
+                "CFG096",
+                "allocation.reconstruction.rank_trust_reference_run",
+                "measured_unit_kl forbids rank values imported from another run",
             )
         if reconstruction.probe_admm is not None:
             require(

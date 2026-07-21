@@ -428,6 +428,7 @@ class Campaign:
             key,
             "--kl-granularity",
             kl_granularity.value,
+            "--legacy-d2-proxy",
             "--v-multiplier",
             str(alpha_v),
             "--patch-rank",
