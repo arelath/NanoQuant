@@ -140,13 +140,16 @@ interprets a transferred sensitivity proxy as KL:
   physical arm and one rank-response curve; logical Q/K/V measurements are diagnostics only.
 - Add an allocation-strategy value `kl_calibrated` in [config/schema.py](../src/nanoquant/config/schema.py)
   beside the existing `sensitivity` / `utility_profile` strategies; selecting it without a joinable,
-  fresh D1 profile is a validation error. With no command-line arguments, Experiment 021 creates or
-  resumes its own uniform control and exact-unit profile under `evidence/021`, then verifies both the
-  control recipe hash and the profile's source commit identity. `--kl-profile` and `--kl-control-run`
-  remain paired overrides for selecting explicit same-campaign inputs.
+  fresh D1 profile is a validation error. With no command-line arguments, each self-measured D2
+  experiment creates or resumes its own uniform control and exact-unit profile under its numbered
+  evidence directory, then verifies both the canonical control recipe and the profile's source commit
+  identity. Experiment 021 applies this workflow to Gemma 3 270M and Experiment 022 applies it to the
+  pinned Gemma 3 1B model. `--kl-profile` and `--kl-control-run` remain paired overrides for selecting
+  explicit same-campaign inputs.
 - `response_source = measured`, `objective_mode = calibration_weighted`, exact KL granularity, no
   imported rank-trust reference, and untempered sensitivity are a single fail-closed configuration
-  contract. Configured Gemma-1B response constants are not inputs to Experiment 021.
+  contract. Configured response constants from earlier experiments are not inputs to Experiments 021
+  or 022.
 - Experiment 021 also disables inherited architecture multipliers and protected cohorts. Rank movement
   is determined by its current exact-unit KL anchors and current per-unit response probes, subject only
   to the declared rank bounds and bit budget.

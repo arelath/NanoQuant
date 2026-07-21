@@ -1,10 +1,9 @@
-"""Experiment 021: self-measured D2 allocation with an Experiment 016-matched quality run."""
+"""Experiment 022: self-measured D2 allocation on pinned Gemma 3 1B."""
 
 from dataclasses import replace
 
 from recipes import (
     ARCHITECTURE_PROTECTED_RECONSTRUCTION_COMPRESSION_TEMPLATE,
-    GEMMA_3_270M_COMPRESSION_TEMPLATE,
     BaselineRef,
     ExperimentIdentity,
     ExperimentRef,
@@ -18,16 +17,13 @@ from nanoquant.config.schema import (
     RankResponseSource,
     ReconstructionImportanceConfig,
 )
-from nanoquant.self_measured_d2_workflow import run_experiment021
+from nanoquant.self_measured_d2_workflow import run_self_measured_d2_experiment
 
-BASELINE = ExperimentRef(16, "compress-and-benchmark-gemma-3-270m-it")
+BASELINE = ExperimentRef(17, "compress-and-benchmark-gemma-3-1b-it")
 _RUNTIME_KL_PROFILE = "runtime-kl-profile-required"
 _RUNTIME_KL_PROFILE_KEY = "runtime-kl-profile-key-required"
 
-BASE_CONFIG = replace(
-    ARCHITECTURE_PROTECTED_RECONSTRUCTION_COMPRESSION_TEMPLATE,
-    model=GEMMA_3_270M_COMPRESSION_TEMPLATE.model,
-)
+BASE_CONFIG = ARCHITECTURE_PROTECTED_RECONSTRUCTION_COMPRESSION_TEMPLATE
 
 CONFIG = replace(
     BASE_CONFIG,
@@ -52,27 +48,27 @@ CONFIG = replace(
             rank_trust_fraction=1.0,
         ),
     ),
-    # Experiment 016 evaluated its globally distilled state. Keep distillation
-    # explicit here so the final packed comparison cannot become static-vs-tuned.
+    # Experiment 017 evaluated its globally distilled state. Keep the same
+    # final operating mode for the matched quality comparison.
     distillation=replace(BASE_CONFIG.distillation, enabled=True),
 )
 
 EXPERIMENT = define_compression_quality_experiment(
     ExperimentIdentity(
-        number=21,
-        name="d2-kl-compress-and-benchmark-gemma-3-270m-it",
+        number=22,
+        name="d2-kl-compress-and-benchmark-gemma-3-1b-it",
         purpose=(
             "Measure self-contained exact-unit D2 KL allocation with per-unit rank responses "
-            "measured on this model, and compare the globally "
-            "distilled packed result with Experiment 016 under the same quality protocol."
+            "measured on pinned Gemma 3 1B, and compare the globally distilled packed result "
+            "with Experiment 017 under the same quality protocol."
         ),
         hypothesis=(
             "Exact physical-unit KL anchors plus same-run calibration-weighted rank-response probes "
-            "improves globally tuned WikiText quality at no greater effective BPW than Experiment 016."
+            "improve globally tuned WikiText quality at no greater effective BPW than Experiment 017."
         ),
         baseline=BaselineRef.experiment(BASELINE),
         tags=(
-            "gemma-3-270m-it",
+            "gemma-3-1b-it",
             "compression",
             "quality",
             "d2",
@@ -81,16 +77,21 @@ EXPERIMENT = define_compression_quality_experiment(
             "same-run-rank-response",
             "measured-unit-kl",
             "global-distillation",
-            "experiment-016-comparison",
+            "experiment-017-comparison",
             "wikitext2",
             "ultrachat",
         ),
     ),
     CONFIG,
-    expected_blocks=18,
+    expected_blocks=26,
     maximum_wddm_shared_gib=0.75,
 )
 
 
 if __name__ == "__main__":
-    raise SystemExit(run_experiment021(EXPERIMENT, launcher_path=__file__))
+    raise SystemExit(
+        run_self_measured_d2_experiment(
+            EXPERIMENT,
+            launcher_path=__file__,
+        )
+    )

@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-import nanoquant.experiment021_workflow as experiment021_workflow
+import nanoquant.self_measured_d2_workflow as experiment021_workflow
 from nanoquant.config.codec import to_dict
 from nanoquant.config.schema import (
     AllocationStrategy,
@@ -13,7 +13,7 @@ from nanoquant.config.schema import (
     KlSensitivityGranularity,
     RankResponseSource,
 )
-from nanoquant.experiment021_workflow import run_experiment021
+from nanoquant.self_measured_d2_workflow import run_experiment021
 from tests.support.experiments import load_experiment
 
 
