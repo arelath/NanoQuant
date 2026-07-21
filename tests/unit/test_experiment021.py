@@ -1,9 +1,12 @@
+import json
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 import nanoquant.experiment021_workflow as experiment021_workflow
+from nanoquant.config.codec import to_dict
 from nanoquant.config.schema import (
     AllocationStrategy,
     KlAllocationObjective,
@@ -143,3 +146,58 @@ def test_experiment021_no_argument_run_prepares_and_consumes_fresh_inputs(
     runtime_config = prepared["config"]
     assert runtime_config.allocation.kl_profile_artifact == str(profile_path)
     assert runtime_config.allocation.kl_profile_key == "sha256:fresh"
+
+
+def test_experiment021_control_validation_keeps_run_and_resident_hashes_distinct(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    campaign = (tmp_path / "evidence" / "021").resolve()
+    control = campaign / "control"
+    profile_path = campaign / "profile"
+    (control / "state").mkdir(parents=True)
+    profile_path.mkdir(parents=True)
+    experiment = load_experiment(21)
+    control_config = experiment021_workflow._uniform_control_config(experiment.config, campaign)
+    manifest_config_hash = "sha256:resolved-resident-request"
+    resident_config_hash = "sha256:resident-semantic-config"
+    identity = {
+        "config_hash": resident_config_hash,
+        "model_hash": "sha256:model",
+        "plan_hash": "sha256:plan",
+    }
+    (control / "manifest.json").write_text(
+        json.dumps(
+            {
+                "config_hash": manifest_config_hash,
+                "resolved_config": {"canonical_run_config": to_dict(control_config)},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (control / "state" / "journal.jsonl").write_text(
+        "\n".join(
+            json.dumps({"kind": "block", "block": block, "identity": identity})
+            for block in range(18)
+        ),
+        encoding="utf-8",
+    )
+    profile = SimpleNamespace(
+        provenance=SimpleNamespace(
+            source_run_identity=(
+                f"{resident_config_hash}|{identity['model_hash']}|{identity['plan_hash']}"
+            )
+        )
+    )
+    monkeypatch.setattr(experiment021_workflow, "load_kl_budget_profile", lambda path: profile)
+
+    assert (
+        experiment021_workflow._validated_kl_profile(
+            profile_path,
+            control,
+            campaign_root=campaign,
+            expected_blocks=18,
+            expected_control_config=control_config,
+        )
+        is profile
+    )

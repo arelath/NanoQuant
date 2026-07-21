@@ -16,7 +16,7 @@ from nanoquant.compression_quality_workflow import (
     CompressionQualityExperiment,
     run_compression_quality_experiment,
 )
-from nanoquant.config.codec import config_hash
+from nanoquant.config.codec import to_dict
 from nanoquant.config.schema import (
     AllocationStrategy,
     KlSensitivityGranularity,
@@ -93,13 +93,27 @@ def _source_identity(identity: CommitIdentity) -> str:
     return f"{identity.config_hash}|{identity.model_hash}|{identity.plan_hash}"
 
 
+def _require_control_recipe(run_output: Path, expected: RunConfig) -> None:
+    """Verify the canonical RunConfig embedded in the resident manifest."""
+
+    payload = json.loads((run_output / "manifest.json").read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("Experiment 021 control manifest is invalid")
+    resolved = payload.get("resolved_config")
+    canonical = None if not isinstance(resolved, dict) else resolved.get("canonical_run_config")
+    if canonical != to_dict(expected):
+        raise ValueError(
+            "Experiment 021 KL control does not match the current fresh uniform-control recipe"
+        )
+
+
 def _validated_kl_profile(
     profile_path: Path,
     control_run: Path,
     *,
     campaign_root: Path,
     expected_blocks: int,
-    expected_control_config_hash: str,
+    expected_control_config: RunConfig,
 ) -> KlBudgetProfile:
     for label, path in (("profile", profile_path), ("control run", control_run)):
         try:
@@ -112,10 +126,7 @@ def _validated_kl_profile(
         profile_path / "kl-budget-profile.json" if profile_path.is_dir() else profile_path
     )
     control_identity = _journal_identity(control_run, expected_blocks)
-    if control_identity.config_hash != expected_control_config_hash:
-        raise ValueError(
-            "Experiment 021 KL control does not match the current fresh uniform-control recipe"
-        )
+    _require_control_recipe(control_run, expected_control_config)
     expected_source_identity = _source_identity(control_identity)
     if not (
         profile.provenance.source_run_identity == expected_source_identity
@@ -139,14 +150,13 @@ def _prepare_automatic_kl_inputs(
     profile_path = campaign_root / _PROFILE_NAME
     control_run = campaign_root / _CONTROL_NAME
     profile_file = profile_path / "kl-budget-profile.json"
-    expected_hash = config_hash(control_config)
     if profile_file.is_file():
         profile = _validated_kl_profile(
             profile_path,
             control_run,
             campaign_root=campaign_root,
             expected_blocks=experiment.workflow.expected_blocks,
-            expected_control_config_hash=expected_hash,
+            expected_control_config=control_config,
         )
         if profile.complete:
             print(f"Reusing completed Experiment 021 KL profile: {profile_file}", flush=True)
@@ -154,14 +164,11 @@ def _prepare_automatic_kl_inputs(
 
     control_complete = False
     try:
-        identity = _journal_identity(control_run, experiment.workflow.expected_blocks)
+        _journal_identity(control_run, experiment.workflow.expected_blocks)
     except (FileNotFoundError, ValueError):
         pass
     else:
-        if identity.config_hash != expected_hash:
-            raise ValueError(
-                "Experiment 021 automatic control directory contains a completed incompatible recipe"
-            )
+        _require_control_recipe(control_run, control_config)
         control_complete = True
 
     if control_complete:
@@ -183,8 +190,7 @@ def _prepare_automatic_kl_inputs(
         )
         if len(result.quantization.inventory.blocks) != experiment.workflow.expected_blocks:
             raise ValueError("Experiment 021 uniform control completed with the wrong block count")
-        if result.quantization.identity.config_hash != expected_hash:
-            raise ValueError("Experiment 021 uniform control completed with the wrong recipe identity")
+        _require_control_recipe(control_run, control_config)
         del result
         gc.collect()
         if control_config.runtime.compute_device.startswith("cuda") and torch.cuda.is_available():
@@ -255,7 +261,7 @@ def run_experiment021(
         control_run,
         campaign_root=campaign_root,
         expected_blocks=experiment.workflow.expected_blocks,
-        expected_control_config_hash=config_hash(control_config),
+        expected_control_config=control_config,
     )
     if not profile.complete:
         raise ValueError("Experiment 021 requires a complete KL profile")
