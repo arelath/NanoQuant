@@ -140,8 +140,10 @@ interprets a transferred sensitivity proxy as KL:
   physical arm and one rank-response curve; logical Q/K/V measurements are diagnostics only.
 - Add an allocation-strategy value `kl_calibrated` in [config/schema.py](../src/nanoquant/config/schema.py)
   beside the existing `sensitivity` / `utility_profile` strategies; selecting it without a joinable,
-  fresh D1 profile is a validation error. Experiment 021 additionally requires both the profile and its
-  source control run under `evidence/021` and verifies the profile's source commit identity.
+  fresh D1 profile is a validation error. With no command-line arguments, Experiment 021 creates or
+  resumes its own uniform control and exact-unit profile under `evidence/021`, then verifies both the
+  control recipe hash and the profile's source commit identity. `--kl-profile` and `--kl-control-run`
+  remain paired overrides for selecting explicit same-campaign inputs.
 - `response_source = measured`, `objective_mode = calibration_weighted`, exact KL granularity, no
   imported rank-trust reference, and untempered sensitivity are a single fail-closed configuration
   contract. Configured Gemma-1B response constants are not inputs to Experiment 021.

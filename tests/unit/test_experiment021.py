@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+import nanoquant.experiment021_workflow as experiment021_workflow
 from nanoquant.config.schema import (
     AllocationStrategy,
     KlAllocationObjective,
@@ -87,3 +88,58 @@ def test_experiment021_rejects_profiles_from_previous_campaigns(tmp_path: Path) 
                 str(tmp_path / "evidence" / "020" / "old-run"),
             ],
         )
+
+
+def test_experiment021_no_argument_run_prepares_and_consumes_fresh_inputs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    experiment = load_experiment(21)
+    launcher = tmp_path / "repo" / "experiments" / "021.py"
+    campaign = (tmp_path / "repo" / "evidence" / "021").resolve()
+    profile_path = campaign / "generated-profile"
+    control_run = campaign / "generated-control"
+    prepared: dict[str, object] = {}
+
+    def prepare(
+        definition: object,
+        *,
+        launcher_path: str | Path,
+        campaign_root: Path,
+        control_config: object,
+    ) -> tuple[Path, Path]:
+        prepared.update(
+            definition=definition,
+            launcher_path=launcher_path,
+            campaign_root=campaign_root,
+            control_config=control_config,
+        )
+        return profile_path, control_run
+
+    class Profile:
+        complete = True
+        profile_key = "sha256:fresh"
+
+    def consume(config: object, workflow: object, *, launcher_path: str | Path) -> int:
+        prepared.update(config=config, workflow=workflow, final_launcher=launcher_path)
+        return 0
+
+    monkeypatch.setattr(experiment021_workflow, "_prepare_automatic_kl_inputs", prepare)
+    monkeypatch.setattr(
+        experiment021_workflow,
+        "_validated_kl_profile",
+        lambda *args, **kwargs: Profile(),
+    )
+    monkeypatch.setattr(experiment021_workflow, "run_compression_quality_experiment", consume)
+
+    assert run_experiment021(experiment, launcher_path=launcher, arguments=[]) == 0
+
+    control_config = prepared["control_config"]
+    assert control_config.allocation.strategy is AllocationStrategy.UNIFORM
+    assert control_config.allocation.kl_profile_artifact is None
+    assert control_config.allocation.reconstruction.enabled is False
+    assert control_config.distillation.enabled is False
+    assert prepared["campaign_root"] == campaign
+    runtime_config = prepared["config"]
+    assert runtime_config.allocation.kl_profile_artifact == str(profile_path)
+    assert runtime_config.allocation.kl_profile_key == "sha256:fresh"
