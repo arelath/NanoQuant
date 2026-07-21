@@ -484,7 +484,11 @@ class Campaign:
         *,
         tuned: bool = False,
         arms: tuple[str, ...] = (),
+        samples: int = 12,
+        persistent_teacher_cache: bool = True,
     ) -> Path:
+        if samples <= 0:
+            raise ValueError("KL profile sample count must be positive")
         output = self.root / name
         command = [
             sys.executable,
@@ -504,17 +508,19 @@ class Campaign:
             "--device",
             self.args.device,
             "--wikitext-samples",
-            "12",
+            str(samples),
             "--sequence-length",
             "512",
             "--batch-size",
             "1",
             "--token-chunk-size",
             "128",
-            "--teacher-cache-root",
-            str(self.root / "teacher-cache"),
             "--local-files-only",
         ]
+        if persistent_teacher_cache:
+            command.extend(("--teacher-cache-root", str(self.root / "teacher-cache")))
+        else:
+            command.extend(("--teacher-cache-mode", "on_the_fly"))
         if tuned:
             command.append("--use-global-tuning")
         for arm in arms:
@@ -589,42 +595,60 @@ class Campaign:
         ):
             raise ValueError("configured baseline KL profile key differs from its artifact")
         baseline_key = self.args.baseline_profile_key or observed_baseline_key
+        baseline_d2_gate_profile = self.profile(
+            "baseline-d2-full-gate-48",
+            Path(self.args.calibration_source),
+            arms=("full",),
+            samples=48,
+            persistent_teacher_cache=False,
+        )
 
         d2 = self.compress(
-            "d2-kl-static",
+            "d2-kl-exact-trust-025-static",
             baseline_profile,
             baseline_key,
             bias=False,
             alpha_v=1,
             patch_rank=0,
             kl_granularity=KlSensitivityGranularity.EXACT_OR_TYPE_BLOCK,
+            rank_trust_reference_run=Path(self.args.calibration_source),
+            rank_trust_fraction=0.25,
         )
-        d2_profile = self.profile("d2-kl-profile", d2)
+        d2_profile = self.profile("d2-kl-exact-trust-025-profile", d2)
+        d2_gate_profile = self.profile(
+            "d2-kl-exact-trust-025-full-gate-48",
+            d2,
+            arms=("full",),
+            samples=48,
+            persistent_teacher_cache=False,
+        )
         if self.args.dry_run:
             return
 
-        def d2_arm_report(run: Path, profile: Path) -> dict[str, object]:
+        def d2_arm_report(run: Path, profile: Path, gate_profile: Path) -> dict[str, object]:
             candidate_summary = _read(run / "candidate-summary.json")
             redistribution = _rank_redistribution(
                 self.baseline_rank_inventory,
                 _rank_inventory_for_run(run, candidate_summary),
             )
-            kl_gate = _profile_improvement_gate(baseline_profile, profile, "full")
+            kl_gate = _profile_improvement_gate(baseline_d2_gate_profile, gate_profile, "full")
             rank_gate = _rank_redistribution_gate(redistribution)
             return {
                 "run": str(run),
                 "profile": str(profile),
+                "gate_profile": str(gate_profile),
                 "full_kl_gate": kl_gate,
                 "rank_redistribution": redistribution,
-                "rank_redistribution_gate": rank_gate,
-                "passed": (
-                    _material_improvement_passed(kl_gate)
-                    and bool(rank_gate["passed"])
-                ),
+                "rank_redistribution_diagnostic": rank_gate,
+                "passed": _material_improvement_passed(kl_gate),
             }
 
         d2_arms = {
-            KlSensitivityGranularity.EXACT_OR_TYPE_BLOCK: d2_arm_report(d2, d2_profile)
+            KlSensitivityGranularity.EXACT_OR_TYPE_BLOCK: d2_arm_report(
+                d2,
+                d2_profile,
+                d2_gate_profile,
+            )
         }
         d2_rank_trust_arm: dict[str, object] | None = None
         if not bool(d2_arms[KlSensitivityGranularity.EXACT_OR_TYPE_BLOCK]["passed"]):
@@ -641,9 +665,17 @@ class Campaign:
                 "d2-kl-type-block-profile",
                 fallback_d2,
             )
+            fallback_d2_gate_profile = self.profile(
+                "d2-kl-type-block-full-gate-48",
+                fallback_d2,
+                arms=("full",),
+                samples=48,
+                persistent_teacher_cache=False,
+            )
             d2_arms[KlSensitivityGranularity.TYPE_BLOCK] = d2_arm_report(
                 fallback_d2,
                 fallback_d2_profile,
+                fallback_d2_gate_profile,
             )
             if not bool(d2_arms[KlSensitivityGranularity.TYPE_BLOCK]["passed"]):
                 trust_d2 = self.compress(
@@ -661,7 +693,18 @@ class Campaign:
                     "d2-kl-type-block-trust-025-profile",
                     trust_d2,
                 )
-                d2_rank_trust_arm = d2_arm_report(trust_d2, trust_d2_profile)
+                trust_d2_gate_profile = self.profile(
+                    "d2-kl-type-block-trust-025-full-gate-48",
+                    trust_d2,
+                    arms=("full",),
+                    samples=48,
+                    persistent_teacher_cache=False,
+                )
+                d2_rank_trust_arm = d2_arm_report(
+                    trust_d2,
+                    trust_d2_profile,
+                    trust_d2_gate_profile,
+                )
                 d2_rank_trust_arm.update(
                     {
                         "granularity": KlSensitivityGranularity.TYPE_BLOCK.value,

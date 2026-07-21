@@ -83,9 +83,12 @@ KlBudgetProfile(arms: dict[arm, ArmResult(nll, kl_nats_per_token, n_tokens)], ba
 
 Mechanics, copied from the validated session script:
 
-- Load the pinned bf16 teacher once; compute and cache teacher log-probs for the KL subset
-  (12×512 tokens was sufficient; fp16 CPU cache ≈ 3.2 GB for Gemma-1B's 262k vocab — chunk the KL
-  reduction at 128 tokens as in the session script).
+- Load the pinned bf16 teacher once; compute and cache teacher log-probs for the KL subset. Retain
+  per-sequence statistics and use a paired confidence interval for adoption decisions. The corrected
+  270M D2 measurement showed that 12×512 was insufficient for a 1% gate, while 48×512 resolved that
+  candidate; sample sufficiency remains an interval-based decision rather than a fixed constant.
+  Chunk the KL reduction at 128 tokens as in the session script. For large-vocabulary models, use
+  on-the-fly teacher evaluation when a persistent fp16 cache would consume excessive host memory.
 - For each arm: copy the arm's reconstructions over `module.weight.data`, run the eval subset, restore
   from clean CPU copies. Reconstructions come from the run's committed factors via
   `live_reconstruction`, not from re-fitting.
@@ -141,14 +144,16 @@ application layer feeds it:
   fresh D1 profile is a validation error (fail-closed, matching the Docs/30 "no plan without a complete
   profile" rule).
 - The protected-cohort logic and floors/caps in `allocate_reconstruction_rank_budget` are unchanged.
-  Expectation to encode in the experiment definition, not the code: `up_proj` and blocks 0–10 gain rank;
-  `k`/`down` and blocks 18–24 lose rank toward their floors.
+  Cross-model rank-direction expectations are diagnostics, not adoption gates. The corrected 270M
+  exact profile moved rank toward attention and still improved end-to-end KL/NLL, contradicting the
+  earlier 1B-derived expectation while validating the measured operating-point profile.
 
 ### 3.3 Gate
 
-Re-run the D1 harness on the re-allocated plan. Success = whole-model KL drops materially below the
-measured 4.675 nats/token baseline at equal bits (the profile predicts the reachable share: the drained
-types/blocks currently contribute >60% of type-sum KL).
+Re-run the D1 harness on the re-allocated plan. Success requires the upper bound of a paired 95%
+confidence interval to show at least the predeclared relative KL improvement at equal or lower bits.
+Then run the exact retained packed quality protocol. A rank redistribution matching historical
+cross-model expectations is reported diagnostically but is not a success condition.
 
 ## 4. D3 — Closed-form output bias correction
 

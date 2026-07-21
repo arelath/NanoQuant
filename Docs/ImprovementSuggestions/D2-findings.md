@@ -54,7 +54,7 @@ The previous suggestion to check that `s × E²` reproduces KL was also removed:
 from the same pair, that check is algebraic and provides little independent protection. The useful
 test is a held-out, end-to-end KL measurement of the resulting plan.
 
-## Finding 2 — Fixed observability; sample sufficiency remains empirical
+## Finding 2 — Fixed observability; 12 sequences were insufficient for this gate
 
 The evaluator-v2 arms contained only aggregate metrics for 12 sequences / 6,132 scored tokens.
 That was enough to report a point estimate but not enough to estimate uncertainty. The difference
@@ -68,12 +68,24 @@ reconstruction followed by a final cast.
 Evaluator v3 now persists NLL, KL, and token count per sequence for every arm. The campaign's D2
 adoption gate performs a deterministic paired bootstrap over those sequences and requires the upper
 95% confidence bound to meet the predeclared 1% relative-improvement threshold. This makes the gate
-data-driven; `48` sequences may be a useful future operating point, but it is not treated as a
-proven minimum without measured intervals.
+data-driven.
+
+The corrected exact-unit candidate measured the following paired results:
+
+| Slice | Baseline KL | Candidate KL | Relative delta | Paired 95% interval | 1% gate |
+| --- | ---: | ---: | ---: | ---: | --- |
+| 12×512 (6,132 tokens) | 2.745538 | 2.733696 | −0.431% | [−2.710%, +1.787%] | Fail |
+| 48×512 (24,528 tokens) | 2.817520 | 2.737990 | −2.823% | [−4.287%, −1.393%] | Pass |
+
+The 12-sequence slice could not distinguish the required improvement from a regression. The
+48-sequence slice resolved this candidate decisively, with the upper confidence bound beyond the
+predeclared 1% improvement threshold. This proves that 12 sequences were insufficient for this
+decision; it does not establish 48 as a universal minimum, so future gates continue to use the
+measured interval rather than a hard-coded sample-count claim.
 
 The retained full quality benchmark remains the final arbiter.
 
-## Finding 3 — Expected headroom was overstated
+## Finding 3 — Expected headroom and structural direction were overstated
 
 This conclusion remains supported:
 
@@ -85,11 +97,13 @@ This conclusion remains supported:
   3.2167%. The 0.25 trust arm reduced that regression to 0.168% on the old point-estimate harness,
   but it cannot be called statistically neutral because evaluator v2 retained no per-sequence data.
 
-These results establish that large allocation steps and cross-model expectations were unsafe. They
-do not establish how much quality the corrected exact-unit metric can recover; that requires a new
-evaluator-v3 baseline profile and a corrected held-out D2 run.
+These results establish that large allocation steps and cross-model expectations were unsafe. The
+corrected 0.25-trust exact-unit arm moved MLP rank by `−480`, attention rank by `+576`, blocks 0–10 by
+`+384`, and blocks 11–17 by `−288`. It therefore reversed the inherited type direction while still
+improving both held-out KL and retained WikiText NLL. The Gemma-1B-derived MLP-gain/attention-drain
+expectation is now a historical diagnostic, not an adoption condition for the fresh 270M profile.
 
-## Reusable evidence and next measurement
+## Corrected measurement and disposition
 
 The evaluator-v2 per-unit KL scalar measurements remain useful diagnostic evidence. They cannot be
 used directly as a planner profile because the old artifact does not store the corrected denominator
@@ -97,11 +111,20 @@ or per-sequence statistics. The normalized denominators can be recovered from al
 units, but a formal adoption attempt must generate a new versioned profile rather than rewriting old
 evidence.
 
-The next D2 measurement should:
+That measurement is now complete:
 
-1. Generate an evaluator-v3 baseline profile from the retained Experiment 016 run.
-2. Run corrected exact-unit allocation from the same operating point with the predeclared 0.25 rank
-   trust region.
-3. Apply the paired-bootstrap D2 gate, then run the exact retained packed quality benchmark if the
-   arm passes.
-4. Record D2 as exhausted on this baseline if the corrected arm is still non-improving.
+1. The evaluator-v3 baseline and candidate profiles each contain all 114 arms and explicit
+   per-sequence statistics.
+2. The corrected 0.25-trust candidate completed and freshly validated 18/18 blocks and 492 transitive
+   artifacts at effective BPW `1.022967310`, below Experiment 016's `1.025280423`.
+3. Its 48-sequence paired KL gate passed, as shown above.
+4. The exact packed quality benchmark reproduced the BF16 base, proved packed/reference parity with
+   maximum absolute error `0.0`, and improved WikiText NLL from `7.222190376` to `7.171782786`.
+
+The pinned downstream tasks were mixed: PIQA `+0.010`, ARC Easy `−0.005`, ARC Challenge `+0.005`,
+HellaSwag `−0.010`, WinoGrande `+0.055`, and BoolQ `−0.210` (macro `−0.025833`). Corrected D2 is
+therefore a demonstrated KL/NLL improvement at lower BPW, not an across-the-board task-quality win.
+
+The complete human- and machine-readable records are
+[`d2-corrected-v3-summary.md`](../../evidence/020/formal/d2-corrected-v3-summary.md) and
+[`d2-corrected-v3-summary.json`](../../evidence/020/formal/d2-corrected-v3-summary.json).

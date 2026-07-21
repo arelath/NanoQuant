@@ -241,14 +241,26 @@ def test_campaign_profile_uses_requested_arms_and_pinned_local_inputs(
         tmp_path / "candidate",
         arms=("type:self_attn.attn_qkv",),
     )
+    campaign.profile(
+        "full-gate-profile",
+        tmp_path / "candidate",
+        arms=("full",),
+        samples=48,
+        persistent_teacher_cache=False,
+    )
     campaign.quality(tmp_path / "candidate")
     marker = campaign.cuda_sidecar()
 
-    profile_command, quality_command, cuda_command = commands
+    profile_command, gate_command, quality_command, cuda_command = commands
     arm_index = profile_command.index("--arm")
     cache_index = profile_command.index("--teacher-cache-root")
     assert profile_command[arm_index + 1] == "type:self_attn.attn_qkv"
     assert Path(profile_command[cache_index + 1]) == campaign.root / "teacher-cache"
+    sample_index = gate_command.index("--wikitext-samples")
+    assert gate_command[sample_index + 1] == "48"
+    assert "--teacher-cache-root" not in gate_command
+    mode_index = gate_command.index("--teacher-cache-mode")
+    assert gate_command[mode_index + 1] == "on_the_fly"
     assert "--local-files-only" in profile_command
     assert "--local-files-only" in quality_command
     assert "addopts=" in cuda_command
