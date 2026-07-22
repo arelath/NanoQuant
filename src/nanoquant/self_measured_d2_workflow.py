@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import gc
 import json
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Protocol
 
@@ -35,6 +35,38 @@ from nanoquant.resident_workflow import (
 _TEACHER_CACHE_NAME = "kl-teacher-cache"
 
 
+@dataclass(frozen=True, slots=True)
+class SelfMeasuredD2ProfileOptions:
+    """Opt-in controls for how the same-campaign KL profile is measured.
+
+    The defaults reproduce the original Experiment 021/022 behavior exactly: a
+    static (undistilled) uniform control profiled over 12x512 WikiText sequences.
+
+    ``tuned_operating_point`` fixes the distillation-measurement mismatch. When it
+    is ``True`` the uniform control keeps global distillation enabled and the KL
+    profile is measured against the tuned reconstruction, so the per-unit
+    sensitivities reflect the same globally distilled operating point as the final
+    candidate rather than the static uniform point. When ``False`` (the default)
+    the control is measured static, as Experiments 021 and 022 did.
+
+    ``wikitext_samples`` / ``sequence_length`` size the profiling slice. The D2
+    campaign review found the fixed 12x512 slice too small to resolve a 1%
+    improvement decisively (a 48x512 slice did), so larger models should request
+    at least 48 sequences.
+    """
+
+    wikitext_samples: int = 12
+    sequence_length: int = 512
+    tuned_operating_point: bool = False
+
+    def __post_init__(self) -> None:
+        if self.wikitext_samples <= 0 or self.sequence_length < 2:
+            raise ValueError("KL profile dataset dimensions must be positive")
+
+
+_DEFAULT_PROFILE_OPTIONS = SelfMeasuredD2ProfileOptions()
+
+
 class _SelfMeasuredD2Definition(Protocol):
     config: RunConfig
     workflow: CompressionQualityExperiment
@@ -59,10 +91,25 @@ def _profile_name(config: RunConfig) -> str:
     return f"{_experiment_number(config):03d}-d2-uniform-control-kl-profile"
 
 
-def _uniform_control_config(config: RunConfig, campaign_root: Path) -> RunConfig:
+def _uniform_control_config(
+    config: RunConfig,
+    campaign_root: Path,
+    *,
+    tuned_operating_point: bool = False,
+) -> RunConfig:
     """Derive a fresh uniform control without imported experimental values."""
 
     number = _experiment_number(config)
+    # When ``tuned_operating_point`` is set the control keeps global distillation
+    # enabled so the KL profile can be measured at the same tuned operating point
+    # as the final candidate. Otherwise the control measures the static uniform
+    # point, as Experiments 021 and 022 did; global tuning then remains part of
+    # only the final candidate/baseline comparison.
+    control_distillation = (
+        config.distillation
+        if tuned_operating_point
+        else replace(config.distillation, enabled=False)
+    )
     control = replace(
         config,
         intent=replace(
@@ -87,9 +134,7 @@ def _uniform_control_config(config: RunConfig, campaign_root: Path) -> RunConfig
             kl_sensitivity_granularity=KlSensitivityGranularity.EXACT_OR_TYPE_BLOCK,
             reconstruction=ReconstructionRankPlanningConfig(),
         ),
-        # The allocation profile measures the static uniform operating point.
-        # Global tuning remains part of the final candidate/baseline comparison.
-        distillation=replace(config.distillation, enabled=False),
+        distillation=control_distillation,
         output=replace(config.output, run_root=str(campaign_root)),
     )
     raise_for_issues(validate(control, ValidationPhase.RESOLVED))
@@ -162,6 +207,7 @@ def _prepare_automatic_kl_inputs(
     launcher_path: str | Path,
     campaign_root: Path,
     control_config: RunConfig,
+    profile_options: SelfMeasuredD2ProfileOptions,
 ) -> tuple[Path, Path]:
     """Create or resume the uniform control and its exact-unit KL profile."""
 
@@ -225,14 +271,14 @@ def _prepare_automatic_kl_inputs(
             revision=str(control_config.model.revision),
             profile_output=profile_path,
             device=control_config.runtime.compute_device,
-            wikitext_samples=12,
-            sequence_length=512,
+            wikitext_samples=profile_options.wikitext_samples,
+            sequence_length=profile_options.sequence_length,
             batch_size=1,
             token_chunk_size=128,
             arm=[],
             teacher_cache_mode="cpu",
             teacher_cache_root=campaign_root / _TEACHER_CACHE_NAME,
-            use_global_tuning=False,
+            use_global_tuning=profile_options.tuned_operating_point,
             local_files_only=False,
         )
     )
@@ -244,6 +290,7 @@ def run_self_measured_d2_experiment(
     *,
     launcher_path: str | Path,
     arguments: list[str] | None = None,
+    profile_options: SelfMeasuredD2ProfileOptions = _DEFAULT_PROFILE_OPTIONS,
 ) -> int:
     """Prepare, verify, and consume same-campaign KL inputs before compression."""
 
@@ -266,13 +313,18 @@ def run_self_measured_d2_experiment(
     number = _experiment_number(experiment.config)
     label = f"Experiment {number:03d}"
     campaign_root = (repository / "evidence" / f"{number:03d}").resolve()
-    control_config = _uniform_control_config(experiment.config, campaign_root)
+    control_config = _uniform_control_config(
+        experiment.config,
+        campaign_root,
+        tuned_operating_point=profile_options.tuned_operating_point,
+    )
     if parsed.kl_profile is None:
         profile_path, control_run = _prepare_automatic_kl_inputs(
             experiment,
             launcher_path=launcher_path,
             campaign_root=campaign_root,
             control_config=control_config,
+            profile_options=profile_options,
         )
     else:
         profile_path = parsed.kl_profile.resolve()
@@ -319,4 +371,8 @@ def run_experiment021(
     )
 
 
-__all__ = ["run_experiment021", "run_self_measured_d2_experiment"]
+__all__ = [
+    "SelfMeasuredD2ProfileOptions",
+    "run_experiment021",
+    "run_self_measured_d2_experiment",
+]

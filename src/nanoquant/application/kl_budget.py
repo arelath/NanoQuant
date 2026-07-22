@@ -425,6 +425,74 @@ def measured_unit_kl_anchors(
     return tuple(result)
 
 
+def interaction_corrected_unit_kl_anchors(
+    profile: KlBudgetProfile,
+    unit_ids: tuple[str, ...],
+) -> tuple[tuple[str, float], ...]:
+    """Return per-unit KL anchors rescaled so each type sums to its joint KL.
+
+    ``measured_unit_kl_anchors`` returns the raw single-unit splice KL for every
+    unit. Summing those raw values across a network heavily over-counts the joint
+    damage, because unit errors interact: on Gemma-3 the raw per-unit sum is about
+    3x the ``full`` arm, and some types (``down_proj``, ``o_proj``) are strongly
+    super-additive while others are sub-additive. Feeding raw anchors into the
+    geometric-mean-normalized allocator therefore misweights types relative to
+    their measured joint effect.
+
+    This anchor replaces the additive-across-units assumption with the measured
+    joint effect per type. For each physical unit ``u`` of type ``t`` it returns
+
+        anchor_u = KL(type:t) * ( KL(unit:u) / sum_{u' in t} KL(unit:u') ),
+
+    so the anchors of one type sum exactly to that type's measured joint arm while
+    preserving each unit's within-type share. This keeps within-type ordering,
+    down-weights sub-additive types, and up-weights super-additive ones. It is a
+    genuinely non-uniform reweighting of the raw anchors (not a global rescale),
+    so it changes the allocation the geometric-mean normalization would otherwise
+    leave invariant. A cross-type distribution by the ``full`` arm would only add
+    a global constant, so it is intentionally omitted.
+    """
+
+    if not profile.complete:
+        raise ValueError("interaction-corrected KL planning requires a complete profile")
+    arms = {arm.arm: arm for arm in profile.arms}
+    type_arms = {name[5:]: arm for name, arm in arms.items() if name.startswith("type:")}
+    unit_kl: dict[str, float] = {}
+    type_of: dict[str, str] = {}
+    for unit_id in unit_ids:
+        arm = arms.get(f"unit:{unit_id}")
+        if arm is None:
+            raise ValueError(f"KL profile has no exact physical-unit arm: {unit_id}")
+        value = arm.kl_nats_per_token
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError(f"measured unit KL is not positive for {unit_id}")
+        try:
+            unit_type = unit_id.split(":", 1)[1]
+        except IndexError as exc:
+            raise ValueError(f"invalid KL planning unit identity: {unit_id}") from exc
+        unit_kl[unit_id] = value
+        type_of[unit_id] = unit_type
+    type_sums: dict[str, float] = {}
+    for unit_id, unit_type in type_of.items():
+        type_sums[unit_type] = type_sums.get(unit_type, 0.0) + unit_kl[unit_id]
+    result: list[tuple[str, float]] = []
+    for unit_id in unit_ids:
+        unit_type = type_of[unit_id]
+        type_arm = type_arms.get(unit_type)
+        if type_arm is None:
+            raise ValueError(
+                f"interaction-corrected KL planning requires a type arm for {unit_type}"
+            )
+        joint = type_arm.kl_nats_per_token
+        if not math.isfinite(joint) or joint <= 0:
+            raise ValueError(f"KL type arm is not positive for {unit_type}")
+        anchor = joint * (unit_kl[unit_id] / type_sums[unit_type])
+        if not math.isfinite(anchor) or anchor <= 0:
+            raise ValueError(f"interaction-corrected KL anchor is not positive for {unit_id}")
+        result.append((unit_id, anchor))
+    return tuple(result)
+
+
 __all__ = [
     "KL_BUDGET_EVALUATOR_VERSION",
     "KL_BUDGET_PROFILE_SCHEMA_VERSION",
@@ -438,6 +506,7 @@ __all__ = [
     "PersistedKlBudgetProfile",
     "causal_kl_nll_from_logits",
     "causal_kl_nll_per_sequence_from_logits",
+    "interaction_corrected_unit_kl_anchors",
     "kl_calibrated_sensitivities",
     "measured_unit_kl_anchors",
     "load_kl_budget_profile",

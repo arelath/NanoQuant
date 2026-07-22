@@ -16,6 +16,7 @@ from nanoquant.application.kl_budget import (
     KlSequenceResult,
     causal_kl_nll_from_logits,
     causal_kl_nll_per_sequence_from_logits,
+    interaction_corrected_unit_kl_anchors,
     kl_calibrated_sensitivities,
     load_kl_budget_profile,
     measured_unit_kl_anchors,
@@ -195,6 +196,66 @@ def test_measured_unit_kl_anchors_fail_without_exact_physical_arm() -> None:
 
     with pytest.raises(ValueError, match="no exact physical-unit arm"):
         measured_unit_kl_anchors(profile, ("0:up",))
+
+
+def _interaction_profile() -> KlBudgetProfile:
+    return KlBudgetProfile(
+        2,
+        _provenance(),
+        1.0,
+        (
+            _arm("unit:0:attn_qkv", 2.0, 0.8),
+            _arm("unit:1:attn_qkv", 2.0, 0.4),
+            _arm("unit:0:up", 2.0, 0.6),
+            _arm("unit:1:up", 2.0, 0.6),
+            _arm("type:attn_qkv", 2.0, 3.0),
+            _arm("type:up", 2.0, 0.6),
+            _arm("block:0", 2.0, 2.0),
+            _arm("block:1", 2.0, 2.0),
+        ),
+        True,
+    )
+
+
+def test_interaction_corrected_anchors_rescale_each_type_to_its_joint_arm() -> None:
+    unit_ids = ("0:attn_qkv", "1:attn_qkv", "0:up", "1:up")
+    values = dict(interaction_corrected_unit_kl_anchors(_interaction_profile(), unit_ids))
+
+    # Each type's anchors sum to its measured joint type-arm KL (attn_qkv=3.0, up=0.6),
+    # replacing the additive-across-units assumption.
+    assert values["0:attn_qkv"] + values["1:attn_qkv"] == pytest.approx(3.0)
+    assert values["0:up"] + values["1:up"] == pytest.approx(0.6)
+    # Within-type shares are preserved: 0:attn_qkv carries twice 1:attn_qkv, as in the raw arms.
+    assert values["0:attn_qkv"] == pytest.approx(2.0)
+    assert values["1:attn_qkv"] == pytest.approx(1.0)
+
+
+def test_interaction_corrected_anchors_reweight_types_non_uniformly() -> None:
+    unit_ids = ("0:attn_qkv", "1:attn_qkv", "0:up", "1:up")
+    raw = dict(measured_unit_kl_anchors(_interaction_profile(), unit_ids))
+    corrected = dict(interaction_corrected_unit_kl_anchors(_interaction_profile(), unit_ids))
+
+    # The correction is a non-uniform reweighting across types (super-additive attn_qkv
+    # scaled up, sub-additive up scaled down), not a global rescale the geometric-mean
+    # normalized allocator would ignore.
+    attn_ratio = corrected["0:attn_qkv"] / raw["0:attn_qkv"]
+    up_ratio = corrected["0:up"] / raw["0:up"]
+    assert attn_ratio == pytest.approx(2.5)
+    assert up_ratio == pytest.approx(0.5)
+    assert attn_ratio != pytest.approx(up_ratio)
+
+
+def test_interaction_corrected_anchors_fail_without_type_arm() -> None:
+    profile = KlBudgetProfile(
+        2,
+        _provenance(),
+        1.0,
+        (_arm("unit:0:up", 2.0, 0.6), _arm("block:0", 2.0, 2.0)),
+        True,
+    )
+
+    with pytest.raises(ValueError, match="requires a type arm"):
+        interaction_corrected_unit_kl_anchors(profile, ("0:up",))
 
 
 def test_profile_key_fails_closed_when_path_content_is_stale(tmp_path: Path) -> None:

@@ -110,12 +110,14 @@ def test_experiment021_no_argument_run_prepares_and_consumes_fresh_inputs(
         launcher_path: str | Path,
         campaign_root: Path,
         control_config: object,
+        profile_options: object,
     ) -> tuple[Path, Path]:
         prepared.update(
             definition=definition,
             launcher_path=launcher_path,
             campaign_root=campaign_root,
             control_config=control_config,
+            profile_options=profile_options,
         )
         return profile_path, control_run
 

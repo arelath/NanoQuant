@@ -92,6 +92,17 @@ class RankResponseSource(StringEnum):
 class KlAllocationObjective(StringEnum):
     SENSITIVITY_PROXY = "sensitivity_proxy"
     MEASURED_UNIT_KL = "measured_unit_kl"
+    INTERACTION_NORMALIZED_UNIT_KL = "interaction_normalized_unit_kl"
+
+
+# Objectives that anchor allocation on directly measured physical-unit KL rather
+# than an error proxy. They share the same fail-closed requirements (exact arms,
+# same-run measured responses, untempered sensitivity, no imported ranks); they
+# differ only in how the per-unit anchor values are derived from the profile.
+MEASURED_UNIT_KL_OBJECTIVES = (
+    KlAllocationObjective.MEASURED_UNIT_KL,
+    KlAllocationObjective.INTERACTION_NORMALIZED_UNIT_KL,
+)
 
 
 class OutlierSelector(StringEnum):

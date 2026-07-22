@@ -9,9 +9,9 @@ from enum import Enum
 from nanoquant.ports.event_sink import Severity
 
 from .schema import (
+    MEASURED_UNIT_KL_OBJECTIVES,
     AllocationStrategy,
     DType,
-    KlAllocationObjective,
     KlSensitivityGranularity,
     ObjectiveKind,
     OutlierSelector,
@@ -308,7 +308,7 @@ def validate(config: RunConfig, phase: ValidationPhase = ValidationPhase.PRE_RES
                 "allocation.reconstruction.objective_mode",
                 "measured response mode requires calibration_weighted probes",
             )
-        if reconstruction.kl_objective is KlAllocationObjective.MEASURED_UNIT_KL:
+        if reconstruction.kl_objective in MEASURED_UNIT_KL_OBJECTIVES:
             require(
                 kl_selected and config.allocation.kl_sensitivity_granularity is KlSensitivityGranularity.EXACT,
                 "CFG094",

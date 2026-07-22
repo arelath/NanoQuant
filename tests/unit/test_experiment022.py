@@ -90,12 +90,14 @@ def test_experiment022_no_argument_run_owns_its_control_and_profile_campaign(
         launcher_path: str | Path,
         campaign_root: Path,
         control_config: object,
+        profile_options: object,
     ) -> tuple[Path, Path]:
         prepared.update(
             definition=definition,
             launcher_path=launcher_path,
             campaign_root=campaign_root,
             control_config=control_config,
+            profile_options=profile_options,
         )
         return campaign / "profile", campaign / "control"
 

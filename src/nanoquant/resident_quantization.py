@@ -30,6 +30,7 @@ from nanoquant.application.calibration_artifacts import (
 from nanoquant.application.covariance import SplitDenseCovarianceAccumulator
 from nanoquant.application.device_batches import iter_device_batches
 from nanoquant.application.kl_budget import (
+    interaction_corrected_unit_kl_anchors,
     kl_calibrated_sensitivities,
     load_kl_budget_profile,
     measured_unit_kl_anchors,
@@ -70,6 +71,7 @@ from nanoquant.application.tuning import (
 )
 from nanoquant.config.codec import canonical_json, from_dict, to_dict
 from nanoquant.config.schema import (
+    MEASURED_UNIT_KL_OBJECTIVES,
     ActivationGpuCacheMode,
     ADMMConfig,
     AllocationStrategy,
@@ -2049,7 +2051,10 @@ def _load_requested_kl_sensitivities(
         expected_profile_key=request.kl_profile_key,
     )
     unit_ids = _planning_unit_ids(inventory, groups)
-    if request.reconstruction_rank_planning.kl_objective is KlAllocationObjective.MEASURED_UNIT_KL:
+    objective = request.reconstruction_rank_planning.kl_objective
+    if objective is KlAllocationObjective.INTERACTION_NORMALIZED_UNIT_KL:
+        return interaction_corrected_unit_kl_anchors(profile, unit_ids)
+    if objective is KlAllocationObjective.MEASURED_UNIT_KL:
         return measured_unit_kl_anchors(profile, unit_ids)
     return kl_calibrated_sensitivities(
         profile,
@@ -2604,7 +2609,7 @@ def _run_reconstruction_rank_probes(
     kl_sensitivity = dict(kl_sensitivities)
     measured_kl_objective = (
         bool(kl_sensitivity)
-        and reconstruction.kl_objective is KlAllocationObjective.MEASURED_UNIT_KL
+        and reconstruction.kl_objective in MEASURED_UNIT_KL_OBJECTIVES
     )
     if kl_sensitivity and set(kl_sensitivity) != {unit_id for unit_id, _unit in units}:
         raise ValueError("KL sensitivity profile does not exactly cover reconstruction units")
@@ -3212,7 +3217,7 @@ def _validate_resident_request(request: ResidentQuantizationRequest) -> None:
         )
     if trust_reference is not None and (not kl_selected or not trust_reference.strip()):
         raise ValueError("resident rank trust reference requires KL-calibrated planning")
-    if reconstruction.kl_objective is KlAllocationObjective.MEASURED_UNIT_KL:
+    if reconstruction.kl_objective in MEASURED_UNIT_KL_OBJECTIVES:
         if (
             not kl_selected
             or request.kl_sensitivity_granularity is not KlSensitivityGranularity.EXACT
