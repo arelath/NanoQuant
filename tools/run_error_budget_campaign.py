@@ -196,6 +196,12 @@ def _material_improvement_passed(
     return bool(gate["improved"]) and measured_delta <= -minimum_relative_improvement
 
 
+def _confidence_improvement_passed(gate: dict[str, float | bool]) -> bool:
+    """Require the paired confidence interval, not only its point estimate, to improve."""
+
+    return bool(gate["improved"]) and float(gate.get("upper_delta", gate["delta"])) < 0
+
+
 def _phase_kl(phase_kls: dict[str, dict[str, object]], phase: str, arm: str) -> float:
     return float(cast(float, phase_kls[phase][arm]))
 
@@ -665,22 +671,33 @@ class Campaign:
             target_bpw=SIDECAR_TARGET_BPW,
         )
         d3_profile = self.profile("d3-bias-kl-profile", d3)
+        d3_gate = _profile_improvement_gate(d3_control_profile, d3_profile, O_ARM)
+        d3_bias_adopted = _confidence_improvement_passed(d3_gate)
+        selected_phase_profile = d3_profile if d3_bias_adopted else d2_profile
+        self._checkpoint(
+            d3_selection={
+                "adopted": d3_bias_adopted,
+                "o_kl_gate": d3_gate,
+                "fallback": None if d3_bias_adopted else "validated D2 static operating point",
+            }
+        )
 
         alpha_runs: dict[int, tuple[Path, Path]] = {}
+        d4_mode = "bias" if d3_bias_adopted else "no-bias"
         for alpha in (1, 2, 4):
             run = self.compress(
-                f"d4-v{alpha}-static",
-                d3_profile,
-                _profile_key(d3_profile),
-                bias=True,
+                f"d4-{d4_mode}-v{alpha}-static",
+                selected_phase_profile,
+                _profile_key(selected_phase_profile),
+                bias=d3_bias_adopted,
                 alpha_v=alpha,
                 patch_rank=0,
-                target_bpw=SIDECAR_TARGET_BPW,
+                target_bpw=SIDECAR_TARGET_BPW if d3_bias_adopted else None,
             )
             alpha_runs[alpha] = (
                 run,
                 self.profile(
-                    f"d4-v{alpha}-kl-profile",
+                    f"d4-{d4_mode}-v{alpha}-kl-profile",
                     run,
                     arms=(QKV_ARM,),
                 ),
@@ -690,17 +707,19 @@ class Campaign:
         )
         winning_d4_run = alpha_runs[winning_alpha][0]
         winning_d4_profile = self.profile(
-            f"d4-v{winning_alpha}-full-kl-profile",
+            f"d4-{d4_mode}-v{winning_alpha}-full-kl-profile",
             winning_d4_run,
         )
 
-        patch_runs: dict[int, tuple[Path, Path]] = {}
-        for rank in (0, 4, 8, 16):
+        patch_runs: dict[int, tuple[Path, Path]] = {
+            0: (winning_d4_run, winning_d4_profile)
+        }
+        for rank in (4, 8, 16):
             run = self.compress(
-                f"d5-k{rank}-static",
+                f"d5-{d4_mode}-k{rank}-static",
                 winning_d4_profile,
                 _profile_key(winning_d4_profile),
-                bias=True,
+                bias=d3_bias_adopted,
                 alpha_v=winning_alpha,
                 patch_rank=rank,
                 target_bpw=SIDECAR_TARGET_BPW,
@@ -798,7 +817,9 @@ class Campaign:
             "d2_full_kl_materially_improved": _material_improvement_passed(
                 phase_gates["d2_full_kl"]
             ),
-            "d3_o_kl_improved": bool(phase_gates["d3_o_kl"]["improved"]),
+            "d3_bias_adopted_and_improved": bool(
+                d3_bias_adopted and _confidence_improvement_passed(d3_gate)
+            ),
             "d4_multiplier_adopted_and_improved": bool(
                 phase_gates["d4_qkv_kl"]["adopted"]
                 and phase_gates["d4_qkv_kl"]["improved"]
@@ -820,6 +841,8 @@ class Campaign:
             "status": "completed",
             "winning_alpha_v": winning_alpha,
             "winning_patch_rank": winning_patch,
+            "d3_bias_adopted": d3_bias_adopted,
+            "d3_o_kl_gate": d3_gate,
             "d2_sensitivity_granularity": KlSensitivityGranularity.EXACT.value,
             "sidecar_target_bpw": SIDECAR_TARGET_BPW,
             "d2_arm": selected_d2,

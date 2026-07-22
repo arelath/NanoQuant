@@ -32,6 +32,11 @@ distillation is scheduled, not built — it already exists.
 - Bias/patch campaign arms reserve 0.01% of the nominal factor budget. This is an alignment guard, not
   extra capacity: it prevents a charged sidecar from consuming a sub-rank remainder and ending a few
   thousand bits above the retained baseline after ranks are rounded to the required multiple.
+- The 270M D2 arm passed its paired 48-sequence gate (2.81752 → 2.59082 nats/token; −8.05%, paired
+  95% interval [−9.07%, −7.03%]). The first all-unit D3 arm was correctly funded at 1.024821 BPW but
+  failed its `o_proj` splice gate (1.65693 → 2.01585; +21.66%, paired 95% interval [+19.23%, +24.15%]).
+  D3 is therefore not adopted for this model. The campaign continues D4 from the last accepted D2
+  operating point; rejected phases never become inputs to later phase measurements.
 
 ## 1. Decision summary
 

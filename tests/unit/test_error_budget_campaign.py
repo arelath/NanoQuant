@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from run_error_budget_campaign import (
     Campaign,
+    _confidence_improvement_passed,
     _improvement_gate,
     _material_improvement_passed,
     _profile_key,
@@ -170,6 +171,9 @@ def test_campaign_improvement_gate_reports_absolute_and_relative_kl() -> None:
     assert not _material_improvement_passed(_improvement_gate(2.0, 1.99))
     assert not _material_improvement_passed({**gate, "upper_relative_delta": -0.005})
     assert _material_improvement_passed({**gate, "upper_relative_delta": -0.02})
+    assert _confidence_improvement_passed({**gate, "upper_delta": -0.01})
+    assert not _confidence_improvement_passed({**gate, "upper_delta": 0.01})
+    assert not _confidence_improvement_passed(_improvement_gate(1.0, 1.1))
 
     with pytest.raises(ValueError, match="threshold"):
         _material_improvement_passed(gate, 0)
