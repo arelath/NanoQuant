@@ -83,9 +83,12 @@ KlBudgetProfile(arms: dict[arm, ArmResult(nll, kl_nats_per_token, n_tokens)], ba
 
 Mechanics, copied from the validated session script:
 
-- Load the pinned bf16 teacher once; compute and cache teacher log-probs for the KL subset
-  (12×512 tokens was sufficient; fp16 CPU cache ≈ 3.2 GB for Gemma-1B's 262k vocab — chunk the KL
-  reduction at 128 tokens as in the session script).
+- Load the pinned bf16 teacher once; compute and cache teacher log-probs for the KL subset. Retain
+  per-sequence statistics and use a paired confidence interval for adoption decisions. The corrected
+  270M D2 measurement showed that 12×512 was insufficient for a 1% gate, while 48×512 resolved that
+  candidate; sample sufficiency remains an interval-based decision rather than a fixed constant.
+  Chunk the KL reduction at 128 tokens as in the session script. For large-vocabulary models, use
+  on-the-fly teacher evaluation when a persistent fp16 cache would consume excessive host memory.
 - For each arm: copy the arm's reconstructions over `module.weight.data`, run the eval subset, restore
   from clean CPU copies. Reconstructions come from the run's committed factors via
   `live_reconstruction`, not from re-fitting.
@@ -95,8 +98,10 @@ Mechanics, copied from the validated session script:
 - Persist as an artifact keyed by (model revision, recipe hash, dataset slice) so planning can reject a
   stale profile — same invalidation rule as the Docs/30 probe profile.
 
-Also computed per arm while the weights are spliced (free): the unit's weighted reconstruction error
-`E_w` from the run record, so the profile stores the pair `(KL_u, E_w,u)` that D2 consumes.
+Also computed per unit arm while the weights are spliced (free): the unit's normalized weighted
+squared reconstruction error `E²_w` from the run record, so the profile stores the pair
+`(KL_u, E²_w,u)` that D2 consumes. The persisted field must be explicitly dimensionless; an absolute
+weighted-error energy is not interchangeable with this quantity.
 
 ### 2.3 Placement
 
@@ -111,40 +116,55 @@ a `kl-budget` run command beside the existing evaluation commands in
 ### 3.1 What changes
 
 [domain/planning.py](../src/nanoquant/domain/planning.py) needs **no change**:
-`ReconstructionAllocationUnit` (line 18) already carries `sensitivity`, and
-`allocate_reconstruction_rank_budget` (line 90) already applies geometrically-normalized sensitivity
-weights with a strength dial (`sensitivity_strength`, line 112–117). The change is entirely in what the
-application layer feeds it:
+`ReconstructionAllocationUnit` remains the allocation primitive, but the production D2 path no longer
+interprets a transferred sensitivity proxy as KL:
 
 - Today, [application/planning.py](../src/nanoquant/application/planning.py) line 129 derives
   `sensitivity = input_summary.mean × output_summary.mean` — an activation-magnitude proxy. Finding F/G
   showed this misranks units end-to-end.
-- New source: `s_u = KL_u / E_w,u²` from the D1 profile. The quadratic conversion is exact under the
-  small-error expansion (KL is locally quadratic in the layer perturbation) and was validated by the
-  sub-additivity measurement; at the current large-error operating point it is approximate, so the
-  profile must be re-measured after each phase lands (cheap, per §2.2).
-- Granularity fallback: per-unit KL (130 arms) when available; otherwise
-  `s_u = type_share(t) × block_share(b)` from the 31-arm profile — this already encodes both measured
-  reversals (attention→MLP, deep→early).
+- The allocation anchor is the directly measured exact physical-unit `KL_u`; no reconstruction-error
+  denominator from the profile is used.
+- Every physical unit is factorized at its aligned lower bound, baseline rank, and aligned upper bound
+  in the current run. These probes use the current calibration-weighted objective. Piecewise log-error
+  slopes are fitted from those points, and a noisy interval that does not demonstrate improvement is
+  conservatively assigned zero gain.
+- The allocator uses `sensitivity_strength = 1`. Its common geometric normalization does not change
+  priorities, so the optimized score is proportional to
+  `KL_u × E_weighted,u(r) / E_weighted,u(r_baseline)` rather than a tempered pseudo-KL quantity.
+- Exact physical-unit arms are mandatory. Type×block fallback remains available only to the historical
+  sensitivity-proxy mode and cannot be used by the measured-unit-KL path.
 
 ### 3.2 Wiring
 
-- Extend the Docs/30 probe-profile assembly (application side) to join the D1 profile by
-  `unit_id`/`profile_key` — the same `f"{block}:{path}"` keys the existing `utility_profile`
-  mechanism uses (application/planning.py lines 74, 131–133).
+- Join the exact D1 arms to the physical rank-probe units by `unit_id`/`profile_key`. Shared QKV is one
+  physical arm and one rank-response curve; logical Q/K/V measurements are diagnostics only.
 - Add an allocation-strategy value `kl_calibrated` in [config/schema.py](../src/nanoquant/config/schema.py)
   beside the existing `sensitivity` / `utility_profile` strategies; selecting it without a joinable,
-  fresh D1 profile is a validation error (fail-closed, matching the Docs/30 "no plan without a complete
-  profile" rule).
+  fresh D1 profile is a validation error. With no command-line arguments, each self-measured D2
+  experiment creates or resumes its own uniform control and exact-unit profile under its numbered
+  evidence directory, then verifies both the canonical control recipe and the profile's source commit
+  identity. Experiment 021 applies this workflow to Gemma 3 270M and Experiment 022 applies it to the
+  pinned Gemma 3 1B model. `--kl-profile` and `--kl-control-run` remain paired overrides for selecting
+  explicit same-campaign inputs.
+- `response_source = measured`, `objective_mode = calibration_weighted`, exact KL granularity, no
+  imported rank-trust reference, and untempered sensitivity are a single fail-closed configuration
+  contract. Configured response constants from earlier experiments are not inputs to Experiments 021
+  or 022.
+- Experiment 021 also disables inherited architecture multipliers and protected cohorts. Rank movement
+  is determined by its current exact-unit KL anchors and current per-unit response probes, subject only
+  to the declared rank bounds and bit budget.
 - The protected-cohort logic and floors/caps in `allocate_reconstruction_rank_budget` are unchanged.
-  Expectation to encode in the experiment definition, not the code: `up_proj` and blocks 0–10 gain rank;
-  `k`/`down` and blocks 18–24 lose rank toward their floors.
+  Cross-model rank-direction expectations are diagnostics, not adoption gates. The corrected 270M
+  exact profile moved rank toward attention and improved splice KL, but its original NLL comparison
+  mixed static and tuned modes; the matched static result regressed. Experiment 021 must decide the
+  globally tuned outcome without treating historical rank direction as a gate.
 
 ### 3.3 Gate
 
-Re-run the D1 harness on the re-allocated plan. Success = whole-model KL drops materially below the
-measured 4.675 nats/token baseline at equal bits (the profile predicts the reachable share: the drained
-types/blocks currently contribute >60% of type-sum KL).
+Re-run the D1 harness on the re-allocated plan. Success requires the upper bound of a paired 95%
+confidence interval to show at least the predeclared relative KL improvement at equal or lower bits.
+Then run the exact retained packed quality protocol. A rank redistribution matching historical
+cross-model expectations is reported diagnostically but is not a success condition.
 
 ## 4. D3 — Closed-form output bias correction
 
@@ -255,7 +275,7 @@ for roughly 15–25% of its functional error.
 | Phase | Items | Format impact | Gate |
 |---|---|---|---|
 | 1 | D1 harness; commit evidence scripts | none | reproduces ErrorAnatomy §2 numbers from run artifacts |
-| 2 | D2 KL-calibrated allocation | none | whole-model KL < 4.675 at equal bits; re-measure profile |
+| 2 | D2 measured-unit-KL allocation | none | paired whole-model KL improves at equal/lower effective BPW; re-measure profile |
 | 3 | D3 bias + D4 v-weighting | packed bias flag only | additive KL gains on `type:o`/`type:qkv` arms; parity vs reference runtime |
 | 4 | D5 o_proj patch | side tensors | §6.4 |
 | 5 | scale-only distillation (existing) | none | end-to-end ppl vs Phase-4 static recipe |
@@ -271,9 +291,9 @@ Measurement discipline, from the anatomy findings:
 
 ## 8. Risks
 
-- **KL≈quadratic conversion is approximate at the current 4.7-nat operating point.** Mitigated by the
-  fallback granularity (type×block shares are directly measured, no conversion) and by re-measuring
-  after each phase.
+- **KL response is still an operating-point model.** The corrected path removes the cross-run error
+  denominator and transferred Frobenius slopes, but assumes local KL scales with the newly measured
+  calibration-weighted response. The paired whole-model KL and packed-quality gates remain mandatory.
 - **Dense-splice harness ≠ packed runtime.** D1 splices bf16 reconstructions; packed-runtime rounding
   (`runtime/packed.py` dtype rules) is not in the loop. Planning evidence tolerates this; phase gates
   3–5 must additionally run [infrastructure/packed_evaluation.py](../src/nanoquant/infrastructure/packed_evaluation.py).

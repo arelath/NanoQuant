@@ -7,13 +7,17 @@ import pytest
 import torch
 
 from nanoquant.application.quantization_stages import (
+    BiasCorrectionStage,
+    BiasCorrectionStageRequest,
     FactorizationAttemptStage,
+    LowRankPatchStage,
+    LowRankPatchStageRequest,
     MaterializedScaleFitStageRequest,
     OutlierSelectionStage,
     ScaleFitStage,
 )
 from nanoquant.application.stages import StageContext, execute_stage
-from nanoquant.config.schema import ADMMConfig
+from nanoquant.config.schema import ADMMConfig, BiasCorrectionConfig, LowRankPatchConfig
 from nanoquant.domain.models import (
     ArtifactRef,
     BlockId,
@@ -23,6 +27,7 @@ from nanoquant.domain.models import (
     OutlierPlan,
     OutlierSelectionRequest,
     ScaleFitRequest,
+    ScaleState,
 )
 from nanoquant.infrastructure.artifacts import LocalArtifactStore
 from nanoquant.infrastructure.events import JsonlEventSink
@@ -167,6 +172,128 @@ def test_residual_probe_uses_configured_inner_iterations(tmp_path: Path, monkeyp
     )
 
     assert observed == [(7, True)]
+
+
+def test_bias_correction_closes_calibration_mean_error(tmp_path: Path) -> None:
+    context, tensors = _context(tmp_path)
+    target = torch.tensor([[2.0, -1.0], [0.5, 3.0]])
+    refs = tensors.put(
+        "bias-fixture",
+        {
+            "target": target,
+            "left": torch.ones(2, 1),
+            "right": torch.ones(1, 2),
+            "pre": torch.zeros(2),
+            "mid": torch.ones(1),
+            "post": torch.ones(2),
+            "mean": torch.tensor([0.25, -0.5]),
+        },
+    )
+    result = execute_stage(
+        BiasCorrectionStage(BiasCorrectionConfig(enabled=True)),
+        BiasCorrectionStageRequest(
+            LayerId(BlockId(0), "linear"),
+            refs["target"],
+            refs["left"],
+            refs["right"],
+            ScaleState(refs["pre"], refs["mid"], refs["post"]),
+            refs["mean"],
+        ),
+        context,
+    )
+
+    assert result.mean_output_error_after_squared < result.mean_output_error_before_squared * 1e-6
+    assert result.bit_cost.bias_bits == target.shape[0] * 16
+
+
+def test_low_rank_patch_improves_disjoint_held_out_activation_error(tmp_path: Path) -> None:
+    context, tensors = _context(tmp_path)
+    target = torch.tensor([[2.0, -1.0, 0.5], [-4.0, 2.0, -1.0]])
+    fit_covariance = torch.tensor(
+        [[1.2, 0.1, 0.0], [0.1, 0.8, 0.05], [0.0, 0.05, 1.1]],
+    )
+    held_out_covariance = torch.tensor(
+        [[0.9, -0.05, 0.0], [-0.05, 1.3, 0.1], [0.0, 0.1, 0.7]],
+    )
+    refs = tensors.put(
+        "patch-fixture",
+        {
+            "target": target,
+            "left": torch.ones(2, 1),
+            "right": torch.ones(1, 3),
+            "pre": torch.zeros(3),
+            "mid": torch.ones(1),
+            "post": torch.ones(2),
+            "fit_covariance": fit_covariance,
+            "held_out_covariance": held_out_covariance,
+            "fit_mean": torch.zeros(3),
+            "held_out_mean": torch.zeros(3),
+        },
+    )
+    result = execute_stage(
+        LowRankPatchStage(LowRankPatchConfig(enabled=True, rank=1)),
+        LowRankPatchStageRequest(
+            LayerId(BlockId(0), "self_attn.o_proj"),
+            refs["target"],
+            refs["left"],
+            refs["right"],
+            ScaleState(refs["pre"], refs["mid"], refs["post"]),
+            refs["fit_covariance"],
+            refs["held_out_covariance"],
+            refs["fit_mean"],
+            refs["held_out_mean"],
+        ),
+        context,
+    )
+
+    assert result.accepted
+    assert result.fit_error_after < result.fit_error_before * 1e-4
+    assert result.held_out_error_after < result.held_out_error_before * 1e-4
+    assert result.bit_cost.patch_bits == 16 * (target.shape[0] + target.shape[1])
+
+
+def test_low_rank_patch_rejects_fit_gain_that_regresses_held_out_bias_error(tmp_path: Path) -> None:
+    context, tensors = _context(tmp_path)
+    target = torch.tensor([[1.0, 0.0, 0.0], [2.0, 0.0, 0.0]])
+    held_out_mean = torch.tensor([1.0, 0.0, 0.0])
+    refs = tensors.put(
+        "patch-held-out-rejection-fixture",
+        {
+            "target": target,
+            "left": torch.ones(2, 1),
+            "right": torch.ones(1, 3),
+            "pre": torch.zeros(3),
+            "mid": torch.ones(1),
+            "post": torch.ones(2),
+            "fit_covariance": torch.eye(3),
+            "held_out_covariance": torch.outer(held_out_mean, held_out_mean),
+            "fit_mean": torch.zeros(3),
+            "held_out_mean": held_out_mean,
+            "bias": target @ held_out_mean,
+        },
+    )
+    result = execute_stage(
+        LowRankPatchStage(LowRankPatchConfig(enabled=True, rank=1)),
+        LowRankPatchStageRequest(
+            LayerId(BlockId(0), "self_attn.o_proj"),
+            refs["target"],
+            refs["left"],
+            refs["right"],
+            ScaleState(refs["pre"], refs["mid"], refs["post"]),
+            refs["fit_covariance"],
+            refs["held_out_covariance"],
+            refs["fit_mean"],
+            refs["held_out_mean"],
+            refs["bias"],
+        ),
+        context,
+    )
+
+    assert result.fit_error_after < result.fit_error_before
+    assert result.held_out_error_before == 0
+    assert result.held_out_error_after > result.held_out_error_before
+    assert not result.accepted
+    assert result.rejection_reason == "held_out_error_did_not_improve"
 
 
 @pytest.mark.cuda

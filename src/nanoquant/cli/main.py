@@ -11,6 +11,7 @@ from nanoquant.cli.run_commands import add_run_commands, execute_run_command
 from nanoquant.config.codec import apply_overrides, load_config, parse_override, to_dict
 from nanoquant.config.help import schema_reference
 from nanoquant.config.validation import raise_for_issues, validate
+from nanoquant.kl_budget_workflow import add_kl_budget_arguments, execute_kl_budget
 
 
 def parser() -> argparse.ArgumentParser:
@@ -26,6 +27,11 @@ def parser() -> argparse.ArgumentParser:
         help="sparse schema-aware override; available paths come from the canonical schema",
     )
     subcommands.add_parser("config-reference", help="emit canonical configuration reference data")
+    kl_budget = subcommands.add_parser(
+        "kl-budget",
+        help="build or resume a dense-splice KL sensitivity profile",
+    )
+    add_kl_budget_arguments(kl_budget)
     add_run_commands(subcommands)
     return result
 
@@ -37,6 +43,8 @@ def main(arguments: list[str] | None = None) -> int:
         return 0
     if args.command in {"runs", "logs"}:
         return execute_run_command(args)
+    if args.command == "kl-budget":
+        return execute_kl_budget(args)
     config = load_config(args.recipe)
     config = apply_overrides(config, dict(parse_override(item) for item in args.set))
     raise_for_issues(validate(config))

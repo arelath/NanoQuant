@@ -28,3 +28,18 @@ def test_causal_calibration_checkpoint_round_trips(tmp_path: Path) -> None:
     assert torch.equal(loaded.layers[0].outputs.total, outputs.total)
     assert loaded.layers[0].outputs.batch_count == outputs.batch_count
     assert loaded.layers[0].outputs.pre_scale == outputs.pre_scale
+
+
+def test_causal_calibration_checkpoint_round_trips_input_mean_state(tmp_path: Path) -> None:
+    inputs = OnlineAccumulatorSnapshot(torch.tensor([1.0, 2.0]), torch.tensor(3.0), 4, 1.0, 1.0, 0.999)
+    outputs = OnlineAccumulatorSnapshot(torch.tensor([5.0]), torch.tensor(6.0), 4, 1e6, 1e-6, 0.999)
+    input_sum = torch.tensor([7.0, 11.0], dtype=torch.float64)
+    state = CausalOnlineCalibrationState(
+        (CausalOnlineLayerSnapshot("block.0.proj", inputs, outputs, input_sum, 12),),
+        4,
+    )
+    save_causal_calibration_state(tmp_path, state)
+
+    loaded = load_causal_calibration_state(tmp_path)
+    assert torch.equal(loaded.layers[0].input_sum, input_sum)
+    assert loaded.layers[0].input_row_count == 12

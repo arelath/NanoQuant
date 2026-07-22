@@ -241,6 +241,8 @@ class PackedLayerState:
     outlier_indices: torch.Tensor | None = None
     outlier_values: torch.Tensor | None = None
     outlier_scales: torch.Tensor | None = None
+    patch_left: torch.Tensor | None = None
+    patch_right: torch.Tensor | None = None
 
     def __post_init__(self) -> None:
         if self.layout != PACKED_LAYOUT_VERSION:
@@ -272,7 +274,7 @@ class PackedLayerState:
         if self.bias is not None:
             if tuple(self.bias.shape) != (self.spec.out_features,) or not self.bias.is_contiguous():
                 raise ValueError("packed layer bias shape differs")
-            if canonical_torch_dtype(self.bias.dtype) != self.spec.scale_dtype:
+            if canonical_torch_dtype(self.bias.dtype) != (self.spec.bias_dtype or self.spec.scale_dtype):
                 raise ValueError("packed layer bias dtype differs")
             if not bool(torch.all(torch.isfinite(self.bias))):
                 raise ValueError("packed layer bias contains a non-finite value")
@@ -331,6 +333,24 @@ class PackedLayerState:
         if self.outlier_values is not None and self.outlier_values.dtype == torch.int8:
             if self.outlier_scales is None:
                 raise ValueError("packed llama.cpp int8 salient values require scales")
+        if (self.patch_left is None) != (self.patch_right is None):
+            raise ValueError("packed low-rank patch tensors must be paired")
+        if (self.patch_left is None) != (self.spec.patch_rank == 0):
+            raise ValueError("packed patch presence differs from its specification")
+        if self.patch_left is not None and self.patch_right is not None:
+            if tuple(self.patch_left.shape) != (self.spec.out_features, self.spec.patch_rank):
+                raise ValueError("packed patch-left shape differs")
+            if tuple(self.patch_right.shape) != (self.spec.patch_rank, self.spec.in_features):
+                raise ValueError("packed patch-right shape differs")
+            if not self.patch_left.is_contiguous() or not self.patch_right.is_contiguous():
+                raise ValueError("packed low-rank patch tensors must be contiguous")
+            if any(
+                canonical_torch_dtype(value.dtype) != self.spec.patch_value_dtype
+                for value in (self.patch_left, self.patch_right)
+            ):
+                raise ValueError("packed patch dtype differs")
+            if any(not bool(torch.all(torch.isfinite(value))) for value in (self.patch_left, self.patch_right)):
+                raise ValueError("packed low-rank patch contains a non-finite value")
 
     def to_logical(self) -> LogicalLayerState:
         factors = {
@@ -358,6 +378,8 @@ class PackedLayerState:
             self.outlier_indices,
             self.outlier_values,
             self.outlier_scales,
+            self.patch_left,
+            self.patch_right,
         )
 
 
@@ -385,4 +407,6 @@ def pack_logical_layer(state: LogicalLayerState) -> PackedLayerState:
         indices,
         _owned(state.outlier_values),
         _owned(state.outlier_scales),
+        _owned(state.patch_left),
+        _owned(state.patch_right),
     )

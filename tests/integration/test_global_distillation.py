@@ -10,6 +10,7 @@ from transformers.models.gemma3.modeling_gemma3 import Gemma3ForCausalLM
 
 import nanoquant.global_distillation as global_distillation_module
 from nanoquant.application.distillation import TopKDistillationConfig
+from nanoquant.application.layers import TrainableFactorizedLinear
 from nanoquant.config.schema import ADMMConfig, SharedInputGroupConfig
 from nanoquant.global_distillation import GlobalDistillationRequest, run_global_topk_distillation
 from nanoquant.infrastructure.artifacts import LocalArtifactStore
@@ -20,6 +21,49 @@ from nanoquant.infrastructure.distillation_checkpoint import (
 from nanoquant.infrastructure.frozen_model_loader import load_frozen_run
 from nanoquant.infrastructure.global_tuning import active_global_tuning, load_global_tuning
 from nanoquant.resident_quantization import ResidentQuantizationRequest, run_resident_quantization
+
+
+def test_global_distillation_selects_budgeted_side_tensors_but_not_binary_latents() -> None:
+    factorized = TrainableFactorizedLinear(
+        torch.ones(3, 2),
+        torch.ones(2, 4),
+        torch.ones(4),
+        torch.ones(2),
+        torch.ones(3),
+        bias=torch.zeros(3),
+        outlier_indices=torch.tensor([1]),
+        outlier_values=torch.ones(3, 1),
+        patch_left=torch.ones(3, 1),
+        patch_right=torch.ones(1, 4),
+        immutable_binary_factors=True,
+    )
+    model = torch.nn.ModuleDict(
+        {
+            "proj": factorized,
+            "norm": torch.nn.LayerNorm(3),
+        }
+    )
+
+    selected, auxiliary = global_distillation_module._selected_parameters(
+        model,
+        {(0, "proj"): factorized},
+    )
+    selected_names = {
+        name for name, parameter in model.named_parameters() if id(parameter) in selected
+    }
+
+    assert selected_names == {
+        "proj.scale_pre",
+        "proj.scale_mid",
+        "proj.scale_post",
+        "proj.bias",
+        "proj.outlier_values",
+        "proj.patch_left",
+        "proj.patch_right",
+        "norm.weight",
+        "norm.bias",
+    }
+    assert set(auxiliary) == {"norm.weight", "norm.bias"}
 
 
 def test_complete_frozen_run_can_be_distilled_committed_and_reloaded(

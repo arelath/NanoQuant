@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 
@@ -16,6 +17,8 @@ class ArtifactTypes:
     RANK_PROBE_PLAN = "rank-probe-plan"
     RANK_PROBE_RESULT = "rank-probe-result"
     RECONSTRUCTION_RANK_PROFILE = "reconstruction-rank-profile"
+    KL_BUDGET_PROFILE = "kl-budget-profile"
+    KL_TEACHER_CACHE = "kl-teacher-cache"
     MEMORY_PLAN = "memory-plan"
     EVALUATION_TASK_INPUTS = "evaluation-task-inputs"
     EVALUATION_RESULT = "evaluation-result"
@@ -47,6 +50,7 @@ class SharedInputGroupCandidate:
     block: BlockId
     name: str
     members: tuple[LayerId, ...]
+    objective_multipliers: tuple[float, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.name or self.name.startswith("/") or ".." in self.name.split("."):
@@ -57,6 +61,10 @@ class SharedInputGroupCandidate:
             raise ValueError("shared-input group members must be unique")
         if any(member.block != self.block for member in self.members):
             raise ValueError("shared-input group members must belong to its block")
+        if self.objective_multipliers and len(self.objective_multipliers) != len(self.members):
+            raise ValueError("shared-input group multipliers must align with members")
+        if any(not math.isfinite(value) or value <= 0 for value in self.objective_multipliers):
+            raise ValueError("shared-input group multipliers must be finite and positive")
 
 
 @dataclass(frozen=True, slots=True, order=True)
@@ -209,6 +217,7 @@ class LayerCalibrationStats:
     input_summary: StatisticSummary
     output_summary: StatisticSummary
     warnings: tuple[str, ...] = ()
+    input_mean: TensorRef | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -236,6 +245,7 @@ class ObjectiveSpec:
     normalization: str
     target_weighted_norm_squared: float | None
     source_calibration: ArtifactRef
+    input_mean: TensorRef | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -245,6 +255,8 @@ class BitCost:
     outlier_value_bits: int = 0
     outlier_index_bits: int = 0
     padding_bits: int = 0
+    bias_bits: int = 0
+    patch_bits: int = 0
 
     def __post_init__(self) -> None:
         if any(
@@ -255,6 +267,8 @@ class BitCost:
                 self.outlier_value_bits,
                 self.outlier_index_bits,
                 self.padding_bits,
+                self.bias_bits,
+                self.patch_bits,
             )
         ):
             raise ValueError("bit costs must not be negative")
@@ -268,19 +282,23 @@ class BitCost:
                 self.outlier_value_bits,
                 self.outlier_index_bits,
                 self.padding_bits,
+                self.bias_bits,
+                self.patch_bits,
             )
         )
 
     def __add__(self, other: BitCost) -> BitCost:
         return BitCost(*(left + right for left, right in zip(self.as_tuple(), other.as_tuple(), strict=True)))
 
-    def as_tuple(self) -> tuple[int, int, int, int, int]:
+    def as_tuple(self) -> tuple[int, int, int, int, int, int, int]:
         return (
             self.binary_factor_bits,
             self.scale_bits,
             self.outlier_value_bits,
             self.outlier_index_bits,
             self.padding_bits,
+            self.bias_bits,
+            self.patch_bits,
         )
 
 
@@ -330,6 +348,7 @@ class SharedInputGroupPlan:
     outliers: OutlierPlan
     retry: RetryPolicy
     estimated_cost: BitCost
+    objective_multipliers: tuple[float, ...] = ()
 
     def __post_init__(self) -> None:
         if len(self.members) < 2 or len(self.members) != len(self.objectives):
@@ -340,6 +359,10 @@ class SharedInputGroupPlan:
             raise ValueError("shared-input plan members must have equal input width")
         if tuple(objective.layer for objective in self.objectives) != tuple(member.layer for member in self.members):
             raise ValueError("shared-input plan objectives must follow member order")
+        if self.objective_multipliers and len(self.objective_multipliers) != len(self.members):
+            raise ValueError("shared-input plan multipliers must align with members")
+        if any(not math.isfinite(value) or value <= 0 for value in self.objective_multipliers):
+            raise ValueError("shared-input plan multipliers must be finite and positive")
 
     @property
     def unit_id(self) -> str:
@@ -513,6 +536,28 @@ class ScaleFitResult:
 
 
 @dataclass(frozen=True, slots=True)
+class BiasCorrectionResult:
+    bias: TensorRef
+    mean_output_error_before_squared: float
+    mean_output_error_after_squared: float
+    bit_cost: BitCost
+
+
+@dataclass(frozen=True, slots=True)
+class LowRankPatchResult:
+    left: TensorRef
+    right: TensorRef
+    rank: int
+    fit_error_before: float
+    fit_error_after: float
+    held_out_error_before: float
+    held_out_error_after: float
+    accepted: bool
+    rejection_reason: str | None
+    bit_cost: BitCost
+
+
+@dataclass(frozen=True, slots=True)
 class AttemptSummary:
     attempt: int
     rank: int
@@ -576,6 +621,12 @@ class FrozenNanoQuantState:
     outliers: FrozenOutlierState | None
     bias: TensorRef | None
     logical_format: str
+    patch_left: TensorRef | None = None
+    patch_right: TensorRef | None = None
+
+    def __post_init__(self) -> None:
+        if (self.patch_left is None) != (self.patch_right is None):
+            raise ValueError("frozen low-rank patch tensors must be paired")
 
 
 @dataclass(frozen=True, slots=True)
@@ -627,6 +678,8 @@ class LayerResult:
     actual_bit_cost: BitCost
     extra_retry_bits: int
     warnings: tuple[str, ...]
+    bias_correction: BiasCorrectionResult | None = None
+    low_rank_patch: LowRankPatchResult | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -646,6 +699,7 @@ class SharedInputGroupResult:
     actual_bit_cost: BitCost
     extra_retry_bits: int
     warnings: tuple[str, ...]
+    bias_correction: BiasCorrectionResult | None = None
 
 
 @dataclass(frozen=True, slots=True)

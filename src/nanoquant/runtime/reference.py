@@ -34,6 +34,7 @@ def _reference_capabilities() -> BackendCapabilities:
         supports_bias=True,
         supports_outliers=True,
         supports_deterministic=True,
+        patch_value_dtypes=_FLOAT_DTYPES,
     )
 
 
@@ -57,6 +58,8 @@ class _ReferencePayload:
     outlier_indices: torch.Tensor | None
     outlier_values: torch.Tensor | None
     outlier_scales: torch.Tensor | None
+    patch_left: torch.Tensor | None
+    patch_right: torch.Tensor | None
 
 
 def _prepare_payload(state: RuntimeLayerState, device: DeviceLike) -> _ReferencePayload:
@@ -73,6 +76,8 @@ def _prepare_payload(state: RuntimeLayerState, device: DeviceLike) -> _Reference
         None if state.outlier_indices is None else state.outlier_indices.to(target),
         None if state.outlier_values is None else state.outlier_values.to(target),
         None if state.outlier_scales is None else state.outlier_scales.to(target),
+        None if state.patch_left is None else state.patch_left.to(target),
+        None if state.patch_right is None else state.patch_right.to(target),
     )
 
 
@@ -123,6 +128,8 @@ class DenseReferenceBackend:
         if payload.outlier_indices is not None and outliers is not None:
             weight = weight.clone()
             weight[:, payload.outlier_indices.long()] += outliers.to(weight.dtype)
+        if payload.patch_left is not None and payload.patch_right is not None:
+            weight = weight + payload.patch_left.float() @ payload.patch_right.float()
         return torch.nn.functional.linear(
             value,
             weight.to(device=value.device, dtype=value.dtype),
@@ -158,6 +165,15 @@ class FactorizedReferenceBackend:
             output = output + torch.nn.functional.linear(
                 value.index_select(-1, payload.outlier_indices.long()),
                 outliers.to(device=value.device, dtype=value.dtype),
+            )
+        if payload.patch_left is not None and payload.patch_right is not None:
+            patch_latent = torch.nn.functional.linear(
+                value,
+                payload.patch_right.to(device=value.device, dtype=value.dtype),
+            )
+            output = output + torch.nn.functional.linear(
+                patch_latent,
+                payload.patch_left.to(device=value.device, dtype=value.dtype),
             )
         if payload.bias is not None:
             output = output + payload.bias.to(device=value.device, dtype=value.dtype)
@@ -201,6 +217,15 @@ class PackedReferenceBackend:
             output = output + torch.nn.functional.linear(
                 value.index_select(-1, payload.outlier_indices.long()),
                 outliers.to(device=value.device, dtype=value.dtype),
+            )
+        if payload.patch_left is not None and payload.patch_right is not None:
+            patch_latent = torch.nn.functional.linear(
+                value,
+                payload.patch_right.to(device=value.device, dtype=value.dtype),
+            )
+            output = output + torch.nn.functional.linear(
+                patch_latent,
+                payload.patch_left.to(device=value.device, dtype=value.dtype),
             )
         if payload.bias is not None:
             output = output + payload.bias.to(device=value.device, dtype=value.dtype)

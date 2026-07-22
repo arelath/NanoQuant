@@ -4,7 +4,9 @@ from pathlib import Path
 from nanoquant.application.planning import PlanningRequest, build_quantization_plan, persist_plan
 from nanoquant.config.schema import (
     AllocationStrategy,
+    BiasCorrectionConfig,
     LayerRankBudgetConfig,
+    LowRankPatchConfig,
     OutlierConfig,
     RankAllocationConfig,
     RankBoundsConfig,
@@ -87,6 +89,30 @@ def test_sensitivity_plan_allocates_no_less_rank_to_more_sensitive_layer() -> No
     plan = build_quantization_plan(_request(AllocationStrategy.SENSITIVITY))
     ranks = [layer.rank for block in plan.blocks for layer in block.layers]
     assert ranks[1] >= ranks[0]
+
+
+def test_bias_and_patch_bits_are_funded_by_reducing_factor_rank() -> None:
+    request = _request()
+    allocation = replace(request.allocation, target_bpw=2.0)
+    baseline = build_quantization_plan(replace(request, allocation=allocation))
+    sided = build_quantization_plan(
+        replace(
+            request,
+            allocation=allocation,
+            bias_correction=BiasCorrectionConfig(enabled=True),
+            low_rank_patch=LowRankPatchConfig(enabled=True, layer_patterns=("*",), rank=1),
+        )
+    )
+    baseline_layers = [layer for block in baseline.blocks for layer in block.layers]
+    sided_layers = [layer for block in sided.blocks for layer in block.layers]
+
+    assert all(layer.estimated_cost.bias_bits == 64 * 16 for layer in sided_layers)
+    assert all(layer.estimated_cost.patch_bits == 16 * (64 + 64) for layer in sided_layers)
+    assert all(
+        sided_layer.rank < baseline_layer.rank
+        for sided_layer, baseline_layer in zip(sided_layers, baseline_layers, strict=True)
+    )
+    assert sided.planned_cost.total <= int(2.0 * 2 * 64 * 64)
 
 
 def test_edge_boost_changes_utility_without_relaxing_rank_ceiling() -> None:

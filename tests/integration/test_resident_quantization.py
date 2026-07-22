@@ -17,8 +17,7 @@ from nanoquant.config.schema import (
     ExecutorKind,
     ProfilingConfig,
     ProfilingLevel,
-    RankResponseCurveConfig,
-    RankResponseSegmentConfig,
+    RankResponseSource,
     RankRetryConfig,
     ReconstructionRankPlanningConfig,
     SharedInputGroupConfig,
@@ -423,21 +422,6 @@ def test_reconstruction_rank_probe_covers_every_physical_unit_before_fitting(tmp
         head_dim=4,
     )
     Gemma3ForCausalLM(config).save_pretrained(snapshot, safe_serialization=True)
-    curves = tuple(
-        RankResponseCurveConfig(
-            name,
-            0.5,
-            1.0,
-            (RankResponseSegmentConfig(1.0, 0.01),),
-        )
-        for name in (
-            "mlp.gate_proj",
-            "mlp.up_proj",
-            "mlp.down_proj",
-            "self_attn.attn_qkv",
-            "self_attn.o_proj",
-        )
-    )
     request = ResidentQuantizationRequest(
         snapshot,
         tmp_path / "run",
@@ -453,9 +437,9 @@ def test_reconstruction_rank_probe_covers_every_physical_unit_before_fitting(tmp
         rank_retry=RankRetryConfig(enabled=False),
         reconstruction_rank_planning=ReconstructionRankPlanningConfig(
             enabled=True,
+            objective_mode="calibration_weighted",
             probe_admm=ADMMConfig(outer_iterations=1, inner_iterations=1),
-            response_curves=curves,
-            response_profile_provenance="tiny-full-iteration-test",
+            response_source=RankResponseSource.MEASURED,
             target_protected_error_reduction_fraction=0,
         ),
         admm=ADMMConfig(outer_iterations=1, inner_iterations=1),
@@ -496,6 +480,19 @@ def test_reconstruction_rank_probe_covers_every_physical_unit_before_fitting(tmp
         (artifacts.path_for(profile.artifact_id) / "reconstruction-rank-profile.json").read_text()
     )
     assert len(profile_payload["unit_results"]) == 5
+    assert profile_payload["importance"]["allocation_error_measure"] == "weighted_normalized_squared_error"
+    first_result = profile_payload["unit_results"][0]["artifact_id"]
+    probe_payload = json.loads(
+        (artifacts.path_for(first_result) / "rank-probe-result.json").read_text()
+    )
+    assert len(probe_payload["response_points"]) == 2
+    assert probe_payload["response_curve"]["unit_pattern"] in {
+        "mlp.gate_proj",
+        "mlp.up_proj",
+        "mlp.down_proj",
+        "self_attn.attn_qkv",
+        "self_attn.o_proj",
+    }
 
 
 def test_resident_tuning_recipe_refits_blocks_and_resumes_exactly(tmp_path: Path) -> None:

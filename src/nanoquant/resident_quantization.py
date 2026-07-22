@@ -27,7 +27,15 @@ from nanoquant.application.calibration_artifacts import (
     build_objectives,
     persist_calibration,
 )
+from nanoquant.application.covariance import SplitDenseCovarianceAccumulator
 from nanoquant.application.device_batches import iter_device_batches
+from nanoquant.application.kl_budget import (
+    interaction_corrected_unit_kl_anchors,
+    kl_calibrated_sensitivities,
+    load_kl_budget_profile,
+    measured_unit_kl_anchors,
+    validate_kl_budget_profile,
+)
 from nanoquant.application.layers import (
     BlockEditor,
     LayerFreezer,
@@ -41,7 +49,11 @@ from nanoquant.application.loss_snapshots import BlockLossRecorder, normalized_a
 from nanoquant.application.planning import PersistedPlan, PlanningRequest, build_quantization_plan, persist_plan
 from nanoquant.application.prefix_capture import capture_prefix_invocations
 from nanoquant.application.quantization_stages import (
+    BiasCorrectionStage,
+    BiasCorrectionStageRequest,
     FactorizationAttemptStage,
+    LowRankPatchStage,
+    LowRankPatchStageRequest,
     MaterializedScaleFitStageRequest,
     OutlierSelectionStage,
     ScaleFitStage,
@@ -59,11 +71,16 @@ from nanoquant.application.tuning import (
 )
 from nanoquant.config.codec import canonical_json, from_dict, to_dict
 from nanoquant.config.schema import (
+    MEASURED_UNIT_KL_OBJECTIVES,
     ActivationGpuCacheMode,
     ADMMConfig,
     AllocationStrategy,
+    BiasCorrectionConfig,
     ExecutorKind,
+    KlAllocationObjective,
+    KlSensitivityGranularity,
     LayerRankBudgetConfig,
+    LowRankPatchConfig,
     ObjectiveConfig,
     ObservabilityConfig,
     OutlierConfig,
@@ -72,6 +89,8 @@ from nanoquant.config.schema import (
     RankAllocationConfig,
     RankBoundsConfig,
     RankResponseCurveConfig,
+    RankResponseSegmentConfig,
+    RankResponseSource,
     RankRetryConfig,
     ReconstructionImportanceConfig,
     ReconstructionRankPlanningConfig,
@@ -80,11 +99,13 @@ from nanoquant.config.schema import (
     ScaleFitConfig,
     SharedInputGroupConfig,
 )
+from nanoquant.domain.calibration_math import weighted_group_output_importance
 from nanoquant.domain.factorization import factorize_admm
 from nanoquant.domain.metrics import reconstruction_metrics
 from nanoquant.domain.models import (
     ArtifactRef,
     ArtifactTypes,
+    BiasCorrectionResult,
     BlockPlan,
     BlockResult,
     CalibrationStats,
@@ -101,6 +122,7 @@ from nanoquant.domain.models import (
     LayerInventory,
     LayerPlan,
     LayerResult,
+    LowRankPatchResult,
     ModelInventory,
     ObjectiveSpec,
     OutlierSelectionRequest,
@@ -122,6 +144,7 @@ from nanoquant.domain.planning import (
     RankResponseSegment,
     ReconstructionAllocationUnit,
     allocate_reconstruction_rank_budget,
+    apply_reconstruction_rank_trust_region,
 )
 from nanoquant.domain.profiling import NULL_RECORDER, PhaseRecorder
 from nanoquant.domain.resources import (
@@ -173,6 +196,7 @@ from nanoquant.infrastructure.runs import (
     launcher_provenance,
     transition,
 )
+from nanoquant.infrastructure.runtime_export import load_frozen_run_planning_reference
 from nanoquant.infrastructure.safetensors_source import SafetensorsModelSource
 from nanoquant.infrastructure.tensor_store import LocalTensorStore
 from nanoquant.infrastructure.tuning_checkpoint import (
@@ -184,7 +208,7 @@ from nanoquant.infrastructure.tuning_checkpoint import (
 from nanoquant.ports.event_sink import EventSink
 from nanoquant.ports.model_adapter import ModelAdapter
 
-RESIDENT_ALGORITHM_VERSION = 40
+RESIDENT_ALGORITHM_VERSION = 47
 _THROUGHPUT_PROBE_REPETITIONS = 5
 
 
@@ -320,11 +344,16 @@ class ResidentQuantizationRequest:
     layer_budget_multipliers: tuple[LayerRankBudgetConfig, ...] = ()
     rank_retry: RankRetryConfig = _DEFAULT_RESIDENT_RANK_RETRY
     reconstruction_rank_planning: ReconstructionRankPlanningConfig = ReconstructionRankPlanningConfig()
+    kl_profile_artifact: str | None = None
+    kl_profile_key: str | None = None
+    kl_sensitivity_granularity: KlSensitivityGranularity = KlSensitivityGranularity.EXACT_OR_TYPE_BLOCK
     layer_order: tuple[str, ...] = ()
     shared_input_groups: tuple[SharedInputGroupConfig, ...] = ()
     admm: ADMMConfig = ADMMConfig(outer_iterations=1, inner_iterations=1)
     outliers: OutlierConfig = OutlierConfig()
     scale_fit: ScaleFitConfig = ScaleFitConfig(enabled=False)
+    bias_correction: BiasCorrectionConfig = BiasCorrectionConfig()
+    low_rank_patch: LowRankPatchConfig = LowRankPatchConfig()
     factorized_tuning_epochs: int = 0
     factorized_tuning_batch_size: int = 8
     factorized_tuning_learning_rate: float = 1e-5
@@ -717,6 +746,78 @@ def _run_block_batched(
     if result is None:
         raise ValueError("cannot run a block over empty inputs")
     return result
+
+
+def _low_rank_patch_selected(request: ResidentQuantizationRequest, layer_path: str) -> bool:
+    return request.low_rank_patch.enabled and any(
+        fnmatchcase(layer_path, pattern) for pattern in request.low_rank_patch.layer_patterns
+    )
+
+
+@torch.no_grad()
+def _capture_low_rank_patch_statistics(
+    request: ResidentQuantizationRequest,
+    adapter: Any,
+    block: nn.Module,
+    layer_path: str,
+    inputs: torch.Tensor,
+    metadata: dict[str, object],
+    tensors: LocalTensorStore,
+    in_features: int,
+) -> tuple[TensorRef, TensorRef, TensorRef, TensorRef]:
+    module = block.get_submodule(layer_path)
+    accumulator = SplitDenseCovarianceAccumulator(
+        in_features,
+        request.low_rank_patch.fit_tokens,
+        request.low_rank_patch.held_out_tokens,
+        device=request.device,
+    )
+
+    def capture(_module: nn.Module, positional: tuple[object, ...]) -> None:
+        if not positional or not isinstance(positional[0], torch.Tensor):
+            raise TypeError(f"low-rank patch input is not a tensor: {layer_path}")
+        accumulator.update(positional[0])
+
+    rows_per_sample = math.prod(inputs.shape[1:-1]) if inputs.ndim > 2 else 1
+    required_rows = request.low_rank_patch.fit_tokens + request.low_rank_patch.held_out_tokens
+    required_samples = math.ceil(required_rows / rows_per_sample)
+    if required_samples > inputs.shape[0]:
+        raise ValueError(
+            f"low-rank patch requires {required_rows} activation rows but only "
+            f"{inputs.shape[0] * rows_per_sample} are available for {layer_path}"
+        )
+    handle = module.register_forward_pre_hook(capture)
+    try:
+        output = _run_block_batched(
+            adapter,
+            block,
+            inputs[:required_samples],
+            metadata,
+            min(request.block_forward_batch_size, required_samples),
+            "cpu",
+        )
+        del output
+    finally:
+        handle.remove()
+    if not accumulator.complete:
+        raise ValueError(f"low-rank patch activation capture was incomplete for {layer_path}")
+    fit_covariance, fit_mean = accumulator.fit.materialize()
+    held_out_covariance, held_out_mean = accumulator.held_out.materialize()
+    refs = tensors.put(
+        "low-rank-patch-calibration",
+        {
+            "fit_covariance": fit_covariance,
+            "held_out_covariance": held_out_covariance,
+            "fit_input_mean": fit_mean,
+            "held_out_input_mean": held_out_mean,
+        },
+    )
+    return (
+        refs["fit_covariance"],
+        refs["held_out_covariance"],
+        refs["fit_input_mean"],
+        refs["held_out_input_mean"],
+    )
 
 
 def _inventory_block_elements(block: Any) -> int:
@@ -1255,6 +1356,8 @@ def _rehydrate_trainable_layer(
         outlier_indices=frozen.outlier_indices,
         outlier_values=frozen.outlier_values,
         outlier_scales=frozen.outlier_scales,
+        patch_left=frozen.patch_left,
+        patch_right=frozen.patch_right,
     ).to(device=device, dtype=dtype)
 
 
@@ -1322,11 +1425,13 @@ def _materialize_shared_input_plan(
         if not torch.allclose(left, right, rtol=1e-4, atol=1e-6):
             raise ValueError(f"shared-input calibration differs for group {group.name}: {member.layer.path}")
     stacked = torch.cat(source_values, dim=0).contiguous()
+    multipliers = group.objective_multipliers or (1.0,) * len(group.members)
+    concatenated_output = weighted_group_output_importance(tuple(output_values), multipliers)
     objective_refs = tensors.put(
         "shared-input-objective",
         {
             "input_importance": canonical_input.contiguous(),
-            "output_importance": torch.cat(output_values, dim=0).contiguous(),
+            "output_importance": concatenated_output,
         },
     )
     source_ref = tensors.put("source-shared-input-group", {"weight": stacked})["weight"]
@@ -1540,6 +1645,100 @@ def _run_resident_factorization_attempts(
     return accepted, outliers, fitted
 
 
+def _run_bias_correction(
+    layer_plan: LayerPlan,
+    source_weight: TensorRef,
+    factorized: FactorizationResult,
+    outliers: OutlierSelectionResult,
+    request: ResidentQuantizationRequest,
+    context: StageContext,
+    stage: BiasCorrectionStage,
+) -> BiasCorrectionResult | None:
+    if not request.bias_correction.enabled:
+        return None
+    input_mean = layer_plan.objective.input_mean
+    if input_mean is None:
+        raise ValueError(f"bias correction requires an input mean for {layer_plan.layer}")
+    return execute_stage(
+        stage,
+        BiasCorrectionStageRequest(
+            layer_plan.layer,
+            source_weight,
+            factorized.factors.left_binary,
+            factorized.factors.right_binary,
+            factorized.factors.scales,
+            input_mean,
+            outliers.indices,
+            outliers.values,
+            outliers.scales,
+        ),
+        context,
+    )
+
+
+def _run_low_rank_patch(
+    layer_plan: LayerPlan,
+    source_weight: TensorRef,
+    factorized: FactorizationResult,
+    outliers: OutlierSelectionResult,
+    bias_correction: BiasCorrectionResult | None,
+    request: ResidentQuantizationRequest,
+    adapter: Any,
+    working_block: nn.Module,
+    compressed_inputs: torch.Tensor,
+    metadata: dict[str, object],
+    context: StageContext,
+    tensors: LocalTensorStore,
+    stage: LowRankPatchStage,
+) -> LowRankPatchResult | None:
+    if not _low_rank_patch_selected(request, layer_plan.layer.path):
+        return None
+    fit_covariance, held_out_covariance, fit_mean, held_out_mean = _capture_low_rank_patch_statistics(
+        request,
+        adapter,
+        working_block,
+        layer_plan.layer.path,
+        compressed_inputs,
+        metadata,
+        tensors,
+        layer_plan.source_weight.spec.shape[1],
+    )
+    return execute_stage(
+        stage,
+        LowRankPatchStageRequest(
+            layer_plan.layer,
+            source_weight,
+            factorized.factors.left_binary,
+            factorized.factors.right_binary,
+            factorized.factors.scales,
+            fit_covariance,
+            held_out_covariance,
+            fit_mean,
+            held_out_mean,
+            None if bias_correction is None else bias_correction.bias,
+            outliers.indices,
+            outliers.values,
+            outliers.scales,
+        ),
+        context,
+    )
+
+
+def _account_for_patch_acceptance(
+    accepted: AcceptedFactorization,
+    patch: LowRankPatchResult | None,
+) -> AcceptedFactorization:
+    actual_patch_bits = 0 if patch is None or not patch.accepted else patch.bit_cost.patch_bits
+    if actual_patch_bits == accepted.actual_bit_cost.patch_bits:
+        return accepted
+    delta = actual_patch_bits - accepted.actual_bit_cost.patch_bits
+    return replace(
+        accepted,
+        actual_bit_cost=replace(accepted.actual_bit_cost, patch_bits=actual_patch_bits),
+        budget=replace(accepted.budget, accepted_bits=accepted.budget.accepted_bits + delta),
+    )
+
+
 def _resident_config_hash(request: ResidentQuantizationRequest) -> str:
     adaptive_memory = request.memory_plan is not None and request.memory_plan.mode == "adaptive"
     semantic_config = {
@@ -1559,11 +1758,16 @@ def _resident_config_hash(request: ResidentQuantizationRequest) -> str:
         "maximum_rank_layer_patterns": request.maximum_rank_layer_patterns,
         "layer_budget_multipliers": request.layer_budget_multipliers,
         "reconstruction_rank_planning": request.reconstruction_rank_planning,
+        "kl_profile_artifact": request.kl_profile_artifact,
+        "kl_profile_key": request.kl_profile_key,
+        "kl_sensitivity_granularity": request.kl_sensitivity_granularity,
         "layer_order": request.layer_order,
         "shared_input_groups": request.shared_input_groups,
         "admm": request.admm,
         "outliers": request.outliers,
         "scale_fit": request.scale_fit,
+        "bias_correction": request.bias_correction,
+        "low_rank_patch": request.low_rank_patch,
         "factorized_tuning_epochs": request.factorized_tuning_epochs,
         "factorized_tuning_batch_size": request.factorized_tuning_batch_size,
         "factorized_tuning_learning_rate": request.factorized_tuning_learning_rate,
@@ -1798,8 +2002,76 @@ def _resolve_shared_input_groups(
                     f"configured members differ from adapter topology for {group.name!r}: "
                     f"{group.members!r} != {actual_members!r}"
                 )
-            resolved.append(candidate)
+            configured_multipliers = {entry.member: entry.multiplier for entry in group.member_multipliers}
+            resolved.append(
+                replace(
+                    candidate,
+                    objective_multipliers=tuple(configured_multipliers.get(member, 1.0) for member in actual_members),
+                )
+            )
     return tuple(resolved)
+
+
+def _planning_unit_ids(
+    inventory: ModelInventory,
+    groups: tuple[SharedInputGroupCandidate, ...],
+) -> tuple[str, ...]:
+    by_member = {member: group for group in groups for member in group.members}
+    result: list[str] = []
+    for block in inventory.blocks:
+        emitted: set[str] = set()
+        for layer in block.quantizable_layers:
+            group = by_member.get(layer.layer)
+            name = layer.layer.path if group is None else group.name
+            if name not in emitted:
+                result.append(f"{block.block.index}:{name}")
+                emitted.add(name)
+    return tuple(result)
+
+
+def _load_requested_kl_sensitivities(
+    request: ResidentQuantizationRequest,
+    inventory: ModelInventory,
+    groups: tuple[SharedInputGroupCandidate, ...],
+) -> tuple[tuple[str, float], ...]:
+    configured = request.kl_profile_artifact
+    if configured is None:
+        raise ValueError("KL-calibrated planning is missing its profile artifact")
+    path = Path(configured)
+    if not path.is_absolute():
+        repository = request.launcher_path.parent.parent if request.launcher_path is not None else Path.cwd()
+        path = repository / path
+    if path.is_dir():
+        path = path / "kl-budget-profile.json"
+    profile = load_kl_budget_profile(path)
+    validate_kl_budget_profile(
+        profile,
+        model_source=request.source,
+        model_revision=request.revision,
+        expected_profile_key=request.kl_profile_key,
+    )
+    unit_ids = _planning_unit_ids(inventory, groups)
+    objective = request.reconstruction_rank_planning.kl_objective
+    if objective is KlAllocationObjective.INTERACTION_NORMALIZED_UNIT_KL:
+        return interaction_corrected_unit_kl_anchors(profile, unit_ids)
+    if objective is KlAllocationObjective.MEASURED_UNIT_KL:
+        return measured_unit_kl_anchors(profile, unit_ids)
+    return kl_calibrated_sensitivities(
+        profile,
+        unit_ids,
+        use_exact_unit_arms=(
+            request.kl_sensitivity_granularity
+            is not KlSensitivityGranularity.TYPE_BLOCK
+        ),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _RankProbePoint:
+    rank: int
+    raw_squared_error: float
+    normalized_squared_error: float
+    weighted_normalized_squared_error: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -1813,8 +2085,10 @@ class _RankProbeEvidence:
     source_weight_hashes: tuple[str, ...]
     baseline_rank: int
     response_curve: RankResponseCurveConfig
+    response_points: tuple[_RankProbePoint, ...]
     raw_squared_error: float
     normalized_squared_error: float
+    weighted_normalized_squared_error: float
     relative_frobenius_error: float
     member_squared_errors: tuple[float, ...]
     member_normalized_squared_errors: tuple[float, ...]
@@ -1823,6 +2097,24 @@ class _RankProbeEvidence:
     logical_seed: int
     wall_seconds: float
     peak_workspace_bytes: int
+
+    def __post_init__(self) -> None:
+        if self.schema_version != 3:
+            raise ValueError("unsupported reconstruction rank-probe evidence schema")
+        if not self.response_points or tuple(point.rank for point in self.response_points) != tuple(
+            sorted({point.rank for point in self.response_points})
+        ):
+            raise ValueError("rank-probe response points must be non-empty, unique, and ordered")
+        if any(
+            not math.isfinite(value) or value <= 0
+            for value in (
+                self.raw_squared_error,
+                self.normalized_squared_error,
+                self.weighted_normalized_squared_error,
+                self.relative_frobenius_error,
+            )
+        ):
+            raise ValueError("reconstruction rank-probe errors must be finite and positive")
 
 
 def _rank_probe_units(
@@ -1851,6 +2143,65 @@ def _matched_rank_response_curve(
     return matches[0]
 
 
+def _aligned_probe_bounds(
+    baseline_rank: int,
+    physical_cap: int,
+    *,
+    multiple: int,
+    floor_fraction: float,
+    ceiling_fraction: float,
+) -> tuple[int, int]:
+    floor_rank = math.ceil(baseline_rank * floor_fraction / multiple) * multiple
+    ceiling_rank = math.floor(baseline_rank * ceiling_fraction / multiple) * multiple
+    ceiling_rank = min(ceiling_rank, math.floor(physical_cap / multiple) * multiple)
+    if not multiple <= floor_rank <= baseline_rank <= ceiling_rank:
+        raise ValueError("measured rank-response bounds do not contain the aligned baseline rank")
+    return floor_rank, ceiling_rank
+
+
+def _measured_response_curve(
+    name: str,
+    baseline_rank: int,
+    points: tuple[_RankProbePoint, ...],
+) -> RankResponseCurveConfig:
+    by_rank = {point.rank: point for point in points}
+    baseline = by_rank.get(baseline_rank)
+    if baseline is None:
+        raise ValueError("measured rank response has no baseline point")
+    lower_rank = min(by_rank)
+    upper_rank = max(by_rank)
+
+    def slope(left_rank: int, right_rank: int) -> float:
+        if left_rank == right_rank:
+            return 0.0
+        left = by_rank[left_rank].weighted_normalized_squared_error
+        right = by_rank[right_rank].weighted_normalized_squared_error
+        # ADMM noise can make a higher-rank probe slightly worse.  A monotone
+        # lower envelope treats that interval as having no demonstrated gain;
+        # it never fabricates a positive response from a regression.
+        return max(0.0, math.log(left / right) / (2.0 * (right_rank - left_rank)))
+
+    lower_beta = slope(lower_rank, baseline_rank)
+    upper_beta = slope(baseline_rank, upper_rank)
+    if lower_rank == baseline_rank:
+        lower_beta = upper_beta
+    if upper_rank == baseline_rank:
+        upper_beta = lower_beta
+    segments: list[RankResponseSegmentConfig] = []
+    if lower_rank < baseline_rank:
+        segments.append(RankResponseSegmentConfig(1.0, lower_beta))
+    if upper_rank > baseline_rank:
+        segments.append(RankResponseSegmentConfig(upper_rank / baseline_rank, upper_beta))
+    if not segments:
+        segments.append(RankResponseSegmentConfig(1.0, 0.0))
+    return RankResponseCurveConfig(
+        name,
+        lower_rank / baseline_rank,
+        upper_rank / baseline_rank,
+        tuple(segments),
+    )
+
+
 def _persist_rank_probe_plan(
     request: ResidentQuantizationRequest,
     baseline_plan: QuantizationPlan,
@@ -1858,10 +2209,11 @@ def _persist_rank_probe_plan(
 ) -> ArtifactRef:
     reconstruction = request.reconstruction_rank_planning
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "resident_config_hash": _resident_config_hash(request),
         "objective_mode": reconstruction.objective_mode,
         "probe_admm": to_dict(reconstruction.probe_admm),
+        "response_source": reconstruction.response_source.value,
         "response_curves": to_dict(reconstruction.response_curves),
         "response_profile_provenance": reconstruction.response_profile_provenance,
         "baseline_plan": to_dict(baseline_plan),
@@ -1963,6 +2315,7 @@ def _run_reconstruction_rank_probes(
     artifacts: LocalArtifactStore,
     events: EventSink,
     recorder: PhaseRecorder,
+    kl_sensitivities: tuple[tuple[str, float], ...] = (),
 ) -> tuple[ArtifactRef, tuple[ReconstructionRankDecision, ...]]:
     reconstruction = request.reconstruction_rank_planning
     probe_admm = reconstruction.probe_admm
@@ -1999,8 +2352,11 @@ def _run_reconstruction_rank_probes(
                 artifact_id=persisted[unit_id][0].artifact_id,
             )
             continue
-        curve = _matched_rank_response_curve(
-            unit.name if isinstance(unit, SharedInputGroupPlan) else unit.layer.path, reconstruction.response_curves
+        unit_name = unit.name if isinstance(unit, SharedInputGroupPlan) else unit.layer.path
+        configured_curve = (
+            _matched_rank_response_curve(unit_name, reconstruction.response_curves)
+            if reconstruction.response_source is RankResponseSource.CONFIGURED
+            else None
         )
         member_layers = tuple(member.layer for member in member_inventories)
         seed = logical_seed(
@@ -2040,13 +2396,32 @@ def _run_reconstruction_rank_probes(
                 for layer in member_layers
             )
             stacked = weights[0] if len(weights) == 1 else torch.cat(weights, dim=0)
-            generator = torch.Generator(device=request.device).manual_seed(seed)
-            with recorder.phase("rank_probe", unit=unit_id):
-                factorized = factorize_admm(
-                    stacked,
-                    torch.ones(stacked.shape[1], device=stacked.device, dtype=torch.float32),
-                    torch.ones(stacked.shape[0], device=stacked.device, dtype=torch.float32),
-                    unit.rank,
+            if reconstruction.objective_mode == "calibration_weighted":
+                probe_input_importance = input_importances[0].float()
+                if any(
+                    not torch.allclose(probe_input_importance, value.float(), rtol=1e-5, atol=1e-7)
+                    for value in input_importances[1:]
+                ):
+                    raise ValueError(f"shared-input unit has inconsistent input importance: {unit_id}")
+                probe_output_importance = torch.cat(tuple(value.float() for value in output_importances))
+            else:
+                probe_input_importance = torch.ones(stacked.shape[1], device=stacked.device, dtype=torch.float32)
+                probe_output_importance = torch.ones(stacked.shape[0], device=stacked.device, dtype=torch.float32)
+
+            def factorize_probe(
+                rank: int,
+                *,
+                probe_seed: int = seed,
+                probe_weight: torch.Tensor = stacked,
+                probe_input: torch.Tensor = probe_input_importance,
+                probe_output: torch.Tensor = probe_output_importance,
+            ) -> Any:
+                generator = torch.Generator(device=request.device).manual_seed(probe_seed)
+                return factorize_admm(
+                    probe_weight,
+                    probe_input,
+                    probe_output,
+                    rank,
                     generator,
                     outer_iterations=probe_admm.outer_iterations,
                     inner_iterations=probe_admm.inner_iterations,
@@ -2056,6 +2431,9 @@ def _run_reconstruction_rank_probes(
                     early_stop_tolerance=probe_admm.early_stop_tolerance,
                     transpose_wide=probe_admm.transpose_wide,
                 )
+
+            with recorder.phase("rank_probe", unit=unit_id):
+                factorized = factorize_probe(unit.rank)
             difference = stacked.float() - factorized.reconstruction.float()
             raw_error = float(difference.square().sum())
             target_norm = float(stacked.float().square().sum())
@@ -2063,6 +2441,8 @@ def _run_reconstruction_rank_probes(
             member_normalized: list[float] = []
             member_energies: list[float] = []
             member_norms: list[float] = []
+            weighted_error = 0.0
+            weighted_target_norm = 0.0
             row = 0
             for weight, input_importance, output_importance in zip(
                 weights,
@@ -2077,21 +2457,80 @@ def _run_reconstruction_rank_probes(
                 member_errors.append(member_error)
                 member_normalized.append(member_error / max(member_norm, 1e-30))
                 member_norms.append(member_norm)
+                member_weights = (
+                    output_importance.float()[:, None].clamp_min(1e-12)
+                    * input_importance.float()[None, :].clamp_min(1e-12)
+                )
+                weighted_error += float((member_difference.square() * member_weights).sum())
+                weighted_target_norm += float((weight.float().square() * member_weights).sum())
                 member_energies.append(
                     float(
                         (
                             weight.float().square()
-                            * output_importance.float()[:, None].clamp_min(1e-12)
-                            * input_importance.float()[None, :].clamp_min(1e-12)
+                            * member_weights
                         )
                         .mean()
                         .sqrt()
                     )
                 )
                 row += rows
+            response_points = [
+                _RankProbePoint(
+                    unit.rank,
+                    raw_error,
+                    raw_error / max(target_norm, 1e-30),
+                    weighted_error / max(weighted_target_norm, 1e-30),
+                )
+            ]
+            if reconstruction.response_source is RankResponseSource.MEASURED:
+                floor_rank, ceiling_rank = _aligned_probe_bounds(
+                    unit.rank,
+                    min(stacked.shape),
+                    multiple=request.rank_multiple,
+                    floor_fraction=request.rank_floor_fraction,
+                    ceiling_fraction=request.rank_ceiling_fraction,
+                )
+                for response_rank in (floor_rank, ceiling_rank):
+                    if response_rank == unit.rank:
+                        continue
+                    with recorder.phase("rank_probe_response", unit=unit_id, rank=response_rank):
+                        response_factorized = factorize_probe(response_rank)
+                    response_difference = stacked.float() - response_factorized.reconstruction.float()
+                    response_raw = float(response_difference.square().sum())
+                    response_weighted = 0.0
+                    response_row = 0
+                    for weight, input_importance, output_importance in zip(
+                        weights,
+                        input_importances,
+                        output_importances,
+                        strict=True,
+                    ):
+                        rows = weight.shape[0]
+                        member_difference = response_difference[response_row : response_row + rows]
+                        member_weights = (
+                            output_importance.float()[:, None].clamp_min(1e-12)
+                            * input_importance.float()[None, :].clamp_min(1e-12)
+                        )
+                        response_weighted += float((member_difference.square() * member_weights).sum())
+                        response_row += rows
+                    response_points.append(
+                        _RankProbePoint(
+                            response_rank,
+                            response_raw,
+                            response_raw / max(target_norm, 1e-30),
+                            response_weighted / max(weighted_target_norm, 1e-30),
+                        )
+                    )
+                    del response_factorized
+            ordered_response_points = tuple(sorted(response_points, key=lambda point: point.rank))
+            curve = configured_curve or _measured_response_curve(
+                unit_name,
+                unit.rank,
+                ordered_response_points,
+            )
             peak = int(torch.cuda.max_memory_allocated(request.device)) if request.device.startswith("cuda") else 0
             evidence = _RankProbeEvidence(
-                1,
+                3,
                 probe_plan,
                 unit_id,
                 member_layers[0].block.index,
@@ -2105,8 +2544,10 @@ def _run_reconstruction_rank_probes(
                 ),
                 unit.rank,
                 curve,
+                ordered_response_points,
                 raw_error,
                 raw_error / max(target_norm, 1e-30),
+                weighted_error / max(weighted_target_norm, 1e-30),
                 math.sqrt(raw_error / max(target_norm, 1e-30)),
                 tuple(member_errors),
                 tuple(member_normalized),
@@ -2165,19 +2606,29 @@ def _run_reconstruction_rank_probes(
         layer: max(value / type_medians[layer.path], 1e-12) * importance_multiplier[layer]
         for layer, value in relative.items()
     }
-    ordered_scores = sorted(member_sensitivity.values())
+    kl_sensitivity = dict(kl_sensitivities)
+    measured_kl_objective = (
+        bool(kl_sensitivity)
+        and reconstruction.kl_objective in MEASURED_UNIT_KL_OBJECTIVES
+    )
+    if kl_sensitivity and set(kl_sensitivity) != {unit_id for unit_id, _unit in units}:
+        raise ValueError("KL sensitivity profile does not exactly cover reconstruction units")
+    ordered_scores = sorted(kl_sensitivity.values() if kl_sensitivity else member_sensitivity.values())
     protected_index = min(
         len(ordered_scores) - 1,
         math.floor(reconstruction.protected_sensitivity_quantile * len(ordered_scores)),
     )
-    protected_threshold = ordered_scores[protected_index]
+    protected_threshold = (
+        ordered_scores[protected_index] if reconstruction.protect_sensitive_units else math.inf
+    )
     allocation_units: list[ReconstructionAllocationUnit] = []
+    uncharged_actual_bits = 0
     protected_by_unit: dict[str, tuple[LayerId, ...]] = {}
     sensitivity_by_unit: dict[str, float] = {}
     for unit_id, unit in units:
         evidence = persisted[unit_id][1]
         total_norm = sum(evidence.member_weight_norms_squared)
-        unit_sensitivity = math.exp(
+        proxy_unit_sensitivity = math.exp(
             sum(
                 norm * math.log(member_sensitivity[layer])
                 for layer, norm in zip(
@@ -2188,11 +2639,16 @@ def _run_reconstruction_rank_probes(
             )
             / max(total_norm, 1e-30)
         )
+        unit_sensitivity = kl_sensitivity.get(unit_id, proxy_unit_sensitivity)
         protected_members = tuple(
             layer
             for layer in evidence.members
             if (
-                member_sensitivity[layer] >= protected_threshold
+                (
+                    unit_sensitivity >= protected_threshold
+                    if kl_sensitivity
+                    else member_sensitivity[layer] >= protected_threshold
+                )
                 or layer in architecture_protected
             )
         )
@@ -2203,13 +2659,33 @@ def _run_reconstruction_rank_probes(
         fixed_bits = 0
         if unit.outliers.charge_to_budget:
             fixed_bits = unit.estimated_cost.outlier_value_bits + unit.estimated_cost.outlier_index_bits
+        if request.bias_correction.charge_to_bit_budget:
+            fixed_bits += unit.estimated_cost.bias_bits
+        if request.low_rank_patch.charge_to_bit_budget:
+            fixed_bits += unit.estimated_cost.patch_bits
+        actual_fixed_bits = (
+            unit.estimated_cost.outlier_value_bits
+            + unit.estimated_cost.outlier_index_bits
+            + unit.estimated_cost.bias_bits
+            + unit.estimated_cost.patch_bits
+        )
+        uncharged_actual_bits += actual_fixed_bits - fixed_bits
         allocation_units.append(
             ReconstructionAllocationUnit(
                 unit_id,
                 out_features,
                 in_features,
                 evidence.baseline_rank,
-                evidence.raw_squared_error,
+                (
+                    1.0
+                    if measured_kl_objective
+                    else evidence.weighted_normalized_squared_error
+                    if (
+                        kl_sensitivity
+                        or reconstruction.response_source is RankResponseSource.MEASURED
+                    )
+                    else evidence.raw_squared_error
+                ),
                 unit_sensitivity,
                 bool(protected_members),
                 evidence.response_curve.calibrated_rank_floor_fraction,
@@ -2239,6 +2715,61 @@ def _run_reconstruction_rank_probes(
         protected_rank_floor_fraction=reconstruction.protected_rank_floor_fraction,
         target_protected_error_reduction_fraction=(reconstruction.target_protected_error_reduction_fraction),
     )
+    rank_trust_region: dict[str, Any] | None = None
+    if reconstruction.rank_trust_reference_run is not None:
+        reference_path = Path(reconstruction.rank_trust_reference_run)
+        if not reference_path.is_absolute():
+            repository = (
+                request.launcher_path.parent.parent
+                if request.launcher_path is not None
+                else Path.cwd()
+            )
+            reference_path = repository / reference_path
+        planning_reference = load_frozen_run_planning_reference(
+            reference_path.resolve(),
+            len(baseline_plan.blocks),
+            fresh_validation=True,
+        )
+        reference_ranks = tuple(
+            (entry.unit_id, entry.rank) for entry in planning_reference.ranks
+        )
+        nominal_target_bits = math.floor(original_elements * request.target_bpw)
+        same_budget_target_bits = planning_reference.total_bits - uncharged_actual_bits
+        trust_target_bits = min(nominal_target_bits, same_budget_target_bits)
+        if trust_target_bits <= 0:
+            raise ValueError("rank trust reference cannot fund candidate fixed bit costs")
+        unconstrained_ranks = {
+            decision.unit_id: decision.planned_rank for decision in allocated.decisions
+        }
+        allocated = apply_reconstruction_rank_trust_region(
+            tuple(allocation_units),
+            allocated,
+            reference_ranks,
+            trust_target_bits,
+            multiple=request.rank_multiple,
+            floor_fraction=request.rank_floor_fraction,
+            ceiling_fraction=request.rank_ceiling_fraction,
+            sensitivity_strength=reconstruction.sensitivity_strength,
+            protected_rank_floor_fraction=reconstruction.protected_rank_floor_fraction,
+            target_protected_error_reduction_fraction=(
+                reconstruction.target_protected_error_reduction_fraction
+            ),
+            step_fraction=reconstruction.rank_trust_fraction,
+        )
+        projected_ranks = {
+            decision.unit_id: decision.planned_rank for decision in allocated.decisions
+        }
+        rank_trust_region = {
+            "reference_run": str(reference_path.resolve()),
+            "step_fraction": reconstruction.rank_trust_fraction,
+            "reference_total_bits": planning_reference.total_bits,
+            "candidate_uncharged_actual_bits": uncharged_actual_bits,
+            "nominal_target_bits": nominal_target_bits,
+            "trust_target_bits": trust_target_bits,
+            "reference_ranks": dict(reference_ranks),
+            "unconstrained_ranks": unconstrained_ranks,
+            "projected_ranks": projected_ranks,
+        }
     allocation_by_unit = {decision.unit_id: decision for decision in allocated.decisions}
     decisions = tuple(
         ReconstructionRankDecision(
@@ -2254,8 +2785,8 @@ def _run_reconstruction_rank_probes(
         for unit_id, _unit in units
     )
     profile_payload = {
-        "schema_version": 1,
-        "producer": {"name": "reconstruction-rank-planner", "version": "1"},
+        "schema_version": 2,
+        "producer": {"name": "reconstruction-rank-planner", "version": "2"},
         "probe_plan": to_dict(probe_plan),
         "unit_results": [to_dict(persisted[unit_id][0]) for unit_id, _unit in units],
         "decisions": to_dict(decisions),
@@ -2265,7 +2796,24 @@ def _run_reconstruction_rank_probes(
             "protected_baseline_objective": allocated.protected_baseline_objective,
             "protected_planned_objective": allocated.protected_planned_objective,
         },
+        "rank_trust_region": rank_trust_region,
         "importance": {
+            "sensitivity_source": "kl_budget_profile" if kl_sensitivity else "activation_weight_proxy",
+            "allocation_error_measure": (
+                "same_run_relative_weighted_error"
+                if measured_kl_objective
+                else "weighted_normalized_squared_error"
+                if (
+                    kl_sensitivity
+                    or reconstruction.response_source is RankResponseSource.MEASURED
+                )
+                else "raw_squared_error"
+            ),
+            "allocation_objective": (
+                "unit_kl_proportional_score"
+                if measured_kl_objective
+                else "tempered_reconstruction_proxy"
+            ),
             "policy": to_dict(importance),
             "edge_blocks": sorted(edge_blocks),
             "member_multipliers": {
@@ -2648,6 +3196,40 @@ def _run_resident_quantization(request: ResidentQuantizationRequest) -> Resident
 
 
 def _validate_resident_request(request: ResidentQuantizationRequest) -> None:
+    kl_selected = request.allocation_strategy is AllocationStrategy.KL_CALIBRATED
+    if kl_selected != bool(request.kl_profile_artifact) or kl_selected != bool(request.kl_profile_key):
+        raise ValueError("KL-calibrated resident planning requires exactly one KL profile artifact and key")
+    if (
+        not kl_selected
+        and request.kl_sensitivity_granularity
+        is not KlSensitivityGranularity.EXACT_OR_TYPE_BLOCK
+    ):
+        raise ValueError("a non-default KL sensitivity granularity requires KL-calibrated planning")
+    reconstruction = request.reconstruction_rank_planning
+    trust_reference = reconstruction.rank_trust_reference_run
+    if not math.isfinite(reconstruction.rank_trust_fraction) or not (
+        0 <= reconstruction.rank_trust_fraction <= 1
+    ):
+        raise ValueError("resident rank trust fraction must be in [0, 1]")
+    if (reconstruction.rank_trust_fraction == 1) != (trust_reference is None):
+        raise ValueError(
+            "resident rank trust reference must be set exactly when its fraction is below one"
+        )
+    if trust_reference is not None and (not kl_selected or not trust_reference.strip()):
+        raise ValueError("resident rank trust reference requires KL-calibrated planning")
+    if reconstruction.kl_objective in MEASURED_UNIT_KL_OBJECTIVES:
+        if (
+            not kl_selected
+            or request.kl_sensitivity_granularity is not KlSensitivityGranularity.EXACT
+            or reconstruction.response_source is not RankResponseSource.MEASURED
+            or reconstruction.objective_mode != "calibration_weighted"
+            or reconstruction.sensitivity_strength != 1
+            or trust_reference is not None
+        ):
+            raise ValueError(
+                "measured-unit KL requires exact arms, current weighted response probes, "
+                "untempered sensitivity, and no imported rank reference"
+            )
     if request.executor not in {ExecutorKind.RESIDENT, ExecutorKind.CPU_OFFLOAD}:
         raise ValueError(f"unsupported resident composition executor: {request.executor.value}")
     if request.executor is ExecutorKind.CPU_OFFLOAD:
@@ -3473,16 +4055,20 @@ def _run_resident_quantization_impl(
             with recorder.phase("plan"):
                 with recorder.phase("objectives"):
                     objectives = build_objectives(calibration, ObjectiveConfig(), artifacts)
+        resolved_groups = _resolve_shared_input_groups(adapter, inventory, request.shared_input_groups)
         with _logged_operation(
             events,
             "sensitivity_analysis",
-            enabled=request.allocation_strategy is AllocationStrategy.SENSITIVITY,
+            enabled=request.allocation_strategy in {
+                AllocationStrategy.SENSITIVITY,
+                AllocationStrategy.KL_CALIBRATED,
+            },
             alpha=request.rank_sensitivity_alpha,
         ):
             with recorder.phase("plan"):
                 with recorder.phase("sensitivity"):
-                    sensitivity_profile = (
-                        _legacy_sensitivity_profile(
+                    if request.allocation_strategy is AllocationStrategy.SENSITIVITY:
+                        sensitivity_profile = _legacy_sensitivity_profile(
                             inventory,
                             calibration,
                             source,
@@ -3490,13 +4076,21 @@ def _run_resident_quantization_impl(
                             alpha=request.rank_sensitivity_alpha,
                             device=request.device,
                         )
-                        if request.allocation_strategy is AllocationStrategy.SENSITIVITY
-                        else ()
-                    )
+                    elif request.allocation_strategy is AllocationStrategy.KL_CALIBRATED:
+                        sensitivity_profile = _load_requested_kl_sensitivities(
+                            request,
+                            inventory,
+                            resolved_groups,
+                        )
+                    else:
+                        sensitivity_profile = ()
         allocation = RankAllocationConfig(
             target_bpw=request.target_bpw,
             strategy=request.allocation_strategy,
             sensitivity_alpha=request.rank_sensitivity_alpha,
+            kl_profile_artifact=request.kl_profile_artifact,
+            kl_profile_key=request.kl_profile_key,
+            kl_sensitivity_granularity=request.kl_sensitivity_granularity,
             maximum_rank_layer_patterns=request.maximum_rank_layer_patterns,
             layer_budget_multipliers=request.layer_budget_multipliers,
             bounds=RankBoundsConfig(
@@ -3508,7 +4102,6 @@ def _run_resident_quantization_impl(
             retry=request.rank_retry,
             reconstruction=request.reconstruction_rank_planning,
         )
-        resolved_groups = _resolve_shared_input_groups(adapter, inventory, request.shared_input_groups)
         with _logged_operation(
             events,
             "rank_planning",
@@ -3522,7 +4115,10 @@ def _run_resident_quantization_impl(
                 with recorder.phase("ranks"):
                     reconstruction_profile = None
                     reconstruction_decisions: tuple[ReconstructionRankDecision, ...] = ()
-                    if request.allocation_strategy is AllocationStrategy.RECONSTRUCTION_AWARE:
+                    if request.allocation_strategy in {
+                        AllocationStrategy.RECONSTRUCTION_AWARE,
+                        AllocationStrategy.KL_CALIBRATED,
+                    }:
                         baseline_allocation = replace(
                             allocation,
                             strategy=AllocationStrategy.UNIFORM,
@@ -3541,6 +4137,8 @@ def _run_resident_quantization_impl(
                                 request.outliers,
                                 (),
                                 resolved_groups,
+                                bias_correction=request.bias_correction,
+                                low_rank_patch=request.low_rank_patch,
                             )
                         )
                         probe_plan = _persist_rank_probe_plan(
@@ -3565,6 +4163,9 @@ def _run_resident_quantization_impl(
                             artifacts,
                             events,
                             recorder,
+                            sensitivity_profile
+                            if request.allocation_strategy is AllocationStrategy.KL_CALIBRATED
+                            else (),
                         )
                     plan = build_quantization_plan(
                         PlanningRequest(
@@ -3578,30 +4179,34 @@ def _run_resident_quantization_impl(
                             resolved_groups,
                             reconstruction_profile,
                             reconstruction_decisions,
+                            request.bias_correction,
+                            request.low_rank_patch,
                         )
                     )
                     persisted_plan = persist_plan(plan, artifacts)
     else:
         calibration, objectives, persisted_plan = preprocessed
         plan = persisted_plan.plan
-    _write_active_preprocessing_state(
-        request,
-        calibration.reference,
-        objectives.reference,
-        persisted_plan.reference,
-    )
-    events.emit(
-        "resident-quantization",
-        "info",
-        "preprocessing.selected",
-        reused=preprocessed is not None,
-        source=preprocessing_source,
-        calibration_artifact=calibration.reference.artifact_id,
-        objectives_artifact=objectives.reference.artifact_id,
-        plan_artifact=persisted_plan.reference.artifact_id,
-        blocks=len(plan.blocks),
-        planned_bits=plan.planned_cost.total,
-    )
+    with recorder.phase("plan"):
+        with recorder.phase("activate"):
+            _write_active_preprocessing_state(
+                request,
+                calibration.reference,
+                objectives.reference,
+                persisted_plan.reference,
+            )
+            events.emit(
+                "resident-quantization",
+                "info",
+                "preprocessing.selected",
+                reused=preprocessed is not None,
+                source=preprocessing_source,
+                calibration_artifact=calibration.reference.artifact_id,
+                objectives_artifact=objectives.reference.artifact_id,
+                plan_artifact=persisted_plan.reference.artifact_id,
+                blocks=len(plan.blocks),
+                planned_bits=plan.planned_cost.total,
+            )
     resume = _restore_committed_state(
         request,
         events,
@@ -3681,14 +4286,16 @@ def _run_resident_quantization_impl(
             else:
                 ordered_paths.extend(member.layer.path for member in group.members)
         live_layer_order = tuple(ordered_paths)
-    update_live_weight_error_report(
-        request.output,
-        tuple(live_layers.values()),
-        tuple(live_blocks.values()),
-        groups=tuple(live_groups.values()),
-        expected_blocks=len(plan.blocks),
-        layer_order=live_layer_order,
-    )
+    with recorder.phase("resume"):
+        with recorder.phase("live_report"):
+            update_live_weight_error_report(
+                request.output,
+                tuple(live_layers.values()),
+                tuple(live_blocks.values()),
+                groups=tuple(live_groups.values()),
+                expected_blocks=len(plan.blocks),
+                layer_order=live_layer_order,
+            )
     del initial_inputs
     del decoder_layers
     peak_device_bytes = 0
@@ -3710,6 +4317,16 @@ def _run_resident_quantization_impl(
         transpose_wide=request.admm.transpose_wide,
     )
     scale_stage = ScaleFitStage(request.scale_fit, device=request.device)
+    bias_stage = BiasCorrectionStage(request.bias_correction, device=request.device)
+    patch_stage = LowRankPatchStage(request.low_rank_patch, device=request.device)
+    bias_storage_dtype = {
+        "float16": torch.float16,
+        "bfloat16": torch.bfloat16,
+    }[request.bias_correction.storage_dtype.value]
+    patch_storage_dtype = {
+        "float16": torch.float16,
+        "bfloat16": torch.bfloat16,
+    }[request.low_rank_patch.storage_dtype.value]
 
     for block_plan in plan.blocks:
         if block_plan.block.index in completed_block_indexes:
@@ -3897,12 +4514,25 @@ def _run_resident_quantization_impl(
                         recorder,
                     )
                 factorized = accepted.result
+                bias_correction = _run_bias_correction(
+                    synthetic_plan,
+                    source_ref,
+                    factorized,
+                    outliers,
+                    request,
+                    context,
+                    bias_stage,
+                )
                 peak_device_bytes = max(peak_device_bytes, accepted.peak_workspace_bytes)
                 factorization_wall_seconds += accepted.wall_seconds
                 scales = factorized.factors.scales
                 if scales.mid is None:
                     raise AssertionError("shared-input factorizer omitted required mid scale")
                 outlier_indices = outlier_values = outlier_scales = None
+                bias = None
+                if bias_correction is not None:
+                    with tensors.read(bias_correction.bias, request.device) as value:
+                        bias = value.clone()
                 if group_plan.outliers.count:
                     with (
                         tensors.read(outliers.indices, request.device) as indices,
@@ -3936,6 +4566,7 @@ def _run_resident_quantization_impl(
                         scale_pre,
                         scale_mid,
                         scale_post,
+                        bias=bias,
                         outlier_indices=outlier_indices,
                         outlier_values=outlier_values,
                         outlier_scales=outlier_scales,
@@ -3980,6 +4611,7 @@ def _run_resident_quantization_impl(
                         trainable_group,
                         tensors,
                         backend="factorized",
+                        bias_storage_dtype=bias_storage_dtype,
                     )
                     editor.install_frozen_group(working_block, frozen_group)
                     frozen_group_states.append(frozen_group.state)
@@ -4040,6 +4672,7 @@ def _run_resident_quantization_impl(
                         accepted.actual_bit_cost,
                         accepted.extra_retry_bits,
                         (),
+                        bias_correction,
                     )
                 with _logged_operation(
                     events,
@@ -4269,6 +4902,31 @@ def _run_resident_quantization_impl(
                     )
                 with _profile_layer_phase(recorder, block_index, layer_plan.layer.path, "materialize"):
                     factorized = accepted.result
+                    bias_correction = _run_bias_correction(
+                        layer_plan,
+                        source_ref,
+                        factorized,
+                        outliers,
+                        request,
+                        context,
+                        bias_stage,
+                    )
+                    low_rank_patch = _run_low_rank_patch(
+                        layer_plan,
+                        source_ref,
+                        factorized,
+                        outliers,
+                        bias_correction,
+                        request,
+                        adapter,
+                        working_block,
+                        compressed_inputs,
+                        metadata,
+                        context,
+                        tensors,
+                        patch_stage,
+                    )
+                    accepted = _account_for_patch_acceptance(accepted, low_rank_patch)
                     peak_device_bytes = max(peak_device_bytes, accepted.peak_workspace_bytes)
                     factorization_wall_seconds += accepted.wall_seconds
                     scales = factorized.factors.scales
@@ -4278,6 +4936,18 @@ def _run_resident_quantization_impl(
                     outlier_indices = None
                     outlier_values = None
                     outlier_scales = None
+                    bias = None
+                    patch_left = patch_right = None
+                    if bias_correction is not None:
+                        with tensors.read(bias_correction.bias, request.device) as value:
+                            bias = value.clone()
+                    if low_rank_patch is not None and low_rank_patch.accepted:
+                        with (
+                            tensors.read(low_rank_patch.left, request.device) as left_value,
+                            tensors.read(low_rank_patch.right, request.device) as right_value,
+                        ):
+                            patch_left = left_value.clone()
+                            patch_right = right_value.clone()
                     if layer_plan.outliers.count:
                         with (
                             tensors.read(outliers.indices, request.device) as indices,
@@ -4311,9 +4981,12 @@ def _run_resident_quantization_impl(
                             scale_pre,
                             scale_mid,
                             scale_post,
+                            bias=bias,
                             outlier_indices=outlier_indices,
                             outlier_values=outlier_values,
                             outlier_scales=outlier_scales,
+                            patch_left=patch_left,
+                            patch_right=patch_right,
                         ).to(device=request.device, dtype=compressed_inputs.dtype)
                 tuning = None
                 if request.factorized_tuning_epochs > 0:
@@ -4437,6 +5110,8 @@ def _run_resident_quantization_impl(
                         tensors,
                         outliers=frozen_outliers,
                         backend="factorized",
+                        bias_storage_dtype=bias_storage_dtype,
+                        patch_storage_dtype=patch_storage_dtype,
                     )
                     with (
                         tensors.read(source_ref, request.device) as source_value,
@@ -4475,6 +5150,8 @@ def _run_resident_quantization_impl(
                             if request.scale_fit.enabled
                             else ("scale_fit_disabled", "tuning_disabled")
                         ),
+                        bias_correction,
+                        low_rank_patch,
                     )
                 with _logged_operation(
                     events,
@@ -4622,6 +5299,8 @@ def _run_resident_quantization_impl(
                     tensors,
                     outliers=layer_result.frozen_state.outliers,
                     backend="factorized",
+                    bias_storage_dtype=bias_storage_dtype,
+                    patch_storage_dtype=patch_storage_dtype,
                 )
                 with (
                     tensors.read(quantization_targets[layer_result.layer.path], request.device) as source_value,
@@ -4652,6 +5331,7 @@ def _run_resident_quantization_impl(
                     trainable_groups[group_result.name],
                     tensors,
                     backend="factorized",
+                    bias_storage_dtype=bias_storage_dtype,
                 )
                 BlockEditor().install_frozen_group(working_block, refitted_group)
                 with (
@@ -5147,6 +5827,7 @@ def _run_resident_factorization_slice_impl(
             transpose_wide=request.admm.transpose_wide,
         )
         scale_stage = ScaleFitStage(request.scale_fit, device=request.device)
+        bias_stage = BiasCorrectionStage(request.bias_correction, device=request.device)
         with source.read_tensor(layer_plan.source_weight, device="cpu") as source_weight:
             source_ref = tensors.put("source-layer", {"weight": source_weight})["weight"]
         accepted, outliers, fitted = _run_resident_factorization_attempts(
@@ -5161,10 +5842,23 @@ def _run_resident_factorization_slice_impl(
             scale_stage,
         )
         factorized = accepted.result
+        bias_correction = _run_bias_correction(
+            layer_plan,
+            source_ref,
+            factorized,
+            outliers,
+            request,
+            context,
+            bias_stage,
+        )
         scales = factorized.factors.scales
         if scales.mid is None:
             raise AssertionError("factorizer omitted required mid scale")
         outlier_indices = outlier_values = outlier_scales = None
+        bias = None
+        if bias_correction is not None:
+            with tensors.read(bias_correction.bias, request.device) as value:
+                bias = value.clone()
         if layer_plan.outliers.count:
             with (
                 tensors.read(outliers.indices, request.device) as indices,
@@ -5188,6 +5882,7 @@ def _run_resident_factorization_slice_impl(
                 scale_pre,
                 scale_mid,
                 scale_post,
+                bias=bias,
                 outlier_indices=outlier_indices,
                 outlier_values=outlier_values,
                 outlier_scales=outlier_scales,
@@ -5197,7 +5892,16 @@ def _run_resident_factorization_slice_impl(
             if layer_plan.outliers.count == 0
             else FrozenOutlierState(outliers.indices, outliers.values, outliers.scales)
         )
-        frozen = LayerFreezer().freeze(layer_plan.layer, trainable, tensors, outliers=frozen_outliers)
+        frozen = LayerFreezer().freeze(
+            layer_plan.layer,
+            trainable,
+            tensors,
+            outliers=frozen_outliers,
+            bias_storage_dtype={
+                "float16": torch.float16,
+                "bfloat16": torch.bfloat16,
+            }[request.bias_correction.storage_dtype.value],
+        )
         with (
             tensors.read(source_ref, request.device) as source_value,
             tensors.read(layer_plan.objective.input_importance, request.device) as input_importance,
@@ -5224,6 +5928,8 @@ def _run_resident_factorization_slice_impl(
             accepted.actual_bit_cost,
             accepted.extra_retry_bits,
             ("tuning_disabled",) if request.scale_fit.enabled else ("scale_fit_disabled", "tuning_disabled"),
+            bias_correction,
+            None,
         )
         committed = commit_layer(layer_result, artifacts, identity)
         journal_record = journal.append(
@@ -5338,6 +6044,8 @@ def _run_resident_factorization_slice(request: ResidentQuantizationRequest) -> R
 
 
 def run_resident_factorization_slice(request: ResidentQuantizationRequest) -> ResidentFactorizationSliceResult:
+    if request.low_rank_patch.enabled:
+        raise ValueError("resident factorization slices cannot fit activation-space low-rank patches")
     if request.device.startswith("cuda"):
         with acquire_device_lease(request.device), _legacy_cuda_numerics():
             return _run_resident_factorization_slice(request)

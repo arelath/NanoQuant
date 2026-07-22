@@ -160,6 +160,8 @@ def llamacpp_checkpoint_tensors(
         raise ValueError("llama.cpp checkpoint prefix must be a canonical dotted name")
     if state.bias is not None:
         raise ValueError("llama.cpp NanoQuant sidecars do not carry bias; model-shell bias export is required")
+    if state.patch_left is not None or state.patch_right is not None:
+        raise ValueError("llama.cpp NanoQuant sidecars do not yet carry low-rank patch tensors")
     tensors = {
         f"{checkpoint_prefix}.V_packed": state.right_words.detach().cpu().contiguous(),
         f"{checkpoint_prefix}.V_shape": torch.tensor((state.spec.rank, state.spec.in_features), dtype=torch.int64),

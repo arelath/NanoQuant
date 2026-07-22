@@ -16,8 +16,16 @@ from nanoquant.application.calibration import (
     memory_efficient_causal_language_model_loss,
 )
 from nanoquant.config.schema import ProfilingConfig, ProfilingLevel
-from nanoquant.domain.calibration_math import activation_square_mean, robust_tau, shrink_importance
+from nanoquant.domain.calibration_math import MeanAccumulator, activation_square_mean, robust_tau, shrink_importance
 from nanoquant.infrastructure.profiling import Profiler
+
+
+def test_mean_accumulator_weights_activation_rows_not_batches() -> None:
+    accumulator = MeanAccumulator(2)
+    accumulator.update(torch.tensor([[[1.0, 3.0], [3.0, 5.0], [5.0, 7.0]]]))
+    accumulator.update(torch.tensor([[[9.0, 11.0]]]))
+
+    assert torch.equal(accumulator.finalize(), torch.tensor([4.5, 6.5]))
 
 
 class CalibrationBlock(nn.Module):
@@ -271,6 +279,7 @@ def test_resumed_online_causal_accumulators_match_uninterrupted_result() -> None
     assert states[-1].sample_count == 4
     assert torch.equal(uninterrupted[0].input_importance, resumed[0].input_importance)
     assert torch.equal(uninterrupted[0].output_importance, resumed[0].output_importance)
+    assert torch.equal(uninterrupted[0].input_mean, resumed[0].input_mean)
 
 
 def test_online_causal_calibration_rejects_incompatible_numerical_state() -> None:

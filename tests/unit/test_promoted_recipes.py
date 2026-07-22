@@ -51,9 +51,20 @@ def test_experiment001_uses_the_current_base_compression_template(tmp_path: Path
 
 def test_numbered_launchers_own_their_concrete_definitions() -> None:
     launchers = sorted(Path("experiments").glob("[0-9][0-9][0-9]-*.py"))
+    launcher_numbers = [int(path.name[:3]) for path in launchers]
+    documented_non_launcher_experiments = {
+        20: Path("Docs/ImprovementSuggestions/D2-findings.md"),
+    }
 
-    assert [int(path.name[:3]) for path in launchers] == list(range(1, len(launchers) + 1))
-    for number, launcher in enumerate(launchers, start=1):
+    assert launcher_numbers == sorted(set(launcher_numbers))
+    assert set(range(1, max(launcher_numbers) + 1)) - set(launcher_numbers) == set(
+        documented_non_launcher_experiments
+    )
+    for number, document in documented_non_launcher_experiments.items():
+        assert document.is_file()
+        assert f"Experiment {number:03d}" in document.read_text(encoding="utf-8")
+    for launcher in launchers:
+        number = int(launcher.name[:3])
         definition = load_experiment(number)
         assert definition.identity.canonical_name == launcher.stem
         assert definition.config.intent.name == launcher.stem

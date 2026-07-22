@@ -38,6 +38,8 @@ class _CudaPackedPayload:
     outlier_indices: torch.Tensor | None
     outlier_values: torch.Tensor | None
     outlier_scales: torch.Tensor | None
+    patch_left: torch.Tensor | None
+    patch_right: torch.Tensor | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,7 +76,12 @@ def prepare_cuda_projection_group(
         or any(layer.spec.rank % 8 or layer.spec.out_features % 8 for layer in layers)
         or any(layer.spec.outlier_count != n_salient for layer in layers)
         or any(payload.right_words.shape[1] != first.right_words.shape[1] for payload in packed)
-        or any(payload.bias is not None or payload.outlier_scales is not None for payload in packed)
+        or any(
+            payload.bias is not None
+            or payload.outlier_scales is not None
+            or payload.patch_left is not None
+            for payload in packed
+        )
         or any(
             payload.outlier_indices is None or payload.outlier_values is None
             for payload in packed
@@ -155,6 +162,7 @@ class CudaPackedBackend:
             supports_bias=True,
             supports_outliers=True,
             supports_deterministic=True,
+            patch_value_dtypes=_FLOAT_DTYPES,
         )
 
     def supports(self, op: QuantizedLinearSpec, workload: WorkloadSpec) -> SupportResult:
@@ -170,6 +178,8 @@ class CudaPackedBackend:
             workload.input_dtype,
             op.scale_dtype,
             op.outlier_value_dtype,
+            op.patch_value_dtype,
+            op.bias_dtype,
         )
         minimum = (8, 0) if needs_bfloat16 else (7, 0)
         if capability < minimum:
@@ -201,6 +211,8 @@ class CudaPackedBackend:
             _copy_optional(state.outlier_indices, target),
             _copy_optional(state.outlier_values, target),
             _copy_optional(state.outlier_scales, target),
+            _copy_optional(state.patch_left, target),
+            _copy_optional(state.patch_right, target),
         )
         return PreparedLayer(self.name, self.version, state.spec, payload)
 
@@ -224,7 +236,7 @@ class CudaPackedBackend:
             raise ValueError("CUDA packed runtime does not support autograd")
         from nanoquant.runtime.cuda_kernels import launch_packed_linear
 
-        return launch_packed_linear(
+        output = launch_packed_linear(
             value,
             payload.left_words,
             payload.right_words,
@@ -236,3 +248,7 @@ class CudaPackedBackend:
             payload.outlier_values,
             payload.outlier_scales,
         )
+        if payload.patch_left is not None and payload.patch_right is not None:
+            patch_latent = F.linear(value, payload.patch_right.to(dtype=value.dtype))
+            output = output + F.linear(patch_latent, payload.patch_left.to(dtype=value.dtype))
+        return output

@@ -23,7 +23,13 @@ from nanoquant.runtime import (
 )
 
 
-def _state(name: str, *, outliers: bool, bias: bool = False) -> LogicalLayerState:
+def _state(
+    name: str,
+    *,
+    outliers: bool,
+    bias: bool = False,
+    patch: bool = False,
+) -> LogicalLayerState:
     spec = QuantizedLinearSpec(
         name,
         "nanoquant-v1",
@@ -35,6 +41,8 @@ def _state(name: str, *, outliers: bool, bias: bool = False) -> LogicalLayerStat
         outlier_count=2 if outliers else 0,
         outlier_value_dtype="float16" if outliers else None,
         has_bias=bias,
+        patch_rank=2 if patch else 0,
+        patch_value_dtype="float16" if patch else None,
     )
     return LogicalLayerState(
         spec,
@@ -58,6 +66,8 @@ def _state(name: str, *, outliers: bool, bias: bool = False) -> LogicalLayerStat
         bias=torch.zeros(3) if bias else None,
         outlier_indices=torch.tensor([1, 34], dtype=torch.int32) if outliers else None,
         outlier_values=(torch.tensor([[1, -2], [3, -4], [5, -6]], dtype=torch.float16) if outliers else None),
+        patch_left=torch.ones(3, 2, dtype=torch.float16) if patch else None,
+        patch_right=torch.ones(2, 35, dtype=torch.float16) if patch else None,
     )
 
 
@@ -119,6 +129,22 @@ def test_llamacpp_checkpoint_tensors_reject_unmapped_bias(tmp_path: Path) -> Non
         llamacpp_checkpoint_tensors(
             state,
             "model.layers.0.self_attn.q_proj",
+        )
+
+
+def test_llamacpp_checkpoint_tensors_reject_unmapped_low_rank_patch(tmp_path: Path) -> None:
+    logical = write_logical_artifact(
+        tmp_path / "logical",
+        RuntimeModelMetadata("fixture/model", "revision", "gemma3", "config", "tokenizer"),
+        {0: (_state("blocks.0.self_attn.o_proj", outliers=False, patch=True),)},
+    )
+    packed = convert_logical_to_packed(logical.root, tmp_path / "packed")
+    state = packed.load_layer("blocks.0.self_attn.o_proj")
+
+    with pytest.raises(ValueError, match="do not yet carry low-rank patch"):
+        llamacpp_checkpoint_tensors(
+            state,
+            "model.layers.0.self_attn.o_proj",
         )
 
 

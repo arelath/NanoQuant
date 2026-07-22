@@ -74,7 +74,35 @@ class AllocationStrategy(StringEnum):
     UNIFORM = "uniform"
     SENSITIVITY = "sensitivity"
     UTILITY_PROFILE = "utility_profile"
+    KL_CALIBRATED = "kl_calibrated"
     RECONSTRUCTION_AWARE = "reconstruction_aware"
+
+
+class KlSensitivityGranularity(StringEnum):
+    EXACT = "exact"
+    EXACT_OR_TYPE_BLOCK = "exact_or_type_block"
+    TYPE_BLOCK = "type_block"
+
+
+class RankResponseSource(StringEnum):
+    CONFIGURED = "configured"
+    MEASURED = "measured"
+
+
+class KlAllocationObjective(StringEnum):
+    SENSITIVITY_PROXY = "sensitivity_proxy"
+    MEASURED_UNIT_KL = "measured_unit_kl"
+    INTERACTION_NORMALIZED_UNIT_KL = "interaction_normalized_unit_kl"
+
+
+# Objectives that anchor allocation on directly measured physical-unit KL rather
+# than an error proxy. They share the same fail-closed requirements (exact arms,
+# same-run measured responses, untempered sensitivity, no imported ranks); they
+# differ only in how the per-unit anchor values are derived from the profile.
+MEASURED_UNIT_KL_OBJECTIVES = (
+    KlAllocationObjective.MEASURED_UNIT_KL,
+    KlAllocationObjective.INTERACTION_NORMALIZED_UNIT_KL,
+)
 
 
 class OutlierSelector(StringEnum):
@@ -257,13 +285,18 @@ class ReconstructionRankPlanningConfig:
     enabled: bool = False
     objective_mode: str = "unit_frobenius"
     probe_admm: ADMMConfig | None = None
+    response_source: RankResponseSource = RankResponseSource.CONFIGURED
     response_curves: tuple[RankResponseCurveConfig, ...] = ()
     response_profile_provenance: str = ""
+    kl_objective: KlAllocationObjective = KlAllocationObjective.SENSITIVITY_PROXY
     importance: ReconstructionImportanceConfig = field(default_factory=ReconstructionImportanceConfig)
     sensitivity_strength: float = 0.75
+    protect_sensitive_units: bool = True
     protected_sensitivity_quantile: float = 0.80
     protected_rank_floor_fraction: float = 1.0
     target_protected_error_reduction_fraction: float = 0.01
+    rank_trust_reference_run: str | None = None
+    rank_trust_fraction: float = 1.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -272,6 +305,9 @@ class RankAllocationConfig:
     strategy: AllocationStrategy = AllocationStrategy.UNIFORM
     sensitivity_alpha: float = 0.5
     utility_profile_artifact: str | None = None
+    kl_profile_artifact: str | None = None
+    kl_profile_key: str | None = None
+    kl_sensitivity_granularity: KlSensitivityGranularity = KlSensitivityGranularity.EXACT_OR_TYPE_BLOCK
     maximum_rank_layer_patterns: tuple[str, ...] = ()
     layer_budget_multipliers: tuple[LayerRankBudgetConfig, ...] = ()
     bounds: RankBoundsConfig = field(default_factory=RankBoundsConfig)
@@ -300,9 +336,36 @@ class ScaleFitConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class BiasCorrectionConfig:
+    enabled: bool = False
+    storage_dtype: DType = DType.FLOAT16
+    charge_to_bit_budget: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class LowRankPatchConfig:
+    enabled: bool = False
+    layer_patterns: tuple[str, ...] = ("self_attn.o_proj",)
+    rank: int = 8
+    storage_dtype: DType = DType.FLOAT16
+    ridge_fraction: float = 1e-2
+    fit_tokens: int = 4096
+    held_out_tokens: int = 4096
+    charge_to_bit_budget: bool = True
+    require_held_out_acceptance: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class SharedInputMemberMultiplierConfig:
+    member: str
+    multiplier: float
+
+
+@dataclass(frozen=True, slots=True)
 class SharedInputGroupConfig:
     name: str
     members: tuple[str, ...]
+    member_multipliers: tuple[SharedInputMemberMultiplierConfig, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -318,6 +381,8 @@ class FactorizationConfig:
     solve_dtype: DType = DType.FLOAT32
     admm: ADMMConfig = field(default_factory=ADMMConfig)
     scale_fit: ScaleFitConfig = field(default_factory=ScaleFitConfig)
+    bias_correction: BiasCorrectionConfig = field(default_factory=BiasCorrectionConfig)
+    low_rank_patch: LowRankPatchConfig = field(default_factory=LowRankPatchConfig)
     shared_input: SharedInputFactorizationConfig = field(default_factory=SharedInputFactorizationConfig)
 
 

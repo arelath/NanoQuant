@@ -4,7 +4,9 @@ import pytest
 import torch
 
 from nanoquant.application.covariance import (
+    DenseCovarianceAccumulator,
     DenseHessianWorkspaceError,
+    SplitDenseCovarianceAccumulator,
     enforce_dense_hessian_reservation,
     load_covariance_objective,
     materialize_covariance,
@@ -12,6 +14,31 @@ from nanoquant.application.covariance import (
 from nanoquant.domain.objectives import DenseHessianObjective
 from nanoquant.infrastructure.artifacts import LocalArtifactStore
 from nanoquant.infrastructure.tensor_store import LocalTensorStore
+
+
+def test_split_dense_covariance_accumulator_uses_disjoint_bounded_rows() -> None:
+    values = torch.tensor(
+        [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0], [9.0, 10.0]],
+    )
+    accumulator = SplitDenseCovarianceAccumulator(2, 2, 2, device="cpu")
+    accumulator.update(values[:3])
+    accumulator.update(values[3:])
+    fit_covariance, fit_mean = accumulator.fit.materialize()
+    held_covariance, held_mean = accumulator.held_out.materialize()
+
+    assert accumulator.complete
+    assert torch.allclose(fit_mean, values[:2].mean(dim=0))
+    assert torch.allclose(fit_covariance, values[:2].mT @ values[:2] / 2)
+    assert torch.allclose(held_mean, values[2:4].mean(dim=0))
+    assert torch.allclose(held_covariance, values[2:4].mT @ values[2:4] / 2)
+
+
+def test_dense_covariance_accumulator_rejects_incomplete_materialization() -> None:
+    accumulator = DenseCovarianceAccumulator(2, 3, device="cpu")
+    accumulator.update(torch.ones(2, 2))
+
+    with pytest.raises(ValueError, match="incomplete"):
+        accumulator.materialize()
 
 
 def test_block_diagonal_covariance_storage_and_execution_match_dense_blocks(tmp_path: Path) -> None:

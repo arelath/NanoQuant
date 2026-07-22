@@ -195,6 +195,8 @@ def _thaw_frozen_layers(
                 outlier_indices=frozen.outlier_indices,
                 outlier_values=frozen.outlier_values,
                 outlier_scales=frozen.outlier_scales,
+                patch_left=frozen.patch_left,
+                patch_right=frozen.patch_right,
                 immutable_binary_factors=True,
             )
             editor.install_trainable_layer(block, state.layer.path, module)
@@ -238,7 +240,15 @@ def _selected_parameters(
     selected = set()
     for module in trainable.values():
         for name, parameter in module.named_parameters():
-            if name in {"scale_pre", "scale_mid", "scale_post", "outlier_values", "bias"}:
+            if name in {
+                "scale_pre",
+                "scale_mid",
+                "scale_post",
+                "outlier_values",
+                "bias",
+                "patch_left",
+                "patch_right",
+            }:
                 selected.add(id(parameter))
     auxiliary = []
     for module_name, module in model.named_modules():
@@ -265,6 +275,11 @@ def _restore_storage_dtype(
             module.outlier_values.data = module.outlier_values.data.to(_storage_dtype(state.outliers.values.spec.dtype))
         if module.bias is not None and state.bias is not None:
             module.bias.data = module.bias.data.to(_storage_dtype(state.bias.spec.dtype))
+        if isinstance(state, FrozenNanoQuantState):
+            if module.patch_left is not None and state.patch_left is not None:
+                module.patch_left.data = module.patch_left.data.to(_storage_dtype(state.patch_left.spec.dtype))
+            if module.patch_right is not None and state.patch_right is not None:
+                module.patch_right.data = module.patch_right.data.to(_storage_dtype(state.patch_right.spec.dtype))
 
 
 def _freeze_tuned_blocks(

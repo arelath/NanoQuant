@@ -29,6 +29,8 @@ def functional_dense_reconstruction(
     outlier_indices: torch.Tensor | None = None,
     outlier_values: torch.Tensor | None = None,
     outlier_scales: torch.Tensor | None = None,
+    patch_left: torch.Tensor | None = None,
+    patch_right: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Materialize the scaled low-rank weight plus optional exact columns."""
 
@@ -40,6 +42,10 @@ def functional_dense_reconstruction(
         values = materialize_outlier_values(outlier_values, outlier_scales)
         result = result.clone()
         result[:, outlier_indices.long()] += values.to(result.dtype)
+    if (patch_left is None) != (patch_right is None):
+        raise ValueError("low-rank patch tensors must be paired")
+    if patch_left is not None and patch_right is not None:
+        result = result + patch_left.to(result.dtype) @ patch_right.to(result.dtype)
     return result
 
 
@@ -54,6 +60,8 @@ def functional_factorized_linear(
     outlier_indices: torch.Tensor | None = None,
     outlier_values: torch.Tensor | None = None,
     outlier_scales: torch.Tensor | None = None,
+    patch_left: torch.Tensor | None = None,
+    patch_right: torch.Tensor | None = None,
     *,
     scale_left_before_linear: bool = False,
 ) -> torch.Tensor:
@@ -72,6 +80,17 @@ def functional_factorized_linear(
         output = output + torch.nn.functional.linear(
             value.index_select(-1, outlier_indices.long()),
             values.to(device=value.device, dtype=value.dtype),
+        )
+    if (patch_left is None) != (patch_right is None):
+        raise ValueError("low-rank patch tensors must be paired")
+    if patch_left is not None and patch_right is not None:
+        patch_latent = torch.nn.functional.linear(
+            value,
+            patch_right.to(device=value.device, dtype=value.dtype),
+        )
+        output = output + torch.nn.functional.linear(
+            patch_latent,
+            patch_left.to(device=value.device, dtype=value.dtype),
         )
     if bias is not None:
         output = output + bias
