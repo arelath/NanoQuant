@@ -16,7 +16,6 @@ from run_error_budget_campaign import (
     _reported_arm_kls,
     _require_at_or_below_budget,
     _require_candidate_sidecars,
-    _select_d2_granularity,
     _select_winning_alpha,
     _select_winning_patch,
 )
@@ -138,23 +137,6 @@ def test_campaign_selects_lowest_qkv_kl_alpha() -> None:
     assert _select_winning_alpha({1: 0.8, 2: 0.6, 4: 0.7}) == 2
 
 
-def test_campaign_selects_exact_d2_first_then_documented_fallback() -> None:
-    exact = KlSensitivityGranularity.EXACT_OR_TYPE_BLOCK
-    fallback = KlSensitivityGranularity.TYPE_BLOCK
-
-    assert _select_d2_granularity({exact: {"passed": True}}) is exact
-    assert (
-        _select_d2_granularity(
-            {exact: {"passed": False}, fallback: {"passed": True}}
-        )
-        is fallback
-    )
-    with pytest.raises(ValueError, match="neither exact-unit nor type-by-block"):
-        _select_d2_granularity(
-            {exact: {"passed": False}, fallback: {"passed": False}}
-        )
-
-
 def test_campaign_selects_smallest_patch_rank_that_improves_over_zero() -> None:
     assert _select_winning_patch({0: 0.8, 4: 0.79, 8: 0.5, 16: 0.4}) == 4
     assert _select_winning_patch({0: 0.8, 4: 0.81, 8: 0.79, 16: 0.7}) == 8
@@ -268,7 +250,7 @@ def test_campaign_profile_uses_requested_arms_and_pinned_local_inputs(
     assert str(marker) in cuda_command
 
 
-def test_campaign_compression_passes_selected_kl_granularity(
+def test_campaign_compression_enforces_exact_measured_d2_without_imported_values(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -299,17 +281,14 @@ def test_campaign_compression_passes_selected_kl_granularity(
         bias=False,
         alpha_v=1,
         patch_rank=0,
-        kl_granularity=KlSensitivityGranularity.TYPE_BLOCK,
-        rank_trust_reference_run=tmp_path / "baseline",
-        rank_trust_fraction=0.25,
     )
 
     command = commands[0]
     index = command.index("--kl-granularity")
-    assert command[index + 1] == "type_block"
-    trust_index = command.index("--rank-trust-fraction")
-    assert command[trust_index + 1] == "0.25"
-    assert "--rank-trust-reference-run" in command
+    assert command[index + 1] == KlSensitivityGranularity.EXACT.value
+    assert "--legacy-d2-proxy" not in command
+    assert "--rank-trust-reference-run" not in command
+    assert "--rank-trust-fraction" not in command
 
 
 def test_campaign_reports_d2_rank_and_factor_bit_redistribution() -> None:

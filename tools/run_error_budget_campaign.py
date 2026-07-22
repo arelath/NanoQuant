@@ -258,18 +258,6 @@ def _rank_redistribution_gate(
     return {**directions, "passed": all(directions.values())}
 
 
-def _select_d2_granularity(
-    gates: dict[KlSensitivityGranularity, dict[str, object]],
-) -> KlSensitivityGranularity:
-    exact = gates.get(KlSensitivityGranularity.EXACT_OR_TYPE_BLOCK)
-    if exact is not None and exact.get("passed") is True:
-        return KlSensitivityGranularity.EXACT_OR_TYPE_BLOCK
-    fallback = gates.get(KlSensitivityGranularity.TYPE_BLOCK)
-    if fallback is not None and fallback.get("passed") is True:
-        return KlSensitivityGranularity.TYPE_BLOCK
-    raise ValueError("neither exact-unit nor type-by-block D2 allocation passed its adoption gates")
-
-
 def _rank_inventory_for_run(
     run: Path,
     summary: dict[str, Any],
@@ -408,9 +396,6 @@ class Campaign:
         bias: bool,
         alpha_v: float,
         patch_rank: int,
-        kl_granularity: KlSensitivityGranularity,
-        rank_trust_reference_run: Path | None = None,
-        rank_trust_fraction: float = 1.0,
     ) -> Path:
         output = self.root / name
         command = [
@@ -427,8 +412,7 @@ class Campaign:
             "--kl-profile-key",
             key,
             "--kl-granularity",
-            kl_granularity.value,
-            "--legacy-d2-proxy",
+            KlSensitivityGranularity.EXACT.value,
             "--v-multiplier",
             str(alpha_v),
             "--patch-rank",
@@ -436,15 +420,6 @@ class Campaign:
             "--device",
             self.args.device,
         ]
-        if rank_trust_reference_run is not None:
-            command.extend(
-                (
-                    "--rank-trust-reference-run",
-                    str(rank_trust_reference_run.resolve()),
-                    "--rank-trust-fraction",
-                    str(rank_trust_fraction),
-                )
-            )
         if not bias:
             command.append("--no-bias-correction")
         self._run(name, command, output / "candidate-summary.json")
@@ -605,19 +580,16 @@ class Campaign:
         )
 
         d2 = self.compress(
-            "d2-kl-exact-trust-025-static",
+            "d2-kl-exact-static",
             baseline_profile,
             baseline_key,
             bias=False,
             alpha_v=1,
             patch_rank=0,
-            kl_granularity=KlSensitivityGranularity.EXACT_OR_TYPE_BLOCK,
-            rank_trust_reference_run=Path(self.args.calibration_source),
-            rank_trust_fraction=0.25,
         )
-        d2_profile = self.profile("d2-kl-exact-trust-025-profile", d2)
+        d2_profile = self.profile("d2-kl-exact-profile", d2)
         d2_gate_profile = self.profile(
-            "d2-kl-exact-trust-025-full-gate-48",
+            "d2-kl-exact-full-gate-48",
             d2,
             arms=("full",),
             samples=48,
@@ -644,110 +616,22 @@ class Campaign:
                 "passed": _material_improvement_passed(kl_gate),
             }
 
-        d2_arms = {
-            KlSensitivityGranularity.EXACT_OR_TYPE_BLOCK: d2_arm_report(
-                d2,
-                d2_profile,
-                d2_gate_profile,
+        selected_d2 = d2_arm_report(d2, d2_profile, d2_gate_profile)
+        if not bool(selected_d2["passed"]):
+            self._checkpoint(
+                d2_arm=selected_d2,
+                d2_selection={
+                    "status": "failed",
+                    "reason": "exact-unit measured-response D2 did not pass the paired material KL gate",
+                },
             )
-        }
-        d2_rank_trust_arm: dict[str, object] | None = None
-        if not bool(d2_arms[KlSensitivityGranularity.EXACT_OR_TYPE_BLOCK]["passed"]):
-            fallback_d2 = self.compress(
-                "d2-kl-type-block-static",
-                baseline_profile,
-                baseline_key,
-                bias=False,
-                alpha_v=1,
-                patch_rank=0,
-                kl_granularity=KlSensitivityGranularity.TYPE_BLOCK,
-            )
-            fallback_d2_profile = self.profile(
-                "d2-kl-type-block-profile",
-                fallback_d2,
-            )
-            fallback_d2_gate_profile = self.profile(
-                "d2-kl-type-block-full-gate-48",
-                fallback_d2,
-                arms=("full",),
-                samples=48,
-                persistent_teacher_cache=False,
-            )
-            d2_arms[KlSensitivityGranularity.TYPE_BLOCK] = d2_arm_report(
-                fallback_d2,
-                fallback_d2_profile,
-                fallback_d2_gate_profile,
-            )
-            if not bool(d2_arms[KlSensitivityGranularity.TYPE_BLOCK]["passed"]):
-                trust_d2 = self.compress(
-                    "d2-kl-type-block-trust-025-static",
-                    baseline_profile,
-                    baseline_key,
-                    bias=False,
-                    alpha_v=1,
-                    patch_rank=0,
-                    kl_granularity=KlSensitivityGranularity.TYPE_BLOCK,
-                    rank_trust_reference_run=Path(self.args.calibration_source),
-                    rank_trust_fraction=0.25,
-                )
-                trust_d2_profile = self.profile(
-                    "d2-kl-type-block-trust-025-profile",
-                    trust_d2,
-                )
-                trust_d2_gate_profile = self.profile(
-                    "d2-kl-type-block-trust-025-full-gate-48",
-                    trust_d2,
-                    arms=("full",),
-                    samples=48,
-                    persistent_teacher_cache=False,
-                )
-                d2_rank_trust_arm = d2_arm_report(
-                    trust_d2,
-                    trust_d2_profile,
-                    trust_d2_gate_profile,
-                )
-                d2_rank_trust_arm.update(
-                    {
-                        "granularity": KlSensitivityGranularity.TYPE_BLOCK.value,
-                        "rank_trust_fraction": 0.25,
-                        "rank_trust_reference_run": str(
-                            Path(self.args.calibration_source).resolve()
-                        ),
-                    }
-                )
-        if d2_rank_trust_arm is not None and bool(d2_rank_trust_arm["passed"]):
-            selected_d2_granularity = KlSensitivityGranularity.TYPE_BLOCK
-            selected_d2 = d2_rank_trust_arm
-        else:
-            try:
-                selected_d2_granularity = _select_d2_granularity(d2_arms)
-            except ValueError:
-                self._checkpoint(
-                    d2_arms={key.value: value for key, value in d2_arms.items()},
-                    d2_rank_trust_arm=d2_rank_trust_arm,
-                    d2_selection={"status": "failed"},
-                )
-                raise
-            selected_d2 = d2_arms[selected_d2_granularity]
-        d2 = Path(str(selected_d2["run"]))
-        d2_profile = Path(str(selected_d2["profile"]))
+            raise ValueError("exact-unit measured-response D2 did not pass its adoption gate")
         self._checkpoint(
-            d2_arms={key.value: value for key, value in d2_arms.items()},
-            d2_rank_trust_arm=d2_rank_trust_arm,
+            d2_arm=selected_d2,
             d2_selection={
                 "status": "selected",
-                "granularity": selected_d2_granularity.value,
-                "reason": (
-                    "exact unit KL passed both adoption gates"
-                    if selected_d2_granularity
-                    is KlSensitivityGranularity.EXACT_OR_TYPE_BLOCK
-                    else (
-                        "exact and full-step type-by-block KL failed; the measured 0.25 "
-                        "rank trust region passed"
-                        if selected_d2 is d2_rank_trust_arm
-                        else "exact unit KL failed; documented type-by-block fallback passed"
-                    )
-                ),
+                "granularity": KlSensitivityGranularity.EXACT.value,
+                "reason": "exact-unit measured-response KL passed the paired material gate",
             },
         )
 
@@ -758,7 +642,6 @@ class Campaign:
             bias=False,
             alpha_v=1,
             patch_rank=0,
-            kl_granularity=selected_d2_granularity,
         )
         d3_control_profile = self.profile(
             "d3-no-bias-control-kl-profile",
@@ -772,7 +655,6 @@ class Campaign:
             bias=True,
             alpha_v=1,
             patch_rank=0,
-            kl_granularity=selected_d2_granularity,
         )
         d3_profile = self.profile("d3-bias-kl-profile", d3)
 
@@ -785,7 +667,6 @@ class Campaign:
                 bias=True,
                 alpha_v=alpha,
                 patch_rank=0,
-                kl_granularity=selected_d2_granularity,
             )
             alpha_runs[alpha] = (
                 run,
@@ -813,7 +694,6 @@ class Campaign:
                 bias=True,
                 alpha_v=winning_alpha,
                 patch_rank=rank,
-                kl_granularity=selected_d2_granularity,
             )
             patch_runs[rank] = (
                 run,
@@ -850,15 +730,6 @@ class Campaign:
         phase_profiles = {
             "baseline": baseline_profile,
             "d2": d2_profile,
-            **{
-                f"d2_{granularity.value}": Path(str(report["profile"]))
-                for granularity, report in d2_arms.items()
-            },
-            **(
-                {"d2_type_block_trust_025": Path(str(d2_rank_trust_arm["profile"]))}
-                if d2_rank_trust_arm is not None
-                else {}
-            ),
             "d3_control": d3_control_profile,
             "d3": d3_profile,
             **{f"d4_v{alpha}": profile for alpha, (_run, profile) in alpha_runs.items()},
@@ -869,13 +740,7 @@ class Campaign:
         }
         phase_kls = {name: _reported_arm_kls(profile) for name, profile in phase_profiles.items()}
         budget_runs = {
-            Path(str(report["run"]))
-            for report in d2_arms.values()
-        } | (
-            {Path(str(d2_rank_trust_arm["run"]))}
-            if d2_rank_trust_arm is not None
-            else set()
-        ) | {
+            d2,
             d3_control,
             d3,
             *(run for run, _profile in alpha_runs.values()),
@@ -945,9 +810,8 @@ class Campaign:
             "status": "completed",
             "winning_alpha_v": winning_alpha,
             "winning_patch_rank": winning_patch,
-            "d2_sensitivity_granularity": selected_d2_granularity.value,
-            "d2_arms": {key.value: value for key, value in d2_arms.items()},
-            "d2_rank_trust_arm": d2_rank_trust_arm,
+            "d2_sensitivity_granularity": KlSensitivityGranularity.EXACT.value,
+            "d2_arm": selected_d2,
             "patch_acceptance": {
                 str(rank): {
                     "accepted_owner_count": int(cast(int, candidate.get("patch_owner_count", 0))),
@@ -971,7 +835,6 @@ class Campaign:
             "design_claims_verified": (
                 all_candidates_at_budget
                 and quality_improved_at_same_budget
-                and bool(d2_rank_gate["passed"])
                 and all(phase_claims.values())
             ),
             "quality_comparison": str(final_run / "quality-comparison-tuned.json"),

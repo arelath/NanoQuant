@@ -1,6 +1,6 @@
 # Error-Budget-Driven Quality Improvements
 
-**Status:** Proposed design
+**Status:** Torch/runtime implementation complete; operating-point campaign in progress
 
 **Primary evidence:** [Error Anatomy](ImprovementSuggestions/ErrorAnatomy.md) (measured 2026-07-19),
 [Next Quality Levers](ImprovementSuggestions/NextQualityLevers.md) (idea catalog)
@@ -13,6 +13,22 @@ weighting on pinned `google/gemma-3-1b-it`) into five concrete pipeline changes:
 harness as a first-class planning input, KL-calibrated allocation sensitivities, closed-form output bias
 correction, member-weighted group objectives, and a targeted low-rank fp16 patch for `o_proj`. Scale-only
 distillation is scheduled, not built — it already exists.
+
+## Implementation and evidence status
+
+- D1 through D5 are implemented in the application, resident-compression, artifact, packed-runtime,
+  and validation paths. Bias and low-rank patch sidecars remain intentionally unsupported by the
+  stock llama.cpp/GGUF path, as described in §§4.3 and 6.3.
+- Experiments 021 and 022 exercise the self-measured, exact-unit D2 workflow without imported response
+  constants or rank plans. Experiment 023 measures the interaction-corrected D2 variant.
+- The resumable 270M phase campaign is driven by `tools/run_error_budget_campaign.py`. It now enforces
+  the corrected D2 contract: exact physical-unit arms, current-run measured responses, untempered KL,
+  no type/block fallback, no legacy KL/error proxy, and no rank-trust dependency on Experiment 016.
+  Cross-model rank direction remains diagnostic only.
+- The remaining work is measured adoption: run the paired D2 gate, then the D3 bias comparison, D4
+  member-multiplier sweep, D5 patch-rank sweep, existing scale-only distillation, packed quality, and
+  CUDA sidecar parity. The campaign checkpoints every completed run/profile and fails closed at each
+  identity, bit-budget, and quality gate.
 
 ## 1. Decision summary
 
