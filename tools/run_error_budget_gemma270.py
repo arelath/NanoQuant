@@ -60,6 +60,11 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--v-multiplier", type=float, default=2.0)
     parser.add_argument("--patch-rank", type=int, default=0)
+    parser.add_argument(
+        "--target-bpw",
+        type=float,
+        help="override the recipe factor-budget target (used for exact sidecar budget guards)",
+    )
     parser.add_argument("--rank-trust-reference-run", type=Path)
     parser.add_argument("--rank-trust-fraction", type=float, default=1.0)
     parser.add_argument(
@@ -90,6 +95,8 @@ def main(arguments: list[str] | None = None) -> int:
         raise ValueError("v multiplier must be positive")
     if args.patch_rank < 0:
         raise ValueError("patch rank must not be negative")
+    if args.target_bpw is not None and args.target_bpw <= 0:
+        raise ValueError("target BPW must be positive")
     if not 0 <= args.rank_trust_fraction <= 1:
         raise ValueError("rank trust fraction must be in [0, 1]")
     if (args.rank_trust_fraction == 1) != (args.rank_trust_reference_run is None):
@@ -126,6 +133,7 @@ def main(arguments: list[str] | None = None) -> int:
     if args.uniform_control:
         allocation = replace(
             base.allocation,
+            target_bpw=(base.allocation.target_bpw if args.target_bpw is None else args.target_bpw),
             strategy=AllocationStrategy.UNIFORM,
             kl_profile_artifact=None,
             kl_profile_key=None,
@@ -152,6 +160,7 @@ def main(arguments: list[str] | None = None) -> int:
         )
         allocation = replace(
             base.allocation,
+            target_bpw=(base.allocation.target_bpw if args.target_bpw is None else args.target_bpw),
             strategy=AllocationStrategy.KL_CALIBRATED,
             kl_profile_artifact=str(args.kl_profile.resolve()),
             kl_profile_key=args.kl_profile_key,

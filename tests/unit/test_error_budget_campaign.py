@@ -281,6 +281,7 @@ def test_campaign_compression_enforces_exact_measured_d2_without_imported_values
         bias=False,
         alpha_v=1,
         patch_rank=0,
+        target_bpw=0.9999,
     )
 
     command = commands[0]
@@ -289,6 +290,8 @@ def test_campaign_compression_enforces_exact_measured_d2_without_imported_values
     assert "--legacy-d2-proxy" not in command
     assert "--rank-trust-reference-run" not in command
     assert "--rank-trust-fraction" not in command
+    target_index = command.index("--target-bpw")
+    assert command[target_index + 1] == "0.9999"
 
 
 def test_campaign_reports_d2_rank_and_factor_bit_redistribution() -> None:

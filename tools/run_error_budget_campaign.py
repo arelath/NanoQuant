@@ -29,6 +29,10 @@ REVISION = "23cf460f6bb16954176b3ddcc8d4f250501458a9"
 QKV_ARM = "type:self_attn.attn_qkv"
 O_ARM = "type:self_attn.o_proj"
 MIN_MATERIAL_RELATIVE_KL_IMPROVEMENT = 0.01
+# A single aligned rank step can leave a few thousand unusable bits.  Reserving
+# 0.01% of the factor budget for bias/patch arms keeps their *actual* BPW below
+# the 1.0-target Experiment 016 artifact instead of spending that alignment tail.
+SIDECAR_TARGET_BPW = 0.9999
 DEFAULT_BASELINE_SUMMARY = (
     ROOT / "Results/016/016-compress-and-benchmark-gemma-3-270m-it-summary.json"
 )
@@ -396,6 +400,7 @@ class Campaign:
         bias: bool,
         alpha_v: float,
         patch_rank: int,
+        target_bpw: float | None = None,
     ) -> Path:
         output = self.root / name
         command = [
@@ -420,6 +425,8 @@ class Campaign:
             "--device",
             self.args.device,
         ]
+        if target_bpw is not None:
+            command.extend(("--target-bpw", str(target_bpw)))
         if not bias:
             command.append("--no-bias-correction")
         self._run(name, command, output / "candidate-summary.json")
@@ -649,12 +656,13 @@ class Campaign:
             arms=(O_ARM,),
         )
         d3 = self.compress(
-            "d3-bias-static",
+            "d3-bias-budget-guard-static",
             d2_profile,
             _profile_key(d2_profile),
             bias=True,
             alpha_v=1,
             patch_rank=0,
+            target_bpw=SIDECAR_TARGET_BPW,
         )
         d3_profile = self.profile("d3-bias-kl-profile", d3)
 
@@ -667,6 +675,7 @@ class Campaign:
                 bias=True,
                 alpha_v=alpha,
                 patch_rank=0,
+                target_bpw=SIDECAR_TARGET_BPW,
             )
             alpha_runs[alpha] = (
                 run,
@@ -694,6 +703,7 @@ class Campaign:
                 bias=True,
                 alpha_v=winning_alpha,
                 patch_rank=rank,
+                target_bpw=SIDECAR_TARGET_BPW,
             )
             patch_runs[rank] = (
                 run,
@@ -811,6 +821,7 @@ class Campaign:
             "winning_alpha_v": winning_alpha,
             "winning_patch_rank": winning_patch,
             "d2_sensitivity_granularity": KlSensitivityGranularity.EXACT.value,
+            "sidecar_target_bpw": SIDECAR_TARGET_BPW,
             "d2_arm": selected_d2,
             "patch_acceptance": {
                 str(rank): {

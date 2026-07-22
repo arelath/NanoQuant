@@ -29,6 +29,9 @@ distillation is scheduled, not built — it already exists.
   member-multiplier sweep, D5 patch-rank sweep, existing scale-only distillation, packed quality, and
   CUDA sidecar parity. The campaign checkpoints every completed run/profile and fails closed at each
   identity, bit-budget, and quality gate.
+- Bias/patch campaign arms reserve 0.01% of the nominal factor budget. This is an alignment guard, not
+  extra capacity: it prevents a charged sidecar from consuming a sub-rank remainder and ending a few
+  thousand bits above the retained baseline after ranks are rounded to the required multiple.
 
 ## 1. Decision summary
 
