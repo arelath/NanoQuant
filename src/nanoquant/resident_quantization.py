@@ -208,7 +208,7 @@ from nanoquant.infrastructure.tuning_checkpoint import (
 from nanoquant.ports.event_sink import EventSink
 from nanoquant.ports.model_adapter import ModelAdapter
 
-RESIDENT_ALGORITHM_VERSION = 47
+RESIDENT_ALGORITHM_VERSION = 48
 _THROUGHPUT_PROBE_REPETITIONS = 5
 
 
@@ -1360,6 +1360,7 @@ def _rehydrate_trainable_layer(
         outlier_scales=frozen.outlier_scales,
         patch_left=frozen.patch_left,
         patch_right=frozen.patch_right,
+        immutable_binary_factors=True,
     ).to(device=device, dtype=dtype)
 
 
@@ -1391,6 +1392,7 @@ def _rehydrate_trainable_group(
         outlier_indices=frozen.outlier_indices,
         outlier_values=frozen.outlier_values,
         outlier_scales=frozen.outlier_scales,
+        immutable_binary_factors=True,
     ).to(device=device, dtype=dtype)
 
 

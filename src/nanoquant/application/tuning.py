@@ -700,11 +700,25 @@ def post_block_refit(
         "patch_left",
         "patch_right",
     )
+    # A shared-input owner's pre and middle scales are one physical parameterization
+    # reused by every member projection.  They have already been tuned at group
+    # scope.  Moving them again in the all-layer refit changes Q, K, and V
+    # simultaneously (including both sides of the attention score), which makes
+    # the legacy absolute scale LR unstable.  Member-specific post scales and side
+    # paths remain safe to co-adapt with the rest of the block.
+    coupled_shared_scale_ids = {
+        id(getattr(module, parameter_name))
+        for module in model.modules()
+        if getattr(module, "coupled_shared_input_scales", False)
+        for parameter_name in ("scale_pre", "scale_mid")
+    }
     return tune(
         model,
         request,
         forward,
-        lambda name, _parameter: name.endswith(tunable_suffixes),
+        lambda name, parameter: (
+            name.endswith(tunable_suffixes) and id(parameter) not in coupled_shared_scale_ids
+        ),
         recorder,
         resume=resume,
         checkpoint_sink=checkpoint_sink,

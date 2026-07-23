@@ -38,6 +38,7 @@ class _SignSTE(torch.autograd.Function):
 
 
 class TrainableFactorizedLinear(nn.Module):
+    coupled_shared_input_scales = False
     outlier_indices: torch.Tensor | None
     outlier_values: nn.Parameter | None
     outlier_scales: torch.Tensor | None
@@ -138,6 +139,8 @@ class TrainableFactorizedLinear(nn.Module):
 
 class TrainableSharedInputFactorGroup(TrainableFactorizedLinear):
     """One parameter owner for a row-stacked collection of projections."""
+
+    coupled_shared_input_scales = True
 
 
 class SharedInputProjectionView(nn.Module):

@@ -296,9 +296,19 @@ non-factorized tuning and global parameter selection will misclassify group view
 `tune_factorized` accepts a unit/owner identity rather than only a logical layer path. Parameter discovery must prove
 that each owner tensor is selected once. Member view paths select no parameters.
 
-Post-block refit and global distillation rehydrate one group owner plus member views and include the group scales,
-outlier values, and bias according to the existing policy. Reports can attribute losses to member paths, but optimizer
-ownership remains at group scope.
+Post-block refit and global distillation rehydrate one group owner plus member views. Global distillation includes all
+group scales, outlier values, and bias according to the existing policy. Post-block refit includes the member-specific
+`scale_post`, outlier values, and bias, but keeps the group's shared `scale_pre` and `scale_mid` fixed after
+group-scope factorized tuning. Reports can attribute losses to member paths, but optimizer ownership remains at group
+scope.
+
+The fixed shared-scale rule is a correction from the first stacked implementation. The legacy joint-refit learning
+rate was qualified on independent Q/K/V parameterizations. Reusing it for shared `scale_pre` and `scale_mid` changes
+Q, K, and V together, including both sides of the attention score. In the retained ungrouped v28 Gemma run all 26
+refits were finite and improving; retained stacked Gemma 270M and 1B runs instead showed immediate multi-order loss
+growth and then non-finite epoch evaluations, with best-state restoration masking the failed refit in the final block
+artifact. Coupled shared scales are therefore tuned once at group scope; the later block pass only co-adapts
+member-specific and ungrouped parameters.
 
 ### 10.4 Retry
 

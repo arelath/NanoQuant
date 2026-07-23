@@ -6,7 +6,7 @@ import torch
 from torch import nn
 
 import nanoquant.application.tuning as tuning_module
-from nanoquant.application.layers import TrainableFactorizedLinear
+from nanoquant.application.layers import TrainableFactorizedLinear, TrainableSharedInputFactorGroup
 from nanoquant.application.tuning import (
     TuningRequest,
     _PinnedBatchStager,
@@ -422,6 +422,45 @@ def test_post_block_refit_updates_scales_without_latent_changes() -> None:
     assert metrics.final.loss <= metrics.before.loss
     assert torch.equal(model.quant.left_latent, latent_before[0])
     assert torch.equal(model.quant.right_latent, latent_before[1])
+
+
+def test_post_block_refit_keeps_coupled_shared_input_scales_fixed() -> None:
+    class SharedHybrid(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.quant = TrainableFactorizedLinear(
+                torch.tensor([[1.0], [-1.0]]),
+                torch.tensor([[1.0, -1.0, 1.0]]),
+                torch.ones(3),
+                torch.ones(1),
+                torch.ones(2),
+            )
+            self.shared = TrainableSharedInputFactorGroup(
+                torch.tensor([[1.0], [-1.0]]),
+                torch.tensor([[1.0, 1.0, -1.0]]),
+                torch.ones(3),
+                torch.ones(1),
+                torch.ones(2),
+            )
+
+        def forward(self, value: torch.Tensor) -> torch.Tensor:
+            return self.quant(value) + self.shared(value)
+
+    model = SharedHybrid()
+    inputs = torch.randn(12, 3, generator=torch.Generator().manual_seed(46))
+    targets = torch.zeros(12, 2)
+    shared_pre = model.shared.scale_pre.detach().clone()
+    shared_mid = model.shared.scale_mid.detach().clone()
+    shared_post = model.shared.scale_post.detach().clone()
+    ordinary_pre = model.quant.scale_pre.detach().clone()
+
+    metrics = post_block_refit(model, TuningRequest(inputs, targets, 3, 3, 0.02), _forward)
+
+    assert metrics.final.loss <= metrics.before.loss
+    assert torch.equal(model.shared.scale_pre, shared_pre)
+    assert torch.equal(model.shared.scale_mid, shared_mid)
+    assert not torch.equal(model.shared.scale_post, shared_post)
+    assert not torch.equal(model.quant.scale_pre, ordinary_pre)
 
 
 def test_microbatch_accumulation_preserves_optimizer_batch_update() -> None:
