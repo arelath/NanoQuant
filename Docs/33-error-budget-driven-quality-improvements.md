@@ -37,6 +37,14 @@ distillation is scheduled, not built — it already exists.
   failed its `o_proj` splice gate (1.65693 → 2.01585; +21.66%, paired 95% interval [+19.23%, +24.15%]).
   D3 is therefore not adopted for this model. The campaign continues D4 from the last accepted D2
   operating point; rejected phases never become inputs to later phase measurements.
+- The no-bias D4 sweep selected `α_v=2`: QKV splice KL moved from 1.15965 at `α_v=1` to 0.94728
+  (−18.31%, paired 95% interval [−22.14%, −14.65%]); `α_v=4` reached 1.01596 and was worse than 2.
+- Initial D4 timing exposed a campaign performance bug: every arm spent about one hour recomputing all
+  90 measured rank-response units before roughly 72 minutes of actual block compression. Rank-probe
+  reuse is now a validated execution cache: it hash-validates a completed same-campaign donor and
+  imports only physical units whose full baseline unit plans, model/calibration identities, probe
+  protocol, source hashes, rank, and deterministic seed match. D4 multiplier arms therefore re-probe
+  QKV only, and D5 patch arms re-probe `o_proj` only; mismatched units fail closed and are recomputed.
 
 ## 1. Decision summary
 

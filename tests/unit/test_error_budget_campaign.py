@@ -286,6 +286,7 @@ def test_campaign_compression_enforces_exact_measured_d2_without_imported_values
         alpha_v=1,
         patch_rank=0,
         target_bpw=0.9999,
+        rank_probe_reuse_run=tmp_path / "donor",
     )
 
     command = commands[0]
@@ -296,6 +297,8 @@ def test_campaign_compression_enforces_exact_measured_d2_without_imported_values
     assert "--rank-trust-fraction" not in command
     target_index = command.index("--target-bpw")
     assert command[target_index + 1] == "0.9999"
+    reuse_index = command.index("--rank-probe-reuse-run")
+    assert Path(command[reuse_index + 1]) == (tmp_path / "donor").resolve()
 
 
 def test_campaign_reports_d2_rank_and_factor_bit_redistribution() -> None:

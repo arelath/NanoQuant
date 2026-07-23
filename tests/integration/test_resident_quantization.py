@@ -494,6 +494,31 @@ def test_reconstruction_rank_probe_covers_every_physical_unit_before_fitting(tmp
         "self_attn.o_proj",
     }
 
+    reused_request = replace(
+        request,
+        output=tmp_path / "reused-probes",
+        rank_probe_reuse_run=request.output,
+    )
+    reused_result = run_resident_quantization(reused_request)
+    reused_events = [
+        json.loads(line)
+        for line in (reused_request.output / "events.jsonl").read_text().splitlines()
+    ]
+    reused_names = [event["name"] for event in reused_events]
+    assert reused_names.count("rank_probe.unit_reused_from_run") == 5
+    assert "rank_probe.unit_started" not in reused_names
+    reused_profile = reused_result.plan.reconstruction_profile
+    assert reused_profile is not None
+    reused_artifacts = LocalArtifactStore(reused_request.output / "artifacts")
+    reused_payload = json.loads(
+        (
+            reused_artifacts.path_for(reused_profile.artifact_id)
+            / "reconstruction-rank-profile.json"
+        ).read_text()
+    )
+    assert reused_payload["rank_probe_reuse"]["source_run"] == str(request.output.resolve())
+    assert len(reused_payload["rank_probe_reuse"]["source_artifacts"]) == 5
+
 
 def test_resident_tuning_recipe_refits_blocks_and_resumes_exactly(tmp_path: Path) -> None:
     snapshot = tmp_path / "snapshot"

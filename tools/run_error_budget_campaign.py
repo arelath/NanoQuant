@@ -407,6 +407,7 @@ class Campaign:
         alpha_v: float,
         patch_rank: int,
         target_bpw: float | None = None,
+        rank_probe_reuse_run: Path | None = None,
     ) -> Path:
         output = self.root / name
         command = [
@@ -433,6 +434,8 @@ class Campaign:
         ]
         if target_bpw is not None:
             command.extend(("--target-bpw", str(target_bpw)))
+        if rank_probe_reuse_run is not None:
+            command.extend(("--rank-probe-reuse-run", str(rank_probe_reuse_run.resolve())))
         if not bias:
             command.append("--no-bias-correction")
         self._run(name, command, output / "candidate-summary.json")
@@ -673,6 +676,7 @@ class Campaign:
         d3_profile = self.profile("d3-bias-kl-profile", d3)
         d3_gate = _profile_improvement_gate(d3_control_profile, d3_profile, O_ARM)
         d3_bias_adopted = _confidence_improvement_passed(d3_gate)
+        selected_phase_run = d3 if d3_bias_adopted else d2
         selected_phase_profile = d3_profile if d3_bias_adopted else d2_profile
         self._checkpoint(
             d3_selection={
@@ -685,6 +689,7 @@ class Campaign:
         alpha_runs: dict[int, tuple[Path, Path]] = {}
         d4_mode = "bias" if d3_bias_adopted else "no-bias"
         for alpha in (1, 2, 4):
+            probe_donor = selected_phase_run if alpha == 1 else alpha_runs[1][0]
             run = self.compress(
                 f"d4-{d4_mode}-v{alpha}-static",
                 selected_phase_profile,
@@ -693,6 +698,7 @@ class Campaign:
                 alpha_v=alpha,
                 patch_rank=0,
                 target_bpw=SIDECAR_TARGET_BPW if d3_bias_adopted else None,
+                rank_probe_reuse_run=probe_donor,
             )
             alpha_runs[alpha] = (
                 run,
@@ -723,6 +729,7 @@ class Campaign:
                 alpha_v=winning_alpha,
                 patch_rank=rank,
                 target_bpw=SIDECAR_TARGET_BPW,
+                rank_probe_reuse_run=winning_d4_run,
             )
             patch_runs[rank] = (
                 run,

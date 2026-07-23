@@ -88,6 +88,7 @@ class ResidentExecutionOptions:
     post_block_refit_epoch_cooldown_seconds: float = 0.0
     distillation_epoch_cooldown_seconds: float = 0.0
     interrupt_after_layer_commits: int | None = None
+    rank_probe_reuse_run: Path | None = None
     interrupt_after_block_commits: int | None = None
     interrupt_after_factorized_tuning_epoch_commits: int | None = None
     interrupt_after_distillation_epoch_commits: int | None = None
@@ -412,6 +413,7 @@ def resident_request_from_config(
         activation_gpu_reserve_bytes=int(config.runtime.activations.gpu_reserve_gib * 2**30),
         seed=config.reproducibility.seed,
         interrupt_after_layer_commits=options.interrupt_after_layer_commits,
+        rank_probe_reuse_run=options.rank_probe_reuse_run,
         interrupt_after_block_commits=options.interrupt_after_block_commits,
         interrupt_after_factorized_tuning_epoch_commits=(options.interrupt_after_factorized_tuning_epoch_commits),
         block_forward_batch_size=effective_forward_batch,

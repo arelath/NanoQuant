@@ -379,6 +379,7 @@ class ResidentQuantizationRequest:
     verify_hashes: bool = True
     interrupt_after_layer_commits: int | None = None
     interrupt_after_rank_probe_commits: int | None = None
+    rank_probe_reuse_run: Path | None = None
     interrupt_after_block_commits: int | None = None
     interrupt_after_factorized_tuning_epoch_commits: int | None = None
     block_forward_batch_size: int = 8
@@ -2270,6 +2271,107 @@ def _load_rank_probe_results(
     return results
 
 
+def _load_reusable_rank_probe_results(
+    request: ResidentQuantizationRequest,
+    baseline_plan: QuantizationPlan,
+) -> dict[str, tuple[ArtifactRef, _RankProbeEvidence]]:
+    """Load donor probes only when their complete physical-unit inputs are identical.
+
+    The donor path is an execution cache hint, not semantic recipe input.  Every
+    reused artifact is hash-validated, and unit plans are compared exactly; a
+    patch-cost rank change therefore invalidates only the affected ``o_proj``
+    unit while unchanged MLP/QKV probes remain reusable.
+    """
+
+    donor_output = request.rank_probe_reuse_run
+    if donor_output is None:
+        return {}
+    donor_output = donor_output.resolve()
+    if donor_output == request.output.resolve():
+        raise ValueError("rank-probe donor must differ from the current run output")
+    manifest_path = donor_output / "manifest.json"
+    journal_path = _rank_probe_journal_path(donor_output)
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        lines = journal_path.read_text(encoding="utf-8").splitlines()
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"rank-probe donor is unreadable: {donor_output}") from exc
+    if manifest.get("status") != "completed" or not lines:
+        raise ValueError("rank-probe donor must be a completed run with probe evidence")
+
+    records: list[dict[str, Any]] = []
+    for sequence, line in enumerate(lines, start=1):
+        try:
+            record = json.loads(line)
+            if record["sequence"] != sequence:
+                raise ValueError("sequence is not contiguous")
+            records.append(record)
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ValueError(f"donor rank-probe journal is invalid at sequence {sequence}") from exc
+    selected_plan_id = str(records[-1]["probe_plan_artifact"])
+    selected = [record for record in records if record.get("probe_plan_artifact") == selected_plan_id]
+    if len({str(record.get("unit_id")) for record in selected}) != len(selected):
+        raise ValueError("donor rank-probe journal has duplicate units for its active plan")
+
+    donor_artifacts = LocalArtifactStore(donor_output / "artifacts")
+    plan_descriptor = donor_artifacts.validate(selected_plan_id)
+    if plan_descriptor.artifact_type != ArtifactTypes.RANK_PROBE_PLAN:
+        raise ValueError("donor rank-probe plan has the wrong artifact type")
+    try:
+        plan_payload = json.loads(
+            (donor_artifacts.path_for(selected_plan_id) / "rank-probe-plan.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        donor_plan = from_dict(
+            QuantizationPlan,
+            plan_payload["baseline_plan"],
+            path="rank_probe_reuse.baseline_plan",
+        )
+    except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("donor rank-probe plan payload is invalid") from exc
+    reconstruction = request.reconstruction_rank_planning
+    expected_protocol = {
+        "objective_mode": reconstruction.objective_mode,
+        "probe_admm": to_dict(reconstruction.probe_admm),
+        "response_source": reconstruction.response_source.value,
+        "response_curves": to_dict(reconstruction.response_curves),
+        "response_profile_provenance": reconstruction.response_profile_provenance,
+    }
+    if any(plan_payload.get(key) != value for key, value in expected_protocol.items()):
+        raise ValueError("donor rank-probe protocol differs from the current run")
+    if donor_plan.model != baseline_plan.model or donor_plan.calibration != baseline_plan.calibration:
+        raise ValueError("donor rank-probe model or calibration identity differs")
+
+    donor_units = dict(_rank_probe_units(donor_plan))
+    current_units = dict(_rank_probe_units(baseline_plan))
+    reusable: dict[str, tuple[ArtifactRef, _RankProbeEvidence]] = {}
+    donor_plan_ref = ArtifactRef(ArtifactTypes.RANK_PROBE_PLAN, selected_plan_id, 1)
+    for record in selected:
+        unit_id = str(record["unit_id"])
+        if unit_id not in current_units or unit_id not in donor_units:
+            continue
+        if to_dict(donor_units[unit_id]) != to_dict(current_units[unit_id]):
+            continue
+        reference = ArtifactRef(ArtifactTypes.RANK_PROBE_RESULT, str(record["artifact_id"]), 1)
+        descriptor = donor_artifacts.validate(reference.artifact_id)
+        if descriptor.artifact_type != ArtifactTypes.RANK_PROBE_RESULT:
+            raise ValueError("donor rank-probe result has the wrong artifact type")
+        try:
+            payload = json.loads(
+                (donor_artifacts.path_for(reference.artifact_id) / "rank-probe-result.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            evidence = from_dict(_RankProbeEvidence, payload, path="rank_probe_reuse.result")
+        except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ValueError(f"donor rank-probe result is invalid: {unit_id}") from exc
+        if evidence.probe_plan != donor_plan_ref or evidence.unit_id != unit_id:
+            raise ValueError(f"donor rank-probe result identity differs: {unit_id}")
+        reusable[unit_id] = (reference, evidence)
+    return reusable
+
+
 def _commit_rank_probe_result(
     request: ResidentQuantizationRequest,
     evidence: _RankProbeEvidence,
@@ -2324,12 +2426,23 @@ def _run_reconstruction_rank_probes(
     calibration_by_layer = {item.layer: item for item in calibration.stats.layers}
     units = _rank_probe_units(baseline_plan)
     persisted = _load_rank_probe_results(request, probe_plan, artifacts)
+    reusable = _load_reusable_rank_probe_results(request, baseline_plan)
+    reused_from: dict[str, ArtifactRef] = {}
     committed_this_execution = 0
     for unit_id, unit in units:
         member_inventories = (
             unit.members
             if isinstance(unit, SharedInputGroupPlan)
             else tuple(layer for block in baseline_plan.blocks for layer in block.layers if layer.layer == unit.layer)
+        )
+        unit_name = unit.name if isinstance(unit, SharedInputGroupPlan) else unit.layer.path
+        member_layers = tuple(member.layer for member in member_inventories)
+        seed = logical_seed(
+            request.seed,
+            "rank-reconstruction-probe",
+            unit.block.index if isinstance(unit, SharedInputGroupPlan) else unit.layer.block.index,
+            unit.name if isinstance(unit, SharedInputGroupPlan) else unit.layer.path,
+            0,
         )
         if unit_id in persisted:
             evidence = persisted[unit_id][1]
@@ -2342,6 +2455,7 @@ def _run_reconstruction_rank_probes(
                 evidence.members != expected_members
                 or evidence.source_weight_hashes != expected_hashes
                 or evidence.baseline_rank != unit.rank
+                or evidence.logical_seed != seed
             ):
                 raise ValueError(f"persisted rank probe differs from current unit: {unit_id}")
             cast(Any, events).emit(
@@ -2352,19 +2466,38 @@ def _run_reconstruction_rank_probes(
                 artifact_id=persisted[unit_id][0].artifact_id,
             )
             continue
-        unit_name = unit.name if isinstance(unit, SharedInputGroupPlan) else unit.layer.path
+        donor = reusable.get(unit_id)
+        if donor is not None:
+            donor_reference, donor_evidence = donor
+            expected_hashes = tuple(
+                member.weight.content_hash if isinstance(member, LayerInventory) else member.source_weight.content_hash
+                for member in member_inventories
+            )
+            if (
+                donor_evidence.members != member_layers
+                or donor_evidence.source_weight_hashes != expected_hashes
+                or donor_evidence.baseline_rank != unit.rank
+                or donor_evidence.logical_seed != seed
+            ):
+                raise ValueError(f"donor rank probe differs from current unit: {unit_id}")
+            imported = replace(donor_evidence, probe_plan=probe_plan)
+            reference = _commit_rank_probe_result(request, imported, artifacts)
+            persisted[unit_id] = (reference, imported)
+            reused_from[unit_id] = donor_reference
+            cast(Any, events).emit(
+                "resident-quantization",
+                "info",
+                "rank_probe.unit_reused_from_run",
+                unit_id=unit_id,
+                source_run=str(request.rank_probe_reuse_run),
+                source_artifact_id=donor_reference.artifact_id,
+                artifact_id=reference.artifact_id,
+            )
+            continue
         configured_curve = (
             _matched_rank_response_curve(unit_name, reconstruction.response_curves)
             if reconstruction.response_source is RankResponseSource.CONFIGURED
             else None
-        )
-        member_layers = tuple(member.layer for member in member_inventories)
-        seed = logical_seed(
-            request.seed,
-            "rank-reconstruction-probe",
-            unit.block.index if isinstance(unit, SharedInputGroupPlan) else unit.layer.block.index,
-            unit.name if isinstance(unit, SharedInputGroupPlan) else unit.layer.path,
-            0,
         )
         cast(Any, events).emit(
             "resident-quantization",
@@ -2789,6 +2922,10 @@ def _run_reconstruction_rank_probes(
         "producer": {"name": "reconstruction-rank-planner", "version": "2"},
         "probe_plan": to_dict(probe_plan),
         "unit_results": [to_dict(persisted[unit_id][0]) for unit_id, _unit in units],
+        "rank_probe_reuse": {
+            "source_run": None if request.rank_probe_reuse_run is None else str(request.rank_probe_reuse_run.resolve()),
+            "source_artifacts": {unit_id: to_dict(reference) for unit_id, reference in reused_from.items()},
+        },
         "decisions": to_dict(decisions),
         "allocation": {
             "spent_bits": allocated.spent_bits,
