@@ -14,8 +14,9 @@ pytest
 
 RunPod setup and complete compression can be bootstrapped from a fresh repository sync on a persistent
 `/workspace` volume. See [`RUNPOD.md`](RUNPOD.md) for pod sizing, environment variables, secrets, experiment
-selection, output locations, and troubleshooting. The default is the Gemma 3 1B architecture-protected Experiment
-017; rerunning the same command resumes its durable commits and publishes the validated GGUF when complete:
+selection, output locations, and troubleshooting. The default is Experiment 025 on
+`meta-llama/Llama-3.2-1B-Instruct`; rerunning the same command resumes its durable commits and publishes the
+validated GGUF when complete:
 
 The RunPod image must provide CUDA-enabled PyTorch 2.6 or newer; the bootstrap preserves that image installation.
 
@@ -24,13 +25,14 @@ export HF_TOKEN=<hugging-face-write-token>  # gated model access and final publi
 bash tools/runpod_bootstrap.sh
 ```
 
-Select the corresponding Gemma 3 4B workflow with `NANOQUANT_EXPERIMENT=018`. The script creates a persistent
+Select the Gemma 3 1B or 4B workflows with `NANOQUANT_EXPERIMENT=017` or `018`. The script creates a persistent
 virtual environment and Hugging Face cache, recreates and verifies the ignored pinned calibration artifact,
 prefetches the pinned quality datasets, installs the repository-vendored NanoQuant converter into a pinned upstream
 llama.cpp conversion toolchain, builds its standard token-embedding quantizer, and launches the numbered experiment. Useful controls are:
 
 ```bash
 NANOQUANT_SETUP_ONLY=1 bash tools/runpod_bootstrap.sh
+NANOQUANT_EXPERIMENT=017 bash tools/runpod_bootstrap.sh
 NANOQUANT_EXPERIMENT=018 bash tools/runpod_bootstrap.sh
 NANOQUANT_LLAMA_CPP_ROOT=/workspace/llama.cpp bash tools/runpod_bootstrap.sh
 ```

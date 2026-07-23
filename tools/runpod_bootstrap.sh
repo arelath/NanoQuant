@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Bootstrap a persistent RunPod workspace and run one complete NanoQuant experiment.
-# Defaults to the architecture-protected Gemma 3 1B compression, quality, and publish experiment.
+# Defaults to the Llama 3.2 1B Instruct compression, quality, and publish experiment.
 set -Eeuo pipefail
 
 REPOSITORY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -8,7 +8,7 @@ WORKSPACE_ROOT="${NANOQUANT_WORKSPACE_ROOT:-/workspace}"
 VENV_OVERRIDE="${NANOQUANT_VENV:-}"
 VENV="${VENV_OVERRIDE:-${WORKSPACE_ROOT}/nanoquant-venv}"
 SYSTEM_PYTHON="${NANOQUANT_SYSTEM_PYTHON:-python3}"
-EXPERIMENT="${NANOQUANT_EXPERIMENT:-017}"
+EXPERIMENT="${NANOQUANT_EXPERIMENT:-025}"
 MINIMUM_TORCH_VERSION="2.6"
 export HF_HOME="${HF_HOME:-${WORKSPACE_ROOT}/huggingface}"
 export NANOQUANT_LLAMA_CPP_ROOT="${NANOQUANT_LLAMA_CPP_ROOT:-${WORKSPACE_ROOT}/llama.cpp}"
@@ -72,8 +72,15 @@ case "${EXPERIMENT}" in
     REQUIRES_HF_WRITE=1
     PREFLIGHT_CCE=1
     ;;
+  025)
+    MODEL_ID="meta-llama/Llama-3.2-1B-Instruct"
+    MODEL_REVISION="9213176726f574b556790deb65791e0c5aa438b6"
+    LAUNCHER="experiments/025-compress-and-benchmark-llama-3-2-1b-instruct.py"
+    REQUIRES_HF_WRITE=1
+    PREFLIGHT_CCE=1
+    ;;
   *)
-    echo "Unsupported NANOQUANT_EXPERIMENT=${EXPERIMENT}; choose 001, 003, 006, 007, 008, 009, 017, or 018." >&2
+    echo "Unsupported NANOQUANT_EXPERIMENT=${EXPERIMENT}; choose 001, 003, 006, 007, 008, 009, 017, 018, or 025." >&2
     exit 2
     ;;
 esac
