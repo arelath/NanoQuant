@@ -68,8 +68,11 @@ _DEFAULT_PROFILE_OPTIONS = SelfMeasuredD2ProfileOptions()
 
 
 class _SelfMeasuredD2Definition(Protocol):
-    config: RunConfig
-    workflow: CompressionQualityExperiment
+    @property
+    def config(self) -> RunConfig: ...
+
+    @property
+    def workflow(self) -> CompressionQualityExperiment: ...
 
 
 def _experiment_number(config: RunConfig) -> int:
