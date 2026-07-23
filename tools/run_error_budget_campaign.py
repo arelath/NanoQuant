@@ -344,7 +344,11 @@ class Campaign:
             payload = _read(marker)
         except (OSError, TypeError, ValueError, json.JSONDecodeError):
             return False
-        if marker.name in {"candidate-summary.json", "distillation-summary.json"}:
+        if marker.name in {
+            "candidate-summary.json",
+            "distillation-summary.json",
+            "patch-screen-summary.json",
+        }:
             return payload.get("status") == "completed"
         if marker.name == "artifact.json":
             return (
@@ -521,6 +525,30 @@ class Campaign:
         for arm in arms:
             command.extend(("--arm", arm))
         self._run(name, command, output / "artifact.json")
+        return output
+
+    def patch_screen(self, run: Path, baseline_profile: Path) -> Path:
+        output = self.root / f"d5-from-{run.name}-validated-model-patch-screen"
+        self._run(
+            output.name,
+            [
+                sys.executable,
+                str(ROOT / "tools/run_validated_d5_patch_screen.py"),
+                "--base-run",
+                str(run.resolve()),
+                "--snapshot",
+                str(self.args.snapshot.resolve()),
+                "--baseline-profile",
+                str(baseline_profile.resolve()),
+                "--output",
+                str(output),
+                "--teacher-cache-root",
+                str(self.root / "teacher-cache"),
+                "--device",
+                self.args.device,
+            ],
+            output / "patch-screen-summary.json",
+        )
         return output
 
     def distill(self, run: Path) -> None:
@@ -721,46 +749,57 @@ class Campaign:
             winning_d4_run,
         )
 
+        patch_screen = self.patch_screen(winning_d4_run, winning_d4_profile)
+        patch_screen_summary = _read(patch_screen / "patch-screen-summary.json")
+        screened_patch = int(patch_screen_summary["selected_rank"])
+        if screened_patch not in {0, 4, 8, 16}:
+            raise ValueError("D5 validated-model screen selected an unsupported patch rank")
         patch_runs: dict[int, tuple[Path, Path]] = {
-            0: (winning_d4_run, winning_d4_profile)
+            0: (winning_d4_run, winning_d4_profile),
         }
-        for rank in (4, 8, 16):
-            run = self.compress(
-                f"d5-{d4_mode}-k{rank}-static",
+        final_patch_gate = _profile_improvement_gate(
+            winning_d4_profile,
+            winning_d4_profile,
+            O_ARM,
+        )
+        winning_patch = 0
+        if screened_patch > 0:
+            selected_run = self.compress(
+                f"d5-from-{winning_d4_run.name}-k{screened_patch}-selected-static",
                 winning_d4_profile,
                 _profile_key(winning_d4_profile),
                 bias=d3_bias_adopted,
                 alpha_v=winning_alpha,
-                patch_rank=rank,
+                patch_rank=screened_patch,
                 target_bpw=SIDECAR_TARGET_BPW,
                 preprocessing_reuse_run=winning_d4_run,
                 rank_probe_reuse_run=winning_d4_run,
             )
-            patch_runs[rank] = (
-                run,
-                self.profile(
-                    f"d5-k{rank}-kl-profile",
-                    run,
-                    arms=(O_ARM,),
-                ),
+            selected_profile = self.profile(
+                f"d5-from-{winning_d4_run.name}-k{screened_patch}-selected-kl-profile",
+                selected_run,
+                arms=(O_ARM,),
             )
-        patch_summaries = {
-            rank: _read(run / "candidate-summary.json")
-            for rank, (run, _profile) in patch_runs.items()
-        }
-        winning_patch = _select_winning_patch(
-            {rank: _arm_kl(profile, O_ARM) for rank, (_run, profile) in patch_runs.items()},
-            eligible_ranks={0}
-            | {
-                rank
-                for rank, summary in patch_summaries.items()
-                if rank > 0 and int(cast(int, summary.get("patch_owner_count", 0))) > 0
-            },
-        )
+            patch_runs[screened_patch] = (selected_run, selected_profile)
+            selected_summary = _read(selected_run / "candidate-summary.json")
+            final_patch_gate = _profile_improvement_gate(
+                winning_d4_profile,
+                selected_profile,
+                O_ARM,
+            )
+            if (
+                int(cast(int, selected_summary.get("patch_owner_count", 0))) > 0
+                and _confidence_improvement_passed(final_patch_gate)
+            ):
+                winning_patch = screened_patch
         final_run = patch_runs[winning_patch][0]
-        final_static_profile = self.profile(
-            f"d5-k{winning_patch}-full-kl-profile",
-            final_run,
+        final_static_profile = (
+            winning_d4_profile
+            if winning_patch == 0
+            else self.profile(
+                f"d5-k{winning_patch}-full-kl-profile",
+                final_run,
+            )
         )
 
         self.distill(final_run)
@@ -813,10 +852,7 @@ class Campaign:
                 "adopted": winning_alpha != 1,
             },
             "d5_o_kl": {
-                **_improvement_gate(
-                    _phase_kl(phase_kls, "d5_k0", "o"),
-                    _phase_kl(phase_kls, f"d5_k{winning_patch}", "o"),
-                ),
+                **final_patch_gate,
                 "adopted": winning_patch > 0,
             },
             "distillation_full_kl": _improvement_gate(
@@ -853,6 +889,7 @@ class Campaign:
             "status": "completed",
             "winning_alpha_v": winning_alpha,
             "winning_patch_rank": winning_patch,
+            "screened_patch_rank": screened_patch,
             "d3_bias_adopted": d3_bias_adopted,
             "d3_o_kl_gate": d3_gate,
             "d2_sensitivity_granularity": KlSensitivityGranularity.EXACT.value,
@@ -860,11 +897,26 @@ class Campaign:
             "d2_arm": selected_d2,
             "patch_acceptance": {
                 str(rank): {
-                    "accepted_owner_count": int(cast(int, candidate.get("patch_owner_count", 0))),
-                    "actual_patch_bits": int(cast(int, candidate.get("actual_patch_bits", 0))),
+                    "accepted_owner_count": int(
+                        cast(
+                            int,
+                            cast(dict[str, object], candidate["patch"])["accepted_owner_count"],
+                        )
+                    ),
+                    "screening_patch_bits": int(
+                        cast(
+                            int,
+                            cast(dict[str, object], candidate["patch"])["actual_patch_bits"],
+                        )
+                    ),
+                    "screening_kl_gate": candidate["gate"],
                 }
-                for rank, candidate in patch_summaries.items()
+                for rank, candidate in cast(
+                    dict[str, dict[str, object]],
+                    patch_screen_summary["ranks"],
+                ).items()
             },
+            "patch_screen": str(patch_screen),
             "final_run": str(final_run),
             "phase_kls": phase_kls,
             "phase_gates": phase_gates,

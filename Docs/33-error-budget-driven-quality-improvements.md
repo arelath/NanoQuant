@@ -49,7 +49,20 @@ distillation is scheduled, not built — it already exists.
   builds a new arm-specific rank plan. Probe reuse imports only physical units whose full baseline unit
   plans, model/calibration identities, probe protocol, source hashes, rank, and deterministic seed
   match. D4 multiplier arms reuse all probes because their uniform baseline probe plans are unchanged;
-  D5 patch arms re-probe `o_proj` only. Every mismatch fails closed and is recomputed.
+  D5 patch arms re-probe every unit whose baseline rank changes when the allocator funds the sidecar.
+  In the measured equal-budget rank-4 run, global budget redistribution changed all 90 probe plans, so
+  no donor probe was eligible; all mismatches failed closed and were recomputed.
+- D5 was screened directly from the strictly validated preliminary `α_v=2` frozen model. The
+  activation-space ceiling was strong: rank-4 patches were accepted for all 18 `o_proj` layers and
+  reduced the 12-sequence splice KL from 1.40077 to 0.92683 (−33.83%; paired 95% delta interval
+  [−0.53404, −0.41541]). This screening arm adds 1,916,928 fp16 patch bits and is not an equal-budget
+  adoption result.
+- The single budget-corrected rank-4 D5 candidate completed and passed a fresh 510-artifact hash audit
+  at 1.025214 BPW, below Experiment 016's 1.025280 BPW. Once the allocator shaved binary-factor ranks
+  to pay for the patches, however, `o_proj` KL regressed from 1.40077 to 1.60032 (+14.25%; paired 95%
+  delta interval [+0.13255, +0.25911] nats/token). D5 is therefore rejected at this operating point.
+  The result shows that the activation-space patch ceiling is real but that globally displaced factor
+  rank costs more quality than the patch recovers.
 
 ## 1. Decision summary
 

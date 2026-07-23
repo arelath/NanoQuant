@@ -304,6 +304,37 @@ def test_campaign_compression_enforces_exact_measured_d2_without_imported_values
     assert Path(command[reuse_index + 1]) == (tmp_path / "donor").resolve()
 
 
+def test_campaign_patch_screen_identity_includes_validated_source_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: list[tuple[str, list[str], Path]] = []
+
+    def capture(
+        _campaign: Campaign,
+        name: str,
+        command: list[str],
+        marker: Path,
+    ) -> None:
+        observed.append((name, command, marker))
+
+    monkeypatch.setattr(Campaign, "_run", capture)
+    campaign = Campaign.__new__(Campaign)
+    campaign.root = tmp_path / "campaign"
+    campaign.args = Namespace(snapshot=tmp_path / "snapshot", device="cuda")
+    source = tmp_path / "d4-controlled-no-bias-v2-static"
+
+    output = campaign.patch_screen(source, tmp_path / "profile")
+
+    assert output.name == (
+        "d5-from-d4-controlled-no-bias-v2-static-validated-model-patch-screen"
+    )
+    name, command, marker = observed[0]
+    assert name == output.name
+    assert Path(command[command.index("--base-run") + 1]) == source.resolve()
+    assert marker == output / "patch-screen-summary.json"
+
+
 def test_campaign_reports_d2_rank_and_factor_bit_redistribution() -> None:
     baseline = [
         {"unit_id": "0:mlp.up_proj", "block": 0, "name": "mlp.up_proj", "rank": 4, "factor_bits": 40},

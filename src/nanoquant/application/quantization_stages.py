@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 import torch
 
+from nanoquant.application.low_rank_patch import fit_low_rank_patch_family
 from nanoquant.application.stages import StageContext
 from nanoquant.config.schema import ADMMConfig, BiasCorrectionConfig, LowRankPatchConfig, ScaleFitConfig
 from nanoquant.domain.factorization import ADMMTracePoint, factorize_admm
@@ -539,19 +540,6 @@ class BiasCorrectionStage:
         return ValidationReport()
 
 
-def _activation_error(
-    residual: torch.Tensor,
-    covariance: torch.Tensor,
-    input_mean: torch.Tensor,
-    bias: torch.Tensor | None,
-) -> float:
-    value = ((residual @ covariance) * residual).sum()
-    if bias is not None:
-        output_mean = residual @ input_mean
-        value = value - 2 * torch.dot(bias, output_mean) + bias.square().sum()
-    return max(0.0, float(value))
-
-
 class LowRankPatchStage:
     name = "fit-low-rank-patch"
     version = "1"
@@ -604,58 +592,32 @@ class LowRankPatchStage:
                     values,
                     outlier_scales,
                 ).float()
-                residual = target.float() - reconstruction
-                covariance = fit_covariance.float()
-                width = covariance.shape[0]
-                ridge = self.config.ridge_fraction * float(torch.trace(covariance)) / width
-                damped = covariance + torch.eye(
-                    width,
-                    dtype=covariance.dtype,
-                    device=covariance.device,
-                ) * ridge
-                cholesky = torch.linalg.cholesky(damped)
-                transformed = cholesky.mT @ residual.mT
-                singular_left, singular_values, singular_right = torch.linalg.svd(
-                    transformed,
-                    full_matrices=False,
-                )
-                rank = min(self.config.rank, singular_values.numel())
-                patch_left = singular_right[:rank].mT * singular_values[:rank]
-                solved = torch.linalg.solve_triangular(
-                    cholesky.mT,
-                    singular_left[:, :rank],
-                    upper=True,
-                )
-                patch_right = solved.mT
                 stored_dtype = {
                     "float16": torch.float16,
                     "bfloat16": torch.bfloat16,
                 }[self.config.storage_dtype.value]
-                stored_left = patch_left.to(stored_dtype)
-                stored_right = patch_right.to(stored_dtype)
-                stored_patch = stored_left.float() @ stored_right.float()
-                fit_before = _activation_error(residual, covariance, fit_input_mean.float(), bias)
-                fit_after = _activation_error(residual - stored_patch, covariance, fit_input_mean.float(), bias)
-                held_before = _activation_error(
-                    residual,
-                    held_out_covariance.float(),
-                    held_out_input_mean.float(),
-                    bias,
-                )
-                held_after = _activation_error(
-                    residual - stored_patch,
-                    held_out_covariance.float(),
-                    held_out_input_mean.float(),
-                    bias,
-                )
-                accepted = fit_after < fit_before and (
-                    not self.config.require_held_out_acceptance or held_after < held_before
-                )
-                reason = None if accepted else (
-                    "held_out_error_did_not_improve"
-                    if held_after >= held_before
-                    else "fit_error_did_not_improve"
-                )
+                candidate = fit_low_rank_patch_family(
+                    target,
+                    reconstruction,
+                    fit_covariance,
+                    held_out_covariance,
+                    fit_input_mean,
+                    held_out_input_mean,
+                    ranks=(self.config.rank,),
+                    ridge_fraction=self.config.ridge_fraction,
+                    storage_dtype=stored_dtype,
+                    bias=bias,
+                    require_held_out_acceptance=self.config.require_held_out_acceptance,
+                )[0]
+                rank = candidate.rank
+                stored_left = candidate.left
+                stored_right = candidate.right
+                fit_before = candidate.fit_error_before
+                fit_after = candidate.fit_error_after
+                held_before = candidate.held_out_error_before
+                held_after = candidate.held_out_error_after
+                accepted = candidate.accepted
+                reason = candidate.rejection_reason
                 refs = context.tensor_store.put(
                     "low-rank-patch",
                     {"patch_left": stored_left, "patch_right": stored_right},
