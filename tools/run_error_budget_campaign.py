@@ -407,6 +407,7 @@ class Campaign:
         alpha_v: float,
         patch_rank: int,
         target_bpw: float | None = None,
+        preprocessing_reuse_run: Path | None = None,
         rank_probe_reuse_run: Path | None = None,
     ) -> Path:
         output = self.root / name
@@ -434,6 +435,8 @@ class Campaign:
         ]
         if target_bpw is not None:
             command.extend(("--target-bpw", str(target_bpw)))
+        if preprocessing_reuse_run is not None:
+            command.extend(("--preprocessing-reuse-run", str(preprocessing_reuse_run.resolve())))
         if rank_probe_reuse_run is not None:
             command.extend(("--rank-probe-reuse-run", str(rank_probe_reuse_run.resolve())))
         if not bias:
@@ -691,19 +694,20 @@ class Campaign:
         for alpha in (1, 2, 4):
             probe_donor = selected_phase_run if alpha == 1 else alpha_runs[1][0]
             run = self.compress(
-                f"d4-{d4_mode}-v{alpha}-static",
+                f"d4-controlled-{d4_mode}-v{alpha}-static",
                 selected_phase_profile,
                 _profile_key(selected_phase_profile),
                 bias=d3_bias_adopted,
                 alpha_v=alpha,
                 patch_rank=0,
                 target_bpw=SIDECAR_TARGET_BPW if d3_bias_adopted else None,
+                preprocessing_reuse_run=selected_phase_run,
                 rank_probe_reuse_run=probe_donor,
             )
             alpha_runs[alpha] = (
                 run,
                 self.profile(
-                    f"d4-{d4_mode}-v{alpha}-kl-profile",
+                    f"d4-controlled-{d4_mode}-v{alpha}-kl-profile",
                     run,
                     arms=(QKV_ARM,),
                 ),
@@ -713,7 +717,7 @@ class Campaign:
         )
         winning_d4_run = alpha_runs[winning_alpha][0]
         winning_d4_profile = self.profile(
-            f"d4-{d4_mode}-v{winning_alpha}-full-kl-profile",
+            f"d4-controlled-{d4_mode}-v{winning_alpha}-full-kl-profile",
             winning_d4_run,
         )
 
@@ -729,6 +733,7 @@ class Campaign:
                 alpha_v=winning_alpha,
                 patch_rank=rank,
                 target_bpw=SIDECAR_TARGET_BPW,
+                preprocessing_reuse_run=winning_d4_run,
                 rank_probe_reuse_run=winning_d4_run,
             )
             patch_runs[rank] = (

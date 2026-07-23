@@ -182,6 +182,24 @@ def test_activation_gpu_cache_policy_maps_as_nonsemantic_execution_control(tmp_p
     assert request.activation_gpu_reserve_bytes == 1_342_177_280
 
 
+def test_sweep_reuse_paths_map_as_nonsemantic_execution_controls(tmp_path: Path) -> None:
+    inputs = _inputs(tmp_path)
+    baseline = resident_request_from_config(_resident_config(), inputs)
+    options = ResidentExecutionOptions(
+        preprocessing_reuse_run=tmp_path / "calibration-donor",
+        rank_probe_reuse_run=tmp_path / "probe-donor",
+    )
+
+    request = resident_request_from_config(_resident_config(), inputs, options)
+
+    assert request.preprocessing_reuse_run == options.preprocessing_reuse_run
+    assert request.rank_probe_reuse_run == options.rank_probe_reuse_run
+    assert resident._resident_manifest_config(request, "resident-quantization") == resident._resident_manifest_config(
+        baseline,
+        "resident-quantization",
+    )
+
+
 def test_combined_workflow_runs_quantization_before_distillation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

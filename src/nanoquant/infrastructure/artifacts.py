@@ -156,6 +156,56 @@ class LocalArtifactStore:
             raise ValueError("invalid artifact id")
         return self.root / artifact_id[7:9] / artifact_id
 
+    def import_validated(self, source: LocalArtifactStore, artifact_id: str) -> ArtifactDescriptor:
+        """Import one immutable object from another validated local store.
+
+        Content-addressed identities are preserved so references embedded in
+        calibration and objective payloads remain valid.  Hard links avoid
+        duplicating large tensor artifacts when both stores share a volume;
+        copying is used as a portable fallback.
+        """
+
+        source_descriptor = source.validate(artifact_id)
+        destination = self.path_for(artifact_id)
+        if destination.exists():
+            destination_descriptor = self.validate(artifact_id)
+            if (
+                destination_descriptor.artifact_type != source_descriptor.artifact_type
+                or destination_descriptor.schema_version != source_descriptor.schema_version
+                or destination_descriptor.files != source_descriptor.files
+            ):
+                raise ArtifactCorruptionError(f"ART001 imported artifact identity mismatch: {artifact_id}")
+            return destination_descriptor
+
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary = Path(tempfile.mkdtemp(prefix=f"import-{artifact_id}-", dir=self.temporary_root))
+
+        def link_or_copy(source_path: str, destination_path: str) -> str:
+            try:
+                os.link(source_path, destination_path)
+            except OSError:
+                shutil.copy2(source_path, destination_path)
+            return destination_path
+
+        try:
+            shutil.copytree(
+                source.path_for(artifact_id),
+                temporary,
+                dirs_exist_ok=True,
+                copy_function=link_or_copy,
+            )
+            if destination.exists():
+                shutil.rmtree(temporary)
+            else:
+                safe_replace(temporary, destination)
+            descriptor = self.validate(artifact_id)
+        finally:
+            if temporary.exists():
+                shutil.rmtree(temporary)
+        self.recorder.add("io.import_bytes", sum(item.bytes for item in descriptor.files))
+        self.recorder.add("io.imported_artifacts", 1, artifact_type=descriptor.artifact_type)
+        return descriptor
+
     def validate(self, artifact_id: str) -> ArtifactDescriptor:
         root = self.path_for(artifact_id)
         cached = self._validated.get(artifact_id)

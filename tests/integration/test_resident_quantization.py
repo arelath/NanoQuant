@@ -497,6 +497,7 @@ def test_reconstruction_rank_probe_covers_every_physical_unit_before_fitting(tmp
     reused_request = replace(
         request,
         output=tmp_path / "reused-probes",
+        preprocessing_reuse_run=request.output,
         rank_probe_reuse_run=request.output,
     )
     reused_result = run_resident_quantization(reused_request)
@@ -505,6 +506,7 @@ def test_reconstruction_rank_probe_covers_every_physical_unit_before_fitting(tmp
         for line in (reused_request.output / "events.jsonl").read_text().splitlines()
     ]
     reused_names = [event["name"] for event in reused_events]
+    assert "calibration.started" not in reused_names
     assert reused_names.count("rank_probe.unit_reused_from_run") == 5
     assert "rank_probe.unit_started" not in reused_names
     reused_profile = reused_result.plan.reconstruction_profile
@@ -518,6 +520,11 @@ def test_reconstruction_rank_probe_covers_every_physical_unit_before_fitting(tmp
     )
     assert reused_payload["rank_probe_reuse"]["source_run"] == str(request.output.resolve())
     assert len(reused_payload["rank_probe_reuse"]["source_artifacts"]) == 5
+    reused_preprocessing = [
+        event for event in reused_events if event["name"] == "preprocessing.selected"
+    ][-1]
+    assert reused_preprocessing["fields"]["source"] == "reuse_run"
+    assert reused_preprocessing["fields"]["calibration_artifact"] == result.plan.calibration.artifact_id
 
 
 def test_resident_tuning_recipe_refits_blocks_and_resumes_exactly(tmp_path: Path) -> None:

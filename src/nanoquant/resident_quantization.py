@@ -379,6 +379,7 @@ class ResidentQuantizationRequest:
     verify_hashes: bool = True
     interrupt_after_layer_commits: int | None = None
     interrupt_after_rank_probe_commits: int | None = None
+    preprocessing_reuse_run: Path | None = None
     rank_probe_reuse_run: Path | None = None
     interrupt_after_block_commits: int | None = None
     interrupt_after_factorized_tuning_epoch_commits: int | None = None
@@ -1831,6 +1832,8 @@ def _resident_manifest_config(request: ResidentQuantizationRequest, component: s
     payload.pop("launcher_path")
     payload.pop("memory_plan")
     payload.pop("memory_plan_reference")
+    payload.pop("preprocessing_reuse_run")
+    payload.pop("rank_probe_reuse_run")
     payload["token_ids"] = _manifest_tensor_identity(request.token_ids)
     payload["quality_token_ids"] = _manifest_tensor_identity(request.quality_token_ids)
     payload["component"] = component
@@ -3166,6 +3169,157 @@ def _load_precomputed_preprocessing(
     return calibration, objectives, persisted_plan
 
 
+def _calibration_tensor_references(calibration: CalibrationStats) -> tuple[TensorRef, ...]:
+    references: list[TensorRef] = []
+    for layer in calibration.layers:
+        references.extend((layer.input_importance, layer.output_importance))
+        if layer.input_mean is not None:
+            references.append(layer.input_mean)
+        covariance = layer.input_covariance
+        if covariance is not None:
+            references.append(covariance.diagonal)
+            references.extend(
+                reference
+                for reference in (covariance.blocks, covariance.low_rank_factors, covariance.dense)
+                if reference is not None
+            )
+    return tuple(references)
+
+
+def _load_reusable_calibration(
+    request: ResidentQuantizationRequest,
+    artifacts: LocalArtifactStore,
+    inventory: ModelInventory,
+    dataset: DatasetIdentity,
+    total_tokens: int,
+) -> tuple[PersistedCalibration, PersistedObjectives] | None:
+    """Import exact calibration/objective inputs from a completed sweep donor.
+
+    The donor is an execution-cache hint.  Its plan is deliberately not reused:
+    the current arm must allocate its own ranks and sidecar budget.  Every
+    transitive tensor is hash-validated and imported under its original
+    content-addressed identity before the current run can select it.
+    """
+
+    donor_output = request.preprocessing_reuse_run
+    if donor_output is None:
+        return None
+    donor_output = donor_output.resolve()
+    if donor_output == request.output.resolve():
+        raise ValueError("preprocessing donor must differ from the current run output")
+    try:
+        manifest = json.loads((donor_output / "manifest.json").read_text(encoding="utf-8"))
+        state_payload = json.loads(_active_preprocessing_path(donor_output).read_text(encoding="utf-8"))
+        state = from_dict(_ActivePreprocessingState, state_payload, path="preprocessing_reuse.state")
+    except (OSError, TypeError, ValueError, KeyError, json.JSONDecodeError) as exc:
+        raise ValueError(f"preprocessing donor is unreadable: {donor_output}") from exc
+    if manifest.get("status") != "completed":
+        raise ValueError("preprocessing donor must be a completed run")
+    if state.schema_version != 1:
+        raise ValueError(f"unsupported donor preprocessing schema: {state.schema_version}")
+    donor_config = manifest.get("resolved_config")
+    if not isinstance(donor_config, dict):
+        raise ValueError("preprocessing donor resolved config is invalid")
+    current_config = _resident_manifest_config(request, "resident-quantization")
+    calibration_protocol_fields: tuple[str, ...] = (
+        "calibration_method",
+        "calibration_shrinkage",
+        "calibration_batch_size",
+        "seed",
+        "token_ids",
+    )
+    if request.calibration_method == "forward_only":
+        calibration_protocol_fields = (*calibration_protocol_fields, "block_forward_batch_size")
+    if any(donor_config.get(field) != current_config.get(field) for field in calibration_protocol_fields):
+        raise ValueError("preprocessing donor calibration protocol config differs")
+
+    donor_artifacts = LocalArtifactStore(donor_output / "artifacts")
+    calibration_descriptor = donor_artifacts.validate(state.calibration.artifact_id)
+    objectives_descriptor = donor_artifacts.validate(state.objectives.artifact_id)
+    if (
+        calibration_descriptor.artifact_type != "calibration-stats"
+        or calibration_descriptor.schema_version != state.calibration.schema_version
+    ):
+        raise ValueError("preprocessing donor calibration reference has the wrong type or schema")
+    if (
+        objectives_descriptor.artifact_type != "objective-specs"
+        or objectives_descriptor.schema_version != state.objectives.schema_version
+    ):
+        raise ValueError("preprocessing donor objectives reference has the wrong type or schema")
+    try:
+        calibration_payload = json.loads(
+            (donor_artifacts.path_for(state.calibration.artifact_id) / "stats.json").read_text(encoding="utf-8")
+        )
+        calibration_stats = from_dict(CalibrationStats, calibration_payload, path="preprocessing_reuse.calibration")
+        objective_payload = json.loads(
+            (donor_artifacts.path_for(state.objectives.artifact_id) / "objectives.json").read_text(encoding="utf-8")
+        )
+        objective_specs = tuple(
+            from_dict(ObjectiveSpec, item, path=f"preprocessing_reuse.objectives[{index}]")
+            for index, item in enumerate(objective_payload)
+        )
+    except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("preprocessing donor calibration/objective payload is invalid") from exc
+
+    if calibration_stats.model != inventory.model or calibration_stats.dataset != dataset:
+        raise ValueError("preprocessing donor model or dataset identity differs")
+    if (
+        calibration_stats.method != request.calibration_method
+        or calibration_stats.accumulation_dtype != "float32"
+        or calibration_stats.total_tokens != total_tokens
+    ):
+        raise ValueError("preprocessing donor calibration protocol differs")
+    calibration_by_layer = {layer.layer: layer for layer in calibration_stats.layers}
+    objective_layers = {objective.layer for objective in objective_specs}
+    expected_layers = {
+        layer.layer
+        for block in inventory.blocks
+        for layer in block.quantizable_layers
+    }
+    if (
+        set(calibration_by_layer) != expected_layers
+        or len(calibration_by_layer) != len(calibration_stats.layers)
+        or len(objective_specs) != len(calibration_by_layer)
+        or objective_layers != expected_layers
+    ):
+        raise ValueError("preprocessing donor layer coverage is invalid")
+    objective_config = ObjectiveConfig()
+    for objective in objective_specs:
+        layer = calibration_by_layer.get(objective.layer)
+        if layer is None:
+            raise ValueError("preprocessing donor objective layer differs from calibration")
+        if (
+            objective.source_calibration != state.calibration
+            or objective.kind != objective_config.kind.value
+            or objective.damping != objective_config.regularization.diagonal_damp_fraction
+            or objective.normalization != "target_weighted_norm_squared"
+            or objective.target_weighted_norm_squared is not None
+            or objective.input_importance != layer.input_importance
+            or objective.output_importance != layer.output_importance
+            or objective.covariance != layer.input_covariance
+            or objective.input_mean != layer.input_mean
+        ):
+            raise ValueError(f"preprocessing donor objective differs for {objective.layer}")
+
+    references = {
+        reference.artifact.artifact_id: reference.artifact
+        for reference in _calibration_tensor_references(calibration_stats)
+    }
+    for reference in references.values():
+        descriptor = donor_artifacts.validate(reference.artifact_id)
+        if (
+            descriptor.artifact_type != reference.artifact_type
+            or descriptor.schema_version != reference.schema_version
+        ):
+            raise ValueError("preprocessing donor tensor reference has the wrong type or schema")
+    for artifact_id in (*references, state.calibration.artifact_id, state.objectives.artifact_id):
+        artifacts.import_validated(donor_artifacts, artifact_id)
+    return (
+        PersistedCalibration(state.calibration, calibration_stats),
+        PersistedObjectives(state.objectives, objective_specs),
+    )
+
+
 def _run_resident_quantization(request: ResidentQuantizationRequest) -> ResidentQuantizationResult:
     proposed = _resident_manifest(request, "resident-quantization")
     with open_run_session(
@@ -3994,9 +4148,22 @@ def _run_resident_quantization_impl(
                     tokens.numel(),
                     preprocessing_references,
                 )
+                reused_preprocessing = (
+                    None
+                    if preprocessed is not None
+                    else _load_reusable_calibration(
+                        request,
+                        artifacts,
+                        inventory,
+                        dataset,
+                        tokens.numel(),
+                    )
+                )
+                if reused_preprocessing is not None:
+                    preprocessing_source = "reuse_run"
 
     calibration_values: list[tuple[LayerId, MaterializedLayerCalibration]] = []
-    if preprocessed is not None:
+    if preprocessed is not None or reused_preprocessing is not None:
         pass
     elif request.calibration_method in {"online_fisher", "two_phase_fisher"}:
         causal_layers: list[tuple[str, nn.Linear]] = []
@@ -4170,28 +4337,31 @@ def _run_resident_quantization_impl(
     else:
         raise ValueError(f"unsupported resident calibration method: {request.calibration_method}")
     if preprocessed is None:
-        with _logged_operation(
-            events,
-            "calibration_persist",
-            layers=len(calibration_values),
-            input_elements=int(tokens.numel()),
-        ):
-            with recorder.phase("calibrate"):
-                with recorder.phase("persist"):
-                    calibration = persist_calibration(
-                        tuple(calibration_values),
-                        inventory.model,
-                        dataset,
-                        request.calibration_method,
-                        "float32",
-                        artifacts,
-                        tensors,
-                        total_tokens=tokens.numel(),
-                    )
-        with _logged_operation(events, "objective_build", layers=len(calibration_values)):
-            with recorder.phase("plan"):
-                with recorder.phase("objectives"):
-                    objectives = build_objectives(calibration, ObjectiveConfig(), artifacts)
+        if reused_preprocessing is None:
+            with _logged_operation(
+                events,
+                "calibration_persist",
+                layers=len(calibration_values),
+                input_elements=int(tokens.numel()),
+            ):
+                with recorder.phase("calibrate"):
+                    with recorder.phase("persist"):
+                        calibration = persist_calibration(
+                            tuple(calibration_values),
+                            inventory.model,
+                            dataset,
+                            request.calibration_method,
+                            "float32",
+                            artifacts,
+                            tensors,
+                            total_tokens=tokens.numel(),
+                        )
+            with _logged_operation(events, "objective_build", layers=len(calibration_values)):
+                with recorder.phase("plan"):
+                    with recorder.phase("objectives"):
+                        objectives = build_objectives(calibration, ObjectiveConfig(), artifacts)
+        else:
+            calibration, objectives = reused_preprocessing
         resolved_groups = _resolve_shared_input_groups(adapter, inventory, request.shared_input_groups)
         with _logged_operation(
             events,
@@ -4336,8 +4506,13 @@ def _run_resident_quantization_impl(
                 "resident-quantization",
                 "info",
                 "preprocessing.selected",
-                reused=preprocessed is not None,
+                reused=preprocessed is not None or reused_preprocessing is not None,
                 source=preprocessing_source,
+                source_run=(
+                    str(request.preprocessing_reuse_run.resolve())
+                    if reused_preprocessing is not None and request.preprocessing_reuse_run is not None
+                    else None
+                ),
                 calibration_artifact=calibration.reference.artifact_id,
                 objectives_artifact=objectives.reference.artifact_id,
                 plan_artifact=persisted_plan.reference.artifact_id,

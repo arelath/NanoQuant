@@ -60,6 +60,23 @@ def test_content_addressed_commit_deduplicates_and_detects_corruption(tmp_path: 
         store.validate(ids[0])
 
 
+def test_validated_artifact_import_preserves_identity_and_detects_source_corruption(tmp_path: Path) -> None:
+    source = LocalArtifactStore(tmp_path / "source")
+    destination = LocalArtifactStore(tmp_path / "destination")
+    with source.begin_write("fixture") as writer:
+        (writer.path / "value.txt").write_text("shared", encoding="utf-8")
+        artifact_id = writer.commit().artifact_id
+
+    imported = destination.import_validated(source, artifact_id)
+
+    assert imported.artifact_id == artifact_id
+    assert destination.validate(artifact_id).artifact_type == "fixture"
+    assert (destination.path_for(artifact_id) / "value.txt").read_text(encoding="utf-8") == "shared"
+    (source.path_for(artifact_id) / "value.txt").write_text("corrupt", encoding="utf-8")
+    with pytest.raises(ArtifactCorruptionError, match="ART001"):
+        LocalArtifactStore(tmp_path / "other").import_validated(source, artifact_id)
+
+
 def test_validation_cache_uses_unique_temporary_files_across_store_instances(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

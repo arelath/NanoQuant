@@ -75,6 +75,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--interrupt-after-block-commits", type=int)
     parser.add_argument(
+        "--preprocessing-reuse-run",
+        type=Path,
+        help="completed same-campaign run whose exact calibration/objectives must be reused",
+    )
+    parser.add_argument(
         "--rank-probe-reuse-run",
         type=Path,
         help="validated same-campaign run whose matching physical-unit probes may be reused",
@@ -231,6 +236,7 @@ def main(arguments: list[str] | None = None) -> int:
         inputs,
         ResidentExecutionOptions(
             interrupt_after_block_commits=args.interrupt_after_block_commits,
+            preprocessing_reuse_run=args.preprocessing_reuse_run,
             rank_probe_reuse_run=args.rank_probe_reuse_run,
             maximum_wddm_shared_bytes=int(0.75 * 2**30),
         ),
