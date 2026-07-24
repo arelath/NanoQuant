@@ -149,9 +149,11 @@ def test_compression_benchmark_executes_export_before_shared_quality_comparison(
 
     monkeypatch.setattr(workflow, "execute_quality_evaluation", quality)
 
-    def upload(result, config, artifacts):  # type: ignore[no-untyped-def]
+    def upload(result, config, artifacts, *, model_card_metadata):  # type: ignore[no-untyped-def]
         calls.append("upload")
         assert config is upload_config
+        assert model_card_metadata.base_model == _CONFIG.model.source
+        assert model_card_metadata.base_model_revision == _CONFIG.model.revision
         quality_output = resolved.benchmark_output.with_suffix(".quality.json")
         assert tuple(artifacts) == ((quality_output, "quality.json"),)
         assert json.loads(quality_output.read_text(encoding="utf-8"))["passed"] is True

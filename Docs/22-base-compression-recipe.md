@@ -30,6 +30,7 @@ outputs/NNN/
 Results/NNN/
   model-slug-nanoquant.gguf
   model-slug-nanoquant.gguf.export.json
+  model-slug-nanoquant.model-card.md       # validated source for Hub README.md
   model-slug-nanoquant.export-summary.json
   model-slug-nanoquant.gguf.huggingface.json  # only when a Hub upload is configured
   mmproj-BF16.gguf                 # multimodal snapshots only
@@ -99,10 +100,21 @@ export = CompressionExportPolicy(
 ```
 
 The low-level compression export never contacts Hugging Face. Quality and benchmark workflows defer the configured
-upload until evaluation succeeds and its document exists. Compression-quality commits expose the rendered report as
-`README.md` and its machine-readable measurements as `quality.json`; benchmark workflows also provide their
-machine-readable measurements as `quality.json`.
+upload until evaluation succeeds and its document exists. Before upload, the reusable
+`tools/render_huggingface_model_card.py` generator creates and validates a separate model card with source-model,
+quantized-derivative, task, format, language, and license metadata. Compression-quality cards retain the rendered
+quality report as their Markdown body; benchmark cards receive a generated summary body. Both workflows expose the
+card as `README.md` and their machine-readable measurements as `quality.json`.
 The GGUF, optional mmproj, and quality files therefore share one commit identity.
+
+The same generator can be run independently without contacting the Hub:
+
+```powershell
+.\.venv\Scripts\python.exe tools\render_huggingface_model_card.py `
+  --base-model owner/source-model --base-revision pinned-revision `
+  --model-name published-model --source-snapshot path\to\snapshot `
+  --body path\to\quality.md --output path\to\model-card.md
+```
 
 Do not put a token in the recipe. The shared resident launcher loads the repository-root `.env` with override
 semantics before resolving Hugging Face inputs, so a corrected local `HF_TOKEN` takes precedence over an inherited

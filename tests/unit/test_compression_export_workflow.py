@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from huggingface_hub import ModelCard
 
 import nanoquant.compression_export_workflow as workflow
 from nanoquant.compression_export_workflow import (
@@ -19,6 +20,7 @@ from nanoquant.compression_export_workflow import (
     resolve_compression_export_recipe,
 )
 from nanoquant.infrastructure.gguf_export import GgufExportResult
+from nanoquant.infrastructure.huggingface_model_card import HuggingFaceModelCardMetadata
 from nanoquant.infrastructure.mmproj_export import MmprojExportResult
 from nanoquant.resident_workflow import ResolvedResidentInputs
 from nanoquant.runtime import RuntimeModelMetadata
@@ -183,6 +185,12 @@ def test_deferred_huggingface_upload_includes_quality_documents_and_refreshes_su
 
     monkeypatch.setattr(workflow, "upload_validated_model_artifacts", upload)
 
+    with pytest.raises(ValueError, match="requires model-card metadata"):
+        complete_deferred_huggingface_upload(
+            result,
+            HuggingFaceUploadConfig("owner/model", private=False),
+        )
+
     completed = complete_deferred_huggingface_upload(
         result,
         HuggingFaceUploadConfig("owner/model", private=False),
@@ -190,13 +198,15 @@ def test_deferred_huggingface_upload_includes_quality_documents_and_refreshes_su
             (quality_markdown, "README.md"),
             (quality_json, "quality.json"),
         ),
+        model_card_metadata=HuggingFaceModelCardMetadata("owner/base-model", "revision"),
     )
 
     artifacts = captured[0][1]
+    model_card = gguf.with_suffix(".model-card.md")
     assert [artifact.source for artifact in artifacts] == [
         gguf,
         mmproj,
-        quality_markdown,
+        model_card,
         quality_json,
     ]
     assert [artifact.path_in_repo for artifact in artifacts] == [
@@ -205,8 +215,73 @@ def test_deferred_huggingface_upload_includes_quality_documents_and_refreshes_su
         "README.md",
         "quality.json",
     ]
+    card = ModelCard.load(model_card)
+    assert card.data.get("base_model") == "owner/base-model"
+    assert card.data.get("base_model_relation") == "quantized"
+    assert card.data.get("pipeline_tag") == "image-text-to-text"
+    assert card.text.strip() == "# Quality"
+    assert quality_markdown.read_bytes() == b"# Quality\n"
     assert completed.huggingface is not None
     assert json.loads(summary.read_text(encoding="utf-8"))["huggingface"]["commit_oid"] == "c" * 40
+
+
+def test_deferred_huggingface_upload_generates_a_card_when_no_report_body_exists(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    gguf = tmp_path / "Results" / "001" / "model.gguf"
+    quality_json = tmp_path / "outputs" / "001" / "quality.json"
+    summary = gguf.with_suffix(".export-summary.json")
+    for path, content in ((gguf, b"model"), (quality_json, b'{"passed":true}\n')):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+    summary.write_text('{"schema_version":4,"huggingface":null}\n', encoding="utf-8")
+    result = CompressionExportResult(
+        {},
+        {},
+        GgufExportResult(
+            gguf,
+            tmp_path / "checkpoint",
+            tmp_path / "converter.py",
+            gguf.stat().st_size,
+            "a" * 64,
+            True,
+        ),
+        summary,
+    )
+    captured = []
+
+    def upload(config, artifacts, *, receipt_output):  # type: ignore[no-untyped-def]
+        captured.extend(artifacts)
+        return HuggingFaceUploadResult(
+            config.repo_id,
+            f"https://huggingface.co/{config.repo_id}",
+            "d" * 40,
+            f"https://huggingface.co/{config.repo_id}/commit/{'d' * 40}",
+            None,
+            config.commit_message,
+            (),
+            receipt_output,
+        )
+
+    monkeypatch.setattr(workflow, "upload_validated_model_artifacts", upload)
+
+    complete_deferred_huggingface_upload(
+        result,
+        HuggingFaceUploadConfig("owner/model"),
+        ((quality_json, "quality.json"),),
+        model_card_metadata=HuggingFaceModelCardMetadata("owner/base-model", "revision"),
+    )
+
+    assert [artifact.path_in_repo for artifact in captured] == [
+        "model.gguf",
+        "README.md",
+        "quality.json",
+    ]
+    card = ModelCard.load(gguf.with_suffix(".model-card.md"))
+    assert card.data.get("pipeline_tag") == "text-generation"
+    assert "# model" in card.text
+    assert "`revision`" in card.text
 
 
 def test_base_compression_requires_export_after_resident_completion(

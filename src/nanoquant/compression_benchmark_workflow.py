@@ -15,6 +15,7 @@ from nanoquant.compression_export_workflow import (
 )
 from nanoquant.config.codec import to_dict
 from nanoquant.config.schema import RunConfig
+from nanoquant.infrastructure.huggingface_model_card import load_huggingface_model_card_metadata
 from nanoquant.infrastructure.huggingface_upload import huggingface_upload_summary
 from nanoquant.infrastructure.io_utils import atomic_write_json
 from nanoquant.infrastructure.publication import (
@@ -145,6 +146,15 @@ def execute_compression_benchmark_experiment(
         exports,
         experiment.export.huggingface,
         ((quality_output, "quality.json"),),
+        model_card_metadata=(
+            None
+            if experiment.export.huggingface is None
+            else load_huggingface_model_card_metadata(
+                config.model.source,
+                str(config.model.revision),
+                resolved.inputs.snapshot,
+            )
+        ),
     )
     publication_directory = repository_root / "Results" / f"{experiment_number:03d}"
     payload = {

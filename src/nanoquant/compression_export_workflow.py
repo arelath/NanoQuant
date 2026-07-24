@@ -17,6 +17,11 @@ from nanoquant.infrastructure.gguf_export import (
     export_llamacpp_gguf,
     normalize_token_embedding_type,
 )
+from nanoquant.infrastructure.huggingface_model_card import (
+    HuggingFaceModelCardMetadata,
+    huggingface_model_card_output,
+    write_huggingface_model_card,
+)
 from nanoquant.infrastructure.huggingface_upload import (
     HuggingFaceUploadConfig,
     HuggingFaceUploadResult,
@@ -270,9 +275,30 @@ def _upload_huggingface_model(
     gguf: GgufExportResult,
     config: HuggingFaceUploadConfig | None,
     supplemental_artifacts: Iterable[tuple[Path, str]] = (),
+    *,
+    model_card_metadata: HuggingFaceModelCardMetadata,
 ) -> HuggingFaceUploadResult | None:
     if config is None:
         return None
+    supplemental = tuple(supplemental_artifacts)
+    readme_sources = tuple(source for source, path_in_repo in supplemental if path_in_repo == "README.md")
+    if len(readme_sources) > 1:
+        raise ValueError("Hugging Face upload contains multiple model-card body sources")
+    model_card = write_huggingface_model_card(
+        model_card_metadata,
+        huggingface_model_card_output(gguf.output),
+        model_name=config.repo_id.rsplit("/", 1)[-1],
+        body_source=None if not readme_sources else readme_sources[0],
+        pipeline_tag="image-text-to-text" if gguf.mmproj is not None else "text-generation",
+    )
+    prepared_supplemental = (
+        tuple(
+            (model_card, path_in_repo) if path_in_repo == "README.md" else (source, path_in_repo)
+            for source, path_in_repo in supplemental
+        )
+        if readme_sources
+        else ((model_card, "README.md"), *supplemental)
+    )
     artifacts = [ValidatedModelArtifact(gguf.output, gguf.bytes, gguf.sha256)]
     if gguf.mmproj is not None:
         artifacts.append(
@@ -282,7 +308,7 @@ def _upload_huggingface_model(
                 gguf.mmproj.sha256,
             )
         )
-    for source, path_in_repo in supplemental_artifacts:
+    for source, path_in_repo in prepared_supplemental:
         resolved = source.resolve(strict=True)
         artifacts.append(
             ValidatedModelArtifact(
@@ -303,11 +329,15 @@ def complete_deferred_huggingface_upload(
     result: CompressionExportResult,
     config: HuggingFaceUploadConfig | None,
     supplemental_artifacts: Iterable[tuple[Path, str]] = (),
+    *,
+    model_card_metadata: HuggingFaceModelCardMetadata | None = None,
 ) -> CompressionExportResult:
     """Upload a local export plus completed quality artifacts and refresh its summary."""
 
     if config is None:
         return result
+    if model_card_metadata is None:
+        raise ValueError("configured Hugging Face upload requires model-card metadata")
     try:
         summary = cast(
             dict[str, Any],
@@ -319,6 +349,7 @@ def complete_deferred_huggingface_upload(
         result.gguf,
         config,
         supplemental_artifacts,
+        model_card_metadata=model_card_metadata,
     )
     if huggingface is None:
         raise AssertionError("configured Hugging Face upload returned no result")
@@ -452,6 +483,7 @@ __all__ = [
     "CompressionExportResult",
     "CompleteCompressionResult",
     "HuggingFaceUploadConfig",
+    "HuggingFaceModelCardMetadata",
     "HuggingFaceUploadResult",
     "ResolvedCompressionExportRecipe",
     "complete_deferred_huggingface_upload",

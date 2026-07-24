@@ -16,6 +16,7 @@ from nanoquant.compression_export_workflow import (
 from nanoquant.config.codec import config_hash, to_dict
 from nanoquant.config.schema import ExecutorKind, RunConfig
 from nanoquant.config.validation import ValidationPhase, raise_for_issues, validate
+from nanoquant.infrastructure.huggingface_model_card import load_huggingface_model_card_metadata
 from nanoquant.infrastructure.huggingface_upload import (
     ensure_huggingface_model_repository,
     huggingface_upload_summary,
@@ -197,6 +198,15 @@ def execute_compression_quality_experiment(
         (
             (resolved.quality_markdown_output, "README.md"),
             (resolved.quality_output, "quality.json"),
+        ),
+        model_card_metadata=(
+            None
+            if experiment.export.huggingface is None
+            else load_huggingface_model_card_metadata(
+                config.model.source,
+                str(config.model.revision),
+                resolved.inputs.snapshot,
+            )
         ),
     )
     profiles = tuple(
