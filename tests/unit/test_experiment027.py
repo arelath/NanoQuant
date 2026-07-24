@@ -21,9 +21,17 @@ def test_experiment027_retargets_experiment025_numerics_with_adaptive_8b_executi
         model=config025.model,
         intent=config025.intent,
         output=config025.output,
+        block_tuning=config025.block_tuning,
         runtime=config025.runtime,
     ) == config025
-    assert config027.block_tuning == config025.block_tuning
+    assert (
+        replace(
+            config027.block_tuning,
+            microbatch_size=config025.block_tuning.microbatch_size,
+        )
+        == config025.block_tuning
+    )
+    assert config027.block_tuning.microbatch_size is None
     assert config027.runtime.memory_policy.mode is MemoryPolicyMode.ADAPTIVE
     assert config027.runtime.memory_policy.profile is MemoryPolicyProfile.THROUGHPUT
     assert config027.runtime.activations.gpu_cache is ActivationGpuCacheMode.AUTO

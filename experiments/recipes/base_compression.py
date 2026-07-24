@@ -402,6 +402,10 @@ META_LLAMA_3_8B_INSTRUCT_COMPRESSION_TEMPLATE = config_delta(
         revision=META_LLAMA_3_8B_INSTRUCT_MODEL_REVISION,
         tokenizer_revision=META_LLAMA_3_8B_INSTRUCT_MODEL_REVISION,
     ),
+    block_tuning=config_delta(
+        LLAMA_ARCHITECTURE_PROTECTED_COMPRESSION_TEMPLATE.block_tuning,
+        microbatch_size=None,
+    ),
     runtime=config_delta(
         LLAMA_ARCHITECTURE_PROTECTED_COMPRESSION_TEMPLATE.runtime,
         memory_policy=config_delta(
