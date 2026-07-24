@@ -41,10 +41,11 @@ def test_experiment026_retargets_experiment025_settings_to_llama_3_2_3b() -> Non
     assert upload.commit_message == "Publish NanoQuant Experiment 026"
 
 
-def test_runpod_supports_experiment026() -> None:
+def test_runpod_defaults_to_experiment026() -> None:
     bootstrap = Path("tools/runpod_bootstrap.sh").read_text(encoding="utf-8")
     experiment026_case = bootstrap.split("  026)", maxsplit=1)[1].split(";;", maxsplit=1)[0]
 
+    assert 'EXPERIMENT="${NANOQUANT_EXPERIMENT:-026}"' in bootstrap
     assert 'MODEL_ID="meta-llama/Llama-3.2-3B-Instruct"' in experiment026_case
     assert 'MODEL_REVISION="0cb88a4f764b7a12671c53f0838cd831a0843b95"' in experiment026_case
     assert (

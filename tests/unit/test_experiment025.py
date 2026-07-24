@@ -35,11 +35,10 @@ def test_experiment025_repeats_experiment019_on_the_current_pipeline() -> None:
     assert upload.commit_message == "Publish NanoQuant Experiment 025"
 
 
-def test_runpod_defaults_to_experiment025() -> None:
+def test_runpod_supports_experiment025() -> None:
     bootstrap = Path("tools/runpod_bootstrap.sh").read_text(encoding="utf-8")
     experiment025_case = bootstrap.split("  025)", maxsplit=1)[1].split(";;", maxsplit=1)[0]
 
-    assert 'EXPERIMENT="${NANOQUANT_EXPERIMENT:-025}"' in bootstrap
     assert 'MODEL_ID="meta-llama/Llama-3.2-1B-Instruct"' in experiment025_case
     assert 'MODEL_REVISION="9213176726f574b556790deb65791e0c5aa438b6"' in experiment025_case
     assert (
