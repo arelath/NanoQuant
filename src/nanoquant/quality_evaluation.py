@@ -114,6 +114,24 @@ class PreparedQualityInputs:
     tasks: tuple[PreparedMultipleChoiceInputs, ...]
 
 
+def _quality_pad_token_id(tokenizer: Any) -> int:
+    """Resolve the legacy-compatible token used only for masked batch padding."""
+
+    pad_token_id = tokenizer.pad_token_id
+    if pad_token_id is None:
+        pad_token_id = tokenizer.eos_token_id
+    if isinstance(pad_token_id, (list, tuple)):
+        pad_token_id = pad_token_id[0] if pad_token_id else None
+    if (
+        pad_token_id is None
+        or isinstance(pad_token_id, bool)
+        or not isinstance(pad_token_id, int)
+        or pad_token_id < 0
+    ):
+        raise ValueError("quality evaluation tokenizer contains neither a valid pad nor EOS token ID")
+    return pad_token_id
+
+
 def _checkpoint_dtype(snapshot: Path) -> torch.dtype:
     config = json.loads((snapshot / "config.json").read_text(encoding="utf-8"))
     return {
@@ -195,9 +213,7 @@ def prepare_quality_inputs(
     _emit_progress(progress, "tokenizer_load_started")
     tokenizer = AutoTokenizer.from_pretrained(request.snapshot, local_files_only=False)
     _emit_progress(progress, "tokenizer_load_completed")
-    pad_token_id = tokenizer.pad_token_id
-    if pad_token_id is None:
-        raise ValueError("quality evaluation tokenizer contains no pad token ID")
+    pad_token_id = _quality_pad_token_id(tokenizer)
     _emit_progress(progress, "tokenizer_hash_started")
     tokenizer_hash = hash_hf_tokenizer_snapshot(request.snapshot)
     _emit_progress(progress, "tokenizer_hash_completed", tokenizer_hash=tokenizer_hash)
@@ -231,7 +247,7 @@ def prepare_quality_inputs(
         tokens,
         fingerprint,
         bos_id,
-        int(pad_token_id),
+        pad_token_id,
         tokenizer_hash,
         tuple(tasks),
     )
@@ -531,6 +547,9 @@ def execute_quality_evaluation(
             "wikitext_sequence_length": request.wikitext_sequence_length,
             "wikitext_batch_size": request.wikitext_batch_size,
             "wikitext_token_hash": token_hash,
+            "bos_token_id": inputs.bos_token_id,
+            "pad_token_id": inputs.pad_token_id,
+            "padding_policy": "tokenizer-pad-else-eos",
             "task_names": request.task_names,
             "task_limit": request.task_limit,
             "task_batch_size": request.task_batch_size,

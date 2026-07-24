@@ -154,6 +154,9 @@ tokenizer default. The pinned tokenizer behavior-file hash is
 `sha256:19317db471b30f6cfa877d781ecac1db28de6628e44e3751df0c44344444a811`.
 The causal window also matches the harness's `max_length + 1` context-plus-target rule: the final target token is not
 fed as model input, so left truncation does not discard one extra context token.
+For masked batching, the evaluator uses the tokenizer's pad token when present and otherwise uses its EOS token,
+matching the legacy tokenizer-loading policy for model families such as Llama that intentionally define no pad token.
+The resolved BOS and padding token IDs and the fallback policy are recorded in the quality protocol payload.
 
 Evaluation retains both summed and continuation-length-normalized log likelihoods, computes log-softmax and score
 accumulation in FP32, records both accuracy variants, ties, per-example scores, and truncation counts, and chooses

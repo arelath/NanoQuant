@@ -5,9 +5,23 @@ from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any
 
+import pytest
 import torch
 
 from nanoquant import quality_evaluation
+
+
+def test_quality_padding_falls_back_to_eos_for_tokenizers_without_pad_tokens() -> None:
+    tokenizer = SimpleNamespace(pad_token_id=None, eos_token_id=128009)
+
+    assert quality_evaluation._quality_pad_token_id(tokenizer) == 128009
+
+
+def test_quality_padding_rejects_tokenizers_without_pad_or_eos_tokens() -> None:
+    tokenizer = SimpleNamespace(pad_token_id=None, eos_token_id=None)
+
+    with pytest.raises(ValueError, match="neither a valid pad nor EOS"):
+        quality_evaluation._quality_pad_token_id(tokenizer)
 
 
 def test_wikitext_tokenization_is_bounded_to_the_evaluated_prefix(monkeypatch: Any, tmp_path: Path) -> None:
