@@ -614,7 +614,8 @@ def load_completed_resident_workflow(
             options,
             memory_plan=memory_plan,
             memory_plan_reference=memory_plan_reference,
-        )
+        ),
+        allow_historical_algorithm=True,
     )
     distillation = None
     if config.distillation.enabled:

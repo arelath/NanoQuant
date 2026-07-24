@@ -39,7 +39,10 @@ from nanoquant.resident_replay import capture_and_replay_resident_layer
 from nanoquant.runtime import RuntimeModelMetadata, convert_logical_to_packed
 
 
-def test_resident_quantization_commits_complete_transformers_model(tmp_path: Path) -> None:
+def test_resident_quantization_commits_complete_transformers_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     snapshot = tmp_path / "snapshot"
     config = Gemma3TextConfig(
         vocab_size=32,
@@ -82,6 +85,20 @@ def test_resident_quantization_commits_complete_transformers_model(tmp_path: Pat
     assert rehydrated.argmax_agreement == result.argmax_agreement
     assert (output / "manifest.json").read_bytes() == manifest_before_rehydrate
     assert (output / "events.jsonl").read_bytes() == events_before_rehydrate
+    with monkeypatch.context() as historical_context:
+        historical_context.setattr(
+            resident,
+            "_resident_config_hash",
+            lambda _request: "sha256:" + "f" * 64,
+        )
+        with pytest.raises(ValueError, match="completed resident commit identity differs"):
+            load_completed_resident_quantization(request)
+        historical = load_completed_resident_quantization(
+            request,
+            allow_historical_algorithm=True,
+        )
+        assert historical.identity == result.identity
+        assert historical.blocks == result.blocks
 
     assert len(result.blocks) == 1
     assert len(result.blocks[0].layers) == 7

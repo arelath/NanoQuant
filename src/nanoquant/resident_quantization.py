@@ -6378,8 +6378,15 @@ def run_resident_quantization(request: ResidentQuantizationRequest) -> ResidentQ
 
 def load_completed_resident_quantization(
     request: ResidentQuantizationRequest,
+    *,
+    allow_historical_algorithm: bool = False,
 ) -> ResidentQuantizationResult:
-    """Rehydrate one completed resident result without reopening its run session."""
+    """Rehydrate one completed resident result without reopening its run session.
+
+    Historical algorithm identities are accepted only for terminal workflow
+    consumption. Active/incomplete resume remains bound to the current resident
+    algorithm identity.
+    """
 
     _validate_resident_request(request)
     directory = RunDirectory(request.output.parent, request.output.name)
@@ -6412,8 +6419,12 @@ def load_completed_resident_quantization(
             raise ValueError(f"completed resident journal line {line_number} is not an object")
         records.append(payload)
     identity, block_records = latest_complete_identity(records, len(inventory.blocks))
-    if identity.config_hash != _resident_config_hash(request):
-        raise ValueError("completed resident commit identity differs from the current algorithm request")
+    current_config_hash = _resident_config_hash(request)
+    if not allow_historical_algorithm and identity.config_hash != current_config_hash:
+        raise ValueError(
+            "completed resident commit identity differs from the current algorithm request: "
+            f"stored {identity.config_hash}, current {current_config_hash}"
+        )
     if identity.model_hash != inventory.model.config_hash:
         raise ValueError("completed resident commit identity belongs to a different model")
 

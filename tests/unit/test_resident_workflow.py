@@ -31,6 +31,7 @@ from nanoquant.resident_workflow import (
     ResolvedResidentInputs,
     distillation_request_from_config,
     execute_resident_workflow,
+    load_completed_resident_workflow,
     resident_request_from_config,
     resolve_resident_experiment_inputs,
 )
@@ -235,6 +236,46 @@ def test_combined_workflow_runs_quantization_before_distillation(
     assert cast(Any, result.quantization) is quantization_result
     assert cast(Any, result.distillation) is distillation_result
     assert transitions == [{"artifact_id": "sha256-distillation"}]
+
+
+def test_completed_workflow_explicitly_loads_historical_algorithm_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base = _resident_config()
+    config = replace(base, distillation=replace(base.distillation, enabled=False))
+    inputs = _inputs(tmp_path)
+    directory = RunDirectory(inputs.output.parent, inputs.output.name)
+    manifest = initial_manifest_from_resolved(
+        "sha256:historical",
+        {},
+        launcher_provenance("experiments/001-compress-gemma-3-1b-it.py", 1),
+        {},
+    )
+    directory.write_manifest(transition(transition(manifest, RunStatus.RUNNING), RunStatus.COMPLETED))
+    request = object()
+    quantization = object()
+    observed: dict[str, object] = {}
+
+    monkeypatch.setattr(workflow, "_resolve_workflow_memory_plan", lambda *_args: (None, None))
+    monkeypatch.setattr(workflow, "resident_request_from_config", lambda *_args, **_kwargs: request)
+
+    def load_completed(candidate: object, *, allow_historical_algorithm: bool = False) -> object:
+        observed["request"] = candidate
+        observed["allow_historical_algorithm"] = allow_historical_algorithm
+        return quantization
+
+    monkeypatch.setattr(workflow, "load_completed_resident_quantization", load_completed)
+
+    result = load_completed_resident_workflow(config, inputs)
+
+    assert result is not None
+    assert cast(Any, result.quantization) is quantization
+    assert result.distillation is None
+    assert observed == {
+        "request": request,
+        "allow_historical_algorithm": True,
+    }
 
 
 def test_zero_argument_resolution_generates_run_local_calibration(
