@@ -1,10 +1,11 @@
 from dataclasses import replace
 from pathlib import Path
 
+from nanoquant.config.schema import ActivationGpuCacheMode, MemoryPolicyMode, MemoryPolicyProfile
 from tests.support.experiments import load_experiment
 
 
-def test_experiment027_retargets_experiment025_settings_to_meta_llama_3_8b() -> None:
+def test_experiment027_retargets_experiment025_numerics_with_adaptive_8b_execution() -> None:
     experiment025 = load_experiment(25)
     experiment027 = load_experiment(27)
     config025 = experiment025.config
@@ -20,7 +21,17 @@ def test_experiment027_retargets_experiment025_settings_to_meta_llama_3_8b() -> 
         model=config025.model,
         intent=config025.intent,
         output=config025.output,
+        runtime=config025.runtime,
     ) == config025
+    assert config027.block_tuning == config025.block_tuning
+    assert config027.runtime.memory_policy.mode is MemoryPolicyMode.ADAPTIVE
+    assert config027.runtime.memory_policy.profile is MemoryPolicyProfile.THROUGHPUT
+    assert config027.runtime.activations.gpu_cache is ActivationGpuCacheMode.AUTO
+    assert config027.runtime.on_cuda_oom == (
+        "reduce_batch_size",
+        "move_activations_down_one_tier",
+        "fail",
+    )
     assert config027.intent.baseline_run == "025-compress-and-benchmark-llama-3-2-1b-instruct"
     assert replace(
         workflow027,

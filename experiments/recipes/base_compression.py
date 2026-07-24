@@ -8,6 +8,8 @@ from nanoquant.config.schema import (
     DatasetSourceConfig,
     ExecutorKind,
     LayerRankBudgetConfig,
+    MemoryPolicyMode,
+    MemoryPolicyProfile,
     OutlierSelector,
     RankResponseCurveConfig,
     RankResponseSegmentConfig,
@@ -399,6 +401,19 @@ META_LLAMA_3_8B_INSTRUCT_COMPRESSION_TEMPLATE = config_delta(
         source="meta-llama/Meta-Llama-3-8B-Instruct",
         revision=META_LLAMA_3_8B_INSTRUCT_MODEL_REVISION,
         tokenizer_revision=META_LLAMA_3_8B_INSTRUCT_MODEL_REVISION,
+    ),
+    runtime=config_delta(
+        LLAMA_ARCHITECTURE_PROTECTED_COMPRESSION_TEMPLATE.runtime,
+        memory_policy=config_delta(
+            LLAMA_ARCHITECTURE_PROTECTED_COMPRESSION_TEMPLATE.runtime.memory_policy,
+            mode=MemoryPolicyMode.ADAPTIVE,
+            profile=MemoryPolicyProfile.THROUGHPUT,
+        ),
+        activations=config_delta(
+            LLAMA_ARCHITECTURE_PROTECTED_COMPRESSION_TEMPLATE.runtime.activations,
+            gpu_cache=ActivationGpuCacheMode.AUTO,
+        ),
+        on_cuda_oom=("reduce_batch_size", "move_activations_down_one_tier", "fail"),
     ),
 )
 

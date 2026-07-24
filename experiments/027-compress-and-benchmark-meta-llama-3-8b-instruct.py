@@ -1,4 +1,4 @@
-"""Experiment 027: apply Experiment 025 unchanged to Meta Llama 3 8B Instruct."""
+"""Experiment 027: apply Experiment 025 numerics with adaptive 8B execution."""
 
 from recipes import (
     META_LLAMA_3_8B_INSTRUCT_COMPRESSION_TEMPLATE,
@@ -19,22 +19,27 @@ EXPERIMENT = define_compression_quality_experiment(
         number=27,
         name="compress-and-benchmark-meta-llama-3-8b-instruct",
         purpose=(
-            "Apply Experiment 025's complete compression, quality, and publication settings "
-            "unchanged to the pinned Meta Llama 3 8B Instruct model."
+            "Apply Experiment 025's numerical compression, quality, and publication settings "
+            "to the pinned Meta Llama 3 8B Instruct model while adapting physical batches and "
+            "activation placement to the available CUDA memory."
         ),
         hypothesis=(
             "Experiment 025's architecture-protected shared-QKV policy transfers from Llama "
-            "3.2 1B to Meta Llama 3 8B while preserving its bit budget, quality protocol, "
-            "bounded execution, resume behavior, and export contracts."
+            "3.2 1B to Meta Llama 3 8B while adaptive throughput sizing and GPU activation "
+            "caching improve device utilization without changing logical optimizer batches, "
+            "the bit budget, quality protocol, resume behavior, or export contracts."
         ),
         baseline=BaselineRef.experiment(BASELINE),
         tags=(
             "meta-llama-3-8b-instruct",
             "compression",
             "quality",
-            "experiment-025-settings",
+            "experiment-025-numerics",
             "cross-scale",
             "cross-generation",
+            "adaptive-memory",
+            "throughput-memory-profile",
+            "activation-gpu-cache-auto",
             "shared-input-qkv",
             "reconstruction-aware-ranks",
             "architecture-protected-ranks",
