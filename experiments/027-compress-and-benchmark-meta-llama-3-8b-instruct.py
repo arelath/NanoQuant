@@ -1,7 +1,7 @@
-"""Experiment 025: rerun Llama 3.2 1B Instruct on the current NanoQuant pipeline."""
+"""Experiment 027: apply Experiment 025 unchanged to Meta Llama 3 8B Instruct."""
 
 from recipes import (
-    LLAMA_ARCHITECTURE_PROTECTED_COMPRESSION_TEMPLATE,
+    META_LLAMA_3_8B_INSTRUCT_COMPRESSION_TEMPLATE,
     BaselineRef,
     CompressionExportPolicy,
     ExperimentIdentity,
@@ -12,28 +12,29 @@ from recipes import (
 
 from nanoquant.compression_quality_workflow import run_compression_quality_experiment
 
-BASELINE = ExperimentRef(19, "compress-and-benchmark-llama-3-2-1b-instruct")
+BASELINE = ExperimentRef(25, "compress-and-benchmark-llama-3-2-1b-instruct")
 
 EXPERIMENT = define_compression_quality_experiment(
     ExperimentIdentity(
-        number=25,
-        name="compress-and-benchmark-llama-3-2-1b-instruct",
+        number=27,
+        name="compress-and-benchmark-meta-llama-3-8b-instruct",
         purpose=(
-            "Re-run Experiment 019's pinned Llama 3.2 1B Instruct compression and benchmark "
-            "recipe on the current NanoQuant implementation and publish its validated GGUF."
+            "Apply Experiment 025's complete compression, quality, and publication settings "
+            "unchanged to the pinned Meta Llama 3 8B Instruct model."
         ),
         hypothesis=(
-            "The current pipeline reproduces or improves Experiment 019 quality at the same "
-            "effective bit budget while preserving bounded memory, resume, packed-runtime, "
-            "benchmark, and export contracts."
+            "Experiment 025's architecture-protected shared-QKV policy transfers from Llama "
+            "3.2 1B to Meta Llama 3 8B while preserving its bit budget, quality protocol, "
+            "bounded execution, resume behavior, and export contracts."
         ),
         baseline=BaselineRef.experiment(BASELINE),
         tags=(
-            "llama-3-2-1b-instruct",
+            "meta-llama-3-8b-instruct",
             "compression",
             "quality",
-            "experiment-019-replication",
-            "cross-architecture",
+            "experiment-025-settings",
+            "cross-scale",
+            "cross-generation",
             "shared-input-qkv",
             "reconstruction-aware-ranks",
             "architecture-protected-ranks",
@@ -41,25 +42,25 @@ EXPERIMENT = define_compression_quality_experiment(
             "down-projection-priority",
             "edge-block-protection",
             "shared-vram-guard",
-            "runpod-default",
+            "runpod",
             "huggingface",
             "gguf",
             "wikitext2",
             "ultrachat",
         ),
     ),
-    LLAMA_ARCHITECTURE_PROTECTED_COMPRESSION_TEMPLATE,
-    expected_blocks=16,
+    META_LLAMA_3_8B_INSTRUCT_COMPRESSION_TEMPLATE,
+    expected_blocks=32,
     maximum_wddm_shared_gib=0.75,
     restore_completed_blocks=False,
     quality_backend="dense",
     export=CompressionExportPolicy(
-        release_name="llama-3-2-1b-instruct",
+        release_name="meta-llama-3-8b-instruct",
         runtime_family="llama",
         huggingface=HuggingFaceUploadConfig(
-            "Llama-3.2-1B-Instruct-nanoquant-GGUF",
+            "Meta-Llama-3-8B-Instruct-nanoquant-GGUF",
             private=False,
-            commit_message="Publish NanoQuant Experiment 025",
+            commit_message="Publish NanoQuant Experiment 027",
         ),
     ),
 )
