@@ -2509,7 +2509,7 @@ def _run_reconstruction_rank_probes(
             "info",
             "rank_probe.unit_started",
             unit_id=unit_id,
-            members=tuple(f"{layer.block.index}:{layer.path}" for layer in member_layers),
+            members=[f"{layer.block.index}:{layer.path}" for layer in member_layers],
             rank=unit.rank,
         )
         started = time.perf_counter()
@@ -4725,7 +4725,7 @@ def _run_resident_quantization_impl(
                     "shared_input_group.started",
                     block=block_index,
                     group=group_plan.name,
-                    members=tuple(member.layer.path for member in group_plan.members),
+                    members=[member.layer.path for member in group_plan.members],
                     position=group_position,
                     planned_rank=group_plan.rank,
                     outlier_columns=group_plan.outliers.count,

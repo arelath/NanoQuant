@@ -381,6 +381,12 @@ def test_resident_quantization_factorizes_qkv_as_one_shared_input_group(tmp_path
     assert names.count("shared_input_group.started") == 2
     assert names.count("shared_input_group.committed") == 1
     assert names.count("shared_input_group.completed") == 1
+    group_started = [event for event in events if event["name"] == "shared_input_group.started"]
+    assert all(
+        event["fields"]["members"]
+        == ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"]
+        for event in group_started
+    )
     metadata = RuntimeModelMetadata(
         request.source,
         request.revision,
@@ -488,6 +494,16 @@ def test_reconstruction_rank_probe_covers_every_physical_unit_before_fitting(tmp
     assert names.count("rank_probe.unit_completed") == 5
     assert names.count("rank_probe.unit_reused") == 2
     assert names.index("rank_probe.profile_committed") < names.index("compression.progress_initialized")
+    gate_probe_started = next(
+        event
+        for event in events
+        if event["name"] == "rank_probe.unit_started"
+        and event["fields"]["unit_id"] == "0:mlp.gate_proj"
+    )
+    assert gate_probe_started["fields"]["members"] == ["0:mlp.gate_proj"]
+    assert 'members=["0:mlp.gate_proj"]' in (request.output / "run.log").read_text(
+        encoding="utf-8"
+    )
     artifacts = LocalArtifactStore(request.output / "artifacts")
     profile = result.plan.reconstruction_profile
     assert artifacts.validate(profile.artifact_id).artifact_type == "reconstruction-rank-profile"
