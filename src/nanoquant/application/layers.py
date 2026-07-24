@@ -678,11 +678,15 @@ class BlockEditor:
         block_index: int,
         members: tuple[tuple[str, int, int], ...],
         owner: FrozenReferenceLinear,
+        *,
+        in_features: int,
     ) -> None:
+        if in_features <= 0:
+            raise ValueError("shared-input runtime group input width must be positive")
         views = tuple(
             (
                 LayerId(BlockId(block_index), path),
-                SharedInputProjectionView(owner, row_start, row_end, owner.scale_pre.numel()),
+                SharedInputProjectionView(owner, row_start, row_end, in_features),
             )
             for path, row_start, row_end in members
         )

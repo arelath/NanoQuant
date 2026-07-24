@@ -408,6 +408,21 @@ def test_resident_quantization_factorizes_qkv_as_one_shared_input_group(tmp_path
             input_ids=torch.tensor(request.token_ids), use_cache=False
         ).logits
     assert torch.isfinite(packed_logits).all()
+    loaded_packed_dense = load_packed_model(
+        packed.root,
+        request.output,
+        snapshot,
+        source_name=request.source,
+        revision=request.revision,
+        device="cpu",
+        backend="dense",
+    )
+    with torch.no_grad():
+        packed_dense_logits = cast(Any, loaded_packed_dense.model)(
+            input_ids=torch.tensor(request.token_ids), use_cache=False
+        ).logits
+    assert torch.isfinite(packed_dense_logits).all()
+    assert torch.allclose(packed_dense_logits, packed_logits, atol=1e-5, rtol=1e-5)
 
 
 def test_reconstruction_rank_probe_covers_every_physical_unit_before_fitting(tmp_path: Path) -> None:

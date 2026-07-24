@@ -141,6 +141,7 @@ def load_packed_model(
                         for member in entry.spec.members
                     ),
                     module,
+                    in_features=entry.spec.in_features,
                 )
             else:
                 editor.install_frozen_layer(block, relative_name, module)
