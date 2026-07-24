@@ -5,7 +5,7 @@ from nanoquant.config.schema import ActivationGpuCacheMode, MemoryPolicyMode, Me
 from tests.support.experiments import load_experiment
 
 
-def test_experiment027_retargets_experiment025_numerics_with_adaptive_8b_execution() -> None:
+def test_experiment027_scales_experiment025_recipe_with_adaptive_8b_execution() -> None:
     experiment025 = load_experiment(25)
     experiment027 = load_experiment(27)
     config025 = experiment025.config
@@ -27,10 +27,31 @@ def test_experiment027_retargets_experiment025_numerics_with_adaptive_8b_executi
     assert (
         replace(
             config027.block_tuning,
+            non_factorized=replace(
+                config027.block_tuning.non_factorized,
+                loop=replace(
+                    config027.block_tuning.non_factorized.loop,
+                    batch_size=config025.block_tuning.non_factorized.loop.batch_size,
+                ),
+            ),
+            factorized=replace(
+                config027.block_tuning.factorized,
+                loop=replace(
+                    config027.block_tuning.factorized.loop,
+                    batch_size=config025.block_tuning.factorized.loop.batch_size,
+                ),
+            ),
+            post_block_refit=replace(
+                config027.block_tuning.post_block_refit,
+                batch_size=config025.block_tuning.post_block_refit.batch_size,
+            ),
             microbatch_size=config025.block_tuning.microbatch_size,
         )
         == config025.block_tuning
     )
+    assert config027.block_tuning.non_factorized.loop.batch_size == 32
+    assert config027.block_tuning.factorized.loop.batch_size == 32
+    assert config027.block_tuning.post_block_refit.batch_size == 32
     assert config027.block_tuning.microbatch_size is None
     assert config027.runtime.memory_policy.mode is MemoryPolicyMode.ADAPTIVE
     assert config027.runtime.memory_policy.profile is MemoryPolicyProfile.THROUGHPUT

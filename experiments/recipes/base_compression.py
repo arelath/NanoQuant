@@ -404,6 +404,28 @@ META_LLAMA_3_8B_INSTRUCT_COMPRESSION_TEMPLATE = config_delta(
     ),
     block_tuning=config_delta(
         LLAMA_ARCHITECTURE_PROTECTED_COMPRESSION_TEMPLATE.block_tuning,
+        # Use one reviewed logical batch across each tuning stage. The adaptive
+        # memory plan still selects a physical microbatch from 1..32, so the
+        # optimizer semantics are hardware-independent while CUDA occupancy can
+        # grow on larger devices.
+        non_factorized=config_delta(
+            LLAMA_ARCHITECTURE_PROTECTED_COMPRESSION_TEMPLATE.block_tuning.non_factorized,
+            loop=config_delta(
+                LLAMA_ARCHITECTURE_PROTECTED_COMPRESSION_TEMPLATE.block_tuning.non_factorized.loop,
+                batch_size=32,
+            ),
+        ),
+        factorized=config_delta(
+            LLAMA_ARCHITECTURE_PROTECTED_COMPRESSION_TEMPLATE.block_tuning.factorized,
+            loop=config_delta(
+                LLAMA_ARCHITECTURE_PROTECTED_COMPRESSION_TEMPLATE.block_tuning.factorized.loop,
+                batch_size=32,
+            ),
+        ),
+        post_block_refit=config_delta(
+            LLAMA_ARCHITECTURE_PROTECTED_COMPRESSION_TEMPLATE.block_tuning.post_block_refit,
+            batch_size=32,
+        ),
         microbatch_size=None,
     ),
     runtime=config_delta(

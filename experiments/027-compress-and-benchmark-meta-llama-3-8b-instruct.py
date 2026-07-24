@@ -1,4 +1,4 @@
-"""Experiment 027: apply Experiment 025 numerics with adaptive 8B execution."""
+"""Experiment 027: scale Experiment 025's recipe with adaptive 8B execution."""
 
 from recipes import (
     META_LLAMA_3_8B_INSTRUCT_COMPRESSION_TEMPLATE,
@@ -20,24 +20,26 @@ EXPERIMENT = define_compression_quality_experiment(
         name="compress-and-benchmark-meta-llama-3-8b-instruct",
         purpose=(
             "Apply Experiment 025's numerical compression, quality, and publication settings "
-            "to the pinned Meta Llama 3 8B Instruct model while adapting physical batches and "
-            "activation placement to the available CUDA memory."
+            "to the pinned Meta Llama 3 8B Instruct model while using 32-sample logical tuning "
+            "batches and adapting their physical microbatches and activation placement to the "
+            "available CUDA memory."
         ),
         hypothesis=(
             "Experiment 025's architecture-protected shared-QKV policy transfers from Llama "
-            "3.2 1B to Meta Llama 3 8B while adaptive throughput sizing and GPU activation "
-            "caching improve device utilization without changing logical optimizer batches, "
-            "the bit budget, quality protocol, resume behavior, or export contracts."
+            "3.2 1B to Meta Llama 3 8B while larger logical optimizer batches, adaptive physical "
+            "microbatches, and GPU activation caching improve throughput without changing the "
+            "bit budget, quality protocol, resume behavior, or export contracts."
         ),
         baseline=BaselineRef.experiment(BASELINE),
         tags=(
             "meta-llama-3-8b-instruct",
             "compression",
             "quality",
-            "experiment-025-numerics",
+            "experiment-025-derived-numerics",
             "cross-scale",
             "cross-generation",
             "adaptive-memory",
+            "logical-batch-32",
             "throughput-memory-profile",
             "activation-gpu-cache-auto",
             "shared-input-qkv",
