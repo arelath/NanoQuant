@@ -29,6 +29,11 @@ _CONFIG = _DEFINITION.config
 _EXPERIMENT = _DEFINITION.workflow
 
 
+def test_llamacpp_is_required_when_pytorch_candidate_quality_is_disabled() -> None:
+    with pytest.raises(ValueError, match="requires llama.cpp quality"):
+        replace(_EXPERIMENT, quality_backend=None)
+
+
 def test_compression_quality_runs_quality_before_huggingface_upload_and_publication(
     tmp_path: Path,
     monkeypatch,
@@ -98,6 +103,7 @@ def test_compression_quality_runs_quality_before_huggingface_upload_and_publicat
     experiment = replace(
         _EXPERIMENT,
         export=replace(_EXPERIMENT.export, huggingface=upload_config),
+        quality_backend=None,
         llamacpp_quality=True,
         llama_cpp_root=tmp_path / "llama.cpp",
     )
@@ -120,16 +126,19 @@ def test_compression_quality_runs_quality_before_huggingface_upload_and_publicat
         lambda _request: calls.append("prepare-quality") or prepared_quality,
     )
 
-    def evaluate(request, *, prepared):  # type: ignore[no-untyped-def]
+    def evaluate(request, *, prepared, evaluate_candidate):  # type: ignore[no-untyped-def]
         calls.append("quality")
         assert prepared is prepared_quality
+        assert evaluate_candidate is False
         quality_requests.append(request)
         return {
             "passed": True,
+            "candidate": None,
             "comparison": {},
             "resource_limits": {},
             "results": {"base": {"tasks": [], "wikitext": {"perplexity": 1.0}}},
             "protocol": {"task_names": (), "wikitext_token_hash": "sha256:tokens"},
+            "wall_seconds": 2.0,
         }
 
     monkeypatch.setattr(workflow, "execute_quality_evaluation", evaluate)
@@ -142,7 +151,21 @@ def test_compression_quality_runs_quality_before_huggingface_upload_and_publicat
         assert base["wikitext"]["perplexity"] == 1.0
         assert protocol["wikitext_token_hash"] == "sha256:tokens"
         request.output.write_text("{}\n", encoding="utf-8")
-        return {"passed": True, "comparison": {"wikitext": {}, "tasks": []}}
+        return {
+            "passed": True,
+            "comparison": {"wikitext": {}, "tasks": []},
+            "gguf": {"path": str(gguf), "bytes": 123, "sha256": "digest"},
+            "runtime": {"git": {"commit": "a" * 40}},
+            "results": {
+                "gguf": {
+                    "label": "gguf",
+                    "tasks": [],
+                    "wikitext": {"perplexity": 1.1},
+                    "elapsed_seconds": 3.0,
+                }
+            },
+            "wall_seconds": 3.0,
+        }
 
     monkeypatch.setattr(
         workflow,
@@ -181,9 +204,7 @@ def test_compression_quality_runs_quality_before_huggingface_upload_and_publicat
             (resolved.llamacpp_quality_output, "gguf-quality.json"),
         )
         assert resolved.quality_output.is_file()
-        assert resolved.quality_markdown_output.read_text(encoding="utf-8") == (
-            "# quality\n\n# GGUF\n"
-        )
+        assert resolved.quality_markdown_output.read_text(encoding="utf-8") == "# quality\n"
         return replace(
             result,
             huggingface=HuggingFaceUploadResult(
@@ -220,7 +241,7 @@ def test_compression_quality_runs_quality_before_huggingface_upload_and_publicat
         "llamacpp-quality",
         "upload",
     ]
-    assert quality_requests[0].packed_artifact == tmp_path / "repo" / "outputs/003/packed"
+    assert quality_requests[0].packed_artifact is None
     assert not quality_requests[0].stream_base_model
     assert quality_requests[0].local_files_only is False
     assert rendered_payloads[0]["deployment_storage"] == {
@@ -228,6 +249,9 @@ def test_compression_quality_runs_quality_before_huggingface_upload_and_publicat
         "packed_quantized_layer_bytes": 25,
         "gguf_bytes": 123,
     }
+    assert rendered_payloads[0]["candidate"]["backend"] == "llama.cpp"
+    assert rendered_payloads[0]["results"]["frozen"]["label"] == "gguf"
+    assert rendered_payloads[0]["comparison"] == {"wikitext": {}, "tasks": []}
     assert payload["exports"]["gguf"]["output"] == str(gguf)
     assert payload["exports"]["mmproj"]["output"] == str(mmproj)
     assert payload["exports"]["huggingface"]["commit_oid"] == "a" * 40

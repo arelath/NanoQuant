@@ -166,6 +166,11 @@ accumulation in FP32, records both accuracy variants, ties, per-example scores, 
 the task's pinned primary metric. Tests cover known logits, serial/batched equality, limiting, exact window edges,
 cache invalidation, and all six real cached dataset/tokenizer row-zero hashes against the retained legacy samples.
 
+Compression experiments with `quality_backend=None` use the same prepared inputs but skip loading a PyTorch
+NanoQuant candidate. Transformers evaluates the BF16 reference, and the protocol-matched llama.cpp runner evaluates
+the exported GGUF as the sole compressed candidate. The resulting BF16-versus-GGUF comparison is the primary quality
+result; the packed artifact is not reconstructed through the dense or factorized correctness backend.
+
 ### 6.2 Gemma long-context protocol
 
 The full-tier `gemma3-hybrid-cache` evaluator binds the model's declared 32,768-token context limit, 512-token

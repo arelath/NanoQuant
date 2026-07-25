@@ -337,7 +337,7 @@ def define_compression_quality_experiment(
     export: CompressionExportPolicy | None = None,
     maximum_wddm_shared_gib: float | None = None,
     restore_completed_blocks: bool = True,
-    quality_backend: str = "factorized",
+    quality_backend: str | None = "factorized",
     large_model_guards: bool = False,
     llamacpp_quality: bool = False,
     llamacpp_quality_parallel: int = 4,

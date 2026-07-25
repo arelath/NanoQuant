@@ -34,6 +34,7 @@ def test_experiment029_retargets_all_experiment028_settings_to_qwen3_8b() -> Non
         == workflow028
     )
     assert workflow029.expected_blocks == 36
+    assert workflow029.quality_backend is None
     assert workflow029.llamacpp_quality is True
     assert workflow029.export.runtime_family == "qwen"
     assert workflow029.export.gguf_output == Path("Results/029/qwen3-8b-nanoquant.gguf")

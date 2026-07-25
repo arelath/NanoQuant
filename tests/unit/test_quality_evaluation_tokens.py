@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from contextlib import nullcontext
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any
@@ -104,3 +105,83 @@ def test_wikitext_uses_first_raw_token_as_context_without_bos(
     assert torch.equal(tokens, torch.tensor([[10, 11, 12, 13], [14, 15, 16, 17]]))
     assert fingerprint == "qwen-fixture"
     assert bos_token_id is None
+
+
+def test_base_only_quality_does_not_load_a_pytorch_candidate(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    request = quality_evaluation.QualityEvaluationRequest(
+        tmp_path / "snapshot",
+        "fixture/model",
+        "revision",
+        tmp_path / "run",
+        device="cpu",
+        wikitext_samples=1,
+        wikitext_sequence_length=2,
+        task_names=("piqa",),
+    )
+    prepared = quality_evaluation.PreparedQualityInputs(
+        torch.tensor(((1, 2),), dtype=torch.long),
+        "fixture-fingerprint",
+        1,
+        0,
+        "sha256:" + "a" * 64,
+        (),
+    )
+    source_model = SimpleNamespace()
+    source_model.to = lambda _device: source_model
+    monkeypatch.setattr(
+        quality_evaluation,
+        "acquire_device_lease",
+        lambda _device: nullcontext(),
+    )
+    monkeypatch.setattr(
+        quality_evaluation.AutoConfig,
+        "from_pretrained",
+        lambda *_args, **_kwargs: SimpleNamespace(model_type="qwen"),
+    )
+    monkeypatch.setattr(
+        quality_evaluation,
+        "_checkpoint_dtype",
+        lambda _snapshot: torch.float32,
+    )
+    monkeypatch.setattr(
+        quality_evaluation,
+        "load_causal_language_model",
+        lambda *_args, **_kwargs: source_model,
+    )
+    monkeypatch.setattr(
+        quality_evaluation,
+        "_evaluate_model",
+        lambda *_args, **_kwargs: {
+            "label": "base",
+            "wikitext": {"perplexity": 2.0},
+            "tasks": [],
+            "elapsed_seconds": 1.0,
+            "peak_device_bytes": 0,
+            "peak_host_bytes": 0,
+        },
+    )
+    monkeypatch.setattr(quality_evaluation, "_release_device_memory", lambda: None)
+    monkeypatch.setattr(
+        quality_evaluation,
+        "load_frozen_run",
+        lambda *_args, **_kwargs: pytest.fail("frozen candidate must not be loaded"),
+    )
+    monkeypatch.setattr(
+        quality_evaluation,
+        "load_packed_model",
+        lambda *_args, **_kwargs: pytest.fail("packed candidate must not be loaded"),
+    )
+
+    result = quality_evaluation.execute_quality_evaluation(
+        request,
+        prepared=prepared,
+        evaluate_candidate=False,
+    )
+
+    assert result["passed"] is True
+    assert result["candidate"] is None
+    assert tuple(result["results"]) == ("base",)
+    assert result["comparison"] is None

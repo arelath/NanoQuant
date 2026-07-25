@@ -95,6 +95,10 @@ def _markdown_cell(value: object) -> str:
     return rendered.replace("|", "\\|").replace("\n", " ")
 
 
+def _optional_integer_cell(value: object, name: str) -> str:
+    return "unavailable" if value is None else f"{int(_number(value, name)):,}"
+
+
 def _deployment_storage_markdown(payload: dict[str, Any]) -> tuple[str, ...]:
     raw = payload.get("deployment_storage")
     if raw is None:
@@ -190,35 +194,74 @@ def render_quality_evaluation_markdown(payload: dict[str, Any]) -> str:
             f"{baseline:.4f} | {value:.4f} | {value - baseline:+.4f} | {ratio_text} |"
         )
     lines.extend(_deployment_storage_markdown(payload))
+    if candidate["backend"] == "llama.cpp":
+        gguf = cast(dict[str, object], candidate["gguf"])
+        runtime = cast(dict[str, Any], candidate["runtime"])
+        git = cast(dict[str, object], runtime["git"])
+        lines.extend(
+            (
+                "",
+                "## Quality execution",
+                "",
+                (
+                    "The BF16 reference uses Transformers. The NanoQuant candidate is evaluated only "
+                    "from the exported GGUF by the pinned llama.cpp runtime; no reconstructed dense or "
+                    "factorized PyTorch candidate is loaded."
+                ),
+                "",
+                "| Runtime | Elapsed seconds | Peak dedicated GPU bytes | Peak host bytes |",
+                "| --- | ---: | ---: | ---: |",
+                (
+                    f"| BF16 Transformers | {_number(base['elapsed_seconds'], 'base elapsed'):.2f} | "
+                    f"{_optional_integer_cell(base.get('peak_device_bytes'), 'base peak device')} | "
+                    f"{_optional_integer_cell(base.get('peak_host_bytes'), 'base peak host')} |"
+                ),
+                (
+                    f"| NanoQuant llama.cpp GGUF | "
+                    f"{_number(frozen['elapsed_seconds'], 'GGUF elapsed'):.2f} | "
+                    f"{_optional_integer_cell(frozen.get('peak_device_bytes'), 'GGUF peak device')} | "
+                    f"{_optional_integer_cell(frozen.get('peak_host_bytes'), 'GGUF peak host')} |"
+                ),
+                "",
+                f"- GGUF: `{_markdown_cell(gguf['path'])}`",
+                f"- GGUF SHA-256: `sha256:{_markdown_cell(gguf['sha256'])}`",
+                f"- llama.cpp commit: `{_markdown_cell(git['commit'])}`",
+            )
+        )
+    else:
+        lines.extend(
+            (
+                "",
+                "## PyTorch quality-reference execution",
+                "",
+                (
+                    f"The NanoQuant row uses the `{_markdown_cell(candidate['backend'])}` correctness backend. "
+                    "It reconstructs or expands packed factors into ordinary PyTorch tensors and is not the "
+                    "GGUF deployment runtime. Its allocator peaks do not measure deployed NanoQuant memory "
+                    "savings. Host values are process-lifetime high-water marks, so the two rows are not "
+                    "independent host-memory windows."
+                ),
+                "",
+                (
+                    "| Reference backend | Elapsed seconds | CUDA allocator peak bytes | "
+                    "Process peak host bytes |"
+                ),
+                "| --- | ---: | ---: | ---: |",
+                (
+                    f"| BF16 Transformers | {_number(base['elapsed_seconds'], 'base elapsed'):.2f} | "
+                    f"{int(_number(base['peak_device_bytes'], 'base peak device')):,} | "
+                    f"{int(_number(base['peak_host_bytes'], 'base peak host')):,} |"
+                ),
+                (
+                    f"| NanoQuant {_markdown_cell(candidate['backend'])} reference | "
+                    f"{_number(frozen['elapsed_seconds'], 'frozen elapsed'):.2f} | "
+                    f"{int(_number(frozen['peak_device_bytes'], 'frozen peak device')):,} | "
+                    f"{int(_number(frozen['peak_host_bytes'], 'frozen peak host')):,} |"
+                ),
+            )
+        )
     lines.extend(
         (
-            "",
-            "## PyTorch quality-reference execution",
-            "",
-            (
-                f"The NanoQuant row uses the `{_markdown_cell(candidate['backend'])}` correctness backend. "
-                "It reconstructs or expands packed factors into ordinary PyTorch tensors and is not the "
-                "GGUF deployment runtime. Its allocator peaks do not measure deployed NanoQuant memory "
-                "savings. Host values are process-lifetime high-water marks, so the two rows are not "
-                "independent host-memory windows."
-            ),
-            "",
-            (
-                "| Reference backend | Elapsed seconds | CUDA allocator peak bytes | "
-                "Process peak host bytes |"
-            ),
-            "| --- | ---: | ---: | ---: |",
-            (
-                f"| BF16 Transformers | {_number(base['elapsed_seconds'], 'base elapsed'):.2f} | "
-                f"{int(_number(base['peak_device_bytes'], 'base peak device')):,} | "
-                f"{int(_number(base['peak_host_bytes'], 'base peak host')):,} |"
-            ),
-            (
-                f"| NanoQuant {_markdown_cell(candidate['backend'])} reference | "
-                f"{_number(frozen['elapsed_seconds'], 'frozen elapsed'):.2f} | "
-                f"{int(_number(frozen['peak_device_bytes'], 'frozen peak device')):,} | "
-                f"{int(_number(frozen['peak_host_bytes'], 'frozen peak host')):,} |"
-            ),
             "",
             "## Provenance",
             "",

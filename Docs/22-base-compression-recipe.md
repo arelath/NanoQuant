@@ -116,11 +116,15 @@ upload until evaluation succeeds and its document exists. Before upload, the reu
 quantized-derivative, task, format, language, and license metadata. Compression-quality cards retain the rendered
 quality report as their Markdown body; benchmark cards receive a generated summary body. Both workflows expose the
 card as `README.md` and their machine-readable measurements as `quality.json`.
-Compression-quality reports distinguish deployable storage from the PyTorch correctness evaluator. The latter
-reconstructs or expands packed factors into ordinary PyTorch tensors, so its CUDA allocator peak is reference-backend
-workspace rather than deployed NanoQuant VRAM; its process host peak is also cumulative across the BF16 and candidate
-passes. The report compares the complete GGUF byte size with the BF16 checkpoint and labels the evaluator table
-accordingly instead of presenting those workspace peaks as deployment memory savings.
+Compression-quality reports distinguish deployable storage from evaluation workspace. Experiments that do not use
+llama.cpp may reconstruct or expand packed factors into ordinary PyTorch tensors as a correctness backend; its CUDA
+allocator peak is reference-backend workspace rather than deployed NanoQuant VRAM. Experiments 027 through 029 disable
+that duplicate candidate pass: Transformers evaluates only the BF16 reference, while the exported NanoQuant GGUF is
+evaluated only by llama.cpp. Their primary comparison, quality gate, report, and publication therefore use the actual
+deployment artifact rather than a reconstructed dense or factorized candidate.
+The llama.cpp quality subprocess runs the GGUF through the pinned custom branch and samples that child process
+independently. On Windows, its table reports WDDM dedicated/shared GPU peaks plus the child working-set peak; these
+are the packed deployment-runtime measurements and remain separate from PyTorch allocator counters.
 The GGUF, optional mmproj, packed quality, optional llama.cpp GGUF quality, and report files therefore share one
 commit identity. The GGUF result is reusable only when the GGUF hash, prepared-input hash, scorer binary, llama.cpp
 commit and runtime-library identity, GPU-layer policy, and parallelism all still match.

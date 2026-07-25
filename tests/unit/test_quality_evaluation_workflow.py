@@ -241,3 +241,37 @@ def test_quality_markdown_reports_deployment_storage_separately() -> None:
     assert "| BF16 checkpoint tensors | 1,000 | — |" in rendered
     assert "| NanoQuant GGUF | 250 | 75.00% |" in rendered
     assert "packed NanoQuant quantized-layer payload is 25 bytes" in rendered
+
+
+def test_quality_markdown_reports_llamacpp_as_the_only_candidate_runtime() -> None:
+    payload = _quality_result()
+    payload["experiment"] = {
+        "config_hash": "sha256:config",
+        "resolved_config": {"intent": {"experiment_number": 29}},
+        "launcher": {"repository_relative_path": "experiments/029.py"},
+    }
+    payload["candidate"] = {
+        "run_output": "run",
+        "commit_identity": {"config_hash": "config", "model_hash": "model"},
+        "global_tuning": None,
+        "backend": "llama.cpp",
+        "gguf": {
+            "path": "Results/029/qwen3-8b-nanoquant.gguf",
+            "bytes": 1_000,
+            "sha256": "b" * 64,
+        },
+        "runtime": {"git": {"commit": "c" * 40}},
+    }
+    payload["results"]["frozen"] = {
+        "elapsed_seconds": 4.0,
+        "peak_device_bytes": None,
+        "peak_host_bytes": 300,
+    }
+
+    rendered = render_quality_evaluation_markdown(payload)
+
+    assert "evaluated only from the exported GGUF" in rendered
+    assert "no reconstructed dense or factorized PyTorch candidate is loaded" in rendered
+    assert "| NanoQuant llama.cpp GGUF | 4.00 | unavailable | 300 |" in rendered
+    assert "## PyTorch quality-reference execution" not in rendered
+    assert f"- llama.cpp commit: `{'c' * 40}`" in rendered

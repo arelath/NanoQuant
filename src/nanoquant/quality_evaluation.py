@@ -433,8 +433,9 @@ def execute_quality_evaluation(
     *,
     prepared: PreparedQualityInputs | None = None,
     progress: QualityProgressCallback | None = None,
+    evaluate_candidate: bool = True,
 ) -> dict[str, Any]:
-    """Evaluate the base and committed frozen models on identical pinned inputs."""
+    """Evaluate the base model and, when requested, the frozen candidate."""
 
     _emit_progress(progress, "input_preparation_started", reused=prepared is not None)
     inputs = prepare_quality_inputs(request, progress) if prepared is None else prepared
@@ -484,77 +485,75 @@ def execute_quality_evaluation(
             finally:
                 del base, source_model
                 _release_device_memory()
-            loaded: LoadedFrozenModel | LoadedPackedModel | None = None
+            frozen_result: dict[str, Any] | None = None
+            frozen_identity: dict[str, Any] | None = None
+            global_tuning: dict[str, Any] | None = None
             packed_descriptor_sha256 = None
-            try:
-                frozen_load_started = time.perf_counter()
-                _emit_progress(progress, "model_load_started", model="frozen")
-                loaded = (
-                    load_frozen_run(
-                        request.run_output,
-                        request.snapshot,
-                        source_name=request.source,
-                        revision=request.revision,
-                        device=request.device,
-                        backend=request.backend,
-                        use_global_tuning=request.use_global_tuning,
+            if evaluate_candidate:
+                loaded: LoadedFrozenModel | LoadedPackedModel | None = None
+                try:
+                    frozen_load_started = time.perf_counter()
+                    _emit_progress(progress, "model_load_started", model="frozen")
+                    loaded = (
+                        load_frozen_run(
+                            request.run_output,
+                            request.snapshot,
+                            source_name=request.source,
+                            revision=request.revision,
+                            device=request.device,
+                            backend=request.backend,
+                            use_global_tuning=request.use_global_tuning,
+                        )
+                        if request.packed_artifact is None
+                        else load_packed_model(
+                            request.packed_artifact,
+                            request.run_output,
+                            request.snapshot,
+                            source_name=request.source,
+                            revision=request.revision,
+                            device=request.device,
+                            backend=request.backend,
+                            use_global_tuning=request.use_global_tuning,
+                        )
                     )
-                    if request.packed_artifact is None
-                    else load_packed_model(
-                        request.packed_artifact,
-                        request.run_output,
-                        request.snapshot,
-                        source_name=request.source,
-                        revision=request.revision,
-                        device=request.device,
-                        backend=request.backend,
-                        use_global_tuning=request.use_global_tuning,
+                    if monitor is not None:
+                        monitor.check()
+                    frozen_load_seconds = time.perf_counter() - frozen_load_started
+                    _emit_progress(
+                        progress,
+                        "model_load_completed",
+                        model="frozen",
+                        elapsed_seconds=frozen_load_seconds,
                     )
-                )
-                if monitor is not None:
-                    monitor.check()
-                frozen_load_seconds = time.perf_counter() - frozen_load_started
-                _emit_progress(
-                    progress,
-                    "model_load_completed",
-                    model="frozen",
-                    elapsed_seconds=frozen_load_seconds,
-                )
-                frozen_result = _evaluate_model(
-                    "frozen",
-                    loaded.model,
-                    request,
-                    inputs,
-                    monitor,
-                    progress,
-                )
-                frozen_result["model_load_seconds"] = frozen_load_seconds
-                frozen_identity = to_dict(loaded.identity)
-                global_tuning = None if loaded.global_tuning is None else to_dict(loaded.global_tuning)
-                packed_descriptor_sha256 = (
-                    loaded.packed_descriptor_sha256 if isinstance(loaded, LoadedPackedModel) else None
-                )
-            finally:
-                if loaded is not None:
-                    del loaded
-                _release_device_memory()
+                    frozen_result = _evaluate_model(
+                        "frozen",
+                        loaded.model,
+                        request,
+                        inputs,
+                        monitor,
+                        progress,
+                    )
+                    frozen_result["model_load_seconds"] = frozen_load_seconds
+                    frozen_identity = to_dict(loaded.identity)
+                    global_tuning = (
+                        None if loaded.global_tuning is None else to_dict(loaded.global_tuning)
+                    )
+                    packed_descriptor_sha256 = (
+                        loaded.packed_descriptor_sha256
+                        if isinstance(loaded, LoadedPackedModel)
+                        else None
+                    )
+                finally:
+                    if loaded is not None:
+                        del loaded
+                    _release_device_memory()
     token_hash = "sha256:" + hashlib.sha256(
         inputs.wikitext_tokens.contiguous().view(torch.uint8).numpy().tobytes()
     ).hexdigest()
-    payload = {
-        "schema_version": 1,
-        "passed": all(
-            math.isfinite(
-                _number(cast(dict[str, object], case["wikitext"])["perplexity"], "perplexity")
-            )
-            for case in (base_result, frozen_result)
-        ),
-        "model": {
-            "source": request.source,
-            "revision": request.revision,
-            "snapshot": str(request.snapshot.resolve()),
-        },
-        "candidate": {
+    candidate = (
+        None
+        if not evaluate_candidate
+        else {
             "run_output": str(request.run_output.resolve()),
             "commit_identity": frozen_identity,
             "global_tuning": global_tuning,
@@ -565,7 +564,25 @@ def execute_quality_evaluation(
             "packed_descriptor_sha256": None
             if request.packed_artifact is None
             else packed_descriptor_sha256,
+        }
+    )
+    results = {"base": base_result}
+    if frozen_result is not None:
+        results["frozen"] = frozen_result
+    payload = {
+        "schema_version": 1,
+        "passed": all(
+            math.isfinite(
+                _number(cast(dict[str, object], case["wikitext"])["perplexity"], "perplexity")
+            )
+            for case in results.values()
+        ),
+        "model": {
+            "source": request.source,
+            "revision": request.revision,
+            "snapshot": str(request.snapshot.resolve()),
         },
+        "candidate": candidate,
         "protocol": {
             "wikitext_dataset": f"{WIKITEXT_DATASET}:{WIKITEXT_CONFIG}:test@{WIKITEXT_REVISION}",
             "wikitext_fingerprint": inputs.wikitext_fingerprint,
@@ -583,8 +600,12 @@ def execute_quality_evaluation(
             "tokenizer_hash": inputs.tokenizer_hash,
             "base_execution": "block_streamed" if request.stream_base_model else "resident",
         },
-        "results": {"base": base_result, "frozen": frozen_result},
-        "comparison": compare_quality_results(base_result, frozen_result),
+        "results": results,
+        "comparison": (
+            None
+            if frozen_result is None
+            else compare_quality_results(base_result, frozen_result)
+        ),
         "wall_seconds": time.perf_counter() - wall_started,
         "resource_limits": {
             "maximum_wddm_shared_bytes": request.maximum_wddm_shared_bytes,

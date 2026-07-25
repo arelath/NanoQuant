@@ -72,7 +72,7 @@ class CompressionQualityExperiment:
     local_files_only: bool = False
     maximum_wddm_shared_gib: float | None = None
     restore_completed_blocks: bool = True
-    quality_backend: str = "factorized"
+    quality_backend: str | None = "factorized"
     large_model_guards: bool = False
     llamacpp_quality: bool = False
     llama_cpp_root: Path | None = None
@@ -89,8 +89,10 @@ class CompressionQualityExperiment:
             not math.isfinite(self.maximum_wddm_shared_gib) or self.maximum_wddm_shared_gib < 0
         ):
             raise ValueError("maximum WDDM shared memory must be finite and non-negative")
-        if self.quality_backend not in {"factorized", "dense"}:
-            raise ValueError("quality backend must be factorized or dense")
+        if self.quality_backend not in {None, "factorized", "dense"}:
+            raise ValueError("quality backend must be factorized, dense, or disabled")
+        if self.quality_backend is None and not self.llamacpp_quality:
+            raise ValueError("disabled PyTorch candidate quality requires llama.cpp quality")
         if self.large_model_guards and self.restore_completed_blocks:
             raise ValueError("large-model quality experiments must disable completed-block restoration")
         if self.llamacpp_quality and self.llama_cpp_root is None:
@@ -194,7 +196,7 @@ def execute_compression_quality_experiment(
         revision=str(config.model.revision),
         run_output=resolved.inputs.output,
         device=config.runtime.compute_device,
-        backend=experiment.quality_backend,
+        backend=experiment.quality_backend or "factorized",
         use_global_tuning=config.distillation.enabled,
         wikitext_samples=experiment.wikitext_samples,
         wikitext_sequence_length=experiment.wikitext_sequence_length,
@@ -204,7 +206,11 @@ def execute_compression_quality_experiment(
         task_batch_size=experiment.task_batch_size,
         local_files_only=experiment.local_files_only,
         maximum_wddm_shared_bytes=maximum_shared_bytes,
-        packed_artifact=_repository_path(experiment.export.packed_output, repository_root),
+        packed_artifact=(
+            None
+            if experiment.quality_backend is None
+            else _repository_path(experiment.export.packed_output, repository_root)
+        ),
         stream_base_model=(
             experiment.large_model_guards
             or config.runtime.executor in {ExecutorKind.CPU_OFFLOAD, ExecutorKind.STREAMING}
@@ -213,10 +219,10 @@ def execute_compression_quality_experiment(
     prepared_quality = (
         prepare_quality_inputs(quality_request) if experiment.llamacpp_quality else None
     )
-    quality = (
-        execute_quality_evaluation(quality_request)
-        if prepared_quality is None
-        else execute_quality_evaluation(quality_request, prepared=prepared_quality)
+    quality = execute_quality_evaluation(
+        quality_request,
+        prepared=prepared_quality,
+        evaluate_candidate=experiment.quality_backend is not None,
     )
     quality_seconds = time.perf_counter() - quality_started
     llamacpp_quality_started = time.perf_counter()
@@ -277,6 +283,31 @@ def execute_compression_quality_experiment(
     llamacpp_quality_seconds = (
         0.0 if llamacpp_quality is None else time.perf_counter() - llamacpp_quality_started
     )
+    if experiment.quality_backend is None:
+        if llamacpp_quality is None:
+            raise RuntimeError("llama.cpp-only quality did not produce a GGUF result")
+        quality = {
+            **quality,
+            "schema_version": 2,
+            "passed": bool(quality.get("passed")) and bool(llamacpp_quality.get("passed")),
+            "candidate": {
+                "run_output": str(resolved.inputs.output.resolve()),
+                "commit_identity": to_dict(workflow.quantization.identity),
+                "global_tuning": None,
+                "backend": "llama.cpp",
+                "packed_artifact": None,
+                "packed_descriptor_sha256": None,
+                "gguf": llamacpp_quality["gguf"],
+                "runtime": llamacpp_quality["runtime"],
+            },
+            "results": {
+                "base": quality["results"]["base"],
+                "frozen": llamacpp_quality["results"]["gguf"],
+            },
+            "comparison": llamacpp_quality["comparison"],
+            "wall_seconds": float(quality["wall_seconds"])
+            + float(llamacpp_quality["wall_seconds"]),
+        }
     provenance = to_dict(launcher_provenance(resolved.inputs.launcher_path, config.intent.experiment_number))
     quality_payload = {
         **quality,
@@ -298,7 +329,7 @@ def execute_compression_quality_experiment(
     }
     atomic_write_json(resolved.quality_output, quality_payload)
     rendered_quality = render_quality_evaluation_markdown(quality_payload)
-    if llamacpp_quality is not None:
+    if llamacpp_quality is not None and experiment.quality_backend is not None:
         rendered_quality = (
             rendered_quality.rstrip()
             + "\n\n"

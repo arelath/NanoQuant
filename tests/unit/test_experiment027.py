@@ -69,10 +69,12 @@ def test_experiment027_scales_experiment025_recipe_with_adaptive_8b_execution() 
         quality_output=workflow025.quality_output,
         quality_markdown_output=workflow025.quality_markdown_output,
         expected_blocks=workflow025.expected_blocks,
+        quality_backend=workflow025.quality_backend,
         llamacpp_quality=workflow025.llamacpp_quality,
         llama_cpp_root=workflow025.llama_cpp_root,
     ) == workflow025
     assert workflow027.expected_blocks == 32
+    assert workflow027.quality_backend is None
     assert workflow027.llamacpp_quality is True
     assert workflow027.llamacpp_quality_parallel == 4
     assert workflow027.llama_cpp_root is not None
