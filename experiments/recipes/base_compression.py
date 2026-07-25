@@ -1,6 +1,7 @@
 """Visible unnumbered templates shared by NanoQuant compression experiments."""
 
 from dataclasses import replace
+from pathlib import Path
 
 from nanoquant.config.codec import apply_overrides
 from nanoquant.config.schema import (
@@ -25,9 +26,9 @@ from nanoquant.config.schema import (
     SharedInputGroupConfig,
     TuningEpochLossMode,
 )
-from nanoquant.interactive_compression import RecommendedModel
 
 from ._delta import config_delta, run_config_defaults
+from ._interactive_catalog import load_interactive_recommended_models
 
 MODEL_REVISION = "dcc83ea841ab6100d6b47a070329e1ba4cf78752"
 GEMMA_3_270M_MODEL_REVISION = "23cf460f6bb16954176b3ddcc8d4f250501458a9"
@@ -547,155 +548,21 @@ _INTERACTIVE_GEMMA_3_12B_TEMPLATE = apply_overrides(
     },
 )
 
-INTERACTIVE_RECOMMENDED_MODELS = (
-    RecommendedModel(
-        family="qwen3",
-        family_label="Qwen3",
-        family_order=0,
-        variant="qwen3-0-6b",
-        variant_label="Qwen3-0.6B",
-        variant_order=0,
-        source="Qwen/Qwen3-0.6B",
-        revision=QWEN_3_0_6B_MODEL_REVISION,
-        runtime_family="qwen",
-        release_name="qwen3-0-6b",
-        profile_id="qwen3-dual-mode-v1",
-        evidence=(
-            "Docs/36-qwen3-thinking-mode-quality.md",
-            "experiments/030-recover-qwen3-0-6b-thinking-quality.py",
-        ),
-        template=QWEN_3_0_6B_DUAL_MODE_COMPRESSION_TEMPLATE,
-        default_family=True,
-        default_variant=True,
-    ),
-    RecommendedModel(
-        family="qwen3",
-        family_label="Qwen3",
-        family_order=0,
-        variant="qwen3-8b",
-        variant_label="Qwen3-8B",
-        variant_order=1,
-        source="Qwen/Qwen3-8B",
-        revision=QWEN_3_8B_MODEL_REVISION,
-        runtime_family="qwen",
-        release_name="qwen3-8b",
-        profile_id="qwen3-dual-mode-v1",
-        evidence=(
-            "Docs/36-qwen3-thinking-mode-quality.md",
-            "experiments/031-confirm-qwen3-8b-thinking-quality.py",
-        ),
-        template=QWEN_3_8B_DUAL_MODE_COMPRESSION_TEMPLATE,
-        llamacpp_quality_parallel=1,
-    ),
-    RecommendedModel(
-        family="gemma3",
-        family_label="Gemma3",
-        family_order=1,
-        variant="gemma3-270m",
-        variant_label="Gemma3-270M",
-        variant_order=0,
-        source="unsloth/gemma-3-270m-it",
-        revision=GEMMA_3_270M_MODEL_REVISION,
-        runtime_family="gemma3",
-        release_name="gemma-3-270m-it",
-        profile_id="gemma3-architecture-protected-v1",
-        evidence=("experiments/016-compress-and-benchmark-gemma-3-270m-it.py",),
-        template=_INTERACTIVE_GEMMA_3_270M_TEMPLATE,
-    ),
-    RecommendedModel(
-        family="gemma3",
-        family_label="Gemma3",
-        family_order=1,
-        variant="gemma3-1b",
-        variant_label="Gemma3-1B",
-        variant_order=1,
-        source="google/gemma-3-1b-it",
-        revision=MODEL_REVISION,
-        runtime_family="gemma3",
-        release_name="gemma-3-1b-it",
-        profile_id="gemma3-architecture-protected-v1",
-        evidence=("experiments/017-compress-and-benchmark-gemma-3-1b-it.py",),
-        template=_INTERACTIVE_GEMMA_3_1B_TEMPLATE,
-        default_variant=True,
-    ),
-    RecommendedModel(
-        family="gemma3",
-        family_label="Gemma3",
-        family_order=1,
-        variant="gemma3-4b",
-        variant_label="Gemma3-4B",
-        variant_order=2,
-        source="google/gemma-3-4b-it",
-        revision=GEMMA_3_4B_MODEL_REVISION,
-        runtime_family="gemma3",
-        release_name="gemma-3-4b-it",
-        profile_id="gemma3-architecture-protected-v1",
-        evidence=("experiments/018-compress-and-benchmark-gemma-3-4b-it.py",),
-        template=_INTERACTIVE_GEMMA_3_4B_TEMPLATE,
-    ),
-    RecommendedModel(
-        family="gemma3",
-        family_label="Gemma3",
-        family_order=1,
-        variant="gemma3-12b",
-        variant_label="Gemma3-12B",
-        variant_order=3,
-        source="unsloth/gemma-3-12b-it",
-        revision=GEMMA_3_12B_MODEL_REVISION,
-        runtime_family="gemma3",
-        release_name="gemma-3-12b-it",
-        profile_id="gemma3-large-model-v1",
-        evidence=("experiments/008-compress-and-benchmark-gemma-3-12b-it.py",),
-        template=_INTERACTIVE_GEMMA_3_12B_TEMPLATE,
-        large_model_guards=True,
-    ),
-    RecommendedModel(
-        family="llama3",
-        family_label="Llama3",
-        family_order=2,
-        variant="llama3-8b-instruct",
-        variant_label="Llama3-8B-Instruct",
-        variant_order=0,
-        source="meta-llama/Meta-Llama-3-8B-Instruct",
-        revision=META_LLAMA_3_8B_INSTRUCT_MODEL_REVISION,
-        runtime_family="llama",
-        release_name="meta-llama-3-8b-instruct",
-        profile_id="llama-architecture-protected-v1",
-        evidence=("experiments/027-compress-and-benchmark-meta-llama-3-8b-instruct.py",),
-        template=META_LLAMA_3_8B_INSTRUCT_COMPRESSION_TEMPLATE,
-        default_variant=True,
-    ),
-    RecommendedModel(
-        family="llama3-2",
-        family_label="Llama3.2",
-        family_order=3,
-        variant="llama3-2-1b-instruct",
-        variant_label="Llama3.2-1B-Instruct",
-        variant_order=0,
-        source="meta-llama/Llama-3.2-1B-Instruct",
-        revision=LLAMA_3_2_1B_INSTRUCT_MODEL_REVISION,
-        runtime_family="llama",
-        release_name="llama-3-2-1b-instruct",
-        profile_id="llama-architecture-protected-v1",
-        evidence=("experiments/025-compress-and-benchmark-llama-3-2-1b-instruct.py",),
-        template=LLAMA_ARCHITECTURE_PROTECTED_COMPRESSION_TEMPLATE,
-        default_variant=True,
-    ),
-    RecommendedModel(
-        family="llama3-2",
-        family_label="Llama3.2",
-        family_order=3,
-        variant="llama3-2-3b-instruct",
-        variant_label="Llama3.2-3B-Instruct",
-        variant_order=1,
-        source="meta-llama/Llama-3.2-3B-Instruct",
-        revision=LLAMA_3_2_3B_INSTRUCT_MODEL_REVISION,
-        runtime_family="llama",
-        release_name="llama-3-2-3b-instruct",
-        profile_id="llama-architecture-protected-v1",
-        evidence=("experiments/026-compress-and-benchmark-llama-3-2-3b-instruct.py",),
-        template=LLAMA_3_2_3B_INSTRUCT_COMPRESSION_TEMPLATE,
-    ),
+_INTERACTIVE_TEMPLATES = {
+    "qwen3-0-6b-dual-mode": QWEN_3_0_6B_DUAL_MODE_COMPRESSION_TEMPLATE,
+    "qwen3-8b-dual-mode": QWEN_3_8B_DUAL_MODE_COMPRESSION_TEMPLATE,
+    "gemma3-270m-architecture-protected": _INTERACTIVE_GEMMA_3_270M_TEMPLATE,
+    "gemma3-1b-architecture-protected": _INTERACTIVE_GEMMA_3_1B_TEMPLATE,
+    "gemma3-4b-architecture-protected": _INTERACTIVE_GEMMA_3_4B_TEMPLATE,
+    "gemma3-12b-large": _INTERACTIVE_GEMMA_3_12B_TEMPLATE,
+    "llama3-8b-architecture-protected": META_LLAMA_3_8B_INSTRUCT_COMPRESSION_TEMPLATE,
+    "llama3-2-1b-architecture-protected": LLAMA_ARCHITECTURE_PROTECTED_COMPRESSION_TEMPLATE,
+    "llama3-2-3b-architecture-protected": LLAMA_3_2_3B_INSTRUCT_COMPRESSION_TEMPLATE,
+}
+
+INTERACTIVE_RECOMMENDED_MODELS = load_interactive_recommended_models(
+    Path(__file__).with_name("interactive_recommended_models.yaml"),
+    _INTERACTIVE_TEMPLATES,
 )
 
 

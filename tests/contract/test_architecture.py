@@ -68,6 +68,7 @@ def test_recipes_contain_only_generic_reusable_definitions() -> None:
         "_declarative.py",
         "_delta.py",
         "_experiment.py",
+        "_interactive_catalog.py",
         "base_compression.py",
     }
 
