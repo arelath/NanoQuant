@@ -361,6 +361,23 @@ int main(int argc, char ** argv) {
                 std::to_string(score.negative_log_likelihood);
         };
 
+        auto score_all_serially = [&]() {
+            scores.assign(sequences.size(), Score{});
+            for (std::size_t sequence_index = 0;
+                 sequence_index < sequences.size();
+                 ++sequence_index) {
+                auto single_score = decode_range(sequence_index, sequence_index + 1).front();
+                if (!valid_score(sequence_index, single_score)) {
+                    throw std::runtime_error(
+                        "quality score remained invalid during full serial retry: " +
+                        invalid_score_message(sequence_index, single_score));
+                }
+                scores[sequence_index] = single_score;
+                std::cerr << "llama.cpp quality serial batch " << (sequence_index + 1)
+                          << "/" << sequences.size() << " completed" << std::endl;
+            }
+        };
+
         for (std::size_t begin = 0; begin < sequences.size(); begin += parallel) {
             const std::size_t end = std::min(begin + parallel, sequences.size());
             auto range_scores = decode_range(begin, end);
@@ -374,18 +391,11 @@ int main(int argc, char ** argv) {
             if (!range_valid && end - begin > 1) {
                 std::cerr
                     << "llama.cpp quality batch " << (begin / parallel + 1)
-                    << " produced an invalid parallel score; retrying sequences "
-                    << begin << "-" << (end - 1) << " individually"
+                    << " produced an invalid parallel score; discarding all parallel "
+                       "scores and restarting the full benchmark serially"
                     << std::endl;
-                for (std::size_t sequence_index = begin; sequence_index < end; ++sequence_index) {
-                    auto single_score = decode_range(sequence_index, sequence_index + 1).front();
-                    if (!valid_score(sequence_index, single_score)) {
-                        throw std::runtime_error(
-                            "quality score remained invalid after single-sequence retry: " +
-                            invalid_score_message(sequence_index, single_score));
-                    }
-                    scores[sequence_index] = single_score;
-                }
+                score_all_serially();
+                break;
             } else {
                 for (std::size_t sequence_index = begin; sequence_index < end; ++sequence_index) {
                     const auto & score = range_scores[sequence_index - begin];

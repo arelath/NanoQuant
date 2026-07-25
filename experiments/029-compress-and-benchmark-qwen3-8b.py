@@ -1,4 +1,4 @@
-"""Experiment 029: apply Experiment 028's settings to Qwen3 8B."""
+"""Experiment 029: apply Experiment 028's compression settings to Qwen3 8B."""
 
 from recipes import (
     QWEN_3_8B_COMPRESSION_TEMPLATE,
@@ -20,13 +20,15 @@ EXPERIMENT = define_compression_quality_experiment(
         name="compress-and-benchmark-qwen3-8b",
         purpose=(
             "Apply Experiment 028's compression, adaptive execution, quality, and publication "
-            "settings unchanged to the pinned Qwen3 8B model."
+            "settings to the pinned Qwen3 8B model, using serial llama.cpp quality scoring "
+            "because its multi-sequence NanoQuant CUDA path is numerically unstable."
         ),
         hypothesis=(
             "Experiment 028's architecture-protected rank policy, 32-sample logical tuning "
             "batches, adaptive physical microbatches, and GPU activation caching transfer from "
             "Qwen3 0.6B to Qwen3 8B while preserving the bit budget, quality protocol, resume "
-            "behavior, and export contracts."
+            "behavior, and export contracts; serial GGUF scoring yields a consistent deployment "
+            "quality measurement."
         ),
         baseline=BaselineRef.experiment(BASELINE),
         tags=(
@@ -51,6 +53,7 @@ EXPERIMENT = define_compression_quality_experiment(
             "gguf",
             "wikitext2",
             "ultrachat",
+            "llamacpp-serial-quality",
         ),
     ),
     QWEN_3_8B_COMPRESSION_TEMPLATE,
@@ -59,6 +62,7 @@ EXPERIMENT = define_compression_quality_experiment(
     restore_completed_blocks=False,
     quality_backend=None,
     llamacpp_quality=True,
+    llamacpp_quality_parallel=1,
     export=CompressionExportPolicy(
         release_name="qwen3-8b",
         runtime_family="qwen",

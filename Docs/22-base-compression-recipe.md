@@ -137,9 +137,10 @@ Multiple-choice tasks score the same retained context and continuation targets u
 the PyTorch evaluator. It does not reconstruct text or substitute generated answer letters. llama.cpp exposes F32
 logits, so the runner records its F64 host log-sum-exp policy explicitly; close-choice results need not be bit-identical
 to the packed PyTorch backend. Each parallel batch is validated immediately. If a batch produces an incomplete or
-non-finite score, the runner retries only that batch one sequence at a time; a persistent failure reports the exact
-sequence index, expected and observed target counts, and accumulated negative log likelihood instead of waiting until
-the end of the full benchmark.
+non-finite score, the runner discards all parallel results and restarts the complete benchmark serially so one report
+never mixes execution modes. A persistent serial failure reports the exact sequence index, expected and observed
+target counts, and accumulated negative log likelihood. Experiment 029 requests serial scoring from the outset
+because Qwen3 8B demonstrated repeated non-finite results under multi-sequence NanoQuant CUDA execution.
 
 The same generator can be run independently without contacting the Hub:
 
