@@ -213,12 +213,27 @@ _THROUGHPUT_PROBE_REPETITIONS = 5
 
 
 def _release_throughput_probe_caches(device: str) -> None:
-    """Prevent candidate probes from accumulating allocator state across trials."""
+    """Isolate candidates without making their timed repetitions cold."""
 
     if not device.startswith("cuda"):
         return
     torch.cuda.empty_cache()
     release_cached_host_memory()
+
+
+def _measure_warm_throughput_candidate(
+    device: str,
+    batch_size: int,
+    benchmark: Callable[[int], float],
+) -> tuple[float, ...]:
+    """Warm one isolated candidate, then measure its steady-state repetitions."""
+
+    _release_throughput_probe_caches(device)
+    try:
+        benchmark(batch_size)
+        return tuple(benchmark(batch_size) for _ in range(_THROUGHPUT_PROBE_REPETITIONS))
+    finally:
+        _release_throughput_probe_caches(device)
 
 
 @dataclass(frozen=True, slots=True)
@@ -869,37 +884,35 @@ def _autotune_block_forward_batch(
     metadata = _forward_metadata_to_device(_clone_forward_metadata(captured_metadata), request.device)
     observations: list[tuple[int, float]] = []
     failures: list[dict[str, object]] = []
-    output: torch.Tensor | None = None
     try:
-        output = _run_block_batched(adapter, block, benchmark_inputs, metadata, baseline, "cpu")
-        if request.device.startswith("cuda"):
-            torch.cuda.synchronize(request.device)
-        output = None
-        _release_throughput_probe_caches(request.device)
+        def benchmark_candidate(batch_size: int) -> float:
+            started = time.perf_counter()
+            output = _run_block_batched(
+                adapter,
+                block,
+                benchmark_inputs,
+                metadata,
+                batch_size,
+                "cpu",
+            )
+            if request.device.startswith("cuda"):
+                torch.cuda.synchronize(request.device)
+            elapsed = time.perf_counter() - started
+            del output
+            return elapsed
+
         for batch_size in candidates:
-            samples: list[float] = []
             try:
-                for _ in range(_THROUGHPUT_PROBE_REPETITIONS):
-                    started = time.perf_counter()
-                    output = _run_block_batched(
-                        adapter,
-                        block,
-                        benchmark_inputs,
-                        metadata,
-                        batch_size,
-                        "cpu",
-                    )
-                    if request.device.startswith("cuda"):
-                        torch.cuda.synchronize(request.device)
-                    samples.append(time.perf_counter() - started)
-                    del output
-                    _release_throughput_probe_caches(request.device)
+                samples = _measure_warm_throughput_candidate(
+                    request.device,
+                    batch_size,
+                    benchmark_candidate,
+                )
                 observations.append((batch_size, statistics.median(samples)))
             except RuntimeError as exc:
                 if not is_cuda_oom(exc):
                     raise
                 failures.append({"batch_size": batch_size, "error": str(exc)})
-                _release_throughput_probe_caches(request.device)
         successful_batches = {batch for batch, _ in observations}
         if baseline not in successful_batches:
             raise ResourceAdmissionError(
@@ -1013,21 +1026,19 @@ def _autotune_tuning_microbatch(
                 torch.cuda.synchronize(request.device)
             return time.perf_counter() - started
 
-        benchmark_candidate(baseline)
-        _release_throughput_probe_caches(request.device)
         for batch_size in throughput_batch_candidates(maximum_safe, baseline):
-            samples: list[float] = []
             try:
-                for _ in range(_THROUGHPUT_PROBE_REPETITIONS):
-                    samples.append(benchmark_candidate(batch_size))
-                    _release_throughput_probe_caches(request.device)
+                samples = _measure_warm_throughput_candidate(
+                    request.device,
+                    batch_size,
+                    benchmark_candidate,
+                )
                 observations.append((batch_size, statistics.median(samples)))
             except RuntimeError as exc:
                 if not is_cuda_oom(exc):
                     raise
                 block.zero_grad(set_to_none=True)
                 failures.append({"batch_size": batch_size, "error": str(exc)})
-                _release_throughput_probe_caches(request.device)
         if baseline not in {batch for batch, _ in observations}:
             raise ResourceAdmissionError(
                 f"RES001 adaptive tuning baseline microbatch {baseline} failed its real probe"

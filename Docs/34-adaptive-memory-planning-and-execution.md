@@ -42,6 +42,8 @@ The first production slice is implemented for the resident compression workflow:
   as a new memory-plan revision;
 - throughput probes do not take an optimizer step or mutate weights, and ordinary resume reuses the persisted
   measured choices rather than timing again;
+- reusable plan request identity includes a memory-planner algorithm version, so a corrected planner or probe can
+  invalidate stale measured choices without changing the canonical compression recipe;
 - minimum viable configurations are admitted before work starts, and user ceilings and reserves are enforced;
 - the plan is stored as a content-addressed artifact with an active pointer and finite, journaled OOM revisions;
 - live disk availability is resampled before every activation-generation commit, and the next largest write plus
@@ -353,8 +355,11 @@ selected   = fastest measured candidate if >=5% faster, otherwise baseline
 
 Block-forward probes process a representative 64-sample full-sequence workload. Tuning probes run forward/backward
 over one logical tuning batch five times per candidate and compare median wall time; they do not create an optimizer
-or step weights. Probes release gradients, outputs, streamed blocks, and CUDA cache before the real stage. Do not
-probe a mutating optimizer step or a factorization attempt whose RNG/result would become part of the algorithm.
+or step weights. Each candidate is isolated by releasing allocator caches, executes one untimed full-workload
+warm-up, and then runs all five timed repetitions without another cache release so the median represents steady-state
+execution rather than cold allocation. Probes release gradients, outputs, streamed blocks, and CUDA cache before the
+real stage. Do not probe a mutating optimizer step or a factorization attempt whose RNG/result would become part of
+the algorithm.
 
 ### 8.2 Hysteresis
 

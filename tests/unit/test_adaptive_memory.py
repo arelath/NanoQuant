@@ -7,6 +7,7 @@ import pytest
 import torch
 from safetensors.torch import save_file
 
+import nanoquant.infrastructure.resource_planning as resource_planning_module
 from nanoquant.config.codec import to_dict
 from nanoquant.config.resolution import resolve_config
 from nanoquant.config.schema import (
@@ -37,6 +38,7 @@ from nanoquant.infrastructure.resource_planning import (
     build_resident_memory_plan,
     load_memory_plan,
     load_memory_plan_revision,
+    memory_plan_request_hash,
     persist_memory_plan,
     revise_resident_memory_plan_for_throughput,
 )
@@ -122,6 +124,21 @@ def test_throughput_selection_searches_safe_candidates_and_requires_material_gai
         ((19, 0.70), (9, 0.80), (8, 0.82), (4, 1.10)),
         baseline_batch=8,
     ) == 19
+
+
+def test_memory_plan_algorithm_version_invalidates_reusable_request_hash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = RunConfig(ModelConfig("fixture"))
+    original = memory_plan_request_hash(config)
+
+    monkeypatch.setattr(
+        resource_planning_module,
+        "MEMORY_PLAN_ALGORITHM_VERSION",
+        resource_planning_module.MEMORY_PLAN_ALGORITHM_VERSION + 1,
+    )
+
+    assert memory_plan_request_hash(config) != original
 
 
 def test_throughput_revision_persists_measured_batch_without_algorithm_change() -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+import hashlib
 import json
 import os
 import shutil
@@ -13,7 +14,7 @@ from typing import Any, cast
 
 import torch
 
-from nanoquant.config.codec import config_hash, from_dict, to_dict
+from nanoquant.config.codec import canonical_json, from_dict, to_dict
 from nanoquant.config.schema import (
     ActivationGpuCacheMode,
     ExecutorKind,
@@ -49,6 +50,19 @@ from nanoquant.infrastructure.safetensors_source import SafetensorsModelSource
 
 class InsufficientResourcesError(RuntimeError):
     code = "RES001"
+
+
+MEMORY_PLAN_ALGORITHM_VERSION = 1
+
+
+def memory_plan_request_hash(config: RunConfig) -> str:
+    """Bind reusable plans to both the canonical request and planner behavior."""
+
+    payload = {
+        "memory_plan_algorithm_version": MEMORY_PLAN_ALGORITHM_VERSION,
+        "config": config,
+    }
+    return "sha256:" + hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
 
 
 class _MemoryStatus(ctypes.Structure):
@@ -506,7 +520,7 @@ def build_resident_memory_plan(
         revision,
         config.runtime.memory_policy.mode.value,
         config.runtime.memory_policy.profile.value,
-        config_hash(config),
+        memory_plan_request_hash(config),
         envelope,
         executor.value,
         "ram",

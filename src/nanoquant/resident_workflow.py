@@ -49,6 +49,7 @@ from nanoquant.infrastructure.hf_calibration_dataset import load_or_prepare_cali
 from nanoquant.infrastructure.resource_planning import (
     build_resident_memory_plan,
     load_memory_plan,
+    memory_plan_request_hash,
     persist_memory_plan,
     revise_resident_memory_plan_after_oom,
 )
@@ -464,7 +465,7 @@ def _resolve_workflow_memory_plan(
 ) -> tuple[ResolvedMemoryPlan | None, ArtifactRef | None]:
     if not _memory_planning_requested(config):
         return None, None
-    request_hash = config_hash(config)
+    request_hash = memory_plan_request_hash(config)
     if not options.replan_memory:
         loaded = load_memory_plan(inputs.output, request_hash)
         if loaded is not None:

@@ -298,23 +298,21 @@ def _probe_model_load(
                         raise RuntimeError("CPU-offload block probe has no loaded block")
                     metadata = _forward_metadata_to_device(capture.keyword, device)
                     legacy_batch_size = case.template.runtime.block_forward_batch_size
-                    # Warm the kernels before comparing the former fixed batch
-                    # with the adaptive batch over the same 64-sample workload.
-                    output = _run_block_batched(
-                        adapter,
-                        target_block,
-                        initial_inputs,
-                        metadata,
-                        legacy_batch_size,
-                        "cpu",
-                    )
-                    torch.cuda.synchronize(device)
-                    output = None
                     candidate_observations: list[tuple[int, float]] = []
                     candidate_peaks: dict[int, tuple[int, int]] = {}
                     for candidate in throughput_batch_candidates(batch_size, legacy_batch_size):
                         timings: list[float] = []
                         torch.cuda.empty_cache()
+                        output = _run_block_batched(
+                            adapter,
+                            target_block,
+                            initial_inputs,
+                            metadata,
+                            candidate,
+                            "cpu",
+                        )
+                        torch.cuda.synchronize(device)
+                        del output
                         torch.cuda.reset_peak_memory_stats(device)
                         for _ in range(_THROUGHPUT_PROBE_REPETITIONS):
                             candidate_started = time.perf_counter()
@@ -405,10 +403,10 @@ def _probe_model_load(
                             torch.cuda.synchronize(device)
                             return time.perf_counter() - candidate_started
 
-                        benchmark_tuning_candidate(tuning_baseline)
                         for candidate in throughput_batch_candidates(tuning_maximum, tuning_baseline):
                             timings = []
                             torch.cuda.empty_cache()
+                            benchmark_tuning_candidate(candidate)
                             torch.cuda.reset_peak_memory_stats(device)
                             for _ in range(_THROUGHPUT_PROBE_REPETITIONS):
                                 timings.append(benchmark_tuning_candidate(candidate))

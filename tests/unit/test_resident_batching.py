@@ -8,7 +8,9 @@ import nanoquant.resident_quantization as resident_quantization_module
 from nanoquant.config.schema import ProfilingConfig, ProfilingLevel
 from nanoquant.infrastructure.profiling import Profiler
 from nanoquant.resident_quantization import (
+    _THROUGHPUT_PROBE_REPETITIONS,
     _block_loss,
+    _measure_warm_throughput_candidate,
     _place_completed_decoder_block,
     _release_throughput_probe_caches,
     _release_uncompleted_decoder_blocks,
@@ -33,6 +35,33 @@ def test_throughput_probe_cache_release_clears_device_and_pinned_host_caches(
     _release_throughput_probe_caches("cuda:0")
 
     assert calls == ["device", "host"]
+
+
+def test_throughput_candidate_warms_once_without_clearing_between_timed_repetitions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, int | None]] = []
+    invocation = 0
+
+    def release(_device: str) -> None:
+        calls.append(("release", None))
+
+    def benchmark(batch_size: int) -> float:
+        nonlocal invocation
+        invocation += 1
+        calls.append(("benchmark", batch_size))
+        return float(invocation)
+
+    monkeypatch.setattr(resident_quantization_module, "_release_throughput_probe_caches", release)
+
+    samples = _measure_warm_throughput_candidate("cuda:0", 8, benchmark)
+
+    assert samples == tuple(float(index) for index in range(2, _THROUGHPUT_PROBE_REPETITIONS + 2))
+    assert calls == [
+        ("release", None),
+        *(("benchmark", 8) for _ in range(_THROUGHPUT_PROBE_REPETITIONS + 1)),
+        ("release", None),
+    ]
 
 
 class _BlockAdapter:
