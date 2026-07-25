@@ -15,6 +15,39 @@ from nanoquant.llamacpp_quality import (
 from nanoquant.quality_evaluation import PreparedQualityInputs, QualityEvaluationRequest
 
 
+def test_llamacpp_quality_uses_first_raw_token_as_context_without_bos(
+    tmp_path: Path,
+) -> None:
+    prepared = PreparedQualityInputs(
+        torch.tensor(((10, 11, 12, 13), (14, 15, 16, 17)), dtype=torch.long),
+        "qwen-wikitext-fingerprint",
+        None,
+        0,
+        "sha256:" + "a" * 64,
+        (),
+    )
+    quality_request = QualityEvaluationRequest(
+        tmp_path,
+        "Qwen/Qwen3-0.6B",
+        "revision",
+        tmp_path / "run",
+        device="cpu",
+        task_names=("piqa",),
+    )
+
+    sequences, task_candidates, task_truncated = llamacpp_quality._quality_sequences(
+        quality_request,
+        prepared,
+    )
+
+    assert sequences == (
+        llamacpp_quality._Sequence((10, 11, 12, 13), 1),
+        llamacpp_quality._Sequence((14, 15, 16, 17), 1),
+    )
+    assert task_candidates == ()
+    assert task_truncated == ()
+
+
 def test_llamacpp_quality_is_protocol_matched_and_identity_resumable(
     tmp_path: Path,
     monkeypatch,

@@ -156,7 +156,10 @@ The causal window also matches the harness's `max_length + 1` context-plus-targe
 fed as model input, so left truncation does not discard one extra context token.
 For masked batching, the evaluator uses the tokenizer's pad token when present and otherwise uses its EOS token,
 matching the legacy tokenizer-loading policy for model families such as Llama that intentionally define no pad token.
-The resolved BOS and padding token IDs and the fallback policy are recorded in the quality protocol payload.
+WikiText windows prepend the tokenizer's BOS token when one exists. For model families such as Qwen3 that intentionally
+define no BOS token, the first raw token in each full-length window supplies context instead; both paths score every
+remaining shifted target. The resolved context policy, BOS token ID, padding token ID, and padding fallback are
+recorded in the quality protocol payload.
 
 Evaluation retains both summed and continuation-length-normalized log likelihoods, computes log-softmax and score
 accumulation in FP32, records both accuracy variants, ties, per-example scores, and truncation counts, and chooses
