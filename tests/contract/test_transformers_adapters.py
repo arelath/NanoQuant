@@ -149,8 +149,11 @@ def test_unsupported_variant_is_explicit() -> None:
         adapter_for_config({"model_type": "mixtral"})
 
 
-def test_llama_exposes_the_configured_shared_input_qkv_candidate() -> None:
-    adapter = adapter_for_config({"model_type": "llama"})
+@pytest.mark.parametrize("model_type", ("llama", "qwen3"))
+def test_llama_shaped_adapter_exposes_the_configured_shared_input_qkv_candidate(
+    model_type: str,
+) -> None:
+    adapter = adapter_for_config({"model_type": model_type})
 
     candidates = adapter.shared_input_group_candidates(BlockId(3))
 
