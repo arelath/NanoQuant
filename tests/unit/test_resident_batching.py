@@ -43,6 +43,7 @@ def test_throughput_candidate_warms_once_without_clearing_between_timed_repetiti
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[tuple[str, int | None]] = []
+    progress: list[tuple[str, int, int, float]] = []
     invocation = 0
 
     def release(_device: str) -> None:
@@ -56,7 +57,12 @@ def test_throughput_candidate_warms_once_without_clearing_between_timed_repetiti
 
     monkeypatch.setattr(resident_quantization_module, "_release_throughput_probe_caches", release)
 
-    samples = _measure_warm_throughput_candidate("cuda:0", 8, benchmark)
+    samples = _measure_warm_throughput_candidate(
+        "cuda:0",
+        8,
+        benchmark,
+        lambda phase, completed, total, seconds: progress.append((phase, completed, total, seconds)),
+    )
 
     assert samples == tuple(
         float(index * _THROUGHPUT_PROBE_WORKLOADS_PER_SAMPLE)
@@ -70,6 +76,18 @@ def test_throughput_candidate_warms_once_without_clearing_between_timed_repetiti
             for _ in range(_THROUGHPUT_PROBE_REPETITIONS)
         ),
         ("release", None),
+    ]
+    assert progress == [
+        ("warmup_completed", 1, 1, float(_THROUGHPUT_PROBE_WARMUP_WORKLOADS)),
+        *(
+            (
+                "sample_completed",
+                index,
+                _THROUGHPUT_PROBE_REPETITIONS,
+                float((index + 1) * _THROUGHPUT_PROBE_WORKLOADS_PER_SAMPLE),
+            )
+            for index in range(1, _THROUGHPUT_PROBE_REPETITIONS + 1)
+        ),
     ]
 
 

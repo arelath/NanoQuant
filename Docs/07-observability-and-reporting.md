@@ -52,6 +52,7 @@ Timed spans include:
 - block output propagation;
 - global tuning;
 - packing and validation;
+- Hugging Face model-card preparation, artifact revalidation, repository access, commit upload, and receipt creation;
 - each evaluator/task;
 - each inference benchmark configuration.
 
@@ -245,6 +246,12 @@ Periodic resource samples and memory fields injected into lifecycle events are o
 followed live with `nanoquant logs latest --memory --follow`. OOM and sampler warnings remain visible in the normal
 view with non-meter diagnostic context. Detailed tensors and histories remain in structured artifacts. Progress
 rendering must not synchronize CUDA or become a material part of stage time.
+
+Adaptive throughput probing emits bounded progress for the overall probe, each candidate, warm-up completion, each
+timed sample, and the candidate median/range. Hugging Face publication appends to the same canonical event stream
+after compression: large-file SHA-256 validation reports progress every 256 MiB, while repository, commit, receipt,
+and export-summary boundaries report start, completion, failure type, and wall time. A blocking Hub commit emits a
+30-second heartbeat with elapsed time until it returns. Tokens and authorization headers are never event fields.
 
 ## 10. Run summary report
 

@@ -211,3 +211,65 @@ def open_run_session(
                 router.close()
         finally:
             lease.release()
+
+
+@contextmanager
+def open_run_event_append_session(
+    output: str | Path,
+    *,
+    observability: ObservabilityConfig,
+    console: bool = True,
+) -> Iterator[EventSink]:
+    """Append post-compression workflow events with the canonical run identity."""
+
+    root = Path(output)
+    directory = RunDirectory(root.parent, root.name)
+    if not directory.manifest_path.is_file():
+        raise ValueError("post-run event append requires an existing run manifest")
+    manifest = from_dict(RunManifest, directory.read_manifest(), path="manifest")
+    event_level, console_level = _levels(observability)
+    lease = directory.lease()
+    lease.acquire()
+    router: EventRouter | None = None
+    try:
+        initial_sequence, recovered_bytes = prepare_event_stream(directory.events_path)
+        destinations: list[EventDestination] = [JsonlEventDestination(directory.events_path, event_level)]
+        if console:
+            destinations.append(ConsoleEventDestination(console_level))
+        router = EventRouter(
+            manifest.run_id,
+            event_level=event_level,
+            destinations=tuple(destinations),
+            initial_sequence=initial_sequence,
+        )
+        if recovered_bytes:
+            router.emit(
+                "observability",
+                "warning",
+                "observability.tail_recovered",
+                quarantined_bytes=recovered_bytes,
+            )
+        yield router
+    finally:
+        try:
+            if router is not None:
+                router.flush()
+                renderings: tuple[tuple[str, EventView], ...] = (
+                    ("run.log", "run"),
+                    ("memory.log", "memory"),
+                )
+                for filename, view in renderings:
+                    try:
+                        render_event_log(directory.events_path, directory.root / filename, view=view)
+                    except Exception as exc:
+                        router.emit(
+                            "observability",
+                            "warning",
+                            "observability.render_failed",
+                            error_type=type(exc).__name__,
+                            output=filename,
+                        )
+                        router.flush()
+                router.close()
+        finally:
+            lease.release()

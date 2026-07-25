@@ -27,6 +27,7 @@ from nanoquant.infrastructure.publication import (
     PublishableArtifactKind,
     publish_experiment_artifacts,
 )
+from nanoquant.infrastructure.run_session import open_run_event_append_session
 from nanoquant.infrastructure.runs import launcher_provenance, validate_launcher_number
 from nanoquant.quality_evaluation import (
     DEFAULT_QUALITY_TASK_BATCH_SIZE,
@@ -129,7 +130,16 @@ def execute_compression_quality_experiment(
             raise ValueError("large-model compression requires distillation to remain disabled until teacher streaming")
 
     if experiment.export.huggingface is not None:
-        ensure_huggingface_model_repository(experiment.export.huggingface)
+        destination = experiment.export.huggingface
+        print(
+            f"Hugging Face repository preflight started: repo_id={destination.repo_id}",
+            flush=True,
+        )
+        resolved_repo_id = ensure_huggingface_model_repository(destination)
+        print(
+            f"Hugging Face repository preflight completed: repo_id={resolved_repo_id}",
+            flush=True,
+        )
 
     wall_started = time.perf_counter()
     compression_started = time.perf_counter()
@@ -192,23 +202,38 @@ def execute_compression_quality_experiment(
     }
     atomic_write_json(resolved.quality_output, quality_payload)
     atomic_write_text(resolved.quality_markdown_output, render_quality_evaluation_markdown(quality_payload))
-    exports = complete_deferred_huggingface_upload(
-        exports,
-        experiment.export.huggingface,
-        (
-            (resolved.quality_markdown_output, "README.md"),
-            (resolved.quality_output, "quality.json"),
-        ),
-        model_card_metadata=(
-            None
-            if experiment.export.huggingface is None
-            else load_huggingface_model_card_metadata(
-                config.model.source,
-                str(config.model.revision),
-                resolved.inputs.snapshot,
-            )
-        ),
+    supplemental = (
+        (resolved.quality_markdown_output, "README.md"),
+        (resolved.quality_output, "quality.json"),
     )
+    model_card_metadata = (
+        None
+        if experiment.export.huggingface is None
+        else load_huggingface_model_card_metadata(
+            config.model.source,
+            str(config.model.revision),
+            resolved.inputs.snapshot,
+        )
+    )
+    if experiment.export.huggingface is None:
+        exports = complete_deferred_huggingface_upload(
+            exports,
+            None,
+            supplemental,
+            model_card_metadata=model_card_metadata,
+        )
+    else:
+        with open_run_event_append_session(
+            resolved.inputs.output,
+            observability=config.observability,
+        ) as upload_events:
+            exports = complete_deferred_huggingface_upload(
+                exports,
+                experiment.export.huggingface,
+                supplemental,
+                model_card_metadata=model_card_metadata,
+                events=upload_events,
+            )
     profiles = tuple(
         str(path.resolve())
         for path in sorted(resolved.inputs.output.glob("profile*.json"))

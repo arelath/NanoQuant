@@ -23,6 +23,7 @@ from nanoquant.infrastructure.huggingface_model_card import (
     write_huggingface_model_card,
 )
 from nanoquant.infrastructure.huggingface_upload import (
+    HuggingFaceProgress,
     HuggingFaceUploadConfig,
     HuggingFaceUploadResult,
     ValidatedModelArtifact,
@@ -37,6 +38,7 @@ from nanoquant.infrastructure.runtime_export import (
     validate_frozen_run_logical,
 )
 from nanoquant.infrastructure.safetensors_source import SafetensorsModelSource
+from nanoquant.ports.event_sink import EventSink
 from nanoquant.resident_workflow import (
     ResidentExecutionOptions,
     ResidentWorkflowResult,
@@ -277,6 +279,7 @@ def _upload_huggingface_model(
     supplemental_artifacts: Iterable[tuple[Path, str]] = (),
     *,
     model_card_metadata: HuggingFaceModelCardMetadata,
+    events: EventSink | None = None,
 ) -> HuggingFaceUploadResult | None:
     if config is None:
         return None
@@ -284,13 +287,43 @@ def _upload_huggingface_model(
     readme_sources = tuple(source for source, path_in_repo in supplemental if path_in_repo == "README.md")
     if len(readme_sources) > 1:
         raise ValueError("Hugging Face upload contains multiple model-card body sources")
-    model_card = write_huggingface_model_card(
-        model_card_metadata,
-        huggingface_model_card_output(gguf.output),
-        model_name=config.repo_id.rsplit("/", 1)[-1],
-        body_source=None if not readme_sources else readme_sources[0],
-        pipeline_tag="image-text-to-text" if gguf.mmproj is not None else "text-generation",
-    )
+    model_card_output = huggingface_model_card_output(gguf.output)
+    if events is not None:
+        events.emit(
+            "huggingface",
+            "info",
+            "huggingface.model_card.started",
+            repo_id=config.repo_id,
+            output=str(model_card_output),
+            body_source=None if not readme_sources else str(readme_sources[0]),
+        )
+    try:
+        model_card = write_huggingface_model_card(
+            model_card_metadata,
+            model_card_output,
+            model_name=config.repo_id.rsplit("/", 1)[-1],
+            body_source=None if not readme_sources else readme_sources[0],
+            pipeline_tag="image-text-to-text" if gguf.mmproj is not None else "text-generation",
+        )
+    except BaseException as exc:
+        if events is not None:
+            events.emit(
+                "huggingface",
+                "error",
+                "huggingface.model_card.failed",
+                repo_id=config.repo_id,
+                error_type=type(exc).__name__,
+            )
+        raise
+    if events is not None:
+        events.emit(
+            "huggingface",
+            "info",
+            "huggingface.model_card.completed",
+            repo_id=config.repo_id,
+            output=str(model_card),
+            bytes=model_card.stat().st_size,
+        )
     prepared_supplemental = (
         tuple(
             (model_card, path_in_repo) if path_in_repo == "README.md" else (source, path_in_repo)
@@ -318,11 +351,23 @@ def _upload_huggingface_model(
                 path_in_repo,
             )
         )
-    return upload_validated_model_artifacts(
-        config,
-        artifacts,
-        receipt_output=gguf.output.with_suffix(gguf.output.suffix + ".huggingface.json"),
-    )
+    progress: HuggingFaceProgress | None = None
+    if events is not None:
+
+        def report_upload_progress(
+            severity: str,
+            name: str,
+            fields: dict[str, object],
+        ) -> None:
+            cast(Any, events).emit("huggingface", severity, name, **fields)
+
+        progress = report_upload_progress
+    upload_kwargs: dict[str, Any] = {
+        "receipt_output": gguf.output.with_suffix(gguf.output.suffix + ".huggingface.json")
+    }
+    if progress is not None:
+        upload_kwargs["progress"] = progress
+    return upload_validated_model_artifacts(config, artifacts, **upload_kwargs)
 
 
 def complete_deferred_huggingface_upload(
@@ -331,6 +376,7 @@ def complete_deferred_huggingface_upload(
     supplemental_artifacts: Iterable[tuple[Path, str]] = (),
     *,
     model_card_metadata: HuggingFaceModelCardMetadata | None = None,
+    events: EventSink | None = None,
 ) -> CompressionExportResult:
     """Upload a local export plus completed quality artifacts and refresh its summary."""
 
@@ -350,11 +396,21 @@ def complete_deferred_huggingface_upload(
         config,
         supplemental_artifacts,
         model_card_metadata=model_card_metadata,
+        events=events,
     )
     if huggingface is None:
         raise AssertionError("configured Hugging Face upload returned no result")
     summary["huggingface"] = huggingface_upload_summary(huggingface)
     atomic_write_json(result.summary_output, summary)
+    if events is not None:
+        events.emit(
+            "huggingface",
+            "info",
+            "huggingface.export_summary.completed",
+            repo_id=huggingface.repo_id,
+            output=str(result.summary_output),
+            commit_oid=huggingface.commit_oid,
+        )
     return replace(result, huggingface=huggingface)
 
 

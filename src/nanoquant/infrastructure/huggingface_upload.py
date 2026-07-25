@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import os
-from collections.abc import Iterable
-from contextlib import ExitStack
+import threading
+import time
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
@@ -17,6 +19,9 @@ from huggingface_hub.utils import validate_repo_id  # type: ignore[attr-defined]
 from nanoquant.infrastructure.io_utils import atomic_write_json
 
 HUGGINGFACE_UPLOAD_SCHEMA_VERSION = 1
+HUGGINGFACE_VALIDATION_PROGRESS_BYTES = 256 * 1024 * 1024
+HUGGINGFACE_COMMIT_HEARTBEAT_SECONDS = 30.0
+HuggingFaceProgress = Callable[[str, str, dict[str, object]], None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,12 +126,70 @@ def huggingface_upload_summary(result: HuggingFaceUploadResult) -> dict[str, obj
     }
 
 
-def _measure_open_file(source: BinaryIO) -> tuple[int, str]:
+def _notify(
+    progress: HuggingFaceProgress | None,
+    severity: str,
+    name: str,
+    **fields: object,
+) -> None:
+    if progress is not None:
+        progress(severity, name, fields)
+
+
+@contextmanager
+def _commit_heartbeat(
+    progress: HuggingFaceProgress | None,
+    *,
+    repo_id: str,
+    artifact_count: int,
+    total_bytes: int,
+) -> Iterator[None]:
+    if progress is None:
+        yield
+        return
+    stopped = threading.Event()
+    started = time.perf_counter()
+
+    def report() -> None:
+        while not stopped.wait(HUGGINGFACE_COMMIT_HEARTBEAT_SECONDS):
+            _notify(
+                progress,
+                "info",
+                "huggingface.commit.progress",
+                repo_id=repo_id,
+                artifact_count=artifact_count,
+                total_bytes=total_bytes,
+                elapsed_seconds=time.perf_counter() - started,
+            )
+
+    worker = threading.Thread(
+        target=report,
+        name="nanoquant-huggingface-upload-progress",
+        daemon=True,
+    )
+    worker.start()
+    try:
+        yield
+    finally:
+        stopped.set()
+        worker.join()
+
+
+def _measure_open_file(
+    source: BinaryIO,
+    *,
+    progress: Callable[[int], None] | None = None,
+) -> tuple[int, str]:
     digest = hashlib.sha256()
     byte_count = 0
+    next_progress = HUGGINGFACE_VALIDATION_PROGRESS_BYTES
     for chunk in iter(lambda: source.read(1024 * 1024), b""):
         byte_count += len(chunk)
         digest.update(chunk)
+        if progress is not None and byte_count >= next_progress:
+            progress(byte_count)
+            while next_progress <= byte_count:
+                next_progress += HUGGINGFACE_VALIDATION_PROGRESS_BYTES
     return byte_count, digest.hexdigest()
 
 
@@ -148,10 +211,19 @@ def ensure_huggingface_model_repository(
     config: HuggingFaceUploadConfig,
     *,
     api: HfApi | None = None,
+    progress: HuggingFaceProgress | None = None,
 ) -> str:
     """Verify explicit-token write access and create the model repository if needed."""
 
     client = _authenticated_api(api)
+    started = time.perf_counter()
+    _notify(
+        progress,
+        "info",
+        "huggingface.repository.started",
+        repo_id=config.repo_id,
+        requested_private=config.private,
+    )
     try:
         repo_url = client.create_repo(
             config.repo_id,
@@ -160,10 +232,26 @@ def ensure_huggingface_model_repository(
             exist_ok=True,
         )
     except HfHubHTTPError as exc:
+        _notify(
+            progress,
+            "error",
+            "huggingface.repository.failed",
+            repo_id=config.repo_id,
+            error_type=type(exc).__name__,
+            wall_seconds=time.perf_counter() - started,
+        )
         raise RuntimeError(
             f"HF_TOKEN cannot create or access model repository {config.repo_id!r}; "
             "use a token with write permission for the destination namespace"
         ) from exc
+    _notify(
+        progress,
+        "info",
+        "huggingface.repository.completed",
+        requested_repo_id=config.repo_id,
+        repo_id=repo_url.repo_id,
+        wall_seconds=time.perf_counter() - started,
+    )
     return repo_url.repo_id
 
 
@@ -173,6 +261,7 @@ def upload_validated_model_artifacts(
     *,
     receipt_output: str | Path,
     api: HfApi | None = None,
+    progress: HuggingFaceProgress | None = None,
 ) -> HuggingFaceUploadResult:
     """Upload the exact validated file handles in one model-repository commit."""
 
@@ -187,47 +276,147 @@ def upload_validated_model_artifacts(
     if receipt.exists() and not receipt.is_file():
         raise ValueError("Hugging Face receipt output must be a regular file")
     client = _authenticated_api(api)
-    with ExitStack() as opened:
-        operations: list[CommitOperationAdd] = []
-        uploaded: list[UploadedModelArtifact] = []
-        for artifact in requested:
-            source = artifact.source.resolve(strict=True)
-            if not source.is_file():
-                raise ValueError(f"validated model artifact is not a regular file: {source}")
-            if source == receipt:
-                raise ValueError("Hugging Face receipt must not overwrite a model artifact")
-            handle = opened.enter_context(source.open("rb"))
-            observed_bytes, observed_sha256 = _measure_open_file(handle)
-            if observed_bytes != artifact.bytes:
-                raise ValueError(
-                    f"validated model artifact byte count changed before upload: "
-                    f"{observed_bytes} != {artifact.bytes}"
-                )
-            if observed_sha256 != artifact.sha256:
-                raise ValueError("validated model artifact SHA-256 changed before upload")
-            handle.seek(0)
-            operations.append(
-                CommitOperationAdd(
+    total_bytes = sum(artifact.bytes for artifact in requested)
+    upload_started = time.perf_counter()
+    _notify(
+        progress,
+        "info",
+        "huggingface.upload.started",
+        repo_id=config.repo_id,
+        artifact_count=len(requested),
+        total_bytes=total_bytes,
+        receipt=str(receipt),
+    )
+    try:
+        with ExitStack() as opened:
+            operations: list[CommitOperationAdd] = []
+            uploaded: list[UploadedModelArtifact] = []
+            for index, artifact in enumerate(requested, start=1):
+                source = artifact.source.resolve(strict=True)
+                if not source.is_file():
+                    raise ValueError(f"validated model artifact is not a regular file: {source}")
+                if source == receipt:
+                    raise ValueError("Hugging Face receipt must not overwrite a model artifact")
+                validation_started = time.perf_counter()
+                _notify(
+                    progress,
+                    "info",
+                    "huggingface.artifact_validation.started",
+                    artifact_index=index,
+                    artifact_count=len(requested),
                     path_in_repo=artifact.path_in_repo,
-                    path_or_fileobj=handle,
+                    expected_bytes=artifact.bytes,
                 )
-            )
-            uploaded.append(
-                UploadedModelArtifact(
-                    source,
-                    artifact.path_in_repo,
-                    artifact.bytes,
-                    artifact.sha256,
-                )
-            )
+                handle = opened.enter_context(source.open("rb"))
 
-        repo_id = ensure_huggingface_model_repository(config, api=client)
-        commit = client.create_commit(
-            repo_id,
-            operations,
-            repo_type="model",
-            commit_message=config.commit_message,
+                def report_validation(
+                    processed_bytes: int,
+                    *,
+                    item: ValidatedModelArtifact = artifact,
+                    item_index: int = index,
+                ) -> None:
+                    _notify(
+                        progress,
+                        "info",
+                        "huggingface.artifact_validation.progress",
+                        artifact_index=item_index,
+                        artifact_count=len(requested),
+                        path_in_repo=item.path_in_repo,
+                        processed_bytes=min(processed_bytes, item.bytes),
+                        expected_bytes=item.bytes,
+                        percent=min(100.0, processed_bytes * 100.0 / item.bytes),
+                    )
+
+                observed_bytes, observed_sha256 = _measure_open_file(
+                    handle,
+                    progress=report_validation,
+                )
+                if observed_bytes != artifact.bytes:
+                    raise ValueError(
+                        f"validated model artifact byte count changed before upload: "
+                        f"{observed_bytes} != {artifact.bytes}"
+                    )
+                if observed_sha256 != artifact.sha256:
+                    raise ValueError("validated model artifact SHA-256 changed before upload")
+                handle.seek(0)
+                operations.append(
+                    CommitOperationAdd(
+                        path_in_repo=artifact.path_in_repo,
+                        path_or_fileobj=handle,
+                    )
+                )
+                uploaded.append(
+                    UploadedModelArtifact(
+                        source,
+                        artifact.path_in_repo,
+                        artifact.bytes,
+                        artifact.sha256,
+                    )
+                )
+                _notify(
+                    progress,
+                    "info",
+                    "huggingface.artifact_validation.completed",
+                    artifact_index=index,
+                    artifact_count=len(requested),
+                    path_in_repo=artifact.path_in_repo,
+                    bytes=observed_bytes,
+                    wall_seconds=time.perf_counter() - validation_started,
+                )
+
+            repo_id = ensure_huggingface_model_repository(config, api=client, progress=progress)
+            commit_started = time.perf_counter()
+            _notify(
+                progress,
+                "info",
+                "huggingface.commit.started",
+                repo_id=repo_id,
+                artifact_count=len(operations),
+                total_bytes=total_bytes,
+                commit_message=config.commit_message,
+            )
+            try:
+                with _commit_heartbeat(
+                    progress,
+                    repo_id=repo_id,
+                    artifact_count=len(operations),
+                    total_bytes=total_bytes,
+                ):
+                    commit = client.create_commit(
+                        repo_id,
+                        operations,
+                        repo_type="model",
+                        commit_message=config.commit_message,
+                    )
+            except BaseException as exc:
+                _notify(
+                    progress,
+                    "error",
+                    "huggingface.commit.failed",
+                    repo_id=repo_id,
+                    error_type=type(exc).__name__,
+                    wall_seconds=time.perf_counter() - commit_started,
+                )
+                raise
+            _notify(
+                progress,
+                "info",
+                "huggingface.commit.completed",
+                repo_id=repo_id,
+                commit_oid=commit.oid,
+                commit_url=commit.commit_url,
+                wall_seconds=time.perf_counter() - commit_started,
+            )
+    except BaseException as exc:
+        _notify(
+            progress,
+            "error",
+            "huggingface.upload.failed",
+            repo_id=config.repo_id,
+            error_type=type(exc).__name__,
+            wall_seconds=time.perf_counter() - upload_started,
         )
+        raise
 
     result = HuggingFaceUploadResult(
         repo_id,
@@ -246,12 +435,33 @@ def upload_validated_model_artifacts(
             **huggingface_upload_summary(result),
         },
     )
+    _notify(
+        progress,
+        "info",
+        "huggingface.receipt.completed",
+        repo_id=repo_id,
+        receipt=str(receipt),
+        artifact_count=len(uploaded),
+    )
+    _notify(
+        progress,
+        "info",
+        "huggingface.upload.completed",
+        repo_id=repo_id,
+        commit_oid=commit.oid,
+        artifact_count=len(uploaded),
+        total_bytes=total_bytes,
+        wall_seconds=time.perf_counter() - upload_started,
+    )
     return result
 
 
 __all__ = [
     "HUGGINGFACE_UPLOAD_SCHEMA_VERSION",
+    "HUGGINGFACE_COMMIT_HEARTBEAT_SECONDS",
+    "HUGGINGFACE_VALIDATION_PROGRESS_BYTES",
     "HuggingFaceUploadConfig",
+    "HuggingFaceProgress",
     "HuggingFaceUploadResult",
     "UploadedModelArtifact",
     "ValidatedModelArtifact",

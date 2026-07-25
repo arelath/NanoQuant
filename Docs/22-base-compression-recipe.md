@@ -131,6 +131,12 @@ the completed local compression and validated exports remain reusable; rerunning
 recompressing. Experiments whose export policy omits `huggingface` do not publish; source-model and evaluation
 resolution may still contact the Hub when a pinned local file is missing.
 
+Publication progress is appended to the compression run's `events.jsonl`, rendered into `run.log`, and shown on the
+console. Events cover model-card generation, each artifact's validation, 256 MiB hash-progress checkpoints for large
+files, repository access, a 30-second heartbeat during the blocking Hub commit, commit completion/failure, receipt
+creation, and export-summary refresh. They include only non-secret repository and artifact metadata; `HF_TOKEN` is
+never logged.
+
 ## Exporting an older completed run
 
 `execute_compression_export` performs only stages 2–5, never recompresses the model, and never contacts Hugging Face.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -149,8 +150,16 @@ def test_compression_benchmark_executes_export_before_shared_quality_comparison(
 
     monkeypatch.setattr(workflow, "execute_quality_evaluation", quality)
 
-    def upload(result, config, artifacts, *, model_card_metadata):  # type: ignore[no-untyped-def]
+    upload_events = SimpleNamespace()
+    monkeypatch.setattr(
+        workflow,
+        "open_run_event_append_session",
+        lambda *_args, **_kwargs: nullcontext(upload_events),
+    )
+
+    def upload(result, config, artifacts, *, model_card_metadata, events):  # type: ignore[no-untyped-def]
         calls.append("upload")
+        assert events is upload_events
         assert config is upload_config
         assert model_card_metadata.base_model == _CONFIG.model.source
         assert model_card_metadata.base_model_revision == _CONFIG.model.revision

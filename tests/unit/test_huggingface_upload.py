@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -59,13 +61,16 @@ def test_huggingface_upload_commits_exact_validated_model_files_and_writes_recei
     projector.write_bytes(b"projector")
     receipt = tmp_path / "model.gguf.huggingface.json"
     api = _FakeHfApi()
+    progress: list[tuple[str, str, dict[str, object]]] = []
     monkeypatch.setenv("HF_TOKEN", "must-not-appear")
+    monkeypatch.setattr(upload_module, "HUGGINGFACE_VALIDATION_PROGRESS_BYTES", 4)
 
     result = upload_validated_model_artifacts(
         HuggingFaceUploadConfig("requested-owner/model", private=True),
         (_artifact(model), _artifact(projector)),
         receipt_output=receipt,
         api=api,  # type: ignore[arg-type]
+        progress=lambda severity, name, fields: progress.append((severity, name, fields)),
     )
 
     assert result.repo_id == "resolved-owner/model"
@@ -94,6 +99,30 @@ def test_huggingface_upload_commits_exact_validated_model_files_and_writes_recei
         "mmproj-BF16.gguf",
     ]
     assert "must-not-appear" not in receipt.read_text(encoding="utf-8")
+    names = [name for _severity, name, _fields in progress]
+    assert names == [
+        "huggingface.upload.started",
+        "huggingface.artifact_validation.started",
+        "huggingface.artifact_validation.progress",
+        "huggingface.artifact_validation.completed",
+        "huggingface.artifact_validation.started",
+        "huggingface.artifact_validation.progress",
+        "huggingface.artifact_validation.completed",
+        "huggingface.repository.started",
+        "huggingface.repository.completed",
+        "huggingface.commit.started",
+        "huggingface.commit.completed",
+        "huggingface.receipt.completed",
+        "huggingface.upload.completed",
+    ]
+    validation_progress = [
+        fields
+        for _severity, name, fields in progress
+        if name == "huggingface.artifact_validation.progress"
+    ]
+    assert validation_progress[0]["processed_bytes"] == len(b"language-model")
+    assert validation_progress[0]["percent"] == 100.0
+    assert all("token" not in json.dumps(fields).lower() for _severity, _name, fields in progress)
 
 
 def test_huggingface_upload_fails_before_hub_mutation_when_validated_hash_changed(
@@ -114,6 +143,35 @@ def test_huggingface_upload_fails_before_hub_mutation_when_validated_hash_change
 
     assert api.calls == []
     assert not (tmp_path / "receipt.json").exists()
+
+
+def test_huggingface_upload_reports_heartbeat_during_long_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"model")
+    api = _FakeHfApi()
+    original_create_commit = api.create_commit
+
+    def slow_create_commit(*args, **kwargs):  # type: ignore[no-untyped-def]
+        time.sleep(0.03)
+        return original_create_commit(*args, **kwargs)
+
+    monkeypatch.setattr(api, "create_commit", slow_create_commit)
+    monkeypatch.setattr(upload_module, "HUGGINGFACE_COMMIT_HEARTBEAT_SECONDS", 0.005)
+    progress: list[str] = []
+
+    upload_validated_model_artifacts(
+        HuggingFaceUploadConfig("owner/model"),
+        (_artifact(model),),
+        receipt_output=tmp_path / "receipt.json",
+        api=api,  # type: ignore[arg-type]
+        progress=lambda _severity, name, _fields: progress.append(name),
+    )
+
+    assert "huggingface.commit.progress" in progress
+    assert not any(thread.name == "nanoquant-huggingface-upload-progress" for thread in threading.enumerate())
 
 
 def test_huggingface_upload_configuration_and_paths_fail_closed(tmp_path: Path) -> None:

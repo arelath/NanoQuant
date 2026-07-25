@@ -8,7 +8,7 @@ import pytest
 import torch
 
 from nanoquant.config.schema import ModelConfig, ObservabilityConfig, RunConfig
-from nanoquant.infrastructure.run_session import open_run_session
+from nanoquant.infrastructure.run_session import open_run_event_append_session, open_run_session
 from nanoquant.infrastructure.runs import RunLease, initial_manifest, launcher_provenance
 
 
@@ -60,6 +60,40 @@ def test_run_session_owns_writer_identity_and_renders_snapshot(tmp_path: Path) -
         assert event is not None and event.sequence == 2
 
     assert len((output / "run.log").read_text(encoding="utf-8").splitlines()) == 2
+
+
+def test_post_run_event_append_preserves_sequence_and_refreshes_run_log(tmp_path: Path) -> None:
+    output = tmp_path / "run"
+    observability = ObservabilityConfig(event_level="debug", console_level="warning")
+    with open_run_session(
+        output,
+        manifest=_manifest(tmp_path),
+        observability=observability,
+        registry_root=None,
+        console=False,
+    ) as session:
+        session.events.emit("run", "info", "run.completed")
+
+    with open_run_event_append_session(
+        output,
+        observability=observability,
+        console=False,
+    ) as events:
+        appended = events.emit(
+            "huggingface",
+            "info",
+            "huggingface.upload.started",
+            repo_id="owner/model",
+        )
+
+    assert appended is not None and appended.sequence == 2
+    payloads = [
+        json.loads(line)
+        for line in (output / "events.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert [payload["sequence"] for payload in payloads] == [1, 2]
+    assert "huggingface.upload.started" in (output / "run.log").read_text(encoding="utf-8")
+    assert not (output / ".active-lease.json").exists()
 
 
 def test_run_lease_takes_over_dead_same_host_owner(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

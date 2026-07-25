@@ -227,16 +227,22 @@ def _measure_warm_throughput_candidate(
     device: str,
     batch_size: int,
     benchmark: Callable[[int, int], float],
+    progress: Callable[[str, int, int, float], None] | None = None,
 ) -> tuple[float, ...]:
     """Warm one isolated candidate, then measure longer steady-state samples."""
 
     _release_throughput_probe_caches(device)
     try:
-        benchmark(batch_size, _THROUGHPUT_PROBE_WARMUP_WORKLOADS)
-        return tuple(
-            benchmark(batch_size, _THROUGHPUT_PROBE_WORKLOADS_PER_SAMPLE)
-            for _ in range(_THROUGHPUT_PROBE_REPETITIONS)
-        )
+        warmup_seconds = benchmark(batch_size, _THROUGHPUT_PROBE_WARMUP_WORKLOADS)
+        if progress is not None:
+            progress("warmup_completed", 1, 1, warmup_seconds)
+        samples: list[float] = []
+        for index in range(_THROUGHPUT_PROBE_REPETITIONS):
+            seconds = benchmark(batch_size, _THROUGHPUT_PROBE_WORKLOADS_PER_SAMPLE)
+            samples.append(seconds)
+            if progress is not None:
+                progress("sample_completed", index + 1, _THROUGHPUT_PROBE_REPETITIONS, seconds)
+        return tuple(samples)
     finally:
         _release_throughput_probe_caches(device)
 
@@ -906,20 +912,83 @@ def _autotune_block_forward_batch(
                 torch.cuda.synchronize(request.device)
             return time.perf_counter() - started
 
+        cast(Any, events).emit(
+            "memory",
+            "info",
+            "memory.throughput_probe.started",
+            stage_name="block_forward",
+            candidates=list(candidates),
+            candidate_count=len(candidates),
+            benchmark_samples=benchmark_samples,
+            warmup_workloads=_THROUGHPUT_PROBE_WARMUP_WORKLOADS,
+            workloads_per_timing=_THROUGHPUT_PROBE_WORKLOADS_PER_SAMPLE,
+            timing_repetitions=_THROUGHPUT_PROBE_REPETITIONS,
+        )
         observation_samples: dict[int, tuple[float, ...]] = {}
         for batch_size in candidates:
+            candidate_started = time.perf_counter()
+            cast(Any, events).emit(
+                "memory",
+                "info",
+                "memory.throughput_probe_candidate.started",
+                stage_name="block_forward",
+                batch_size=batch_size,
+                benchmark_samples=benchmark_samples,
+            )
+
+            def report_progress(
+                phase: str,
+                completed: int,
+                total: int,
+                seconds: float,
+                *,
+                candidate: int = batch_size,
+            ) -> None:
+                cast(Any, events).emit(
+                    "memory",
+                    "info",
+                    f"memory.throughput_probe_candidate.{phase}",
+                    stage_name="block_forward",
+                    batch_size=candidate,
+                    completed=completed,
+                    total=total,
+                    wall_seconds=seconds,
+                )
+
             try:
                 samples = _measure_warm_throughput_candidate(
                     request.device,
                     batch_size,
                     benchmark_candidate,
+                    report_progress,
                 )
                 observation_samples[batch_size] = samples
-                observations.append((batch_size, statistics.median(samples)))
+                median_seconds = statistics.median(samples)
+                observations.append((batch_size, median_seconds))
+                cast(Any, events).emit(
+                    "memory",
+                    "info",
+                    "memory.throughput_probe_candidate.completed",
+                    stage_name="block_forward",
+                    batch_size=batch_size,
+                    median_seconds=median_seconds,
+                    minimum_seconds=min(samples),
+                    maximum_seconds=max(samples),
+                    wall_seconds=time.perf_counter() - candidate_started,
+                )
             except RuntimeError as exc:
                 if not is_cuda_oom(exc):
                     raise
                 failures.append({"batch_size": batch_size, "error": str(exc)})
+                cast(Any, events).emit(
+                    "memory",
+                    "warning",
+                    "memory.throughput_probe_candidate.failed",
+                    stage_name="block_forward",
+                    batch_size=batch_size,
+                    error_type=type(exc).__name__,
+                    wall_seconds=time.perf_counter() - candidate_started,
+                )
         successful_batches = {batch for batch, _ in observations}
         if baseline not in successful_batches:
             raise ResourceAdmissionError(
@@ -1045,21 +1114,85 @@ def _autotune_tuning_microbatch(
                 torch.cuda.synchronize(request.device)
             return time.perf_counter() - started
 
+        candidates = throughput_batch_candidates(maximum_safe, baseline)
+        cast(Any, events).emit(
+            "memory",
+            "info",
+            "memory.throughput_probe.started",
+            stage_name="tuning",
+            candidates=list(candidates),
+            candidate_count=len(candidates),
+            benchmark_samples=benchmark_samples,
+            warmup_workloads=_THROUGHPUT_PROBE_WARMUP_WORKLOADS,
+            workloads_per_timing=_THROUGHPUT_PROBE_WORKLOADS_PER_SAMPLE,
+            timing_repetitions=_THROUGHPUT_PROBE_REPETITIONS,
+        )
         observation_samples: dict[int, tuple[float, ...]] = {}
-        for batch_size in throughput_batch_candidates(maximum_safe, baseline):
+        for batch_size in candidates:
+            candidate_started = time.perf_counter()
+            cast(Any, events).emit(
+                "memory",
+                "info",
+                "memory.throughput_probe_candidate.started",
+                stage_name="tuning",
+                batch_size=batch_size,
+                benchmark_samples=benchmark_samples,
+            )
+
+            def report_progress(
+                phase: str,
+                completed: int,
+                total: int,
+                seconds: float,
+                *,
+                candidate: int = batch_size,
+            ) -> None:
+                cast(Any, events).emit(
+                    "memory",
+                    "info",
+                    f"memory.throughput_probe_candidate.{phase}",
+                    stage_name="tuning",
+                    batch_size=candidate,
+                    completed=completed,
+                    total=total,
+                    wall_seconds=seconds,
+                )
+
             try:
                 samples = _measure_warm_throughput_candidate(
                     request.device,
                     batch_size,
                     benchmark_candidate,
+                    report_progress,
                 )
                 observation_samples[batch_size] = samples
-                observations.append((batch_size, statistics.median(samples)))
+                median_seconds = statistics.median(samples)
+                observations.append((batch_size, median_seconds))
+                cast(Any, events).emit(
+                    "memory",
+                    "info",
+                    "memory.throughput_probe_candidate.completed",
+                    stage_name="tuning",
+                    batch_size=batch_size,
+                    median_seconds=median_seconds,
+                    minimum_seconds=min(samples),
+                    maximum_seconds=max(samples),
+                    wall_seconds=time.perf_counter() - candidate_started,
+                )
             except RuntimeError as exc:
                 if not is_cuda_oom(exc):
                     raise
                 block.zero_grad(set_to_none=True)
                 failures.append({"batch_size": batch_size, "error": str(exc)})
+                cast(Any, events).emit(
+                    "memory",
+                    "warning",
+                    "memory.throughput_probe_candidate.failed",
+                    stage_name="tuning",
+                    batch_size=batch_size,
+                    error_type=type(exc).__name__,
+                    wall_seconds=time.perf_counter() - candidate_started,
+                )
         if baseline not in {batch for batch, _ in observations}:
             raise ResourceAdmissionError(
                 f"RES001 adaptive tuning baseline microbatch {baseline} failed its real probe"

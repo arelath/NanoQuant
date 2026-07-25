@@ -23,6 +23,7 @@ from nanoquant.infrastructure.publication import (
     PublishableArtifactKind,
     publish_experiment_artifacts,
 )
+from nanoquant.infrastructure.run_session import open_run_event_append_session
 from nanoquant.quality_evaluation import (
     DEFAULT_QUALITY_TASK_BATCH_SIZE,
     DEFAULT_QUALITY_WIKITEXT_BATCH_SIZE,
@@ -142,20 +143,35 @@ def execute_compression_benchmark_experiment(
     )
     quality_output = resolved.benchmark_output.with_suffix(".quality.json")
     atomic_write_json(quality_output, quality)
-    exports = complete_deferred_huggingface_upload(
-        exports,
-        experiment.export.huggingface,
-        ((quality_output, "quality.json"),),
-        model_card_metadata=(
-            None
-            if experiment.export.huggingface is None
-            else load_huggingface_model_card_metadata(
-                config.model.source,
-                str(config.model.revision),
-                resolved.inputs.snapshot,
-            )
-        ),
+    supplemental = ((quality_output, "quality.json"),)
+    model_card_metadata = (
+        None
+        if experiment.export.huggingface is None
+        else load_huggingface_model_card_metadata(
+            config.model.source,
+            str(config.model.revision),
+            resolved.inputs.snapshot,
+        )
     )
+    if experiment.export.huggingface is None:
+        exports = complete_deferred_huggingface_upload(
+            exports,
+            None,
+            supplemental,
+            model_card_metadata=model_card_metadata,
+        )
+    else:
+        with open_run_event_append_session(
+            resolved.inputs.output,
+            observability=config.observability,
+        ) as upload_events:
+            exports = complete_deferred_huggingface_upload(
+                exports,
+                experiment.export.huggingface,
+                supplemental,
+                model_card_metadata=model_card_metadata,
+                events=upload_events,
+            )
     publication_directory = repository_root / "Results" / f"{experiment_number:03d}"
     payload = {
         "schema_version": 2,
