@@ -9,6 +9,8 @@ from nanoquant.config.schema import ProfilingConfig, ProfilingLevel
 from nanoquant.infrastructure.profiling import Profiler
 from nanoquant.resident_quantization import (
     _THROUGHPUT_PROBE_REPETITIONS,
+    _THROUGHPUT_PROBE_WARMUP_WORKLOADS,
+    _THROUGHPUT_PROBE_WORKLOADS_PER_SAMPLE,
     _block_loss,
     _measure_warm_throughput_candidate,
     _place_completed_decoder_block,
@@ -46,20 +48,27 @@ def test_throughput_candidate_warms_once_without_clearing_between_timed_repetiti
     def release(_device: str) -> None:
         calls.append(("release", None))
 
-    def benchmark(batch_size: int) -> float:
+    def benchmark(batch_size: int, workloads: int) -> float:
         nonlocal invocation
         invocation += 1
-        calls.append(("benchmark", batch_size))
-        return float(invocation)
+        calls.append((f"benchmark:{workloads}", batch_size))
+        return float(invocation * workloads)
 
     monkeypatch.setattr(resident_quantization_module, "_release_throughput_probe_caches", release)
 
     samples = _measure_warm_throughput_candidate("cuda:0", 8, benchmark)
 
-    assert samples == tuple(float(index) for index in range(2, _THROUGHPUT_PROBE_REPETITIONS + 2))
+    assert samples == tuple(
+        float(index * _THROUGHPUT_PROBE_WORKLOADS_PER_SAMPLE)
+        for index in range(2, _THROUGHPUT_PROBE_REPETITIONS + 2)
+    )
     assert calls == [
         ("release", None),
-        *(("benchmark", 8) for _ in range(_THROUGHPUT_PROBE_REPETITIONS + 1)),
+        (f"benchmark:{_THROUGHPUT_PROBE_WARMUP_WORKLOADS}", 8),
+        *(
+            (f"benchmark:{_THROUGHPUT_PROBE_WORKLOADS_PER_SAMPLE}", 8)
+            for _ in range(_THROUGHPUT_PROBE_REPETITIONS)
+        ),
         ("release", None),
     ]
 

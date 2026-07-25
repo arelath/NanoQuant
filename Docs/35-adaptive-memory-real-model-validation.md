@@ -18,10 +18,13 @@ not prove final BPW, quality, resume, or end-to-end wall-time parity.
 - Balanced policy: 1 GiB CUDA reserve, 25% estimator allowance, minimum 1.25 GiB uncertainty.
 - All CUDA probes ran sequentially under `device_lease.py`; the device returned to about 0.7 GiB graphics usage and
   0% utilization afterward.
-- The benchmark uses full configured sequence length, 64 samples for no-gradient block forward, and one logical
-  tuning batch for forward/backward. Each throughput candidate is measured five times after full-workload warm-up
-  and compared
-  by median wall time. A new value must beat the configured baseline by at least 5%.
+- The retained benchmark uses full configured sequence length, 64 samples for no-gradient block forward, and one
+  logical tuning batch for forward/backward. Each retained throughput candidate was measured five times after a
+  full-workload warm-up and compared by median wall time. A new value had to beat the configured baseline by at
+  least 5%.
+- As of 2026-07-24, the production probe and benchmark tool use three untimed warm-up workloads followed by five
+  timed samples containing two complete workloads each, and retain every raw timing. The matrix below predates that
+  longer protocol and must be regenerated before its batch selections are treated as current evidence.
 - The model-load and largest-block probes use the exact local snapshot named below. Retained historical runs provide
   longer block-depth evidence but are not silently treated as completed when interrupted.
 

@@ -97,6 +97,8 @@ CASES = (
 )
 
 _THROUGHPUT_PROBE_REPETITIONS = 5
+_THROUGHPUT_PROBE_WARMUP_WORKLOADS = 3
+_THROUGHPUT_PROBE_WORKLOADS_PER_SAMPLE = 2
 
 
 def _snapshot(cache_root: Path, case: ModelCase) -> Path:
@@ -299,23 +301,12 @@ def _probe_model_load(
                     metadata = _forward_metadata_to_device(capture.keyword, device)
                     legacy_batch_size = case.template.runtime.block_forward_batch_size
                     candidate_observations: list[tuple[int, float]] = []
+                    candidate_timing_samples: dict[int, tuple[float, ...]] = {}
                     candidate_peaks: dict[int, tuple[int, int]] = {}
                     for candidate in throughput_batch_candidates(batch_size, legacy_batch_size):
                         timings: list[float] = []
                         torch.cuda.empty_cache()
-                        output = _run_block_batched(
-                            adapter,
-                            target_block,
-                            initial_inputs,
-                            metadata,
-                            candidate,
-                            "cpu",
-                        )
-                        torch.cuda.synchronize(device)
-                        del output
-                        torch.cuda.reset_peak_memory_stats(device)
-                        for _ in range(_THROUGHPUT_PROBE_REPETITIONS):
-                            candidate_started = time.perf_counter()
+                        for _ in range(_THROUGHPUT_PROBE_WARMUP_WORKLOADS):
                             output = _run_block_batched(
                                 adapter,
                                 target_block,
@@ -324,9 +315,24 @@ def _probe_model_load(
                                 candidate,
                                 "cpu",
                             )
+                            del output
+                        torch.cuda.synchronize(device)
+                        torch.cuda.reset_peak_memory_stats(device)
+                        for _ in range(_THROUGHPUT_PROBE_REPETITIONS):
+                            candidate_started = time.perf_counter()
+                            for _ in range(_THROUGHPUT_PROBE_WORKLOADS_PER_SAMPLE):
+                                output = _run_block_batched(
+                                    adapter,
+                                    target_block,
+                                    initial_inputs,
+                                    metadata,
+                                    candidate,
+                                    "cpu",
+                                )
+                                del output
                             torch.cuda.synchronize(device)
                             timings.append(time.perf_counter() - candidate_started)
-                            del output
+                        candidate_timing_samples[candidate] = tuple(timings)
                         candidate_observations.append((candidate, statistics.median(timings)))
                         candidate_peaks[candidate] = (
                             int(torch.cuda.max_memory_allocated(device)),
@@ -356,8 +362,15 @@ def _probe_model_load(
                         "legacy_peak_allocated_bytes": legacy_peak_allocated,
                         "legacy_peak_reserved_bytes": legacy_peak_reserved,
                         "speedup": legacy_wall_seconds / selected_wall_seconds,
+                        "warmup_workloads": _THROUGHPUT_PROBE_WARMUP_WORKLOADS,
+                        "workloads_per_timing": _THROUGHPUT_PROBE_WORKLOADS_PER_SAMPLE,
+                        "timing_repetitions": _THROUGHPUT_PROBE_REPETITIONS,
                         "candidate_observations": [
-                            {"batch_size": candidate, "seconds": seconds}
+                            {
+                                "batch_size": candidate,
+                                "seconds": seconds,
+                                "sample_seconds": list(candidate_timing_samples[candidate]),
+                            }
                             for candidate, seconds in candidate_observations
                         ],
                         "peak_allocated_bytes": forward_peak_allocated,
@@ -387,29 +400,37 @@ def _probe_model_load(
                         "cpu",
                     ).detach()
                     tuning_observations: list[tuple[int, float]] = []
+                    tuning_timing_samples: dict[int, tuple[float, ...]] = {}
                     tuning_peaks: dict[int, tuple[int, int]] = {}
                     try:
-                        def benchmark_tuning_candidate(candidate: int) -> float:
-                            target_block.zero_grad(set_to_none=True)
+                        def benchmark_tuning_candidate(candidate: int, workloads: int) -> float:
                             candidate_started = time.perf_counter()
-                            for start in range(0, tuning_samples, candidate):
-                                stop = min(start + candidate, tuning_samples)
-                                input_batch = initial_inputs[start:stop].to(device)
-                                target_batch = target_values[start:stop].to(device)
-                                prediction = adapter.run_block(target_block, input_batch, **metadata)
-                                loss = (prediction.float() - target_batch.float()).square().mean()
-                                loss.backward()
-                                del input_batch, target_batch, prediction, loss
+                            for _ in range(workloads):
+                                target_block.zero_grad(set_to_none=True)
+                                for start in range(0, tuning_samples, candidate):
+                                    stop = min(start + candidate, tuning_samples)
+                                    input_batch = initial_inputs[start:stop].to(device)
+                                    target_batch = target_values[start:stop].to(device)
+                                    prediction = adapter.run_block(target_block, input_batch, **metadata)
+                                    loss = (prediction.float() - target_batch.float()).square().mean()
+                                    loss.backward()
+                                    del input_batch, target_batch, prediction, loss
                             torch.cuda.synchronize(device)
                             return time.perf_counter() - candidate_started
 
                         for candidate in throughput_batch_candidates(tuning_maximum, tuning_baseline):
                             timings = []
                             torch.cuda.empty_cache()
-                            benchmark_tuning_candidate(candidate)
+                            benchmark_tuning_candidate(candidate, _THROUGHPUT_PROBE_WARMUP_WORKLOADS)
                             torch.cuda.reset_peak_memory_stats(device)
                             for _ in range(_THROUGHPUT_PROBE_REPETITIONS):
-                                timings.append(benchmark_tuning_candidate(candidate))
+                                timings.append(
+                                    benchmark_tuning_candidate(
+                                        candidate,
+                                        _THROUGHPUT_PROBE_WORKLOADS_PER_SAMPLE,
+                                    )
+                                )
+                            tuning_timing_samples[candidate] = tuple(timings)
                             tuning_observations.append((candidate, statistics.median(timings)))
                             tuning_peaks[candidate] = (
                                 int(torch.cuda.max_memory_allocated(device)),
@@ -437,8 +458,15 @@ def _probe_model_load(
                             "baseline_wall_seconds": tuning_seconds[tuning_baseline],
                             "selected_wall_seconds": tuning_seconds[selected_tuning],
                             "speedup": tuning_seconds[tuning_baseline] / tuning_seconds[selected_tuning],
+                            "warmup_workloads": _THROUGHPUT_PROBE_WARMUP_WORKLOADS,
+                            "workloads_per_timing": _THROUGHPUT_PROBE_WORKLOADS_PER_SAMPLE,
+                            "timing_repetitions": _THROUGHPUT_PROBE_REPETITIONS,
                             "candidate_observations": [
-                                {"batch_size": candidate, "seconds": seconds}
+                                {
+                                    "batch_size": candidate,
+                                    "seconds": seconds,
+                                    "sample_seconds": list(tuning_timing_samples[candidate]),
+                                }
                                 for candidate, seconds in tuning_observations
                             ],
                         }

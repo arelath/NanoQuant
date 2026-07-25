@@ -210,6 +210,8 @@ from nanoquant.ports.model_adapter import ModelAdapter
 
 RESIDENT_ALGORITHM_VERSION = 48
 _THROUGHPUT_PROBE_REPETITIONS = 5
+_THROUGHPUT_PROBE_WARMUP_WORKLOADS = 3
+_THROUGHPUT_PROBE_WORKLOADS_PER_SAMPLE = 2
 
 
 def _release_throughput_probe_caches(device: str) -> None:
@@ -224,14 +226,17 @@ def _release_throughput_probe_caches(device: str) -> None:
 def _measure_warm_throughput_candidate(
     device: str,
     batch_size: int,
-    benchmark: Callable[[int], float],
+    benchmark: Callable[[int, int], float],
 ) -> tuple[float, ...]:
-    """Warm one isolated candidate, then measure its steady-state repetitions."""
+    """Warm one isolated candidate, then measure longer steady-state samples."""
 
     _release_throughput_probe_caches(device)
     try:
-        benchmark(batch_size)
-        return tuple(benchmark(batch_size) for _ in range(_THROUGHPUT_PROBE_REPETITIONS))
+        benchmark(batch_size, _THROUGHPUT_PROBE_WARMUP_WORKLOADS)
+        return tuple(
+            benchmark(batch_size, _THROUGHPUT_PROBE_WORKLOADS_PER_SAMPLE)
+            for _ in range(_THROUGHPUT_PROBE_REPETITIONS)
+        )
     finally:
         _release_throughput_probe_caches(device)
 
@@ -885,22 +890,23 @@ def _autotune_block_forward_batch(
     observations: list[tuple[int, float]] = []
     failures: list[dict[str, object]] = []
     try:
-        def benchmark_candidate(batch_size: int) -> float:
+        def benchmark_candidate(batch_size: int, workloads: int) -> float:
             started = time.perf_counter()
-            output = _run_block_batched(
-                adapter,
-                block,
-                benchmark_inputs,
-                metadata,
-                batch_size,
-                "cpu",
-            )
+            for _ in range(workloads):
+                output = _run_block_batched(
+                    adapter,
+                    block,
+                    benchmark_inputs,
+                    metadata,
+                    batch_size,
+                    "cpu",
+                )
+                del output
             if request.device.startswith("cuda"):
                 torch.cuda.synchronize(request.device)
-            elapsed = time.perf_counter() - started
-            del output
-            return elapsed
+            return time.perf_counter() - started
 
+        observation_samples: dict[int, tuple[float, ...]] = {}
         for batch_size in candidates:
             try:
                 samples = _measure_warm_throughput_candidate(
@@ -908,6 +914,7 @@ def _autotune_block_forward_batch(
                     batch_size,
                     benchmark_candidate,
                 )
+                observation_samples[batch_size] = samples
                 observations.append((batch_size, statistics.median(samples)))
             except RuntimeError as exc:
                 if not is_cuda_oom(exc):
@@ -934,8 +941,19 @@ def _autotune_block_forward_batch(
             baseline_batch_size=baseline,
             selected_batch_size=selected,
             benchmark_samples=benchmark_samples,
+            samples_per_timing=benchmark_samples * _THROUGHPUT_PROBE_WORKLOADS_PER_SAMPLE,
+            warmup_workloads=_THROUGHPUT_PROBE_WARMUP_WORKLOADS,
+            workloads_per_timing=_THROUGHPUT_PROBE_WORKLOADS_PER_SAMPLE,
+            timing_repetitions=_THROUGHPUT_PROBE_REPETITIONS,
             selected_speedup=baseline_seconds / selected_seconds,
-            observations=[{"batch_size": batch, "seconds": seconds} for batch, seconds in observations],
+            observations=[
+                {
+                    "batch_size": batch,
+                    "seconds": seconds,
+                    "sample_seconds": list(observation_samples[batch]),
+                }
+                for batch, seconds in observations
+            ],
             failed_candidates=failures,
         )
         return selected
@@ -1011,21 +1029,23 @@ def _autotune_tuning_microbatch(
         ).detach()
         benchmark_targets = targets
 
-        def benchmark_candidate(batch_size: int) -> float:
-            block.zero_grad(set_to_none=True)
+        def benchmark_candidate(batch_size: int, workloads: int) -> float:
             started = time.perf_counter()
-            for start in range(0, benchmark_samples, batch_size):
-                stop = min(start + batch_size, benchmark_samples)
-                input_batch = benchmark_inputs[start:stop].to(request.device)
-                target_batch = benchmark_targets[start:stop].to(request.device)
-                prediction = adapter.run_block(block, input_batch, **metadata)
-                loss = (prediction.float() - target_batch.float()).square().mean()
-                torch.autograd.backward(loss)
-                del input_batch, target_batch, prediction, loss
+            for _ in range(workloads):
+                block.zero_grad(set_to_none=True)
+                for start in range(0, benchmark_samples, batch_size):
+                    stop = min(start + batch_size, benchmark_samples)
+                    input_batch = benchmark_inputs[start:stop].to(request.device)
+                    target_batch = benchmark_targets[start:stop].to(request.device)
+                    prediction = adapter.run_block(block, input_batch, **metadata)
+                    loss = (prediction.float() - target_batch.float()).square().mean()
+                    torch.autograd.backward(loss)
+                    del input_batch, target_batch, prediction, loss
             if request.device.startswith("cuda"):
                 torch.cuda.synchronize(request.device)
             return time.perf_counter() - started
 
+        observation_samples: dict[int, tuple[float, ...]] = {}
         for batch_size in throughput_batch_candidates(maximum_safe, baseline):
             try:
                 samples = _measure_warm_throughput_candidate(
@@ -1033,6 +1053,7 @@ def _autotune_tuning_microbatch(
                     batch_size,
                     benchmark_candidate,
                 )
+                observation_samples[batch_size] = samples
                 observations.append((batch_size, statistics.median(samples)))
             except RuntimeError as exc:
                 if not is_cuda_oom(exc):
@@ -1058,8 +1079,19 @@ def _autotune_tuning_microbatch(
             baseline_batch_size=baseline,
             selected_batch_size=selected,
             benchmark_samples=benchmark_samples,
+            samples_per_timing=benchmark_samples * _THROUGHPUT_PROBE_WORKLOADS_PER_SAMPLE,
+            warmup_workloads=_THROUGHPUT_PROBE_WARMUP_WORKLOADS,
+            workloads_per_timing=_THROUGHPUT_PROBE_WORKLOADS_PER_SAMPLE,
+            timing_repetitions=_THROUGHPUT_PROBE_REPETITIONS,
             selected_speedup=timings[baseline] / timings[selected],
-            observations=[{"batch_size": batch, "seconds": seconds} for batch, seconds in observations],
+            observations=[
+                {
+                    "batch_size": batch,
+                    "seconds": seconds,
+                    "sample_seconds": list(observation_samples[batch]),
+                }
+                for batch, seconds in observations
+            ],
             failed_candidates=failures,
         )
         refit_maximum = request.post_block_refit_microbatch_size

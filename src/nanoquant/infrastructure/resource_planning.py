@@ -52,7 +52,7 @@ class InsufficientResourcesError(RuntimeError):
     code = "RES001"
 
 
-MEMORY_PLAN_ALGORITHM_VERSION = 1
+MEMORY_PLAN_ALGORITHM_VERSION = 2
 
 
 def memory_plan_request_hash(config: RunConfig) -> str:

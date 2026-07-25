@@ -354,12 +354,12 @@ selected   = fastest measured candidate if >=5% faster, otherwise baseline
 ```
 
 Block-forward probes process a representative 64-sample full-sequence workload. Tuning probes run forward/backward
-over one logical tuning batch five times per candidate and compare median wall time; they do not create an optimizer
-or step weights. Each candidate is isolated by releasing allocator caches, executes one untimed full-workload
-warm-up, and then runs all five timed repetitions without another cache release so the median represents steady-state
-execution rather than cold allocation. Probes release gradients, outputs, streamed blocks, and CUDA cache before the
-real stage. Do not probe a mutating optimizer step or a factorization attempt whose RNG/result would become part of
-the algorithm.
+over one logical tuning batch and do not create an optimizer or step weights. Each candidate is isolated by releasing
+allocator caches, executes three untimed full-workload warm-ups, and then runs five timed samples containing two
+complete workloads each without another cache release. The median therefore represents a longer steady-state window
+rather than cold allocation or a single short pass. Raw sample timings are retained with the median. Probes release
+gradients, outputs, streamed blocks, and CUDA cache before the real stage. Do not probe a mutating optimizer step or
+a factorization attempt whose RNG/result would become part of the algorithm.
 
 ### 8.2 Hysteresis
 
