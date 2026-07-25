@@ -213,4 +213,31 @@ def test_quality_workflow_writes_deterministic_markdown(
     assert "| WikiText-2 | perplexity ↓ | 10.000000 | 12.500000 | +2.500000 (+25.00%) | 1.2500x |" in rendered
     assert "| piqa | acc_norm ↑ | 0.7500 | 0.7000 | -0.0500 | 0.9333x |" in rendered
     assert "`completed` means all evaluators returned finite metrics" in rendered
+    assert "## PyTorch quality-reference execution" in rendered
+    assert "do not measure deployed NanoQuant memory savings" in rendered
+    assert "| BF16 Transformers | 2.00 | 100 | 200 |" in rendered
+    assert "| NanoQuant factorized reference | 3.00 | 110 | 220 |" in rendered
     assert [artifact.source for artifact in published[0][2]] == [output, markdown]
+
+
+def test_quality_markdown_reports_deployment_storage_separately() -> None:
+    payload = _quality_result()
+    payload["deployment_storage"] = {
+        "bf16_checkpoint_bytes": 1_000,
+        "packed_quantized_layer_bytes": 25,
+        "gguf_bytes": 250,
+    }
+    payload["experiment"] = {
+        "config_hash": "sha256:config",
+        "resolved_config": {
+            "intent": {"experiment_number": 28},
+        },
+        "launcher": {"repository_relative_path": "experiments/028.py"},
+    }
+
+    rendered = render_quality_evaluation_markdown(payload)
+
+    assert "## Deployment storage" in rendered
+    assert "| BF16 checkpoint tensors | 1,000 | — |" in rendered
+    assert "| NanoQuant GGUF | 250 | 75.00% |" in rendered
+    assert "packed NanoQuant quantized-layer payload is 25 bytes" in rendered

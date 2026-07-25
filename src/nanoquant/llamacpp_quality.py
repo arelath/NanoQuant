@@ -584,7 +584,7 @@ def render_llamacpp_quality_markdown(payload: dict[str, Any]) -> str:
         "",
         (
             f"- GGUF: `{payload['gguf']['path']}` "
-            f"(`sha256:{payload['gguf']['sha256']}`)"
+            f"({int(payload['gguf']['bytes']):,} bytes; `sha256:{payload['gguf']['sha256']}`)"
         ),
         f"- llama.cpp commit: `{payload['runtime']['git']['commit']}`",
         (
@@ -592,6 +592,10 @@ def render_llamacpp_quality_markdown(payload: dict[str, Any]) -> str:
             "llama.cpp F32 logits with host F64 log-sum-exp"
         ),
         f"- Wall time: {float(payload['wall_seconds']):.2f} seconds",
+        (
+            "- Runtime peak VRAM is not inferred from the PyTorch reference evaluator; "
+            "the out-of-process llama.cpp scorer does not yet capture that metric."
+        ),
         "",
         "| Benchmark | Metric | BF16 | GGUF | Delta | Ratio |",
         "| --- | --- | ---: | ---: | ---: | ---: |",

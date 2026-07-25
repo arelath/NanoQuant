@@ -285,6 +285,11 @@ def execute_compression_quality_experiment(
             if llamacpp_quality is None
             else {"deployment_quality": llamacpp_quality}
         ),
+        "deployment_storage": {
+            "bf16_checkpoint_bytes": workflow.quantization.inventory.total_source_bytes,
+            "packed_quantized_layer_bytes": exports.packed["packed_weight_bytes"],
+            "gguf_bytes": exports.gguf.bytes,
+        },
         "experiment": {
             "config_hash": config_hash(config),
             "resolved_config": to_dict(config),

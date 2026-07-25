@@ -95,6 +95,40 @@ def _markdown_cell(value: object) -> str:
     return rendered.replace("|", "\\|").replace("\n", " ")
 
 
+def _deployment_storage_markdown(payload: dict[str, Any]) -> tuple[str, ...]:
+    raw = payload.get("deployment_storage")
+    if raw is None:
+        return ()
+    if not isinstance(raw, dict):
+        raise TypeError("quality deployment storage must be an object")
+    source_bytes = int(_number(raw.get("bf16_checkpoint_bytes"), "BF16 checkpoint bytes"))
+    packed_bytes = int(
+        _number(
+            raw.get("packed_quantized_layer_bytes"),
+            "packed quantized layer bytes",
+        )
+    )
+    gguf_bytes = int(_number(raw.get("gguf_bytes"), "GGUF bytes"))
+    if source_bytes <= 0 or packed_bytes <= 0 or gguf_bytes <= 0:
+        raise ValueError("quality deployment storage byte counts must be positive")
+    gguf_savings = 1.0 - gguf_bytes / source_bytes
+    return (
+        "",
+        "## Deployment storage",
+        "",
+        "| Deployable representation | Bytes | Storage savings vs BF16 |",
+        "| --- | ---: | ---: |",
+        f"| BF16 checkpoint tensors | {source_bytes:,} | — |",
+        f"| NanoQuant GGUF | {gguf_bytes:,} | {gguf_savings:.2%} |",
+        "",
+        (
+            f"The packed NanoQuant quantized-layer payload is {packed_bytes:,} bytes. "
+            "The complete GGUF is the comparable deployable artifact and also includes "
+            "embeddings, the output projection, norms, and metadata."
+        ),
+    )
+
+
 def render_quality_evaluation_markdown(payload: dict[str, Any]) -> str:
     """Render a compact deterministic BF16-versus-NanoQuant benchmark report."""
 
@@ -155,20 +189,33 @@ def render_quality_evaluation_markdown(payload: dict[str, Any]) -> str:
             f"| {_markdown_cell(item['task_name'])} | {_markdown_cell(item['metric'])} ↑ | "
             f"{baseline:.4f} | {value:.4f} | {value - baseline:+.4f} | {ratio_text} |"
         )
+    lines.extend(_deployment_storage_markdown(payload))
     lines.extend(
         (
             "",
-            "## Runtime and memory",
+            "## PyTorch quality-reference execution",
             "",
-            "| Model | Elapsed seconds | Peak CUDA bytes | Peak host bytes |",
+            (
+                f"The NanoQuant row uses the `{_markdown_cell(candidate['backend'])}` correctness backend. "
+                "It reconstructs or expands packed factors into ordinary PyTorch tensors and is not the "
+                "GGUF deployment runtime. Its allocator peaks do not measure deployed NanoQuant memory "
+                "savings. Host values are process-lifetime high-water marks, so the two rows are not "
+                "independent host-memory windows."
+            ),
+            "",
+            (
+                "| Reference backend | Elapsed seconds | CUDA allocator peak bytes | "
+                "Process peak host bytes |"
+            ),
             "| --- | ---: | ---: | ---: |",
             (
-                f"| BF16 | {_number(base['elapsed_seconds'], 'base elapsed'):.2f} | "
+                f"| BF16 Transformers | {_number(base['elapsed_seconds'], 'base elapsed'):.2f} | "
                 f"{int(_number(base['peak_device_bytes'], 'base peak device')):,} | "
                 f"{int(_number(base['peak_host_bytes'], 'base peak host')):,} |"
             ),
             (
-                f"| NanoQuant | {_number(frozen['elapsed_seconds'], 'frozen elapsed'):.2f} | "
+                f"| NanoQuant {_markdown_cell(candidate['backend'])} reference | "
+                f"{_number(frozen['elapsed_seconds'], 'frozen elapsed'):.2f} | "
                 f"{int(_number(frozen['peak_device_bytes'], 'frozen peak device')):,} | "
                 f"{int(_number(frozen['peak_host_bytes'], 'frozen peak host')):,} |"
             ),

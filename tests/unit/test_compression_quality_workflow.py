@@ -55,7 +55,10 @@ def test_compression_quality_runs_quality_before_huggingface_upload_and_publicat
         tmp_path / "gguf-quality.json",
     )
     quantization = SimpleNamespace(
-        inventory=SimpleNamespace(blocks=tuple(range(34))),
+        inventory=SimpleNamespace(
+            blocks=tuple(range(34)),
+            total_source_bytes=1_000,
+        ),
         identity=CommitIdentity("config", "model", "plan"),
         frozen_model=SimpleNamespace(effective_bpw=0.998),
         peak_device_bytes=100,
@@ -69,7 +72,7 @@ def test_compression_quality_runs_quality_before_huggingface_upload_and_publicat
     mmproj = gguf.parent / "mmproj-BF16.gguf"
     export = CompressionExportResult(
         {"exact": True},
-        {"exact": True},
+        {"exact": True, "packed_weight_bytes": 25},
         GgufExportResult(
             gguf,
             tmp_path / "checkpoint",
@@ -147,7 +150,12 @@ def test_compression_quality_runs_quality_before_huggingface_upload_and_publicat
         evaluate_llamacpp,
     )
     monkeypatch.setattr(workflow, "render_llamacpp_quality_markdown", lambda _payload: "# GGUF\n")
-    monkeypatch.setattr(workflow, "render_quality_evaluation_markdown", lambda _payload: "# quality\n")
+    rendered_payloads = []
+    monkeypatch.setattr(
+        workflow,
+        "render_quality_evaluation_markdown",
+        lambda payload: rendered_payloads.append(payload) or "# quality\n",
+    )
 
     emitted_events = []
     upload_events = SimpleNamespace(
@@ -215,6 +223,11 @@ def test_compression_quality_runs_quality_before_huggingface_upload_and_publicat
     assert quality_requests[0].packed_artifact == tmp_path / "repo" / "outputs/003/packed"
     assert not quality_requests[0].stream_base_model
     assert quality_requests[0].local_files_only is False
+    assert rendered_payloads[0]["deployment_storage"] == {
+        "bf16_checkpoint_bytes": 1_000,
+        "packed_quantized_layer_bytes": 25,
+        "gguf_bytes": 123,
+    }
     assert payload["exports"]["gguf"]["output"] == str(gguf)
     assert payload["exports"]["mmproj"]["output"] == str(mmproj)
     assert payload["exports"]["huggingface"]["commit_oid"] == "a" * 40
