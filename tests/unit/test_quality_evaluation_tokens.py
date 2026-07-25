@@ -61,3 +61,46 @@ def test_wikitext_tokenization_is_bounded_to_the_evaluated_prefix(monkeypatch: A
     assert torch.equal(tokens, torch.tensor([[2, 10, 11, 12], [2, 13, 14, 15]]))
     assert fingerprint == "fixture-fingerprint"
     assert bos_token_id == 2
+
+
+def test_wikitext_uses_first_raw_token_as_context_without_bos(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    class FakeDataset(dict[str, list[str]]):
+        _fingerprint = "qwen-fixture"
+
+    class FakeTokenizer:
+        bos_token_id = None
+
+        def __call__(self, _text: str, **kwargs: object) -> SimpleNamespace:
+            calls.append(dict(kwargs))
+            return SimpleNamespace(
+                input_ids=torch.tensor([[10, 11, 12, 13, 14, 15, 16, 17]])
+            )
+
+    datasets = ModuleType("datasets")
+    datasets.Dataset = object  # type: ignore[attr-defined]
+    datasets.DownloadConfig = lambda **_kwargs: object()  # type: ignore[attr-defined]
+    datasets.config = SimpleNamespace(HF_DATASETS_CACHE=tmp_path)  # type: ignore[attr-defined]
+    datasets.load_dataset = lambda *_args, **_kwargs: FakeDataset(text=["qwen"])  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "datasets", datasets)
+    monkeypatch.setattr(
+        quality_evaluation.AutoTokenizer,
+        "from_pretrained",
+        lambda *_args, **_kwargs: FakeTokenizer(),
+    )
+
+    tokens, fingerprint, bos_token_id = quality_evaluation._wikitext_tokens(
+        tmp_path,
+        samples=2,
+        sequence_length=4,
+        local_files_only=False,
+    )
+
+    assert calls == [{"return_tensors": "pt", "truncation": True, "max_length": 8}]
+    assert torch.equal(tokens, torch.tensor([[10, 11, 12, 13], [14, 15, 16, 17]]))
+    assert fingerprint == "qwen-fixture"
+    assert bos_token_id is None

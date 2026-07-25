@@ -108,10 +108,18 @@ class QualityEvaluationRequest:
 class PreparedQualityInputs:
     wikitext_tokens: torch.Tensor
     wikitext_fingerprint: str
-    bos_token_id: int
+    bos_token_id: int | None
     pad_token_id: int
     tokenizer_hash: str
     tasks: tuple[PreparedMultipleChoiceInputs, ...]
+
+
+def _wikitext_context_policy(bos_token_id: int | None) -> str:
+    return (
+        "prepend_tokenizer_bos"
+        if bos_token_id is not None
+        else "first_raw_token_is_context"
+    )
 
 
 def _quality_pad_token_id(tokenizer: Any) -> int:
@@ -148,7 +156,7 @@ def _wikitext_tokens(
     sequence_length: int,
     local_files_only: bool,
     progress: QualityProgressCallback | None = None,
-) -> tuple[torch.Tensor, str, int]:
+) -> tuple[torch.Tensor, str, int | None]:
     _emit_progress(progress, "wikitext_input_dataset_started", dataset=WIKITEXT_DATASET)
     dataset = load_pinned_dataset_split(
         WIKITEXT_DATASET,
@@ -164,7 +172,13 @@ def _wikitext_tokens(
         rows=len(dataset),
     )
     tokenizer = AutoTokenizer.from_pretrained(snapshot, local_files_only=False)
-    payload = sequence_length - 1
+    bos_id = tokenizer.bos_token_id
+    if bos_id is not None and (
+        isinstance(bos_id, bool) or not isinstance(bos_id, int) or bos_id < 0
+    ):
+        raise ValueError("quality evaluation tokenizer BOS token ID is invalid")
+    context_policy = _wikitext_context_policy(bos_id)
+    payload = sequence_length - 1 if bos_id is not None else sequence_length
     required = samples * payload
     # The protocol evaluates independent, bounded windows.  Ask the tokenizer
     # for exactly the prefix those windows consume instead of materializing the
@@ -178,23 +192,33 @@ def _wikitext_tokens(
         truncation=True,
         max_length=required,
     ).input_ids
-    _emit_progress(progress, "wikitext_input_tokenization_completed", tokens=encoded.shape[1])
-    bos_id = tokenizer.bos_token_id
-    if bos_id is None:
-        raise ValueError("Gemma WikiText protocol requires a BOS token")
+    _emit_progress(
+        progress,
+        "wikitext_input_tokenization_completed",
+        tokens=encoded.shape[1],
+        bos_token_id=bos_id,
+        context_policy=context_policy,
+    )
     if encoded.shape[1] < required:
         raise ValueError(f"WikiText token stream has {encoded.shape[1]} tokens; protocol requires {required}")
-    rows = tuple(
-        torch.cat(
-            (
-                torch.tensor([[bos_id]], dtype=encoded.dtype),
-                encoded[:, index * payload : (index + 1) * payload],
-            ),
-            dim=1,
+    rows = (
+        tuple(
+            torch.cat(
+                (
+                    torch.tensor([[bos_id]], dtype=encoded.dtype),
+                    encoded[:, index * payload : (index + 1) * payload],
+                ),
+                dim=1,
+            )
+            for index in range(samples)
         )
-        for index in range(samples)
+        if bos_id is not None
+        else tuple(
+            encoded[:, index * payload : (index + 1) * payload]
+            for index in range(samples)
+        )
     )
-    return torch.cat(rows, dim=0), str(getattr(dataset, "_fingerprint", "unknown")), int(bos_id)
+    return torch.cat(rows, dim=0), str(getattr(dataset, "_fingerprint", "unknown")), bos_id
 
 
 def prepare_quality_inputs(
@@ -550,6 +574,7 @@ def execute_quality_evaluation(
             "wikitext_batch_size": request.wikitext_batch_size,
             "wikitext_token_hash": token_hash,
             "bos_token_id": inputs.bos_token_id,
+            "wikitext_context_policy": _wikitext_context_policy(inputs.bos_token_id),
             "pad_token_id": inputs.pad_token_id,
             "padding_policy": "tokenizer-pad-else-eos",
             "task_names": request.task_names,

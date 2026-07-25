@@ -122,7 +122,9 @@ commit and runtime-library identity, GPU-layer policy, and parallelism all still
 
 The protocol-matched runner is built from `tools/llamacpp/quality_runner` with
 `tools/build_llamacpp_quality.py`. It calls the llama.cpp C API directly: WikiText scores every shifted target after
-the per-window BOS token, and multiple-choice tasks score the same retained context and continuation targets used by
+the per-window BOS token when the tokenizer defines one; for tokenizers such as Qwen3 that intentionally omit BOS,
+the first raw token in each window supplies context instead. Both policies score 127 targets in a 128-token window.
+Multiple-choice tasks score the same retained context and continuation targets used by
 the PyTorch evaluator. It does not reconstruct text or substitute generated answer letters. llama.cpp exposes F32
 logits, so the runner records its F64 host log-sum-exp policy explicitly; close-choice results need not be bit-identical
 to the packed PyTorch backend.
