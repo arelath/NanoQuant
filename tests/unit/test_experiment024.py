@@ -33,7 +33,6 @@ def test_experiment024_combines_best_retained_1b_quality_methods() -> None:
     assert config.factorization.low_rank_patch.enabled is False
     assert config.distillation.enabled is True
 
-    assert experiment.workflow.expected_blocks == 26
     assert experiment.workflow.maximum_wddm_shared_gib == 0.75
     assert experiment.workflow.task_limit == 1000
     assert experiment.workflow.local_files_only is True

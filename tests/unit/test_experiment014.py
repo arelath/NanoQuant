@@ -27,4 +27,3 @@ def test_experiment014_runs_full_reconstruction_planning_before_stacked_compress
     assert config.allocation.maximum_rank_layer_patterns == ()
     assert config.allocation.layer_budget_multipliers == ()
     assert config.factorization.shared_input.enabled is True
-    assert experiment.workflow.expected_blocks == 18

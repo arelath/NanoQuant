@@ -51,7 +51,6 @@ class CompressionBenchmarkExperiment:
 
     export: CompressionExportRecipe
     benchmark_output: Path
-    expected_blocks: int = 26
     wikitext_samples: int = 64
     wikitext_sequence_length: int = 128
     wikitext_batch_size: int = DEFAULT_QUALITY_WIKITEXT_BATCH_SIZE
@@ -61,8 +60,6 @@ class CompressionBenchmarkExperiment:
     local_files_only: bool = False
 
     def __post_init__(self) -> None:
-        if self.expected_blocks <= 0:
-            raise ValueError("expected block count must be positive")
         if self.wikitext_samples <= 0 or self.wikitext_sequence_length < 2:
             raise ValueError("WikiText protocol dimensions are invalid")
         if self.wikitext_batch_size <= 0 or self.task_limit <= 0 or self.task_batch_size <= 0:
@@ -118,7 +115,6 @@ def execute_compression_benchmark_experiment(
         config,
         resolved.inputs,
         experiment.export,
-        expected_blocks=experiment.expected_blocks,
     )
     workflow = complete.workflow
     exports = complete.exports

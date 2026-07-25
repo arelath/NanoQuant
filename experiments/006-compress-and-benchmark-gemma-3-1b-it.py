@@ -31,7 +31,6 @@ EXPERIMENT = define_compression_quality_experiment(
         ),
     ),
     BASE_COMPRESSION_TEMPLATE,
-    expected_blocks=26,
     maximum_wddm_shared_gib=0.75,
 )
 

@@ -20,7 +20,6 @@ def test_experiment019_changes_only_llama_identity_and_architecture_contracts() 
         intent=config018.intent,
         output=config018.output,
     ) == config018
-    assert workflow.expected_blocks == 16
     assert workflow.maximum_wddm_shared_gib == 0.75
     assert workflow.restore_completed_blocks is False
     assert workflow.quality_backend == "dense"

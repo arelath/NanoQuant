@@ -23,7 +23,6 @@ def test_experiment018_applies_experiment017_policy_with_gemma4b_guards_and_uplo
     assert config018.block_tuning.microbatch_size == 1
     assert config018.evaluation.inline_quality is False
     assert config018.profiling.level is ProfilingLevel.MACRO
-    assert workflow.expected_blocks == 34
     assert workflow.maximum_wddm_shared_gib == 0.75
     assert workflow.restore_completed_blocks is False
     assert workflow.quality_backend == "dense"

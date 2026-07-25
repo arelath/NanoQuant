@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 from recipes import INTERACTIVE_RECOMMENDED_MODELS
 
 import nanoquant.interactive_compression as interactive
@@ -42,6 +43,30 @@ def _inputs(values: list[str]) -> Any:
 
 def _model(variant: str = "qwen3-0-6b"):  # type: ignore[no-untyped-def]
     return next(item for item in INTERACTIVE_RECOMMENDED_MODELS if item.variant == variant)
+
+
+@pytest.fixture(autouse=True)
+def _resolve_promoted_model_configs(monkeypatch: pytest.MonkeyPatch) -> None:
+    configs = {
+        "Qwen/Qwen3-0.6B": ("qwen3", 28),
+        "Qwen/Qwen3-8B": ("qwen3", 36),
+        "unsloth/gemma-3-270m-it": ("gemma3_text", 18),
+        "google/gemma-3-1b-it": ("gemma3_text", 26),
+        "google/gemma-3-4b-it": ("gemma3", 34),
+        "unsloth/gemma-3-12b-it": ("gemma3", 48),
+        "meta-llama/Meta-Llama-3-8B-Instruct": ("llama", 32),
+        "meta-llama/Llama-3.2-1B-Instruct": ("llama", 16),
+        "meta-llama/Llama-3.2-3B-Instruct": ("llama", 28),
+    }
+
+    def resolve(source: str, revision: str | None):  # type: ignore[no-untyped-def]
+        architecture, blocks = configs[source]
+        config = {"model_type": architecture, "num_hidden_layers": blocks}
+        if architecture == "gemma3":
+            config["text_config"] = {"num_hidden_layers": blocks}
+        return config, revision or "resolved-revision"
+
+    monkeypatch.setattr(interactive, "_model_config", resolve)
 
 
 def _persist(root: Path, settings) -> Path:  # type: ignore[no-untyped-def]
@@ -189,6 +214,33 @@ def test_settings_are_strict_and_tamper_evident(tmp_path: Path) -> None:
     assert discover_interactive_runs(tmp_path) == ()
 
 
+def test_schema_one_settings_migrate_the_derived_block_count_on_load(tmp_path: Path) -> None:
+    settings = create_interactive_settings(
+        _model(),
+        target_bpw=1.0,
+        quality_requested=False,
+        huggingface=None,
+        llama_cpp_root=tmp_path / "llama.cpp",
+        run_name="legacy-settings",
+    )
+    body = interactive._settings_body(settings)
+    body["schema_version"] = 1
+    resolved_source = body["resolved_source"]
+    resolved_source["expected_blocks"] = resolved_source.pop("block_count")
+    digest = interactive.semantic_hash(body)
+    path = tmp_path / "settings.yaml"
+    path.write_text(
+        yaml.safe_dump({"settings_hash": digest, **body}, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    loaded, observed = load_interactive_settings(path)
+
+    assert observed == digest
+    assert loaded.schema_version == 2
+    assert loaded.resolved_source.block_count == 28
+
+
 def test_custom_model_inherits_nearest_compatible_family_profile(
     monkeypatch,
 ) -> None:  # type: ignore[no-untyped-def]
@@ -207,7 +259,7 @@ def test_custom_model_inherits_nearest_compatible_family_profile(
     )
 
     assert resolved.family == "qwen3"
-    assert resolved.expected_blocks == 40
+    assert interactive._resolved_source_for_model(resolved).block_count == 40
     assert resolved.source == "owner/Qwen3-Custom"
     assert resolved.revision == "a" * 40
     assert resolved.template.dataset.behavior_slices
@@ -258,7 +310,7 @@ def test_quality_dispatch_uses_non_numbered_quality_workflow_and_writes_completi
 
     assert execute_interactive_run(settings_path, launcher) == 0
     assert calls[0][0].intent.experiment_number is None
-    assert calls[0][1].expected_blocks == 28
+    assert settings.resolved_source.block_count == 28
     assert calls[0][1].llamacpp_quality
     completion = json.loads(
         (settings_path.parent / INTERACTIVE_COMPLETION_NAME).read_text(encoding="utf-8")

@@ -23,6 +23,8 @@ from nanoquant.infrastructure.artifacts import LocalArtifactStore
 from nanoquant.infrastructure.commits import latest_complete_identity, load_committed_block
 from nanoquant.infrastructure.io_utils import atomic_write_json, hash_file
 from nanoquant.infrastructure.memory_cleanup import gpu_memory_scope
+from nanoquant.infrastructure.model_adapters import decoder_block_count_from_config
+from nanoquant.infrastructure.resolved_model_config import load_snapshot_model_config
 from nanoquant.infrastructure.safetensors_io import SAFETENSORS
 from nanoquant.infrastructure.safetensors_source import SafetensorsModelSource
 from nanoquant.infrastructure.tensor_store import LocalTensorStore
@@ -46,7 +48,6 @@ class RankExpansionRequest:
     report_output: Path
     source: str
     revision: str
-    expected_blocks: int
     layer_suffix: str = "self_attn.v_proj"
     bit_multiplier: float = 1.30
     rank_multiple: int = 32
@@ -60,8 +61,6 @@ class RankExpansionRequest:
     early_stop_tolerance: float | None = None
 
     def __post_init__(self) -> None:
-        if self.expected_blocks <= 0:
-            raise ValueError("rank expansion expected block count must be positive")
         if not self.layer_suffix or self.layer_suffix.startswith("."):
             raise ValueError("rank expansion layer suffix must be a canonical relative path")
         if self.bit_multiplier <= 1:
@@ -85,7 +84,10 @@ def _journal_records(path: Path) -> list[dict[str, Any]]:
     return records
 
 
-def _parent_blocks(request: RankExpansionRequest) -> tuple[tuple[BlockResult, ...], LocalTensorStore]:
+def _parent_blocks(
+    request: RankExpansionRequest,
+    block_count: int,
+) -> tuple[tuple[BlockResult, ...], LocalTensorStore]:
     artifacts = LocalArtifactStore(
         request.parent_run / "artifacts",
         use_persistent_validation_cache=False,
@@ -93,7 +95,7 @@ def _parent_blocks(request: RankExpansionRequest) -> tuple[tuple[BlockResult, ..
     tensors = LocalTensorStore(artifacts)
     identity, records = latest_complete_identity(
         _journal_records(request.parent_run / "state" / "journal.jsonl"),
-        request.expected_blocks,
+        block_count,
     )
     blocks = tuple(
         load_committed_block(
@@ -101,7 +103,7 @@ def _parent_blocks(request: RankExpansionRequest) -> tuple[tuple[BlockResult, ..
             artifacts,
             identity,
         ).result
-        for index in range(request.expected_blocks)
+        for index in range(block_count)
     )
     return blocks, tensors
 
@@ -154,14 +156,20 @@ def _target_rank(state: PackedLayerState, multiplier: float, multiple: int) -> t
     return target, old_bits, _packed_bits_at_rank(state, target)
 
 
-def _work_identity(request: RankExpansionRequest, source_packed: OpenPackedArtifact) -> str:
+def _work_identity(
+    request: RankExpansionRequest,
+    source_packed: OpenPackedArtifact,
+    block_count: int,
+) -> str:
     payload = {
         "schema_version": 1,
         "source_descriptor_sha256": hash_file(source_packed.root / "nanoquant-packed-model.json"),
         "parent_run": str(request.parent_run.resolve()),
         "source": request.source,
         "revision": request.revision,
-        "expected_blocks": request.expected_blocks,
+        # Retain the legacy identity key so derived-count runs can resume
+        # checkpoints created before the recipe field was removed.
+        "expected_blocks": block_count,
         "layer_suffix": request.layer_suffix,
         "bit_multiplier": request.bit_multiplier,
         "rank_multiple": request.rank_multiple,
@@ -459,7 +467,8 @@ def execute_rank_expansion(
     if safe_point is not None:
         safe_point()
     source_packed = open_packed_artifact(request.source_packed, verify_hashes=True)
-    identity = _work_identity(request, source_packed)
+    block_count = decoder_block_count_from_config(load_snapshot_model_config(request.snapshot))
+    identity = _work_identity(request, source_packed, block_count)
     if request.output_packed.exists() or request.report_output.exists():
         if not request.output_packed.is_dir() or not request.report_output.is_file():
             raise FileExistsError("rank expansion output exists only partially")
@@ -470,7 +479,7 @@ def execute_rank_expansion(
         _verify_derivative(source_packed, output, request.layer_suffix)
         return report
 
-    blocks, tensors = _parent_blocks(request)
+    blocks, tensors = _parent_blocks(request, block_count)
     source_weights = SafetensorsModelSource(
         request.snapshot,
         source=request.source,

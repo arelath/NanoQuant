@@ -27,7 +27,6 @@ def test_experiment017_changes_only_model_sensitivity_and_intent_from_experiment
     assert config017.model.revision == "dcc83ea841ab6100d6b47a070329e1ba4cf78752"
     assert config017.allocation.reconstruction.sensitivity_strength == 0.5
     assert config017.factorization.shared_input.enabled is True
-    assert experiment017.workflow.expected_blocks == 26
     assert config017.intent.baseline_run == "012-compress-and-benchmark-gemma-3-1b-it"
     upload = experiment017.workflow.export.huggingface
     assert upload is not None

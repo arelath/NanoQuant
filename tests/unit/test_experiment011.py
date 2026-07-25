@@ -29,7 +29,6 @@ def test_experiment011_doubles_experiment006_outliers_and_stores_them_as_int8() 
     assert config.outliers.storage_dtype is DType.INT8
     assert config.outliers.selector == parent.config.outliers.selector
     assert config.outliers.charge_to_bit_budget is parent.config.outliers.charge_to_bit_budget is False
-    assert experiment.expected_blocks == parent.workflow.expected_blocks == 26
     assert experiment.maximum_wddm_shared_gib == parent.workflow.maximum_wddm_shared_gib == 0.75
     assert experiment.wikitext_batch_size == parent.workflow.wikitext_batch_size == 8
     assert experiment.task_batch_size == parent.workflow.task_batch_size == 4

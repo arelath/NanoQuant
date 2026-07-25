@@ -20,7 +20,6 @@ def test_experiment004_is_a_selective_experiment003_derivative() -> None:
     assert experiment.gguf_output == Path("Results/004/gemma-3-4b-it-vproj-plus30-nanoquant.gguf")
     assert experiment.layer_suffix == "self_attn.v_proj"
     assert experiment.bit_multiplier == 1.30
-    assert experiment.expected_blocks == 34
 
 
 def test_candidate_comparison_uses_experiment003_frozen_metrics() -> None:

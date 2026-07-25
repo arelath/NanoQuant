@@ -84,7 +84,6 @@ EXPERIMENT = define_compression_quality_experiment(
         ),
     ),
     CONFIG,
-    expected_blocks=26,
     maximum_wddm_shared_gib=0.75,
 )
 

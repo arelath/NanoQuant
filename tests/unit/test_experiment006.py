@@ -32,7 +32,6 @@ def test_experiment006_is_the_new_gemma1b_attention_rank_quality_baseline() -> N
         "HuggingFaceH4/ultrachat_200k",
         "Salesforce/wikitext",
     )
-    assert experiment.expected_blocks == 26
     assert experiment.maximum_wddm_shared_gib == 0.75
     assert experiment.export.gguf_output == Path("Results/006/gemma-3-1b-it-nanoquant.gguf")
     assert experiment.wikitext_samples == 64

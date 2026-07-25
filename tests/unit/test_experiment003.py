@@ -50,7 +50,6 @@ def test_experiment003_is_full_gemma4b_compression_quality_proof(tmp_path: Path)
     assert config.profiling.cuda_timing
     assert config.profiling.memory_counters
     assert config.profiling.emit_span_events
-    assert experiment.expected_blocks == 34
     assert len(experiment.task_names) == 6
     assert experiment.task_limit == 200
 

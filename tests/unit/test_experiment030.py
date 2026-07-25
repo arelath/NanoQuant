@@ -29,7 +29,6 @@ def test_experiment030_is_additive_dual_mode_recovery_canary() -> None:
         ReasoningMode.NON_THINKING,
     )
     assert config.distillation.enabled
-    assert workflow.expected_blocks == 28
     assert workflow.llamacpp_quality
     assert workflow.export.huggingface is None
     assert workflow.export.gguf_output == Path(

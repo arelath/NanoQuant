@@ -19,4 +19,3 @@ def test_experiment013_uses_one_fixed_budget_qkv_group_per_block() -> None:
     assert config.allocation.maximum_rank_layer_patterns == ()
     assert config.allocation.layer_budget_multipliers == ()
     assert config.block_tuning.non_factorized.epochs_by_layer_position == (8, 4, 3, 6, 2)
-    assert experiment.workflow.expected_blocks == 18

@@ -47,7 +47,6 @@ def test_experiment022_is_self_measured_d2_matched_to_experiment017() -> None:
     assert adjusted022 == config017
     assert config022.distillation.enabled is True
     assert config022.intent.baseline_run == "017-compress-and-benchmark-gemma-3-1b-it"
-    assert experiment022.workflow.expected_blocks == 26
     assert experiment022.workflow.maximum_wddm_shared_gib == 0.75
     assert experiment022.workflow.export.huggingface is None
     assert experiment022.workflow.export.gguf_output == Path(

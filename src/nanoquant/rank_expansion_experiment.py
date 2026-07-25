@@ -42,7 +42,6 @@ class RankExpansionExperiment:
     summary_output: Path
     baseline_quality: Path
     llama_cpp_root: Path
-    expected_blocks: int = 34
     layer_suffix: str = "self_attn.v_proj"
     bit_multiplier: float = 1.30
     maximum_wddm_shared_gib: float = 0.75
@@ -59,7 +58,7 @@ class RankExpansionExperiment:
     task_limit: int = 200
 
     def __post_init__(self) -> None:
-        if self.expected_blocks <= 0 or self.bit_multiplier <= 1:
+        if self.bit_multiplier <= 1:
             raise ValueError("rank expansion experiment dimensions are invalid")
         if not math.isfinite(self.maximum_wddm_shared_gib) or self.maximum_wddm_shared_gib < 0:
             raise ValueError("rank expansion shared-memory limit is invalid")
@@ -172,7 +171,6 @@ def run_rank_expansion_experiment(
                 report_output=resolved.expansion_report,
                 source=config.model.source,
                 revision=str(config.model.revision),
-                expected_blocks=resolved.expected_blocks,
                 layer_suffix=resolved.layer_suffix,
                 bit_multiplier=resolved.bit_multiplier,
                 rank_multiple=config.allocation.bounds.multiple,

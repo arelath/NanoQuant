@@ -63,6 +63,7 @@ def test_complete_compression_export_runs_validated_stages_in_order(
         "_runtime_metadata",
         lambda *_args: RuntimeModelMetadata("source", "revision", "gemma3", "config", "tokenizer"),
     )
+    monkeypatch.setattr(workflow, "_resolved_model_block_count", lambda *_args: 34)
     monkeypatch.setattr(
         workflow,
         "_ensure_logical_export",
@@ -110,7 +111,6 @@ def test_complete_compression_export_runs_validated_stages_in_order(
         repository_root=tmp_path,
         run_output=tmp_path / "run",
         snapshot=tmp_path / "snapshot",
-        expected_blocks=34,
     )
 
     assert calls == [("logical", True), "packed", ("gguf", "q8_0", "q8_0")]
@@ -315,12 +315,12 @@ def test_base_compression_requires_export_after_resident_completion(
         "execute_compression_export",
         lambda *_args, **_kwargs: calls.append("export") or export,
     )
+    monkeypatch.setattr(workflow, "_resolved_model_block_count", lambda *_args: 2)
 
     result = workflow.execute_complete_compression(
         _CONFIG,
         inputs,
         _recipe(),
-        expected_blocks=2,
     )
 
     assert calls == ["compress", "export"]
@@ -328,6 +328,38 @@ def test_base_compression_requires_export_after_resident_completion(
     assert result.exports is export
     assert (inputs.output / "weight-errors.md").is_file()
     assert (launcher.parent.parent / "Results" / "003" / "weight-errors.md").is_file()
+
+
+def test_complete_compression_rejects_workflow_depth_that_differs_from_model_config(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    launcher = tmp_path / "repo" / "experiments" / "003.py"
+    inputs = ResolvedResidentInputs(
+        tmp_path / "snapshot",
+        tmp_path / "run",
+        tmp_path / "registry",
+        ((1, 2, 3),),
+        None,
+        launcher_path=launcher,
+    )
+    resident = SimpleNamespace(
+        quantization=SimpleNamespace(inventory=SimpleNamespace(blocks=(0, 1)))
+    )
+    monkeypatch.setattr(workflow, "_resolved_model_block_count", lambda *_args: 3)
+    monkeypatch.setattr(
+        workflow,
+        "load_completed_resident_workflow",
+        lambda *_args: resident,
+    )
+    monkeypatch.setattr(
+        workflow,
+        "execute_compression_export",
+        lambda *_args, **_kwargs: pytest.fail("mismatched workflow must not export"),
+    )
+
+    with pytest.raises(ValueError, match="differs from the resolved model config"):
+        workflow.execute_complete_compression(_CONFIG, inputs, _recipe())
 
 
 def test_compression_export_rejects_gguf_outside_numbered_results(tmp_path: Path) -> None:
@@ -340,7 +372,6 @@ def test_compression_export_rejects_gguf_outside_numbered_results(tmp_path: Path
             repository_root=tmp_path,
             run_output=tmp_path / "run",
             snapshot=tmp_path / "snapshot",
-            expected_blocks=34,
         )
 
 
@@ -383,6 +414,7 @@ def test_compression_export_adopts_validated_legacy_gguf_without_copying(
         "_runtime_metadata",
         lambda *_args: RuntimeModelMetadata("source", "revision", "gemma3", "config", "tokenizer"),
     )
+    monkeypatch.setattr(workflow, "_resolved_model_block_count", lambda *_args: 34)
     monkeypatch.setattr(workflow, "_ensure_logical_export", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(workflow, "_ensure_packed_export", lambda *_args: {})
     calls: list[Path] = []
@@ -407,7 +439,6 @@ def test_compression_export_adopts_validated_legacy_gguf_without_copying(
         repository_root=tmp_path,
         run_output=tmp_path / "run",
         snapshot=tmp_path / "snapshot",
-        expected_blocks=34,
     )
 
     assert calls == [legacy_output.resolve(), resolved.gguf_output]
@@ -455,12 +486,12 @@ def test_complete_compression_reuses_terminal_completed_workflow_before_export(
         "execute_compression_export",
         lambda *_args, **_kwargs: calls.append("export") or export,
     )
+    monkeypatch.setattr(workflow, "_resolved_model_block_count", lambda *_args: 2)
 
     result = workflow.execute_complete_compression(
         _CONFIG,
         inputs,
         _recipe(),
-        expected_blocks=2,
     )
 
     assert calls == ["load-completed", "export"]

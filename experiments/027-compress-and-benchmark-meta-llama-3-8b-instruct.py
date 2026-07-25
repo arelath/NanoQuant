@@ -56,7 +56,6 @@ EXPERIMENT = define_compression_quality_experiment(
         ),
     ),
     META_LLAMA_3_8B_INSTRUCT_COMPRESSION_TEMPLATE,
-    expected_blocks=32,
     maximum_wddm_shared_gib=0.75,
     restore_completed_blocks=False,
     quality_backend=None,

@@ -28,9 +28,7 @@ def test_experiment026_retargets_experiment025_settings_to_llama_3_2_3b() -> Non
         summary_output=workflow025.summary_output,
         quality_output=workflow025.quality_output,
         quality_markdown_output=workflow025.quality_markdown_output,
-        expected_blocks=workflow025.expected_blocks,
     ) == workflow025
-    assert workflow026.expected_blocks == 28
     assert workflow026.export.gguf_output == Path(
         "Results/026/llama-3-2-3b-instruct-nanoquant.gguf"
     )

@@ -62,7 +62,6 @@ class CompressionQualityExperiment:
     summary_output: Path
     quality_output: Path
     quality_markdown_output: Path
-    expected_blocks: int
     wikitext_samples: int = 64
     wikitext_sequence_length: int = 128
     wikitext_batch_size: int = DEFAULT_QUALITY_WIKITEXT_BATCH_SIZE
@@ -86,8 +85,6 @@ class CompressionQualityExperiment:
     llamacpp_quality_parallel: int = 4
 
     def __post_init__(self) -> None:
-        if self.expected_blocks <= 0:
-            raise ValueError("expected block count must be positive")
         if self.wikitext_samples <= 0 or self.wikitext_sequence_length < 2:
             raise ValueError("quality dimensions are invalid")
         if self.wikitext_batch_size <= 0 or self.task_batch_size <= 0 or self.task_limit <= 0:
@@ -172,7 +169,6 @@ def execute_compression_quality_experiment(
         config,
         resolved.inputs,
         experiment.export,
-        expected_blocks=experiment.expected_blocks,
         options=ResidentExecutionOptions(
             restore_completed_blocks=experiment.restore_completed_blocks,
             maximum_wddm_shared_bytes=maximum_shared_bytes,

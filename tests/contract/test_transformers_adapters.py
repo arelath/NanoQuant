@@ -21,7 +21,11 @@ from transformers.models.qwen3.modeling_qwen3 import Qwen3ForCausalLM
 
 from nanoquant.application.prefix_capture import capture_prefix_invocations
 from nanoquant.domain.models import BlockId, CheckpointInventory, SourceTensor
-from nanoquant.infrastructure.model_adapters import UnsupportedModelVariant, adapter_for_config
+from nanoquant.infrastructure.model_adapters import (
+    UnsupportedModelVariant,
+    adapter_for_config,
+    decoder_block_count_from_config,
+)
 from nanoquant.infrastructure.safetensors_source import SafetensorsModelSource
 
 CONFIGS = (
@@ -132,6 +136,7 @@ def test_adapter_contract_inventory_mapping_loading_and_order(tmp_path: Path, co
     adapter = adapter_for_config(source.inventory().config)
     assert adapter.attention_implementation == ("eager" if config.model_type.startswith("gemma") else "sdpa")
     assert adapter.decoder_block_count(source) == 1
+    assert decoder_block_count_from_config(source.inventory().config) == 1
     inventory = adapter.model_inventory(source)
     assert len(inventory.blocks) == 1
     block_inventory = inventory.blocks[0]
@@ -198,6 +203,7 @@ def test_gemma3_multimodal_wrapper_maps_only_language_model_tensors(tmp_path: Pa
     source = SafetensorsModelSource(snapshot, source="fixture/gemma3-wrapper", revision="abc", verify_hashes=False)
 
     assert adapter.decoder_block_count(source) == 1
+    assert decoder_block_count_from_config(values) == 1
     inventory = adapter.model_inventory(source)
     assert all(tensor.source_key.startswith("language_model.") for tensor in inventory.shared_tensors)
     assert not any(tensor.source_key.startswith("vision_tower.") for tensor in inventory.shared_tensors)

@@ -38,7 +38,6 @@ EXPERIMENT = define_compression_quality_experiment(
         ),
     ),
     QWEN_3_0_6B_DUAL_MODE_COMPRESSION_TEMPLATE,
-    expected_blocks=28,
     maximum_wddm_shared_gib=0.75,
     restore_completed_blocks=False,
     quality_backend=None,

@@ -23,6 +23,8 @@ from nanoquant.config.schema import (
 from nanoquant.config.validation import ValidationPhase, raise_for_issues, validate
 from nanoquant.infrastructure.commits import CommitIdentity, latest_complete_identity
 from nanoquant.infrastructure.memory_cleanup import release_memory
+from nanoquant.infrastructure.model_adapters import decoder_block_count_from_config
+from nanoquant.infrastructure.resolved_model_config import resolve_model_config
 from nanoquant.kl_budget_workflow import execute_kl_budget
 from nanoquant.resident_workflow import (
     ResidentExecutionOptions,
@@ -142,15 +144,20 @@ def _uniform_control_config(
     return control
 
 
-def _journal_identity(run_output: Path, expected_blocks: int) -> CommitIdentity:
+def _journal_identity(run_output: Path, block_count: int) -> CommitIdentity:
     journal = run_output / "state" / "journal.jsonl"
     records = [
         json.loads(line)
         for line in journal.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
-    identity, _blocks = latest_complete_identity(records, expected_blocks)
+    identity, _blocks = latest_complete_identity(records, block_count)
     return identity
+
+
+def _resolved_model_block_count(config: RunConfig) -> int:
+    resolved = resolve_model_config(config.model.source, str(config.model.revision))
+    return decoder_block_count_from_config(resolved.values)
 
 
 def _source_identity(identity: CommitIdentity) -> str:
@@ -176,7 +183,6 @@ def _validated_kl_profile(
     control_run: Path,
     *,
     campaign_root: Path,
-    expected_blocks: int,
     expected_control_config: RunConfig,
 ) -> KlBudgetProfile:
     for label, path in (("profile", profile_path), ("control run", control_run)):
@@ -189,7 +195,10 @@ def _validated_kl_profile(
     profile = load_kl_budget_profile(
         profile_path / "kl-budget-profile.json" if profile_path.is_dir() else profile_path
     )
-    control_identity = _journal_identity(control_run, expected_blocks)
+    control_identity = _journal_identity(
+        control_run,
+        _resolved_model_block_count(expected_control_config),
+    )
     _require_control_recipe(control_run, expected_control_config)
     expected_source_identity = _source_identity(control_identity)
     if not (
@@ -216,13 +225,13 @@ def _prepare_automatic_kl_inputs(
     label = f"Experiment {number:03d}"
     profile_path = campaign_root / _profile_name(experiment.config)
     control_run = campaign_root / _control_name(experiment.config)
+    block_count = _resolved_model_block_count(control_config)
     profile_file = profile_path / "kl-budget-profile.json"
     if profile_file.is_file():
         profile = _validated_kl_profile(
             profile_path,
             control_run,
             campaign_root=campaign_root,
-            expected_blocks=experiment.workflow.expected_blocks,
             expected_control_config=control_config,
         )
         if profile.complete:
@@ -231,7 +240,7 @@ def _prepare_automatic_kl_inputs(
 
     control_complete = False
     try:
-        _journal_identity(control_run, experiment.workflow.expected_blocks)
+        _journal_identity(control_run, block_count)
     except (FileNotFoundError, ValueError):
         pass
     else:
@@ -255,7 +264,7 @@ def _prepare_automatic_kl_inputs(
                 ),
             ),
         )
-        if len(result.quantization.inventory.blocks) != experiment.workflow.expected_blocks:
+        if len(result.quantization.inventory.blocks) != block_count:
             raise ValueError(f"{label} uniform control completed with the wrong block count")
         _require_control_recipe(control_run, control_config)
         del result
@@ -333,7 +342,6 @@ def run_self_measured_d2_experiment(
         profile_path,
         control_run,
         campaign_root=campaign_root,
-        expected_blocks=experiment.workflow.expected_blocks,
         expected_control_config=control_config,
     )
     if not profile.complete:

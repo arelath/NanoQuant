@@ -29,7 +29,6 @@ def test_experiment010_uses_baseline_rank_and_admm_policy_without_huggingface_pu
     assert config.factorization.admm.penalty_schedule == (
         previous.config.factorization.admm.penalty_schedule
     ) == "cubic"
-    assert experiment.expected_blocks == previous.workflow.expected_blocks == 18
     assert experiment.maximum_wddm_shared_gib == previous.workflow.maximum_wddm_shared_gib == 0.75
     assert experiment.quality_backend == previous.workflow.quality_backend == "factorized"
     assert experiment.wikitext_samples == previous.workflow.wikitext_samples

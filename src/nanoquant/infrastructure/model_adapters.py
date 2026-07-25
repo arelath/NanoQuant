@@ -230,7 +230,17 @@ class TransformersModelAdapter:
         return "eager" if self.family == "gemma" else "sdpa"
 
     def decoder_block_count(self, source: ModelSource) -> int:
-        config = self._checkpoint(source).config
+        return self.decoder_block_count_from_config(self._checkpoint(source).config)
+
+    def decoder_block_count_from_config(self, config: dict[str, object]) -> int:
+        """Return the decoder depth declared by an already resolved model config."""
+
+        model_type = config.get("model_type")
+        if model_type not in self.definition.model_types:
+            raise UnsupportedModelVariant(
+                f"SRC001 adapter {self.family!r} does not support model_type={model_type!r}; "
+                f"expected one of {self.definition.model_types}"
+            )
         if config.get("model_type") == "gemma3":
             text_config = config.get("text_config")
             value = text_config.get(self.definition.block_count_field) if isinstance(text_config, dict) else None
@@ -458,3 +468,9 @@ def adapter_for_config(config: dict[str, object]) -> TransformersModelAdapter:
         raise UnsupportedModelVariant(
             f"SRC001 unsupported model_type={model_type!r}; supported={sorted(ADAPTERS)}"
         ) from exc
+
+
+def decoder_block_count_from_config(config: dict[str, object]) -> int:
+    """Resolve decoder depth without loading or inventorying model weights."""
+
+    return adapter_for_config(config).decoder_block_count_from_config(config)

@@ -33,7 +33,6 @@ def test_experiment008_is_guarded_12b_compression_quality_proof(tmp_path: Path) 
     assert config.block_tuning.post_block_refit.batch_size == 8
     assert not config.evaluation.inline_quality
     assert not config.distillation.enabled
-    assert experiment.expected_blocks == 48
     assert experiment.large_model_guards
     assert not experiment.restore_completed_blocks
     assert experiment.maximum_wddm_shared_gib == 0.75

@@ -299,7 +299,6 @@ def define_compression_benchmark_experiment(
     identity: ExperimentIdentity,
     template: RunConfig,
     *,
-    expected_blocks: int = 26,
     export: CompressionExportPolicy | None = None,
 ) -> ExperimentDefinition[CompressionBenchmarkExperiment]:
     layout = ExperimentLayout(identity)
@@ -308,7 +307,6 @@ def define_compression_benchmark_experiment(
     workflow = CompressionBenchmarkExperiment(
         export=_export_recipe(config, layout, export_policy),
         benchmark_output=layout.benchmark_output,
-        expected_blocks=expected_blocks,
     )
     return ExperimentDefinition(identity, config, workflow, layout)
 
@@ -335,7 +333,6 @@ def define_compression_quality_experiment(
     identity: ExperimentIdentity,
     template: RunConfig,
     *,
-    expected_blocks: int,
     export: CompressionExportPolicy | None = None,
     maximum_wddm_shared_gib: float | None = None,
     restore_completed_blocks: bool = True,
@@ -352,7 +349,6 @@ def define_compression_quality_experiment(
         summary_output=layout.summary_output,
         quality_output=layout.quality_output,
         quality_markdown_output=layout.quality_markdown_output,
-        expected_blocks=expected_blocks,
         maximum_wddm_shared_gib=maximum_wddm_shared_gib,
         restore_completed_blocks=restore_completed_blocks,
         quality_backend=quality_backend,
@@ -372,7 +368,6 @@ def define_rank_expansion_experiment(
     release_name: str,
     bit_multiplier: float = 1.30,
     layer_suffix: str = "self_attn.v_proj",
-    expected_blocks: int = 34,
     maximum_wddm_shared_gib: float = 0.75,
 ) -> ExperimentDefinition[RankExpansionExperiment]:
     layout = ExperimentLayout(identity)
@@ -390,7 +385,6 @@ def define_rank_expansion_experiment(
         summary_output=layout.summary_output,
         baseline_quality=parent.published_quality_output,
         llama_cpp_root=_LLAMA_CPP_ROOT,
-        expected_blocks=expected_blocks,
         layer_suffix=layer_suffix,
         bit_multiplier=bit_multiplier,
         maximum_wddm_shared_gib=maximum_wddm_shared_gib,

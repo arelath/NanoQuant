@@ -17,7 +17,6 @@ def test_experiment031_scales_dual_mode_recipe_with_serial_deployment_quality() 
     assert config031.calibration == config030.calibration
     assert config031.evaluation.reasoning_modes == config030.evaluation.reasoning_modes
     assert config031.evaluation.default_tier.value == "full"
-    assert workflow031.expected_blocks == 36
     assert workflow031.llamacpp_quality_parallel == 1
     assert workflow031.export.huggingface is None
     assert workflow031.export.gguf_output == Path(

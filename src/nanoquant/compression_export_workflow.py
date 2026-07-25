@@ -37,7 +37,11 @@ from nanoquant.infrastructure.live_reconstruction import (
     initialize_live_weight_error_report,
     initialize_unpublished_live_weight_error_report,
 )
-from nanoquant.infrastructure.model_adapters import adapter_for_config
+from nanoquant.infrastructure.model_adapters import (
+    adapter_for_config,
+    decoder_block_count_from_config,
+)
+from nanoquant.infrastructure.resolved_model_config import load_snapshot_model_config
 from nanoquant.infrastructure.runtime_export import (
     export_frozen_run_logical,
     validate_frozen_run_logical,
@@ -246,11 +250,16 @@ def _runtime_metadata(
     )
 
 
+def _resolved_model_block_count(snapshot: Path) -> int:
+    payload = load_snapshot_model_config(snapshot)
+    return decoder_block_count_from_config(cast(dict[str, object], payload))
+
+
 def _ensure_logical_export(
     run_output: Path,
     resolved: ResolvedCompressionExportRecipe,
     metadata: RuntimeModelMetadata,
-    expected_blocks: int,
+    block_count: int,
     *,
     use_global_tuning: bool,
 ) -> dict[str, Any]:
@@ -263,7 +272,7 @@ def _ensure_logical_export(
             run_output,
             resolved.logical_output,
             metadata,
-            expected_blocks,
+            block_count,
             use_global_tuning=use_global_tuning,
             fresh_validation=True,
         )
@@ -273,7 +282,7 @@ def _ensure_logical_export(
             validate_frozen_run_logical(
                 run_output,
                 resolved.logical_output,
-                expected_blocks,
+                block_count,
                 use_global_tuning=use_global_tuning,
                 fresh_validation=True,
             )
@@ -440,23 +449,21 @@ def execute_compression_export(
     repository_root: str | Path,
     run_output: str | Path,
     snapshot: str | Path,
-    expected_blocks: int,
 ) -> CompressionExportResult:
     """Validate and export one complete committed run without recompressing it."""
 
-    if expected_blocks <= 0:
-        raise ValueError("compression export expected block count must be positive")
     root = Path(repository_root).resolve()
     resolved = resolve_compression_export_recipe(recipe, root)
     _require_results_gguf_output(config, root, resolved.gguf_output)
     run = Path(run_output).resolve()
     source_snapshot = Path(snapshot).resolve()
+    block_count = _resolved_model_block_count(source_snapshot)
     metadata = _runtime_metadata(config, source_snapshot, resolved.runtime_family)
     logical = _ensure_logical_export(
         run,
         resolved,
         metadata,
-        expected_blocks,
+        block_count,
         use_global_tuning=config.distillation.enabled,
     )
     packed = _ensure_packed_export(resolved)
@@ -518,7 +525,6 @@ def execute_complete_compression(
     inputs: ResolvedResidentInputs,
     recipe: CompressionExportRecipe,
     *,
-    expected_blocks: int,
     options: ResidentExecutionOptions | None = None,
 ) -> CompleteCompressionResult:
     """Run compression and require its validated GGUF before reporting completion."""
@@ -528,12 +534,13 @@ def execute_complete_compression(
     experiment_number = config.intent.experiment_number
     repository_root = inputs.launcher_path.resolve().parent.parent
     execution_options = ResidentExecutionOptions() if options is None else options
+    resolved_block_count = _resolved_model_block_count(inputs.snapshot)
     workflow = load_completed_resident_workflow(config, inputs, execution_options)
     if workflow is None:
         if experiment_number is None:
             initialize_unpublished_live_weight_error_report(
                 inputs.output,
-                expected_blocks=expected_blocks,
+                expected_blocks=resolved_block_count,
                 layer_order=config.block_tuning.layer_order,
             )
         else:
@@ -541,14 +548,15 @@ def execute_complete_compression(
                 repository_root,
                 experiment_number,
                 inputs.output,
-                expected_blocks=expected_blocks,
+                expected_blocks=resolved_block_count,
                 layer_order=config.block_tuning.layer_order,
             )
         workflow = execute_resident_workflow(config, inputs, execution_options)
     block_count = len(workflow.quantization.inventory.blocks)
-    if block_count != expected_blocks:
+    if block_count != resolved_block_count:
         raise ValueError(
-            f"resolved model block count differs from compression recipe: {block_count} != {expected_blocks}"
+            "resident workflow block count differs from the resolved model config: "
+            f"{block_count} != {resolved_block_count}"
         )
     exports = execute_compression_export(
         config,
@@ -556,7 +564,6 @@ def execute_complete_compression(
         repository_root=repository_root,
         run_output=inputs.output,
         snapshot=inputs.snapshot,
-        expected_blocks=block_count,
     )
     return CompleteCompressionResult(workflow, exports)
 

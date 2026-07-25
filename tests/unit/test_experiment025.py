@@ -20,7 +20,6 @@ def test_experiment025_repeats_experiment019_on_the_current_pipeline() -> None:
         output=config019.output,
     ) == config019
     assert config025.intent.baseline_run == "019-compress-and-benchmark-llama-3-2-1b-instruct"
-    assert workflow.expected_blocks == 16
     assert workflow.maximum_wddm_shared_gib == 0.75
     assert workflow.restore_completed_blocks is False
     assert workflow.quality_backend == "dense"

@@ -48,7 +48,6 @@ EXPERIMENT = define_compression_quality_experiment(
         ),
     ),
     LLAMA_ARCHITECTURE_PROTECTED_COMPRESSION_TEMPLATE,
-    expected_blocks=16,
     maximum_wddm_shared_gib=0.75,
     restore_completed_blocks=False,
     quality_backend="dense",

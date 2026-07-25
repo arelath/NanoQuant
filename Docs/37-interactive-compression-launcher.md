@@ -433,8 +433,9 @@ The first catalog is extracted from the currently promoted reusable settings, no
 - Gemma 3 uses the best promoted Gemma policy for its scale. If the best method requires a same-run measured KL
   profile, that profile-generation stage must first be made reusable and included in the profile workflow; a stale
   profile from another model or BPW is never copied.
-- Model-size-specific execution guards, quality parallelism, source formatting, and expected block count are
-  capabilities or derived settings, not new interactive questions.
+- Model-size-specific execution guards, quality parallelism, and source formatting are explicit capabilities, not
+  new interactive questions. Architecture and decoder block count are resolved from the pinned model `config.json`;
+  they are not duplicated in the recommendation catalog.
 
 An experimental result becomes an interactive default only through an explicit profile-promotion change with
 evidence. Profiles with unfinished real-model gates may be available as `candidate` definitions for numbered
@@ -467,7 +468,7 @@ changing the recipe.
 Each interactive run owns `settings.yaml`:
 
 ```yaml
-schema_version: 1
+schema_version: 2
 kind: interactive_compression
 created_at: "2026-07-25T21:45:00Z"
 
@@ -493,7 +494,7 @@ resolved_source:
   tokenizer_revision: b968826d9c46dd6066d109eabc6255188de91218
   snapshot_identity: "..."
   architecture: qwen3
-  expected_blocks: 36
+  block_count: 36
 
 resolved:
   run_config: { ...complete canonical RunConfig... }
@@ -508,6 +509,9 @@ The file is immutable after creation. Its canonical SHA-256 is recorded in the r
 index. Manual edits produce a mismatch and fail continuation. To change model, BPW, quality, upload, or any resolved
 setting, start a new run. A future explicit `fork` action may reuse compatible upstream artifacts through semantic
 identity; it must not rewrite the parent.
+
+Schema-version-1 settings remain resumable: their verified `resolved_source.expected_blocks` value is migrated
+in memory to the schema-version-2 `resolved_source.block_count` field without rewriting the immutable file.
 
 ### 6.2 Run layout
 

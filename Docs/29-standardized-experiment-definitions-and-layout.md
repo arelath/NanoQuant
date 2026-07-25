@@ -198,7 +198,6 @@ EXPERIMENT = define_compression_quality_experiment(
         tags=("compression", "quality"),
     ),
     SOME_REUSABLE_TEMPLATE,
-    expected_blocks=26,
 )
 
 if __name__ == "__main__":
@@ -212,6 +211,7 @@ if __name__ == "__main__":
 ```
 
 No `CONFIG`, `EVALUATION`, export path factory, numbered recipe module, or duplicated output constant is needed.
+Decoder depth is read from the pinned model `config.json`; experiment definitions do not repeat it.
 
 ## Retention and publication rules
 

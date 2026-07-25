@@ -14,4 +14,3 @@ def test_experiment016_increases_only_down_and_edge_importance() -> None:
     assert importance.edge_block_multiplier == 1.30
     assert importance.protected_edge_block_count == 1
     assert experiment.config.allocation.reconstruction.sensitivity_strength == 0.75
-    assert experiment.workflow.expected_blocks == 18

@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import yaml
-from huggingface_hub import HfApi, get_token, hf_hub_download
+from huggingface_hub import HfApi, get_token
 from huggingface_hub.utils import validate_repo_id  # type: ignore[attr-defined]
 
 from nanoquant.compression_export_workflow import (
@@ -37,18 +37,20 @@ from nanoquant.infrastructure.huggingface_upload import (
     huggingface_upload_summary,
 )
 from nanoquant.infrastructure.io_utils import atomic_write_json, atomic_write_text, hash_file
+from nanoquant.infrastructure.model_adapters import decoder_block_count_from_config
 from nanoquant.infrastructure.publication import (
     PublishableArtifact,
     PublishableArtifactKind,
     publish_run_artifacts,
 )
+from nanoquant.infrastructure.resolved_model_config import resolve_model_config
 from nanoquant.infrastructure.run_session import open_run_event_append_session
 from nanoquant.resident_workflow import (
     ResidentExecutionOptions,
     resolve_resident_experiment_inputs,
 )
 
-INTERACTIVE_SETTINGS_SCHEMA_VERSION = 1
+INTERACTIVE_SETTINGS_SCHEMA_VERSION = 2
 INTERACTIVE_SETTINGS_KIND = "interactive_compression"
 INTERACTIVE_SETTINGS_NAME = "settings.yaml"
 INTERACTIVE_COMPLETION_NAME = "interactive-completion.json"
@@ -71,8 +73,6 @@ class RecommendedModel:
     variant_order: int
     source: str
     revision: str
-    architecture: str
-    expected_blocks: int
     runtime_family: str
     release_name: str
     profile_id: str
@@ -101,10 +101,8 @@ class RecommendedModel:
             raise ValueError("recommended model labels are required")
         if self.family_order < 0 or self.variant_order < 0:
             raise ValueError("recommended model ordering must be non-negative")
-        if not self.source.strip() or not self.revision.strip() or not self.architecture.strip():
-            raise ValueError("recommended model source, revision, and architecture are required")
-        if self.expected_blocks <= 0:
-            raise ValueError("recommended model block count must be positive")
+        if not self.source.strip() or not self.revision.strip():
+            raise ValueError("recommended model source and revision are required")
         if not self.runtime_family.strip() or not self.evidence:
             raise ValueError("recommended model runtime family and evidence are required")
         if not math.isfinite(self.default_target_bpw) or self.default_target_bpw <= 0:
@@ -124,8 +122,6 @@ class RecommendedModel:
                 "variant": self.variant,
                 "source": self.source,
                 "revision": self.revision,
-                "architecture": self.architecture,
-                "expected_blocks": self.expected_blocks,
                 "runtime_family": self.runtime_family,
                 "release_name": self.release_name,
                 "profile_id": self.profile_id,
@@ -175,7 +171,15 @@ class InteractiveResolvedSource:
     revision: str
     tokenizer_revision: str
     architecture: str
-    expected_blocks: int
+    block_count: int
+
+    def __post_init__(self) -> None:
+        if not self.model.strip() or not self.revision.strip() or not self.tokenizer_revision.strip():
+            raise ValueError("interactive resolved model identity is incomplete")
+        if not self.architecture.strip():
+            raise ValueError("interactive resolved model architecture is required")
+        if self.block_count <= 0:
+            raise ValueError("interactive resolved model block count must be positive")
 
 
 @dataclass(frozen=True, slots=True)
@@ -286,12 +290,21 @@ def load_interactive_settings(path: str | Path) -> tuple[InteractiveSettings, st
     expected = payload.pop("settings_hash", None)
     if not isinstance(expected, str):
         raise ValueError(f"interactive settings hash is missing: {source}")
-    settings = from_dict(InteractiveSettings, cast(dict[str, Any], payload), path="settings")
-    observed = settings_hash(settings)
+    observed = semantic_hash(payload)
     if observed != expected:
         raise ValueError(
             f"interactive settings hash mismatch: {source}; expected={expected}, observed={observed}"
         )
+    schema_version = payload.get("schema_version")
+    if schema_version == 1:
+        raw_source = payload.get("resolved_source")
+        if not isinstance(raw_source, dict) or type(raw_source.get("expected_blocks")) is not int:
+            raise ValueError(f"legacy interactive settings have no valid block count: {source}")
+        migrated_source = dict(raw_source)
+        migrated_source["block_count"] = migrated_source.pop("expected_blocks")
+        payload["resolved_source"] = migrated_source
+        payload["schema_version"] = INTERACTIVE_SETTINGS_SCHEMA_VERSION
+    settings = from_dict(InteractiveSettings, cast(dict[str, Any], payload), path="settings")
     return settings, observed
 
 
@@ -416,12 +429,20 @@ def create_interactive_settings(
     name = _new_run_name(model, now) if run_name is None else run_name
     if not _SAFE_SLUG.fullmatch(name):
         raise ValueError("interactive run name must be lowercase kebab-case")
+    resolved_source = _resolved_source_for_model(model)
     run_root = Path("evidence") / "interactive"
     run_output = run_root / name
     outputs_root = Path("outputs") / "interactive" / name
     results_root = Path("Results") / "interactive" / name
     config = replace(
         model.template,
+        model=replace(
+            model.template.model,
+            source=resolved_source.model,
+            revision=resolved_source.revision,
+            tokenizer_source=None,
+            tokenizer_revision=resolved_source.tokenizer_revision,
+        ),
         intent=IntentConfig(
             experiment_number=None,
             name=name,
@@ -461,13 +482,7 @@ def create_interactive_settings(
             huggingface,
         ),
         InteractiveProfile(model.profile_id, 1, model.profile_hash, model.evidence),
-        InteractiveResolvedSource(
-            model.source,
-            model.revision,
-            str(model.template.model.tokenizer_revision or model.revision),
-            model.architecture,
-            model.expected_blocks,
-        ),
+        resolved_source,
         config,
         InteractiveWorkflow(
             model.maximum_wddm_shared_gib,
@@ -515,7 +530,6 @@ def _quality_experiment(settings: InteractiveSettings) -> CompressionQualityExpe
         summary_output=settings.paths.summary_output,
         quality_output=settings.paths.quality_output,
         quality_markdown_output=settings.paths.quality_markdown_output,
-        expected_blocks=settings.resolved_source.expected_blocks,
         maximum_wddm_shared_gib=workflow.maximum_wddm_shared_gib,
         restore_completed_blocks=workflow.restore_completed_blocks,
         quality_backend=workflow.quality_backend,
@@ -577,7 +591,6 @@ def _execute_without_quality(
         config,
         inputs,
         _export_recipe(settings, include_huggingface=False),
-        expected_blocks=settings.resolved_source.expected_blocks,
         options=ResidentExecutionOptions(
             restore_completed_blocks=settings.workflow.restore_completed_blocks,
             maximum_wddm_shared_bytes=(
@@ -898,39 +911,42 @@ def _parse_custom_model(text: str) -> tuple[str, str | None]:
 
 
 def _model_config(source: str, revision: str | None) -> tuple[dict[str, Any], str]:
-    local = Path(source)
-    if local.exists():
-        config_path = local / "config.json"
-        if not config_path.is_file():
-            raise ValueError(f"local model snapshot has no config.json: {local}")
-        resolved_revision = "local-" + semantic_hash(
-            json.loads(config_path.read_text(encoding="utf-8"))
-        ).removeprefix("sha256:")
-    else:
-        info = HfApi().model_info(source, revision=revision)
-        resolved_revision = str(info.sha)
-        config_path = Path(
-            hf_hub_download(
-                repo_id=source,
-                filename="config.json",
-                revision=resolved_revision,
-            )
-        )
-    payload = json.loads(config_path.read_text(encoding="utf-8"))
-    if not isinstance(payload, dict):
-        raise ValueError("model config root must be an object")
-    return cast(dict[str, Any], payload), resolved_revision
+    resolved = resolve_model_config(source, revision)
+    return resolved.values, resolved.revision
 
 
-def _architecture_and_blocks(config: dict[str, Any]) -> tuple[str, int]:
+def _architecture_and_block_count(config: dict[str, Any]) -> tuple[str, int]:
     architecture = str(config.get("model_type", ""))
-    block_count = config.get("num_hidden_layers")
-    if architecture == "gemma3" and isinstance(config.get("text_config"), dict):
-        text = cast(dict[str, Any], config["text_config"])
-        block_count = text.get("num_hidden_layers", block_count)
-    if not architecture or type(block_count) is not int or block_count <= 0:
-        raise ValueError("model config does not declare a supported architecture and block count")
-    return architecture, block_count
+    if not architecture:
+        raise ValueError("model config does not declare an architecture")
+    return architecture, decoder_block_count_from_config(cast(dict[str, object], config))
+
+
+def _family_for_model(source: str, architecture: str) -> str:
+    if architecture == "qwen3":
+        return "qwen3"
+    if architecture in {"gemma3", "gemma3_text"}:
+        return "gemma3"
+    if architecture == "llama":
+        return "llama3-2" if "3.2" in source.lower() else "llama3"
+    raise ValueError(f"no promoted interactive profile supports model_type={architecture!r}")
+
+
+def _resolved_source_for_model(model: RecommendedModel) -> InteractiveResolvedSource:
+    config_payload, revision = _model_config(model.source, model.revision)
+    architecture, block_count = _architecture_and_block_count(config_payload)
+    family = _family_for_model(model.source, architecture)
+    if family != model.family:
+        raise ValueError(
+            f"resolved model family differs from promoted profile: {family!r} != {model.family!r}"
+        )
+    return InteractiveResolvedSource(
+        model.source,
+        revision,
+        revision,
+        architecture,
+        block_count,
+    )
 
 
 def resolve_custom_model(
@@ -941,19 +957,18 @@ def resolve_custom_model(
 
     source, requested_revision = _parse_custom_model(text)
     config_payload, revision = _model_config(source, requested_revision)
-    architecture, blocks = _architecture_and_blocks(config_payload)
-    if architecture == "qwen3":
-        family = "qwen3"
-    elif architecture in {"gemma3", "gemma3_text"}:
-        family = "gemma3"
-    elif architecture == "llama":
-        family = "llama3-2" if "3.2" in source.lower() else "llama3"
-    else:
-        raise ValueError(f"no promoted interactive profile supports model_type={architecture!r}")
+    architecture, block_count = _architecture_and_block_count(config_payload)
+    family = _family_for_model(source, architecture)
     candidates = _variants(catalog, family)
     if not candidates:
         raise ValueError(f"no promoted interactive profile supports family {family!r}")
-    parent = min(candidates, key=lambda model: (abs(model.expected_blocks - blocks), model.variant_order))
+    parent = min(
+        candidates,
+        key=lambda model: (
+            abs(_resolved_source_for_model(model).block_count - block_count),
+            model.variant_order,
+        ),
+    )
     model_config = replace(
         parent.template.model,
         source=source,
@@ -969,8 +984,6 @@ def resolve_custom_model(
         variant_label=source,
         source=source,
         revision=revision,
-        architecture=architecture,
-        expected_blocks=blocks,
         release_name=release_name,
         profile_id=f"{parent.profile_id}-custom",
         evidence=(*parent.evidence, f"custom-source:{source}@{revision}"),
@@ -1089,7 +1102,7 @@ def _render_previous(console: InteractiveConsole, record: InteractiveRunRecord) 
     )
     console.write(
         f"  Status:       {record.status} — {record.completed_blocks} of "
-        f"{record.settings.resolved_source.expected_blocks} blocks complete"
+        f"{record.settings.resolved_source.block_count} blocks complete"
     )
     if record.active_owner is not None:
         console.write(f"  Active owner: {json.dumps(record.active_owner, sort_keys=True)}")

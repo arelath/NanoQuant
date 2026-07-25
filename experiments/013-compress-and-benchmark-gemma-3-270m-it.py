@@ -36,7 +36,6 @@ EXPERIMENT = define_compression_quality_experiment(
         ),
     ),
     GEMMA_3_270M_STACKED_QKV_COMPRESSION_TEMPLATE,
-    expected_blocks=18,
     maximum_wddm_shared_gib=0.75,
 )
 

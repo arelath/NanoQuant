@@ -24,7 +24,6 @@ EXPERIMENT = define_compression_quality_experiment(
         tags=("gemma-3-4b-it", "compression", "quality", "shared-vram-guard", "profiling"),
     ),
     GEMMA_3_4B_COMPRESSION_TEMPLATE,
-    expected_blocks=34,
     maximum_wddm_shared_gib=0.75,
     restore_completed_blocks=False,
     quality_backend="dense",

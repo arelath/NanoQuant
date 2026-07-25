@@ -72,7 +72,6 @@ EXPERIMENT = define_compression_quality_experiment(
         ),
     ),
     HISTORICAL_CONFIG,
-    expected_blocks=18,
     maximum_wddm_shared_gib=0.75,
 )
 

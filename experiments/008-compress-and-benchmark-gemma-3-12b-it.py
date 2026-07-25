@@ -62,7 +62,6 @@ EXPERIMENT = define_compression_quality_experiment(
         ),
     ),
     _TEMPLATE,
-    expected_blocks=48,
     maximum_wddm_shared_gib=0.75,
     restore_completed_blocks=False,
     large_model_guards=True,

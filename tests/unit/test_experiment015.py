@@ -26,4 +26,3 @@ def test_experiment015_protects_important_layers_and_edge_blocks() -> None:
     assert importance.protected_edge_block_count == 1
     assert reconstruction.sensitivity_strength == 0.25
     assert config.factorization.shared_input.enabled is True
-    assert experiment.workflow.expected_blocks == 18

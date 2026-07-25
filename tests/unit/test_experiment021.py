@@ -192,13 +192,13 @@ def test_experiment021_control_validation_keeps_run_and_resident_hashes_distinct
         )
     )
     monkeypatch.setattr(experiment021_workflow, "load_kl_budget_profile", lambda path: profile)
+    monkeypatch.setattr(experiment021_workflow, "_resolved_model_block_count", lambda config: 18)
 
     assert (
         experiment021_workflow._validated_kl_profile(
             profile_path,
             control,
             campaign_root=campaign,
-            expected_blocks=18,
             expected_control_config=control_config,
         )
         is profile

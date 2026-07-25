@@ -73,7 +73,6 @@ EXPERIMENT = define_compression_quality_experiment(
         ),
     ),
     CONFIG,
-    expected_blocks=34,
     maximum_wddm_shared_gib=0.75,
     restore_completed_blocks=False,
     quality_backend="dense",

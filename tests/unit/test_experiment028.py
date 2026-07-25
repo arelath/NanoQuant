@@ -29,11 +29,9 @@ def test_experiment028_retargets_experiment027_settings_to_qwen3_0_6b() -> None:
             summary_output=workflow027.summary_output,
             quality_output=workflow027.quality_output,
             quality_markdown_output=workflow027.quality_markdown_output,
-            expected_blocks=workflow027.expected_blocks,
         )
         == workflow027
     )
-    assert workflow028.expected_blocks == 28
     assert workflow028.quality_backend is None
     assert workflow028.llamacpp_quality is True
     assert workflow028.export.runtime_family == "qwen"
