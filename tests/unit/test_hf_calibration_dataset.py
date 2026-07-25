@@ -7,6 +7,7 @@ import pytest
 import torch
 
 import nanoquant.infrastructure.hf_calibration_dataset as calibration_module
+from nanoquant.config.schema import BehaviorSliceConfig, DatasetConfig, DatasetSourceConfig, ReasoningMode
 from nanoquant.domain.models import ArtifactRef
 from nanoquant.infrastructure.hf_calibration_dataset import (
     PinnedCalibrationDataset,
@@ -67,6 +68,26 @@ def test_behavior_packing_never_splits_records_and_rejects_overlength_units() ->
     assert rejected == 1
 
 
+def test_behavior_packing_emits_bounded_progress() -> None:
+    events: list[tuple[str, dict[str, object]]] = []
+    record = RenderedBehaviorRecord((7,), (2,), (2,), (False,), (0.0,))
+
+    _pack_behavior_records(
+        (record for _index in range(2_000)),
+        count=1,
+        sequence_length=2_000,
+        pad_token_id=0,
+        slice_name="thinking",
+        progress=lambda event, fields: events.append((event, dict(fields))),
+    )
+
+    progress = [fields for event, fields in events if event == "packing_progress"]
+    assert progress
+    assert progress[0]["slice"] == "thinking"
+    assert progress[0]["rendered_records_considered"] == 1_000
+    assert progress[0]["valid_tokens"] == 1_000
+
+
 def test_openr1_normalization_selects_a_complete_verified_generation() -> None:
     messages = _openr1_messages(
         {
@@ -93,6 +114,69 @@ def test_openr1_normalization_selects_a_complete_verified_generation() -> None:
                 "correctness_math_verify": [False],
             }
         )
+
+
+def test_behavior_preparation_logs_slice_and_artifact_milestones(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class RawTokenizer:
+        pad_token_id = 0
+        eos_token_id = 1
+
+        def __call__(self, text: str, return_tensors: str) -> SimpleNamespace:
+            assert return_tensors == "pt"
+            return SimpleNamespace(input_ids=torch.arange(max(40, len(text))).reshape(1, -1))
+
+    class Behavior:
+        supported_modes = (ReasoningMode.THINKING, ReasoningMode.NON_THINKING)
+
+        @staticmethod
+        def policy_identity(_tokenizer: object) -> str:
+            return "sha256:fixture-policy"
+
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    source = DatasetSourceConfig("fixture/raw", revision="pinned")
+    config = DatasetConfig(
+        behavior_slices=(
+            BehaviorSliceConfig("raw", ReasoningMode.RAW, source, "raw_text", 1.0),
+        )
+    )
+    events: list[str] = []
+    monkeypatch.setattr(
+        calibration_module.AutoTokenizer,
+        "from_pretrained",
+        lambda *_args, **_kwargs: RawTokenizer(),
+    )
+    monkeypatch.setattr(calibration_module, "chat_behavior_for_snapshot", lambda _snapshot: Behavior())
+    monkeypatch.setattr(
+        calibration_module,
+        "_load_behavior_source",
+        lambda _item, _seed: ({"text": "enough raw fixture text for tokenization"},),
+    )
+
+    calibration_module.prepare_behavior_calibration(
+        snapshot,
+        tmp_path / "run",
+        config,
+        sample_count=1,
+        sequence_length=8,
+        seed=0,
+        progress=lambda event, _fields: events.append(event),
+    )
+
+    assert events == [
+        "started",
+        "tokenizer_load_started",
+        "tokenizer_load_completed",
+        "slice_source_load_started",
+        "slice_source_load_completed",
+        "raw_tokenization_started",
+        "slice_completed",
+        "artifact_persist_started",
+        "completed",
+    ]
 
 
 def _fixture_calibration(artifact_id: str = "sha256-" + "1" * 64) -> PinnedCalibrationDataset:

@@ -5,7 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import random
-from collections.abc import Iterable
+import time
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -35,6 +36,16 @@ BehaviorWindow = tuple[
     list[bool],
     list[float],
 ]
+BehaviorPreparationProgress = Callable[[str, Mapping[str, object]], None]
+
+
+def _console_behavior_progress(event: str, fields: Mapping[str, object]) -> None:
+    payload = {"event": event, **fields}
+    print(
+        "Qwen3 behavior preparation: "
+        + json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str),
+        flush=True,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -400,6 +411,8 @@ def _pack_behavior_records(
     count: int,
     sequence_length: int,
     pad_token_id: int,
+    slice_name: str | None = None,
+    progress: BehaviorPreparationProgress | None = None,
 ) -> tuple[
     list[BehaviorWindow],
     tuple[str, ...],
@@ -411,6 +424,8 @@ def _pack_behavior_records(
     rejected_length = 0
     attempts = 0
     maximum_attempts = max(count * 100, 1_000)
+    report_interval = max(1_000, count * 4)
+    started = time.perf_counter()
     for record in records:
         if attempts >= maximum_attempts or all(
             used >= int(sequence_length * 0.98) for used in bin_tokens
@@ -419,18 +434,34 @@ def _pack_behavior_records(
         attempts += 1
         if len(record.input_ids) > sequence_length:
             rejected_length += 1
-            continue
-        candidates = [
-            (sequence_length - bin_tokens[index] - len(record.input_ids), index)
-            for index in range(count)
-            if bin_tokens[index] + len(record.input_ids) <= sequence_length
-        ]
-        if not candidates:
-            continue
-        _remaining, selected = min(candidates)
-        bins[selected].append(record)
-        bin_tokens[selected] += len(record.input_ids)
-        bin_receipts[selected].append(_record_hash(record))
+        else:
+            candidates = [
+                (sequence_length - bin_tokens[index] - len(record.input_ids), index)
+                for index in range(count)
+                if bin_tokens[index] + len(record.input_ids) <= sequence_length
+            ]
+            if candidates:
+                _remaining, selected = min(candidates)
+                bins[selected].append(record)
+                bin_tokens[selected] += len(record.input_ids)
+                bin_receipts[selected].append(_record_hash(record))
+        if progress is not None and attempts % report_interval == 0:
+            valid_tokens = sum(bin_tokens)
+            progress(
+                "packing_progress",
+                {
+                    "slice": slice_name,
+                    "rendered_records_considered": attempts,
+                    "packed_records": sum(len(values) for values in bins),
+                    "windows_started": sum(bool(values) for values in bins),
+                    "target_windows": count,
+                    "valid_tokens": valid_tokens,
+                    "capacity_tokens": count * sequence_length,
+                    "packing_utilization": valid_tokens / (count * sequence_length),
+                    "rejected_length": rejected_length,
+                    "elapsed_seconds": time.perf_counter() - started,
+                },
+            )
     if any(not values for values in bins):
         completed = sum(bool(values) for values in bins)
         raise ValueError(f"behavior slice produced {completed} complete-record windows; expected {count}")
@@ -541,15 +572,34 @@ def prepare_behavior_calibration(
     sample_count: int,
     sequence_length: int,
     seed: int,
+    progress: BehaviorPreparationProgress = _console_behavior_progress,
 ) -> PinnedCalibrationDataset:
     """Prepare the versioned, mode-aware Qwen3 behavior artifact."""
 
     slices = dataset_config.behavior_slices
     if not slices:
         raise ValueError("behavior calibration requires at least one behavior slice")
+    preparation_started = time.perf_counter()
+    progress(
+        "started",
+        {
+            "sample_count": sample_count,
+            "sequence_length": sequence_length,
+            "slice_count": len(slices),
+            "seed": seed,
+        },
+    )
     snapshot = Path(snapshot)
+    progress("tokenizer_load_started", {"snapshot": str(snapshot.resolve())})
     tokenizer = AutoTokenizer.from_pretrained(snapshot, local_files_only=False)
     behavior = chat_behavior_for_snapshot(snapshot)
+    progress(
+        "tokenizer_load_completed",
+        {
+            "snapshot": str(snapshot.resolve()),
+            "chat_policy_identity": behavior.policy_identity(tokenizer),
+        },
+    )
     unsupported = [
         item.mode
         for item in slices
@@ -569,11 +619,43 @@ def prepare_behavior_calibration(
     summaries: list[dict[str, object]] = []
     source_revisions: list[tuple[str, str]] = []
     for slice_index, (item, count) in enumerate(zip(slices, counts, strict=True)):
+        slice_started = time.perf_counter()
+        progress(
+            "slice_source_load_started",
+            {
+                "slice": item.name,
+                "mode": item.mode.value,
+                "source": item.source.name,
+                "revision": item.source.revision,
+                "partition": item.partition,
+                "target_windows": count,
+                "slice_index": slice_index + 1,
+                "slice_count": len(slices),
+            },
+        )
         records = _load_behavior_source(item, seed + slice_index)
+        progress(
+            "slice_source_load_completed",
+            {
+                "slice": item.name,
+                "mode": item.mode.value,
+                "source": item.source.name,
+                "streaming": item.record_format != "raw_text",
+                "elapsed_seconds": time.perf_counter() - slice_started,
+            },
+        )
         source_revisions.append((item.source.name, str(item.source.revision)))
         rejected_schema = 0
         rejected_length = 0
         if item.mode is ReasoningMode.RAW:
+            progress(
+                "raw_tokenization_started",
+                {
+                    "slice": item.name,
+                    "target_windows": count,
+                    "sequence_length": sequence_length,
+                },
+            )
             windows, receipts = _raw_behavior_windows(
                 item,
                 tokenizer,
@@ -583,12 +665,19 @@ def prepare_behavior_calibration(
                 seed=seed + slice_index,
             )
         else:
+            scanned_records = 0
+            rendered_record_count = 0
+            scan_report_interval = max(500, count * 2)
+
             def rendered_records(
                 source_records: Iterable[dict[str, object]] = records,
                 slice_config: BehaviorSliceConfig = item,
+                report_every: int = scan_report_interval,
+                started_at: float = slice_started,
             ) -> Iterable[RenderedBehaviorRecord]:
-                nonlocal rejected_schema
+                nonlocal rejected_schema, rendered_record_count, scanned_records
                 for record in source_records:
+                    scanned_records += 1
                     try:
                         if slice_config.record_format == "openr1_generations":
                             messages = _openr1_messages(record)
@@ -596,21 +685,37 @@ def prepare_behavior_calibration(
                             messages = cast(list[dict[str, object]], record.get("messages") or [])
                         else:
                             raise ValueError(f"unsupported chat record format: {slice_config.record_format}")
-                        yield behavior.render_completed(
+                        rendered = behavior.render_completed(
                             tokenizer,
                             messages,
                             slice_config.mode,
                             assistant_target_weight=slice_config.assistant_target_weight,
                             prompt_target_weight=slice_config.prompt_target_weight,
                         )
+                        rendered_record_count += 1
+                        yield rendered
                     except (TypeError, ValueError):
                         rejected_schema += 1
+                    finally:
+                        if scanned_records % report_every == 0:
+                            progress(
+                                "record_scan_progress",
+                                {
+                                    "slice": slice_config.name,
+                                    "source_records_scanned": scanned_records,
+                                    "rendered_records": rendered_record_count,
+                                    "rejected_schema": rejected_schema,
+                                    "elapsed_seconds": time.perf_counter() - started_at,
+                                },
+                            )
 
             windows, receipts, rejected_length = _pack_behavior_records(
                 rendered_records(),
                 count=count,
                 sequence_length=sequence_length,
                 pad_token_id=pad_token_id,
+                slice_name=item.name,
+                progress=progress,
             )
         valid_tokens = sum(sum(window[1]) for window in windows)
         target_tokens = sum(sum(window[4]) for window in windows)
@@ -632,6 +737,13 @@ def prepare_behavior_calibration(
                 "rejected_length_count": rejected_length,
                 "packing_utilization": valid_tokens / (count * sequence_length),
             }
+        )
+        progress(
+            "slice_completed",
+            {
+                **summaries[-1],
+                "elapsed_seconds": time.perf_counter() - slice_started,
+            },
         )
         ordered_receipts.extend({"slice": item.name, "content_hash": value} for value in receipts)
         all_windows.extend((slice_index, window) for window in windows)
@@ -679,6 +791,14 @@ def prepare_behavior_calibration(
         "distillation_target_mask": distillation_target_mask,
         "distillation_weights": distillation_weights,
     }
+    progress(
+        "artifact_persist_started",
+        {
+            "output": str(Path(output).resolve()),
+            "valid_token_count": int(attention_mask.sum()),
+            "target_token_count": int(distillation_target_mask.sum()),
+        },
+    )
     artifacts = LocalArtifactStore(Path(output) / "artifacts")
     refs = LocalTensorStore(artifacts).put("calibration-token-dataset", tensor_values)
     manifest = {
@@ -704,6 +824,15 @@ def prepare_behavior_calibration(
             encoding="utf-8",
         )
         descriptor = writer.commit()
+    progress(
+        "completed",
+        {
+            "output": str(Path(output).resolve()),
+            "artifact_id": descriptor.artifact_id,
+            "fingerprint": fingerprint,
+            "elapsed_seconds": time.perf_counter() - preparation_started,
+        },
+    )
     return PinnedCalibrationDataset(
         ArtifactRef("calibration-dataset-manifest", descriptor.artifact_id, 1),
         input_ids,
@@ -802,6 +931,7 @@ def load_or_prepare_calibration(
 
     output = Path(output)
     receipt_path = output / CALIBRATION_RECEIPT_NAME
+    mode_aware = dataset_config is not None and bool(dataset_config.behavior_slices)
     requested = {
         "sample_count": sample_count,
         "sequence_length": sequence_length,
@@ -817,6 +947,14 @@ def load_or_prepare_calibration(
             }
         ),
     }
+    if mode_aware:
+        _console_behavior_progress(
+            "cache_lookup_started",
+            {
+                "output": str(output.resolve()),
+                "receipt": str(receipt_path.resolve()),
+            },
+        )
     try:
         receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
         if not isinstance(receipt, dict) or any(receipt.get(key) != value for key, value in requested.items()):
@@ -831,11 +969,29 @@ def load_or_prepare_calibration(
             raise ValueError("generated calibration tensor has the wrong shape")
         if tuple(calibration.attention_mask.shape) != (sample_count, sequence_length):
             raise ValueError("generated calibration mask has the wrong shape")
+        if mode_aware:
+            _console_behavior_progress(
+                "cache_reused",
+                {
+                    "output": str(output.resolve()),
+                    "artifact_id": calibration.reference.artifact_id,
+                    "fingerprint": calibration.fingerprint,
+                },
+            )
         return calibration
-    except (ArtifactCorruptionError, KeyError, OSError, TypeError, ValueError):
-        pass
+    except (ArtifactCorruptionError, KeyError, OSError, TypeError, ValueError) as exc:
+        if mode_aware:
+            _console_behavior_progress(
+                "cache_miss",
+                {
+                    "output": str(output.resolve()),
+                    "reason_type": type(exc).__name__,
+                    "reason": str(exc),
+                },
+            )
 
-    if dataset_config is not None and dataset_config.behavior_slices:
+    if mode_aware:
+        assert dataset_config is not None
         calibration = prepare_behavior_calibration(
             snapshot,
             output,
