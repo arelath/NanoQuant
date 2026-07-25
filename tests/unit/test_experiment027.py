@@ -69,8 +69,13 @@ def test_experiment027_scales_experiment025_recipe_with_adaptive_8b_execution() 
         quality_output=workflow025.quality_output,
         quality_markdown_output=workflow025.quality_markdown_output,
         expected_blocks=workflow025.expected_blocks,
+        llamacpp_quality=workflow025.llamacpp_quality,
+        llama_cpp_root=workflow025.llama_cpp_root,
     ) == workflow025
     assert workflow027.expected_blocks == 32
+    assert workflow027.llamacpp_quality is True
+    assert workflow027.llamacpp_quality_parallel == 4
+    assert workflow027.llama_cpp_root is not None
     assert workflow027.export.gguf_output == Path(
         "Results/027/meta-llama-3-8b-instruct-nanoquant.gguf"
     )

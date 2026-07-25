@@ -363,7 +363,9 @@ def _number(value: object, field: str) -> float:
     return float(value)
 
 
-def _comparison(base: dict[str, Any], frozen: dict[str, Any]) -> dict[str, Any]:
+def compare_quality_results(base: dict[str, Any], frozen: dict[str, Any]) -> dict[str, Any]:
+    """Compare two results produced by the shared pinned quality protocol."""
+
     base_ppl = _number(cast(dict[str, object], base["wikitext"])["perplexity"], "base perplexity")
     frozen_ppl = _number(
         cast(dict[str, object], frozen["wikitext"])["perplexity"],
@@ -557,7 +559,7 @@ def execute_quality_evaluation(
             "base_execution": "block_streamed" if request.stream_base_model else "resident",
         },
         "results": {"base": base_result, "frozen": frozen_result},
-        "comparison": _comparison(base_result, frozen_result),
+        "comparison": compare_quality_results(base_result, frozen_result),
         "wall_seconds": time.perf_counter() - wall_started,
         "resource_limits": {
             "maximum_wddm_shared_bytes": request.maximum_wddm_shared_bytes,
@@ -574,6 +576,7 @@ __all__ = [
     "PreparedQualityInputs",
     "QualityProgressCallback",
     "QualityEvaluationRequest",
+    "compare_quality_results",
     "execute_quality_evaluation",
     "prepare_quality_inputs",
 ]

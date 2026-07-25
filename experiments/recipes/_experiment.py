@@ -339,6 +339,8 @@ def define_compression_quality_experiment(
     restore_completed_blocks: bool = True,
     quality_backend: str = "factorized",
     large_model_guards: bool = False,
+    llamacpp_quality: bool = False,
+    llamacpp_quality_parallel: int = 4,
 ) -> ExperimentDefinition[CompressionQualityExperiment]:
     layout = ExperimentLayout(identity)
     config = _materialize_config(template, identity, layout)
@@ -353,6 +355,9 @@ def define_compression_quality_experiment(
         restore_completed_blocks=restore_completed_blocks,
         quality_backend=quality_backend,
         large_model_guards=large_model_guards,
+        llamacpp_quality=llamacpp_quality,
+        llama_cpp_root=_LLAMA_CPP_ROOT if llamacpp_quality else None,
+        llamacpp_quality_parallel=llamacpp_quality_parallel,
     )
     return ExperimentDefinition(identity, config, workflow, layout)
 

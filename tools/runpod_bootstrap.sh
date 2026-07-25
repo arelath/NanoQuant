@@ -19,8 +19,8 @@ export TORCHINDUCTOR_CACHE_DIR="${TORCHINDUCTOR_CACHE_DIR:-${WORKSPACE_ROOT}/tor
 export TRITON_CACHE_DIR="${TRITON_CACHE_DIR:-${WORKSPACE_ROOT}/triton-cache}"
 export CCE_AUTOTUNE="${CCE_AUTOTUNE:-0}"
 
-LLAMA_CPP_REPOSITORY="${NANOQUANT_LLAMA_CPP_REPOSITORY:-https://github.com/ggml-org/llama.cpp.git}"
-LLAMA_CPP_REVISION="${NANOQUANT_LLAMA_CPP_REVISION:-68a521b591edd2f36a456809230d63aa81003dfc}"
+LLAMA_CPP_REPOSITORY="${NANOQUANT_LLAMA_CPP_REPOSITORY:-https://github.com/arelath/llama.cpp.git}"
+LLAMA_CPP_REVISION="${NANOQUANT_LLAMA_CPP_REVISION:-nanoquants}"
 VENDORED_CONVERTER="${REPOSITORY_ROOT}/tools/llamacpp/convert_nanoquant_to_gguf.py"
 VENDORED_CONVERTER_SHA256="c2e1fd064bbd46f38e9e3c5f739865d198ca75bd0bb9db16f72530d378d11304"
 REQUIRES_HF_WRITE=0
@@ -342,21 +342,37 @@ PY
 fi
 
 if [[ ! -d "${NANOQUANT_LLAMA_CPP_ROOT}/.git" ]]; then
-  echo "==> Fetching pinned upstream llama.cpp conversion toolchain"
+  echo "==> Fetching NanoQuant llama.cpp fork (${LLAMA_CPP_REPOSITORY}@${LLAMA_CPP_REVISION})"
   mkdir -p "${NANOQUANT_LLAMA_CPP_ROOT}"
   git -C "${NANOQUANT_LLAMA_CPP_ROOT}" init
   git -C "${NANOQUANT_LLAMA_CPP_ROOT}" remote add origin "${LLAMA_CPP_REPOSITORY}"
-  git -C "${NANOQUANT_LLAMA_CPP_ROOT}" fetch --depth 1 origin "${LLAMA_CPP_REVISION}"
-  git -C "${NANOQUANT_LLAMA_CPP_ROOT}" checkout --detach FETCH_HEAD
 fi
-if [[ "$(git -C "${NANOQUANT_LLAMA_CPP_ROOT}" rev-parse HEAD)" != "${LLAMA_CPP_REVISION}" ]]; then
+
+# This file is managed by this bootstrap and is copied again after repository sync.
+if [[ -f "${NANOQUANT_LLAMA_CPP_ROOT}/convert_nanoquant_to_gguf.py" ]] &&
+   [[ "$(sha256sum "${NANOQUANT_LLAMA_CPP_ROOT}/convert_nanoquant_to_gguf.py" | awk '{print $1}')" == "${VENDORED_CONVERTER_SHA256}" ]]; then
+  rm -f -- "${NANOQUANT_LLAMA_CPP_ROOT}/convert_nanoquant_to_gguf.py"
+fi
+CURRENT_LLAMA_CPP_REPOSITORY="$(git -C "${NANOQUANT_LLAMA_CPP_ROOT}" remote get-url origin)"
+if [[ "${CURRENT_LLAMA_CPP_REPOSITORY}" != "${LLAMA_CPP_REPOSITORY}" ]]; then
   if [[ -n "$(git -C "${NANOQUANT_LLAMA_CPP_ROOT}" status --porcelain)" ]]; then
-    echo "llama.cpp has local changes and is not at ${LLAMA_CPP_REVISION}; refusing to overwrite it" >&2
+    echo "llama.cpp has local changes and its origin differs from ${LLAMA_CPP_REPOSITORY}; refusing to overwrite it" >&2
     exit 1
   fi
-  git -C "${NANOQUANT_LLAMA_CPP_ROOT}" fetch origin "${LLAMA_CPP_REVISION}"
-  git -C "${NANOQUANT_LLAMA_CPP_ROOT}" checkout --detach "${LLAMA_CPP_REVISION}"
+  git -C "${NANOQUANT_LLAMA_CPP_ROOT}" remote set-url origin "${LLAMA_CPP_REPOSITORY}"
 fi
+
+git -C "${NANOQUANT_LLAMA_CPP_ROOT}" fetch --depth 1 origin "${LLAMA_CPP_REVISION}"
+LLAMA_CPP_COMMIT="$(git -C "${NANOQUANT_LLAMA_CPP_ROOT}" rev-parse FETCH_HEAD)"
+CURRENT_LLAMA_CPP_COMMIT="$(git -C "${NANOQUANT_LLAMA_CPP_ROOT}" rev-parse HEAD 2>/dev/null || true)"
+if [[ "${CURRENT_LLAMA_CPP_COMMIT}" != "${LLAMA_CPP_COMMIT}" ]]; then
+  if [[ -n "$(git -C "${NANOQUANT_LLAMA_CPP_ROOT}" status --porcelain)" ]]; then
+    echo "llama.cpp has local changes and is not at ${LLAMA_CPP_COMMIT}; refusing to overwrite it" >&2
+    exit 1
+  fi
+  git -C "${NANOQUANT_LLAMA_CPP_ROOT}" checkout --detach "${LLAMA_CPP_COMMIT}"
+fi
+echo "==> NanoQuant llama.cpp commit: ${LLAMA_CPP_COMMIT}"
 
 python - "${VENDORED_CONVERTER}" "${VENDORED_CONVERTER_SHA256}" <<'PY'
 import hashlib
@@ -374,13 +390,17 @@ python - <<'PY'
 import sentencepiece
 PY
 python "${NANOQUANT_LLAMA_CPP_ROOT}/convert_nanoquant_to_gguf.py" --help >/dev/null
-if [[ ! -x "${NANOQUANT_LLAMA_CPP_ROOT}/build/bin/llama-quantize" ]]; then
-  echo "==> Building upstream llama.cpp token-embedding quantizer"
-  cmake -S "${NANOQUANT_LLAMA_CPP_ROOT}" -B "${NANOQUANT_LLAMA_CPP_ROOT}/build" \
-    -DGGML_CUDA=OFF -DCMAKE_BUILD_TYPE=Release
-  cmake --build "${NANOQUANT_LLAMA_CPP_ROOT}/build" --target llama-quantize \
-    --config Release -j"$(nproc)"
-fi
+echo "==> Configuring CUDA-enabled NanoQuant llama.cpp runtime"
+cmake -S "${NANOQUANT_LLAMA_CPP_ROOT}" -B "${NANOQUANT_LLAMA_CPP_ROOT}/build" \
+  -DGGML_CUDA=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build "${NANOQUANT_LLAMA_CPP_ROOT}/build" --target llama llama-quantize \
+  --config Release -j"$(nproc)"
+
+echo "==> Building protocol-matched llama.cpp GGUF quality runner"
+"${VENV}/bin/python" tools/build_llamacpp_quality.py \
+  --llama-cpp-root "${NANOQUANT_LLAMA_CPP_ROOT}" \
+  --config Release \
+  --jobs "$(nproc)"
 
 if [[ "${NANOQUANT_SETUP_ONLY:-0}" == "1" ]]; then
   echo "==> Setup complete (NANOQUANT_SETUP_ONLY=1); experiment was not launched"

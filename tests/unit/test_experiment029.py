@@ -34,6 +34,7 @@ def test_experiment029_retargets_all_experiment028_settings_to_qwen3_8b() -> Non
         == workflow028
     )
     assert workflow029.expected_blocks == 36
+    assert workflow029.llamacpp_quality is True
     assert workflow029.export.runtime_family == "qwen"
     assert workflow029.export.gguf_output == Path("Results/029/qwen3-8b-nanoquant.gguf")
     upload = workflow029.export.huggingface
@@ -53,3 +54,13 @@ def test_runpod_defaults_to_and_supports_experiment029() -> None:
     assert 'LAUNCHER="experiments/029-compress-and-benchmark-qwen3-8b.py"' in experiment029_case
     assert "REQUIRES_HF_WRITE=1" in experiment029_case
     assert "PREFLIGHT_CCE=1" in experiment029_case
+    assert (
+        'LLAMA_CPP_REPOSITORY="${NANOQUANT_LLAMA_CPP_REPOSITORY:-'
+        'https://github.com/arelath/llama.cpp.git}"'
+    ) in bootstrap
+    assert (
+        'LLAMA_CPP_REVISION="${NANOQUANT_LLAMA_CPP_REVISION:-nanoquants}"'
+        in bootstrap
+    )
+    assert "-DGGML_CUDA=ON" in bootstrap
+    assert "tools/build_llamacpp_quality.py" in bootstrap

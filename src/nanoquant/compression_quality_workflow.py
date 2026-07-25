@@ -29,11 +29,17 @@ from nanoquant.infrastructure.publication import (
 )
 from nanoquant.infrastructure.run_session import open_run_event_append_session
 from nanoquant.infrastructure.runs import launcher_provenance, validate_launcher_number
+from nanoquant.llamacpp_quality import (
+    LlamaCppQualityRequest,
+    execute_llamacpp_quality_evaluation,
+    render_llamacpp_quality_markdown,
+)
 from nanoquant.quality_evaluation import (
     DEFAULT_QUALITY_TASK_BATCH_SIZE,
     DEFAULT_QUALITY_WIKITEXT_BATCH_SIZE,
     QualityEvaluationRequest,
     execute_quality_evaluation,
+    prepare_quality_inputs,
 )
 from nanoquant.quality_evaluation_workflow import render_quality_evaluation_markdown
 from nanoquant.resident_workflow import (
@@ -68,6 +74,9 @@ class CompressionQualityExperiment:
     restore_completed_blocks: bool = True
     quality_backend: str = "factorized"
     large_model_guards: bool = False
+    llamacpp_quality: bool = False
+    llama_cpp_root: Path | None = None
+    llamacpp_quality_parallel: int = 4
 
     def __post_init__(self) -> None:
         if self.expected_blocks <= 0:
@@ -84,6 +93,10 @@ class CompressionQualityExperiment:
             raise ValueError("quality backend must be factorized or dense")
         if self.large_model_guards and self.restore_completed_blocks:
             raise ValueError("large-model quality experiments must disable completed-block restoration")
+        if self.llamacpp_quality and self.llama_cpp_root is None:
+            raise ValueError("llama.cpp quality requires a llama.cpp repository root")
+        if self.llamacpp_quality_parallel <= 0:
+            raise ValueError("llama.cpp quality parallel sequence count must be positive")
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,6 +105,7 @@ class ResolvedCompressionQualityExperiment:
     summary_output: Path
     quality_output: Path
     quality_markdown_output: Path
+    llamacpp_quality_output: Path | None = None
 
 
 def _repository_path(path: Path, repository_root: Path) -> Path:
@@ -106,11 +120,19 @@ def resolve_compression_quality_experiment(
 ) -> ResolvedCompressionQualityExperiment:
     launcher = Path(launcher_path).resolve()
     root = launcher.parent.parent
+    quality_output = _repository_path(experiment.quality_output, root)
     return ResolvedCompressionQualityExperiment(
         resolve_resident_experiment_inputs(config, launcher_path=launcher),
         _repository_path(experiment.summary_output, root),
-        _repository_path(experiment.quality_output, root),
+        quality_output,
         _repository_path(experiment.quality_markdown_output, root),
+        (
+            quality_output.with_name(
+                quality_output.stem.removesuffix("-quality") + "-gguf-quality.json"
+            )
+            if experiment.llamacpp_quality
+            else None
+        ),
     )
 
 
@@ -166,34 +188,103 @@ def execute_compression_quality_experiment(
         raise ValueError("compression-quality experiment requires launcher provenance")
     repository_root = resolved.inputs.launcher_path.resolve().parent.parent
     quality_started = time.perf_counter()
-    quality = execute_quality_evaluation(
-        QualityEvaluationRequest(
-            snapshot=resolved.inputs.snapshot,
-            source=config.model.source,
-            revision=str(config.model.revision),
-            run_output=resolved.inputs.output,
-            device=config.runtime.compute_device,
-            backend=experiment.quality_backend,
-            use_global_tuning=config.distillation.enabled,
-            wikitext_samples=experiment.wikitext_samples,
-            wikitext_sequence_length=experiment.wikitext_sequence_length,
-            wikitext_batch_size=experiment.wikitext_batch_size,
-            task_names=experiment.task_names,
-            task_limit=experiment.task_limit,
-            task_batch_size=experiment.task_batch_size,
-            local_files_only=experiment.local_files_only,
-            maximum_wddm_shared_bytes=maximum_shared_bytes,
-            packed_artifact=_repository_path(experiment.export.packed_output, repository_root),
-            stream_base_model=(
-                experiment.large_model_guards
-                or config.runtime.executor in {ExecutorKind.CPU_OFFLOAD, ExecutorKind.STREAMING}
-            ),
-        )
+    quality_request = QualityEvaluationRequest(
+        snapshot=resolved.inputs.snapshot,
+        source=config.model.source,
+        revision=str(config.model.revision),
+        run_output=resolved.inputs.output,
+        device=config.runtime.compute_device,
+        backend=experiment.quality_backend,
+        use_global_tuning=config.distillation.enabled,
+        wikitext_samples=experiment.wikitext_samples,
+        wikitext_sequence_length=experiment.wikitext_sequence_length,
+        wikitext_batch_size=experiment.wikitext_batch_size,
+        task_names=experiment.task_names,
+        task_limit=experiment.task_limit,
+        task_batch_size=experiment.task_batch_size,
+        local_files_only=experiment.local_files_only,
+        maximum_wddm_shared_bytes=maximum_shared_bytes,
+        packed_artifact=_repository_path(experiment.export.packed_output, repository_root),
+        stream_base_model=(
+            experiment.large_model_guards
+            or config.runtime.executor in {ExecutorKind.CPU_OFFLOAD, ExecutorKind.STREAMING}
+        ),
+    )
+    prepared_quality = (
+        prepare_quality_inputs(quality_request) if experiment.llamacpp_quality else None
+    )
+    quality = (
+        execute_quality_evaluation(quality_request)
+        if prepared_quality is None
+        else execute_quality_evaluation(quality_request, prepared=prepared_quality)
     )
     quality_seconds = time.perf_counter() - quality_started
+    llamacpp_quality_started = time.perf_counter()
+    llamacpp_quality = None
+    if experiment.llamacpp_quality:
+        if resolved.llamacpp_quality_output is None or experiment.llama_cpp_root is None:
+            raise ValueError("resolved llama.cpp quality paths are incomplete")
+        if prepared_quality is None:
+            raise RuntimeError("llama.cpp quality inputs were not prepared")
+        with open_run_event_append_session(
+            resolved.inputs.output,
+            observability=config.observability,
+        ) as quality_events:
+            quality_events.emit(
+                "quality",
+                "info",
+                "quality.llamacpp.started",
+                gguf=str(exports.gguf.output),
+                gguf_sha256=exports.gguf.sha256,
+                parallel=experiment.llamacpp_quality_parallel,
+            )
+            try:
+                llamacpp_quality = execute_llamacpp_quality_evaluation(
+                    LlamaCppQualityRequest(
+                        gguf=exports.gguf.output,
+                        output=resolved.llamacpp_quality_output,
+                        llama_cpp_root=experiment.llama_cpp_root,
+                        device=config.runtime.compute_device,
+                        gpu_layers=(
+                            -1
+                            if config.runtime.compute_device.startswith("cuda")
+                            else 0
+                        ),
+                        parallel=experiment.llamacpp_quality_parallel,
+                    ),
+                    quality_request,
+                    prepared_quality,
+                    quality["results"]["base"],
+                    quality["protocol"],
+                )
+            except BaseException as exc:
+                quality_events.emit(
+                    "quality",
+                    "error",
+                    "quality.llamacpp.failed",
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
+                raise
+            quality_events.emit(
+                "quality",
+                "info",
+                "quality.llamacpp.completed",
+                output=str(resolved.llamacpp_quality_output),
+                reused=bool(llamacpp_quality.get("reused")),
+                wall_seconds=llamacpp_quality.get("wall_seconds"),
+            )
+    llamacpp_quality_seconds = (
+        0.0 if llamacpp_quality is None else time.perf_counter() - llamacpp_quality_started
+    )
     provenance = to_dict(launcher_provenance(resolved.inputs.launcher_path, config.intent.experiment_number))
     quality_payload = {
         **quality,
+        **(
+            {}
+            if llamacpp_quality is None
+            else {"deployment_quality": llamacpp_quality}
+        ),
         "experiment": {
             "config_hash": config_hash(config),
             "resolved_config": to_dict(config),
@@ -201,10 +292,22 @@ def execute_compression_quality_experiment(
         },
     }
     atomic_write_json(resolved.quality_output, quality_payload)
-    atomic_write_text(resolved.quality_markdown_output, render_quality_evaluation_markdown(quality_payload))
+    rendered_quality = render_quality_evaluation_markdown(quality_payload)
+    if llamacpp_quality is not None:
+        rendered_quality = (
+            rendered_quality.rstrip()
+            + "\n\n"
+            + render_llamacpp_quality_markdown(llamacpp_quality)
+        )
+    atomic_write_text(resolved.quality_markdown_output, rendered_quality)
     supplemental = (
         (resolved.quality_markdown_output, "README.md"),
         (resolved.quality_output, "quality.json"),
+        *(
+            ()
+            if resolved.llamacpp_quality_output is None
+            else ((resolved.llamacpp_quality_output, "gguf-quality.json"),)
+        ),
     )
     model_card_metadata = (
         None
@@ -241,7 +344,9 @@ def execute_compression_quality_experiment(
     publication_directory = repository_root / "Results" / f"{experiment_number:03d}"
     payload = {
         "schema_version": 2,
-        "passed": bool(quality.get("passed")),
+        "passed": bool(quality.get("passed")) and (
+            llamacpp_quality is None or bool(llamacpp_quality.get("passed"))
+        ),
         "experiment": quality_payload["experiment"],
         "compression": {
             "run_output": str(resolved.inputs.output.resolve()),
@@ -291,12 +396,21 @@ def execute_compression_quality_experiment(
                 None if workflow.distillation is None else workflow.distillation.result.wall_seconds
             ),
             "quality_seconds": quality_seconds,
+            "llamacpp_quality_seconds": llamacpp_quality_seconds,
             "wall_seconds": time.perf_counter() - wall_started,
         },
         "quality": {
             "json": str(resolved.quality_output),
             "markdown": str(resolved.quality_markdown_output),
             "comparison": quality["comparison"],
+            "gguf_json": (
+                None
+                if resolved.llamacpp_quality_output is None
+                else str(resolved.llamacpp_quality_output)
+            ),
+            "gguf_comparison": (
+                None if llamacpp_quality is None else llamacpp_quality["comparison"]
+            ),
             "resource_limits": quality["resource_limits"],
         },
         "publication": {
@@ -342,6 +456,16 @@ def execute_compression_quality_experiment(
             ),
             PublishableArtifact(resolved.summary_output, PublishableArtifactKind.STATISTICS),
             PublishableArtifact(resolved.quality_output, PublishableArtifactKind.STATISTICS),
+            *(
+                ()
+                if resolved.llamacpp_quality_output is None
+                else (
+                    PublishableArtifact(
+                        resolved.llamacpp_quality_output,
+                        PublishableArtifactKind.STATISTICS,
+                    ),
+                )
+            ),
             PublishableArtifact(resolved.quality_markdown_output, PublishableArtifactKind.REPORT),
             *(PublishableArtifact(path, PublishableArtifactKind.STATISTICS) for path in profile_json),
             *(PublishableArtifact(path, PublishableArtifactKind.REPORT) for path in profile_markdown),

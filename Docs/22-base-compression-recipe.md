@@ -32,6 +32,7 @@ Results/NNN/
   model-slug-nanoquant.gguf.export.json
   model-slug-nanoquant.model-card.md       # validated source for Hub README.md
   model-slug-nanoquant.export-summary.json
+  NNN-experiment-name-gguf-quality.json    # when llama.cpp deployment quality is enabled
   model-slug-nanoquant.gguf.huggingface.json  # only when a Hub upload is configured
   mmproj-BF16.gguf                 # multimodal snapshots only
   mmproj-BF16.gguf.export.json     # multimodal snapshots only
@@ -51,8 +52,10 @@ complete until all of these stages succeed:
 5. when the source snapshot declares a non-empty `vision_config`, the pinned upstream converter exports the vision
    tower and projector as `mmproj-BF16.gguf`, verifies `general.type=mmproj`, `MOSTLY_BF16`, a non-empty tensor
    inventory, and a receipt bound to the source config and converter;
-6. workflows with a quality protocol complete that protocol and write its machine-readable JSON and rendered
-   Markdown before any external publication;
+6. workflows with a quality protocol complete the BF16-versus-packed protocol and write its machine-readable JSON;
+   recipes with llama.cpp deployment quality enabled then run the exported GGUF through the NanoQuant fork on the
+   identical prepared token IDs and target positions, write an identity-bound `gguf-quality.json`, and include both
+   comparisons in the rendered Markdown before any external publication;
 7. when the export recipe declares a Hugging Face destination, the validated language GGUF, optional mmproj, and
    completed quality artifacts are uploaded in one model-repository commit, and a local token-free receipt records
    its exact commit and file hashes;
@@ -110,7 +113,16 @@ upload until evaluation succeeds and its document exists. Before upload, the reu
 quantized-derivative, task, format, language, and license metadata. Compression-quality cards retain the rendered
 quality report as their Markdown body; benchmark cards receive a generated summary body. Both workflows expose the
 card as `README.md` and their machine-readable measurements as `quality.json`.
-The GGUF, optional mmproj, and quality files therefore share one commit identity.
+The GGUF, optional mmproj, packed quality, optional llama.cpp GGUF quality, and report files therefore share one
+commit identity. The GGUF result is reusable only when the GGUF hash, prepared-input hash, scorer binary, llama.cpp
+commit and runtime-library identity, GPU-layer policy, and parallelism all still match.
+
+The protocol-matched runner is built from `tools/llamacpp/quality_runner` with
+`tools/build_llamacpp_quality.py`. It calls the llama.cpp C API directly: WikiText scores every shifted target after
+the per-window BOS token, and multiple-choice tasks score the same retained context and continuation targets used by
+the PyTorch evaluator. It does not reconstruct text or substitute generated answer letters. llama.cpp exposes F32
+logits, so the runner records its F64 host log-sum-exp policy explicitly; close-choice results need not be bit-identical
+to the packed PyTorch backend.
 
 The same generator can be run independently without contacting the Hub:
 

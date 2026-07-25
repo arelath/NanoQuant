@@ -61,6 +61,7 @@ EXPERIMENT = define_compression_quality_experiment(
     maximum_wddm_shared_gib=0.75,
     restore_completed_blocks=False,
     quality_backend="dense",
+    llamacpp_quality=True,
     export=CompressionExportPolicy(
         release_name="meta-llama-3-8b-instruct",
         runtime_family="llama",

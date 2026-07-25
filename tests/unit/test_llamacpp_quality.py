@@ -1,0 +1,129 @@
+from __future__ import annotations
+
+import math
+import struct
+from pathlib import Path
+
+import pytest
+import torch
+
+import nanoquant.llamacpp_quality as llamacpp_quality
+from nanoquant.llamacpp_quality import (
+    LlamaCppQualityRequest,
+    execute_llamacpp_quality_evaluation,
+)
+from nanoquant.quality_evaluation import PreparedQualityInputs, QualityEvaluationRequest
+
+
+def test_llamacpp_quality_is_protocol_matched_and_identity_resumable(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    root = tmp_path / "llama.cpp"
+    (root / ".git").mkdir(parents=True)
+    runner = root / "build" / "nanoquant-quality" / "nanoquant-llamacpp-quality"
+    runner.parent.mkdir(parents=True)
+    runner.write_bytes(b"runner")
+    gguf = tmp_path / "model.gguf"
+    gguf.write_bytes(b"GGUF fixture")
+    output = tmp_path / "gguf-quality.json"
+    prepared = PreparedQualityInputs(
+        torch.tensor(((1, 2, 3), (1, 4, 5)), dtype=torch.long),
+        "wikitext-fingerprint",
+        1,
+        0,
+        "sha256:" + "a" * 64,
+        (),
+    )
+    quality_request = QualityEvaluationRequest(
+        tmp_path,
+        "fixture/model",
+        "revision",
+        tmp_path / "run",
+        device="cpu",
+        task_names=("piqa",),
+    )
+    base_result = {
+        "label": "base",
+        "wikitext": {
+            "total_negative_log_likelihood": 2.0,
+            "mean_negative_log_likelihood": 0.5,
+            "perplexity": math.exp(0.5),
+            "token_count": 4,
+            "window_count": 2,
+            "sample_count": 2,
+        },
+        "tasks": [],
+    }
+    monkeypatch.setattr(
+        llamacpp_quality,
+        "_git_capture",
+        lambda _root: {
+            "repository": "https://github.com/arelath/llama.cpp.git",
+            "commit": "1" * 40,
+            "branch": "nanoquants",
+            "dirty": False,
+        },
+    )
+    monkeypatch.setattr(
+        llamacpp_quality,
+        "_runtime_files",
+        lambda _root, _runner: (runner,),
+    )
+    calls = []
+
+    def run(_request, _runner, input_path, output_path):  # type: ignore[no-untyped-def]
+        calls.append(input_path.read_bytes())
+        with output_path.open("wb") as destination:
+            destination.write(b"NQQO0001")
+            destination.write(struct.pack("<I", 2))
+            destination.write(struct.pack("<dI", 1.0, 2))
+            destination.write(struct.pack("<dI", 3.0, 2))
+
+    monkeypatch.setattr(llamacpp_quality, "_run", run)
+    request = LlamaCppQualityRequest(
+        gguf,
+        output,
+        root,
+        device="cpu",
+        runner=runner,
+        gpu_layers=0,
+        parallel=2,
+    )
+
+    result = execute_llamacpp_quality_evaluation(
+        request,
+        quality_request,
+        prepared,
+        base_result,
+        {"wikitext_token_hash": "sha256:tokens", "task_names": ()},
+    )
+
+    assert result["passed"] is True
+    assert result["results"]["gguf"]["wikitext"]["token_count"] == 4
+    assert result["results"]["gguf"]["wikitext"]["perplexity"] == math.e
+    assert result["comparison"]["wikitext"]["ratio"] == pytest.approx(math.exp(0.5))
+    assert result["identity"]["llama_cpp_commit"] == "1" * 40
+    assert result["runtime"]["git"]["repository"] == (
+        "https://github.com/arelath/llama.cpp.git"
+    )
+    assert len(calls) == 1
+    assert calls[0].startswith(b"NQQL0001")
+
+    reused = execute_llamacpp_quality_evaluation(
+        request,
+        quality_request,
+        prepared,
+        base_result,
+        {"wikitext_token_hash": "sha256:tokens", "task_names": ()},
+    )
+    assert reused["reused"] is True
+    assert len(calls) == 1
+
+
+def test_llamacpp_quality_runner_source_uses_target_only_logits() -> None:
+    source = Path("tools/llamacpp/quality_runner/main.cpp").read_text(encoding="utf-8")
+
+    assert "batch.logits[batch_index] = scored ? 1 : 0;" in source
+    assert "sequence.tokens[position + 1]" in source
+    assert "llama_memory_clear" in source

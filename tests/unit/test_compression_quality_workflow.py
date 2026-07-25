@@ -52,6 +52,7 @@ def test_compression_quality_runs_quality_before_huggingface_upload_and_publicat
         tmp_path / "summary.json",
         tmp_path / "quality.json",
         tmp_path / "quality.md",
+        tmp_path / "gguf-quality.json",
     )
     quantization = SimpleNamespace(
         inventory=SimpleNamespace(blocks=tuple(range(34))),
@@ -94,6 +95,8 @@ def test_compression_quality_runs_quality_before_huggingface_upload_and_publicat
     experiment = replace(
         _EXPERIMENT,
         export=replace(_EXPERIMENT.export, huggingface=upload_config),
+        llamacpp_quality=True,
+        llama_cpp_root=tmp_path / "llama.cpp",
     )
     monkeypatch.setattr(
         workflow,
@@ -107,15 +110,51 @@ def test_compression_quality_runs_quality_before_huggingface_upload_and_publicat
         return CompleteCompressionResult(resident, export)
 
     monkeypatch.setattr(workflow, "execute_complete_compression", complete)
-    def evaluate(request):  # type: ignore[no-untyped-def]
+    prepared_quality = SimpleNamespace()
+    monkeypatch.setattr(
+        workflow,
+        "prepare_quality_inputs",
+        lambda _request: calls.append("prepare-quality") or prepared_quality,
+    )
+
+    def evaluate(request, *, prepared):  # type: ignore[no-untyped-def]
         calls.append("quality")
+        assert prepared is prepared_quality
         quality_requests.append(request)
-        return {"passed": True, "comparison": {}, "resource_limits": {}}
+        return {
+            "passed": True,
+            "comparison": {},
+            "resource_limits": {},
+            "results": {"base": {"tasks": [], "wikitext": {"perplexity": 1.0}}},
+            "protocol": {"task_names": (), "wikitext_token_hash": "sha256:tokens"},
+        }
 
     monkeypatch.setattr(workflow, "execute_quality_evaluation", evaluate)
+    def evaluate_llamacpp(request, quality_request, prepared, base, protocol):  # type: ignore[no-untyped-def]
+        calls.append("llamacpp-quality")
+        assert request.gguf == gguf
+        assert request.output == resolved.llamacpp_quality_output
+        assert quality_request is quality_requests[0]
+        assert prepared is prepared_quality
+        assert base["wikitext"]["perplexity"] == 1.0
+        assert protocol["wikitext_token_hash"] == "sha256:tokens"
+        request.output.write_text("{}\n", encoding="utf-8")
+        return {"passed": True, "comparison": {"wikitext": {}, "tasks": []}}
+
+    monkeypatch.setattr(
+        workflow,
+        "execute_llamacpp_quality_evaluation",
+        evaluate_llamacpp,
+    )
+    monkeypatch.setattr(workflow, "render_llamacpp_quality_markdown", lambda _payload: "# GGUF\n")
     monkeypatch.setattr(workflow, "render_quality_evaluation_markdown", lambda _payload: "# quality\n")
 
-    upload_events = SimpleNamespace()
+    emitted_events = []
+    upload_events = SimpleNamespace(
+        emit=lambda component, severity, name, **fields: emitted_events.append(
+            (component, severity, name, fields)
+        )
+    )
     monkeypatch.setattr(
         workflow,
         "open_run_event_append_session",
@@ -131,9 +170,12 @@ def test_compression_quality_runs_quality_before_huggingface_upload_and_publicat
         assert tuple(artifacts) == (
             (resolved.quality_markdown_output, "README.md"),
             (resolved.quality_output, "quality.json"),
+            (resolved.llamacpp_quality_output, "gguf-quality.json"),
         )
         assert resolved.quality_output.is_file()
-        assert resolved.quality_markdown_output.read_text(encoding="utf-8") == "# quality\n"
+        assert resolved.quality_markdown_output.read_text(encoding="utf-8") == (
+            "# quality\n\n# GGUF\n"
+        )
         return replace(
             result,
             huggingface=HuggingFaceUploadResult(
@@ -162,13 +204,25 @@ def test_compression_quality_runs_quality_before_huggingface_upload_and_publicat
         resolved,
     )
 
-    assert calls == ["preflight", "complete", "quality", "upload"]
+    assert calls == [
+        "preflight",
+        "complete",
+        "prepare-quality",
+        "quality",
+        "llamacpp-quality",
+        "upload",
+    ]
     assert quality_requests[0].packed_artifact == tmp_path / "repo" / "outputs/003/packed"
     assert not quality_requests[0].stream_base_model
     assert quality_requests[0].local_files_only is False
     assert payload["exports"]["gguf"]["output"] == str(gguf)
     assert payload["exports"]["mmproj"]["output"] == str(mmproj)
     assert payload["exports"]["huggingface"]["commit_oid"] == "a" * 40
+    assert payload["quality"]["gguf_json"] == str(resolved.llamacpp_quality_output)
+    assert [event[2] for event in emitted_events[:2]] == [
+        "quality.llamacpp.started",
+        "quality.llamacpp.completed",
+    ]
     assert published[0][1] == 3
     assert [artifact.source for artifact in published[0][2]][:5] == [
         gguf,
