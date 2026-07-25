@@ -48,6 +48,7 @@ def test_compression_export_recipe_resolves_all_material_paths(tmp_path: Path) -
     assert resolved.gguf_output == tmp_path / "Results" / "003" / "model.gguf"
     assert resolved.llama_cpp_root == Path(r"D:\reference\llama.cpp")
     assert resolved.token_embedding_type == "q8_0"
+    assert resolved.output_tensor_type == "q8_0"
 
 
 def test_complete_compression_export_runs_validated_stages_in_order(
@@ -76,7 +77,9 @@ def test_complete_compression_export_runs_validated_stages_in_order(
     monkeypatch.setattr(
         workflow,
         "export_llamacpp_gguf",
-        lambda *_args, **kwargs: calls.append(("gguf", kwargs["token_embedding_type"]))
+        lambda *_args, **kwargs: calls.append(
+            ("gguf", kwargs["token_embedding_type"], kwargs["output_tensor_type"])
+        )
         or GgufExportResult(
             resolved.gguf_output,
             resolved.checkpoint_output,
@@ -110,7 +113,7 @@ def test_complete_compression_export_runs_validated_stages_in_order(
         expected_blocks=34,
     )
 
-    assert calls == [("logical", True), "packed", ("gguf", "q8_0")]
+    assert calls == [("logical", True), "packed", ("gguf", "q8_0", "q8_0")]
     assert result.logical == {"exact": True}
     assert result.packed == {"exact": True}
     assert result.gguf.output == resolved.gguf_output
@@ -121,7 +124,9 @@ def test_complete_compression_export_runs_validated_stages_in_order(
     assert summary["packed"] == {"exact": True}
     assert summary["gguf"]["sha256"] == "a" * 64
     assert summary["gguf"]["token_embedding_type"] == "q8_0"
-    assert summary["schema_version"] == 4
+    assert summary["gguf"]["output_tensor_type"] == "q8_0"
+    assert summary["gguf"]["output_tensor_present"] is False
+    assert summary["schema_version"] == 5
     assert summary["mmproj"]["output"] == str(resolved.gguf_output.parent / "mmproj-BF16.gguf")
     assert summary["mmproj"]["sha256"] == "b" * 64
     assert summary["huggingface"] is None

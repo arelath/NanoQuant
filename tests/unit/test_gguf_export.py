@@ -104,7 +104,7 @@ Path(a.outfile).write_bytes(b'GGUF-fixture')
     monkeypatch.setattr(
         gguf_export,
         "_inspect_gguf_tensor_contract",
-        lambda *_args: ("q8_0", 3, ("bf16",)),
+        lambda *_args: ("q8_0", "q8_0", 3, ("bf16",)),
     )
     mmproj_calls: list[Path] = []
 
@@ -149,10 +149,13 @@ Path(a.outfile).write_bytes(b'GGUF-fixture')
     assert second.mmproj is not None and second.mmproj.reused
     assert mmproj_calls == [output.parent / "mmproj-BF16.gguf"] * 2
     receipt = json.loads(output.with_suffix(".gguf.export.json").read_text(encoding="utf-8"))
-    assert receipt["schema_version"] == 3
+    assert receipt["schema_version"] == 4
     assert receipt["gguf_sha256"] == real_hash_file(output)
     assert receipt["converter_sha256"] == PACKED_REFERENCE_CONVERTER_SHA256
     assert receipt["token_embedding_type"] == "q8_0"
+    assert receipt["output_tensor_type"] == "q8_0"
+    assert receipt["output_tensor"] == "output.weight"
+    assert receipt["output_tensor_present"] is True
     assert receipt["nanoquant_scale_type"] == "bf16"
     assert receipt["nanoquant_scale_tensor_count"] == 3
     assert receipt["quantizer_sha256"] == real_hash_file(quantizer)
@@ -162,8 +165,17 @@ Path(a.outfile).write_bytes(b'GGUF-fixture')
     assert converter_environment["NO_LOCAL_GGUF"] == "1"
     assert str(reference) in converter_environment["PYTHONPATH"]
     assert str(reference / "gguf-py") in converter_environment["PYTHONPATH"]
-    assert commands[1][1:3] == ("--token-embedding-type", "Q8_0")
+    assert commands[1][1:5] == (
+        "--output-tensor-type",
+        "Q8_0",
+        "--token-embedding-type",
+        "Q8_0",
+    )
     assert commands[1][-1] == "F16"
+    assert first.output_tensor_type == "q8_0"
+    assert first.output_tensor_present
+    assert second.output_tensor_type == "q8_0"
+    assert second.output_tensor_present
 
 
 def test_gguf_export_contract_rejects_widened_or_missing_scales() -> None:
@@ -171,6 +183,14 @@ def test_gguf_export_contract_rejects_widened_or_missing_scales() -> None:
         gguf_export._require_bfloat16_nanoquant_scales(3, ("f32",), 3)
     with pytest.raises(ValueError, match="tensor count differs"):
         gguf_export._require_bfloat16_nanoquant_scales(0, (), 3)
+
+
+def test_gguf_export_output_tensor_contract_is_optional_but_validated_when_present() -> None:
+    gguf_export._require_output_tensor_type(None, "q8_0")
+    gguf_export._require_output_tensor_type("q8_0", "q8_0")
+
+    with pytest.raises(ValueError, match="output tensor type differs"):
+        gguf_export._require_output_tensor_type("f16", "q8_0")
 
 
 def test_gguf_export_rejects_unsupported_embedding_type(tmp_path: Path) -> None:
@@ -183,6 +203,11 @@ def test_gguf_export_rejects_unsupported_embedding_type(tmp_path: Path) -> None:
             tmp_path / "llama.cpp",
             token_embedding_type="bf16",
         )
+
+
+def test_gguf_export_rejects_unsupported_output_tensor_type() -> None:
+    with pytest.raises(ValueError, match="unsupported output tensor"):
+        gguf_export.normalize_output_tensor_type("bf16")
 
 
 def test_gguf_export_rejects_unpinned_converter(tmp_path: Path) -> None:

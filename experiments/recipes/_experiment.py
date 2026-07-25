@@ -237,6 +237,7 @@ class CompressionExportPolicy:
     runtime_family: str = "gemma3"
     token_embedding_type: str = "q8_0"
     huggingface: HuggingFaceUploadConfig | None = None
+    output_tensor_type: str = "q8_0"
 
     def __post_init__(self) -> None:
         if self.release_name is not None:
@@ -287,6 +288,7 @@ def _export_recipe(
         llama_cpp_root=policy.llama_cpp_root,
         runtime_family=policy.runtime_family,
         token_embedding_type=policy.token_embedding_type,
+        output_tensor_type=policy.output_tensor_type,
         huggingface=policy.huggingface,
     )
 

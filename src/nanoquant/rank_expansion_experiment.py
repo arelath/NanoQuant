@@ -251,6 +251,8 @@ def run_rank_expansion_experiment(
             "bytes": gguf.bytes,
             "sha256": gguf.sha256,
             "token_embedding_type": gguf.token_embedding_type,
+            "output_tensor_type": gguf.output_tensor_type,
+            "output_tensor_present": gguf.output_tensor_present,
             "receipt": str(gguf.output.with_suffix(gguf.output.suffix + ".export.json")),
         },
         "mmproj": (

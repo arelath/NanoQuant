@@ -12,9 +12,11 @@ from typing import Any, cast
 from nanoquant.config.codec import to_dict
 from nanoquant.config.schema import RunConfig
 from nanoquant.infrastructure.gguf_export import (
+    DEFAULT_OUTPUT_TENSOR_TYPE,
     DEFAULT_TOKEN_EMBEDDING_TYPE,
     GgufExportResult,
     export_llamacpp_gguf,
+    normalize_output_tensor_type,
     normalize_token_embedding_type,
 )
 from nanoquant.infrastructure.huggingface_model_card import (
@@ -67,6 +69,7 @@ class CompressionExportRecipe:
     runtime_family: str = "gemma3"
     token_embedding_type: str = DEFAULT_TOKEN_EMBEDDING_TYPE
     huggingface: HuggingFaceUploadConfig | None = None
+    output_tensor_type: str = DEFAULT_OUTPUT_TENSOR_TYPE
 
     def __post_init__(self) -> None:
         if not self.runtime_family:
@@ -83,6 +86,11 @@ class CompressionExportRecipe:
             "token_embedding_type",
             normalize_token_embedding_type(self.token_embedding_type),
         )
+        object.__setattr__(
+            self,
+            "output_tensor_type",
+            normalize_output_tensor_type(self.output_tensor_type),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,6 +103,7 @@ class ResolvedCompressionExportRecipe:
     runtime_family: str
     token_embedding_type: str = DEFAULT_TOKEN_EMBEDDING_TYPE
     huggingface: HuggingFaceUploadConfig | None = None
+    output_tensor_type: str = DEFAULT_OUTPUT_TENSOR_TYPE
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,14 +131,15 @@ def resolve_compression_export_recipe(
 ) -> ResolvedCompressionExportRecipe:
     root = Path(repository_root).resolve()
     return ResolvedCompressionExportRecipe(
-        _repository_path(recipe.logical_output, root),
-        _repository_path(recipe.packed_output, root),
-        _repository_path(recipe.checkpoint_output, root),
-        _repository_path(recipe.gguf_output, root),
-        _repository_path(recipe.llama_cpp_root, root),
-        recipe.runtime_family,
-        recipe.token_embedding_type,
-        recipe.huggingface,
+        logical_output=_repository_path(recipe.logical_output, root),
+        packed_output=_repository_path(recipe.packed_output, root),
+        checkpoint_output=_repository_path(recipe.checkpoint_output, root),
+        gguf_output=_repository_path(recipe.gguf_output, root),
+        llama_cpp_root=_repository_path(recipe.llama_cpp_root, root),
+        runtime_family=recipe.runtime_family,
+        token_embedding_type=recipe.token_embedding_type,
+        huggingface=recipe.huggingface,
+        output_tensor_type=recipe.output_tensor_type,
     )
 
 
@@ -191,6 +201,7 @@ def _adopt_legacy_gguf_export(
         legacy_output,
         resolved.llama_cpp_root,
         token_embedding_type=resolved.token_embedding_type,
+        output_tensor_type=resolved.output_tensor_type,
         converter_path=repository_root / "tools" / "llamacpp" / "convert_nanoquant_to_gguf.py",
     )
     _link_validated_export_member(legacy.output, destination)
@@ -449,6 +460,7 @@ def execute_compression_export(
         resolved.gguf_output,
         resolved.llama_cpp_root,
         token_embedding_type=resolved.token_embedding_type,
+        output_tensor_type=resolved.output_tensor_type,
         converter_path=root / "tools" / "llamacpp" / "convert_nanoquant_to_gguf.py",
     )
     huggingface = None
@@ -456,7 +468,7 @@ def execute_compression_export(
     atomic_write_json(
         summary_output,
         {
-            "schema_version": 4,
+            "schema_version": 5,
             "run_output": str(run),
             "logical": logical,
             "packed": packed,
@@ -466,6 +478,8 @@ def execute_compression_export(
                 "converter": str(gguf.converter),
                 "quantizer": None if gguf.quantizer is None else str(gguf.quantizer),
                 "token_embedding_type": gguf.token_embedding_type,
+                "output_tensor_type": gguf.output_tensor_type,
+                "output_tensor_present": gguf.output_tensor_present,
                 "bytes": gguf.bytes,
                 "sha256": gguf.sha256,
                 "reused": gguf.reused,

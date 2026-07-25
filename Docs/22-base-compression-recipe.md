@@ -46,7 +46,8 @@ complete until all of these stages succeed:
 2. the complete run passes a fresh transitive artifact validation while streaming into the logical runtime format;
 3. logical-to-packed conversion validates every tensor exactly;
 4. the pinned modified llama.cpp converter produces a non-empty GGUF shell, then `llama-quantize` quantizes
-   `token_embd.weight` to Q8_0 by default and verifies the material tensor type;
+   `token_embd.weight` and, when it exists independently, `output.weight` to Q8_0 by default and verifies both
+   material tensor types;
 5. when the source snapshot declares a non-empty `vision_config`, the pinned upstream converter exports the vision
    tower and projector as `mmproj-BF16.gguf`, verifies `general.type=mmproj`, `MOSTLY_BF16`, a non-empty tensor
    inventory, and a receipt bound to the source config and converter;
@@ -58,11 +59,12 @@ complete until all of these stages succeed:
 8. final GGUFs, export summaries, and export/upload receipts already reside in `Results/NNN`; remaining validated
    experiment statistics are hard-linked there without copying large artifacts.
 
-The embedding level is part of `CompressionExportPolicy` and receipt identity. Set
-`CompressionExportPolicy(token_embedding_type="q4_k")` for a Q4_K embedding; Q4/Q5/Q6/Q8 llama.cpp variants
-accepted by the export contract are supported. The second pass uses F16 as its base type because llama.cpp's `COPY`
-mode disables per-tensor overrides. On NanoQuant GGUFs, the F16 base leaves the existing BF16/F16/I32/F32 sidecars alone
-and changes only the BF16 token embedding.
+The embedding and output levels are independent parts of `CompressionExportPolicy` and receipt identity. Set
+`CompressionExportPolicy(token_embedding_type="q4_k", output_tensor_type="q6_k")` to override either default;
+Q4/Q5/Q6/Q8 llama.cpp variants accepted by the export contract are supported. Models with tied embeddings may omit
+the separate `output.weight`; its absence is recorded and accepted. The second pass uses F16 as its base type because
+llama.cpp's `COPY` mode disables per-tensor overrides. On NanoQuant GGUFs, the F16 base leaves existing
+BF16/F16/I32/F32 sidecars alone and changes the token embedding plus the independent output tensor when present.
 
 The mmproj remains independent of NanoQuant language-weight compression and is generated directly from the pinned
 Hugging Face vision stack. Text-only snapshots, including Gemma 3 1B, do not produce a placeholder mmproj.

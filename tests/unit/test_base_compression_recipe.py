@@ -55,6 +55,7 @@ def test_experiment_layout_derives_safe_numbered_export_outputs() -> None:
     assert export.packed_output == Path("outputs/003/packed")
     assert export.gguf_output == Path("Results/003/gemma-3-4b-it-nanoquant.gguf")
     assert export.token_embedding_type == "q8_0"
+    assert export.output_tensor_type == "q8_0"
     with pytest.raises(ValueError, match="release name"):
         CompressionExportPolicy(release_name="../escape")
 
