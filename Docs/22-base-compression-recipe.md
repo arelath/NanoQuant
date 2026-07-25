@@ -136,7 +136,10 @@ the first raw token in each window supplies context instead. Both policies score
 Multiple-choice tasks score the same retained context and continuation targets used by
 the PyTorch evaluator. It does not reconstruct text or substitute generated answer letters. llama.cpp exposes F32
 logits, so the runner records its F64 host log-sum-exp policy explicitly; close-choice results need not be bit-identical
-to the packed PyTorch backend.
+to the packed PyTorch backend. Each parallel batch is validated immediately. If a batch produces an incomplete or
+non-finite score, the runner retries only that batch one sequence at a time; a persistent failure reports the exact
+sequence index, expected and observed target counts, and accumulated negative log likelihood instead of waiting until
+the end of the full benchmark.
 
 The same generator can be run independently without contacting the Hub:
 

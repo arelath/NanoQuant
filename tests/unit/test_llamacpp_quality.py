@@ -170,6 +170,9 @@ def test_llamacpp_quality_runner_source_uses_target_only_logits() -> None:
     assert "batch.logits[batch_index] = scored ? 1 : 0;" in source
     assert "sequence.tokens[position + 1]" in source
     assert "llama_memory_clear" in source
+    assert "retrying sequences" in source
+    assert "single-sequence retry" in source
+    assert "quality score failed final validation" in source
 
 
 def test_llamacpp_quality_markdown_reports_packed_runtime_memory() -> None:

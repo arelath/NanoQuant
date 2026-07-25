@@ -299,8 +299,7 @@ int main(int argc, char ** argv) {
         std::vector<Score> scores(sequences.size());
         const auto wall_started = std::chrono::steady_clock::now();
 
-        for (std::size_t begin = 0; begin < sequences.size(); begin += parallel) {
-            const std::size_t end = std::min(begin + parallel, sequences.size());
+        auto decode_range = [&](std::size_t begin, std::size_t end) {
             llama_memory_clear(llama_get_memory(context), true);
             batch.n_tokens = 0;
             std::vector<std::pair<std::size_t, llama_token>> outputs;
@@ -332,10 +331,71 @@ int main(int argc, char ** argv) {
             const float * all_logits = llama_get_logits(context);
             const auto output_scores = score_outputs(
                 all_logits, vocabulary_size, outputs, options.threads);
+            std::vector<Score> range_scores(end - begin);
             for (std::size_t output_index = 0; output_index < outputs.size(); ++output_index) {
                 const auto sequence_index = outputs[output_index].first;
-                scores[sequence_index].negative_log_likelihood += output_scores[output_index];
-                ++scores[sequence_index].token_count;
+                auto & score = range_scores[sequence_index - begin];
+                score.negative_log_likelihood += output_scores[output_index];
+                ++score.token_count;
+            }
+            return range_scores;
+        };
+
+        auto valid_score = [&](std::size_t sequence_index, const Score & score) {
+            const auto expected =
+                sequences[sequence_index].tokens.size() -
+                sequences[sequence_index].score_start;
+            return score.token_count == expected &&
+                std::isfinite(score.negative_log_likelihood);
+        };
+
+        auto invalid_score_message = [&](std::size_t sequence_index, const Score & score) {
+            const auto expected =
+                sequences[sequence_index].tokens.size() -
+                sequences[sequence_index].score_start;
+            return
+                "sequence " + std::to_string(sequence_index) +
+                " expected " + std::to_string(expected) +
+                " scored tokens but received " + std::to_string(score.token_count) +
+                "; negative_log_likelihood=" +
+                std::to_string(score.negative_log_likelihood);
+        };
+
+        for (std::size_t begin = 0; begin < sequences.size(); begin += parallel) {
+            const std::size_t end = std::min(begin + parallel, sequences.size());
+            auto range_scores = decode_range(begin, end);
+            bool range_valid = true;
+            for (std::size_t sequence_index = begin; sequence_index < end; ++sequence_index) {
+                if (!valid_score(sequence_index, range_scores[sequence_index - begin])) {
+                    range_valid = false;
+                    break;
+                }
+            }
+            if (!range_valid && end - begin > 1) {
+                std::cerr
+                    << "llama.cpp quality batch " << (begin / parallel + 1)
+                    << " produced an invalid parallel score; retrying sequences "
+                    << begin << "-" << (end - 1) << " individually"
+                    << std::endl;
+                for (std::size_t sequence_index = begin; sequence_index < end; ++sequence_index) {
+                    auto single_score = decode_range(sequence_index, sequence_index + 1).front();
+                    if (!valid_score(sequence_index, single_score)) {
+                        throw std::runtime_error(
+                            "quality score remained invalid after single-sequence retry: " +
+                            invalid_score_message(sequence_index, single_score));
+                    }
+                    scores[sequence_index] = single_score;
+                }
+            } else {
+                for (std::size_t sequence_index = begin; sequence_index < end; ++sequence_index) {
+                    const auto & score = range_scores[sequence_index - begin];
+                    if (!valid_score(sequence_index, score)) {
+                        throw std::runtime_error(
+                            "quality score is invalid: " +
+                            invalid_score_message(sequence_index, score));
+                    }
+                    scores[sequence_index] = score;
+                }
             }
             std::cerr << "llama.cpp quality batch " << (begin / parallel + 1) << "/"
                       << ((sequences.size() + parallel - 1) / parallel) << " completed"
@@ -343,11 +403,10 @@ int main(int argc, char ** argv) {
         }
         llama_synchronize(context);
         for (std::size_t index = 0; index < sequences.size(); ++index) {
-            const auto expected =
-                sequences[index].tokens.size() - sequences[index].score_start;
-            if (scores[index].token_count != expected ||
-                !std::isfinite(scores[index].negative_log_likelihood)) {
-                throw std::runtime_error("llama.cpp quality score is incomplete or non-finite");
+            if (!valid_score(index, scores[index])) {
+                throw std::runtime_error(
+                    "quality score failed final validation: " +
+                    invalid_score_message(index, scores[index]));
             }
         }
         write_scores(options.output, scores);
