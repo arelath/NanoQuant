@@ -134,26 +134,56 @@ updated time. Numbered experiments are resumed through their existing launchers 
 
 If no interactive run exists, go directly to Step 1.
 
-### 4.3 Step 1 — Choose the model
+### 4.3 Step 1 — Choose the model family and size
 
-Show a small catalog generated from promoted profiles, followed by a custom choice:
+Model selection is two-level so the first screen remains short as support expands.
+
+First choose the family:
 
 ```text
-Choose a model:
-  1. Qwen/Qwen3-0.6B
-  2. Qwen/Qwen3-8B
-  3. google/gemma-3-1b-it
-  4. meta-llama/Llama-3.2-1B-Instruct
+Choose a model family:
+  1. Qwen3
+  2. Gemma3
+  3. Llama3
+  4. Llama3.2
   5. Enter another Hugging Face model ID or local snapshot
 Selection [1]:
 ```
 
-The entries are data-driven; the terminal code does not hard-code this list. The default is:
+Then show only the promoted models in that family. For Qwen3:
 
-1. the model from the last successfully created interactive run, when that model still has a promoted profile;
-2. otherwise the catalog's explicitly declared default model.
+```text
+Choose a Qwen3 model:
+  1. Qwen3-0.6B
+  2. Qwen3-8B
+  3. Back to model families
+Selection [1]:
+```
 
-For option 5, prompt:
+The friendly label maps to an exact source ID and promoted profile:
+
+| Family | Size/variant menu | Exact source |
+| --- | --- | --- |
+| Qwen3 | Qwen3-0.6B; Qwen3-8B | `Qwen/Qwen3-0.6B`; `Qwen/Qwen3-8B` |
+| Gemma3 | Gemma3-270M; Gemma3-1B; Gemma3-4B; Gemma3-12B | the catalog's pinned Google/Unsloth source for each promoted variant |
+| Llama3 | Llama3-8B-Instruct | `meta-llama/Meta-Llama-3-8B-Instruct` |
+| Llama3.2 | Llama3.2-1B-Instruct; Llama3.2-3B-Instruct | `meta-llama/Llama-3.2-1B-Instruct`; `meta-llama/Llama-3.2-3B-Instruct` |
+
+Both menus are generated from the promoted-profile catalog; the terminal code does not hard-code family names,
+variants, source IDs, or ordering. A family is shown only when it has at least one compatible promoted model.
+
+The family default is:
+
+1. the family from the last successfully created interactive run, when it remains promoted;
+2. otherwise the catalog's explicitly declared default family.
+
+The size/variant default is:
+
+1. the model from the last successfully created interactive run when it belongs to the selected family and remains
+   promoted;
+2. otherwise that family's explicitly declared default model.
+
+Choosing option 5 in the family menu prompts:
 
 ```text
 Model ID or local snapshot:
@@ -181,6 +211,10 @@ Profile matching is most-specific-first:
 1. exact model/revision rule;
 2. supported architecture/family rule;
 3. explicitly promoted generic dense-transformer fallback.
+
+The family menu is a user-interface filter, not the source of architecture truth. After a friendly or custom model
+is selected, the resolver validates its actual model configuration against the chosen/catalogued family. A source
+whose architecture disagrees with its catalog entry fails before settings are persisted.
 
 If no compatible promoted profile exists, explain why and offer `Return to model selection` or `Exit`. A generic
 fallback may be offered only when its capability checks pass and must be explicitly confirmed. It is never described
@@ -419,6 +453,8 @@ kind: interactive_compression
 created_at: "2026-07-25T21:45:00Z"
 
 selection:
+  model_family: qwen3
+  model_variant: qwen3-8b
   model_input: Qwen/Qwen3-8B
   target_bpw: 1.0
   quality_requested: true
@@ -648,7 +684,11 @@ publication failure. The final console message always prints the run directory a
 
 ### Unit tests
 
-- prompt parser accepts Enter defaults and rejects invalid menu, boolean, BPW, repository, and visibility input;
+- prompt parser accepts Enter defaults and rejects invalid family, model-variant, boolean, BPW, repository, and
+  visibility input;
+- family menus contain only families with promoted models and variant menus contain only models from the selected
+  family;
+- previous-run defaults select its family first and its exact variant second without changing catalog ordering;
 - profile selection prefers exact-model over architecture over generic matches;
 - every promoted profile decodes and validates;
 - a Qwen3 model resolves only to a dual-mode promoted profile;
