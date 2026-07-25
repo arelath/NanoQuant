@@ -344,6 +344,29 @@ def test_compression_export_rejects_gguf_outside_numbered_results(tmp_path: Path
         )
 
 
+def test_nonnumbered_export_requires_its_interactive_results_directory(
+    tmp_path: Path,
+) -> None:
+    config = replace(
+        _CONFIG,
+        intent=replace(
+            _CONFIG.intent,
+            experiment_number=None,
+            name="interactive-run-one",
+        ),
+    )
+    expected = tmp_path / "Results" / "interactive" / "interactive-run-one" / "model.gguf"
+
+    workflow._require_results_gguf_output(config, tmp_path, expected)
+
+    with pytest.raises(ValueError, match="interactive Results"):
+        workflow._require_results_gguf_output(
+            config,
+            tmp_path,
+            tmp_path / "Results" / "000" / "model.gguf",
+        )
+
+
 def test_compression_export_adopts_validated_legacy_gguf_without_copying(
     tmp_path: Path,
     monkeypatch,

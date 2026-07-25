@@ -1,5 +1,7 @@
 """Visible unnumbered templates shared by NanoQuant compression experiments."""
 
+from dataclasses import replace
+
 from nanoquant.config.codec import apply_overrides
 from nanoquant.config.schema import (
     ActivationGpuCacheMode,
@@ -23,6 +25,7 @@ from nanoquant.config.schema import (
     SharedInputGroupConfig,
     TuningEpochLossMode,
 )
+from nanoquant.interactive_compression import RecommendedModel
 
 from ._delta import config_delta, run_config_defaults
 
@@ -498,6 +501,222 @@ QWEN_3_8B_DUAL_MODE_COMPRESSION_TEMPLATE = config_delta(
 )
 
 
+_INTERACTIVE_GEMMA_3_1B_TEMPLATE = apply_overrides(
+    ARCHITECTURE_PROTECTED_RECONSTRUCTION_COMPRESSION_TEMPLATE,
+    {
+        "allocation.reconstruction.sensitivity_strength": 0.5,
+    },
+)
+
+_INTERACTIVE_GEMMA_3_270M_TEMPLATE = replace(
+    ARCHITECTURE_PROTECTED_RECONSTRUCTION_COMPRESSION_TEMPLATE,
+    model=GEMMA_3_270M_COMPRESSION_TEMPLATE.model,
+)
+
+_INTERACTIVE_GEMMA_3_4B_TEMPLATE = replace(
+    GEMMA_3_4B_COMPRESSION_TEMPLATE,
+    allocation=_INTERACTIVE_GEMMA_3_1B_TEMPLATE.allocation,
+    factorization=_INTERACTIVE_GEMMA_3_1B_TEMPLATE.factorization,
+    block_tuning=replace(
+        GEMMA_3_4B_COMPRESSION_TEMPLATE.block_tuning,
+        non_factorized=replace(
+            GEMMA_3_4B_COMPRESSION_TEMPLATE.block_tuning.non_factorized,
+            epochs_by_layer_position=(
+                _INTERACTIVE_GEMMA_3_1B_TEMPLATE.block_tuning.non_factorized.epochs_by_layer_position
+            ),
+        ),
+    ),
+)
+
+GEMMA_3_12B_MODEL_REVISION = "9478e665381f42974aa06177b019352fb6291876"
+_INTERACTIVE_GEMMA_3_12B_TEMPLATE = apply_overrides(
+    BASE_COMPRESSION_TEMPLATE,
+    {
+        "model.source": "unsloth/gemma-3-12b-it",
+        "model.revision": GEMMA_3_12B_MODEL_REVISION,
+        "model.tokenizer_source": "unsloth/gemma-3-12b-it",
+        "model.tokenizer_revision": GEMMA_3_12B_MODEL_REVISION,
+        "distillation.enabled": False,
+        "calibration.method": "forward_only",
+        "runtime.executor": "cpu_offload",
+        "runtime.activations.gpu_cache": "auto",
+        "runtime.activations.gpu_reserve_gib": 4.0,
+        "evaluation.inline_quality": False,
+        "block_tuning.microbatch_size": 1,
+        "runtime.block_forward_batch_size": 1,
+    },
+)
+
+INTERACTIVE_RECOMMENDED_MODELS = (
+    RecommendedModel(
+        family="qwen3",
+        family_label="Qwen3",
+        family_order=0,
+        variant="qwen3-0-6b",
+        variant_label="Qwen3-0.6B",
+        variant_order=0,
+        source="Qwen/Qwen3-0.6B",
+        revision=QWEN_3_0_6B_MODEL_REVISION,
+        architecture="qwen3",
+        expected_blocks=28,
+        runtime_family="qwen",
+        release_name="qwen3-0-6b",
+        profile_id="qwen3-dual-mode-v1",
+        evidence=(
+            "Docs/36-qwen3-thinking-mode-quality.md",
+            "experiments/030-recover-qwen3-0-6b-thinking-quality.py",
+        ),
+        template=QWEN_3_0_6B_DUAL_MODE_COMPRESSION_TEMPLATE,
+        default_family=True,
+        default_variant=True,
+    ),
+    RecommendedModel(
+        family="qwen3",
+        family_label="Qwen3",
+        family_order=0,
+        variant="qwen3-8b",
+        variant_label="Qwen3-8B",
+        variant_order=1,
+        source="Qwen/Qwen3-8B",
+        revision=QWEN_3_8B_MODEL_REVISION,
+        architecture="qwen3",
+        expected_blocks=36,
+        runtime_family="qwen",
+        release_name="qwen3-8b",
+        profile_id="qwen3-dual-mode-v1",
+        evidence=(
+            "Docs/36-qwen3-thinking-mode-quality.md",
+            "experiments/031-confirm-qwen3-8b-thinking-quality.py",
+        ),
+        template=QWEN_3_8B_DUAL_MODE_COMPRESSION_TEMPLATE,
+        llamacpp_quality_parallel=1,
+    ),
+    RecommendedModel(
+        family="gemma3",
+        family_label="Gemma3",
+        family_order=1,
+        variant="gemma3-270m",
+        variant_label="Gemma3-270M",
+        variant_order=0,
+        source="unsloth/gemma-3-270m-it",
+        revision=GEMMA_3_270M_MODEL_REVISION,
+        architecture="gemma3_text",
+        expected_blocks=18,
+        runtime_family="gemma3",
+        release_name="gemma-3-270m-it",
+        profile_id="gemma3-architecture-protected-v1",
+        evidence=("experiments/016-compress-and-benchmark-gemma-3-270m-it.py",),
+        template=_INTERACTIVE_GEMMA_3_270M_TEMPLATE,
+    ),
+    RecommendedModel(
+        family="gemma3",
+        family_label="Gemma3",
+        family_order=1,
+        variant="gemma3-1b",
+        variant_label="Gemma3-1B",
+        variant_order=1,
+        source="google/gemma-3-1b-it",
+        revision=MODEL_REVISION,
+        architecture="gemma3_text",
+        expected_blocks=26,
+        runtime_family="gemma3",
+        release_name="gemma-3-1b-it",
+        profile_id="gemma3-architecture-protected-v1",
+        evidence=("experiments/017-compress-and-benchmark-gemma-3-1b-it.py",),
+        template=_INTERACTIVE_GEMMA_3_1B_TEMPLATE,
+        default_variant=True,
+    ),
+    RecommendedModel(
+        family="gemma3",
+        family_label="Gemma3",
+        family_order=1,
+        variant="gemma3-4b",
+        variant_label="Gemma3-4B",
+        variant_order=2,
+        source="google/gemma-3-4b-it",
+        revision=GEMMA_3_4B_MODEL_REVISION,
+        architecture="gemma3",
+        expected_blocks=34,
+        runtime_family="gemma3",
+        release_name="gemma-3-4b-it",
+        profile_id="gemma3-architecture-protected-v1",
+        evidence=("experiments/018-compress-and-benchmark-gemma-3-4b-it.py",),
+        template=_INTERACTIVE_GEMMA_3_4B_TEMPLATE,
+    ),
+    RecommendedModel(
+        family="gemma3",
+        family_label="Gemma3",
+        family_order=1,
+        variant="gemma3-12b",
+        variant_label="Gemma3-12B",
+        variant_order=3,
+        source="unsloth/gemma-3-12b-it",
+        revision=GEMMA_3_12B_MODEL_REVISION,
+        architecture="gemma3",
+        expected_blocks=48,
+        runtime_family="gemma3",
+        release_name="gemma-3-12b-it",
+        profile_id="gemma3-large-model-v1",
+        evidence=("experiments/008-compress-and-benchmark-gemma-3-12b-it.py",),
+        template=_INTERACTIVE_GEMMA_3_12B_TEMPLATE,
+        large_model_guards=True,
+    ),
+    RecommendedModel(
+        family="llama3",
+        family_label="Llama3",
+        family_order=2,
+        variant="llama3-8b-instruct",
+        variant_label="Llama3-8B-Instruct",
+        variant_order=0,
+        source="meta-llama/Meta-Llama-3-8B-Instruct",
+        revision=META_LLAMA_3_8B_INSTRUCT_MODEL_REVISION,
+        architecture="llama",
+        expected_blocks=32,
+        runtime_family="llama",
+        release_name="meta-llama-3-8b-instruct",
+        profile_id="llama-architecture-protected-v1",
+        evidence=("experiments/027-compress-and-benchmark-meta-llama-3-8b-instruct.py",),
+        template=META_LLAMA_3_8B_INSTRUCT_COMPRESSION_TEMPLATE,
+        default_variant=True,
+    ),
+    RecommendedModel(
+        family="llama3-2",
+        family_label="Llama3.2",
+        family_order=3,
+        variant="llama3-2-1b-instruct",
+        variant_label="Llama3.2-1B-Instruct",
+        variant_order=0,
+        source="meta-llama/Llama-3.2-1B-Instruct",
+        revision=LLAMA_3_2_1B_INSTRUCT_MODEL_REVISION,
+        architecture="llama",
+        expected_blocks=16,
+        runtime_family="llama",
+        release_name="llama-3-2-1b-instruct",
+        profile_id="llama-architecture-protected-v1",
+        evidence=("experiments/025-compress-and-benchmark-llama-3-2-1b-instruct.py",),
+        template=LLAMA_ARCHITECTURE_PROTECTED_COMPRESSION_TEMPLATE,
+        default_variant=True,
+    ),
+    RecommendedModel(
+        family="llama3-2",
+        family_label="Llama3.2",
+        family_order=3,
+        variant="llama3-2-3b-instruct",
+        variant_label="Llama3.2-3B-Instruct",
+        variant_order=1,
+        source="meta-llama/Llama-3.2-3B-Instruct",
+        revision=LLAMA_3_2_3B_INSTRUCT_MODEL_REVISION,
+        architecture="llama",
+        expected_blocks=28,
+        runtime_family="llama",
+        release_name="llama-3-2-3b-instruct",
+        profile_id="llama-architecture-protected-v1",
+        evidence=("experiments/026-compress-and-benchmark-llama-3-2-3b-instruct.py",),
+        template=LLAMA_3_2_3B_INSTRUCT_COMPRESSION_TEMPLATE,
+    ),
+)
+
+
 LARGE_MODEL_COMPRESSION_TEMPLATE = config_delta(
     BASE_COMPRESSION_TEMPLATE,
     distillation=config_delta(
@@ -530,8 +749,10 @@ __all__ = [
     "GEMMA_3_270M_COMPRESSION_TEMPLATE",
     "GEMMA_3_270M_MODEL_REVISION",
     "GEMMA_3_270M_STACKED_QKV_COMPRESSION_TEMPLATE",
+    "GEMMA_3_12B_MODEL_REVISION",
     "GEMMA_3_4B_COMPRESSION_TEMPLATE",
     "GEMMA_3_4B_MODEL_REVISION",
+    "INTERACTIVE_RECOMMENDED_MODELS",
     "LARGE_MODEL_COMPRESSION_TEMPLATE",
     "LLAMA_3_2_1B_INSTRUCT_COMPRESSION_TEMPLATE",
     "LLAMA_3_2_1B_INSTRUCT_MODEL_REVISION",

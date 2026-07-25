@@ -84,6 +84,29 @@ def initialize_live_weight_error_report(
     )
 
 
+def initialize_unpublished_live_weight_error_report(
+    run_output: str | Path,
+    *,
+    expected_blocks: int,
+    layer_order: tuple[str, ...],
+) -> Path:
+    """Create the run-local live report for a non-numbered workflow."""
+
+    report = live_weight_error_path(run_output)
+    if not report.exists():
+        atomic_write_text(
+            report,
+            render_live_weight_error_report(
+                (),
+                (),
+                expected_blocks=expected_blocks,
+                layer_order=layer_order,
+                status="initializing",
+            ),
+        )
+    return report
+
+
 def update_live_weight_error_report(
     run_output: str | Path,
     layers: tuple[LayerResult, ...],
@@ -203,6 +226,7 @@ def rebuild_live_weight_error_report(
 __all__ = [
     "LIVE_WEIGHT_ERROR_REPORT",
     "initialize_live_weight_error_report",
+    "initialize_unpublished_live_weight_error_report",
     "live_weight_error_path",
     "rebuild_live_weight_error_report",
     "update_live_weight_error_report",

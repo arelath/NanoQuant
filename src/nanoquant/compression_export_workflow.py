@@ -33,7 +33,10 @@ from nanoquant.infrastructure.huggingface_upload import (
     upload_validated_model_artifacts,
 )
 from nanoquant.infrastructure.io_utils import atomic_write_json, hash_file
-from nanoquant.infrastructure.live_reconstruction import initialize_live_weight_error_report
+from nanoquant.infrastructure.live_reconstruction import (
+    initialize_live_weight_error_report,
+    initialize_unpublished_live_weight_error_report,
+)
 from nanoquant.infrastructure.model_adapters import adapter_for_config
 from nanoquant.infrastructure.runtime_export import (
     export_frozen_run_logical,
@@ -143,11 +146,14 @@ def resolve_compression_export_recipe(
     )
 
 
-def _numbered_results_directory(config: RunConfig, repository_root: Path) -> Path:
+def _results_directory(config: RunConfig, repository_root: Path) -> Path:
     experiment_number = config.intent.experiment_number
-    if experiment_number is None:
-        raise ValueError("compression export requires a numbered experiment")
-    return (repository_root / "Results" / f"{experiment_number:03d}").resolve()
+    if experiment_number is not None:
+        return (repository_root / "Results" / f"{experiment_number:03d}").resolve()
+    run_name = config.intent.name.strip()
+    if not run_name or run_name == "unnamed-run" or Path(run_name).name != run_name:
+        raise ValueError("non-numbered compression export requires a safe stable run name")
+    return (repository_root / "Results" / "interactive" / run_name).resolve()
 
 
 def _require_results_gguf_output(
@@ -155,10 +161,12 @@ def _require_results_gguf_output(
     repository_root: Path,
     gguf_output: Path,
 ) -> None:
-    expected_directory = _numbered_results_directory(config, repository_root)
+    expected_directory = _results_directory(config, repository_root)
     if gguf_output.parent != expected_directory:
+        scope = "numbered Results" if config.intent.experiment_number is not None else "interactive Results"
         raise ValueError(
-            f"compression export GGUF must be written directly to the numbered Results directory: {expected_directory}"
+            f"compression export GGUF must be written directly to the {scope} directory: "
+            f"{expected_directory}"
         )
 
 
@@ -518,19 +526,24 @@ def execute_complete_compression(
     if inputs.launcher_path is None:
         raise ValueError("complete compression requires launcher provenance")
     experiment_number = config.intent.experiment_number
-    if experiment_number is None:
-        raise ValueError("complete compression requires a numbered experiment")
     repository_root = inputs.launcher_path.resolve().parent.parent
     execution_options = ResidentExecutionOptions() if options is None else options
     workflow = load_completed_resident_workflow(config, inputs, execution_options)
     if workflow is None:
-        initialize_live_weight_error_report(
-            repository_root,
-            experiment_number,
-            inputs.output,
-            expected_blocks=expected_blocks,
-            layer_order=config.block_tuning.layer_order,
-        )
+        if experiment_number is None:
+            initialize_unpublished_live_weight_error_report(
+                inputs.output,
+                expected_blocks=expected_blocks,
+                layer_order=config.block_tuning.layer_order,
+            )
+        else:
+            initialize_live_weight_error_report(
+                repository_root,
+                experiment_number,
+                inputs.output,
+                expected_blocks=expected_blocks,
+                layer_order=config.block_tuning.layer_order,
+            )
         workflow = execute_resident_workflow(config, inputs, execution_options)
     block_count = len(workflow.quantization.inventory.blocks)
     if block_count != expected_blocks:

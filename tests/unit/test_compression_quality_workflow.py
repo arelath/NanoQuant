@@ -107,12 +107,6 @@ def test_compression_quality_runs_quality_before_huggingface_upload_and_publicat
         llamacpp_quality=True,
         llama_cpp_root=tmp_path / "llama.cpp",
     )
-    monkeypatch.setattr(
-        workflow,
-        "ensure_huggingface_model_repository",
-        lambda config: calls.append("preflight") or config.repo_id,
-    )
-
     def complete(*_args, **kwargs):  # type: ignore[no-untyped-def]
         assert "defer_huggingface" not in kwargs
         calls.append("complete")
@@ -234,7 +228,6 @@ def test_compression_quality_runs_quality_before_huggingface_upload_and_publicat
     )
 
     assert calls == [
-        "preflight",
         "complete",
         "prepare-quality",
         "quality",

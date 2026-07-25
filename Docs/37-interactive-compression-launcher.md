@@ -1,8 +1,27 @@
 # Interactive Compression Launcher
 
-Status: proposed
+Status: implemented; real-model continuation gate pending
 
 Audience: model publishers, compression operators, researchers, and maintainers
+
+## Implementation status
+
+The interactive operator path is implemented:
+
+- `tools/compress_model.py` provides the zero-argument family, size, BPW, quality, upload, confirmation, and
+  previous-run menus.
+- `INTERACTIVE_RECOMMENDED_MODELS` is the typed promoted catalog for Qwen3, Gemma3, Llama3, and Llama3.2. Qwen3
+  choices use the dual thinking/non-thinking profile.
+- `src/nanoquant/interactive_compression.py` owns strict settings, tamper-evident YAML persistence, discovery,
+  continuation, optional quality, optional upload, and non-numbered summaries.
+- Non-numbered exports and zero-copy publication use `Results/interactive/<run-name>` without allocating a fake
+  experiment number.
+- A validated Hugging Face receipt is a reusable publication checkpoint, so retry does not create a second commit.
+- Local tests cover menu defaults, family/variant selection, persistence, continuation, custom-family resolution,
+  generic publication, optional workflow dispatch, quality upload gating, and upload receipt reuse.
+
+The remaining real gate is to complete and intentionally interrupt one supported small-model run through this
+launcher, then resume it from a fresh process and validate the resulting GGUF and optional upload receipt.
 
 ## 0. Decision summary
 

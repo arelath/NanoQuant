@@ -19,7 +19,6 @@ from nanoquant.config.validation import ValidationPhase, raise_for_issues, valid
 from nanoquant.domain.constants import BackendType
 from nanoquant.infrastructure.huggingface_model_card import load_huggingface_model_card_metadata
 from nanoquant.infrastructure.huggingface_upload import (
-    ensure_huggingface_model_repository,
     huggingface_upload_summary,
 )
 from nanoquant.infrastructure.io_utils import atomic_write_json, atomic_write_text
@@ -27,6 +26,7 @@ from nanoquant.infrastructure.publication import (
     PublishableArtifact,
     PublishableArtifactKind,
     publish_experiment_artifacts,
+    publish_run_artifacts,
 )
 from nanoquant.infrastructure.run_session import open_run_event_append_session
 from nanoquant.infrastructure.runs import launcher_provenance, validate_launcher_number
@@ -164,18 +164,6 @@ def execute_compression_quality_experiment(
         if config.distillation.enabled:
             raise ValueError("large-model compression requires distillation to remain disabled until teacher streaming")
 
-    if experiment.export.huggingface is not None:
-        destination = experiment.export.huggingface
-        print(
-            f"Hugging Face repository preflight started: repo_id={destination.repo_id}",
-            flush=True,
-        )
-        resolved_repo_id = ensure_huggingface_model_repository(destination)
-        print(
-            f"Hugging Face repository preflight completed: repo_id={resolved_repo_id}",
-            flush=True,
-        )
-
     wall_started = time.perf_counter()
     compression_started = time.perf_counter()
     maximum_shared = experiment.maximum_wddm_shared_gib
@@ -195,8 +183,6 @@ def execute_compression_quality_experiment(
     compression_seconds = time.perf_counter() - compression_started
     block_count = len(workflow.quantization.inventory.blocks)
     experiment_number = config.intent.experiment_number
-    if experiment_number is None:
-        raise ValueError("compression-quality experiment requires an experiment number")
     if resolved.inputs.launcher_path is None:
         raise ValueError("compression-quality experiment requires launcher provenance")
     repository_root = resolved.inputs.launcher_path.resolve().parent.parent
@@ -360,6 +346,13 @@ def execute_compression_quality_experiment(
             + render_llamacpp_quality_markdown(llamacpp_quality)
         )
     atomic_write_text(resolved.quality_markdown_output, rendered_quality)
+    passed = bool(quality.get("passed")) and (
+        llamacpp_quality is None or bool(llamacpp_quality.get("passed"))
+    )
+    if experiment.export.huggingface is not None and not passed:
+        raise RuntimeError(
+            "quality gate failed; Hugging Face upload is blocked and local artifacts were retained"
+        )
     supplemental = (
         (resolved.quality_markdown_output, "README.md"),
         (resolved.quality_output, "quality.json"),
@@ -401,12 +394,14 @@ def execute_compression_quality_experiment(
         str(path.resolve())
         for path in sorted(resolved.inputs.output.glob("profile*.json"))
     )
-    publication_directory = repository_root / "Results" / f"{experiment_number:03d}"
+    publication_directory = (
+        repository_root / "Results" / f"{experiment_number:03d}"
+        if experiment_number is not None
+        else repository_root / "Results" / "interactive" / config.intent.name
+    )
     payload = {
         "schema_version": 2,
-        "passed": bool(quality.get("passed")) and (
-            llamacpp_quality is None or bool(llamacpp_quality.get("passed"))
-        ),
+        "passed": passed,
         "experiment": quality_payload["experiment"],
         "compression": {
             "run_output": str(resolved.inputs.output.resolve()),
@@ -481,56 +476,56 @@ def execute_compression_quality_experiment(
     atomic_write_json(resolved.summary_output, payload)
     profile_json = sorted(resolved.inputs.output.glob("profile*.json"))
     profile_markdown = sorted(resolved.inputs.output.glob("profile*.md"))
-    publish_experiment_artifacts(
-        repository_root,
-        experiment_number,
-        (
-            PublishableArtifact(exports.gguf.output, PublishableArtifactKind.MODEL),
-            PublishableArtifact(exports.summary_output, PublishableArtifactKind.STATISTICS),
-            PublishableArtifact(
-                exports.gguf.output.with_suffix(exports.gguf.output.suffix + ".export.json"),
-                PublishableArtifactKind.STATISTICS,
-            ),
-            *(
-                ()
-                if exports.gguf.mmproj is None
-                else (
-                    PublishableArtifact(exports.gguf.mmproj.output, PublishableArtifactKind.MODEL),
-                    PublishableArtifact(
-                        exports.gguf.mmproj.output.with_suffix(
-                            exports.gguf.mmproj.output.suffix + ".export.json"
-                        ),
-                        PublishableArtifactKind.STATISTICS,
-                    ),
-                )
-            ),
-            *(
-                ()
-                if exports.huggingface is None
-                else (
-                    PublishableArtifact(
-                        exports.huggingface.receipt_output,
-                        PublishableArtifactKind.STATISTICS,
-                    ),
-                )
-            ),
-            PublishableArtifact(resolved.summary_output, PublishableArtifactKind.STATISTICS),
-            PublishableArtifact(resolved.quality_output, PublishableArtifactKind.STATISTICS),
-            *(
-                ()
-                if resolved.llamacpp_quality_output is None
-                else (
-                    PublishableArtifact(
-                        resolved.llamacpp_quality_output,
-                        PublishableArtifactKind.STATISTICS,
-                    ),
-                )
-            ),
-            PublishableArtifact(resolved.quality_markdown_output, PublishableArtifactKind.REPORT),
-            *(PublishableArtifact(path, PublishableArtifactKind.STATISTICS) for path in profile_json),
-            *(PublishableArtifact(path, PublishableArtifactKind.REPORT) for path in profile_markdown),
+    publishable = (
+        PublishableArtifact(exports.gguf.output, PublishableArtifactKind.MODEL),
+        PublishableArtifact(exports.summary_output, PublishableArtifactKind.STATISTICS),
+        PublishableArtifact(
+            exports.gguf.output.with_suffix(exports.gguf.output.suffix + ".export.json"),
+            PublishableArtifactKind.STATISTICS,
         ),
+        *(
+            ()
+            if exports.gguf.mmproj is None
+            else (
+                PublishableArtifact(exports.gguf.mmproj.output, PublishableArtifactKind.MODEL),
+                PublishableArtifact(
+                    exports.gguf.mmproj.output.with_suffix(
+                        exports.gguf.mmproj.output.suffix + ".export.json"
+                    ),
+                    PublishableArtifactKind.STATISTICS,
+                ),
+            )
+        ),
+        *(
+            ()
+            if exports.huggingface is None
+            else (
+                PublishableArtifact(
+                    exports.huggingface.receipt_output,
+                    PublishableArtifactKind.STATISTICS,
+                ),
+            )
+        ),
+        PublishableArtifact(resolved.summary_output, PublishableArtifactKind.STATISTICS),
+        PublishableArtifact(resolved.quality_output, PublishableArtifactKind.STATISTICS),
+        *(
+            ()
+            if resolved.llamacpp_quality_output is None
+            else (
+                PublishableArtifact(
+                    resolved.llamacpp_quality_output,
+                    PublishableArtifactKind.STATISTICS,
+                ),
+            )
+        ),
+        PublishableArtifact(resolved.quality_markdown_output, PublishableArtifactKind.REPORT),
+        *(PublishableArtifact(path, PublishableArtifactKind.STATISTICS) for path in profile_json),
+        *(PublishableArtifact(path, PublishableArtifactKind.REPORT) for path in profile_markdown),
     )
+    if experiment_number is None:
+        publish_run_artifacts(repository_root, config.intent.name, publishable)
+    else:
+        publish_experiment_artifacts(repository_root, experiment_number, publishable)
     return payload
 
 

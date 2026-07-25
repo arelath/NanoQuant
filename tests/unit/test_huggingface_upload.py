@@ -145,6 +145,36 @@ def test_huggingface_upload_fails_before_hub_mutation_when_validated_hash_change
     assert not (tmp_path / "receipt.json").exists()
 
 
+def test_huggingface_upload_reuses_validated_receipt_without_second_commit(
+    tmp_path: Path,
+) -> None:
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"model")
+    receipt = tmp_path / "receipt.json"
+    first_api = _FakeHfApi()
+    config = HuggingFaceUploadConfig("model")
+    first = upload_validated_model_artifacts(
+        config,
+        (_artifact(model),),
+        receipt_output=receipt,
+        api=first_api,  # type: ignore[arg-type]
+    )
+    second_api = _FakeHfApi()
+    progress: list[str] = []
+
+    second = upload_validated_model_artifacts(
+        config,
+        (_artifact(model),),
+        receipt_output=receipt,
+        api=second_api,  # type: ignore[arg-type]
+        progress=lambda _severity, name, _fields: progress.append(name),
+    )
+
+    assert second == first
+    assert second_api.calls == []
+    assert progress == ["huggingface.upload.reused"]
+
+
 def test_huggingface_upload_reports_heartbeat_during_long_commit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -195,6 +225,7 @@ def test_huggingface_upload_configuration_and_paths_fail_closed(tmp_path: Path) 
 
 def test_huggingface_preflight_requires_exact_token_name(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(upload_module.os, "environ", {"HF_Token": "wrong-case"})
+    monkeypatch.setattr(upload_module, "get_token", lambda: None)
 
     with pytest.raises(RuntimeError, match="use HF_TOKEN, not HF_Token"):
         ensure_huggingface_model_repository(HuggingFaceUploadConfig("owner/model"))

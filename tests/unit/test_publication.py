@@ -10,6 +10,7 @@ from nanoquant.infrastructure.publication import (
     PublishableArtifact,
     PublishableArtifactKind,
     publish_experiment_artifacts,
+    publish_run_artifacts,
 )
 
 
@@ -92,3 +93,25 @@ def test_publication_does_not_replace_unmanaged_result_file(tmp_path: Path) -> N
 def test_publication_requires_at_least_one_artifact(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="at least one"):
         publish_experiment_artifacts(tmp_path, 2, ())
+
+
+def test_interactive_publication_uses_non_numbered_owned_results_directory(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "outputs" / "interactive" / "run-one" / "summary.json"
+    source.parent.mkdir(parents=True)
+    source.write_text('{"passed":true}\n', encoding="utf-8")
+
+    result = publish_run_artifacts(
+        tmp_path,
+        "run-one",
+        (PublishableArtifact(source, PublishableArtifactKind.STATISTICS),),
+    )
+
+    destination = tmp_path / "Results" / "interactive" / "run-one" / "summary.json"
+    assert result.experiment_number is None
+    assert result.results_directory == destination.parent
+    assert os.path.samefile(source, destination)
+    payload = json.loads(result.manifest.read_text(encoding="utf-8"))
+    assert payload["experiment_number"] is None
+    assert payload["run_name"] == "run-one"

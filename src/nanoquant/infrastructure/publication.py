@@ -1,4 +1,4 @@
-"""Zero-copy publication of durable experiment outputs into ``Results/NNN``."""
+"""Zero-copy publication of durable outputs into an owned Results directory."""
 
 from __future__ import annotations
 
@@ -42,7 +42,7 @@ class PublishedArtifact:
 
 @dataclass(frozen=True, slots=True)
 class PublicationResult:
-    experiment_number: int
+    experiment_number: int | None
     results_directory: Path
     manifest: Path
     artifacts: tuple[PublishedArtifact, ...]
@@ -113,19 +113,32 @@ def _hardlink(source: Path, destination: Path, *, replace_owned: bool) -> str:
             ) from hardlink_error
 
 
-def publish_experiment_artifacts(
+def publish_artifacts(
     repository_root: str | Path,
-    experiment_number: int,
+    results_directory: str | Path,
     artifacts: Iterable[PublishableArtifact],
+    *,
+    experiment_number: int | None = None,
+    run_name: str | None = None,
 ) -> PublicationResult:
     """Publish files without copying their contents and write link provenance."""
 
-    if experiment_number < 0 or experiment_number > 999:
+    if experiment_number is not None and (experiment_number < 0 or experiment_number > 999):
         raise ValueError("experiment number must be between 0 and 999")
+    if experiment_number is None and (run_name is None or not run_name.strip()):
+        raise ValueError("non-experiment publication requires a run name")
     root = Path(repository_root).resolve()
-    results_directory = root / "Results" / f"{experiment_number:03d}"
-    results_directory.mkdir(parents=True, exist_ok=True)
-    manifest = results_directory / "publication.json"
+    destination_root = Path(results_directory)
+    if not destination_root.is_absolute():
+        destination_root = root / destination_root
+    destination_root = destination_root.resolve()
+    expected_results_root = (root / "Results").resolve()
+    if destination_root == expected_results_root or not destination_root.is_relative_to(
+        expected_results_root
+    ):
+        raise ValueError("publication directory must be a child of the repository Results directory")
+    destination_root.mkdir(parents=True, exist_ok=True)
+    manifest = destination_root / "publication.json"
     previous = _previous_artifacts(manifest)
     previously_owned = set(previous)
     requested = tuple(artifacts)
@@ -137,13 +150,13 @@ def publish_experiment_artifacts(
     published_by_name = {
         name: item
         for name, item in previous.items()
-        if (results_directory / name).exists() or (results_directory / name).is_symlink()
+        if (destination_root / name).exists() or (destination_root / name).is_symlink()
     }
     for artifact, name in zip(requested, names, strict=True):
         source = artifact.source.resolve(strict=True)
         if not source.is_file():
             raise ValueError(f"publishable artifact is not a regular file: {source}")
-        destination = results_directory / name
+        destination = destination_root / name
         link_type = _hardlink(source, destination, replace_owned=name in previously_owned)
         published_by_name[name] = PublishedArtifact(
             artifact.kind.value,
@@ -159,8 +172,45 @@ def publish_experiment_artifacts(
         "experiment_number": experiment_number,
         "artifacts": [asdict(item) for item in published],
     }
+    if run_name is not None:
+        payload["run_name"] = run_name
     atomic_write_json(manifest, payload)
-    return PublicationResult(experiment_number, results_directory, manifest, published)
+    return PublicationResult(experiment_number, destination_root, manifest, published)
+
+
+def publish_experiment_artifacts(
+    repository_root: str | Path,
+    experiment_number: int,
+    artifacts: Iterable[PublishableArtifact],
+) -> PublicationResult:
+    """Publish one numbered experiment into ``Results/NNN``."""
+
+    if experiment_number < 0 or experiment_number > 999:
+        raise ValueError("experiment number must be between 0 and 999")
+    return publish_artifacts(
+        repository_root,
+        Path("Results") / f"{experiment_number:03d}",
+        artifacts,
+        experiment_number=experiment_number,
+    )
+
+
+def publish_run_artifacts(
+    repository_root: str | Path,
+    run_name: str,
+    artifacts: Iterable[PublishableArtifact],
+) -> PublicationResult:
+    """Publish one non-numbered run into ``Results/interactive/<run-name>``."""
+
+    name = run_name.strip()
+    if not name or Path(name).name != name or name in {".", ".."}:
+        raise ValueError("interactive publication run name is invalid")
+    return publish_artifacts(
+        repository_root,
+        Path("Results") / "interactive" / name,
+        artifacts,
+        run_name=name,
+    )
 
 
 __all__ = [
@@ -168,5 +218,7 @@ __all__ = [
     "PublishableArtifactKind",
     "PublicationResult",
     "PublishedArtifact",
+    "publish_artifacts",
     "publish_experiment_artifacts",
+    "publish_run_artifacts",
 ]

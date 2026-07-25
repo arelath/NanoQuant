@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import threading
 import time
@@ -12,11 +13,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
 
-from huggingface_hub import CommitOperationAdd, HfApi
+from huggingface_hub import CommitOperationAdd, HfApi, get_token
 from huggingface_hub.errors import HfHubHTTPError, HFValidationError
 from huggingface_hub.utils import validate_repo_id  # type: ignore[attr-defined]
 
-from nanoquant.infrastructure.io_utils import atomic_write_json
+from nanoquant.infrastructure.io_utils import atomic_write_json, hash_file
 
 HUGGINGFACE_UPLOAD_SCHEMA_VERSION = 1
 HUGGINGFACE_VALIDATION_PROGRESS_BYTES = 256 * 1024 * 1024
@@ -126,6 +127,69 @@ def huggingface_upload_summary(result: HuggingFaceUploadResult) -> dict[str, obj
     }
 
 
+def _repo_id_matches(requested: str, observed: str) -> bool:
+    return observed == requested or ("/" not in requested and observed.endswith(f"/{requested}"))
+
+
+def _load_completed_upload(
+    config: HuggingFaceUploadConfig,
+    requested: tuple[ValidatedModelArtifact, ...],
+    receipt: Path,
+) -> HuggingFaceUploadResult | None:
+    if not receipt.is_file():
+        return None
+    try:
+        payload = json.loads(receipt.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict) or payload.get("schema_version") != HUGGINGFACE_UPLOAD_SCHEMA_VERSION:
+            raise ValueError("unsupported receipt schema")
+        repo_id = str(payload["repo_id"])
+        if not _repo_id_matches(config.repo_id, repo_id):
+            raise ValueError("repository differs")
+        if payload.get("requested_private") != config.private:
+            raise ValueError("visibility differs")
+        if payload.get("commit_message") != config.commit_message:
+            raise ValueError("commit message differs")
+        raw_artifacts = payload["artifacts"]
+        if not isinstance(raw_artifacts, list) or len(raw_artifacts) != len(requested):
+            raise ValueError("artifact inventory differs")
+        uploaded: list[UploadedModelArtifact] = []
+        for expected, raw in zip(requested, raw_artifacts, strict=True):
+            if not isinstance(raw, dict):
+                raise ValueError("artifact entry is invalid")
+            source = Path(str(raw["source"])).resolve(strict=True)
+            if source != expected.source.resolve(strict=True):
+                raise ValueError("artifact source differs")
+            if str(raw["path_in_repo"]) != expected.path_in_repo:
+                raise ValueError("artifact repository path differs")
+            if int(raw["bytes"]) != expected.bytes or source.stat().st_size != expected.bytes:
+                raise ValueError("artifact byte count differs")
+            observed_hash = hash_file(source)
+            if str(raw["sha256"]) != expected.sha256 or observed_hash != expected.sha256:
+                raise ValueError("artifact SHA-256 differs")
+            uploaded.append(
+                UploadedModelArtifact(
+                    source,
+                    expected.path_in_repo,
+                    expected.bytes,
+                    expected.sha256,
+                )
+            )
+        return HuggingFaceUploadResult(
+            repo_id,
+            str(payload["repo_url"]),
+            str(payload["commit_oid"]),
+            str(payload["commit_url"]),
+            config.private,
+            config.commit_message,
+            tuple(uploaded),
+            receipt,
+        )
+    except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError(
+            f"existing Hugging Face upload receipt is incompatible or corrupt: {receipt}"
+        ) from exc
+
+
 def _notify(
     progress: HuggingFaceProgress | None,
     severity: str,
@@ -196,14 +260,17 @@ def _measure_open_file(
 def _authenticated_api(api: HfApi | None) -> HfApi:
     if api is not None:
         return api
-    token = os.environ.get("HF_TOKEN", "").strip()
+    token = os.environ.get("HF_TOKEN", "").strip() or (get_token() or "").strip()
     if not token:
         suffix = (
             " Environment variable names are case-sensitive; use HF_TOKEN, not HF_Token."
             if os.environ.get("HF_Token")
             else ""
         )
-        raise RuntimeError(f"Hugging Face publication requires the HF_TOKEN environment variable.{suffix}")
+        raise RuntimeError(
+            "Hugging Face publication requires HF_TOKEN or a cached Hugging Face login."
+            f"{suffix}"
+        )
     return HfApi(token=token)
 
 
@@ -275,6 +342,20 @@ def upload_validated_model_artifacts(
     receipt = Path(receipt_output).resolve()
     if receipt.exists() and not receipt.is_file():
         raise ValueError("Hugging Face receipt output must be a regular file")
+    if any(artifact.source.resolve() == receipt for artifact in requested):
+        raise ValueError("Hugging Face receipt must not overwrite a model artifact")
+    completed = _load_completed_upload(config, requested, receipt)
+    if completed is not None:
+        _notify(
+            progress,
+            "info",
+            "huggingface.upload.reused",
+            repo_id=completed.repo_id,
+            commit_oid=completed.commit_oid,
+            artifact_count=len(completed.artifacts),
+            receipt=str(receipt),
+        )
+        return completed
     client = _authenticated_api(api)
     total_bytes = sum(artifact.bytes for artifact in requested)
     upload_started = time.perf_counter()
