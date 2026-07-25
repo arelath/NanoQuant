@@ -12,6 +12,18 @@ families:
           - experiments/030-recover-qwen3-0-6b-thinking-quality.py
         default: true
 
+      - source: Qwen/Qwen3-1.7B
+        runtime_family: qwen
+        profile_id: qwen3-dual-mode-v1
+        evidence:
+          - https://huggingface.co/Qwen/Qwen3-1.7B
+
+      - source: Qwen/Qwen3-4B
+        runtime_family: qwen
+        profile_id: qwen3-dual-mode-v1
+        evidence:
+          - https://huggingface.co/Qwen/Qwen3-4B
+
       - source: Qwen/Qwen3-8B
         runtime_family: qwen
         profile_id: qwen3-dual-mode-v1
@@ -19,6 +31,71 @@ families:
           - Docs/36-qwen3-thinking-mode-quality.md
           - experiments/031-confirm-qwen3-8b-thinking-quality.py
         llamacpp_quality_parallel: 1
+
+      - source: Qwen/Qwen3-14B
+        runtime_family: qwen
+        profile_id: qwen3-dual-mode-v1
+        evidence:
+          - https://huggingface.co/Qwen/Qwen3-14B
+        large_model_guards: true
+        llamacpp_quality_parallel: 1
+
+      - source: Qwen/Qwen3-32B
+        runtime_family: qwen
+        profile_id: qwen3-dual-mode-v1
+        evidence:
+          - https://huggingface.co/Qwen/Qwen3-32B
+        large_model_guards: true
+        llamacpp_quality_parallel: 1
+
+  - id: qwen3-5
+    label: Qwen3.5
+    variants:
+      - source: Qwen/Qwen3.5-0.8B
+        runtime_family: qwen
+        profile_id: qwen3-hybrid-dual-mode-v1
+        evidence:
+          - https://huggingface.co/Qwen/Qwen3.5-0.8B
+
+      - source: Qwen/Qwen3.5-2B
+        runtime_family: qwen
+        profile_id: qwen3-hybrid-dual-mode-v1
+        evidence:
+          - https://huggingface.co/Qwen/Qwen3.5-2B
+        default: true
+
+      - source: Qwen/Qwen3.5-4B
+        runtime_family: qwen
+        profile_id: qwen3-hybrid-dual-mode-v1
+        evidence:
+          - https://huggingface.co/Qwen/Qwen3.5-4B
+
+      - source: Qwen/Qwen3.5-9B
+        runtime_family: qwen
+        profile_id: qwen3-hybrid-dual-mode-v1
+        evidence:
+          - https://huggingface.co/Qwen/Qwen3.5-9B
+        llamacpp_quality_parallel: 1
+
+      - source: Qwen/Qwen3.5-27B
+        runtime_family: qwen
+        profile_id: qwen3-hybrid-dual-mode-v1
+        evidence:
+          - https://huggingface.co/Qwen/Qwen3.5-27B
+        large_model_guards: true
+        llamacpp_quality_parallel: 1
+
+  - id: qwen3-6
+    label: Qwen3.6
+    variants:
+      - source: Qwen/Qwen3.6-27B
+        runtime_family: qwen
+        profile_id: qwen3-hybrid-dual-mode-v1
+        evidence:
+          - https://huggingface.co/Qwen/Qwen3.6-27B
+        large_model_guards: true
+        llamacpp_quality_parallel: 1
+        default: true
 
   - id: gemma3
     label: Gemma3

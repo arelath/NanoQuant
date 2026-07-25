@@ -933,6 +933,8 @@ def _architecture_and_block_count(config: dict[str, Any]) -> tuple[str, int]:
 def _family_for_model(source: str, architecture: str) -> str:
     if architecture == "qwen3":
         return "qwen3"
+    if architecture in {"qwen3_5", "qwen3_5_text"}:
+        return "qwen3-6" if "/qwen3.6-" in source.lower() else "qwen3-5"
     if architecture in {"gemma3", "gemma3_text"}:
         return "gemma3"
     if architecture == "llama":

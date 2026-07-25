@@ -10,9 +10,10 @@ The interactive operator path is implemented:
 
 - `tools/compress_model.py` provides the zero-argument family, size, BPW, quality, upload, confirmation, and
   previous-run menus.
-- `experiments/recipes/interactive_recommended_models.yaml` stores the promoted Qwen3, Gemma3, Llama3, and
-  Llama3.2 catalog. A strict loader materializes `INTERACTIVE_RECOMMENDED_MODELS`, using each source to select its
-  reusable template and derive its variant identity; Qwen3 choices use the dual thinking/non-thinking profile.
+- `experiments/recipes/interactive_recommended_models.yaml` stores the promoted Qwen3, Qwen3.5, Qwen3.6, Gemma3,
+  Llama3, and Llama3.2 catalog. A strict loader materializes `INTERACTIVE_RECOMMENDED_MODELS`, using each source to
+  select its reusable template and derive its variant identity; Qwen choices use a dual thinking/non-thinking
+  profile.
 - `src/nanoquant/interactive_compression.py` owns strict settings, tamper-evident YAML persistence, discovery,
   continuation, optional quality, optional upload, and non-numbered summaries.
 - Non-numbered exports and zero-copy publication use `Results/interactive/<run-name>` without allocating a fake
@@ -184,7 +185,9 @@ The friendly label maps to an exact source ID and promoted profile:
 
 | Family | Size/variant menu | Exact source |
 | --- | --- | --- |
-| Qwen3 | Qwen3-0.6B; Qwen3-8B | `Qwen/Qwen3-0.6B`; `Qwen/Qwen3-8B` |
+| Qwen3 | Qwen3-0.6B; Qwen3-1.7B; Qwen3-4B; Qwen3-8B; Qwen3-14B; Qwen3-32B | the matching official `Qwen/` source |
+| Qwen3.5 | Qwen3.5-0.8B; Qwen3.5-2B; Qwen3.5-4B; Qwen3.5-9B; Qwen3.5-27B | the matching official `Qwen/` source |
+| Qwen3.6 | Qwen3.6-27B | `Qwen/Qwen3.6-27B` |
 | Gemma3 | gemma-3-270m-it; gemma-3-1b-it; gemma-3-4b-it; gemma-3-12b-it | the catalog's pinned Google/Unsloth source for each promoted variant |
 | Llama3 | Meta-Llama-3-8B-Instruct | `meta-llama/Meta-Llama-3-8B-Instruct` |
 | Llama3.2 | Llama-3.2-1B-Instruct; Llama-3.2-3B-Instruct | `meta-llama/Llama-3.2-1B-Instruct`; `meta-llama/Llama-3.2-3B-Instruct` |
@@ -442,6 +445,9 @@ loading.
 - Qwen3 uses the dual-mode behavior preparation and evaluation policy from
   [the Qwen3 recovery design](36-qwen3-thinking-mode-quality.md), plus the adaptive architecture-protected execution
   settings already used by the Qwen3 launchers.
+- The official Qwen organization inventory is filtered to canonical dense post-trained checkpoints. Base, SAE,
+  Guard, Coder, VL/Omni, speech, embedding/reranker, quantized (`FP8`, `GPTQ`, `AWQ`, `GGUF`, `MLX`), fixed-mode
+  `Instruct`/`Thinking`, and sparse MoE (`A3B`, `A10B`, `A17B`) variants are not interactive recommendations.
 - Llama-family models use the promoted architecture-protected stacked-input/reconstruction and adaptive-memory
   policy represented by the current Llama templates.
 - Gemma 3 uses the best promoted Gemma policy for its scale. If the best method requires a same-run measured KL

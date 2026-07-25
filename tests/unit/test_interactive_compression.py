@@ -81,17 +81,40 @@ def test_promoted_catalog_groups_family_then_size_and_keeps_qwen_dual_mode() -> 
 
     assert families == (
         ("qwen3", "Qwen3"),
+        ("qwen3-5", "Qwen3.5"),
+        ("qwen3-6", "Qwen3.6"),
         ("gemma3", "Gemma3"),
         ("llama3", "Llama3"),
         ("llama3-2", "Llama3.2"),
     )
     assert [item.variant_label for item in interactive._variants(
         INTERACTIVE_RECOMMENDED_MODELS, "qwen3"
-    )] == ["Qwen3-0.6B", "Qwen3-8B"]
+    )] == [
+        "Qwen3-0.6B",
+        "Qwen3-1.7B",
+        "Qwen3-4B",
+        "Qwen3-8B",
+        "Qwen3-14B",
+        "Qwen3-32B",
+    ]
+    assert [item.variant_label for item in interactive._variants(
+        INTERACTIVE_RECOMMENDED_MODELS, "qwen3-5"
+    )] == [
+        "Qwen3.5-0.8B",
+        "Qwen3.5-2B",
+        "Qwen3.5-4B",
+        "Qwen3.5-9B",
+        "Qwen3.5-27B",
+    ]
+    assert [item.variant_label for item in interactive._variants(
+        INTERACTIVE_RECOMMENDED_MODELS, "qwen3-6"
+    )] == [
+        "Qwen3.6-27B",
+    ]
     assert all(
         item.template.dataset.behavior_slices
         for item in INTERACTIVE_RECOMMENDED_MODELS
-        if item.family == "qwen3"
+        if item.family.startswith("qwen3")
     )
 
 
@@ -119,7 +142,7 @@ def test_new_launcher_run_uses_family_size_prompts_and_persists_before_dispatch(
         tmp_path,
         launcher,
         INTERACTIVE_RECOMMENDED_MODELS,
-        input_fn=_inputs(["", "2", "1.25", "n", "", ""]),
+        input_fn=_inputs(["", "4", "1.25", "n", "", ""]),
         write=outputs.append,
         execute=execute,
     )

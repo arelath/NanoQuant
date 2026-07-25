@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
+import pytest
+
 from nanoquant.config.schema import ReasoningMode
-from nanoquant.infrastructure.chat_behaviors import Qwen3ChatBehavior
+from nanoquant.infrastructure.chat_behaviors import Qwen3ChatBehavior, chat_behavior_for_snapshot
 from nanoquant.ports.chat_behavior import TokenRole
 
 
@@ -88,8 +93,6 @@ def test_qwen3_renderer_rejects_empty_thinking_and_reasoning_in_non_thinking_mod
     behavior = Qwen3ChatBehavior()
     prompt = [{"role": "user", "content": "question"}]
 
-    import pytest
-
     with pytest.raises(ValueError, match="no non-empty reasoning"):
         behavior.render_completed(
             tokenizer,
@@ -106,3 +109,16 @@ def test_qwen3_renderer_rejects_empty_thinking_and_reasoning_in_non_thinking_mod
             assistant_target_weight=1.0,
             prompt_target_weight=0.0,
         )
+
+
+@pytest.mark.parametrize("model_type", ["qwen3", "qwen3_5", "qwen3_5_text"])
+def test_qwen3_family_snapshots_share_the_dual_mode_renderer(
+    tmp_path: Path,
+    model_type: str,
+) -> None:
+    (tmp_path / "config.json").write_text(
+        json.dumps({"model_type": model_type}),
+        encoding="utf-8",
+    )
+
+    assert isinstance(chat_behavior_for_snapshot(tmp_path), Qwen3ChatBehavior)

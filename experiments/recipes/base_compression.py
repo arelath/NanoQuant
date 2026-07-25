@@ -22,6 +22,7 @@ from nanoquant.config.schema import (
     ReasoningMode,
     ReconstructionImportanceConfig,
     ReconstructionRankPlanningConfig,
+    RunConfig,
     SharedInputFactorizationConfig,
     SharedInputGroupConfig,
     TuningEpochLossMode,
@@ -548,9 +549,41 @@ _INTERACTIVE_GEMMA_3_12B_TEMPLATE = apply_overrides(
     },
 )
 
+_INTERACTIVE_QWEN_REVISIONS = {
+    "Qwen/Qwen3-1.7B": "70d244cc86ccca08cf5af4e1e306ecf908b1ad5e",
+    "Qwen/Qwen3-4B": "1cfa9a7208912126459214e8b04321603b3df60c",
+    "Qwen/Qwen3-14B": "40c069824f4251a91eefaf281ebe4c544efd3e18",
+    "Qwen/Qwen3-32B": "9216db5781bf21249d130ec9da846c4624c16137",
+    "Qwen/Qwen3.5-0.8B": "2fc06364715b967f1860aea9cf38778875588b17",
+    "Qwen/Qwen3.5-2B": "15852e8c16360a2fea060d615a32b45270f8a8fc",
+    "Qwen/Qwen3.5-4B": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a",
+    "Qwen/Qwen3.5-9B": "c202236235762e1c871ad0ccb60c8ee5ba337b9a",
+    "Qwen/Qwen3.5-27B": "fc05daec18b0a78c049392ed2e771dde82bdf654",
+    "Qwen/Qwen3.6-27B": "6a9e13bd6fc8f0983b9b99948120bc37f49c13e9",
+}
+
+
+def _interactive_qwen_template(source: str, revision: str) -> RunConfig:
+    return apply_overrides(
+        QWEN_3_8B_DUAL_MODE_COMPRESSION_TEMPLATE,
+        {
+            "model.source": source,
+            "model.revision": revision,
+            "model.tokenizer_source": None,
+            "model.tokenizer_revision": revision,
+        },
+    )
+
+
+_INTERACTIVE_QWEN_TEMPLATES = {
+    source: _interactive_qwen_template(source, revision)
+    for source, revision in _INTERACTIVE_QWEN_REVISIONS.items()
+}
+
 _INTERACTIVE_TEMPLATES = {
     "Qwen/Qwen3-0.6B": QWEN_3_0_6B_DUAL_MODE_COMPRESSION_TEMPLATE,
     "Qwen/Qwen3-8B": QWEN_3_8B_DUAL_MODE_COMPRESSION_TEMPLATE,
+    **_INTERACTIVE_QWEN_TEMPLATES,
     "unsloth/gemma-3-270m-it": _INTERACTIVE_GEMMA_3_270M_TEMPLATE,
     "google/gemma-3-1b-it": _INTERACTIVE_GEMMA_3_1B_TEMPLATE,
     "google/gemma-3-4b-it": _INTERACTIVE_GEMMA_3_4B_TEMPLATE,

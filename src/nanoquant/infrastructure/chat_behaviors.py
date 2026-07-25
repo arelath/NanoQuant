@@ -181,8 +181,8 @@ class Qwen3ChatBehavior:
 
 def chat_behavior_for_snapshot(snapshot: str | Path) -> ChatBehaviorPort:
     config = json.loads((Path(snapshot) / "config.json").read_text(encoding="utf-8"))
-    if config.get("model_type") != "qwen3":
-        raise ValueError("configured reasoning modes require a Qwen3 model adapter")
+    if config.get("model_type") not in {"qwen3", "qwen3_5", "qwen3_5_text"}:
+        raise ValueError("configured reasoning modes require a Qwen3-family model adapter")
     return Qwen3ChatBehavior()
 
 
