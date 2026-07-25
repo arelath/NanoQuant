@@ -238,25 +238,29 @@ def test_llamacpp_checkpoint_export_rejects_unmapped_model_family(tmp_path: Path
     state = _state("blocks.0.self_attn.q_proj", outliers=False)
     logical = write_logical_artifact(
         tmp_path / "logical",
-        RuntimeModelMetadata("fixture/model", "revision", "qwen", "config", "tokenizer"),
+        RuntimeModelMetadata("fixture/model", "revision", "opt", "config", "tokenizer"),
         {0: (state,)},
     )
     packed = convert_logical_to_packed(logical.root, tmp_path / "packed")
 
-    with pytest.raises(ValueError, match="does not support model family: qwen"):
+    with pytest.raises(ValueError, match="does not support model family: opt"):
         export_llamacpp_checkpoint(packed.root, tmp_path / "checkpoint")
 
 
-def test_llamacpp_checkpoint_export_accepts_llama_family(tmp_path: Path) -> None:
+@pytest.mark.parametrize("family", ("llama", "qwen"))
+def test_llamacpp_checkpoint_export_accepts_llama_shaped_family(
+    tmp_path: Path,
+    family: str,
+) -> None:
     state = _state("blocks.0.self_attn.q_proj", outliers=False)
     logical = write_logical_artifact(
         tmp_path / "logical",
-        RuntimeModelMetadata("fixture/model", "revision", "llama", "config", "tokenizer"),
+        RuntimeModelMetadata("fixture/model", "revision", family, "config", "tokenizer"),
         {0: (state,)},
     )
     packed = convert_logical_to_packed(logical.root, tmp_path / "packed")
 
     manifest = export_llamacpp_checkpoint(packed.root, tmp_path / "checkpoint")
 
-    assert manifest.model.family == "llama"
+    assert manifest.model.family == family
     assert manifest.layer_count == 1

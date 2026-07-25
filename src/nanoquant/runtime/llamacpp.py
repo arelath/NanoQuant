@@ -35,7 +35,7 @@ _GEMMA_GGUF_BASES = {
     "mlp.up_proj": "ffn_up",
     "mlp.down_proj": "ffn_down",
 }
-_SUPPORTED_CHECKPOINT_FAMILIES = frozenset(("gemma3", "llama"))
+_SUPPORTED_CHECKPOINT_FAMILIES = frozenset(("gemma3", "llama", "qwen"))
 
 
 @dataclass(frozen=True, slots=True)
