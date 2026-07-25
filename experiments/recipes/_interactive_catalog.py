@@ -10,20 +10,19 @@ import yaml
 
 from nanoquant.config.codec import ConfigDecodeError, from_dict
 from nanoquant.config.schema import RunConfig
-from nanoquant.interactive_compression import RecommendedModel
+from nanoquant.interactive_compression import RecommendedModel, _slug, _source_model_name
 
-INTERACTIVE_MODEL_CATALOG_SCHEMA_VERSION = 4
+INTERACTIVE_MODEL_CATALOG_SCHEMA_VERSION = 5
 
 
 @dataclass(frozen=True, slots=True)
 class _RecommendedVariantEntry:
-    id: str
-    label: str
     source: str
     runtime_family: str
-    release_name: str
     profile_id: str
     evidence: tuple[str, ...]
+    id: str | None = None
+    release_name: str | None = None
     default_target_bpw: float = 1.0
     default: bool = False
     maximum_wddm_shared_gib: float | None = 0.75
@@ -41,21 +40,23 @@ class _RecommendedVariantEntry:
         default_family: bool,
         templates: Mapping[str, RunConfig],
     ) -> RecommendedModel:
+        derived_name = _slug(_source_model_name(self.source))
+        variant_id = self.id or derived_name
+        release_name = self.release_name or derived_name
         try:
-            template = templates[self.id]
+            template = templates[self.source]
         except KeyError as exc:
             raise ConfigDecodeError(
-                f"interactive_model_catalog.families[{family_id}].variants[{self.id}].id",
-                f"no reusable template registered for variant {self.id!r}",
+                f"interactive_model_catalog.families[{family_id}].variants[{variant_id}].source",
+                f"no reusable template registered for source {self.source!r}",
             ) from exc
         return RecommendedModel(
             family=family_id,
             family_label=family_label,
-            variant=self.id,
-            variant_label=self.label,
+            variant=variant_id,
             source=self.source,
             runtime_family=self.runtime_family,
-            release_name=self.release_name,
+            release_name=release_name,
             profile_id=self.profile_id,
             evidence=self.evidence,
             template=template,
@@ -110,11 +111,12 @@ def _validate_catalog(catalog: _RecommendedModelCatalog) -> None:
         family_ids.add(family.id)
         default_variants = 0
         for variant in family.variants:
-            if variant.id in variants:
+            variant_id = variant.id or _slug(_source_model_name(variant.source))
+            if variant_id in variants:
                 raise ValueError(
-                    f"interactive model catalog repeats variant {variant.id!r}"
+                    f"interactive model catalog repeats variant {variant_id!r}"
                 )
-            variants.add(variant.id)
+            variants.add(variant_id)
             default_variants += int(variant.default)
         if default_variants != 1:
             raise ValueError(

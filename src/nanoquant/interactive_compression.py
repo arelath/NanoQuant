@@ -61,6 +61,20 @@ WriteFn = Callable[[str], None]
 ExecuteFn = Callable[[Path, Path], int]
 
 
+def _source_model_name(source: str) -> str:
+    value = source.strip().rstrip("/\\")
+    if not value:
+        raise ValueError("model source is required")
+    return re.split(r"[/\\]", value)[-1]
+
+
+def _slug(value: str) -> str:
+    normalized = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+    if not normalized:
+        raise ValueError(f"cannot derive a safe slug from {value!r}")
+    return normalized
+
+
 @dataclass(frozen=True, slots=True)
 class RecommendedModel:
     """One promoted model choice and its complete reusable recipe."""
@@ -68,7 +82,6 @@ class RecommendedModel:
     family: str
     family_label: str
     variant: str
-    variant_label: str
     source: str
     runtime_family: str
     release_name: str
@@ -94,10 +107,11 @@ class RecommendedModel:
         ):
             if not _SAFE_SLUG.fullmatch(value):
                 raise ValueError(f"recommended model {label} must be lowercase kebab-case")
-        if not self.family_label.strip() or not self.variant_label.strip():
-            raise ValueError("recommended model labels are required")
+        if not self.family_label.strip():
+            raise ValueError("recommended model family label is required")
         if not self.source.strip():
             raise ValueError("recommended model source is required")
+        _source_model_name(self.source)
         template_revision = self.template.model.revision
         if template_revision is None or not template_revision.strip():
             raise ValueError("recommended model template revision is required")
@@ -111,6 +125,12 @@ class RecommendedModel:
             raise ValueError("recommended quality requires a candidate backend")
         if self.llamacpp_quality_parallel <= 0:
             raise ValueError("llama.cpp quality parallelism must be positive")
+
+    @property
+    def variant_label(self) -> str:
+        """Return the source basename used as the menu label."""
+
+        return _source_model_name(self.source)
 
     @property
     def revision(self) -> str:
@@ -403,13 +423,6 @@ def discover_interactive_runs(repository_root: str | Path) -> tuple[InteractiveR
             reverse=True,
         )
     )
-
-
-def _slug(value: str) -> str:
-    normalized = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
-    if not normalized:
-        raise ValueError(f"cannot derive a safe slug from {value!r}")
-    return normalized
 
 
 def _new_run_name(model: RecommendedModel, now: datetime | None = None) -> str:
@@ -968,12 +981,10 @@ def resolve_custom_model(
         tokenizer_source=None,
         tokenizer_revision=revision,
     )
-    release_name = _slug(Path(source).name if Path(source).exists() else source.rsplit("/", 1)[-1])
-    variant = f"custom-{release_name}"
+    release_name = _slug(_source_model_name(source))
     return replace(
         parent,
-        variant=variant,
-        variant_label=source,
+        variant=release_name,
         source=source,
         release_name=release_name,
         profile_id=f"{parent.profile_id}-custom",

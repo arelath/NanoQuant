@@ -135,7 +135,7 @@ def test_new_launcher_run_uses_family_size_prompts_and_persists_before_dispatch(
 def test_second_invocation_defaults_to_continuing_previous_settings(tmp_path: Path) -> None:
     launcher = _launcher(tmp_path)
     settings = create_interactive_settings(
-        _model("llama3-2-3b-instruct"),
+        _model("llama-3-2-3b-instruct"),
         target_bpw=0.9,
         quality_requested=True,
         huggingface=None,
@@ -261,6 +261,8 @@ def test_custom_model_inherits_nearest_compatible_family_profile(
     assert resolved.family == "qwen3"
     assert interactive._resolved_source_for_model(resolved).block_count == 40
     assert resolved.source == "owner/Qwen3-Custom"
+    assert resolved.variant == resolved.release_name == "qwen3-custom"
+    assert resolved.variant_label == "Qwen3-Custom"
     assert resolved.revision == "a" * 40
     assert resolved.template.dataset.behavior_slices
     assert resolved.template.model.source == "owner/Qwen3-Custom"

@@ -11,8 +11,8 @@ The interactive operator path is implemented:
 - `tools/compress_model.py` provides the zero-argument family, size, BPW, quality, upload, confirmation, and
   previous-run menus.
 - `experiments/recipes/interactive_recommended_models.yaml` stores the promoted Qwen3, Gemma3, Llama3, and
-  Llama3.2 catalog. A strict loader materializes `INTERACTIVE_RECOMMENDED_MODELS`, using each variant ID to select
-  its reusable template; Qwen3 choices use the dual thinking/non-thinking profile.
+  Llama3.2 catalog. A strict loader materializes `INTERACTIVE_RECOMMENDED_MODELS`, using each source to select its
+  reusable template and derive its variant identity; Qwen3 choices use the dual thinking/non-thinking profile.
 - `src/nanoquant/interactive_compression.py` owns strict settings, tamper-evident YAML persistence, discovery,
   continuation, optional quality, optional upload, and non-numbered summaries.
 - Non-numbered exports and zero-copy publication use `Results/interactive/<run-name>` without allocating a fake
@@ -185,12 +185,14 @@ The friendly label maps to an exact source ID and promoted profile:
 | Family | Size/variant menu | Exact source |
 | --- | --- | --- |
 | Qwen3 | Qwen3-0.6B; Qwen3-8B | `Qwen/Qwen3-0.6B`; `Qwen/Qwen3-8B` |
-| Gemma3 | Gemma3-270M; Gemma3-1B; Gemma3-4B; Gemma3-12B | the catalog's pinned Google/Unsloth source for each promoted variant |
-| Llama3 | Llama3-8B-Instruct | `meta-llama/Meta-Llama-3-8B-Instruct` |
-| Llama3.2 | Llama3.2-1B-Instruct; Llama3.2-3B-Instruct | `meta-llama/Llama-3.2-1B-Instruct`; `meta-llama/Llama-3.2-3B-Instruct` |
+| Gemma3 | gemma-3-270m-it; gemma-3-1b-it; gemma-3-4b-it; gemma-3-12b-it | the catalog's pinned Google/Unsloth source for each promoted variant |
+| Llama3 | Meta-Llama-3-8B-Instruct | `meta-llama/Meta-Llama-3-8B-Instruct` |
+| Llama3.2 | Llama-3.2-1B-Instruct; Llama-3.2-3B-Instruct | `meta-llama/Llama-3.2-1B-Instruct`; `meta-llama/Llama-3.2-3B-Instruct` |
 
 Both menus are generated from the promoted-profile catalog; the terminal code does not hard-code family names,
-variants, source IDs, or ordering. A family is shown only when it has at least one compatible promoted model.
+variants, source IDs, or ordering. A variant's source basename is its menu label; the lowercase kebab-case slug of
+that basename is its default variant ID and release name. A family is shown only when it has at least one compatible
+promoted model.
 
 The family default is:
 
@@ -428,12 +430,14 @@ The first catalog is extracted from the currently promoted reusable settings, no
 
 The versioned source of truth is `experiments/recipes/interactive_recommended_models.yaml`. Variants are nested under
 their family, and family/variant sequence order directly controls the two menus—there are no separate order fields.
-Each unique variant ID selects its reusable Python `RunConfig` template, so the YAML does not carry a separate
-template ID. The profile ID remains the persisted numerical/workflow policy identity and may intentionally be shared
-by compatible variants. YAML owns selection and publication metadata while Python owns numerical templates. The
-pinned model revision comes from that template rather than being repeated in YAML. Unknown fields, variants without
-registered templates, duplicate families or variants, empty families, unpinned template revisions, or invalid
-defaults fail during catalog loading.
+Each source selects its reusable Python `RunConfig` template. The source basename supplies the display label, and its
+slug supplies both variant ID and release name. Optional `id` and `release_name` fields override those two derived
+values when a future model requires it; there is no separate label or template ID. The profile ID remains the
+persisted numerical/workflow policy identity and may intentionally be shared by compatible variants. YAML owns
+selection and publication metadata while Python owns numerical templates. The pinned model revision comes from that
+template rather than being repeated in YAML. Unknown fields, sources without registered templates, duplicate
+derived/overridden variant IDs, empty families, unpinned template revisions, or invalid defaults fail during catalog
+loading.
 
 - Qwen3 uses the dual-mode behavior preparation and evaluation policy from
   [the Qwen3 recovery design](36-qwen3-thinking-mode-quality.md), plus the adaptive architecture-protected execution

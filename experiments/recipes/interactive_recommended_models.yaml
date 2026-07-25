@@ -1,25 +1,19 @@
-schema_version: 4
+schema_version: 5
 families:
   - id: qwen3
     label: Qwen3
     default: true
     variants:
-      - id: qwen3-0-6b
-        label: Qwen3-0.6B
-        source: Qwen/Qwen3-0.6B
+      - source: Qwen/Qwen3-0.6B
         runtime_family: qwen
-        release_name: qwen3-0-6b
         profile_id: qwen3-dual-mode-v1
         evidence:
           - Docs/36-qwen3-thinking-mode-quality.md
           - experiments/030-recover-qwen3-0-6b-thinking-quality.py
         default: true
 
-      - id: qwen3-8b
-        label: Qwen3-8B
-        source: Qwen/Qwen3-8B
+      - source: Qwen/Qwen3-8B
         runtime_family: qwen
-        release_name: qwen3-8b
         profile_id: qwen3-dual-mode-v1
         evidence:
           - Docs/36-qwen3-thinking-mode-quality.md
@@ -29,39 +23,27 @@ families:
   - id: gemma3
     label: Gemma3
     variants:
-      - id: gemma3-270m
-        label: Gemma3-270M
-        source: unsloth/gemma-3-270m-it
+      - source: unsloth/gemma-3-270m-it
         runtime_family: gemma3
-        release_name: gemma-3-270m-it
         profile_id: gemma3-architecture-protected-v1
         evidence:
           - experiments/016-compress-and-benchmark-gemma-3-270m-it.py
 
-      - id: gemma3-1b
-        label: Gemma3-1B
-        source: google/gemma-3-1b-it
+      - source: google/gemma-3-1b-it
         runtime_family: gemma3
-        release_name: gemma-3-1b-it
         profile_id: gemma3-architecture-protected-v1
         evidence:
           - experiments/017-compress-and-benchmark-gemma-3-1b-it.py
         default: true
 
-      - id: gemma3-4b
-        label: Gemma3-4B
-        source: google/gemma-3-4b-it
+      - source: google/gemma-3-4b-it
         runtime_family: gemma3
-        release_name: gemma-3-4b-it
         profile_id: gemma3-architecture-protected-v1
         evidence:
           - experiments/018-compress-and-benchmark-gemma-3-4b-it.py
 
-      - id: gemma3-12b
-        label: Gemma3-12B
-        source: unsloth/gemma-3-12b-it
+      - source: unsloth/gemma-3-12b-it
         runtime_family: gemma3
-        release_name: gemma-3-12b-it
         profile_id: gemma3-large-model-v1
         evidence:
           - experiments/008-compress-and-benchmark-gemma-3-12b-it.py
@@ -70,11 +52,8 @@ families:
   - id: llama3
     label: Llama3
     variants:
-      - id: llama3-8b-instruct
-        label: Llama3-8B-Instruct
-        source: meta-llama/Meta-Llama-3-8B-Instruct
+      - source: meta-llama/Meta-Llama-3-8B-Instruct
         runtime_family: llama
-        release_name: meta-llama-3-8b-instruct
         profile_id: llama-architecture-protected-v1
         evidence:
           - experiments/027-compress-and-benchmark-meta-llama-3-8b-instruct.py
@@ -83,21 +62,15 @@ families:
   - id: llama3-2
     label: Llama3.2
     variants:
-      - id: llama3-2-1b-instruct
-        label: Llama3.2-1B-Instruct
-        source: meta-llama/Llama-3.2-1B-Instruct
+      - source: meta-llama/Llama-3.2-1B-Instruct
         runtime_family: llama
-        release_name: llama-3-2-1b-instruct
         profile_id: llama-architecture-protected-v1
         evidence:
           - experiments/025-compress-and-benchmark-llama-3-2-1b-instruct.py
         default: true
 
-      - id: llama3-2-3b-instruct
-        label: Llama3.2-3B-Instruct
-        source: meta-llama/Llama-3.2-3B-Instruct
+      - source: meta-llama/Llama-3.2-3B-Instruct
         runtime_family: llama
-        release_name: llama-3-2-3b-instruct
         profile_id: llama-architecture-protected-v1
         evidence:
           - experiments/026-compress-and-benchmark-llama-3-2-3b-instruct.py
