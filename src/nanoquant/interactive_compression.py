@@ -67,10 +67,8 @@ class RecommendedModel:
 
     family: str
     family_label: str
-    family_order: int
     variant: str
     variant_label: str
-    variant_order: int
     source: str
     revision: str
     runtime_family: str
@@ -99,8 +97,6 @@ class RecommendedModel:
                 raise ValueError(f"recommended model {label} must be lowercase kebab-case")
         if not self.family_label.strip() or not self.variant_label.strip():
             raise ValueError("recommended model labels are required")
-        if self.family_order < 0 or self.variant_order < 0:
-            raise ValueError("recommended model ordering must be non-negative")
         if not self.source.strip() or not self.revision.strip():
             raise ValueError("recommended model source and revision are required")
         if not self.runtime_family.strip() or not self.evidence:
@@ -835,32 +831,21 @@ class InteractiveConsole:
 
 
 def _families(catalog: Iterable[RecommendedModel]) -> tuple[tuple[str, str], ...]:
-    ordered: dict[str, tuple[int, str]] = {}
+    ordered: dict[str, str] = {}
     for model in catalog:
         current = ordered.get(model.family)
-        candidate = (model.family_order, model.family_label)
         if current is None:
-            ordered[model.family] = candidate
-        elif current != candidate:
+            ordered[model.family] = model.family_label
+        elif current != model.family_label:
             raise ValueError(f"catalog family metadata disagrees for {model.family}")
-    return tuple(
-        (family, label)
-        for family, (_order, label) in sorted(
-            ordered.items(), key=lambda item: (item[1][0], item[0])
-        )
-    )
+    return tuple(ordered.items())
 
 
 def _variants(
     catalog: Iterable[RecommendedModel],
     family: str,
 ) -> tuple[RecommendedModel, ...]:
-    return tuple(
-        sorted(
-            (model for model in catalog if model.family == family),
-            key=lambda model: (model.variant_order, model.variant),
-        )
-    )
+    return tuple(model for model in catalog if model.family == family)
 
 
 def _default_family(
@@ -964,10 +949,7 @@ def resolve_custom_model(
         raise ValueError(f"no promoted interactive profile supports family {family!r}")
     parent = min(
         candidates,
-        key=lambda model: (
-            abs(_resolved_source_for_model(model).block_count - block_count),
-            model.variant_order,
-        ),
+        key=lambda model: abs(_resolved_source_for_model(model).block_count - block_count),
     )
     model_config = replace(
         parent.template.model,

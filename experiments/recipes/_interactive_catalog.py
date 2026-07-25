@@ -12,17 +12,13 @@ from nanoquant.config.codec import ConfigDecodeError, from_dict
 from nanoquant.config.schema import RunConfig
 from nanoquant.interactive_compression import RecommendedModel
 
-INTERACTIVE_MODEL_CATALOG_SCHEMA_VERSION = 1
+INTERACTIVE_MODEL_CATALOG_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True, slots=True)
-class _RecommendedModelEntry:
-    family: str
-    family_label: str
-    family_order: int
-    variant: str
-    variant_label: str
-    variant_order: int
+class _RecommendedVariantEntry:
+    id: str
+    label: str
     source: str
     revision: str
     runtime_family: str
@@ -31,8 +27,7 @@ class _RecommendedModelEntry:
     evidence: tuple[str, ...]
     template_id: str
     default_target_bpw: float = 1.0
-    default_family: bool = False
-    default_variant: bool = False
+    default: bool = False
     maximum_wddm_shared_gib: float | None = 0.75
     restore_completed_blocks: bool = False
     quality_backend: str | None = None
@@ -40,21 +35,26 @@ class _RecommendedModelEntry:
     llamacpp_quality: bool = True
     llamacpp_quality_parallel: int = 4
 
-    def materialize(self, templates: Mapping[str, RunConfig]) -> RecommendedModel:
+    def materialize(
+        self,
+        *,
+        family_id: str,
+        family_label: str,
+        default_family: bool,
+        templates: Mapping[str, RunConfig],
+    ) -> RecommendedModel:
         try:
             template = templates[self.template_id]
         except KeyError as exc:
             raise ConfigDecodeError(
-                f"interactive_model_catalog.models[{self.variant}].template_id",
+                f"interactive_model_catalog.families[{family_id}].variants[{self.id}].template_id",
                 f"unknown template {self.template_id!r}",
             ) from exc
         return RecommendedModel(
-            family=self.family,
-            family_label=self.family_label,
-            family_order=self.family_order,
-            variant=self.variant,
-            variant_label=self.variant_label,
-            variant_order=self.variant_order,
+            family=family_id,
+            family_label=family_label,
+            variant=self.id,
+            variant_label=self.label,
             source=self.source,
             revision=self.revision,
             runtime_family=self.runtime_family,
@@ -63,8 +63,8 @@ class _RecommendedModelEntry:
             evidence=self.evidence,
             template=template,
             default_target_bpw=self.default_target_bpw,
-            default_family=self.default_family,
-            default_variant=self.default_variant,
+            default_family=default_family,
+            default_variant=self.default,
             maximum_wddm_shared_gib=self.maximum_wddm_shared_gib,
             restore_completed_blocks=self.restore_completed_blocks,
             quality_backend=self.quality_backend,
@@ -75,56 +75,57 @@ class _RecommendedModelEntry:
 
 
 @dataclass(frozen=True, slots=True)
+class _RecommendedFamilyEntry:
+    id: str
+    label: str
+    variants: tuple[_RecommendedVariantEntry, ...]
+    default: bool = False
+
+    def __post_init__(self) -> None:
+        if not self.variants:
+            raise ValueError(
+                f"interactive model family {self.id!r} must contain at least one variant"
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class _RecommendedModelCatalog:
     schema_version: int
-    models: tuple[_RecommendedModelEntry, ...]
+    families: tuple[_RecommendedFamilyEntry, ...]
 
     def __post_init__(self) -> None:
         if self.schema_version != INTERACTIVE_MODEL_CATALOG_SCHEMA_VERSION:
             raise ValueError(
                 f"unsupported interactive model catalog schema: {self.schema_version}"
             )
-        if not self.models:
-            raise ValueError("interactive model catalog must contain at least one model")
+        if not self.families:
+            raise ValueError("interactive model catalog must contain at least one family")
 
 
-def _validate_catalog(models: tuple[RecommendedModel, ...]) -> None:
+def _validate_catalog(catalog: _RecommendedModelCatalog) -> None:
+    family_ids: set[str] = set()
     variants: set[str] = set()
-    positions: set[tuple[str, int]] = set()
-    family_metadata: dict[str, tuple[str, int]] = {}
-    default_families = 0
-    default_variants: dict[str, int] = {}
-    for model in models:
-        if model.variant in variants:
-            raise ValueError(f"interactive model catalog repeats variant {model.variant!r}")
-        variants.add(model.variant)
-        position = (model.family, model.variant_order)
-        if position in positions:
+    for family in catalog.families:
+        if family.id in family_ids:
             raise ValueError(
-                "interactive model catalog repeats variant order "
-                f"{model.variant_order} in family {model.family!r}"
+                f"interactive model catalog repeats family {family.id!r}"
             )
-        positions.add(position)
-        metadata = (model.family_label, model.family_order)
-        previous = family_metadata.setdefault(model.family, metadata)
-        if previous != metadata:
+        family_ids.add(family.id)
+        default_variants = 0
+        for variant in family.variants:
+            if variant.id in variants:
+                raise ValueError(
+                    f"interactive model catalog repeats variant {variant.id!r}"
+                )
+            variants.add(variant.id)
+            default_variants += int(variant.default)
+        if default_variants != 1:
             raise ValueError(
-                f"interactive model catalog has inconsistent metadata for family {model.family!r}"
+                "interactive model catalog must declare exactly one default variant "
+                f"for family {family.id!r}"
             )
-        default_families += int(model.default_family)
-        default_variants[model.family] = (
-            default_variants.get(model.family, 0) + int(model.default_variant)
-        )
-    if default_families != 1:
+    if sum(int(family.default) for family in catalog.families) != 1:
         raise ValueError("interactive model catalog must declare exactly one default family")
-    invalid_defaults = {
-        family: count for family, count in default_variants.items() if count != 1
-    }
-    if invalid_defaults:
-        raise ValueError(
-            "interactive model catalog must declare exactly one default variant per family: "
-            f"{invalid_defaults}"
-        )
 
 
 def load_interactive_recommended_models(
@@ -153,9 +154,17 @@ def load_interactive_recommended_models(
         payload,
         path="interactive_model_catalog",
     )
-    models = tuple(entry.materialize(templates) for entry in catalog.models)
-    _validate_catalog(models)
-    return models
+    _validate_catalog(catalog)
+    return tuple(
+        variant.materialize(
+            family_id=family.id,
+            family_label=family.label,
+            default_family=family.default,
+            templates=templates,
+        )
+        for family in catalog.families
+        for variant in family.variants
+    )
 
 
 __all__ = [

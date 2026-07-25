@@ -426,10 +426,11 @@ environment-independent numerical/workflow policy.
 
 The first catalog is extracted from the currently promoted reusable settings, not reconstructed from memory:
 
-The versioned source of truth is `experiments/recipes/interactive_recommended_models.yaml`. Each entry names a
-symbolic reusable-template ID; YAML owns selection and publication metadata while Python owns numerical `RunConfig`
-templates. Unknown fields, missing template IDs, duplicate variants/orders, inconsistent family metadata, or invalid
-defaults fail during catalog loading.
+The versioned source of truth is `experiments/recipes/interactive_recommended_models.yaml`. Variants are nested under
+their family, and family/variant sequence order directly controls the two menus—there are no separate order fields.
+Each variant names a symbolic reusable-template ID; YAML owns selection and publication metadata while Python owns
+numerical `RunConfig` templates. Unknown fields, missing template IDs, duplicate families or variants, empty
+families, or invalid defaults fail during catalog loading.
 
 - Qwen3 uses the dual-mode behavior preparation and evaluation policy from
   [the Qwen3 recovery design](36-qwen3-thinking-mode-quality.md), plus the adaptive architecture-protected execution
