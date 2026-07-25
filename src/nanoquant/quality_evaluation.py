@@ -8,7 +8,7 @@ import math
 import time
 from collections.abc import Callable, Mapping
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -29,10 +29,15 @@ from nanoquant.application.task_evaluation import (
     pinned_legacy_multiple_choice_tasks,
 )
 from nanoquant.config.codec import to_dict
+from nanoquant.config.schema import BehaviorSliceConfig, ReasoningMode
 from nanoquant.domain.constants import BackendType
 from nanoquant.infrastructure.device_lease import acquire_device_lease
 from nanoquant.infrastructure.device_memory import SharedDeviceMemoryMonitor
 from nanoquant.infrastructure.frozen_model_loader import LoadedFrozenModel, load_frozen_run
+from nanoquant.infrastructure.hf_calibration_dataset import (
+    PreparedBehaviorEvaluation,
+    prepare_behavior_evaluation,
+)
 from nanoquant.infrastructure.hf_language_model import load_causal_language_model
 from nanoquant.infrastructure.hf_task_evaluation import (
     hash_hf_tokenizer_snapshot,
@@ -85,6 +90,12 @@ class QualityEvaluationRequest:
     maximum_wddm_shared_bytes: int | None = None
     packed_artifact: Path | None = None
     stream_base_model: bool = False
+    reasoning_modes: tuple[ReasoningMode, ...] = ()
+    reasoning_behavior_slices: tuple[BehaviorSliceConfig, ...] = ()
+    reasoning_partition: str = "quick"
+    reasoning_samples_per_mode: int = 8
+    reasoning_sequence_length: int = 512
+    maximum_thinking_degradation_ratio: float = 1.10
 
     def __post_init__(self) -> None:
         if not self.source or not self.revision:
@@ -106,6 +117,23 @@ class QualityEvaluationRequest:
         unknown = set(self.task_names) - supported
         if unknown:
             raise ValueError(f"quality evaluation tasks are unsupported: {sorted(unknown)}")
+        if len(set(self.reasoning_modes)) != len(self.reasoning_modes):
+            raise ValueError("quality reasoning modes must be unique")
+        if any(mode is ReasoningMode.RAW for mode in self.reasoning_modes):
+            raise ValueError("raw is not a chat reasoning evaluation mode")
+        if self.reasoning_modes:
+            if self.reasoning_samples_per_mode <= 0 or self.reasoning_sequence_length < 2:
+                raise ValueError("quality reasoning dimensions are invalid")
+            available = {item.mode for item in self.reasoning_behavior_slices}
+            if not set(self.reasoning_modes) <= available:
+                raise ValueError("quality reasoning modes require matching behavior slices")
+            if (
+                not math.isfinite(self.maximum_thinking_degradation_ratio)
+                or self.maximum_thinking_degradation_ratio < 1
+            ):
+                raise ValueError("quality thinking degradation ratio must be finite and at least one")
+        if self.reasoning_partition not in {"quick", "final"}:
+            raise ValueError("quality reasoning partition must be quick or final")
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,6 +144,7 @@ class PreparedQualityInputs:
     pad_token_id: int
     tokenizer_hash: str
     tasks: tuple[PreparedMultipleChoiceInputs, ...]
+    reasoning: tuple[PreparedBehaviorEvaluation, ...] = ()
 
 
 def _wikitext_context_policy(bos_token_id: int | None) -> str:
@@ -271,6 +300,24 @@ def prepare_quality_inputs(
             task=name,
             examples=len(prepared.examples),
         )
+    reasoning = []
+    by_mode = {item.mode: item for item in request.reasoning_behavior_slices}
+    for mode_index, mode in enumerate(request.reasoning_modes):
+        _emit_progress(progress, "reasoning_input_started", mode=mode.value)
+        prepared_reasoning = prepare_behavior_evaluation(
+            request.snapshot,
+            replace(by_mode[mode], partition=request.reasoning_partition),
+            sample_count=request.reasoning_samples_per_mode,
+            sequence_length=request.reasoning_sequence_length,
+            seed=91_700 + mode_index,
+        )
+        reasoning.append(prepared_reasoning)
+        _emit_progress(
+            progress,
+            "reasoning_input_completed",
+            mode=mode.value,
+            identity=prepared_reasoning.identity,
+        )
     return PreparedQualityInputs(
         tokens,
         fingerprint,
@@ -278,6 +325,7 @@ def prepare_quality_inputs(
         pad_token_id,
         tokenizer_hash,
         tuple(tasks),
+        tuple(reasoning),
     )
 
 
@@ -365,11 +413,53 @@ def _evaluate_model(
             metric=result.primary_metric,
             value=result.primary_value,
         )
+    reasoning = []
+    for prepared_reasoning in inputs.reasoning:
+        mode = prepared_reasoning.mode.value
+        reasoning_started = time.perf_counter()
+        total_nll = 0.0
+        token_count = 0
+        for start in range(0, prepared_reasoning.input_ids.shape[0], request.wikitext_batch_size):
+            token_ids = prepared_reasoning.input_ids[start : start + request.wikitext_batch_size].to(request.device)
+            attention_mask = prepared_reasoning.attention_mask[
+                start : start + request.wikitext_batch_size
+            ].to(request.device)
+            target_mask = prepared_reasoning.target_mask[
+                start : start + request.wikitext_batch_size
+            ].to(request.device)
+            logits = guarded_logits(token_ids, attention_mask)
+            selected_logits = logits[:, :-1, :][target_mask[:, :-1]]
+            selected_targets = token_ids[:, 1:][target_mask[:, :-1]]
+            if selected_targets.numel() == 0:
+                continue
+            losses = torch.nn.functional.cross_entropy(
+                selected_logits.float(),
+                selected_targets,
+                reduction="sum",
+            )
+            total_nll += float(losses)
+            token_count += int(selected_targets.numel())
+        if token_count == 0:
+            raise ValueError(f"quality reasoning mode {mode} contains no response targets")
+        mean_nll = total_nll / token_count
+        reasoning.append(
+            {
+                "mode": mode,
+                "identity": prepared_reasoning.identity,
+                "total_negative_log_likelihood": total_nll,
+                "mean_negative_log_likelihood": mean_nll,
+                "perplexity": math.exp(mean_nll),
+                "token_count": token_count,
+                "sample_count": prepared_reasoning.input_ids.shape[0],
+                "elapsed_seconds": time.perf_counter() - reasoning_started,
+            }
+        )
     payload = {
         "label": label,
         "wikitext": to_dict(causal),
         "wikitext_elapsed_seconds": wikitext_seconds,
         "tasks": tasks,
+        "reasoning": reasoning,
         "elapsed_seconds": time.perf_counter() - started,
         "peak_device_bytes": peak_device_memory_bytes(request.device),
         "peak_host_bytes": peak_process_memory_bytes(),
@@ -389,7 +479,11 @@ def _number(value: object, field: str) -> float:
     return float(value)
 
 
-def compare_quality_results(base: dict[str, Any], frozen: dict[str, Any]) -> dict[str, Any]:
+def compare_quality_results(
+    base: dict[str, Any],
+    frozen: dict[str, Any],
+    maximum_thinking_degradation_ratio: float = 1.10,
+) -> dict[str, Any]:
     """Compare two results produced by the shared pinned quality protocol."""
 
     base_ppl = _number(cast(dict[str, object], base["wikitext"])["perplexity"], "base perplexity")
@@ -419,7 +513,38 @@ def compare_quality_results(base: dict[str, Any], frozen: dict[str, Any]) -> dic
                 "ratio": None if baseline == 0 else candidate / baseline,
             }
         )
-    return {
+    base_reasoning = {
+        str(item["mode"]): item
+        for item in cast(list[dict[str, object]], base.get("reasoning", []))
+    }
+    frozen_reasoning = {
+        str(item["mode"]): item
+        for item in cast(list[dict[str, object]], frozen.get("reasoning", []))
+    }
+    reasoning_rows: list[dict[str, object]] = []
+    for mode in base_reasoning:
+        baseline = _number(base_reasoning[mode]["mean_negative_log_likelihood"], f"{mode} base NLL")
+        candidate = _number(frozen_reasoning[mode]["mean_negative_log_likelihood"], f"{mode} frozen NLL")
+        reasoning_rows.append(
+            {
+                "mode": mode,
+                "base_mean_nll": baseline,
+                "frozen_mean_nll": candidate,
+                "ratio": candidate / baseline,
+                "relative_change": candidate / baseline - 1.0,
+            }
+        )
+    ratios = {
+        str(item["mode"]): _number(item["ratio"], f"{item['mode']} reasoning ratio")
+        for item in reasoning_rows
+    }
+    cross_mode_passed = (
+        True
+        if not {ReasoningMode.THINKING.value, ReasoningMode.NON_THINKING.value} <= ratios.keys()
+        else ratios[ReasoningMode.THINKING.value]
+        <= maximum_thinking_degradation_ratio * ratios[ReasoningMode.NON_THINKING.value]
+    )
+    comparison: dict[str, object] = {
         "wikitext": {
             "base_perplexity": base_ppl,
             "frozen_perplexity": frozen_ppl,
@@ -428,6 +553,13 @@ def compare_quality_results(base: dict[str, Any], frozen: dict[str, Any]) -> dic
         },
         "tasks": task_rows,
     }
+    if reasoning_rows:
+        comparison["reasoning"] = reasoning_rows
+        comparison["reasoning_cross_mode"] = {
+            "maximum_thinking_degradation_ratio": maximum_thinking_degradation_ratio,
+            "passed": cross_mode_passed,
+        }
+    return comparison
 
 
 def execute_quality_evaluation(
@@ -571,14 +703,29 @@ def execute_quality_evaluation(
     results = {"base": base_result}
     if frozen_result is not None:
         results["frozen"] = frozen_result
-    payload = {
-        "schema_version": 1,
-        "passed": all(
+    comparison = (
+        None
+        if frozen_result is None
+        else compare_quality_results(
+            base_result,
+            frozen_result,
+            request.maximum_thinking_degradation_ratio,
+        )
+    )
+    finite_results = all(
             math.isfinite(
                 _number(cast(dict[str, object], case["wikitext"])["perplexity"], "perplexity")
             )
             for case in results.values()
-        ),
+        )
+    reasoning_passed = (
+        True
+        if comparison is None or "reasoning_cross_mode" not in comparison
+        else bool(cast(dict[str, object], comparison["reasoning_cross_mode"])["passed"])
+    )
+    payload = {
+        "schema_version": 2 if request.reasoning_modes else 1,
+        "passed": finite_results and reasoning_passed,
         "model": {
             "source": request.source,
             "revision": request.revision,
@@ -601,13 +748,20 @@ def execute_quality_evaluation(
             "task_batch_size": request.task_batch_size,
             "tokenizer_hash": inputs.tokenizer_hash,
             "base_execution": "block_streamed" if request.stream_base_model else "resident",
+            **(
+                {}
+                if not request.reasoning_modes
+                else {
+                    "reasoning_modes": tuple(mode.value for mode in request.reasoning_modes),
+                    "reasoning_samples_per_mode": request.reasoning_samples_per_mode,
+                    "reasoning_sequence_length": request.reasoning_sequence_length,
+                    "reasoning_partition": request.reasoning_partition,
+                    "reasoning_input_identities": tuple(item.identity for item in inputs.reasoning),
+                }
+            ),
         },
         "results": results,
-        "comparison": (
-            None
-            if frozen_result is None
-            else compare_quality_results(base_result, frozen_result)
-        ),
+        "comparison": comparison,
         "wall_seconds": time.perf_counter() - wall_started,
         "resource_limits": {
             "maximum_wddm_shared_bytes": request.maximum_wddm_shared_bytes,

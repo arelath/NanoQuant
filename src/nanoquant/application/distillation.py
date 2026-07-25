@@ -62,6 +62,7 @@ class TopKTeacherBatch:
     token_indices: torch.Tensor
     top_values: torch.Tensor
     top_indices: torch.Tensor
+    token_weights: torch.Tensor | None = None
 
     def __post_init__(self) -> None:
         if not self.sample_indices:
@@ -76,6 +77,13 @@ class TopKTeacherBatch:
             raise ValueError("teacher targets must be cached on CPU")
         if self.top_indices.device.type != "cpu" or self.top_indices.dtype is not torch.int32:
             raise ValueError("teacher target vocabulary indices must be CPU int32")
+        if self.token_weights is not None:
+            if self.token_weights.ndim != 1 or self.token_weights.shape != self.token_indices.shape:
+                raise ValueError("teacher target weights must align with token indices")
+            if self.token_weights.device.type != "cpu":
+                raise ValueError("teacher target weights must be cached on CPU")
+            if not torch.isfinite(self.token_weights).all() or (self.token_weights < 0).any():
+                raise ValueError("teacher target weights must be finite and non-negative")
 
 
 @dataclass(frozen=True, slots=True)
@@ -193,6 +201,7 @@ def topk_distillation_loss(
     *,
     temperature: float,
     token_chunk_size: int,
+    token_weights: torch.Tensor | None = None,
 ) -> torch.Tensor:
     if student_hidden_states.shape[0] == 0:
         return student_hidden_states.sum() * 0
@@ -211,7 +220,17 @@ def topk_distillation_loss(
         losses.append(
             -(teacher_probabilities.to(student_log_probabilities.device) * student_log_probabilities).sum(dim=-1)
         )
-    loss = torch.cat(losses).mean()
+    per_token = torch.cat(losses)
+    if token_weights is None:
+        loss = per_token.mean()
+    else:
+        weights = token_weights.to(device=per_token.device, dtype=per_token.dtype)
+        if weights.shape != per_token.shape:
+            raise ValueError("distillation token weights do not match selected tokens")
+        denominator = weights.sum()
+        if denominator <= 0:
+            raise ValueError("distillation token weights must contain a positive value")
+        loss = (per_token * weights).sum() / denominator
     return loss if temperature == 1.0 else loss * temperature**2
 
 
@@ -224,6 +243,8 @@ def cache_topk_teacher_targets(
     *,
     device: str | torch.device,
     pad_token_id: int | None,
+    target_mask: torch.Tensor | None = None,
+    target_weights: torch.Tensor | None = None,
     recorder: PhaseRecorder = NULL_RECORDER,
 ) -> TopKTeacherCache:
     epochs = []
@@ -238,6 +259,8 @@ def cache_topk_teacher_targets(
             epoch_index=epoch_index,
             device=device,
             pad_token_id=pad_token_id,
+            target_mask=target_mask,
+            target_weights=target_weights,
             recorder=recorder,
         )
         epochs.append(batches)
@@ -255,6 +278,8 @@ def cache_topk_teacher_epoch(
     epoch_index: int,
     device: str | torch.device,
     pad_token_id: int | None,
+    target_mask: torch.Tensor | None = None,
+    target_weights: torch.Tensor | None = None,
     recorder: PhaseRecorder = NULL_RECORDER,
 ) -> tuple[tuple[TopKTeacherBatch, ...], int]:
     if token_ids.ndim != 2 or token_ids.shape[0] == 0:
@@ -263,6 +288,17 @@ def cache_topk_teacher_epoch(
         raise ValueError("distillation teacher-cache epoch index is out of range")
     with recorder.phase("planning"):
         cpu_tokens = token_ids.detach().cpu()
+        cpu_target_mask = None if target_mask is None else target_mask.detach().cpu().bool()
+        cpu_target_weights = None if target_weights is None else target_weights.detach().cpu().float()
+        if cpu_target_mask is not None and cpu_target_mask.shape != cpu_tokens.shape:
+            raise ValueError("distillation target mask must match token IDs")
+        if cpu_target_weights is not None:
+            if cpu_target_weights.shape != cpu_tokens.shape:
+                raise ValueError("distillation target weights must match token IDs")
+            if cpu_target_mask is None:
+                raise ValueError("distillation target weights require a target mask")
+            if not torch.isfinite(cpu_target_weights).all() or (cpu_target_weights < 0).any():
+                raise ValueError("distillation target weights must be finite and non-negative")
         # Match the legacy cache plan exactly. Hugging Face ``set_seed`` seeded
         # Python's RNG and the default RNG on the training device once; the legacy
         # loop then shuffled one persistent Python list and selected token positions
@@ -280,6 +316,8 @@ def cache_topk_teacher_epoch(
                 indices = torch.tensor(order[start : start + config.batch_size], dtype=torch.long)
                 batch = cpu_tokens.index_select(0, indices)
                 mask = torch.ones_like(batch, dtype=torch.bool) if pad_token_id is None else batch != pad_token_id
+                if cpu_target_mask is not None:
+                    mask &= cpu_target_mask.index_select(0, indices)
                 valid = torch.nonzero(mask.reshape(-1), as_tuple=False).flatten()
                 maximum_tokens = config.maximum_tokens_per_batch
                 if maximum_tokens is not None and valid.numel() > maximum_tokens:
@@ -313,6 +351,11 @@ def cache_topk_teacher_epoch(
                 selected_cpu = selected.cpu()
                 values_cpu = values.cpu()
                 vocabulary_indices_cpu = vocabulary_indices.to(device="cpu", dtype=torch.int32)
+                weights_cpu = (
+                    None
+                    if cpu_target_weights is None
+                    else cpu_target_weights.index_select(0, indices).reshape(-1).index_select(0, selected_cpu)
+                )
             else:
                 with recorder.phase("h2d"):
                     batch = cpu_tokens.index_select(0, indices).to(device)
@@ -332,11 +375,17 @@ def cache_topk_teacher_epoch(
                     selected_cpu = selected.cpu()
                     values_cpu = values.cpu()
                     vocabulary_indices_cpu = vocabulary_indices.to(device="cpu", dtype=torch.int32)
+                    weights_cpu = (
+                        None
+                        if cpu_target_weights is None
+                        else cpu_target_weights.index_select(0, indices).reshape(-1).index_select(0, selected_cpu)
+                    )
                 recorder.add("distillation.teacher_batches", 1)
                 recorder.add("distillation.teacher_tokens", selected.numel())
             cache_bytes += sum(
                 value.numel() * value.element_size()
-                for value in (selected_cpu, values_cpu, vocabulary_indices_cpu)
+                for value in (selected_cpu, values_cpu, vocabulary_indices_cpu, weights_cpu)
+                if value is not None
             )
             batches.append(
                 TopKTeacherBatch(
@@ -344,6 +393,7 @@ def cache_topk_teacher_epoch(
                     selected_cpu,
                     values_cpu,
                     vocabulary_indices_cpu,
+                    weights_cpu,
                 )
             )
     recorder.add("distillation.teacher_cache_bytes", cache_bytes)
@@ -443,6 +493,9 @@ def distill_topk(
                             lm_head,
                             temperature=config.temperature,
                             token_chunk_size=config.token_chunk_size,
+                            token_weights=(
+                                None if target.token_weights is None else target.token_weights.to(device)
+                            ),
                         )
                         optimizer.zero_grad(set_to_none=True)
                         torch.autograd.backward(loss)
@@ -466,6 +519,9 @@ def distill_topk(
                                 lm_head,
                                 temperature=config.temperature,
                                 token_chunk_size=config.token_chunk_size,
+                                token_weights=(
+                                    None if target.token_weights is None else target.token_weights.to(device)
+                                ),
                             )
                         with recorder.phase("zero_grad"):
                             optimizer.zero_grad(set_to_none=True)

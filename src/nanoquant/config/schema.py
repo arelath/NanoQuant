@@ -137,6 +137,18 @@ class TuningEpochLossMode(StringEnum):
     LEGACY_TRAINING = "legacy_training"
 
 
+class ReasoningMode(StringEnum):
+    RAW = "raw"
+    THINKING = "thinking"
+    NON_THINKING = "non_thinking"
+
+
+class ChatReasoningMode(StringEnum):
+    SOURCE_DEFAULT = "source_default"
+    THINKING = "thinking"
+    NON_THINKING = "non_thinking"
+
+
 class ActivationRetention(StringEnum):
     ROLLING = "rolling"
     ALL = "all"
@@ -174,12 +186,26 @@ class DatasetSourceConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class BehaviorSliceConfig:
+    name: str
+    mode: ReasoningMode
+    source: DatasetSourceConfig
+    record_format: str
+    target_valid_token_fraction: float
+    assistant_target_weight: float = 1.0
+    prompt_target_weight: float = 0.0
+    partition: str = "train"
+    minimum_valid_tokens: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class DatasetConfig:
     sources: tuple[DatasetSourceConfig, ...] = (DatasetSourceConfig(name="wikitext2"),)
     formatting: str = "model_default"
     shuffle: bool = True
     selection_seed: int = 0
     cache_tokenized: bool = True
+    behavior_slices: tuple[BehaviorSliceConfig, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -576,6 +602,10 @@ class EvaluationConfig:
     inline_quality: bool = True
     inline_quality_samples: int = 1
     inline_quality_tokens: int = 8
+    reasoning_modes: tuple[ReasoningMode, ...] = ()
+    reasoning_samples_per_mode: int = 8
+    reasoning_sequence_length: int = 512
+    maximum_thinking_degradation_ratio: float = 1.10
 
 
 @dataclass(frozen=True, slots=True)

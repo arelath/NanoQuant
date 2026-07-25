@@ -23,6 +23,7 @@ from .safetensors_io import SAFETENSORS
 class TeacherCacheIdentity:
     protocol_hash: str
     token_hash: str
+    target_hash: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,17 +55,20 @@ def commit_teacher_epoch(
         values[f"{prefix}.token_indices"] = batch.token_indices.contiguous()
         values[f"{prefix}.top_values"] = batch.top_values.contiguous()
         values[f"{prefix}.top_indices"] = batch.top_indices.contiguous()
+        if batch.token_weights is not None:
+            values[f"{prefix}.token_weights"] = batch.token_weights.contiguous()
         manifest_batches.append({"prefix": prefix, "sample_indices": list(batch.sample_indices)})
         cache_bytes += sum(
             tensor.numel() * tensor.element_size()
-            for tensor in (batch.token_indices, batch.top_values, batch.top_indices)
+            for tensor in (batch.token_indices, batch.top_values, batch.top_indices, batch.token_weights)
+            if tensor is not None
         )
     if not values:
         raise ValueError("cannot commit an empty teacher-target epoch")
     with artifacts.recorder.phase("serialize"):
         encoded = json.dumps(
             {
-                "schema_version": 1,
+                "schema_version": 2 if any(batch.token_weights is not None for batch in batches) else 1,
                 "identity": to_dict(identity),
                 "epoch_index": epoch_index,
                 "bytes": cache_bytes,
@@ -96,6 +100,7 @@ def load_teacher_epoch(
     if observed_identity != identity:
         raise ValueError("teacher-cache artifact identity does not match the requested protocol")
     batches = []
+    schema_version = int(manifest.get("schema_version", 1))
     with SAFETENSORS.open(root / "targets.safetensors") as handle:
         for batch in manifest["batches"]:
             prefix = str(batch["prefix"])
@@ -105,6 +110,11 @@ def load_teacher_epoch(
                     handle.get_tensor(f"{prefix}.token_indices"),
                     handle.get_tensor(f"{prefix}.top_values"),
                     handle.get_tensor(f"{prefix}.top_indices"),
+                    (
+                        handle.get_tensor(f"{prefix}.token_weights")
+                        if schema_version >= 2
+                        else None
+                    ),
                 )
             )
     return CommittedTeacherEpoch(reference, int(manifest["epoch_index"]), tuple(batches), int(manifest["bytes"]))

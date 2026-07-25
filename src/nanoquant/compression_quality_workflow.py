@@ -14,7 +14,7 @@ from nanoquant.compression_export_workflow import (
     execute_complete_compression,
 )
 from nanoquant.config.codec import config_hash, to_dict
-from nanoquant.config.schema import ExecutorKind, RunConfig
+from nanoquant.config.schema import EvaluationTier, ExecutorKind, RunConfig
 from nanoquant.config.validation import ValidationPhase, raise_for_issues, validate
 from nanoquant.domain.constants import BackendType
 from nanoquant.infrastructure.huggingface_model_card import load_huggingface_model_card_metadata
@@ -226,6 +226,16 @@ def execute_compression_quality_experiment(
             experiment.large_model_guards
             or config.runtime.executor in {ExecutorKind.CPU_OFFLOAD, ExecutorKind.STREAMING}
         ),
+        reasoning_modes=config.evaluation.reasoning_modes,
+        reasoning_behavior_slices=config.dataset.behavior_slices,
+        reasoning_partition=(
+            "final"
+            if config.evaluation.default_tier is EvaluationTier.FULL
+            else "quick"
+        ),
+        reasoning_samples_per_mode=config.evaluation.reasoning_samples_per_mode,
+        reasoning_sequence_length=config.evaluation.reasoning_sequence_length,
+        maximum_thinking_degradation_ratio=config.evaluation.maximum_thinking_degradation_ratio,
     )
     prepared_quality = (
         prepare_quality_inputs(quality_request) if experiment.llamacpp_quality else None

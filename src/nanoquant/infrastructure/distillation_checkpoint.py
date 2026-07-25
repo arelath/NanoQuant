@@ -27,6 +27,7 @@ class DistillationCheckpointIdentity:
     source_blocks: tuple[ArtifactRef, ...]
     protocol_hash: str
     token_hash: str
+    target_hash: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

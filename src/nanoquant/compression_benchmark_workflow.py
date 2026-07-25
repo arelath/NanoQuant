@@ -14,7 +14,7 @@ from nanoquant.compression_export_workflow import (
     resolve_compression_export_recipe,
 )
 from nanoquant.config.codec import to_dict
-from nanoquant.config.schema import RunConfig
+from nanoquant.config.schema import EvaluationTier, RunConfig
 from nanoquant.infrastructure.huggingface_model_card import load_huggingface_model_card_metadata
 from nanoquant.infrastructure.huggingface_upload import huggingface_upload_summary
 from nanoquant.infrastructure.io_utils import atomic_write_json
@@ -139,6 +139,16 @@ def execute_compression_benchmark_experiment(
             task_batch_size=experiment.task_batch_size,
             local_files_only=experiment.local_files_only,
             packed_artifact=resolved.export.packed_output,
+            reasoning_modes=config.evaluation.reasoning_modes,
+            reasoning_behavior_slices=config.dataset.behavior_slices,
+            reasoning_partition=(
+                "final"
+                if config.evaluation.default_tier is EvaluationTier.FULL
+                else "quick"
+            ),
+            reasoning_samples_per_mode=config.evaluation.reasoning_samples_per_mode,
+            reasoning_sequence_length=config.evaluation.reasoning_sequence_length,
+            maximum_thinking_degradation_ratio=config.evaluation.maximum_thinking_degradation_ratio,
         )
     )
     quality_output = resolved.benchmark_output.with_suffix(".quality.json")

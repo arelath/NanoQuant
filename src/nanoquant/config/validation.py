@@ -47,6 +47,112 @@ def validate(config: RunConfig, phase: ValidationPhase = ValidationPhase.PRE_RES
     require(config.calibration.sample_count >= 0, "CFG004", "calibration.sample_count", "must not be negative")
     require(config.calibration.batch_size > 0, "CFG017", "calibration.batch_size", "must be positive")
     require(0 <= config.calibration.shrinkage <= 1, "CFG005", "calibration.shrinkage", "must be in [0, 1]")
+    behavior_slices = config.dataset.behavior_slices
+    behavior_names = tuple(item.name for item in behavior_slices)
+    require(
+        all(bool(name.strip()) for name in behavior_names),
+        "CFG088",
+        "dataset.behavior_slices",
+        "slice names must not be empty",
+    )
+    require(
+        len(set(behavior_names)) == len(behavior_names),
+        "CFG089",
+        "dataset.behavior_slices",
+        "slice names must be unique",
+    )
+    require(
+        all(
+            item.source.revision
+            and math.isfinite(item.target_valid_token_fraction)
+            and item.target_valid_token_fraction > 0
+            for item in behavior_slices
+        ),
+        "CFG090",
+        "dataset.behavior_slices",
+        "every slice requires a pinned source and a positive finite token fraction",
+    )
+    require(
+        not behavior_slices
+        or math.isclose(
+            sum(item.target_valid_token_fraction for item in behavior_slices),
+            1.0,
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        ),
+        "CFG091",
+        "dataset.behavior_slices",
+        "target valid-token fractions must sum to one",
+    )
+    require(
+        all(item.record_format in {"raw_text", "ultrachat_messages", "openr1_generations"} for item in behavior_slices),
+        "CFG092",
+        "dataset.behavior_slices",
+        "record format is unsupported",
+    )
+    require(
+        all(item.partition in {"train", "quick", "final"} for item in behavior_slices),
+        "CFG099",
+        "dataset.behavior_slices",
+        "partition must be train, quick, or final",
+    )
+    require(
+        all(
+            item.minimum_valid_tokens is None or item.minimum_valid_tokens > 0
+            for item in behavior_slices
+        ),
+        "CFG100",
+        "dataset.behavior_slices",
+        "minimum valid-token floors must be positive when configured",
+    )
+    require(
+        all(
+            math.isfinite(item.assistant_target_weight)
+            and item.assistant_target_weight >= 0
+            and math.isfinite(item.prompt_target_weight)
+            and item.prompt_target_weight >= 0
+            for item in behavior_slices
+        ),
+        "CFG093",
+        "dataset.behavior_slices",
+        "distillation weights must be finite and non-negative",
+    )
+    reasoning_modes = config.evaluation.reasoning_modes
+    require(
+        len(set(reasoning_modes)) == len(reasoning_modes),
+        "CFG094",
+        "evaluation.reasoning_modes",
+        "reasoning modes must be unique",
+    )
+    require(
+        all(mode.value in {"thinking", "non_thinking"} for mode in reasoning_modes),
+        "CFG095",
+        "evaluation.reasoning_modes",
+        "raw is not a chat reasoning evaluation mode",
+    )
+    require(
+        not reasoning_modes or config.evaluation.reasoning_samples_per_mode > 0,
+        "CFG096",
+        "evaluation.reasoning_samples_per_mode",
+        "must be positive",
+    )
+    require(
+        not reasoning_modes
+        or 2 <= config.evaluation.reasoning_sequence_length <= config.model.sequence_length,
+        "CFG097",
+        "evaluation.reasoning_sequence_length",
+        "must be between two and the model sequence length",
+    )
+    require(
+        not reasoning_modes
+        or (
+            math.isfinite(config.evaluation.maximum_thinking_degradation_ratio)
+            and config.evaluation.maximum_thinking_degradation_ratio >= 1
+        ),
+        "CFG098",
+        "evaluation.maximum_thinking_degradation_ratio",
+        "must be finite and at least one",
+    )
     require(config.allocation.target_bpw > 0, "CFG006", "allocation.target_bpw", "must be positive")
     require(config.allocation.bounds.multiple > 0, "CFG007", "allocation.bounds.multiple", "must be positive")
     kl_selected = config.allocation.strategy is AllocationStrategy.KL_CALIBRATED

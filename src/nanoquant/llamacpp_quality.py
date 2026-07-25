@@ -11,7 +11,9 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
+
+import torch
 
 from nanoquant.application.task_evaluation import (
     MultipleChoiceEvaluationResult,
@@ -249,6 +251,26 @@ def _quality_sequences(
                 )
         task_candidates.append(tuple(candidates))
         task_truncated.append(truncated)
+    for reasoning in prepared.reasoning:
+        for row_index in range(reasoning.input_ids.shape[0]):
+            valid = int(reasoning.attention_mask[row_index].sum())
+            target_positions = reasoning.target_mask[row_index, :valid].nonzero().flatten()
+            if target_positions.numel() == 0:
+                raise ValueError("reasoning quality sequence contains no response targets")
+            first_target = int(target_positions[0])
+            expected = torch.arange(
+                first_target,
+                valid - 1,
+                dtype=target_positions.dtype,
+            )
+            if not torch.equal(target_positions.cpu(), expected):
+                raise ValueError("llama.cpp reasoning quality requires one contiguous response span")
+            sequences.append(
+                _Sequence(
+                    tuple(int(token) for token in reasoning.input_ids[row_index, :valid].tolist()),
+                    first_target + 1,
+                )
+            )
     return tuple(sequences), tuple(task_candidates), tuple(task_truncated)
 
 
@@ -551,6 +573,24 @@ def execute_llamacpp_quality_evaluation(
                     "result": to_dict(result),
                 }
             )
+        reasoning = []
+        for prepared_reasoning in prepared.reasoning:
+            selected_scores = scores[offset : offset + prepared_reasoning.input_ids.shape[0]]
+            offset += prepared_reasoning.input_ids.shape[0]
+            total_nll = sum(score.negative_log_likelihood for score in selected_scores)
+            token_count = sum(score.token_count for score in selected_scores)
+            mean_nll = total_nll / token_count
+            reasoning.append(
+                {
+                    "mode": prepared_reasoning.mode.value,
+                    "identity": prepared_reasoning.identity,
+                    "total_negative_log_likelihood": total_nll,
+                    "mean_negative_log_likelihood": mean_nll,
+                    "perplexity": math.exp(mean_nll),
+                    "token_count": token_count,
+                    "sample_count": len(selected_scores),
+                }
+            )
         elapsed = time.perf_counter() - started
         candidate_result: dict[str, Any] = {
             "label": "gguf",
@@ -563,6 +603,7 @@ def execute_llamacpp_quality_evaluation(
                 "sample_count": wikitext_count,
             },
             "tasks": tasks,
+            "reasoning": reasoning,
             "elapsed_seconds": elapsed,
             "peak_device_bytes": measured.peak_device_bytes,
             "peak_device_shared_bytes": measured.peak_device_shared_bytes,
@@ -587,10 +628,18 @@ def execute_llamacpp_quality_evaluation(
             "runtime": runtime,
             "protocol": protocol,
             "results": {"base": base_result, "gguf": candidate_result},
-            "comparison": compare_quality_results(base_result, candidate_result),
+            "comparison": compare_quality_results(
+                base_result,
+                candidate_result,
+                quality.maximum_thinking_degradation_ratio,
+            ),
             "wall_seconds": elapsed,
             "reused": False,
         }
+        comparison_result = cast(dict[str, Any], payload["comparison"])
+        if "reasoning_cross_mode" in comparison_result:
+            cross_mode = cast(dict[str, object], comparison_result["reasoning_cross_mode"])
+            payload["passed"] = bool(cross_mode["passed"])
         atomic_write_json(request.output, payload)
         print(
             "llama.cpp GGUF quality completed: "
@@ -659,6 +708,13 @@ def render_llamacpp_quality_markdown(payload: dict[str, Any]) -> str:
         lines.append(
             f"| {item['task_name']} | {item['metric']} ↑ | {baseline:.4f} | "
             f"{candidate:.4f} | {candidate - baseline:+.4f} | {ratio_text} |"
+        )
+    for item in comparison.get("reasoning", []):
+        baseline = float(item["base_mean_nll"])
+        candidate = float(item["frozen_mean_nll"])
+        lines.append(
+            f"| Qwen3 {item['mode']} | response-token mean NLL ↓ | {baseline:.6f} | "
+            f"{candidate:.6f} | {candidate - baseline:+.6f} | {float(item['ratio']):.4f}x |"
         )
     return "\n".join((*lines, ""))
 

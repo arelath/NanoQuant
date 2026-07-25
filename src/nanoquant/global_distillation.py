@@ -90,6 +90,8 @@ class GlobalDistillationRequest:
     block_snapshot_tokens: int = 512
     block_snapshot_denominator_floor: float = 1e-12
     maximum_wddm_shared_bytes: int | None = None
+    distillation_target_mask: torch.Tensor | None = None
+    distillation_weights: torch.Tensor | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -368,7 +370,22 @@ def _run_global_topk_distillation(
     teacher_protocol["weight_decay"] = 0.01
     teacher_protocol_hash = semantic_hash(teacher_protocol)
     token_hash = "sha256:" + hashlib.sha256(token_bytes).hexdigest()
-    cache_identity = TeacherCacheIdentity(teacher_protocol_hash, token_hash)
+    target_hash = None
+    if request.distillation_target_mask is not None:
+        target_mask = request.distillation_target_mask.detach().cpu().bool()
+        if target_mask.shape != tokens.shape:
+            raise ValueError("global distillation target mask must match token IDs")
+        target_values = [target_mask.contiguous().view(torch.uint8).numpy().tobytes()]
+        if request.distillation_weights is not None:
+            target_weights = request.distillation_weights.detach().cpu().float()
+            if target_weights.shape != tokens.shape:
+                raise ValueError("global distillation weights must match token IDs")
+            target_values.append(target_weights.contiguous().view(torch.uint8).numpy().tobytes())
+        target_hash = "sha256:" + hashlib.sha256(b"".join(target_values)).hexdigest()
+    elif request.distillation_weights is not None:
+        raise ValueError("global distillation weights require a target mask")
+    data_hash = token_hash if target_hash is None else semantic_hash({"tokens": token_hash, "targets": target_hash})
+    cache_identity = TeacherCacheIdentity(teacher_protocol_hash, token_hash, target_hash)
     micro_recorder = recorder if request.profiling.level is ProfilingLevel.MICRO else NULL_RECORDER
     artifacts = LocalArtifactStore(request.run_output / "artifacts", recorder=micro_recorder)
     tensors = LocalTensorStore(artifacts)
@@ -430,6 +447,8 @@ def _run_global_topk_distillation(
                 epoch_index=epoch_index,
                 device=request.device,
                 pad_token_id=request.pad_token_id,
+                target_mask=request.distillation_target_mask,
+                target_weights=request.distillation_weights,
                 recorder=micro_recorder,
             )
             with recorder.phase("commit"):
@@ -470,7 +489,8 @@ def _run_global_topk_distillation(
     checkpoint_identity = DistillationCheckpointIdentity(
         tuple(block.teacher_outputs.artifact for block in loaded.blocks),
         protocol_hash,
-        token_hash,
+        data_hash,
+        target_hash,
     )
     active_checkpoint = active_distillation_checkpoint(request.run_output, checkpoint_identity, artifacts)
 
@@ -543,7 +563,7 @@ def _run_global_topk_distillation(
         tuned_blocks,
         tuple((name, auxiliary_refs[name]) for name in auxiliary_names),
         protocol_hash,
-        token_hash,
+        data_hash,
         metrics.epoch_losses,
         metrics.steps_completed,
         metrics.selected_parameter_count,

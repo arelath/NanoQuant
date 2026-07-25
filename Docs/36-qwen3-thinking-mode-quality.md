@@ -1,8 +1,40 @@
 # Qwen3 Thinking-Mode Quality Recovery
 
-Status: proposed
+Status: implemented; real-model promotion gates pending
 
 Audience: compression researchers, dataset/evaluation owners, runtime engineers, and release reviewers
+
+## 0. Implementation status
+
+The mode-aware recovery slice is implemented in the rewrite:
+
+- `ReasoningMode`, `ChatReasoningMode`, and `BehaviorSliceConfig` make training, evaluation, and runtime mode
+  selection explicit.
+- The Qwen3 chat behavior adapter renders the pinned template with an explicit `enable_thinking` value and rejects
+  empty thinking traces, non-empty non-thinking spans, missing answers, and prompt-prefix drift.
+- Schema-2 calibration artifacts persist aligned token roles, mode IDs, response-target masks, weights, ordered
+  record hashes, per-slice summaries, and rendering-policy identity. Schema-1 artifacts remain readable and
+  mode-unaware.
+- Conversational records are packed without splitting; over-length records are rejected. Hash-partitioned `train`,
+  `quick`, and `final` selections prevent the prepared evaluation slice from overlapping training by content.
+- Top-k teacher caches, resumable checkpoints, and global-tuning identities include the response-target policy.
+  Weighted KD consumes the prepared assistant-response mask while legacy recipes retain their original objective.
+- PyTorch and llama.cpp quality paths score held-out thinking and non-thinking response tokens independently and
+  enforce the configured cross-mode NLL degradation guard.
+- Runtime benchmarks accept `source_default`, `thinking`, or `non_thinking`; explicit modes fail closed on an
+  unsupported model family.
+- `tools/audit_qwen3_behavior.py` records the exact pinned prompt tokens and audits role/mode counts in a prepared
+  calibration artifact before CUDA work.
+- Experiment 030 is the pinned Qwen3 0.6B 25/25/50 recovery canary. Experiment 031 applies the same recipe to Qwen3
+  8B with serial llama.cpp scoring. Neither experiment automatically publishes to Hugging Face.
+
+The selected external thinking source is `open-r1/OpenR1-Math-220k` at revision
+`e4e141ec9dea9f8326f4d347be56105859b2bd68`; the recipe accepts only complete generations marked correct when that
+signal is available. The raw and UltraChat inputs retain their existing pinned revisions.
+
+This implementation does not close the issue by itself. The paired BF16/Experiment 028 diagnostic, generated
+mode-compliance and objective-task suites, Experiment 030 ablations, complete Experiment 031 run, artifact audit,
+and publication review remain real-model gates under Sections 9, 10, and 14.
 
 ## 1. Decision summary
 
@@ -129,9 +161,12 @@ class BehaviorSliceConfig:
     name: str
     mode: ReasoningMode
     source: DatasetSourceConfig
+    record_format: str
     target_valid_token_fraction: float
     assistant_target_weight: float = 1.0
     prompt_target_weight: float = 0.0
+    partition: str = "train"
+    minimum_valid_tokens: int | None = None
     trace_generation: TraceGenerationConfig | None = None
 ```
 
@@ -177,7 +212,9 @@ new_total >= max(C_raw / f_raw, C_non_thinking / f_non_thinking)
 ```
 
 For the initial 25/25/50 proposal, preserving both halves of the current 256-by-2048 control implies approximately
-twice the total valid-token budget. The 0.6B canary should establish whether a smaller budget preserves the same
+twice the total valid-token budget. Experiment 030 reserves 528 windows so indivisible-record packing can meet
+explicit 262,144-token floors for both raw and non-thinking slices; preparation fails if either floor is missed.
+The 0.6B canary should establish whether a smaller budget preserves the same
 quality, but a lower-cost run must be labeled as an ablation rather than described as additive coverage. The accepted
 8B recipe records both target fractions and absolute per-slice token counts.
 

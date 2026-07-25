@@ -107,8 +107,20 @@ case "${EXPERIMENT}" in
     REQUIRES_HF_WRITE=1
     PREFLIGHT_CCE=1
     ;;
+  030)
+    MODEL_ID="Qwen/Qwen3-0.6B"
+    MODEL_REVISION="c1899de289a04d12100db370d81485cdf75e47ca"
+    LAUNCHER="experiments/030-recover-qwen3-0-6b-thinking-quality.py"
+    PREFLIGHT_CCE=1
+    ;;
+  031)
+    MODEL_ID="Qwen/Qwen3-8B"
+    MODEL_REVISION="b968826d9c46dd6066d109eabc6255188de91218"
+    LAUNCHER="experiments/031-confirm-qwen3-8b-thinking-quality.py"
+    PREFLIGHT_CCE=1
+    ;;
   *)
-    echo "Unsupported NANOQUANT_EXPERIMENT=${EXPERIMENT}; choose 001, 003, 006, 007, 008, 009, 017, 018, 025, 026, 027, 028, or 029." >&2
+    echo "Unsupported NANOQUANT_EXPERIMENT=${EXPERIMENT}; choose 001, 003, 006, 007, 008, 009, 017, 018, 025, 026, 027, 028, 029, 030, or 031." >&2
     exit 2
     ;;
 esac

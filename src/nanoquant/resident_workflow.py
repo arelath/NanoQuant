@@ -76,6 +76,8 @@ class ResolvedResidentInputs:
     precomputed_calibration: ArtifactRef | None = None
     precomputed_objectives: ArtifactRef | None = None
     precomputed_plan: ArtifactRef | None = None
+    distillation_target_mask: torch.Tensor | None = None
+    distillation_weights: torch.Tensor | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -499,6 +501,8 @@ def distillation_request_from_config(
         source=config.model.source,
         revision=str(config.model.revision),
         token_ids=inputs.token_ids,
+        distillation_target_mask=inputs.distillation_target_mask,
+        distillation_weights=inputs.distillation_weights,
         config=TopKDistillationConfig(
             epochs=distillation.epochs,
             batch_size=distillation.batch_size,
@@ -670,13 +674,25 @@ def resolve_resident_experiment_inputs(config: RunConfig, *, launcher_path: str 
     if not registry_root.is_absolute():
         registry_root = repository_root / registry_root
     output = registry_root / config.intent.name
-    calibration = load_or_prepare_calibration(
-        snapshot,
-        output,
-        sample_count=config.calibration.sample_count,
-        sequence_length=config.model.sequence_length,
-        seed=config.dataset.selection_seed,
-        preparation_id=config_hash(config),
+    calibration = (
+        load_or_prepare_calibration(
+            snapshot,
+            output,
+            sample_count=config.calibration.sample_count,
+            sequence_length=config.model.sequence_length,
+            seed=config.dataset.selection_seed,
+            preparation_id=config_hash(config),
+            dataset_config=config.dataset,
+        )
+        if config.dataset.behavior_slices
+        else load_or_prepare_calibration(
+            snapshot,
+            output,
+            sample_count=config.calibration.sample_count,
+            sequence_length=config.model.sequence_length,
+            seed=config.dataset.selection_seed,
+            preparation_id=config_hash(config),
+        )
     )
     tokens = calibration.input_ids
     quality_tokens = None
@@ -698,6 +714,8 @@ def resolve_resident_experiment_inputs(config: RunConfig, *, launcher_path: str 
         quality_token_ids=quality_tokens,
         launcher_path=launcher,
         pad_token_id=pad_token_id,
+        distillation_target_mask=getattr(calibration, "distillation_target_mask", None),
+        distillation_weights=getattr(calibration, "distillation_weights", None),
     )
 
 

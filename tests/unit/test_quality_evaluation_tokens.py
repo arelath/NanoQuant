@@ -185,3 +185,30 @@ def test_base_only_quality_does_not_load_a_pytorch_candidate(
     assert result["candidate"] is None
     assert tuple(result["results"]) == ("base",)
     assert result["comparison"] is None
+
+
+def test_reasoning_comparison_rejects_hidden_thinking_regression() -> None:
+    base = {
+        "wikitext": {"perplexity": 10.0},
+        "tasks": [],
+        "reasoning": [
+            {"mode": "thinking", "mean_negative_log_likelihood": 2.0},
+            {"mode": "non_thinking", "mean_negative_log_likelihood": 1.0},
+        ],
+    }
+    candidate = {
+        "wikitext": {"perplexity": 10.0},
+        "tasks": [],
+        "reasoning": [
+            {"mode": "thinking", "mean_negative_log_likelihood": 2.6},
+            {"mode": "non_thinking", "mean_negative_log_likelihood": 1.05},
+        ],
+    }
+
+    comparison = quality_evaluation.compare_quality_results(base, candidate, 1.10)
+
+    assert comparison["reasoning_cross_mode"]["passed"] is False
+    assert {item["mode"] for item in comparison["reasoning"]} == {
+        "thinking",
+        "non_thinking",
+    }

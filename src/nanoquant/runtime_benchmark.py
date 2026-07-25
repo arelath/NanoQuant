@@ -19,6 +19,8 @@ from torch import nn
 from transformers import AutoModelForCausalLM
 from transformers.models.auto.tokenization_auto import AutoTokenizer
 
+from nanoquant.config.schema import ChatReasoningMode, ReasoningMode
+from nanoquant.infrastructure.chat_behaviors import chat_behavior_for_snapshot
 from nanoquant.infrastructure.device_lease import wait_for_device_lease
 from nanoquant.infrastructure.io_utils import atomic_write_json, hash_file
 from nanoquant.infrastructure.resource_usage import peak_process_memory_bytes
@@ -86,6 +88,7 @@ class RuntimeBenchmarkRequest:
     layer: str | None = None
     block_index: int = 0
     chat_template: bool = True
+    reasoning_mode: ChatReasoningMode = ChatReasoningMode.SOURCE_DEFAULT
     ignore_eos: bool = True
     prompt: tuple[str, ...] = ("Write a short paragraph about quantization.",)
     wait_for_device_seconds: float = 0.0
@@ -105,6 +108,8 @@ class RuntimeBenchmarkRequest:
             raise ValueError("runtime benchmark block index must not be negative")
         if not self.prompt or any(not item for item in self.prompt):
             raise ValueError("runtime benchmark prompts must be non-empty")
+        if not self.chat_template and self.reasoning_mode is not ChatReasoningMode.SOURCE_DEFAULT:
+            raise ValueError("runtime benchmark reasoning mode requires chat-template rendering")
         if self.wait_for_device_seconds < 0:
             raise ValueError("runtime benchmark device wait must not be negative")
 
@@ -364,8 +369,10 @@ def _benchmark(args: RuntimeBenchmarkRequest) -> dict[str, Any]:
         raise ValueError("benchmark block index is outside the packed artifact")
 
     tokenizer = AutoTokenizer.from_pretrained(args.model, local_files_only=False)
-    prompt_ids = (
-        tuple(
+    if not args.chat_template:
+        prompt_ids = tuple(tokenizer.encode(prompt, add_special_tokens=True) for prompt in args.prompt)
+    elif args.reasoning_mode is ChatReasoningMode.SOURCE_DEFAULT:
+        prompt_ids = tuple(
             tokenizer.apply_chat_template(
                 [{"role": "user", "content": prompt}],
                 tokenize=True,
@@ -373,9 +380,21 @@ def _benchmark(args: RuntimeBenchmarkRequest) -> dict[str, Any]:
             )
             for prompt in args.prompt
         )
-        if args.chat_template
-        else tuple(tokenizer.encode(prompt, add_special_tokens=True) for prompt in args.prompt)
-    )
+    else:
+        behavior = chat_behavior_for_snapshot(args.model)
+        mode = (
+            ReasoningMode.THINKING
+            if args.reasoning_mode is ChatReasoningMode.THINKING
+            else ReasoningMode.NON_THINKING
+        )
+        prompt_ids = tuple(
+            behavior.render_generation_prompt(
+                tokenizer,
+                [{"role": "user", "content": prompt}],
+                mode,
+            )
+            for prompt in args.prompt
+        )
     pad_token_id = tokenizer.pad_token_id
     if pad_token_id is None:
         raise ValueError("model tokenizer contains no pad token ID")
@@ -824,6 +843,11 @@ def _benchmark(args: RuntimeBenchmarkRequest) -> dict[str, Any]:
             "repetitions": args.repetitions,
             "prompt": args.prompt,
             "chat_template": args.chat_template,
+            **(
+                {}
+                if args.reasoning_mode is ChatReasoningMode.SOURCE_DEFAULT
+                else {"reasoning_mode": args.reasoning_mode.value}
+            ),
             "prompt_lengths": [len(item) for item in prompt_ids],
             "prompt_width": prompt_width,
             "batch_size": batch_size,
@@ -945,6 +969,11 @@ def main() -> None:
     parser.add_argument("--layer")
     parser.add_argument("--block-index", type=int, default=0)
     parser.add_argument("--chat-template", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--reasoning-mode",
+        choices=tuple(mode.value for mode in ChatReasoningMode),
+        default=ChatReasoningMode.SOURCE_DEFAULT.value,
+    )
     parser.add_argument("--ignore-eos", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--prompt", action="append", default=[])
     parser.add_argument("--wait-for-device-seconds", type=float, default=0.0)
@@ -976,6 +1005,7 @@ def main() -> None:
         layer=args.layer,
         block_index=args.block_index,
         chat_template=args.chat_template,
+        reasoning_mode=ChatReasoningMode(args.reasoning_mode),
         ignore_eos=args.ignore_eos,
         prompt=tuple(args.prompt or ("Write a short paragraph about quantization.",)),
         wait_for_device_seconds=args.wait_for_device_seconds,

@@ -160,7 +160,10 @@ def render_quality_evaluation_markdown(payload: dict[str, Any]) -> str:
         f"- Backend: `{_markdown_cell(candidate['backend'])}`",
         f"- Wall time: {_number(payload['wall_seconds'], 'wall_seconds'):.2f} seconds",
         "",
-        "`completed` means all evaluators returned finite metrics; it is not a BF16-quality acceptance gate.",
+        (
+            "`completed` means all evaluators returned finite metrics and any configured cross-mode NLL "
+            "guard passed; task-retention and generation gates remain separate."
+        ),
         "",
         "## Protocol",
         "",
@@ -192,6 +195,26 @@ def render_quality_evaluation_markdown(payload: dict[str, Any]) -> str:
         lines.append(
             f"| {_markdown_cell(item['task_name'])} | {_markdown_cell(item['metric'])} ↑ | "
             f"{baseline:.4f} | {value:.4f} | {value - baseline:+.4f} | {ratio_text} |"
+        )
+    for item in cast(list[dict[str, object]], comparison.get("reasoning", [])):
+        baseline = _number(item["base_mean_nll"], "reasoning base NLL")
+        value = _number(item["frozen_mean_nll"], "reasoning frozen NLL")
+        ratio = _number(item["ratio"], "reasoning ratio")
+        lines.append(
+            f"| Qwen3 {_markdown_cell(item['mode'])} | response-token mean NLL ↓ | "
+            f"{baseline:.6f} | {value:.6f} | {value - baseline:+.6f} | {ratio:.4f}x |"
+        )
+    if comparison.get("reasoning"):
+        cross_mode = cast(dict[str, object], comparison["reasoning_cross_mode"])
+        lines.extend(
+            (
+                "",
+                (
+                    "- Thinking/non-thinking degradation guard: "
+                    f"`{'passed' if cross_mode['passed'] else 'failed'}` "
+                    f"(margin {_number(cross_mode['maximum_thinking_degradation_ratio'], 'reasoning margin'):.3f}x)"
+                ),
+            )
         )
     lines.extend(_deployment_storage_markdown(payload))
     if candidate["backend"] == "llama.cpp":

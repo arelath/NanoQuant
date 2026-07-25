@@ -5,8 +5,10 @@ from nanoquant.config.schema import (
     ActivationGpuCacheMode,
     ADMMConfig,
     AllocationStrategy,
+    BehaviorSliceConfig,
     CalibrationMethod,
     DatasetSourceConfig,
+    EvaluationTier,
     ExecutorKind,
     LayerRankBudgetConfig,
     MemoryPolicyMode,
@@ -14,6 +16,7 @@ from nanoquant.config.schema import (
     OutlierSelector,
     RankResponseCurveConfig,
     RankResponseSegmentConfig,
+    ReasoningMode,
     ReconstructionImportanceConfig,
     ReconstructionRankPlanningConfig,
     SharedInputFactorizationConfig,
@@ -428,6 +431,72 @@ QWEN_3_8B_COMPRESSION_TEMPLATE = apply_overrides(
     },
 )
 
+OPENR1_MATH_220K_REVISION = "e4e141ec9dea9f8326f4d347be56105859b2bd68"
+
+_QWEN_DUAL_MODE_SLICES = (
+    BehaviorSliceConfig(
+        "raw",
+        ReasoningMode.RAW,
+        DatasetSourceConfig(
+            "Salesforce/wikitext",
+            revision="b08601e04326c79dfdd32d625aee71d232d685c3",
+            subset="wikitext-2-raw-v1",
+        ),
+        "raw_text",
+        0.25,
+        minimum_valid_tokens=256 // 2 * 2048,
+    ),
+    BehaviorSliceConfig(
+        "non-thinking",
+        ReasoningMode.NON_THINKING,
+        DatasetSourceConfig(
+            "HuggingFaceH4/ultrachat_200k",
+            revision="8049631c405ae6576f93f445c6b8166f76f5505a",
+            split="train_sft",
+        ),
+        "ultrachat_messages",
+        0.25,
+        minimum_valid_tokens=256 // 2 * 2048,
+    ),
+    BehaviorSliceConfig(
+        "thinking",
+        ReasoningMode.THINKING,
+        DatasetSourceConfig(
+            "open-r1/OpenR1-Math-220k",
+            revision=OPENR1_MATH_220K_REVISION,
+        ),
+        "openr1_generations",
+        0.50,
+    ),
+)
+
+QWEN_3_0_6B_DUAL_MODE_COMPRESSION_TEMPLATE = config_delta(
+    QWEN_3_0_6B_COMPRESSION_TEMPLATE,
+    dataset=config_delta(
+        QWEN_3_0_6B_COMPRESSION_TEMPLATE.dataset,
+        sources=tuple(item.source for item in _QWEN_DUAL_MODE_SLICES),
+        formatting="qwen3-dual-mode-behavior-v1",
+        behavior_slices=_QWEN_DUAL_MODE_SLICES,
+    ),
+    calibration=config_delta(
+        QWEN_3_0_6B_COMPRESSION_TEMPLATE.calibration,
+        sample_count=528,
+    ),
+    evaluation=config_delta(
+        QWEN_3_0_6B_COMPRESSION_TEMPLATE.evaluation,
+        reasoning_modes=(ReasoningMode.THINKING, ReasoningMode.NON_THINKING),
+    ),
+)
+
+QWEN_3_8B_DUAL_MODE_COMPRESSION_TEMPLATE = config_delta(
+    QWEN_3_0_6B_DUAL_MODE_COMPRESSION_TEMPLATE,
+    model=QWEN_3_8B_COMPRESSION_TEMPLATE.model,
+    evaluation=config_delta(
+        QWEN_3_0_6B_DUAL_MODE_COMPRESSION_TEMPLATE.evaluation,
+        default_tier=EvaluationTier.FULL,
+    ),
+)
+
 
 LARGE_MODEL_COMPRESSION_TEMPLATE = config_delta(
     BASE_COMPRESSION_TEMPLATE,
@@ -473,8 +542,10 @@ __all__ = [
     "META_LLAMA_3_8B_INSTRUCT_MODEL_REVISION",
     "MODEL_REVISION",
     "QWEN_3_0_6B_COMPRESSION_TEMPLATE",
+    "QWEN_3_0_6B_DUAL_MODE_COMPRESSION_TEMPLATE",
     "QWEN_3_0_6B_MODEL_REVISION",
     "QWEN_3_8B_COMPRESSION_TEMPLATE",
+    "QWEN_3_8B_DUAL_MODE_COMPRESSION_TEMPLATE",
     "QWEN_3_8B_MODEL_REVISION",
     "RECONSTRUCTION_AWARE_STACKED_QKV_COMPRESSION_TEMPLATE",
     "STACKED_QKV_COMPRESSION_TEMPLATE",

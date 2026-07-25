@@ -11,6 +11,8 @@ from nanoquant.config.schema import (
     ActivationStorageConfig,
     ActivationStoreKind,
     AllocationStrategy,
+    BehaviorSliceConfig,
+    DatasetConfig,
     DatasetSourceConfig,
     DType,
     KlSensitivityGranularity,
@@ -20,6 +22,7 @@ from nanoquant.config.schema import (
     ObservabilityConfig,
     ProfilingConfig,
     ProfilingLevel,
+    ReasoningMode,
     RunConfig,
 )
 from nanoquant.config.validation import ValidationPhase, validate
@@ -50,6 +53,38 @@ def test_round_trip_decodes_nested_enums_tuples_and_optionals() -> None:
     assert config.calibration.objective.kind is ObjectiveKind.LOW_RANK_DIAGONAL
     assert config.profiling.level is ProfilingLevel.MICRO
     assert config.profiling.trace_blocks == (3, 7)
+    assert from_dict(RunConfig, to_dict(config)) == config
+
+
+def test_behavior_slices_and_reasoning_modes_round_trip_and_validate() -> None:
+    source = DatasetSourceConfig("fixture/reasoning", revision="pinned")
+    config = replace(
+        RunConfig(ModelConfig("x")),
+        dataset=DatasetConfig(
+            behavior_slices=(
+                BehaviorSliceConfig(
+                    "thinking",
+                    ReasoningMode.THINKING,
+                    source,
+                    "openr1_generations",
+                    0.5,
+                ),
+                BehaviorSliceConfig(
+                    "non-thinking",
+                    ReasoningMode.NON_THINKING,
+                    source,
+                    "ultrachat_messages",
+                    0.5,
+                ),
+            )
+        ),
+        evaluation=replace(
+            RunConfig(ModelConfig("x")).evaluation,
+            reasoning_modes=(ReasoningMode.THINKING, ReasoningMode.NON_THINKING),
+        ),
+    )
+
+    assert not validate(config)
     assert from_dict(RunConfig, to_dict(config)) == config
 
 

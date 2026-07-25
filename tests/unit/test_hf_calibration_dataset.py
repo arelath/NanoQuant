@@ -10,12 +10,15 @@ import nanoquant.infrastructure.hf_calibration_dataset as calibration_module
 from nanoquant.domain.models import ArtifactRef
 from nanoquant.infrastructure.hf_calibration_dataset import (
     PinnedCalibrationDataset,
+    _openr1_messages,
+    _pack_behavior_records,
     _pack_chat_records,
     _slice_wikitext,
     load_or_prepare_calibration,
     load_pinned_calibration,
     materialize_pinned_calibration,
 )
+from nanoquant.ports.chat_behavior import RenderedBehaviorRecord
 
 
 class Tokenizer:
@@ -39,6 +42,57 @@ def test_chat_packing_and_wikitext_slicing_are_exact_length_and_deterministic() 
     assert len(chat) == 3 and all(len(row) == 10 for row in chat)
     assert all(len(row) == 8 for row in first)
     assert first == second
+
+
+def test_behavior_packing_never_splits_records_and_rejects_overlength_units() -> None:
+    def record(length: int, value: int) -> RenderedBehaviorRecord:
+        return RenderedBehaviorRecord(
+            (value,) * length,
+            (2,) * length,
+            (2,) * length,
+            (False,) * length,
+            (0.0,) * length,
+        )
+
+    windows, receipts, rejected = _pack_behavior_records(
+        (record(7, 7), record(4, 4), record(11, 9), record(6, 6)),
+        count=2,
+        sequence_length=10,
+        pad_token_id=0,
+    )
+
+    assert windows[0][0] == [7] * 7 + [0] * 3
+    assert windows[1][0] == [4] * 4 + [6] * 6
+    assert len(receipts) == 3
+    assert rejected == 1
+
+
+def test_openr1_normalization_selects_a_complete_verified_generation() -> None:
+    messages = _openr1_messages(
+        {
+            "problem": "2+2?",
+            "generations": [
+                "<think>wrong path</think>3",
+                "<think>add the terms</think>4",
+            ],
+            "correctness_math_verify": [False, True],
+        }
+    )
+
+    assert messages[-1] == {
+        "role": "assistant",
+        "reasoning_content": "add the terms",
+        "content": "4",
+    }
+
+    with pytest.raises(ValueError, match="no generation marked correct"):
+        _openr1_messages(
+            {
+                "problem": "2+2?",
+                "generations": ["<think>wrong</think>3"],
+                "correctness_math_verify": [False],
+            }
+        )
 
 
 def _fixture_calibration(artifact_id: str = "sha256-" + "1" * 64) -> PinnedCalibrationDataset:

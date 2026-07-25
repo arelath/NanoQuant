@@ -122,6 +122,42 @@ def test_topk_loss_matches_selected_teacher_cross_entropy() -> None:
     assert float(actual.detach()) == pytest.approx(float(expected.detach()))
 
 
+def test_target_mask_and_weights_control_cached_tokens_and_weighted_loss() -> None:
+    torch.manual_seed(51)
+    teacher = ToyLanguageModel()
+    tokens = torch.arange(10).remainder(17).reshape(2, 5)
+    target_mask = torch.tensor(
+        ((False, True, False, True, False), (True, False, False, False, True))
+    )
+    weights = torch.tensor(((0.0, 1.0, 0.0, 3.0, 0.0), (2.0, 0.0, 0.0, 0.0, 4.0)))
+    config = TopKDistillationConfig(
+        epochs=1,
+        batch_size=2,
+        top_k=4,
+        maximum_tokens_per_batch=None,
+    )
+
+    cache = cache_topk_teacher_targets(
+        teacher,
+        tokens,
+        teacher.lm_head,
+        _hidden,
+        config,
+        device="cpu",
+        pad_token_id=None,
+        target_mask=target_mask,
+        target_weights=weights,
+    )
+
+    batch = cache.epochs[0][0]
+    selected_samples = torch.tensor(batch.sample_indices)
+    expected_mask = target_mask.index_select(0, selected_samples).reshape(-1)
+    expected_weights = weights.index_select(0, selected_samples).reshape(-1)[expected_mask]
+    assert batch.token_indices.tolist() == expected_mask.nonzero().flatten().tolist()
+    assert batch.token_weights is not None
+    assert torch.equal(batch.token_weights, expected_weights)
+
+
 def test_cached_topk_distillation_is_bounded_deterministic_and_improves_student() -> None:
     torch.manual_seed(7)
     teacher = ToyLanguageModel()
