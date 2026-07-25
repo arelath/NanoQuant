@@ -32,6 +32,7 @@ from nanoquant.infrastructure.commits import (
 )
 from nanoquant.infrastructure.frozen_model_loader import LoadedFrozenModel
 from nanoquant.infrastructure.global_tuning import active_global_tuning, load_global_tuning
+from nanoquant.infrastructure.hf_model_protocol import HuggingFaceModel
 from nanoquant.infrastructure.tensor_store import LocalTensorStore
 
 
@@ -388,7 +389,9 @@ class DenseKlSpliceEvaluator:
         with torch.no_grad():
             for start in range(0, self.token_ids.shape[0], self.batch_size):
                 batch = self.token_ids[start : start + self.batch_size].to(self.device)
-                logits = cast(Any, self.teacher)(input_ids=batch, use_cache=False).logits
+                logits = cast(HuggingFaceModel, self.teacher)(
+                    input_ids=batch, use_cache=False
+                ).logits
                 log_probs = torch.log_softmax(logits[:, :-1].float(), dim=-1)
                 labels = batch[:, 1:].reshape(-1, 1)
                 total_nll -= float(log_probs.reshape(-1, log_probs.shape[-1]).gather(1, labels).sum())
@@ -406,7 +409,9 @@ class DenseKlSpliceEvaluator:
         with torch.no_grad():
             for start in range(0, self.token_ids.shape[0], self.batch_size):
                 batch = self.token_ids[start : start + self.batch_size].to(self.device)
-                logits = cast(Any, self.teacher)(input_ids=batch, use_cache=False).logits
+                logits = cast(HuggingFaceModel, self.teacher)(
+                    input_ids=batch, use_cache=False
+                ).logits
                 log_probs = torch.log_softmax(logits.float(), dim=-1)
                 labels = batch[:, 1:].reshape(-1, 1)
                 shifted = log_probs[:, :-1]
@@ -482,7 +487,9 @@ class DenseKlSpliceEvaluator:
             with torch.no_grad():
                 for batch_index, start in enumerate(range(0, self.token_ids.shape[0], self.batch_size)):
                     batch = self.token_ids[start : start + self.batch_size].to(self.device)
-                    logits = cast(Any, self.teacher)(input_ids=batch, use_cache=False).logits
+                    logits = cast(HuggingFaceModel, self.teacher)(
+                        input_ids=batch, use_cache=False
+                    ).logits
                     sequences.extend(
                         causal_kl_nll_per_sequence_from_logits(
                             self._teacher_log_probs[batch_index].to(self.device),
@@ -504,10 +511,14 @@ class DenseKlSpliceEvaluator:
             with torch.no_grad():
                 for start in range(0, self.token_ids.shape[0], self.batch_size):
                     batch = self.token_ids[start : start + self.batch_size].to(self.device)
-                    teacher_logits = cast(Any, self.teacher)(input_ids=batch, use_cache=False).logits
+                    teacher_logits = cast(HuggingFaceModel, self.teacher)(
+                        input_ids=batch, use_cache=False
+                    ).logits
                     self._install(layers)
                     installed = True
-                    student_logits = cast(Any, self.teacher)(input_ids=batch, use_cache=False).logits
+                    student_logits = cast(HuggingFaceModel, self.teacher)(
+                        input_ids=batch, use_cache=False
+                    ).logits
                     self._restore(layers)
                     installed = False
                     teacher_log_probs = torch.log_softmax(teacher_logits.float(), dim=-1).to(

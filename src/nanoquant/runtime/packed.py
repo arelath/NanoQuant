@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import torch
 
 from nanoquant.runtime.backend import QuantizedLinearSpec
-from nanoquant.runtime.logical import LogicalLayerState, canonical_torch_dtype
+from nanoquant.runtime.logical import LogicalLayerState, canonical_torch_dtype, parse_torch_dtype
 
 PACKED_LAYOUT_VERSION = "llama.cpp-i32-lsb-v1"
 PACKED_WORD_BITS = 32
@@ -218,13 +218,11 @@ def unpack_sign_matrix(
 
 
 def _factor_dtype(name: str) -> torch.dtype:
+    if name not in ("float16", "bfloat16", "float32"):
+        raise ValueError(f"packed layout does not support logical factor dtype: {name}")
     try:
-        return {
-            "float16": torch.float16,
-            "bfloat16": torch.bfloat16,
-            "float32": torch.float32,
-        }[name]
-    except KeyError as error:
+        return parse_torch_dtype(name)
+    except ValueError as error:
         raise ValueError(f"packed layout does not support logical factor dtype: {name}") from error
 
 

@@ -31,7 +31,7 @@ from nanoquant.application.layers import (
     TrainableFactorizedLinear,
     TrainableSharedInputFactorGroup,
 )
-from nanoquant.config.codec import canonical_json, to_dict
+from nanoquant.config.codec import semantic_hash, to_dict
 from nanoquant.config.schema import ProfilingConfig, ProfilingLevel
 from nanoquant.domain.models import (
     ArtifactRef,
@@ -64,6 +64,7 @@ from nanoquant.infrastructure.distillation_checkpoint import (
 from nanoquant.infrastructure.frozen_model_loader import LoadedFrozenModel, load_frozen_run
 from nanoquant.infrastructure.global_tuning import activate_global_tuning, commit_global_tuning
 from nanoquant.infrastructure.hf_language_model import load_causal_language_model
+from nanoquant.infrastructure.memory_cleanup import release_memory
 from nanoquant.infrastructure.profiling import profiled_run
 from nanoquant.infrastructure.resource_usage import peak_device_memory_bytes, peak_process_memory_bytes
 from nanoquant.infrastructure.tensor_store import LocalTensorStore
@@ -356,7 +357,7 @@ def _run_global_topk_distillation(
         denominator_floor=request.block_snapshot_denominator_floor,
     )
     token_bytes = tokens.contiguous().view(torch.uint8).numpy().tobytes()
-    protocol_hash = "sha256:" + hashlib.sha256(canonical_json(request.config).encode()).hexdigest()
+    protocol_hash = semantic_hash(request.config)
     teacher_protocol = to_dict(request.config)
     if not isinstance(teacher_protocol, dict):
         raise TypeError("distillation config did not encode as an object")
@@ -365,7 +366,7 @@ def _run_global_topk_distillation(
     # affect teacher targets. Normalize it to the original protocol value so
     # the legacy-zero-decay correction can reuse the already committed cache.
     teacher_protocol["weight_decay"] = 0.01
-    teacher_protocol_hash = "sha256:" + hashlib.sha256(canonical_json(teacher_protocol).encode()).hexdigest()
+    teacher_protocol_hash = semantic_hash(teacher_protocol)
     token_hash = "sha256:" + hashlib.sha256(token_bytes).hexdigest()
     cache_identity = TeacherCacheIdentity(teacher_protocol_hash, token_hash)
     micro_recorder = recorder if request.profiling.level is ProfilingLevel.MICRO else NULL_RECORDER
@@ -441,9 +442,7 @@ def _run_global_topk_distillation(
                 )
     teacher.cpu()
     del teacher_head, teacher
-    gc.collect()
-    if request.device.startswith("cuda"):
-        torch.cuda.empty_cache()
+    release_memory(request.device)
     with recorder.phase("teacher_cache_load"):
         teacher_cache = materialize_teacher_cache(cache_journal, artifacts)
 

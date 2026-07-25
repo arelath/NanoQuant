@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import math
 import re
 from collections.abc import Callable, Iterable, Mapping
@@ -12,13 +11,13 @@ import torch
 
 from nanoquant.application.evaluation import EvaluationPartition, EvaluatorRegistry, EvaluatorSpec, LogitsFunction
 from nanoquant.application.evaluation_cache import TaskInputCacheIdentity
-from nanoquant.config.codec import canonical_json
+from nanoquant.config.codec import canonical_json, semantic_hash
 
 TokenizePair = Callable[[str, str], tuple[tuple[int, ...], tuple[int, ...]]]
 
 
 def _hash(value: object) -> str:
-    return "sha256:" + hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
+    return semantic_hash(value)
 
 
 @dataclass(frozen=True, slots=True)

@@ -6,10 +6,10 @@ from recipes import (
     ExperimentIdentity,
     ExperimentRef,
     define_compression_quality_experiment,
+    experiment_main,
 )
 from recipes._delta import config_delta
 
-from nanoquant.compression_quality_workflow import run_compression_quality_experiment
 from nanoquant.config.schema import DType
 
 PARENT = ExperimentRef(6, "compress-and-benchmark-gemma-3-1b-it")
@@ -52,11 +52,4 @@ EXPERIMENT = define_compression_quality_experiment(
 )
 
 
-if __name__ == "__main__":
-    raise SystemExit(
-        run_compression_quality_experiment(
-            EXPERIMENT.config,
-            EXPERIMENT.workflow,
-            launcher_path=__file__,
-        )
-    )
+experiment_main(__name__, __file__, EXPERIMENT)

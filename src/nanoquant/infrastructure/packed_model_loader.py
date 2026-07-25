@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import gc
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import cast
 
 import torch
 from torch import nn
@@ -20,7 +19,9 @@ from nanoquant.domain.linear_math import functional_dense_reconstruction
 from nanoquant.domain.models import ArtifactRef
 from nanoquant.infrastructure.commits import CommitIdentity
 from nanoquant.infrastructure.hf_language_model import load_causal_language_model
+from nanoquant.infrastructure.hf_model_protocol import HuggingFaceModel
 from nanoquant.infrastructure.io_utils import hash_file
+from nanoquant.infrastructure.memory_cleanup import release_memory
 from nanoquant.infrastructure.model_adapters import adapter_for_config
 from nanoquant.infrastructure.runtime_export import load_frozen_run_auxiliary
 from nanoquant.infrastructure.safetensors_source import SafetensorsModelSource
@@ -146,9 +147,7 @@ def load_packed_model(
             else:
                 editor.install_frozen_layer(block, relative_name, module)
             del state, module
-        gc.collect()
-        if torch.cuda.is_available() and device.startswith("cuda"):
-            torch.cuda.empty_cache()
+        release_memory(device)
 
     auxiliary = load_frozen_run_auxiliary(
         auxiliary_run,
@@ -166,7 +165,7 @@ def load_packed_model(
                 raise ValueError(f"packed quality auxiliary parameter shape differs: {name}")
             target.copy_(value.to(device=device, dtype=target.dtype))
     del parameters
-    cast(Any, model).config.use_cache = False
+    cast(HuggingFaceModel, model).config.use_cache = False
     return LoadedPackedModel(
         model,
         packed,

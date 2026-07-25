@@ -51,12 +51,9 @@ from nanoquant.runtime import (
     transformers_decoder_module_paths,
 )
 from nanoquant.runtime.backend import WorkloadKind
+from nanoquant.runtime.logical import parse_torch_dtype
 
-_DTYPES = {
-    "float16": torch.float16,
-    "bfloat16": torch.bfloat16,
-    "float32": torch.float32,
-}
+_DTYPE_NAMES = ("float16", "bfloat16", "float32")
 _SUITES = ("kernel", "layer", "block", "prefill", "decode", "end-to-end")
 
 
@@ -96,7 +93,7 @@ class RuntimeBenchmarkRequest:
     def __post_init__(self) -> None:
         if self.expected_blocks <= 0:
             raise ValueError("runtime benchmark expected block count must be positive")
-        if self.input_dtype not in _DTYPES or self.cache_dtype not in {None, *_DTYPES}:
+        if self.input_dtype not in _DTYPE_NAMES or self.cache_dtype not in {None, *_DTYPE_NAMES}:
             raise ValueError("runtime benchmark dtype is unsupported")
         if not self.suite or any(item not in {"all", *_SUITES} for item in self.suite):
             raise ValueError("runtime benchmark suite is unsupported")
@@ -352,7 +349,7 @@ def _benchmark(args: RuntimeBenchmarkRequest) -> dict[str, Any]:
         raise ValueError("packed runtime benchmarks require a CUDA device")
     if device.index is None:
         device = torch.device("cuda", torch.cuda.current_device())
-    dtype = _DTYPES[args.input_dtype]
+    dtype = parse_torch_dtype(args.input_dtype)
     selected_suites = set(_SUITES if "all" in args.suite else args.suite)
     artifact = open_packed_artifact(args.packed_artifact, verify_hashes=True)
     entries = tuple(entry for block in artifact.manifest.blocks for entry in block.layers)
@@ -473,7 +470,7 @@ def _benchmark(args: RuntimeBenchmarkRequest) -> dict[str, Any]:
         full_attention_mask[:, :prompt_width] = device_attention_mask
         cache_factory = hybrid_cache_factory(
             model.config,
-            None if args.cache_dtype is None else _DTYPES[args.cache_dtype],
+            None if args.cache_dtype is None else parse_torch_dtype(args.cache_dtype),
             fast_sliding_prefix=args.fast_sliding_cache,
             fused_cache_prefix=args.fused_cache_prefix,
         )
@@ -872,8 +869,8 @@ def main() -> None:
     parser.add_argument("--run-output", type=Path)
     parser.add_argument("--expected-blocks", type=int, default=26)
     parser.add_argument("--device", default="cuda:0")
-    parser.add_argument("--input-dtype", choices=tuple(_DTYPES), default="float32")
-    parser.add_argument("--cache-dtype", choices=tuple(_DTYPES))
+    parser.add_argument("--input-dtype", choices=_DTYPE_NAMES, default="float32")
+    parser.add_argument("--cache-dtype", choices=_DTYPE_NAMES)
     parser.add_argument(
         "--suite",
         action="append",

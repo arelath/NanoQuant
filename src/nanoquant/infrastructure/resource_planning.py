@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import ctypes
-import hashlib
 import json
 import os
 import shutil
@@ -14,7 +13,7 @@ from typing import Any, cast
 
 import torch
 
-from nanoquant.config.codec import canonical_json, from_dict, to_dict
+from nanoquant.config.codec import from_dict, semantic_hash, to_dict
 from nanoquant.config.schema import (
     ActivationGpuCacheMode,
     ExecutorKind,
@@ -62,7 +61,7 @@ def memory_plan_request_hash(config: RunConfig) -> str:
         "memory_plan_algorithm_version": MEMORY_PLAN_ALGORITHM_VERSION,
         "config": config,
     }
-    return "sha256:" + hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
+    return semantic_hash(payload)
 
 
 class _MemoryStatus(ctypes.Structure):

@@ -9,6 +9,7 @@ from pathlib import Path
 import torch
 
 from nanoquant.runtime.artifact import open_logical_artifact
+from nanoquant.runtime.logical import parse_torch_dtype
 from nanoquant.runtime.reference import DenseReferenceBackend, FactorizedReferenceBackend
 
 
@@ -27,13 +28,11 @@ class ReferenceParityResult:
 
 
 def _torch_dtype(name: str) -> torch.dtype:
+    if name not in ("float16", "bfloat16", "float32"):
+        raise ReferenceParityError(f"reference validation does not support input dtype: {name}")
     try:
-        return {
-            "float16": torch.float16,
-            "bfloat16": torch.bfloat16,
-            "float32": torch.float32,
-        }[name]
-    except KeyError as error:
+        return parse_torch_dtype(name)
+    except ValueError as error:
         raise ReferenceParityError(f"reference validation does not support input dtype: {name}") from error
 
 

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import math
 import random
 import statistics
@@ -14,7 +13,7 @@ from typing import Any, cast
 import torch
 from torch import nn
 
-from nanoquant.config.codec import canonical_json
+from nanoquant.config.codec import canonical_json, semantic_hash
 
 LogitsFunction = Callable[[torch.Tensor, torch.Tensor | None], torch.Tensor]
 
@@ -37,7 +36,7 @@ class EvaluatorSpec:
     @property
     def semantic_key(self) -> str:
         identity = (self.name, self.version, self.tier, tuple(sorted(self.parameters, key=lambda item: item[0])))
-        return "sha256:" + hashlib.sha256(canonical_json(identity).encode()).hexdigest()
+        return semantic_hash(identity)
 
 
 @dataclass(frozen=True, slots=True)
@@ -293,11 +292,11 @@ class EvaluationPartition:
         if not name or not version or not items:
             raise ValueError("evaluation partition name, version, and items are required")
         item_hashes = tuple(
-            "sha256:" + hashlib.sha256(canonical_json(item).encode()).hexdigest() for item in items
+            semantic_hash(item) for item in items
         )
         if len(item_hashes) != len(set(item_hashes)):
             raise ValueError(f"evaluation partition contains duplicate items: {name}")
-        content_hash = "sha256:" + hashlib.sha256(canonical_json(item_hashes).encode()).hexdigest()
+        content_hash = semantic_hash(item_hashes)
         return cls(name, version, content_hash, item_hashes)
 
 
@@ -350,7 +349,7 @@ class GatePolicy:
 
     @property
     def semantic_key(self) -> str:
-        return "sha256:" + hashlib.sha256(canonical_json(self).encode()).hexdigest()
+        return semantic_hash(self)
 
 
 @dataclass(frozen=True, slots=True)
@@ -463,7 +462,7 @@ def compare_paired(request: PairedComparisonRequest) -> PairedComparisonResult:
 
 
 def _token_hash(tokens: tuple[int, ...]) -> str:
-    return "sha256:" + hashlib.sha256(canonical_json(tokens).encode()).hexdigest()
+    return semantic_hash(tokens)
 
 
 def _first_token_mismatch(expected: tuple[int, ...], observed: tuple[int, ...]) -> int | None:
@@ -540,7 +539,7 @@ def evaluate_generation_regression(request: object) -> GenerationRegressionResul
         request.maximum_repeated_token_run,
     )
     return GenerationRegressionResult(
-        "sha256:" + hashlib.sha256(canonical_json(case_payload).encode()).hexdigest(),
+        semantic_hash(case_payload),
         len(request.observed_token_ids),
         len(first),
         _token_hash(request.expected_token_ids),

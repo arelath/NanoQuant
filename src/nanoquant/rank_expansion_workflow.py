@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import gc
 import hashlib
 import json
 import math
@@ -25,6 +24,7 @@ from nanoquant.domain.rank_expansion import fit_residual_middle_scales
 from nanoquant.infrastructure.artifacts import LocalArtifactStore
 from nanoquant.infrastructure.commits import latest_complete_identity, load_committed_block
 from nanoquant.infrastructure.io_utils import atomic_write_json, hash_file
+from nanoquant.infrastructure.memory_cleanup import release_memory
 from nanoquant.infrastructure.safetensors_source import SafetensorsModelSource
 from nanoquant.infrastructure.tensor_store import LocalTensorStore
 from nanoquant.runtime import (
@@ -518,9 +518,7 @@ def execute_rank_expansion(
         expanded_by_block[block_index] = expanded
         results[block_index] = result
         del expanded, source_state
-        gc.collect()
-        if torch.cuda.is_available() and request.device.startswith("cuda"):
-            torch.cuda.empty_cache()
+        release_memory(request.device)
         if safe_point is not None:
             safe_point()
 

@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import hashlib
 import math
 import statistics
 from dataclasses import dataclass
 
-from nanoquant.config.codec import canonical_json
+from nanoquant.config.codec import semantic_hash
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,7 +49,7 @@ class DiagnosticPolicy:
 
     @property
     def semantic_key(self) -> str:
-        return "sha256:" + hashlib.sha256(canonical_json(self).encode()).hexdigest()
+        return semantic_hash(self)
 
 
 DEFAULT_DIAGNOSTIC_POLICY = DiagnosticPolicy()

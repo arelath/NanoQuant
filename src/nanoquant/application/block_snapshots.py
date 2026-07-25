@@ -9,7 +9,7 @@ from dataclasses import dataclass
 import torch
 
 from nanoquant.application.loss_snapshots import compare_global_tuning_losses
-from nanoquant.config.codec import canonical_json
+from nanoquant.config.codec import semantic_hash
 from nanoquant.domain.models import BlockId, GlobalTuningBlockMetrics
 
 
@@ -27,7 +27,7 @@ class BlockSnapshotProtocol:
 
     @property
     def semantic_key(self) -> str:
-        return "sha256:" + hashlib.sha256(canonical_json(self).encode()).hexdigest()
+        return semantic_hash(self)
 
 
 @dataclass(frozen=True, slots=True)

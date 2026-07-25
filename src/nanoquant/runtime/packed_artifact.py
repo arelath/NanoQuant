@@ -22,26 +22,22 @@ from nanoquant.runtime.artifact import (
     RuntimeModelMetadata,
     _hash_file,
     _header_dtype,
-    _integer,
-    _mapping,
     _resolved_member,
-    _sequence,
-    _spec_from_payload,
-    _string,
     _validate_relative_path,
     open_logical_artifact,
 )
 from nanoquant.runtime.backend import DeviceLike, QuantizedLinearSpec
-from nanoquant.runtime.logical import LogicalLayerState, canonical_torch_dtype
+from nanoquant.runtime.codec import decode_dataclass
+from nanoquant.runtime.logical import LogicalLayerState, canonical_torch_dtype, parse_torch_dtype
 from nanoquant.runtime.packed import (
     PACKED_TENSOR_NAMESPACE,
     PackedLayerState,
     PackedLayoutMetadata,
-    PackedReferenceProvenance,
     pack_logical_layer,
     packed_word_count,
 )
 from nanoquant.runtime.reference import FactorizedReferenceBackend, PackedReferenceBackend
+from nanoquant.runtime.safetensors_io import load_tensors
 
 PACKED_DESCRIPTOR_SCHEMA_VERSION = 1
 PACKED_ARTIFACT_FORMAT = "nanoquant-packed-model"
@@ -206,14 +202,12 @@ class OpenPackedArtifact:
         if len(matches) != 1:
             raise KeyError(f"packed artifact layer not found: {name}")
         block, layer = matches[0]
-        by_role: dict[str, torch.Tensor] = {}
-        with safe_open(
+        loaded = load_tensors(
             self.root / block.path,
-            framework="pt",
-            device=str(torch.device(device)),
-        ) as handle:
-            for tensor in layer.tensors:
-                by_role[tensor.role] = handle.get_tensor(tensor.key)
+            (tensor.key for tensor in layer.tensors),
+            device=device,
+        )
+        by_role = {tensor.role: loaded[tensor.key] for tensor in layer.tensors}
         return PackedLayerState(
             layer.spec,
             self.manifest.layout.version,
@@ -386,120 +380,8 @@ def write_packed_artifact(
     )
 
 
-def _tensor_from_payload(payload: object, path: str) -> PackedTensorEntry:
-    value = _mapping(payload, path)
-    return PackedTensorEntry(
-        _string(value.get("role"), f"{path}.role"),
-        _string(value.get("key"), f"{path}.key"),
-        tuple(
-            _integer(item, f"{path}.shape[{index}]")
-            for index, item in enumerate(_sequence(value.get("shape"), f"{path}.shape"))
-        ),
-        _string(value.get("dtype"), f"{path}.dtype"),
-    )
-
-
-def _model_from_payload(payload: object, path: str) -> RuntimeModelMetadata:
-    value = _mapping(payload, path)
-    return RuntimeModelMetadata(
-        _string(value.get("source"), f"{path}.source"),
-        _string(value.get("revision"), f"{path}.revision"),
-        _string(value.get("family"), f"{path}.family"),
-        _string(value.get("config_hash"), f"{path}.config_hash"),
-        _string(value.get("tokenizer_hash"), f"{path}.tokenizer_hash"),
-    )
-
-
-def _layout_from_payload(payload: object, path: str) -> PackedLayoutMetadata:
-    value = _mapping(payload, path)
-    reference_path = f"{path}.reference"
-    reference = _mapping(value.get("reference"), reference_path)
-    return PackedLayoutMetadata(
-        _string(value.get("version"), f"{path}.version"),
-        _string(value.get("word_dtype"), f"{path}.word_dtype"),
-        _integer(value.get("word_bits"), f"{path}.word_bits"),
-        _string(value.get("bit_order"), f"{path}.bit_order"),
-        _integer(value.get("positive_bit"), f"{path}.positive_bit"),
-        _integer(value.get("negative_bit"), f"{path}.negative_bit"),
-        _integer(value.get("padding_bit"), f"{path}.padding_bit"),
-        _integer(value.get("minimum_alignment_bytes"), f"{path}.minimum_alignment_bytes"),
-        _integer(value.get("vector_alignment_bytes"), f"{path}.vector_alignment_bytes"),
-        _string(value.get("tensor_namespace"), f"{path}.tensor_namespace"),
-        _string(value.get("left_sidecar_name"), f"{path}.left_sidecar_name"),
-        _string(value.get("right_sidecar_name"), f"{path}.right_sidecar_name"),
-        _string(value.get("scale_pre_sidecar_name"), f"{path}.scale_pre_sidecar_name"),
-        _string(value.get("scale_mid_sidecar_name"), f"{path}.scale_mid_sidecar_name"),
-        _string(value.get("scale_post_sidecar_name"), f"{path}.scale_post_sidecar_name"),
-        _string(value.get("outlier_index_sidecar_name"), f"{path}.outlier_index_sidecar_name"),
-        _string(value.get("outlier_value_sidecar_name"), f"{path}.outlier_value_sidecar_name"),
-        _string(value.get("outlier_scale_sidecar_name"), f"{path}.outlier_scale_sidecar_name"),
-        _string(value.get("bias_storage"), f"{path}.bias_storage"),
-        PackedReferenceProvenance(
-            _string(reference.get("repository"), f"{reference_path}.repository"),
-            _string(reference.get("commit"), f"{reference_path}.commit"),
-            _string(
-                reference.get("dirty_diff_git_object"),
-                f"{reference_path}.dirty_diff_git_object",
-            ),
-            _string(reference.get("cuda_sha256"), f"{reference_path}.cuda_sha256"),
-            _string(
-                reference.get("converter_sha256"),
-                f"{reference_path}.converter_sha256",
-            ),
-            _string(
-                reference.get("documentation_sha256"),
-                f"{reference_path}.documentation_sha256",
-            ),
-            _string(
-                reference.get("model_loader_sha256"),
-                f"{reference_path}.model_loader_sha256",
-            ),
-            _string(reference.get("cpu_sha256"), f"{reference_path}.cpu_sha256"),
-        ),
-    )
-
-
 def _manifest_from_payload(payload: object) -> PackedModelManifest:
-    value = _mapping(payload, "manifest")
-    blocks = []
-    for block_index, block_payload in enumerate(_sequence(value.get("blocks"), "manifest.blocks")):
-        block_path = f"manifest.blocks[{block_index}]"
-        block_value = _mapping(block_payload, block_path)
-        layers = []
-        for layer_index, layer_payload in enumerate(_sequence(block_value.get("layers"), f"{block_path}.layers")):
-            layer_path = f"{block_path}.layers[{layer_index}]"
-            layer_value = _mapping(layer_payload, layer_path)
-            layers.append(
-                PackedLayerEntry(
-                    _spec_from_payload(layer_value.get("spec"), f"{layer_path}.spec"),
-                    tuple(
-                        _tensor_from_payload(item, f"{layer_path}.tensors[{tensor_index}]")
-                        for tensor_index, item in enumerate(
-                            _sequence(layer_value.get("tensors"), f"{layer_path}.tensors")
-                        )
-                    ),
-                )
-            )
-        blocks.append(
-            PackedBlockEntry(
-                _integer(block_value.get("index"), f"{block_path}.index"),
-                _string(block_value.get("path"), f"{block_path}.path"),
-                _integer(block_value.get("bytes"), f"{block_path}.bytes"),
-                _string(block_value.get("sha256"), f"{block_path}.sha256"),
-                tuple(layers),
-            )
-        )
-    return PackedModelManifest(
-        _integer(value.get("schema_version"), "manifest.schema_version"),
-        _string(value.get("artifact_format"), "manifest.artifact_format"),
-        _string(value.get("minimum_runtime_version"), "manifest.minimum_runtime_version"),
-        _layout_from_payload(value.get("layout"), "manifest.layout"),
-        _model_from_payload(value.get("model"), "manifest.model"),
-        _string(value.get("logical_descriptor_sha256"), "manifest.logical_descriptor_sha256"),
-        tuple(blocks),
-        _integer(value.get("layer_count"), "manifest.layer_count"),
-        _integer(value.get("weight_bytes"), "manifest.weight_bytes"),
-    )
+    return decode_dataclass(PackedModelManifest, payload)
 
 
 def open_packed_artifact(
@@ -640,13 +522,11 @@ def validate_packed_conversion(
 
 
 def _input_dtype(name: str) -> torch.dtype:
+    if name not in ("float16", "bfloat16", "float32"):
+        raise ValueError(f"packed reference validation input dtype is unsupported: {name}")
     try:
-        return {
-            "float16": torch.float16,
-            "bfloat16": torch.bfloat16,
-            "float32": torch.float32,
-        }[name]
-    except KeyError as error:
+        return parse_torch_dtype(name)
+    except ValueError as error:
         raise ValueError(f"packed reference validation input dtype is unsupported: {name}") from error
 
 

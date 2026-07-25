@@ -13,6 +13,7 @@ from typing import Any, cast
 
 import torch
 
+from nanoquant.domain.linear_math import parse_torch_dtype
 from nanoquant.domain.resources import ResourcePlan
 from nanoquant.infrastructure.io_utils import atomic_write_json, hash_file, safe_replace
 
@@ -56,20 +57,14 @@ class MemoryActivationStore:
         self._values.clear()
 
 
-_DTYPES = {
-    "float32": torch.float32,
-    "float16": torch.float16,
-    "bfloat16": torch.bfloat16,
-    "int64": torch.int64,
-    "int32": torch.int32,
-}
+_MMAP_DTYPE_NAMES = ("float32", "float16", "bfloat16", "int64", "int32")
 
 
 class MmapGenerationWriter:
     def __init__(self, store: MmapActivationStore, key: str, shape: tuple[int, ...], dtype: torch.dtype) -> None:
         if not key or not shape or any(dimension <= 0 for dimension in shape):
             raise ValueError("mmap activation generation requires a key and positive shape")
-        if dtype not in _DTYPES.values():
+        if dtype not in tuple(parse_torch_dtype(name) for name in _MMAP_DTYPE_NAMES):
             raise ValueError(f"unsupported mmap activation dtype: {dtype}")
         if store._descriptor(key).exists():
             raise ValueError(f"activation key already exists: {key}")
@@ -189,8 +184,8 @@ class MmapActivationStore:
         metadata = self._metadata(key)
         dtype_name = str(metadata["dtype"])
         try:
-            dtype = _DTYPES[dtype_name]
-        except KeyError as exc:
+            dtype = parse_torch_dtype(dtype_name)
+        except ValueError as exc:
             raise OSError(f"ACT001 unsupported activation dtype: {dtype_name}") from exc
         shape = tuple(int(value) for value in metadata["shape"])
         numel = 1

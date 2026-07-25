@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from enum import Enum
 from typing import Protocol
 
@@ -45,6 +45,57 @@ class EventSink(Protocol):
         parent_span_id: str | None = None,
         **fields: object,
     ) -> Event | None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class LayerCommittedPayload:
+    block: int
+    layer: str
+    artifact_id: str
+    journal_sequence: int
+    rank: int
+    accepted_attempt: int
+    actual_bits: int
+    extra_retry_bits: int
+    weighted_error: float
+    raw_error: float
+
+
+@dataclass(frozen=True, slots=True)
+class LlamaCppQualityStartedPayload:
+    gguf: str
+    gguf_sha256: str
+    parallel: int
+
+
+@dataclass(frozen=True, slots=True)
+class LlamaCppQualityCompletedPayload:
+    output: str
+    reused: bool
+    wall_seconds: float | None
+
+
+def emit_layer_committed(
+    sink: EventSink,
+    payload: LayerCommittedPayload,
+    *,
+    stage: str = "resident-quantization",
+) -> Event | None:
+    return sink.emit(stage, Severity.INFO.value, "layer.committed", **asdict(payload))
+
+
+def emit_llamacpp_quality_started(
+    sink: EventSink,
+    payload: LlamaCppQualityStartedPayload,
+) -> Event | None:
+    return sink.emit("quality", Severity.INFO.value, "quality.llamacpp.started", **asdict(payload))
+
+
+def emit_llamacpp_quality_completed(
+    sink: EventSink,
+    payload: LlamaCppQualityCompletedPayload,
+) -> Event | None:
+    return sink.emit("quality", Severity.INFO.value, "quality.llamacpp.completed", **asdict(payload))
 
 
 def capture_oom_if_supported(

@@ -21,7 +21,8 @@ from torch import nn
 
 from nanoquant.runtime.artifact import MINIMUM_RUNTIME_VERSION, RuntimeModelMetadata
 from nanoquant.runtime.backend import DeviceLike, RuntimeBackend, WorkloadSpec
-from nanoquant.runtime.logical import canonical_torch_dtype
+from nanoquant.runtime.codec import RuntimeDecodeError, decode_dataclass
+from nanoquant.runtime.logical import canonical_torch_dtype, parse_torch_dtype
 from nanoquant.runtime.packed_artifact import OpenPackedArtifact, open_packed_artifact
 from nanoquant.runtime.planning import (
     PreparedExecutionPlans,
@@ -53,13 +54,7 @@ _MODEL_ASSET_NAMES = (
     "tokenizer_config.json",
 )
 _REQUIRED_MODEL_ASSETS = ("config.json", "tokenizer.json", "tokenizer_config.json")
-_DTYPES = {
-    "float16": torch.float16,
-    "bfloat16": torch.bfloat16,
-    "float32": torch.float32,
-}
-
-
+_FLOAT_DTYPE_NAMES = ("float16", "bfloat16", "float32")
 class RuntimeBundleError(ValueError):
     pass
 
@@ -117,7 +112,7 @@ class RuntimeShellTensor:
             raise RuntimeBundleError("runtime shell tensor name must be canonical")
         if any(dimension < 0 for dimension in self.shape):
             raise RuntimeBundleError("runtime shell tensor shape must be non-negative")
-        if self.dtype not in _DTYPES:
+        if self.dtype not in _FLOAT_DTYPE_NAMES:
             raise RuntimeBundleError(f"runtime shell tensor dtype is unsupported: {self.dtype}")
         _member_path(self.shard)
         if self.kind not in ("state", "buffer"):
@@ -220,67 +215,11 @@ def _integer(value: object, path: str) -> int:
     return value
 
 
-def _model(value: object) -> RuntimeModelMetadata:
-    payload = _mapping(value, "manifest.model")
-    return RuntimeModelMetadata(
-        _string(payload.get("source"), "manifest.model.source"),
-        _string(payload.get("revision"), "manifest.model.revision"),
-        _string(payload.get("family"), "manifest.model.family"),
-        _string(payload.get("config_hash"), "manifest.model.config_hash"),
-        _string(payload.get("tokenizer_hash"), "manifest.model.tokenizer_hash"),
-    )
-
-
 def _manifest(payload: object) -> RuntimeBundleManifest:
-    value = _mapping(payload, "manifest")
-    members = []
-    for index, item in enumerate(_sequence(value.get("members"), "manifest.members")):
-        member = _mapping(item, f"manifest.members[{index}]")
-        members.append(
-            RuntimeBundleMember(
-                _string(member.get("path"), f"manifest.members[{index}].path"),
-                _integer(member.get("bytes"), f"manifest.members[{index}].bytes"),
-                _string(member.get("sha256"), f"manifest.members[{index}].sha256"),
-            )
-        )
-    tensors = []
-    for index, item in enumerate(_sequence(value.get("shell_tensors"), "manifest.shell_tensors")):
-        tensor = _mapping(item, f"manifest.shell_tensors[{index}]")
-        tensors.append(
-            RuntimeShellTensor(
-                _string(tensor.get("name"), f"manifest.shell_tensors[{index}].name"),
-                tuple(
-                    _integer(dimension, f"manifest.shell_tensors[{index}].shape")
-                    for dimension in _sequence(tensor.get("shape"), f"manifest.shell_tensors[{index}].shape")
-                ),
-                _string(tensor.get("dtype"), f"manifest.shell_tensors[{index}].dtype"),
-                _string(tensor.get("shard"), f"manifest.shell_tensors[{index}].shard"),
-                _string(tensor.get("kind"), f"manifest.shell_tensors[{index}].kind"),
-            )
-        )
-    return RuntimeBundleManifest(
-        _integer(value.get("schema_version"), "manifest.schema_version"),
-        _string(value.get("artifact_format"), "manifest.artifact_format"),
-        _string(value.get("minimum_runtime_version"), "manifest.minimum_runtime_version"),
-        _model(value.get("model")),
-        _string(value.get("packed_path"), "manifest.packed_path"),
-        _string(
-            value.get("packed_descriptor_sha256"),
-            "manifest.packed_descriptor_sha256",
-        ),
-        tuple(members),
-        tuple(tensors),
-        tuple(
-            _string(item, f"manifest.excluded_linear_modules[{index}]")
-            for index, item in enumerate(
-                _sequence(
-                    value.get("excluded_linear_modules"),
-                    "manifest.excluded_linear_modules",
-                )
-            )
-        ),
-        _integer(value.get("total_member_bytes"), "manifest.total_member_bytes"),
-    )
+    try:
+        return decode_dataclass(RuntimeBundleManifest, payload)
+    except RuntimeDecodeError as error:
+        raise RuntimeBundleError(str(error)) from error
 
 
 def open_runtime_bundle(
@@ -561,8 +500,9 @@ def load_transformers_runtime(
 ) -> LoadedTransformersRuntime:
     """Build a prepared model shell without loading source dense linear weights."""
 
-    if input_dtype not in _DTYPES:
+    if input_dtype not in _FLOAT_DTYPE_NAMES:
         raise RuntimeBundleError(f"runtime bundle input dtype is unsupported: {input_dtype}")
+    dtype = parse_torch_dtype(input_dtype)
     opened = bundle if isinstance(bundle, OpenRuntimeBundle) else open_runtime_bundle(bundle, verify_hashes=True)
     target = torch.device(device)
     use_native_bfloat16_tied_projection = (
@@ -589,7 +529,6 @@ def load_transformers_runtime(
     from transformers.models.auto.modeling_auto import AutoModelForCausalLM
 
     config = AutoConfig.from_pretrained(opened.model_assets, local_files_only=False)
-    dtype = _DTYPES[input_dtype]
     with torch.device("meta"):
         model = AutoModelForCausalLM.from_config(  # type: ignore[no-untyped-call]
             config,

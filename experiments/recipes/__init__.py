@@ -14,6 +14,8 @@ from ._experiment import (
     define_compression_quality_experiment,
     define_quality_evaluation_experiment,
     define_rank_expansion_experiment,
+    experiment_callable_main,
+    experiment_main,
 )
 from .base_compression import (
     ARCHITECTURE_PROTECTED_RECONSTRUCTION_COMPRESSION_TEMPLATE,
@@ -71,4 +73,6 @@ __all__ = [
     "define_compression_quality_experiment",
     "define_quality_evaluation_experiment",
     "define_rank_expansion_experiment",
+    "experiment_callable_main",
+    "experiment_main",
 ]

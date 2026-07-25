@@ -25,7 +25,7 @@ from nanoquant.application.quantization_stages import (
 from nanoquant.application.reconstruction_report import render_reconstruction_tables
 from nanoquant.application.stages import StageContext, execute_stage
 from nanoquant.application.tuning import TuningRequest, tune_factorized
-from nanoquant.config.codec import canonical_json, to_dict
+from nanoquant.config.codec import semantic_hash, to_dict
 from nanoquant.config.schema import (
     ADMMConfig,
     AllocationStrategy,
@@ -411,7 +411,7 @@ def run_tiny_pipeline(
         "profiling": to_dict(profiling),
         "observability": to_dict(observability),
     }
-    resolved_hash = "sha256:" + hashlib.sha256(canonical_json(resolved).encode()).hexdigest()
+    resolved_hash = semantic_hash(resolved)
     proposed = initial_manifest_from_resolved(
         resolved_hash,
         resolved,

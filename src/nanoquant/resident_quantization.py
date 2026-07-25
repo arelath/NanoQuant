@@ -69,7 +69,7 @@ from nanoquant.application.tuning import (
     tune_factorized,
     tune_non_factorized,
 )
-from nanoquant.config.codec import canonical_json, from_dict, to_dict
+from nanoquant.config.codec import from_dict, semantic_hash, to_dict
 from nanoquant.config.schema import (
     MEASURED_UNIT_KL_OBJECTIVES,
     ActivationGpuCacheMode,
@@ -101,6 +101,7 @@ from nanoquant.config.schema import (
 )
 from nanoquant.domain.calibration_math import weighted_group_output_importance
 from nanoquant.domain.factorization import factorize_admm
+from nanoquant.domain.linear_math import chunk_slices
 from nanoquant.domain.metrics import reconstruction_metrics
 from nanoquant.domain.models import (
     ArtifactRef,
@@ -205,7 +206,7 @@ from nanoquant.infrastructure.tuning_checkpoint import (
     clear_tuning_checkpoint,
     save_tuning_checkpoint,
 )
-from nanoquant.ports.event_sink import EventSink
+from nanoquant.ports.event_sink import EventSink, LayerCommittedPayload, emit_layer_committed
 from nanoquant.ports.model_adapter import ModelAdapter
 
 RESIDENT_ALGORITHM_VERSION = 48
@@ -318,10 +319,12 @@ def _profile_block_phase(
     block: int,
     name: str,
 ) -> Iterator[None]:
-    with recorder.phase("blocks"):
-        with recorder.phase("block", block=block):
-            with recorder.phase(name):
-                yield
+    with (
+        recorder.phase("blocks"),
+        recorder.phase("block", block=block),
+        recorder.phase(name),
+    ):
+        yield
 
 
 @contextmanager
@@ -331,11 +334,13 @@ def _profile_layer_phase(
     layer: str,
     name: str,
 ) -> Iterator[None]:
-    with recorder.phase("blocks"):
-        with recorder.phase("block", block=block):
-            with recorder.phase("layer", layer=layer):
-                with recorder.phase(name):
-                    yield
+    with (
+        recorder.phase("blocks"),
+        recorder.phase("block", block=block),
+        recorder.phase("layer", layer=layer),
+        recorder.phase(name),
+    ):
+        yield
 
 
 _DEFAULT_RESIDENT_RANK_RETRY = RankRetryConfig(
@@ -525,9 +530,8 @@ def _weighted_target_mean_square(target: torch.Tensor, importance: torch.Tensor)
     hidden = target.shape[-1]
     rows = target.detach().reshape(-1, hidden)
     total = torch.zeros((), device=target.device)
-    for start in range(0, rows.shape[0], 256):
-        stop = min(start + 256, rows.shape[0])
-        value = rows[start:stop].float()
+    for row_slice in chunk_slices(rows.shape[0], 256):
+        value = rows[row_slice].float()
         value.square_()
         value.mul_(weights)
         total += value.sum()
@@ -678,10 +682,9 @@ def _block_loss(
         prediction_rows = prediction.detach().reshape(-1, hidden)
         target_rows = target.detach().reshape(-1, hidden)
         total = torch.zeros((), device=device)
-        for start in range(0, prediction_rows.shape[0], 256):
-            stop = min(start + 256, prediction_rows.shape[0])
-            error = prediction_rows[start:stop].float()
-            error.sub_(target_rows[start:stop])
+        for row_slice in chunk_slices(prediction_rows.shape[0], 256):
+            error = prediction_rows[row_slice].float()
+            error.sub_(target_rows[row_slice])
             error.square_()
             error.mul_(weights)
             total += error.sum()
@@ -1989,7 +1992,7 @@ def _resident_config_hash(request: ResidentQuantizationRequest) -> str:
             "block_forward_batch_maximum": request.run_config.runtime.block_forward_batch_size,
             "tuning_microbatch_maximum": request.run_config.block_tuning.microbatch_size,
         }
-    return "sha256:" + hashlib.sha256(canonical_json(semantic_config).encode()).hexdigest()
+    return semantic_hash(semantic_config)
 
 
 def _manifest_tensor_identity(value: torch.Tensor | tuple[tuple[int, ...], ...] | None) -> object:
@@ -2040,7 +2043,7 @@ def _resident_manifest_config(request: ResidentQuantizationRequest, component: s
 
 def _resident_manifest(request: ResidentQuantizationRequest, component: str) -> RunManifest:
     resolved = _resident_manifest_config(request, component)
-    resolved_hash = "sha256:" + hashlib.sha256(canonical_json(resolved).encode()).hexdigest()
+    resolved_hash = semantic_hash(resolved)
     launcher_path = request.launcher_path or Path(__file__)
     experiment_number = None if request.run_config is None else request.run_config.intent.experiment_number
     return initial_manifest_from_resolved(
@@ -3815,18 +3818,16 @@ def _setup_resident_environment(
         source=request.source,
         revision=request.revision,
         verify_hashes=request.verify_hashes,
-    ):
-        with recorder.phase("setup"):
-            with recorder.phase("inventory"):
-                source = SafetensorsModelSource(
-                    request.snapshot,
-                    source=request.source,
-                    revision=request.revision,
-                    verify_hashes=request.verify_hashes,
-                )
-                checkpoint = source.inventory()
-                adapter = adapter_for_config(checkpoint.config)
-                inventory = adapter.model_inventory(source)
+    ), recorder.phase("setup"), recorder.phase("inventory"):
+        source = SafetensorsModelSource(
+            request.snapshot,
+            source=request.source,
+            revision=request.revision,
+            verify_hashes=request.verify_hashes,
+        )
+        checkpoint = source.inventory()
+        adapter = adapter_for_config(checkpoint.config)
+        inventory = adapter.model_inventory(source)
     if request.layer_order:
         reordered_blocks = []
         for inventory_block in inventory.blocks:
@@ -3841,13 +3842,12 @@ def _setup_resident_environment(
             )
         inventory = replace(inventory, blocks=tuple(reordered_blocks))
     model_device = _model_placement_device(request)
-    with recorder.phase("setup"):
-        with recorder.phase("inputs"):
-            tokens = _token_tensor(request.token_ids, model_device)
-            quality_tokens = _token_tensor(
-                request.token_ids if request.quality_token_ids is None else request.quality_token_ids,
-                model_device,
-            )
+    with recorder.phase("setup"), recorder.phase("inputs"):
+        tokens = _token_tensor(request.token_ids, model_device)
+        quality_tokens = _token_tensor(
+            request.token_ids if request.quality_token_ids is None else request.quality_token_ids,
+            model_device,
+        )
     if request.device.startswith("cuda"):
         torch.cuda.reset_peak_memory_stats(request.device)
     with _logged_operation(
@@ -3858,14 +3858,12 @@ def _setup_resident_environment(
         executor=request.executor.value,
         dtype=str(_checkpoint_dtype(checkpoint.config)),
         attention_implementation=adapter.attention_implementation,
-    ):
-        with recorder.phase("setup"):
-            with recorder.phase("model_load"):
-                model = load_causal_language_model(
-                    request.snapshot,
-                    torch_dtype=_checkpoint_dtype(checkpoint.config),
-                    attention_implementation=adapter.attention_implementation,
-                ).to(model_device)
+    ), recorder.phase("setup"), recorder.phase("model_load"):
+        model = load_causal_language_model(
+            request.snapshot,
+            torch_dtype=_checkpoint_dtype(checkpoint.config),
+            attention_implementation=adapter.attention_implementation,
+        ).to(model_device)
     model.eval()
     if request.memory_plan is not None:
         observed = sample_device_memory()
@@ -4161,6 +4159,73 @@ def _process_resident_block(
         loss_recorder,
         deferred_slice,
     )
+
+
+def _evaluate_resident_quality(
+    request: ResidentQuantizationRequest,
+    events: EventSink,
+    recorder: PhaseRecorder,
+    adapter: Any,
+    model: nn.Module,
+    quality_tokens: torch.Tensor,
+    reference_logits: torch.Tensor | None,
+    completed_block_indexes: set[int],
+) -> tuple[float, float, float, float] | None:
+    """Run the optional final quality comparison after block processing."""
+
+    with (
+        _logged_operation(
+            events,
+            "quality_evaluation",
+            enabled=request.evaluate_inline_quality,
+            samples=int(quality_tokens.shape[0]),
+            input_elements=int(quality_tokens.numel()),
+        ),
+        recorder.phase("finalize"),
+        recorder.phase("quality"),
+    ):
+        if not request.evaluate_inline_quality:
+            return None
+        if not request.restore_completed_blocks and completed_block_indexes:
+            raise ValueError("inline quality evaluation requires completed-block restoration")
+        if reference_logits is None:
+            raise AssertionError("inline quality evaluation requires captured reference logits")
+        return _streamed_quality_metrics(adapter, model, quality_tokens, reference_logits)
+
+
+def _commit_resident_report(
+    artifacts: LocalArtifactStore,
+    events: EventSink,
+    recorder: PhaseRecorder,
+    report_payload: dict[str, object],
+    committed_blocks: list[tuple[ArtifactRef, BlockResult]],
+) -> ArtifactRef:
+    """Persist the final JSON and reconstruction report as one immutable artifact."""
+
+    layer_count = sum(
+        len(block.layers) + sum(len(group.plan.members) for group in block.shared_input_groups)
+        for _, block in committed_blocks
+    )
+    with (
+        _logged_operation(
+            events,
+            "report_write",
+            blocks=len(committed_blocks),
+            layers=layer_count,
+        ),
+        recorder.phase("finalize"),
+        recorder.phase("report"),
+        artifacts.begin_write("resident-quantization-report") as writer,
+    ):
+        (writer.path / "report.json").write_text(
+            json.dumps(report_payload, sort_keys=True, indent=2), encoding="utf-8"
+        )
+        (writer.path / "reconstruction.md").write_text(
+            render_reconstruction_tables(tuple(block for _, block in committed_blocks)),
+            encoding="utf-8",
+        )
+        descriptor = writer.commit()
+    return ArtifactRef("resident-quantization-report", descriptor.artifact_id, descriptor.schema_version)
 
 
 def _run_resident_quantization_impl(
@@ -4521,19 +4586,17 @@ def _run_resident_quantization_impl(
                 "calibration_persist",
                 layers=len(calibration_values),
                 input_elements=int(tokens.numel()),
-            ):
-                with recorder.phase("calibrate"):
-                    with recorder.phase("persist"):
-                        calibration = persist_calibration(
-                            tuple(calibration_values),
-                            inventory.model,
-                            dataset,
-                            request.calibration_method,
-                            "float32",
-                            artifacts,
-                            tensors,
-                            total_tokens=tokens.numel(),
-                        )
+            ), recorder.phase("calibrate"), recorder.phase("persist"):
+                calibration = persist_calibration(
+                    tuple(calibration_values),
+                    inventory.model,
+                    dataset,
+                    request.calibration_method,
+                    "float32",
+                    artifacts,
+                    tensors,
+                    total_tokens=tokens.numel(),
+                )
             with _logged_operation(events, "objective_build", layers=len(calibration_values)):
                 with recorder.phase("plan"):
                     with recorder.phase("objectives"):
@@ -5660,20 +5723,22 @@ def _run_resident_quantization_impl(
                             identity,
                         )
                         clear_tuning_checkpoint(request.output)
-                        events.emit(
-                            "resident-quantization",
-                            "info",
-                            "layer.committed",
-                            block=block_index,
-                            layer=layer_plan.layer.path,
-                            artifact_id=committed_layer.reference.artifact_id,
-                            journal_sequence=layer_journal_record.sequence,
-                            rank=layer_result.frozen_state.rank,
-                            accepted_attempt=layer_result.accepted_attempt,
-                            actual_bits=layer_result.actual_bit_cost.total,
-                            extra_retry_bits=layer_result.extra_retry_bits,
-                            weighted_error=layer_result.final_reconstruction.export_weighted_normalized_error,
-                            raw_error=layer_result.final_reconstruction.raw_normalized_error,
+                        emit_layer_committed(
+                            events,
+                            LayerCommittedPayload(
+                                block=block_index,
+                                layer=layer_plan.layer.path,
+                                artifact_id=committed_layer.reference.artifact_id,
+                                journal_sequence=layer_journal_record.sequence,
+                                rank=layer_result.frozen_state.rank,
+                                accepted_attempt=layer_result.accepted_attempt,
+                                actual_bits=layer_result.actual_bit_cost.total,
+                                extra_retry_bits=layer_result.extra_retry_bits,
+                                weighted_error=(
+                                    layer_result.final_reconstruction.export_weighted_normalized_error
+                                ),
+                                raw_error=layer_result.final_reconstruction.raw_normalized_error,
+                            ),
                         )
                         live_layers[(block_index, layer_plan.layer.path)] = layer_result
                         update_live_weight_error_report(
@@ -6082,22 +6147,16 @@ def _run_resident_quantization_impl(
     if request.device.startswith("cuda"):
         torch.cuda.empty_cache()
 
-    quality_metrics: tuple[float, float, float, float] | None = None
-    with _logged_operation(
+    quality_metrics = _evaluate_resident_quality(
+        request,
         events,
-        "quality_evaluation",
-        enabled=request.evaluate_inline_quality,
-        samples=int(quality_tokens.shape[0]),
-        input_elements=int(quality_tokens.numel()),
-    ):
-        with recorder.phase("finalize"):
-            with recorder.phase("quality"):
-                if request.evaluate_inline_quality:
-                    if not request.restore_completed_blocks and completed_block_indexes:
-                        raise ValueError("inline quality evaluation requires completed-block restoration")
-                    if reference_logits is None:
-                        raise AssertionError("inline quality evaluation requires captured reference logits")
-                    quality_metrics = _streamed_quality_metrics(adapter, model, quality_tokens, reference_logits)
+        recorder,
+        adapter,
+        model,
+        quality_tokens,
+        reference_logits,
+        completed_block_indexes,
+    )
     original_elements = sum(
         layer.in_features * layer.out_features for block in inventory.blocks for layer in block.quantizable_layers
     )
@@ -6183,30 +6242,10 @@ def _run_resident_quantization_impl(
                 ],
                 "reused_commit_count": len(discovered_records),
             }
-    with _logged_operation(
-        events,
-        "report_write",
-        blocks=len(committed_blocks),
-        layers=sum(
-            len(block.layers) + sum(len(group.plan.members) for group in block.shared_input_groups)
-            for _, block in committed_blocks
-        ),
-    ):
-        with recorder.phase("finalize"):
-            with recorder.phase("report"):
-                with artifacts.begin_write("resident-quantization-report") as writer:
-                    (writer.path / "report.json").write_text(
-                        json.dumps(report_payload, sort_keys=True, indent=2), encoding="utf-8"
-                    )
-                    (writer.path / "reconstruction.md").write_text(
-                        render_reconstruction_tables(tuple(block for _, block in committed_blocks)), encoding="utf-8"
-                    )
-                    descriptor = writer.commit()
-    with recorder.phase("finalize"):
-        with recorder.phase("resource_summary"):
-            report = ArtifactRef("resident-quantization-report", descriptor.artifact_id, descriptor.schema_version)
-            artifact_bytes = _artifact_bytes(artifacts.root)
-            executor.release()
+    report = _commit_resident_report(artifacts, events, recorder, report_payload, committed_blocks)
+    with recorder.phase("finalize"), recorder.phase("resource_summary"):
+        artifact_bytes = _artifact_bytes(artifacts.root)
+        executor.release()
     return ResidentQuantizationResult(
         inventory,
         plan,
@@ -6425,20 +6464,21 @@ def _run_resident_factorization_slice_impl(
         journal_record = journal.append(
             "layer", block_index, layer_plan.layer.path, committed.reference.artifact_id, identity
         )
-        events.emit(
-            "resident-factorization-slice",
-            "info",
-            "layer.committed",
-            block=block_index,
-            layer=layer_plan.layer.path,
-            artifact_id=committed.reference.artifact_id,
-            journal_sequence=journal_record.sequence,
-            rank=layer_result.frozen_state.rank,
-            accepted_attempt=layer_result.accepted_attempt,
-            actual_bits=layer_result.actual_bit_cost.total,
-            extra_retry_bits=layer_result.extra_retry_bits,
-            weighted_error=layer_result.final_reconstruction.export_weighted_normalized_error,
-            raw_error=layer_result.final_reconstruction.raw_normalized_error,
+        emit_layer_committed(
+            events,
+            LayerCommittedPayload(
+                block=block_index,
+                layer=layer_plan.layer.path,
+                artifact_id=committed.reference.artifact_id,
+                journal_sequence=journal_record.sequence,
+                rank=layer_result.frozen_state.rank,
+                accepted_attempt=layer_result.accepted_attempt,
+                actual_bits=layer_result.actual_bit_cost.total,
+                extra_retry_bits=layer_result.extra_retry_bits,
+                weighted_error=layer_result.final_reconstruction.export_weighted_normalized_error,
+                raw_error=layer_result.final_reconstruction.raw_normalized_error,
+            ),
+            stage="resident-factorization-slice",
         )
         slice_window.finish()
         peak = slice_window.peak_allocated_bytes

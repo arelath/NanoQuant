@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from nanoquant.domain.models import ArtifactType
+
 
 @dataclass(frozen=True, slots=True)
 class ArtifactFile:
@@ -16,7 +18,7 @@ class ArtifactFile:
 @dataclass(frozen=True, slots=True)
 class ArtifactDescriptor:
     schema_version: int
-    artifact_type: str
+    artifact_type: ArtifactType | str
     artifact_id: str
     content_hash: str
     files: tuple[ArtifactFile, ...]
@@ -30,5 +32,5 @@ class ArtifactWriter(AbstractContextManager["ArtifactWriter"], Protocol):
 
 
 class ArtifactStore(Protocol):
-    def begin_write(self, artifact_type: str, schema_version: int = 1) -> ArtifactWriter: ...
+    def begin_write(self, artifact_type: ArtifactType | str, schema_version: int = 1) -> ArtifactWriter: ...
     def validate(self, artifact_id: str) -> ArtifactDescriptor: ...

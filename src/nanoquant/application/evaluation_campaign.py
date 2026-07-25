@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -14,13 +13,13 @@ from nanoquant.application.evaluation import (
     GatePolicy,
     evaluate_gate,
 )
-from nanoquant.config.codec import canonical_json, to_dict
+from nanoquant.config.codec import canonical_json, semantic_hash, to_dict
 
 CampaignMetricExtractor = Callable[[EvaluatorSpec, object], tuple[tuple[str, float], ...]]
 
 
 def _semantic_key(value: object) -> str:
-    return "sha256:" + hashlib.sha256(canonical_json(to_dict(value)).encode("utf-8")).hexdigest()
+    return semantic_hash(to_dict(value))
 
 
 @dataclass(frozen=True, slots=True)

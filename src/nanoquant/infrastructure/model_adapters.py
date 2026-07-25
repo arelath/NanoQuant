@@ -37,6 +37,7 @@ from nanoquant.domain.models import (
     SourceTensor,
     TensorId,
 )
+from nanoquant.infrastructure.hf_model_protocol import HuggingFaceModel
 from nanoquant.ports.model_source import ModelSource
 
 
@@ -375,7 +376,7 @@ class TransformersModelAdapter:
         return cast(Any, base)(input_ids=tokens, use_cache=False)
 
     def run_full_forward(self, model: nn.Module, tokens: torch.Tensor) -> torch.Tensor:
-        output = cast(Any, model)(input_ids=tokens, use_cache=False)
+        output = cast(HuggingFaceModel, model)(input_ids=tokens, use_cache=False)
         logits = getattr(output, "logits", None)
         if not isinstance(logits, torch.Tensor):
             raise UnsupportedModelVariant("SRC001 causal model forward returned no logits")
@@ -402,10 +403,10 @@ class TransformersModelAdapter:
             if isinstance(project_in, nn.Module):
                 embeddings = project_in(embeddings)
             return cast(torch.Tensor, embeddings + positions.to(embeddings.device))
-        get_embeddings = cast(Callable[[], nn.Module], cast(Any, model).get_input_embeddings)
-        embeddings = cast(torch.Tensor, get_embeddings()(tokens))
+        hf_model = cast(HuggingFaceModel, model)
+        embeddings = cast(torch.Tensor, hf_model.get_input_embeddings()(tokens))
         if self.definition.model_types[0] in {"gemma", "gemma2"}:
-            config = cast(Any, model).config
+            config = hf_model.config
             normalizer = torch.tensor(config.hidden_size**0.5, dtype=embeddings.dtype)
             embeddings = embeddings * normalizer
         return embeddings
@@ -430,7 +431,7 @@ class TransformersModelAdapter:
         norm = getattr(base, "norm", nn.Identity())
         logits = cast(torch.Tensor, self.lm_head(model)(norm(inputs)))
         if self.definition.model_types[0] in {"gemma2", "gemma3_text", "gemma3"}:
-            softcap = getattr(cast(Any, model).config, "final_logit_softcapping", None)
+            softcap = getattr(cast(HuggingFaceModel, model).config, "final_logit_softcapping", None)
             if softcap is not None:
                 logits = torch.tanh(logits / softcap) * softcap
         return logits

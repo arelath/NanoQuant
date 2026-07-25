@@ -8,18 +8,29 @@ import torch
 
 from nanoquant.runtime.backend import QuantizedLinearSpec
 
+_TORCH_DTYPES = {
+    "float16": torch.float16,
+    "bfloat16": torch.bfloat16,
+    "float32": torch.float32,
+    "int8": torch.int8,
+    "int16": torch.int16,
+    "int32": torch.int32,
+    "int64": torch.int64,
+    "uint8": torch.uint8,
+}
+
+
+def parse_torch_dtype(name: str) -> torch.dtype:
+    """Parse a canonical deployment-runtime dtype name."""
+
+    try:
+        return _TORCH_DTYPES[name]
+    except KeyError as error:
+        raise ValueError(f"unsupported runtime tensor dtype: {name}") from error
+
 
 def canonical_torch_dtype(dtype: torch.dtype) -> str:
-    names = {
-        torch.float16: "float16",
-        torch.bfloat16: "bfloat16",
-        torch.float32: "float32",
-        torch.int8: "int8",
-        torch.int16: "int16",
-        torch.int32: "int32",
-        torch.int64: "int64",
-        torch.uint8: "uint8",
-    }
+    names = {value: name for name, value in _TORCH_DTYPES.items()}
     try:
         return names[dtype]
     except KeyError as error:

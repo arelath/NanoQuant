@@ -6,9 +6,8 @@ from recipes import (
     ExperimentIdentity,
     ExperimentRef,
     define_rank_expansion_experiment,
+    experiment_main,
 )
-
-from nanoquant.rank_expansion_experiment import run_rank_expansion_experiment
 
 PARENT = ExperimentRef(3, "compress-and-benchmark-gemma-3-4b-it")
 
@@ -31,11 +30,4 @@ EXPERIMENT = define_rank_expansion_experiment(
 )
 
 
-if __name__ == "__main__":
-    raise SystemExit(
-        run_rank_expansion_experiment(
-            EXPERIMENT.config,
-            EXPERIMENT.workflow,
-            launcher_path=__file__,
-        )
-    )
+experiment_main(__name__, __file__, EXPERIMENT)

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import math
 import random
@@ -12,7 +11,8 @@ from typing import Protocol
 
 import torch
 
-from nanoquant.config.codec import canonical_json, from_dict, to_dict
+from nanoquant.config.codec import from_dict, semantic_hash, to_dict
+from nanoquant.domain.linear_math import chunk_slices
 from nanoquant.domain.models import ArtifactRef, ArtifactTypes
 from nanoquant.ports.artifact_store import ArtifactStore
 
@@ -45,7 +45,7 @@ class KlBudgetProvenance:
 
     @property
     def profile_key(self) -> str:
-        return "sha256:" + hashlib.sha256(canonical_json(self).encode()).hexdigest()
+        return semantic_hash(self)
 
 
 @dataclass(frozen=True, slots=True)
@@ -216,8 +216,8 @@ def causal_kl_nll_from_logits(
         raise ValueError("KL reduction has no valid next-token positions")
     total_nll = 0.0
     total_kl = 0.0
-    for start in range(0, valid_rows.numel(), token_chunk_size):
-        rows = valid_rows[start : start + token_chunk_size]
+    for row_slice in chunk_slices(valid_rows.numel(), token_chunk_size):
+        rows = valid_rows[row_slice]
         teacher_values = teacher.index_select(0, rows).float()
         teacher_log_probs = teacher_values if teacher_is_log_probs else torch.log_softmax(teacher_values, dim=-1)
         student_log_probs = torch.log_softmax(student.index_select(0, rows).float(), dim=-1)

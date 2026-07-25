@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from enum import Enum
 
 
-class ArtifactTypes:
+class ArtifactType(str, Enum):
     """Canonical content-addressed artifact schema identities."""
 
     LAYER_RESULT = "layer-result"
@@ -22,6 +23,13 @@ class ArtifactTypes:
     MEMORY_PLAN = "memory-plan"
     EVALUATION_TASK_INPUTS = "evaluation-task-inputs"
     EVALUATION_RESULT = "evaluation-result"
+
+    def __str__(self) -> str:
+        return self.value
+
+
+# Kept as a compatibility alias while callers migrate to the singular enum name.
+ArtifactTypes = ArtifactType
 
 
 @dataclass(frozen=True, slots=True, order=True)
@@ -81,7 +89,7 @@ class ComponentRef:
 
 @dataclass(frozen=True, slots=True)
 class ArtifactRef:
-    artifact_type: str
+    artifact_type: ArtifactType | str
     artifact_id: str
     schema_version: int
 

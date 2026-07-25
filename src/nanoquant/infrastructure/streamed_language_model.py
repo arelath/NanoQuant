@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import cast
 
 import torch
 from torch import nn
 
 from nanoquant.application.prefix_capture import capture_prefix_invocations
+from nanoquant.infrastructure.hf_model_protocol import HuggingFaceModel
 from nanoquant.infrastructure.model_adapters import TransformersModelAdapter
 
 
@@ -65,7 +66,7 @@ class BlockStreamedCausalLM(nn.Module):
         self.model = model
         self.adapter = adapter
         self.compute_device = torch.device(device)
-        self.config = cast(Any, model).config
+        self.config = cast(HuggingFaceModel, model).config
 
     def forward(
         self,
@@ -86,7 +87,7 @@ class BlockStreamedCausalLM(nn.Module):
         host_mask = None if attention_mask is None else attention_mask.to("cpu")
 
         def prefix_call() -> object:
-            return cast(Any, self.model)(
+            return cast(HuggingFaceModel, self.model)(
                 input_ids=host_tokens,
                 attention_mask=host_mask,
                 use_cache=False,

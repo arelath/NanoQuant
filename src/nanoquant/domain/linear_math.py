@@ -2,7 +2,60 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterator
+
 import torch
+
+
+def chunk_slices(length: int, chunk_size: int) -> Iterator[slice]:
+    """Yield contiguous bounded slices covering ``range(length)`` exactly once."""
+
+    if length < 0:
+        raise ValueError("chunked length must be non-negative")
+    if chunk_size <= 0:
+        raise ValueError("chunk size must be positive")
+    for start in range(0, length, chunk_size):
+        yield slice(start, min(start + chunk_size, length))
+
+
+def chunked_reduce(
+    tensor: torch.Tensor,
+    chunk_size: int,
+    reduction_fn: Callable[[torch.Tensor], torch.Tensor],
+    *,
+    dtype: torch.dtype | None = None,
+) -> torch.Tensor:
+    """Sum scalar reductions over bounded first-dimension chunks."""
+
+    if tensor.ndim == 0:
+        raise ValueError("chunked reduction requires a tensor with a leading dimension")
+    total = torch.zeros((), device=tensor.device, dtype=dtype or tensor.dtype)
+    for item_slice in chunk_slices(tensor.shape[0], chunk_size):
+        reduced = reduction_fn(tensor[item_slice])
+        if reduced.numel() != 1:
+            raise ValueError("chunk reduction function must return a scalar tensor")
+        total = total + reduced.to(device=total.device, dtype=total.dtype)
+    return total
+
+
+def parse_torch_dtype(name: str) -> torch.dtype:
+    """Parse a canonical research-pipeline dtype name."""
+
+    mapping = {
+        "float16": torch.float16,
+        "bfloat16": torch.bfloat16,
+        "float32": torch.float32,
+        "float64": torch.float64,
+        "int8": torch.int8,
+        "int16": torch.int16,
+        "int32": torch.int32,
+        "int64": torch.int64,
+        "uint8": torch.uint8,
+    }
+    try:
+        return mapping[name]
+    except KeyError as error:
+        raise ValueError(f"unsupported torch dtype: {name}") from error
 
 
 def mask_outlier_columns(scale_pre: torch.Tensor, indices: torch.Tensor | None) -> torch.Tensor:

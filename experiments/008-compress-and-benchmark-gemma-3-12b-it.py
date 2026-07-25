@@ -5,10 +5,9 @@ from recipes import (
     BaselineRef,
     ExperimentIdentity,
     define_compression_quality_experiment,
+    experiment_main,
 )
 from recipes._delta import config_delta
-
-from nanoquant.compression_quality_workflow import run_compression_quality_experiment
 
 REQUESTED_GGUF_REPOSITORY = "unsloth/gemma-3-12b-it-GGUF"
 REQUESTED_GGUF_REVISION = "d15e4c7dc21dc55d56bf8549db57a71ad8a2a35d"
@@ -70,11 +69,4 @@ EXPERIMENT = define_compression_quality_experiment(
 )
 
 
-if __name__ == "__main__":
-    raise SystemExit(
-        run_compression_quality_experiment(
-            EXPERIMENT.config,
-            EXPERIMENT.workflow,
-            launcher_path=__file__,
-        )
-    )
+experiment_main(__name__, __file__, EXPERIMENT)

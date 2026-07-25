@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
-import hashlib
 from dataclasses import dataclass
 
 from nanoquant.application.evaluation import EvaluationPartition, EvaluatorSpec
-from nanoquant.config.codec import canonical_json
+from nanoquant.config.codec import canonical_json, semantic_hash
 from nanoquant.domain.models import ArtifactRef
 
 
 def _semantic_hash(value: object) -> str:
-    return "sha256:" + hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
+    return semantic_hash(value)
 
 
 def _require_hash(value: str, field: str) -> None:

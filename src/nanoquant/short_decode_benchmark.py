@@ -18,6 +18,7 @@ from torch import nn
 from transformers import AutoModelForCausalLM
 from transformers.models.auto.tokenization_auto import AutoTokenizer
 
+from nanoquant.domain.linear_math import parse_torch_dtype
 from nanoquant.infrastructure.device_lease import wait_for_device_lease
 from nanoquant.infrastructure.frozen_model_loader import LoadedFrozenModel, load_frozen_run
 from nanoquant.infrastructure.io_utils import atomic_write_json, hash_file
@@ -30,11 +31,7 @@ from nanoquant.runtime import (
     summarize_benchmark,
 )
 
-_DTYPES = {
-    "float16": torch.float16,
-    "bfloat16": torch.bfloat16,
-    "float32": torch.float32,
-}
+_DTYPE_NAMES = ("float16", "bfloat16", "float32")
 _DEFAULT_PROMPT = "Explain why compact language models are useful for local inference."
 
 
@@ -93,7 +90,7 @@ class ShortDecodeBenchmarkRequest:
     def __post_init__(self) -> None:
         if not self.source or not self.revision:
             raise ValueError("short-decode source and revision must be non-empty")
-        if self.dtype not in _DTYPES:
+        if self.dtype not in _DTYPE_NAMES:
             raise ValueError("short-decode dtype is unsupported")
         if self.backend not in {"dense", "factorized"}:
             raise ValueError("short-decode frozen backend is unsupported")
@@ -263,7 +260,7 @@ def _case(
     *,
     implementation: dict[str, Any],
 ) -> dict[str, Any]:
-    dtype = _DTYPES[request.dtype]
+    dtype = parse_torch_dtype(request.dtype)
     cast(Any, model).config.use_cache = True
     model.eval()
     torch.manual_seed(request.seed)
@@ -323,7 +320,7 @@ def _base_model(request: ShortDecodeBenchmarkRequest, device: torch.device) -> n
         AutoModelForCausalLM.from_pretrained(
             request.snapshot,
             local_files_only=False,
-            torch_dtype=_DTYPES[request.dtype],
+            torch_dtype=parse_torch_dtype(request.dtype),
             attn_implementation="eager",
         ),
     )
@@ -521,7 +518,7 @@ def main() -> None:
     parser.add_argument("--source", required=True)
     parser.add_argument("--revision", required=True)
     parser.add_argument("--device", default="cuda:0")
-    parser.add_argument("--dtype", choices=tuple(_DTYPES), default="bfloat16")
+    parser.add_argument("--dtype", choices=_DTYPE_NAMES, default="bfloat16")
     parser.add_argument("--backend", choices=("dense", "factorized"), default="factorized")
     parser.add_argument("--prompt", default=_DEFAULT_PROMPT)
     parser.add_argument("--prompt-tokens", type=int, default=32)

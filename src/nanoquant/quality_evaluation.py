@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import gc
 import hashlib
 import json
 import math
@@ -39,6 +38,7 @@ from nanoquant.infrastructure.hf_task_evaluation import (
     load_pinned_dataset_split,
     prepare_pinned_hf_multiple_choice_inputs,
 )
+from nanoquant.infrastructure.memory_cleanup import release_memory
 from nanoquant.infrastructure.model_adapters import adapter_for_config
 from nanoquant.infrastructure.packed_model_loader import LoadedPackedModel, load_packed_model
 from nanoquant.infrastructure.resource_usage import (
@@ -278,9 +278,7 @@ def prepare_quality_inputs(
 
 
 def _release_device_memory() -> None:
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+    release_memory("cuda" if torch.cuda.is_available() else "cpu")
 
 
 def _evaluate_model(

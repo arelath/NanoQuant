@@ -1,5 +1,6 @@
 """Visible unnumbered templates shared by NanoQuant compression experiments."""
 
+from nanoquant.config.codec import apply_overrides
 from nanoquant.config.schema import (
     ActivationGpuCacheMode,
     ADMMConfig,
@@ -288,72 +289,35 @@ ARCHITECTURE_PROTECTED_RECONSTRUCTION_COMPRESSION_TEMPLATE = config_delta(
 )
 
 
-_4B_TUNING = BASE_COMPRESSION_TEMPLATE.block_tuning
-
-GEMMA_3_4B_COMPRESSION_TEMPLATE = config_delta(
+GEMMA_3_4B_COMPRESSION_TEMPLATE = apply_overrides(
     BASE_COMPRESSION_TEMPLATE,
-    model=config_delta(
-        BASE_COMPRESSION_TEMPLATE.model,
-        source="google/gemma-3-4b-it",
-        revision=GEMMA_3_4B_MODEL_REVISION,
-        tokenizer_revision=GEMMA_3_4B_MODEL_REVISION,
-    ),
-    allocation=config_delta(
-        BASE_COMPRESSION_TEMPLATE.allocation,
-        retry=config_delta(
-            BASE_COMPRESSION_TEMPLATE.allocation.retry,
-            thresholds=config_delta(
-                BASE_COMPRESSION_TEMPLATE.allocation.retry.thresholds,
-                weighted_normalized_error=0.35,
-                raw_normalized_error=0.40,
-            ),
-        ),
-    ),
-    block_tuning=config_delta(
-        _4B_TUNING,
-        non_factorized=config_delta(
-            _4B_TUNING.non_factorized,
-            loop=config_delta(_4B_TUNING.non_factorized.loop, batch_size=4),
-        ),
-        factorized=config_delta(
-            _4B_TUNING.factorized,
-            loop=config_delta(_4B_TUNING.factorized.loop, batch_size=1),
-        ),
-        post_block_refit=config_delta(
-            _4B_TUNING.post_block_refit,
-            batch_size=1,
-        ),
-        microbatch_size=1,
-    ),
-    runtime=config_delta(
-        BASE_COMPRESSION_TEMPLATE.runtime,
-        block_forward_batch_size=4,
-    ),
-    evaluation=config_delta(
-        BASE_COMPRESSION_TEMPLATE.evaluation,
-        inline_quality=False,
-    ),
-    observability=config_delta(
-        BASE_COMPRESSION_TEMPLATE.observability,
-        record_resource_interval_seconds=1.0,
-    ),
-    profiling=config_delta(
-        BASE_COMPRESSION_TEMPLATE.profiling,
-        cuda_timing=True,
-        memory_counters=True,
-        emit_span_events=True,
-    ),
+    {
+        "model.source": "google/gemma-3-4b-it",
+        "model.revision": GEMMA_3_4B_MODEL_REVISION,
+        "model.tokenizer_revision": GEMMA_3_4B_MODEL_REVISION,
+        "allocation.retry.thresholds.weighted_normalized_error": 0.35,
+        "allocation.retry.thresholds.raw_normalized_error": 0.40,
+        "block_tuning.non_factorized.loop.batch_size": 4,
+        "block_tuning.factorized.loop.batch_size": 1,
+        "block_tuning.post_block_refit.batch_size": 1,
+        "block_tuning.microbatch_size": 1,
+        "runtime.block_forward_batch_size": 4,
+        "evaluation.inline_quality": False,
+        "observability.record_resource_interval_seconds": 1.0,
+        "profiling.cuda_timing": True,
+        "profiling.memory_counters": True,
+        "profiling.emit_span_events": True,
+    },
 )
 
 
-LLAMA_3_2_1B_INSTRUCT_COMPRESSION_TEMPLATE = config_delta(
+LLAMA_3_2_1B_INSTRUCT_COMPRESSION_TEMPLATE = apply_overrides(
     GEMMA_3_4B_COMPRESSION_TEMPLATE,
-    model=config_delta(
-        GEMMA_3_4B_COMPRESSION_TEMPLATE.model,
-        source="meta-llama/Llama-3.2-1B-Instruct",
-        revision=LLAMA_3_2_1B_INSTRUCT_MODEL_REVISION,
-        tokenizer_revision=LLAMA_3_2_1B_INSTRUCT_MODEL_REVISION,
-    ),
+    {
+        "model.source": "meta-llama/Llama-3.2-1B-Instruct",
+        "model.revision": LLAMA_3_2_1B_INSTRUCT_MODEL_REVISION,
+        "model.tokenizer_revision": LLAMA_3_2_1B_INSTRUCT_MODEL_REVISION,
+    },
 )
 
 
@@ -385,14 +349,13 @@ LLAMA_ARCHITECTURE_PROTECTED_COMPRESSION_TEMPLATE = config_delta(
 )
 
 
-LLAMA_3_2_3B_INSTRUCT_COMPRESSION_TEMPLATE = config_delta(
+LLAMA_3_2_3B_INSTRUCT_COMPRESSION_TEMPLATE = apply_overrides(
     LLAMA_ARCHITECTURE_PROTECTED_COMPRESSION_TEMPLATE,
-    model=config_delta(
-        LLAMA_ARCHITECTURE_PROTECTED_COMPRESSION_TEMPLATE.model,
-        source="meta-llama/Llama-3.2-3B-Instruct",
-        revision=LLAMA_3_2_3B_INSTRUCT_MODEL_REVISION,
-        tokenizer_revision=LLAMA_3_2_3B_INSTRUCT_MODEL_REVISION,
-    ),
+    {
+        "model.source": "meta-llama/Llama-3.2-3B-Instruct",
+        "model.revision": LLAMA_3_2_3B_INSTRUCT_MODEL_REVISION,
+        "model.tokenizer_revision": LLAMA_3_2_3B_INSTRUCT_MODEL_REVISION,
+    },
 )
 
 
@@ -446,25 +409,23 @@ META_LLAMA_3_8B_INSTRUCT_COMPRESSION_TEMPLATE = config_delta(
 )
 
 
-QWEN_3_0_6B_COMPRESSION_TEMPLATE = config_delta(
+QWEN_3_0_6B_COMPRESSION_TEMPLATE = apply_overrides(
     META_LLAMA_3_8B_INSTRUCT_COMPRESSION_TEMPLATE,
-    model=config_delta(
-        META_LLAMA_3_8B_INSTRUCT_COMPRESSION_TEMPLATE.model,
-        source="Qwen/Qwen3-0.6B",
-        revision=QWEN_3_0_6B_MODEL_REVISION,
-        tokenizer_revision=QWEN_3_0_6B_MODEL_REVISION,
-    ),
+    {
+        "model.source": "Qwen/Qwen3-0.6B",
+        "model.revision": QWEN_3_0_6B_MODEL_REVISION,
+        "model.tokenizer_revision": QWEN_3_0_6B_MODEL_REVISION,
+    },
 )
 
 
-QWEN_3_8B_COMPRESSION_TEMPLATE = config_delta(
+QWEN_3_8B_COMPRESSION_TEMPLATE = apply_overrides(
     QWEN_3_0_6B_COMPRESSION_TEMPLATE,
-    model=config_delta(
-        QWEN_3_0_6B_COMPRESSION_TEMPLATE.model,
-        source="Qwen/Qwen3-8B",
-        revision=QWEN_3_8B_MODEL_REVISION,
-        tokenizer_revision=QWEN_3_8B_MODEL_REVISION,
-    ),
+    {
+        "model.source": "Qwen/Qwen3-8B",
+        "model.revision": QWEN_3_8B_MODEL_REVISION,
+        "model.tokenizer_revision": QWEN_3_8B_MODEL_REVISION,
+    },
 )
 
 

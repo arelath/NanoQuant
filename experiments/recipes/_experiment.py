@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
@@ -407,6 +408,67 @@ def validate_experiment_registry(
         raise ValueError("active experiment names must be unique")
 
 
+ExperimentWorkflow = (
+    CompressionBenchmarkExperiment
+    | CompressionQualityExperiment
+    | QualityEvaluationExperiment
+    | RankExpansionExperiment
+)
+
+
+def run_experiment(
+    definition: ExperimentDefinition[ExperimentWorkflow],
+    *,
+    launcher_path: str | Path,
+) -> int:
+    """Dispatch a declarative experiment definition to its workflow runner."""
+
+    workflow = definition.workflow
+    if isinstance(workflow, CompressionBenchmarkExperiment):
+        from nanoquant.compression_benchmark_workflow import run_compression_benchmark_experiment
+
+        return run_compression_benchmark_experiment(
+            definition.config, workflow, launcher_path=launcher_path
+        )
+    if isinstance(workflow, CompressionQualityExperiment):
+        from nanoquant.compression_quality_workflow import run_compression_quality_experiment
+
+        return run_compression_quality_experiment(
+            definition.config, workflow, launcher_path=launcher_path
+        )
+    if isinstance(workflow, QualityEvaluationExperiment):
+        from nanoquant.quality_evaluation_workflow import run_quality_evaluation_experiment
+
+        return run_quality_evaluation_experiment(
+            definition.config, workflow, launcher_path=launcher_path
+        )
+    if isinstance(workflow, RankExpansionExperiment):
+        from nanoquant.rank_expansion_experiment import run_rank_expansion_experiment
+
+        return run_rank_expansion_experiment(
+            definition.config, workflow, launcher_path=launcher_path
+        )
+    raise TypeError(f"unsupported experiment workflow: {type(workflow).__name__}")
+
+
+def experiment_main(
+    module_name: str,
+    launcher_path: str | Path,
+    definition: ExperimentDefinition[ExperimentWorkflow],
+) -> None:
+    """Run a numbered launcher only when its module is the process entry point."""
+
+    if module_name == "__main__":
+        raise SystemExit(run_experiment(definition, launcher_path=launcher_path))
+
+
+def experiment_callable_main(module_name: str, runner: Callable[[], int]) -> None:
+    """Run a specialized launcher without repeating the module-entry guard."""
+
+    if module_name == "__main__":
+        raise SystemExit(runner())
+
+
 __all__ = [
     "BaselineKind",
     "BaselineRef",
@@ -415,9 +477,13 @@ __all__ = [
     "ExperimentIdentity",
     "ExperimentLayout",
     "ExperimentRef",
+    "ExperimentWorkflow",
     "define_compression_benchmark_experiment",
     "define_compression_quality_experiment",
     "define_quality_evaluation_experiment",
     "define_rank_expansion_experiment",
+    "experiment_callable_main",
+    "experiment_main",
+    "run_experiment",
     "validate_experiment_registry",
 ]

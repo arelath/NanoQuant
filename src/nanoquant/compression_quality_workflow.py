@@ -34,6 +34,12 @@ from nanoquant.llamacpp_quality import (
     execute_llamacpp_quality_evaluation,
     render_llamacpp_quality_markdown,
 )
+from nanoquant.ports.event_sink import (
+    LlamaCppQualityCompletedPayload,
+    LlamaCppQualityStartedPayload,
+    emit_llamacpp_quality_completed,
+    emit_llamacpp_quality_started,
+)
 from nanoquant.quality_evaluation import (
     DEFAULT_QUALITY_TASK_BATCH_SIZE,
     DEFAULT_QUALITY_WIKITEXT_BATCH_SIZE,
@@ -236,13 +242,13 @@ def execute_compression_quality_experiment(
             resolved.inputs.output,
             observability=config.observability,
         ) as quality_events:
-            quality_events.emit(
-                "quality",
-                "info",
-                "quality.llamacpp.started",
-                gguf=str(exports.gguf.output),
-                gguf_sha256=exports.gguf.sha256,
-                parallel=experiment.llamacpp_quality_parallel,
+            emit_llamacpp_quality_started(
+                quality_events,
+                LlamaCppQualityStartedPayload(
+                    gguf=str(exports.gguf.output),
+                    gguf_sha256=exports.gguf.sha256,
+                    parallel=experiment.llamacpp_quality_parallel,
+                ),
             )
             try:
                 llamacpp_quality = execute_llamacpp_quality_evaluation(
@@ -272,13 +278,16 @@ def execute_compression_quality_experiment(
                     error=str(exc),
                 )
                 raise
-            quality_events.emit(
-                "quality",
-                "info",
-                "quality.llamacpp.completed",
-                output=str(resolved.llamacpp_quality_output),
-                reused=bool(llamacpp_quality.get("reused")),
-                wall_seconds=llamacpp_quality.get("wall_seconds"),
+            llamacpp_wall_seconds = llamacpp_quality.get("wall_seconds")
+            emit_llamacpp_quality_completed(
+                quality_events,
+                LlamaCppQualityCompletedPayload(
+                    output=str(resolved.llamacpp_quality_output),
+                    reused=bool(llamacpp_quality.get("reused")),
+                    wall_seconds=(
+                        None if llamacpp_wall_seconds is None else float(llamacpp_wall_seconds)
+                    ),
+                ),
             )
     llamacpp_quality_seconds = (
         0.0 if llamacpp_quality is None else time.perf_counter() - llamacpp_quality_started

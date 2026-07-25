@@ -127,8 +127,14 @@ def canonical_json(value: Any) -> str:
     return json.dumps(to_dict(value), sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
 
 
+def semantic_hash(value: Any) -> str:
+    """Return a stable SHA-256 identity for a canonical JSON value."""
+
+    return "sha256:" + hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
+
+
 def config_hash(config: RunConfig) -> str:
-    return "sha256:" + hashlib.sha256(canonical_json(config).encode("utf-8")).hexdigest()
+    return semantic_hash(config)
 
 
 def load_config(path: str | Path) -> RunConfig:

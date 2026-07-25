@@ -11,6 +11,7 @@ import time
 from dataclasses import asdict
 from pathlib import Path
 
+from nanoquant.domain.models import ArtifactType
 from nanoquant.domain.profiling import NULL_RECORDER, PhaseRecorder
 from nanoquant.infrastructure.io_utils import atomic_write_json, hash_file, safe_replace
 from nanoquant.ports.artifact_store import ArtifactDescriptor, ArtifactFile
@@ -21,9 +22,14 @@ class ArtifactCorruptionError(IOError):
 
 
 class LocalArtifactWriter:
-    def __init__(self, store: LocalArtifactStore, artifact_type: str, schema_version: int) -> None:
+    def __init__(
+        self,
+        store: LocalArtifactStore,
+        artifact_type: ArtifactType | str,
+        schema_version: int,
+    ) -> None:
         self.store = store
-        self.artifact_type = artifact_type
+        self.artifact_type = str(artifact_type)
         self.schema_version = schema_version
         self.path = Path(tempfile.mkdtemp(prefix="lease-", dir=store.temporary_root))
         (self.path / ".lease.json").write_text(
@@ -144,12 +150,13 @@ class LocalArtifactStore:
         self._persistent_validation[descriptor.artifact_id] = persistent_signature
         self._persist_validation()
 
-    def begin_write(self, artifact_type: str, schema_version: int = 1) -> LocalArtifactWriter:
-        if not artifact_type or any(
-            character not in "abcdefghijklmnopqrstuvwxyz0123456789-_" for character in artifact_type
+    def begin_write(self, artifact_type: ArtifactType | str, schema_version: int = 1) -> LocalArtifactWriter:
+        artifact_type_name = str(artifact_type)
+        if not artifact_type_name or any(
+            character not in "abcdefghijklmnopqrstuvwxyz0123456789-_" for character in artifact_type_name
         ):
             raise ValueError("artifact type must be lowercase alphanumeric with '-' or '_'")
-        return LocalArtifactWriter(self, artifact_type, schema_version)
+        return LocalArtifactWriter(self, artifact_type_name, schema_version)
 
     def path_for(self, artifact_id: str) -> Path:
         if not artifact_id.startswith("sha256-") or len(artifact_id) != 71:

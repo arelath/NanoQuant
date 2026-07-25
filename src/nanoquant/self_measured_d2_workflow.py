@@ -3,13 +3,10 @@
 from __future__ import annotations
 
 import argparse
-import gc
 import json
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Protocol
-
-import torch
 
 from nanoquant.application.kl_budget import KlBudgetProfile, load_kl_budget_profile
 from nanoquant.compression_quality_workflow import (
@@ -25,6 +22,7 @@ from nanoquant.config.schema import (
 )
 from nanoquant.config.validation import ValidationPhase, raise_for_issues, validate
 from nanoquant.infrastructure.commits import CommitIdentity, latest_complete_identity
+from nanoquant.infrastructure.memory_cleanup import release_memory
 from nanoquant.kl_budget_workflow import execute_kl_budget
 from nanoquant.resident_workflow import (
     ResidentExecutionOptions,
@@ -261,9 +259,7 @@ def _prepare_automatic_kl_inputs(
             raise ValueError(f"{label} uniform control completed with the wrong block count")
         _require_control_recipe(control_run, control_config)
         del result
-        gc.collect()
-        if control_config.runtime.compute_device.startswith("cuda") and torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        release_memory(control_config.runtime.compute_device)
 
     print(f"Creating or resuming {label} exact-unit KL profile: {profile_path}", flush=True)
     execute_kl_budget(

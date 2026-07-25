@@ -9,9 +9,8 @@ from recipes import (
     ExperimentIdentity,
     ExperimentRef,
     define_compression_quality_experiment,
+    experiment_main,
 )
-
-from nanoquant.compression_quality_workflow import run_compression_quality_experiment
 
 PARENT = ExperimentRef(13, "compress-and-benchmark-gemma-3-270m-it")
 
@@ -59,11 +58,4 @@ EXPERIMENT = define_compression_quality_experiment(
 )
 
 
-if __name__ == "__main__":
-    raise SystemExit(
-        run_compression_quality_experiment(
-            EXPERIMENT.config,
-            EXPERIMENT.workflow,
-            launcher_path=__file__,
-        )
-    )
+experiment_main(__name__, __file__, EXPERIMENT)

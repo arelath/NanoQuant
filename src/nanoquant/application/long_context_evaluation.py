@@ -2,17 +2,16 @@
 
 from __future__ import annotations
 
-import hashlib
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
 
 from nanoquant.application.evaluation import EvaluatorRegistry, EvaluatorSpec
-from nanoquant.config.codec import canonical_json
+from nanoquant.config.codec import semantic_hash
 
 
 def _hash(value: object) -> str:
-    return "sha256:" + hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
+    return semantic_hash(value)
 
 
 @dataclass(frozen=True, slots=True)

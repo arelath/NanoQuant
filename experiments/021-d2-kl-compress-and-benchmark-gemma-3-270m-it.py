@@ -9,6 +9,7 @@ from recipes import (
     ExperimentIdentity,
     ExperimentRef,
     define_compression_quality_experiment,
+    experiment_callable_main,
 )
 
 from nanoquant.config.schema import (
@@ -92,5 +93,7 @@ EXPERIMENT = define_compression_quality_experiment(
 )
 
 
-if __name__ == "__main__":
-    raise SystemExit(run_experiment021(EXPERIMENT, launcher_path=__file__))
+experiment_callable_main(
+    __name__,
+    lambda: run_experiment021(EXPERIMENT, launcher_path=__file__),
+)

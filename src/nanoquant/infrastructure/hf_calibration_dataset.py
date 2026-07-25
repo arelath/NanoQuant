@@ -12,12 +12,12 @@ from typing import Any, cast
 
 import torch
 from datasets import load_dataset  # type: ignore[import-untyped]
-from safetensors import safe_open
 from transformers.models.auto.tokenization_auto import AutoTokenizer
 
 from nanoquant.domain.models import ArtifactRef
 from nanoquant.infrastructure.artifacts import ArtifactCorruptionError, LocalArtifactStore
 from nanoquant.infrastructure.io_utils import atomic_write_json
+from nanoquant.infrastructure.safetensors_io import load_tensors
 from nanoquant.infrastructure.tensor_store import LocalTensorStore
 
 ULTRACHAT_REVISION = "8049631c405ae6576f93f445c6b8166f76f5505a"
@@ -42,14 +42,12 @@ def load_pinned_calibration(output: str | Path, reference: ArtifactRef) -> Pinne
     tensor_artifact_id = str(manifest["tensor_artifact"])
     artifacts.validate(tensor_artifact_id)
     tensor_path = artifacts.path_for(tensor_artifact_id) / "tensors.safetensors"
-    with safe_open(tensor_path, framework="pt", device="cpu") as handle:
-        input_ids = handle.get_tensor("input_ids")
-        attention_mask = handle.get_tensor("attention_mask")
+    tensors = load_tensors(tensor_path, ("input_ids", "attention_mask"))
     source_revisions = tuple((str(name), str(revision)) for name, revision in manifest["source_revisions"].items())
     return PinnedCalibrationDataset(
         reference,
-        input_ids,
-        attention_mask,
+        tensors["input_ids"],
+        tensors["attention_mask"],
         str(manifest["fingerprint"]),
         source_revisions,
     )

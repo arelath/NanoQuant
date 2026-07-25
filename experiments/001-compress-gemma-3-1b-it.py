@@ -5,9 +5,8 @@ from recipes import (
     BaselineRef,
     ExperimentIdentity,
     define_compression_benchmark_experiment,
+    experiment_main,
 )
-
-from nanoquant.compression_benchmark_workflow import run_compression_benchmark_experiment
 
 EXPERIMENT = define_compression_benchmark_experiment(
     ExperimentIdentity(
@@ -28,11 +27,4 @@ EXPERIMENT = define_compression_benchmark_experiment(
 )
 
 
-if __name__ == "__main__":
-    raise SystemExit(
-        run_compression_benchmark_experiment(
-            EXPERIMENT.config,
-            EXPERIMENT.workflow,
-            launcher_path=__file__,
-        )
-    )
+experiment_main(__name__, __file__, EXPERIMENT)

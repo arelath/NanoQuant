@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import cast
 
 import torch
 from torch import nn
@@ -22,6 +22,7 @@ from nanoquant.infrastructure.artifacts import LocalArtifactStore
 from nanoquant.infrastructure.commits import CommitIdentity, latest_complete_identity, load_committed_block
 from nanoquant.infrastructure.global_tuning import active_global_tuning, load_global_tuning
 from nanoquant.infrastructure.hf_language_model import load_causal_language_model
+from nanoquant.infrastructure.hf_model_protocol import HuggingFaceModel
 from nanoquant.infrastructure.model_adapters import adapter_for_config
 from nanoquant.infrastructure.safetensors_source import SafetensorsModelSource
 from nanoquant.infrastructure.tensor_store import LocalTensorStore
@@ -162,5 +163,5 @@ def load_frozen_run(
                         if value.shape != parameter.shape:
                             raise ValueError(f"global tuning parameter shape differs: {name}")
                         parameter.copy_(value.to(dtype=parameter.dtype))
-    cast(Any, model).config.use_cache = False
+    cast(HuggingFaceModel, model).config.use_cache = False
     return LoadedFrozenModel(model, committed, identity, global_tuning_ref)

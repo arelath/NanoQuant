@@ -7,11 +7,11 @@ from recipes import (
     BaselineRef,
     ExperimentIdentity,
     define_quality_evaluation_experiment,
+    experiment_main,
 )
 from recipes._delta import config_delta
 
 from nanoquant.quality_evaluation import QualityEvaluationRequest
-from nanoquant.quality_evaluation_workflow import run_quality_evaluation_experiment
 
 MODEL_REVISION = str(BASE_COMPRESSION_TEMPLATE.model.revision)
 
@@ -67,11 +67,4 @@ EXPERIMENT = define_quality_evaluation_experiment(
 )
 
 
-if __name__ == "__main__":
-    raise SystemExit(
-        run_quality_evaluation_experiment(
-            EXPERIMENT.config,
-            EXPERIMENT.workflow,
-            launcher_path=__file__,
-        )
-    )
+experiment_main(__name__, __file__, EXPERIMENT)
