@@ -76,6 +76,7 @@ Read these in order for a full rewrite plan:
 18. [Glossary](glossary.md)
 19. [Legacy numbered experiment migration inventory](22-legacy-experiment-migration-inventory.md)
 20. [Standardized experiment definitions and output layout](29-standardized-experiment-definitions-and-layout.md)
+21. [Qwen3 thinking-mode quality recovery](36-qwen3-thinking-mode-quality.md)
 
 The [architecture decision record directory](adr/README.md) records decisions that future contributors may otherwise be tempted to reverse without understanding their context.
 
