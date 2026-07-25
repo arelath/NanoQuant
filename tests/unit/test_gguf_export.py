@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 import torch
+from safetensors.torch import save_file
 
 import nanoquant.infrastructure.gguf_export as gguf_export
 from nanoquant.infrastructure.gguf_export import export_llamacpp_gguf
@@ -47,7 +48,7 @@ def _packed(tmp_path: Path) -> Path:
     return convert_logical_to_packed(logical.root, tmp_path / "packed").root
 
 
-def test_gguf_export_is_converter_pinned_and_resumable(
+def test_qwen_gguf_export_quantizes_lm_head_as_canonical_output_and_resumes(
     tmp_path: Path,
     monkeypatch,
 ) -> None:  # type: ignore[no-untyped-def]
@@ -55,9 +56,17 @@ def test_gguf_export_is_converter_pinned_and_resumable(
     source = tmp_path / "snapshot"
     source.mkdir()
     (source / "config.json").write_text(
-        json.dumps({"vision_config": {"hidden_size": 16}}),
+        json.dumps(
+            {
+                "architectures": ["Qwen3ForCausalLM"],
+                "model_type": "qwen3",
+                "tie_word_embeddings": False,
+                "vision_config": {"hidden_size": 16},
+            }
+        ),
         encoding="utf-8",
     )
+    save_file({"lm_head.weight": torch.ones((32, 32))}, source / "model.safetensors")
     reference = tmp_path / "llama.cpp"
     reference.mkdir()
     converter = tmp_path / "vendored" / "convert_nanoquant_to_gguf.py"
@@ -149,13 +158,14 @@ Path(a.outfile).write_bytes(b'GGUF-fixture')
     assert second.mmproj is not None and second.mmproj.reused
     assert mmproj_calls == [output.parent / "mmproj-BF16.gguf"] * 2
     receipt = json.loads(output.with_suffix(".gguf.export.json").read_text(encoding="utf-8"))
-    assert receipt["schema_version"] == 4
+    assert receipt["schema_version"] == 5
     assert receipt["gguf_sha256"] == real_hash_file(output)
     assert receipt["converter_sha256"] == PACKED_REFERENCE_CONVERTER_SHA256
     assert receipt["token_embedding_type"] == "q8_0"
     assert receipt["output_tensor_type"] == "q8_0"
     assert receipt["output_tensor"] == "output.weight"
     assert receipt["output_tensor_present"] is True
+    assert receipt["source_output_tensors"] == ["lm_head.weight"]
     assert receipt["nanoquant_scale_type"] == "bf16"
     assert receipt["nanoquant_scale_tensor_count"] == 3
     assert receipt["quantizer_sha256"] == real_hash_file(quantizer)
@@ -189,6 +199,8 @@ def test_gguf_export_output_tensor_contract_is_optional_but_validated_when_prese
     gguf_export._require_output_tensor_type(None, "q8_0")
     gguf_export._require_output_tensor_type("q8_0", "q8_0")
 
+    with pytest.raises(ValueError, match=r"lm_head\.weight.*canonical GGUF output\.weight"):
+        gguf_export._require_output_tensor_type(None, "q8_0", ("lm_head.weight",))
     with pytest.raises(ValueError, match="output tensor type differs"):
         gguf_export._require_output_tensor_type("f16", "q8_0")
 

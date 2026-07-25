@@ -18,6 +18,7 @@ from nanoquant.infrastructure.mmproj_export import (
     export_mmproj_bfloat16,
     source_has_vision_stack,
 )
+from nanoquant.infrastructure.safetensors_source import SafetensorsModelSource
 from nanoquant.runtime import (
     LlamaCppCheckpointManifest,
     export_llamacpp_checkpoint,
@@ -25,7 +26,7 @@ from nanoquant.runtime import (
     open_packed_artifact,
 )
 
-GGUF_EXPORT_SCHEMA_VERSION = 4
+GGUF_EXPORT_SCHEMA_VERSION = 5
 DEFAULT_TOKEN_EMBEDDING_TYPE = "q8_0"
 DEFAULT_OUTPUT_TENSOR_TYPE = "q8_0"
 SUPPORTED_AUXILIARY_TENSOR_TYPES = frozenset(
@@ -165,7 +166,30 @@ def _require_bfloat16_nanoquant_scales(
         raise ValueError(f"GGUF NanoQuant scale tensors must all be BF16, found: {rendered}")
 
 
-def _require_output_tensor_type(actual_type: str | None, requested_type: str) -> None:
+def _source_output_tensor_names(source: Path) -> tuple[str, ...]:
+    inventory = SafetensorsModelSource(
+        source,
+        source=str(source),
+        revision="gguf-export",
+        verify_hashes=False,
+    ).tensor_metadata()
+    return tuple(
+        metadata.key
+        for metadata in inventory
+        if metadata.key in {"lm_head.weight", "model.lm_head.weight", "output.weight", "model.output.weight"}
+    )
+
+
+def _require_output_tensor_type(
+    actual_type: str | None,
+    requested_type: str,
+    source_output_tensors: tuple[str, ...] = (),
+) -> None:
+    if source_output_tensors and actual_type is None:
+        rendered = ", ".join(source_output_tensors)
+        raise ValueError(
+            f"source output tensor {rendered} did not map to canonical GGUF output.weight"
+        )
     if actual_type is not None and actual_type != requested_type:
         raise ValueError(
             f"GGUF output tensor type differs from export recipe: {actual_type} != {requested_type}"
@@ -219,6 +243,7 @@ def _reuse_existing(
     packed_descriptor_hash: str,
     token_embedding_type: str,
     output_tensor_type: str,
+    source_output_tensors: tuple[str, ...],
     expected_scale_count: int,
     reference: Path,
     python_executable: str | Path,
@@ -239,7 +264,7 @@ def _reuse_existing(
         python_executable,
     )
     _require_bfloat16_nanoquant_scales(scale_count, scale_types, expected_scale_count)
-    _require_output_tensor_type(actual_output_type, output_tensor_type)
+    _require_output_tensor_type(actual_output_type, output_tensor_type, source_output_tensors)
     expected = {
         "schema_version": GGUF_EXPORT_SCHEMA_VERSION,
         "packed_descriptor_sha256": packed_descriptor_hash,
@@ -248,6 +273,7 @@ def _reuse_existing(
         "token_embedding_type": token_embedding_type,
         "output_tensor_type": output_tensor_type,
         "output_tensor_present": actual_output_type is not None,
+        "source_output_tensors": list(source_output_tensors),
         "nanoquant_scale_type": "bf16",
         "nanoquant_scale_tensor_count": scale_count,
         "gguf_sha256": hash_file(output),
@@ -313,6 +339,7 @@ def export_llamacpp_gguf(
             "modified llama.cpp converter hash differs from packed provenance: "
             f"{converter_hash} != {expected_converter_hash}"
         )
+    source_output_tensors = _source_output_tensor_names(source)
     quantizer = _find_quantizer(reference)
     checkpoint_path = Path(checkpoint_root).resolve()
     _checkpoint_for_packed(packed.root, checkpoint_path)
@@ -328,6 +355,7 @@ def export_llamacpp_gguf(
             packed_descriptor_hash,
             embedding_type,
             requested_output_type,
+            source_output_tensors,
             expected_scale_count,
             reference,
             python_executable,
@@ -436,7 +464,11 @@ def export_llamacpp_gguf(
                 f"{actual_embedding_type} != {embedding_type}"
             )
         try:
-            _require_output_tensor_type(actual_output_type, requested_output_type)
+            _require_output_tensor_type(
+                actual_output_type,
+                requested_output_type,
+                source_output_tensors,
+            )
             _require_bfloat16_nanoquant_scales(scale_count, scale_types, expected_scale_count)
         except ValueError as exc:
             raise RuntimeError(str(exc)) from exc
@@ -462,6 +494,7 @@ def export_llamacpp_gguf(
         "output_tensor_type": requested_output_type,
         "output_tensor": "output.weight" if actual_output_type is not None else None,
         "output_tensor_present": actual_output_type is not None,
+        "source_output_tensors": list(source_output_tensors),
         "nanoquant_scale_type": "bf16",
         "nanoquant_scale_tensor_count": scale_count,
         "gguf": str(destination),

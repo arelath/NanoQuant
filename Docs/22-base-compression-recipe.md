@@ -62,8 +62,10 @@ complete until all of these stages succeed:
 The embedding and output levels are independent parts of `CompressionExportPolicy` and receipt identity. Set
 `CompressionExportPolicy(token_embedding_type="q4_k", output_tensor_type="q6_k")` to override either default;
 Q4/Q5/Q6/Q8 llama.cpp variants accepted by the export contract are supported. Models with tied embeddings may omit
-the separate `output.weight`; its absence is recorded and accepted. The second pass uses F16 as its base type because
-llama.cpp's `COPY` mode disables per-tensor overrides. On NanoQuant GGUFs, the F16 base leaves existing
+the separate `output.weight`; its absence is recorded and accepted. Source `lm_head.weight` and `output.weight`
+tensors are both treated as independent output projections and must map to canonical GGUF `output.weight`; Qwen3
+therefore follows the same quantization contract as Llama-family models. The second pass uses F16 as its base type
+because llama.cpp's `COPY` mode disables per-tensor overrides. On NanoQuant GGUFs, the F16 base leaves existing
 BF16/F16/I32/F32 sidecars alone and changes the token embedding plus the independent output tensor when present.
 
 The mmproj remains independent of NanoQuant language-weight compression and is generated directly from the pinned
