@@ -88,6 +88,9 @@ Each stage is resumable. Existing logical, packed, checkpoint, language GGUF, an
 and reused. A complete pre-convention GGUF under `outputs/NNN` is validated and hard-linked into `Results/NNN` on
 the first retry, so the layout transition does not repeat conversion or duplicate model bytes. A partial or
 provenance-mismatched output fails closed rather than being treated as complete.
+When a source has an independent output head and its otherwise bound GGUF receipt predates the output-tensor
+quantization contract, export keeps the old GGUF in place while rebuilding and validating a replacement, then
+atomically supersedes the GGUF and receipt. Current-schema tensor mismatches still fail closed as corruption.
 
 ## Optional Hugging Face upload
 

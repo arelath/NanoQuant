@@ -29,6 +29,10 @@ from nanoquant.runtime import (
 GGUF_EXPORT_SCHEMA_VERSION = 5
 DEFAULT_TOKEN_EMBEDDING_TYPE = "q8_0"
 DEFAULT_OUTPUT_TENSOR_TYPE = "q8_0"
+
+
+class _StaleAuxiliaryTensorQuantizationError(ValueError):
+    """A valid legacy GGUF must be superseded under the current tensor policy."""
 SUPPORTED_AUXILIARY_TENSOR_TYPES = frozenset(
     {
         "q4_0",
@@ -264,6 +268,30 @@ def _reuse_existing(
         python_executable,
     )
     _require_bfloat16_nanoquant_scales(scale_count, scale_types, expected_scale_count)
+    if actual_embedding_type != token_embedding_type:
+        raise ValueError(
+            "GGUF token embedding tensor type differs from export recipe: "
+            f"{actual_embedding_type} != {token_embedding_type}"
+        )
+    legacy_binding = {
+        "packed_descriptor_sha256": packed_descriptor_hash,
+        "converter_sha256": hash_canonical_text_file(converter),
+        "token_embedding_type": token_embedding_type,
+        "nanoquant_scale_type": "bf16",
+        "nanoquant_scale_tensor_count": scale_count,
+    }
+    schema_version = receipt.get("schema_version")
+    legacy_bound = (
+        bool(source_output_tensors)
+        and type(schema_version) is int
+        and schema_version < GGUF_EXPORT_SCHEMA_VERSION
+        and all(receipt.get(name) == value for name, value in legacy_binding.items())
+        and receipt.get("checkpoint") == str(checkpoint_root.resolve())
+    )
+    if legacy_bound:
+        raise _StaleAuxiliaryTensorQuantizationError(
+            "legacy GGUF must be rebuilt under the current auxiliary tensor policy"
+        )
     _require_output_tensor_type(actual_output_type, output_tensor_type, source_output_tensors)
     expected = {
         "schema_version": GGUF_EXPORT_SCHEMA_VERSION,
@@ -284,11 +312,6 @@ def _reuse_existing(
             raise ValueError(f"GGUF export receipt field differs: {name}")
     if receipt.get("checkpoint") != str(checkpoint_root.resolve()):
         raise ValueError("GGUF export receipt checkpoint path differs")
-    if actual_embedding_type != token_embedding_type:
-        raise ValueError(
-            "GGUF token embedding tensor type differs from export recipe: "
-            f"{actual_embedding_type} != {token_embedding_type}"
-        )
     return GgufExportResult(
         output.resolve(),
         checkpoint_root.resolve(),
@@ -317,9 +340,10 @@ def export_llamacpp_gguf(
 ) -> GgufExportResult:
     """Export one packed artifact to GGUF and bind it to a durable receipt.
 
-    Existing complete outputs are hash-verified and reused. Partial or mismatched
-    outputs fail closed so an interrupted conversion cannot be mistaken for a
-    valid deployment artifact.
+    Existing complete outputs are hash-verified and reused. Bound legacy exports
+    that predate independent output-tensor quantization are atomically rebuilt.
+    Partial or current-schema mismatched outputs fail closed so an interrupted
+    conversion cannot be mistaken for a valid deployment artifact.
     """
 
     embedding_type = normalize_token_embedding_type(token_embedding_type)
@@ -347,21 +371,29 @@ def export_llamacpp_gguf(
     packed_descriptor_hash = hash_file(packed.root / "nanoquant-packed-model.json")
     expected_scale_count = packed.manifest.layer_count * 3
     if destination.exists() or _receipt_path(destination).exists():
-        result = _reuse_existing(
-            destination,
-            checkpoint_path,
-            converter,
-            quantizer,
-            packed_descriptor_hash,
-            embedding_type,
-            requested_output_type,
-            source_output_tensors,
-            expected_scale_count,
-            reference,
-            python_executable,
-        )
-        mmproj = _export_mmproj_for_source(source, destination, reference, python_executable)
-        return replace(result, mmproj=mmproj)
+        try:
+            result = _reuse_existing(
+                destination,
+                checkpoint_path,
+                converter,
+                quantizer,
+                packed_descriptor_hash,
+                embedding_type,
+                requested_output_type,
+                source_output_tensors,
+                expected_scale_count,
+                reference,
+                python_executable,
+            )
+        except _StaleAuxiliaryTensorQuantizationError:
+            print(
+                "Existing legacy GGUF uses stale auxiliary tensor quantization; "
+                f"rebuilding atomically: {destination}",
+                flush=True,
+            )
+        else:
+            mmproj = _export_mmproj_for_source(source, destination, reference, python_executable)
+            return replace(result, mmproj=mmproj)
 
     destination.parent.mkdir(parents=True, exist_ok=True)
     descriptor, converted_name = tempfile.mkstemp(

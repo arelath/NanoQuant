@@ -110,11 +110,16 @@ Path(a.outfile).write_bytes(b'GGUF-fixture')
         return subprocess.CompletedProcess(command, 0)
 
     monkeypatch.setattr(gguf_export.subprocess, "run", fake_run)
-    monkeypatch.setattr(
-        gguf_export,
-        "_inspect_gguf_tensor_contract",
-        lambda *_args: ("q8_0", "q8_0", 3, ("bf16",)),
-    )
+    def inspect(path, *_args):  # type: ignore[no-untyped-def]
+        candidate = Path(path)
+        output_type = (
+            "f16"
+            if candidate == output and candidate.read_bytes() == b"GGUF-legacy"
+            else "q8_0"
+        )
+        return "q8_0", output_type, 3, ("bf16",)
+
+    monkeypatch.setattr(gguf_export, "_inspect_gguf_tensor_contract", inspect)
     mmproj_calls: list[Path] = []
 
     def export_mmproj(_source, mmproj_output, _reference, **_kwargs):  # type: ignore[no-untyped-def]
@@ -150,13 +155,64 @@ Path(a.outfile).write_bytes(b'GGUF-fixture')
         reference,
         converter_path=converter,
     )
+    legacy_receipt = json.loads(
+        output.with_suffix(".gguf.export.json").read_text(encoding="utf-8")
+    )
+    output.write_bytes(b"GGUF-legacy")
+    legacy_receipt["gguf_sha256"] = real_hash_file(output)
+    legacy_receipt["gguf_bytes"] = output.stat().st_size
+    output.with_suffix(".gguf.export.json").write_text(
+        json.dumps(legacy_receipt),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="output tensor type differs"):
+        export_llamacpp_gguf(
+            packed,
+            source,
+            checkpoint,
+            output,
+            reference,
+            converter_path=converter,
+        )
+    assert len(commands) == 2
+
+    legacy_receipt["schema_version"] = 3
+    for field in (
+        "output_tensor_type",
+        "output_tensor",
+        "output_tensor_present",
+        "source_output_tensors",
+    ):
+        legacy_receipt.pop(field, None)
+    output.with_suffix(".gguf.export.json").write_text(
+        json.dumps(legacy_receipt),
+        encoding="utf-8",
+    )
+    rebuilt = export_llamacpp_gguf(
+        packed,
+        source,
+        checkpoint,
+        output,
+        reference,
+        converter_path=converter,
+    )
+    resumed = export_llamacpp_gguf(
+        packed,
+        source,
+        checkpoint,
+        output,
+        reference,
+        converter_path=converter,
+    )
 
     assert output.read_bytes() == b"GGUF-q8_0"
     assert not first.reused
     assert second.reused
+    assert not rebuilt.reused
+    assert resumed.reused
     assert first.mmproj is not None and not first.mmproj.reused
     assert second.mmproj is not None and second.mmproj.reused
-    assert mmproj_calls == [output.parent / "mmproj-BF16.gguf"] * 2
+    assert mmproj_calls == [output.parent / "mmproj-BF16.gguf"] * 4
     receipt = json.loads(output.with_suffix(".gguf.export.json").read_text(encoding="utf-8"))
     assert receipt["schema_version"] == 5
     assert receipt["gguf_sha256"] == real_hash_file(output)
@@ -169,7 +225,7 @@ Path(a.outfile).write_bytes(b'GGUF-fixture')
     assert receipt["nanoquant_scale_type"] == "bf16"
     assert receipt["nanoquant_scale_tensor_count"] == 3
     assert receipt["quantizer_sha256"] == real_hash_file(quantizer)
-    assert len(commands) == 2
+    assert len(commands) == 4
     converter_environment = command_environments[0]
     assert converter_environment is not None
     assert converter_environment["NO_LOCAL_GGUF"] == "1"
@@ -182,6 +238,12 @@ Path(a.outfile).write_bytes(b'GGUF-fixture')
         "Q8_0",
     )
     assert commands[1][-1] == "F16"
+    assert commands[3][1:5] == (
+        "--output-tensor-type",
+        "Q8_0",
+        "--token-embedding-type",
+        "Q8_0",
+    )
     assert first.output_tensor_type == "q8_0"
     assert first.output_tensor_present
     assert second.output_tensor_type == "q8_0"
