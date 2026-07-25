@@ -11,8 +11,8 @@ The interactive operator path is implemented:
 - `tools/compress_model.py` provides the zero-argument family, size, BPW, quality, upload, confirmation, and
   previous-run menus.
 - `experiments/recipes/interactive_recommended_models.yaml` stores the promoted Qwen3, Gemma3, Llama3, and
-  Llama3.2 catalog. A strict loader materializes `INTERACTIVE_RECOMMENDED_MODELS` from symbolic reusable-template
-  IDs; Qwen3 choices use the dual thinking/non-thinking profile.
+  Llama3.2 catalog. A strict loader materializes `INTERACTIVE_RECOMMENDED_MODELS`, using each variant ID to select
+  its reusable template; Qwen3 choices use the dual thinking/non-thinking profile.
 - `src/nanoquant/interactive_compression.py` owns strict settings, tamper-evident YAML persistence, discovery,
   continuation, optional quality, optional upload, and non-numbered summaries.
 - Non-numbered exports and zero-copy publication use `Results/interactive/<run-name>` without allocating a fake
@@ -428,10 +428,12 @@ The first catalog is extracted from the currently promoted reusable settings, no
 
 The versioned source of truth is `experiments/recipes/interactive_recommended_models.yaml`. Variants are nested under
 their family, and family/variant sequence order directly controls the two menus—there are no separate order fields.
-Each variant names a symbolic reusable-template ID; YAML owns selection and publication metadata while Python owns
-numerical `RunConfig` templates. The pinned model revision comes from that template rather than being repeated in
-YAML. Unknown fields, missing template IDs, duplicate families or variants, empty families, unpinned template
-revisions, or invalid defaults fail during catalog loading.
+Each unique variant ID selects its reusable Python `RunConfig` template, so the YAML does not carry a separate
+template ID. The profile ID remains the persisted numerical/workflow policy identity and may intentionally be shared
+by compatible variants. YAML owns selection and publication metadata while Python owns numerical templates. The
+pinned model revision comes from that template rather than being repeated in YAML. Unknown fields, variants without
+registered templates, duplicate families or variants, empty families, unpinned template revisions, or invalid
+defaults fail during catalog loading.
 
 - Qwen3 uses the dual-mode behavior preparation and evaluation policy from
   [the Qwen3 recovery design](36-qwen3-thinking-mode-quality.md), plus the adaptive architecture-protected execution

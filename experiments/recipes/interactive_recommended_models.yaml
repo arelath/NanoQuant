@@ -1,4 +1,4 @@
-schema_version: 3
+schema_version: 4
 families:
   - id: qwen3
     label: Qwen3
@@ -13,7 +13,6 @@ families:
         evidence:
           - Docs/36-qwen3-thinking-mode-quality.md
           - experiments/030-recover-qwen3-0-6b-thinking-quality.py
-        template_id: qwen3-0-6b-dual-mode
         default: true
 
       - id: qwen3-8b
@@ -25,7 +24,6 @@ families:
         evidence:
           - Docs/36-qwen3-thinking-mode-quality.md
           - experiments/031-confirm-qwen3-8b-thinking-quality.py
-        template_id: qwen3-8b-dual-mode
         llamacpp_quality_parallel: 1
 
   - id: gemma3
@@ -39,7 +37,6 @@ families:
         profile_id: gemma3-architecture-protected-v1
         evidence:
           - experiments/016-compress-and-benchmark-gemma-3-270m-it.py
-        template_id: gemma3-270m-architecture-protected
 
       - id: gemma3-1b
         label: Gemma3-1B
@@ -49,7 +46,6 @@ families:
         profile_id: gemma3-architecture-protected-v1
         evidence:
           - experiments/017-compress-and-benchmark-gemma-3-1b-it.py
-        template_id: gemma3-1b-architecture-protected
         default: true
 
       - id: gemma3-4b
@@ -60,7 +56,6 @@ families:
         profile_id: gemma3-architecture-protected-v1
         evidence:
           - experiments/018-compress-and-benchmark-gemma-3-4b-it.py
-        template_id: gemma3-4b-architecture-protected
 
       - id: gemma3-12b
         label: Gemma3-12B
@@ -70,7 +65,6 @@ families:
         profile_id: gemma3-large-model-v1
         evidence:
           - experiments/008-compress-and-benchmark-gemma-3-12b-it.py
-        template_id: gemma3-12b-large
         large_model_guards: true
 
   - id: llama3
@@ -84,7 +78,6 @@ families:
         profile_id: llama-architecture-protected-v1
         evidence:
           - experiments/027-compress-and-benchmark-meta-llama-3-8b-instruct.py
-        template_id: llama3-8b-architecture-protected
         default: true
 
   - id: llama3-2
@@ -98,7 +91,6 @@ families:
         profile_id: llama-architecture-protected-v1
         evidence:
           - experiments/025-compress-and-benchmark-llama-3-2-1b-instruct.py
-        template_id: llama3-2-1b-architecture-protected
         default: true
 
       - id: llama3-2-3b-instruct
@@ -109,4 +101,3 @@ families:
         profile_id: llama-architecture-protected-v1
         evidence:
           - experiments/026-compress-and-benchmark-llama-3-2-3b-instruct.py
-        template_id: llama3-2-3b-architecture-protected

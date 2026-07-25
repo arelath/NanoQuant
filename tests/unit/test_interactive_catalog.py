@@ -22,7 +22,6 @@ def _variant() -> dict[str, Any]:
         "release_name": model.release_name,
         "profile_id": model.profile_id,
         "evidence": list(model.evidence),
-        "template_id": "fixture-template",
         "default": True,
     }
 
@@ -39,7 +38,7 @@ def _family(variants: list[dict[str, Any]]) -> dict[str, Any]:
 
 def _write(path: Path, families: list[dict[str, Any]]) -> None:
     path.write_text(
-        yaml.safe_dump({"schema_version": 3, "families": families}, sort_keys=False),
+        yaml.safe_dump({"schema_version": 4, "families": families}, sort_keys=False),
         encoding="utf-8",
     )
 
@@ -60,11 +59,12 @@ def test_repository_interactive_catalog_is_loaded_from_yaml() -> None:
 
     assert len(payload["families"]) == 4
     assert len(variants) == len(INTERACTIVE_RECOMMENDED_MODELS) == 9
-    assert payload["schema_version"] == 3
+    assert payload["schema_version"] == 4
     assert [item["id"] for item in variants] == [
         model.variant for model in INTERACTIVE_RECOMMENDED_MODELS
     ]
-    assert all("template_id" in item for item in variants)
+    assert all("profile_id" in item for item in variants)
+    assert all("template_id" not in item for item in variants)
     assert all("family_order" not in family for family in payload["families"])
     assert all("variant_order" not in variant for variant in variants)
     assert all("revision" not in variant for variant in variants)
@@ -76,22 +76,22 @@ def test_repository_interactive_catalog_is_loaded_from_yaml() -> None:
 
 def test_interactive_catalog_rejects_unknown_fields(tmp_path: Path) -> None:
     variant = _variant()
-    variant["templat_id"] = variant.pop("template_id")
+    variant["template_id"] = "obsolete-template-key"
     path = tmp_path / "catalog.yaml"
     _write(path, [_family([variant])])
 
     with pytest.raises(ConfigDecodeError, match="template_id"):
         load_interactive_recommended_models(
             path,
-            {"fixture-template": INTERACTIVE_RECOMMENDED_MODELS[0].template},
+            {variant["id"]: INTERACTIVE_RECOMMENDED_MODELS[0].template},
         )
 
 
-def test_interactive_catalog_rejects_unknown_template_ids(tmp_path: Path) -> None:
+def test_interactive_catalog_requires_a_template_for_each_variant(tmp_path: Path) -> None:
     path = tmp_path / "catalog.yaml"
     _write(path, [_family([_variant()])])
 
-    with pytest.raises(ConfigDecodeError, match="unknown template"):
+    with pytest.raises(ConfigDecodeError, match="no reusable template registered"):
         load_interactive_recommended_models(path, {})
 
 
@@ -105,7 +105,10 @@ def test_interactive_catalog_rejects_unpinned_template_revision(tmp_path: Path) 
     )
 
     with pytest.raises(ValueError, match="template revision is required"):
-        load_interactive_recommended_models(path, {"fixture-template": unpinned})
+        load_interactive_recommended_models(
+            path,
+            {INTERACTIVE_RECOMMENDED_MODELS[0].variant: unpinned},
+        )
 
 
 def test_interactive_catalog_rejects_duplicate_variants(tmp_path: Path) -> None:
@@ -114,9 +117,10 @@ def test_interactive_catalog_rejects_duplicate_variants(tmp_path: Path) -> None:
     duplicate["default"] = False
     path = tmp_path / "catalog.yaml"
     _write(path, [_family([variant, duplicate])])
+    model = INTERACTIVE_RECOMMENDED_MODELS[0]
 
     with pytest.raises(ValueError, match="repeats variant"):
         load_interactive_recommended_models(
             path,
-            {"fixture-template": INTERACTIVE_RECOMMENDED_MODELS[0].template},
+            {model.variant: model.template},
         )

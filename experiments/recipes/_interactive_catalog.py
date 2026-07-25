@@ -12,7 +12,7 @@ from nanoquant.config.codec import ConfigDecodeError, from_dict
 from nanoquant.config.schema import RunConfig
 from nanoquant.interactive_compression import RecommendedModel
 
-INTERACTIVE_MODEL_CATALOG_SCHEMA_VERSION = 3
+INTERACTIVE_MODEL_CATALOG_SCHEMA_VERSION = 4
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,7 +24,6 @@ class _RecommendedVariantEntry:
     release_name: str
     profile_id: str
     evidence: tuple[str, ...]
-    template_id: str
     default_target_bpw: float = 1.0
     default: bool = False
     maximum_wddm_shared_gib: float | None = 0.75
@@ -43,11 +42,11 @@ class _RecommendedVariantEntry:
         templates: Mapping[str, RunConfig],
     ) -> RecommendedModel:
         try:
-            template = templates[self.template_id]
+            template = templates[self.id]
         except KeyError as exc:
             raise ConfigDecodeError(
-                f"interactive_model_catalog.families[{family_id}].variants[{self.id}].template_id",
-                f"unknown template {self.template_id!r}",
+                f"interactive_model_catalog.families[{family_id}].variants[{self.id}].id",
+                f"no reusable template registered for variant {self.id!r}",
             ) from exc
         return RecommendedModel(
             family=family_id,
