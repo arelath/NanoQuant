@@ -39,6 +39,12 @@ Thinking is the source model's default. In a completed thinking conversation, th
 non-empty `<think> ... </think>` span before the final answer. In a completed non-thinking conversation, that span
 is empty.
 
+The completed-chat behavior has an additional consequence for data preparation: Qwen3 preserves reasoning content
+only for the assistant response after the final user turn. Earlier assistant reasoning is intentionally omitted when
+a multi-turn record is rendered. A generic multi-turn reasoning dataset can therefore contain valid source fields
+while still producing no reasoning tokens in the prepared sequence. The formatter must validate rendered tokens,
+not infer success from source fields.
+
 The current Qwen3 recipes inherit the Gemma-era 50/50 UltraChat and WikiText preparation path in
 [hf_calibration_dataset.py](../src/nanoquant/infrastructure/hf_calibration_dataset.py). UltraChat records do not
 provide `reasoning_content`. When the pinned Qwen3 tokenizer formats those completed assistant messages, it emits an
@@ -71,6 +77,8 @@ This design must:
 - keep model-family behavior out of generic calibration, factorization, and tuning math;
 - evaluate the actual exported GGUF as well as the source and frozen PyTorch representations;
 - fail closed when a template, mode policy, trace corpus, or generation protocol changes;
+- leave non-hybrid model recipes, prepared inputs, and evaluation cache identities byte-identical unless their
+  configuration explicitly opts into the new behavior contract;
 - support bounded, resumable preparation and training for the 8B workload.
 
 ## 4. Non-goals
@@ -99,6 +107,9 @@ The implementation must enforce these invariants before any CUDA work starts:
 7. A cached dataset or teacher-target artifact is reusable only under the same source-model revision, tokenizer
    revision and content, chat-template arguments, behavior profile, trace-generation protocol, and ordered samples.
 8. A dual-mode release passes independent thinking and non-thinking gates through the deployment runtime.
+9. A rendered conversational training unit is never split across fixed-length windows. A thinking unit contains its
+   prompt, opening delimiter, non-empty reasoning, closing delimiter, final answer, and end-of-turn token.
+10. Adding thinking data does not silently reduce the current absolute raw-text or non-thinking valid-token budget.
 
 ## 6. Behavioral data design
 
@@ -138,6 +149,11 @@ The Qwen adapter supplies a `ChatBehaviorPort` that:
 For unsupported families, only `raw` or the family's ordinary chat behavior is valid. Selecting a reasoning mode for
 such a model is a configuration error.
 
+Evaluation configuration uses an explicit tuple of requested modes, for example
+`evaluation.reasoning_modes=(THINKING, NON_THINKING)`, rather than a Qwen-specific boolean. The empty/default value
+preserves the existing evaluator and cache identity for non-hybrid recipes. A requested mode is validated against
+the adapter before task preparation.
+
 ### 6.2 Initial Qwen3 mixture
 
 The first recovery experiment should use the following valid-token targets:
@@ -151,6 +167,19 @@ The first recovery experiment should use the following valid-token targets:
 These are token fractions, not record fractions. Thinking responses are longer, so record-count weighting would let
 their variable lengths determine the effective recipe accidentally. The materializer should select and pack records
 until each slice reaches its valid-token budget, then deterministically interleave windows.
+
+The mixture is additive to the current control workload. Let `C_raw` and `C_non_thinking` be the valid-token counts
+in the retained control and `f_raw` and `f_non_thinking` their fractions in the proposed mixture. The new total token
+budget must satisfy:
+
+```text
+new_total >= max(C_raw / f_raw, C_non_thinking / f_non_thinking)
+```
+
+For the initial 25/25/50 proposal, preserving both halves of the current 256-by-2048 control implies approximately
+twice the total valid-token budget. The 0.6B canary should establish whether a smaller budget preserves the same
+quality, but a lower-cost run must be labeled as an ablation rather than described as additive coverage. The accepted
+8B recipe records both target fractions and absolute per-slice token counts.
 
 The 25/25/50 mixture is an initial experiment, not a permanent universal constant. Ablations may move it, but every
 change creates a new dataset identity and experiment. Promotion must show the quality tradeoff in all three slices.
@@ -185,7 +214,31 @@ Reject traces with missing or empty thinking spans, missing final answers, non-f
 the final answer, repeated delimiter loops, or an unrecognized termination. Retain rejection counts and reasons.
 Do not silently replace rejected thinking records with ordinary answers.
 
-### 6.4 Non-thinking records
+Reasoning sources must be normalized into a structured final assistant response before template rendering. A source
+may provide a separate reasoning field or inline `<think>` delimiters; the adapter converts either form to one
+canonical representation and prevents double-wrapping. License review, field-schema validation, and a small
+source-style comparison are required before pinning an external corpus. If its traces do not match the BF16 Qwen3
+activation and delimiter distribution closely enough to pass the 0.6B canary, use pinned BF16-generated traces
+instead.
+
+### 6.4 Record-aware packing
+
+Conversation records are rendered independently and then packed as indivisible units. Deterministic bin packing may
+place multiple complete short conversations in one sequence with explicit end-of-turn boundaries, but it must never
+start a fixed-length window in the middle of a reasoning record. Raw-text slices continue to use ordinary
+deterministic stream windows.
+
+A conversational record longer than `model.sequence_length` is not truncated mid-reasoning. For generated traces,
+the generation protocol should reserve space for the prompt, delimiters, final answer, and end-of-turn token and stop
+or reject the record when that complete form cannot fit. For external traces, select a complete bounded record or
+reject it. This is stricter than activation-only cropping because the same artifact also supplies next-token
+distillation targets and final-answer transition coverage.
+
+Preparation reports include accepted/rejected length distributions, packing utilization, complete-record count, and
+the number of windows containing each delimiter and token role. These measurements expose a corpus that meets its
+record ratio while losing most useful reasoning tokens to length filtering.
+
+### 6.5 Non-thinking records
 
 Non-thinking records use the same pinned prompt distribution where practical, rendered with
 `enable_thinking=False`. Their generation prefix includes Qwen3's empty `<think></think>` preamble. Responses may
@@ -195,7 +248,7 @@ empty-span invariant.
 Using matched prompts for thinking and non-thinking slices makes mode-specific activation and quality differences
 measurable without conflating them with prompt selection.
 
-### 6.5 Prepared artifact
+### 6.6 Prepared artifact
 
 Replace the implicit “one tensor means one behavior” contract with a versioned prepared artifact:
 
@@ -337,7 +390,11 @@ from GGUF.
 
 ### 9.2 Mode-aware suites
 
-Each evaluation tier includes both explicit modes.
+Each evaluation tier includes both explicit modes. Before running generated tasks, the cheap evaluator scores
+teacher-forced next-token likelihood on disjoint held-out thinking and non-thinking conversations. It reports
+delimiter, reasoning, final-answer, and end-of-turn NLL separately. Quick-decision and final-evaluation records come
+from partitions that are disjoint from trace generation and calibration; a partition-version change invalidates the
+prepared evaluation inputs.
 
 | Dimension | Thinking gate | Non-thinking gate |
 | --- | --- | --- |
@@ -355,6 +412,11 @@ Add matched-prompt switch tests:
 - multi-turn thinking to non-thinking and non-thinking to thinking;
 - a final answer after a long thinking span near the supported context limit.
 
+The smoke tier first runs this suite against the existing Experiment 028 artifact and the pinned BF16 source. That
+control quantifies the current gap and proves that the evaluator detects it before the new data recipe is allowed to
+claim improvement. Captured generations are useful diagnostics, but deterministic compliance and objective task
+results—not human inspection alone—gate promotion.
+
 Generation scoring should prefer objective answers, executable code tests, and deterministic format checks. If a
 judge model is used for open-ended prompts, pin its model/revision, prompt, decoding, and raw judgments, and keep the
 objective subset as the hard gate.
@@ -370,6 +432,13 @@ definition. Recommended starting gates are:
 - thinking reasoning-task aggregate at least 95% of the BF16 aggregate;
 - non-thinking instruction/task aggregate at least 95% of the BF16 aggregate;
 - no individual critical task more than 10 percentage points below BF16;
+- for teacher-forced NLL, the thinking degradation ratio
+  `R_thinking = candidate_thinking_nll / bf16_thinking_nll` may not exceed
+  `1.10 * R_non_thinking`; the final margin is frozen after the control measurement and before inspecting the fixed
+  candidate;
+- non-thinking results must also remain within the predeclared paired confidence/noise bound of Experiment 028 so
+  the repair does not exchange an existing behavior for thinking quality; Experiment 028 is a regression control,
+  never a substitute for the BF16 acceptance baseline;
 - generic WikiText and legacy multiple-choice gates remain in force;
 - no mode-specific response-token NLL regression hidden by an improved aggregate.
 
@@ -383,8 +452,11 @@ a new documented experiment.
 
 1. Add a small diagnostic that renders the pinned Qwen3 template in both modes and audits the current calibration
    tensor for empty/non-empty thinking spans.
-2. Run a paired BF16 versus Experiment 028 generation canary to quantify the observed gap.
-3. Update affected publication text to recommend non-thinking mode; do not overwrite retained evidence.
+2. Land the held-out per-mode NLL, prompt-conformance, and generation-smoke evaluators before changing the training
+   data.
+3. Run a paired BF16 versus Experiment 028 evaluation to quantify the observed gap and prove that the new gate fails
+   the affected artifact.
+4. Update affected publication text to recommend non-thinking mode; do not overwrite retained evidence.
 
 ### Phase B — Contracts and preparation
 
@@ -402,19 +474,38 @@ a new documented experiment.
 
 ### Phase D — Evaluation and canary
 
-1. Add prompt-parity, mode-compliance, paired-logit, and generated-task evaluators.
-2. Run 0.6B ablations: current data; mode-aware data without global KD; mode-aware data with global KD.
-3. Select the smallest recipe that passes both mode gates at the same BPW.
-4. Repeat the accepted recipe on 8B only after the 0.6B mechanism is demonstrated.
-5. Publish a new artifact and model card only after GGUF deployment gates pass.
+1. Promote the Phase A smoke evaluators to the standard/full prompt-parity, mode-compliance, paired-logit, and
+   generated-task suites.
+2. Use Experiment 030, while that number remains available, for the Qwen3 0.6B recovery: retain Experiment 028 as
+   its control and compare current data, mode-aware data without global KD, and mode-aware data with global KD.
+3. Select the smallest recipe that passes both mode gates at the same BPW without reducing the declared control token
+   coverage.
+4. Use Experiment 031 for the Qwen3 8B confirmation, inheriting the accepted Experiment 030 behavior recipe and
+   Experiment 029's serial llama.cpp quality policy where that measured CUDA constraint still applies.
+5. Publish a replacement artifact and model card only after the 8B GGUF deployment gates pass.
+
+### Phase E — Publication migration
+
+Retained local Results 028/029 artifacts, receipts, reports, and evidence are immutable historical records. A fixed
+artifact receives its new experiment identity and hashes. In an existing Hugging Face repository, publish it as a
+new commit with an explicitly versioned filename or release revision, make the corrected artifact the model card's
+recommended download, and label the old file as non-thinking-only legacy output. Do not rewrite the old local
+receipt or imply that its hash now names corrected bytes.
+
+The replacement keeps the source tokenizer chat template and thinking default. Until it lands, model cards show
+`enable_thinking=False` and relevant deployment-runtime controls as a reversible mitigation; they must not rewrite
+the embedded GGUF template to force non-thinking behavior.
 
 ## 11. Test plan
 
 ### Unit tests
 
 - exact thinking and non-thinking rendering against the pinned Qwen3 template;
+- completed multi-turn rendering proves that only the assistant response after the final user retains reasoning;
 - reasoning-span parsing, including malformed, nested, empty, truncated, and multi-turn cases;
 - valid-token fraction allocation independent of response length;
+- additive budget resolution preserves the control's absolute raw and non-thinking valid-token counts;
+- record-aware packing never splits a conversation and rejects an over-length incomplete trace;
 - role masks align with next-token targets and exclude padding;
 - content identity changes for mode, template kwarg, trace, mask, weight, or generation change;
 - mode-aware logical batching remains invariant under physical microbatch splitting.
@@ -423,6 +514,7 @@ a new documented experiment.
 
 - Qwen3 adapter advertises dual-mode support; other adapters reject unsupported modes;
 - generic calibration/tuning modules never import Qwen tokenizer classes;
+- a non-hybrid recipe produces byte-identical prepared inputs and evaluation identities before and after the feature;
 - schema-1 mode-unaware artifacts remain readable but cannot satisfy dual-mode validation;
 - Transformers and llama.cpp prompt token IDs match for both modes.
 
@@ -432,6 +524,7 @@ a new documented experiment.
 - interrupted trace generation and distillation resume bit-for-bit;
 - a changed reasoning trace cannot reuse old calibration or teacher targets;
 - an intentionally empty “thinking” corpus fails before model loading;
+- a corpus whose reasoning records are all removed by length validation fails its token-budget contract;
 - a candidate that passes aggregate loss but fails thinking loss is rejected.
 
 ### Real-model gates
@@ -449,8 +542,11 @@ Tiny fixtures validate mechanics only. They cannot close the Qwen3 behavioral ga
 | Risk | Response |
 | --- | --- |
 | Thinking traces dominate tokens and regress concise answers | Allocate by valid tokens, gate modes separately, and ablate the mixture |
+| Additive thinking coverage substantially increases calibration cost | Prove the mechanism with the budget-preserving 0.6B run, then ablate total tokens without mislabeling reduced-coverage runs |
 | Trace generation is expensive | Generate once from pinned BF16, commit bounded shards, and reuse only by exact identity |
+| An external trace style differs from Qwen3 behavior | Validate rendered spans and activation/fidelity statistics; fall back to pinned BF16-generated Qwen3 traces |
 | Long traces truncate before the answer | Reject incomplete records and report completion/token distributions |
+| Multi-turn rendering strips earlier reasoning | Treat the final assistant response as the supervised reasoning unit and validate the rendered tokens |
 | Empty tags are mistaken for reasoning data | Enforce a non-empty-span invariant for every thinking record |
 | Aggregate tuning hides a weak mode | Stratify batches, report per-mode loss, and select best state with mode guards |
 | Runtime template behavior drifts | Hash tokenizer/template content and require cross-runtime golden token IDs |
@@ -466,6 +562,10 @@ Tiny fixtures validate mechanics only. They cannot close the Qwen3 behavioral ga
   trajectory.
 - **Use reasoning questions with ordinary final answers.** The missing distribution is primarily the generated
   reasoning span and transition back to the final answer.
+- **Concatenate traces into ordinary fixed windows.** A window that starts mid-reasoning or ends before the answer
+  does not represent the source mode transition and cannot supply complete distillation targets.
+- **Hold the old total token count while taking half for thinking.** That confounds recovery with removal of the raw
+  and non-thinking coverage the current artifact received.
 - **Run only more epochs on the current tensor.** It reinforces the same mode-unaware objective.
 - **Judge recovery with WikiText perplexity.** Raw-text likelihood does not execute the chat-mode state transition.
 - **Train two models immediately.** Separate artifacts may hide a capacity issue, but they should be considered only
