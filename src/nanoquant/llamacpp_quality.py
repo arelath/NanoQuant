@@ -9,6 +9,7 @@ import os
 import struct
 import subprocess
 import tempfile
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,14 +22,17 @@ from nanoquant.application.task_evaluation import (
 from nanoquant.config.codec import canonical_json, to_dict
 from nanoquant.infrastructure.device_lease import acquire_device_lease
 from nanoquant.infrastructure.io_utils import atomic_write_json, hash_file
-from nanoquant.infrastructure.resource_usage import peak_process_memory_bytes
+from nanoquant.infrastructure.resource_usage import (
+    GpuProcessMemoryMonitor,
+    process_memory_snapshot,
+)
 from nanoquant.quality_evaluation import (
     PreparedQualityInputs,
     QualityEvaluationRequest,
     compare_quality_results,
 )
 
-LLAMACPP_QUALITY_SCHEMA_VERSION = 1
+LLAMACPP_QUALITY_SCHEMA_VERSION = 2
 _INPUT_MAGIC = b"NQQL0001"
 _OUTPUT_MAGIC = b"NQQO0001"
 
@@ -70,6 +74,14 @@ class _Sequence:
 class _Score:
     negative_log_likelihood: float
     token_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class _RunnerResourceMetrics:
+    peak_device_bytes: int | None
+    peak_device_shared_bytes: int | None
+    peak_host_bytes: int | None
+    measurement: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -314,7 +326,7 @@ def _run(
     runner: Path,
     input_path: Path,
     output_path: Path,
-) -> None:
+) -> _RunnerResourceMetrics:
     command = (
         str(runner),
         "--model",
@@ -359,17 +371,63 @@ def _run(
         env=environment,
     )
     assert process.stderr is not None
-    lines = []
-    for line in process.stderr:
-        rendered = line.rstrip()
-        lines.append(rendered)
-        print(rendered, flush=True)
+    lines: list[str] = []
+
+    def drain_stderr() -> None:
+        assert process.stderr is not None
+        for line in process.stderr:
+            rendered = line.rstrip()
+            lines.append(rendered)
+            print(rendered, flush=True)
+
+    stderr_thread = threading.Thread(
+        target=drain_stderr,
+        name="nanoquant-llamacpp-quality-stderr",
+        daemon=True,
+    )
+    stderr_thread.start()
+    gpu_monitor = None
+    try:
+        gpu_monitor = GpuProcessMemoryMonitor(process.pid)
+    except (OSError, AttributeError):
+        pass
+    peak_device_bytes = 0
+    peak_device_shared_bytes = 0
+    peak_host_bytes = 0
+
+    def sample_resources() -> None:
+        nonlocal peak_device_bytes, peak_device_shared_bytes, peak_host_bytes
+        try:
+            host = process_memory_snapshot(process.pid)
+        except (OSError, FileNotFoundError, ProcessLookupError):
+            host = None
+        if host is not None:
+            peak_host_bytes = max(peak_host_bytes, host.peak_working_set_bytes)
+        gpu = None if gpu_monitor is None else gpu_monitor.sample()
+        if gpu is not None:
+            peak_device_bytes = max(peak_device_bytes, gpu.peak_dedicated_bytes)
+            peak_device_shared_bytes = max(
+                peak_device_shared_bytes,
+                gpu.peak_shared_bytes,
+            )
+
+    while process.poll() is None:
+        sample_resources()
+        time.sleep(0.05)
+    sample_resources()
     return_code = process.wait()
+    stderr_thread.join()
     if return_code != 0:
         detail = "\n".join(lines[-20:])
         raise RuntimeError(
             f"llama.cpp GGUF quality runner failed with exit code {return_code}:\n{detail}"
         )
+    return _RunnerResourceMetrics(
+        peak_device_bytes or None,
+        peak_device_shared_bytes or None,
+        peak_host_bytes or None,
+        "windows-pdh-child-process" if gpu_monitor is not None else "child-process-host-only",
+    )
 
 
 def execute_llamacpp_quality_evaluation(
@@ -495,7 +553,9 @@ def execute_llamacpp_quality_evaluation(
 
         started = time.perf_counter()
         with acquire_device_lease(request.device):
-            _run(request, runner, input_path, output_path)
+            measured = _run(request, runner, input_path, output_path)
+        if measured is None:
+            measured = _RunnerResourceMetrics(None, None, None, "unavailable")
         scores = _read_scores(output_path, len(sequences))
         wikitext_count = prepared.wikitext_tokens.shape[0]
         wikitext_scores = scores[:wikitext_count]
@@ -536,8 +596,10 @@ def execute_llamacpp_quality_evaluation(
             },
             "tasks": tasks,
             "elapsed_seconds": elapsed,
-            "peak_device_bytes": None,
-            "peak_host_bytes": peak_process_memory_bytes(),
+            "peak_device_bytes": measured.peak_device_bytes,
+            "peak_device_shared_bytes": measured.peak_device_shared_bytes,
+            "peak_host_bytes": measured.peak_host_bytes,
+            "memory_measurement": measured.measurement,
             "execution": "llama.cpp",
         }
         payload = {
@@ -579,6 +641,18 @@ def render_llamacpp_quality_markdown(payload: dict[str, Any]) -> str:
 
     comparison = payload["comparison"]
     wikitext = comparison["wikitext"]
+    gguf_result = payload["results"]["gguf"]
+    peak_device = gguf_result.get("peak_device_bytes")
+    peak_shared = gguf_result.get("peak_device_shared_bytes")
+    peak_host = gguf_result.get("peak_host_bytes")
+
+    def bytes_or_unavailable(value: object) -> str:
+        if value is None:
+            return "unavailable"
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise TypeError("llama.cpp quality memory measurement is not numeric")
+        return f"{int(value):,}"
+
     lines = [
         "## GGUF deployment quality (llama.cpp)",
         "",
@@ -592,10 +666,13 @@ def render_llamacpp_quality_markdown(payload: dict[str, Any]) -> str:
             "llama.cpp F32 logits with host F64 log-sum-exp"
         ),
         f"- Wall time: {float(payload['wall_seconds']):.2f} seconds",
-        (
-            "- Runtime peak VRAM is not inferred from the PyTorch reference evaluator; "
-            "the out-of-process llama.cpp scorer does not yet capture that metric."
-        ),
+        f"- Runtime memory measurement: `{gguf_result.get('memory_measurement', 'unavailable')}`",
+        "",
+        "| Packed GGUF runtime resource | Peak bytes |",
+        "| --- | ---: |",
+        f"| Dedicated GPU memory | {bytes_or_unavailable(peak_device)} |",
+        f"| Shared GPU memory | {bytes_or_unavailable(peak_shared)} |",
+        f"| Host working set | {bytes_or_unavailable(peak_host)} |",
         "",
         "| Benchmark | Metric | BF16 | GGUF | Delta | Ratio |",
         "| --- | --- | ---: | ---: | ---: | ---: |",

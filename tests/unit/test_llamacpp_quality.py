@@ -112,6 +112,12 @@ def test_llamacpp_quality_is_protocol_matched_and_identity_resumable(
             destination.write(struct.pack("<I", 2))
             destination.write(struct.pack("<dI", 1.0, 2))
             destination.write(struct.pack("<dI", 3.0, 2))
+        return llamacpp_quality._RunnerResourceMetrics(
+            400,
+            50,
+            800,
+            "fixture-child-process",
+        )
 
     monkeypatch.setattr(llamacpp_quality, "_run", run)
     request = LlamaCppQualityRequest(
@@ -135,6 +141,10 @@ def test_llamacpp_quality_is_protocol_matched_and_identity_resumable(
     assert result["passed"] is True
     assert result["results"]["gguf"]["wikitext"]["token_count"] == 4
     assert result["results"]["gguf"]["wikitext"]["perplexity"] == math.e
+    assert result["results"]["gguf"]["peak_device_bytes"] == 400
+    assert result["results"]["gguf"]["peak_device_shared_bytes"] == 50
+    assert result["results"]["gguf"]["peak_host_bytes"] == 800
+    assert result["results"]["gguf"]["memory_measurement"] == "fixture-child-process"
     assert result["comparison"]["wikitext"]["ratio"] == pytest.approx(math.exp(0.5))
     assert result["identity"]["llama_cpp_commit"] == "1" * 40
     assert result["runtime"]["git"]["repository"] == (
@@ -160,3 +170,37 @@ def test_llamacpp_quality_runner_source_uses_target_only_logits() -> None:
     assert "batch.logits[batch_index] = scored ? 1 : 0;" in source
     assert "sequence.tokens[position + 1]" in source
     assert "llama_memory_clear" in source
+
+
+def test_llamacpp_quality_markdown_reports_packed_runtime_memory() -> None:
+    payload = {
+        "gguf": {
+            "path": "model.gguf",
+            "bytes": 250,
+            "sha256": "a" * 64,
+        },
+        "runtime": {"git": {"commit": "b" * 40}},
+        "wall_seconds": 4.0,
+        "results": {
+            "gguf": {
+                "peak_device_bytes": 400,
+                "peak_device_shared_bytes": 50,
+                "peak_host_bytes": 800,
+                "memory_measurement": "fixture-child-process",
+            }
+        },
+        "comparison": {
+            "wikitext": {
+                "base_perplexity": 10.0,
+                "frozen_perplexity": 12.0,
+            },
+            "tasks": [],
+        },
+    }
+
+    rendered = llamacpp_quality.render_llamacpp_quality_markdown(payload)
+
+    assert "Packed GGUF runtime resource" in rendered
+    assert "| Dedicated GPU memory | 400 |" in rendered
+    assert "| Shared GPU memory | 50 |" in rendered
+    assert "| Host working set | 800 |" in rendered

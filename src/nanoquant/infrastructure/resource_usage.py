@@ -169,6 +169,28 @@ _gpu_process_memory_sampler: _WindowsGpuProcessMemorySampler | None = None
 _gpu_process_memory_unavailable = False
 
 
+class GpuProcessMemoryMonitor:
+    """Sample one process's dedicated/shared GPU memory on Windows."""
+
+    def __init__(self, process_id: int) -> None:
+        if process_id <= 0:
+            raise ValueError("GPU process-memory monitor requires a positive process ID")
+        self._sampler = (
+            _WindowsGpuProcessMemorySampler(process_id)
+            if os.name == "nt"
+            else None
+        )
+
+    def sample(self) -> GpuProcessMemorySnapshot | None:
+        if self._sampler is None:
+            return None
+        try:
+            return self._sampler.sample()
+        except (OSError, AttributeError):
+            self._sampler = None
+            return None
+
+
 def gpu_process_memory_snapshot() -> GpuProcessMemorySnapshot | None:
     """Return current-process WDDM dedicated/shared usage when available."""
 
@@ -185,7 +207,7 @@ def gpu_process_memory_snapshot() -> GpuProcessMemorySnapshot | None:
             return None
 
 
-def process_memory_snapshot() -> ProcessMemorySnapshot:
+def process_memory_snapshot(process_id: int | None = None) -> ProcessMemorySnapshot:
     """Return non-synchronizing process memory counters when the platform exposes them."""
     if os.name == "nt":
         counters = _ProcessMemoryCounters()
@@ -193,20 +215,47 @@ def process_memory_snapshot() -> ProcessMemorySnapshot:
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         psapi = ctypes.WinDLL("psapi", use_last_error=True)
         kernel32.GetCurrentProcess.restype = ctypes.c_void_p
+        kernel32.OpenProcess.argtypes = (ctypes.c_ulong, ctypes.c_bool, ctypes.c_ulong)
+        kernel32.OpenProcess.restype = ctypes.c_void_p
+        kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
+        kernel32.CloseHandle.restype = ctypes.c_bool
         psapi.GetProcessMemoryInfo.argtypes = (
             ctypes.c_void_p,
             ctypes.POINTER(_ProcessMemoryCounters),
             ctypes.c_ulong,
         )
-        process = kernel32.GetCurrentProcess()
-        if not psapi.GetProcessMemoryInfo(process, ctypes.byref(counters), counters.cb):
-            raise OSError(ctypes.get_last_error(), "GetProcessMemoryInfo failed")
-        return ProcessMemorySnapshot(
-            int(counters.WorkingSetSize),
-            int(counters.PeakWorkingSetSize),
-            int(counters.PagefileUsage),
-            int(counters.PeakPagefileUsage),
+        close_process = process_id is not None
+        process = (
+            kernel32.GetCurrentProcess()
+            if process_id is None
+            else kernel32.OpenProcess(0x0400 | 0x0010, False, process_id)
         )
+        if not process:
+            raise OSError(ctypes.get_last_error(), "OpenProcess failed")
+        try:
+            if not psapi.GetProcessMemoryInfo(process, ctypes.byref(counters), counters.cb):
+                raise OSError(ctypes.get_last_error(), "GetProcessMemoryInfo failed")
+            return ProcessMemorySnapshot(
+                int(counters.WorkingSetSize),
+                int(counters.PeakWorkingSetSize),
+                int(counters.PagefileUsage),
+                int(counters.PeakPagefileUsage),
+            )
+        finally:
+            if close_process:
+                kernel32.CloseHandle(process)
+    if process_id is not None:
+        status = Path(f"/proc/{process_id}/status").read_text(encoding="ascii")
+        status_fields = {
+            key: int(value.split()[0]) * 1024
+            for line in status.splitlines()
+            if ":" in line
+            for key, value in (line.split(":", 1),)
+            if key in {"VmRSS", "VmHWM"}
+        }
+        current = status_fields.get("VmRSS", 0)
+        peak = status_fields.get("VmHWM", current)
+        return ProcessMemorySnapshot(current, peak, 0, 0)
     resource = cast(Any, importlib.import_module("resource"))
     raw_peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     peak = int(raw_peak if platform.system() == "Darwin" else raw_peak * 1024)

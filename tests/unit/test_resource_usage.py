@@ -1,3 +1,5 @@
+import os
+
 import pytest
 import torch
 
@@ -16,6 +18,13 @@ def test_process_memory_snapshot_reports_current_and_peak_working_set() -> None:
     assert snapshot.private_bytes >= 0
     assert snapshot.peak_private_bytes >= snapshot.private_bytes
     assert peak_process_memory_bytes() >= snapshot.peak_working_set_bytes
+
+
+def test_process_memory_snapshot_can_measure_an_explicit_process() -> None:
+    snapshot = process_memory_snapshot(os.getpid())
+
+    assert snapshot.working_set_bytes > 0
+    assert snapshot.peak_working_set_bytes >= snapshot.working_set_bytes
 
 
 def test_peak_device_memory_uses_reserved_allocator_high_water(monkeypatch: pytest.MonkeyPatch) -> None:
