@@ -429,8 +429,9 @@ The first catalog is extracted from the currently promoted reusable settings, no
 The versioned source of truth is `experiments/recipes/interactive_recommended_models.yaml`. Variants are nested under
 their family, and family/variant sequence order directly controls the two menus—there are no separate order fields.
 Each variant names a symbolic reusable-template ID; YAML owns selection and publication metadata while Python owns
-numerical `RunConfig` templates. Unknown fields, missing template IDs, duplicate families or variants, empty
-families, or invalid defaults fail during catalog loading.
+numerical `RunConfig` templates. The pinned model revision comes from that template rather than being repeated in
+YAML. Unknown fields, missing template IDs, duplicate families or variants, empty families, unpinned template
+revisions, or invalid defaults fail during catalog loading.
 
 - Qwen3 uses the dual-mode behavior preparation and evaluation policy from
   [the Qwen3 recovery design](36-qwen3-thinking-mode-quality.md), plus the adaptive architecture-protected execution
@@ -442,7 +443,7 @@ families, or invalid defaults fail during catalog loading.
   profile from another model or BPW is never copied.
 - Model-size-specific execution guards, quality parallelism, and source formatting are explicit capabilities, not
   new interactive questions. Architecture and decoder block count are resolved from the pinned model `config.json`;
-  they are not duplicated in the recommendation catalog.
+  the block count and pinned revision are not duplicated in the recommendation catalog.
 
 An experimental result becomes an interactive default only through an explicit profile-promotion change with
 evidence. Profiles with unfinished real-model gates may be available as `candidate` definitions for numbered

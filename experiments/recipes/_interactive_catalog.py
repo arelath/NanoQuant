@@ -12,7 +12,7 @@ from nanoquant.config.codec import ConfigDecodeError, from_dict
 from nanoquant.config.schema import RunConfig
 from nanoquant.interactive_compression import RecommendedModel
 
-INTERACTIVE_MODEL_CATALOG_SCHEMA_VERSION = 2
+INTERACTIVE_MODEL_CATALOG_SCHEMA_VERSION = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,7 +20,6 @@ class _RecommendedVariantEntry:
     id: str
     label: str
     source: str
-    revision: str
     runtime_family: str
     release_name: str
     profile_id: str
@@ -56,7 +55,6 @@ class _RecommendedVariantEntry:
             variant=self.id,
             variant_label=self.label,
             source=self.source,
-            revision=self.revision,
             runtime_family=self.runtime_family,
             release_name=self.release_name,
             profile_id=self.profile_id,

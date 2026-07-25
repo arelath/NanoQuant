@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +18,6 @@ def _variant() -> dict[str, Any]:
         "id": model.variant,
         "label": model.variant_label,
         "source": model.source,
-        "revision": model.revision,
         "runtime_family": model.runtime_family,
         "release_name": model.release_name,
         "profile_id": model.profile_id,
@@ -39,7 +39,7 @@ def _family(variants: list[dict[str, Any]]) -> dict[str, Any]:
 
 def _write(path: Path, families: list[dict[str, Any]]) -> None:
     path.write_text(
-        yaml.safe_dump({"schema_version": 2, "families": families}, sort_keys=False),
+        yaml.safe_dump({"schema_version": 3, "families": families}, sort_keys=False),
         encoding="utf-8",
     )
 
@@ -60,12 +60,18 @@ def test_repository_interactive_catalog_is_loaded_from_yaml() -> None:
 
     assert len(payload["families"]) == 4
     assert len(variants) == len(INTERACTIVE_RECOMMENDED_MODELS) == 9
+    assert payload["schema_version"] == 3
     assert [item["id"] for item in variants] == [
         model.variant for model in INTERACTIVE_RECOMMENDED_MODELS
     ]
     assert all("template_id" in item for item in variants)
     assert all("family_order" not in family for family in payload["families"])
     assert all("variant_order" not in variant for variant in variants)
+    assert all("revision" not in variant for variant in variants)
+    assert all(
+        model.revision == model.template.model.revision
+        for model in INTERACTIVE_RECOMMENDED_MODELS
+    )
 
 
 def test_interactive_catalog_rejects_unknown_fields(tmp_path: Path) -> None:
@@ -87,6 +93,19 @@ def test_interactive_catalog_rejects_unknown_template_ids(tmp_path: Path) -> Non
 
     with pytest.raises(ConfigDecodeError, match="unknown template"):
         load_interactive_recommended_models(path, {})
+
+
+def test_interactive_catalog_rejects_unpinned_template_revision(tmp_path: Path) -> None:
+    path = tmp_path / "catalog.yaml"
+    _write(path, [_family([_variant()])])
+    template = INTERACTIVE_RECOMMENDED_MODELS[0].template
+    unpinned = replace(
+        template,
+        model=replace(template.model, revision=None),
+    )
+
+    with pytest.raises(ValueError, match="template revision is required"):
+        load_interactive_recommended_models(path, {"fixture-template": unpinned})
 
 
 def test_interactive_catalog_rejects_duplicate_variants(tmp_path: Path) -> None:

@@ -70,7 +70,6 @@ class RecommendedModel:
     variant: str
     variant_label: str
     source: str
-    revision: str
     runtime_family: str
     release_name: str
     profile_id: str
@@ -97,18 +96,29 @@ class RecommendedModel:
                 raise ValueError(f"recommended model {label} must be lowercase kebab-case")
         if not self.family_label.strip() or not self.variant_label.strip():
             raise ValueError("recommended model labels are required")
-        if not self.source.strip() or not self.revision.strip():
-            raise ValueError("recommended model source and revision are required")
+        if not self.source.strip():
+            raise ValueError("recommended model source is required")
+        template_revision = self.template.model.revision
+        if template_revision is None or not template_revision.strip():
+            raise ValueError("recommended model template revision is required")
         if not self.runtime_family.strip() or not self.evidence:
             raise ValueError("recommended model runtime family and evidence are required")
         if not math.isfinite(self.default_target_bpw) or self.default_target_bpw <= 0:
             raise ValueError("recommended target BPW must be finite and positive")
-        if self.template.model.source != self.source or self.template.model.revision != self.revision:
+        if self.template.model.source != self.source:
             raise ValueError("recommended model template identity does not match its catalog identity")
         if self.quality_backend is None and not self.llamacpp_quality:
             raise ValueError("recommended quality requires a candidate backend")
         if self.llamacpp_quality_parallel <= 0:
             raise ValueError("llama.cpp quality parallelism must be positive")
+
+    @property
+    def revision(self) -> str:
+        """Return the pinned revision owned by the reusable RunConfig template."""
+
+        revision = self.template.model.revision
+        assert revision is not None
+        return revision
 
     @property
     def profile_hash(self) -> str:
@@ -965,7 +975,6 @@ def resolve_custom_model(
         variant=variant,
         variant_label=source,
         source=source,
-        revision=revision,
         release_name=release_name,
         profile_id=f"{parent.profile_id}-custom",
         evidence=(*parent.evidence, f"custom-source:{source}@{revision}"),
