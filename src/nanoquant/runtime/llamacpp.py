@@ -5,18 +5,17 @@ from __future__ import annotations
 import json
 import os
 import re
-import shutil
-import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, cast
 
 import torch
-from safetensors.torch import save_file
 
 from nanoquant.runtime.artifact import RuntimeModelMetadata, _hash_file
+from nanoquant.runtime.io_utils import atomic_output_directory
 from nanoquant.runtime.packed import PackedLayerState, PackedReferenceProvenance
 from nanoquant.runtime.packed_artifact import open_packed_artifact
+from nanoquant.runtime.safetensors_io import SAFETENSORS
 
 LLAMACPP_CHECKPOINT_SCHEMA_VERSION = 1
 LLAMACPP_CHECKPOINT_FORMAT = "nanoquant-llamacpp-checkpoint"
@@ -207,9 +206,7 @@ def export_llamacpp_checkpoint(
     destination = Path(output)
     if destination.exists():
         raise FileExistsError(f"llama.cpp checkpoint output already exists: {destination}")
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = Path(tempfile.mkdtemp(prefix=".nanoquant-llamacpp-", dir=destination.parent))
-    try:
+    with atomic_output_directory(destination, prefix=".nanoquant-llamacpp-") as temporary:
         shards: list[LlamaCppCheckpointShard] = []
         total_layers = 0
         total_tensors = 0
@@ -225,7 +222,7 @@ def export_llamacpp_checkpoint(
                 tensors.update(group)
             relative = f"block-{block.index:05d}.safetensors"
             shard = temporary / relative
-            save_file(tensors, shard)
+            SAFETENSORS.save(tensors, shard)
             shards.append(
                 LlamaCppCheckpointShard(
                     block.index,
@@ -257,8 +254,4 @@ def export_llamacpp_checkpoint(
             stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, destination)
-    finally:
-        if temporary.exists():
-            shutil.rmtree(temporary)
     return manifest

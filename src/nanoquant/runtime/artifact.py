@@ -5,21 +5,20 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import shutil
-import tempfile
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, cast
 
 import torch
-from safetensors import safe_open
-from safetensors.torch import save_file
 
 from nanoquant.runtime.backend import DeviceLike, ProjectionMemberSpec, QuantizedLinearSpec
+from nanoquant.runtime.constants import RUNTIME_ARTIFACT_SCHEMA_VERSION
+from nanoquant.runtime.io_utils import atomic_output_directory
 from nanoquant.runtime.logical import LogicalLayerState, canonical_torch_dtype
+from nanoquant.runtime.safetensors_io import SAFETENSORS
 
-DESCRIPTOR_SCHEMA_VERSION = 1
+DESCRIPTOR_SCHEMA_VERSION = RUNTIME_ARTIFACT_SCHEMA_VERSION
 LOGICAL_FORMAT_VERSION = "nanoquant-v1"
 MINIMUM_RUNTIME_VERSION = "0.1.0"
 _MAXIMUM_DESCRIPTOR_BYTES = 16 * 1024 * 1024
@@ -179,7 +178,7 @@ class OpenLogicalArtifact:
             raise KeyError(f"logical artifact layer not found: {name}")
         block, layer = matches[0]
         by_role: dict[str, torch.Tensor] = {}
-        with safe_open(self.root / block.path, framework="pt", device=str(torch.device(device))) as handle:
+        with SAFETENSORS.open(self.root / block.path, device=device) as handle:
             for tensor in layer.tensors:
                 by_role[tensor.role] = handle.get_tensor(tensor.key)
         return LogicalLayerState(
@@ -266,7 +265,7 @@ def _write_block_shard(
         layer_entries.append(LogicalLayerEntry(state.spec, tuple(entries)))
     relative = f"weights/block-{index:05d}.safetensors"
     shard = temporary / relative
-    save_file(tensors, shard)
+    SAFETENSORS.save(tensors, shard)
     return LogicalBlockEntry(
         index,
         relative,
@@ -303,9 +302,7 @@ def write_logical_artifact_stream(
     destination = Path(output)
     if destination.exists():
         raise FileExistsError(f"logical artifact output already exists: {destination}")
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = Path(tempfile.mkdtemp(prefix=".nanoquant-logical-", dir=destination.parent))
-    try:
+    with atomic_output_directory(destination, prefix=".nanoquant-logical-") as temporary:
         weights = temporary / "weights"
         weights.mkdir()
         block_entries: list[LogicalBlockEntry] = []
@@ -351,10 +348,6 @@ def write_logical_artifact_stream(
             stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, destination)
-    finally:
-        if temporary.exists():
-            shutil.rmtree(temporary)
     return open_logical_artifact(destination)
 
 
@@ -533,7 +526,7 @@ def open_logical_artifact(
         if len(declared) != sum(len(layer.tensors) for layer in block.layers):
             raise LogicalArtifactError(f"logical artifact tensor key is duplicated: {block.path}")
         try:
-            with safe_open(shard, framework="pt", device="cpu") as handle:
+            with SAFETENSORS.open(shard) as handle:
                 keys = set(handle.keys())
                 if keys != set(declared):
                     raise LogicalArtifactError(f"logical artifact shard tensor inventory differs: {block.path}")

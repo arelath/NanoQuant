@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 import sys
 import tempfile
 from dataclasses import asdict, dataclass, replace
@@ -19,6 +18,7 @@ from nanoquant.infrastructure.mmproj_export import (
     source_has_vision_stack,
 )
 from nanoquant.infrastructure.safetensors_source import SafetensorsModelSource
+from nanoquant.infrastructure.subprocess_interop import LlamaCppInterop
 from nanoquant.runtime import (
     LlamaCppCheckpointManifest,
     export_llamacpp_checkpoint,
@@ -137,11 +137,9 @@ print(json.dumps({
     'nanoquant_scale_types': sorted(set(scale_types)),
 }))
 """
-    completed = subprocess.run(
-        (str(Path(python_executable)), "-c", program, str(gguf_python), str(gguf_path)),
-        capture_output=True,
-        text=True,
-        check=False,
+    interop = LlamaCppInterop(reference)
+    completed = interop.run(
+        interop.request((Path(python_executable), "-c", program, gguf_python, gguf_path))
     )
     if completed.returncode != 0:
         detail = completed.stderr.strip() or completed.stdout.strip()
@@ -428,18 +426,8 @@ def export_llamacpp_gguf(
         "bf16",
         "--no-lazy",
     )
-    converter_environment = None
-    if converter.parent != reference:
-        converter_environment = os.environ.copy()
-        python_paths = (reference, reference / "gguf-py")
-        existing_python_path = converter_environment.get("PYTHONPATH")
-        converter_environment["PYTHONPATH"] = os.pathsep.join(
-            (
-                *(str(path) for path in python_paths),
-                *((existing_python_path,) if existing_python_path else ()),
-            )
-        )
-        converter_environment["NO_LOCAL_GGUF"] = "1"
+    interop = LlamaCppInterop(reference)
+    converter_environment = interop.converter_environment(converter)
     # COPY disables llama.cpp's per-tensor overrides. F16 is intentional here:
     # the converter's NanoQuant sidecars are already BF16/F16/I32/F32, so this base
     # type leaves them alone while allowing token_embd.weight and an independent
@@ -459,12 +447,10 @@ def export_llamacpp_gguf(
             converter_stdout_path.open("w", encoding="utf-8", newline="\n") as stdout,
             converter_stderr_path.open("w", encoding="utf-8", newline="\n") as stderr,
         ):
-            completed = subprocess.run(
-                converter_command,
+            completed = interop.run(
+                interop.request(converter_command, environment=converter_environment),
                 stdout=stdout,
                 stderr=stderr,
-                check=False,
-                env=converter_environment,
             )
         if completed.returncode != 0:
             raise RuntimeError(
@@ -477,7 +463,11 @@ def export_llamacpp_gguf(
             quantizer_stdout_path.open("w", encoding="utf-8", newline="\n") as stdout,
             quantizer_stderr_path.open("w", encoding="utf-8", newline="\n") as stderr,
         ):
-            completed = subprocess.run(quantizer_command, stdout=stdout, stderr=stderr, check=False)
+            completed = interop.run(
+                interop.request(quantizer_command),
+                stdout=stdout,
+                stderr=stderr,
+            )
         if completed.returncode != 0:
             raise RuntimeError(
                 f"llama.cpp auxiliary tensor quantization failed with exit code {completed.returncode}; "

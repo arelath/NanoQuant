@@ -50,8 +50,12 @@ def launcher_provenance(
     root = Path(root_text) if root_text else None
     relative = launcher.relative_to(root).as_posix() if root and launcher.is_relative_to(root) else None
     revision = _git(root, "rev-parse", "HEAD") if root else None
+    if experiment_number is not None and launcher.suffix.lower() in {".yaml", ".yml", ".json"}:
+        launcher_kind = "numbered_recipe"
+    else:
+        launcher_kind = "numbered_runfile" if experiment_number is not None else "python"
     return LauncherProvenance(
-        "numbered_runfile" if experiment_number is not None else "python",
+        launcher_kind,
         experiment_number,
         relative,
         content_hash,

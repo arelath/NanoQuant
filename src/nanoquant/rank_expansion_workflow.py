@@ -13,10 +13,8 @@ from pathlib import Path
 from typing import Any, cast
 
 import torch
-from safetensors import safe_open
-from safetensors.torch import save_file
 
-from nanoquant.domain.factorization import factorize_admm
+from nanoquant.domain.factorization import AdmmParameters, factorize_admm_with_parameters
 from nanoquant.domain.linear_math import functional_dense_reconstruction
 from nanoquant.domain.metrics import reconstruction_metrics
 from nanoquant.domain.models import ArtifactRef, ArtifactTypes, BlockResult
@@ -24,7 +22,8 @@ from nanoquant.domain.rank_expansion import fit_residual_middle_scales
 from nanoquant.infrastructure.artifacts import LocalArtifactStore
 from nanoquant.infrastructure.commits import latest_complete_identity, load_committed_block
 from nanoquant.infrastructure.io_utils import atomic_write_json, hash_file
-from nanoquant.infrastructure.memory_cleanup import release_memory
+from nanoquant.infrastructure.memory_cleanup import gpu_memory_scope
+from nanoquant.infrastructure.safetensors_io import SAFETENSORS
 from nanoquant.infrastructure.safetensors_source import SafetensorsModelSource
 from nanoquant.infrastructure.tensor_store import LocalTensorStore
 from nanoquant.runtime import (
@@ -218,7 +217,7 @@ def _load_expanded_checkpoint(
     if result.get("identity") != identity:
         raise ValueError("rank expansion checkpoint identity differs")
     target_rank = int(result["target_rank"])
-    with safe_open(root / "state.safetensors", framework="pt", device="cpu") as handle:
+    with SAFETENSORS.open(root / "state.safetensors") as handle:
         values = {name: handle.get_tensor(name) for name in handle.keys()}
     spec = replace(source_state.spec, rank=target_rank)
     state = PackedLayerState(
@@ -245,7 +244,7 @@ def _commit_expanded_checkpoint(
     artifacts: LocalArtifactStore,
 ) -> ArtifactRef:
     with artifacts.begin_write("rank-expanded-layer") as writer:
-        save_file(_packed_tensors(state), writer.path / "state.safetensors")
+        SAFETENSORS.save(_packed_tensors(state), writer.path / "state.safetensors")
         atomic_write_json(writer.path / "result.json", result)
         descriptor = writer.commit()
     return ArtifactRef("rank-expanded-layer", descriptor.artifact_id, 1)
@@ -293,19 +292,20 @@ def _expand_layer(
         if protected is not None:
             residual[:, protected.long()] = 0
         generator = torch.Generator(device=device).manual_seed(request.seed + block_index * 1_000_003)
-        factors = factorize_admm(
+        factors = factorize_admm_with_parameters(
             residual,
             input_importance,
             output_importance,
             added_rank,
             generator,
-            outer_iterations=request.outer_iterations,
-            inner_iterations=request.inner_iterations,
-            regularization=request.regularization,
-            penalty_schedule=request.penalty_schedule,
-            convergence_check_interval=request.convergence_check_interval,
-            early_stop_tolerance=request.early_stop_tolerance,
-            transpose_wide=False,
+            AdmmParameters(
+                outer_iterations=request.outer_iterations,
+                inner_iterations=request.inner_iterations,
+                regularization=request.regularization,
+                penalty_schedule=request.penalty_schedule,
+                convergence_check_interval=request.convergence_check_interval,
+                early_stop_tolerance=request.early_stop_tolerance,
+            ),
         )
         fit = fit_residual_middle_scales(
             residual,
@@ -485,40 +485,40 @@ def execute_rank_expansion(
     results: dict[int, dict[str, Any]] = {}
     expanded_by_block: dict[int, PackedLayerState] = {}
     for block_index, block in enumerate(blocks):
-        name = f"blocks.{block_index}.{request.layer_suffix}"
-        source_state = source_packed.load_layer(name)
-        if block_index in completed:
-            expanded, result = _load_expanded_checkpoint(
-                completed[block_index],
-                work_artifacts,
-                source_state,
-                identity,
-            )
-        else:
-            expanded, result = _expand_layer(
-                request,
-                block_index,
-                source_state,
-                block,
-                source_weights,
-                tensors,
-                identity,
-            )
-            reference = _commit_expanded_checkpoint(expanded, result, work_artifacts)
-            _append_checkpoint(
-                journal,
-                {
-                    "schema_version": 1,
-                    "kind": "expanded_layer",
-                    "identity": identity,
-                    "block": block_index,
-                    "artifact_id": reference.artifact_id,
-                },
-            )
-        expanded_by_block[block_index] = expanded
-        results[block_index] = result
-        del expanded, source_state
-        release_memory(request.device)
+        with gpu_memory_scope(request.device, synchronize=False):
+            name = f"blocks.{block_index}.{request.layer_suffix}"
+            source_state = source_packed.load_layer(name)
+            if block_index in completed:
+                expanded, result = _load_expanded_checkpoint(
+                    completed[block_index],
+                    work_artifacts,
+                    source_state,
+                    identity,
+                )
+            else:
+                expanded, result = _expand_layer(
+                    request,
+                    block_index,
+                    source_state,
+                    block,
+                    source_weights,
+                    tensors,
+                    identity,
+                )
+                reference = _commit_expanded_checkpoint(expanded, result, work_artifacts)
+                _append_checkpoint(
+                    journal,
+                    {
+                        "schema_version": 1,
+                        "kind": "expanded_layer",
+                        "identity": identity,
+                        "block": block_index,
+                        "artifact_id": reference.artifact_id,
+                    },
+                )
+            expanded_by_block[block_index] = expanded
+            results[block_index] = result
+            del expanded, source_state
         if safe_point is not None:
             safe_point()
 

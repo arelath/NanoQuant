@@ -6,22 +6,19 @@ import copy
 import gc
 import hashlib
 import json
-import os
 import shutil
-import tempfile
 from collections import defaultdict
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
 from typing import cast
 
 import torch
-from safetensors import safe_open
-from safetensors.torch import save_file
 from torch import nn
 
 from nanoquant.runtime.artifact import MINIMUM_RUNTIME_VERSION, RuntimeModelMetadata
 from nanoquant.runtime.backend import DeviceLike, RuntimeBackend, WorkloadSpec
 from nanoquant.runtime.codec import RuntimeDecodeError, decode_dataclass
+from nanoquant.runtime.io_utils import atomic_output_directory
 from nanoquant.runtime.logical import canonical_torch_dtype, parse_torch_dtype
 from nanoquant.runtime.packed_artifact import OpenPackedArtifact, open_packed_artifact
 from nanoquant.runtime.planning import (
@@ -29,6 +26,7 @@ from nanoquant.runtime.planning import (
     plan_execution_workloads,
     prepare_execution_workloads,
 )
+from nanoquant.runtime.safetensors_io import SAFETENSORS
 from nanoquant.runtime.torch_model import (
     bind_fused_decode_rope,
     bind_grouped_decode_mlp,
@@ -273,7 +271,7 @@ def _checkpoint_files(source: Path) -> dict[Path, tuple[str, ...]]:
     checkpoint = source / "model.safetensors"
     if not checkpoint.is_file():
         raise RuntimeBundleError("source model has no safetensors checkpoint")
-    with safe_open(checkpoint, framework="pt", device="cpu") as handle:
+    with SAFETENSORS.open(checkpoint) as handle:
         return {checkpoint: tuple(handle.keys())}
 
 
@@ -383,14 +381,13 @@ def write_runtime_bundle(
         }
     )
     for source_shard, names in checkpoint_files.items():
-        with safe_open(source_shard, framework="pt", device="cpu") as handle:
+        with SAFETENSORS.open(source_shard) as handle:
             for name in names:
                 expected_shape = expected_linear_shapes.get(name)
                 if expected_shape is not None and tuple(handle.get_slice(name).get_shape()) != expected_shape:
                     raise RuntimeBundleError(f"source packed linear tensor shape differs: {name}")
 
-    temporary = Path(tempfile.mkdtemp(prefix=f".{destination.name}-", dir=str(destination.parent)))
-    try:
+    with atomic_output_directory(destination, replace_existing=True) as temporary:
         shutil.copytree(packed.root, temporary / "packed")
         model_root = temporary / "model"
         model_root.mkdir()
@@ -407,9 +404,9 @@ def write_runtime_bundle(
                 continue
             shard_number += 1
             shard_path = model_root / f"nanoquant-shell-{shard_number:05d}.safetensors"
-            with safe_open(source_shard, framework="pt", device="cpu") as handle:
+            with SAFETENSORS.open(source_shard) as handle:
                 values = {name: handle.get_tensor(name).detach().cpu().contiguous() for name in selected}
-            save_file(values, shard_path, metadata={"format": "pt"})
+            SAFETENSORS.save(values, shard_path, metadata={"format": "pt"})
             relative = shard_path.relative_to(temporary).as_posix()
             shell_entries.extend(
                 RuntimeShellTensor(
@@ -425,7 +422,7 @@ def write_runtime_bundle(
 
         buffer_values = _derived_runtime_buffers(source)
         buffer_path = model_root / "nanoquant-runtime-buffers.safetensors"
-        save_file(buffer_values, buffer_path, metadata={"format": "pt"})
+        SAFETENSORS.save(buffer_values, buffer_path, metadata={"format": "pt"})
         buffer_relative = buffer_path.relative_to(temporary).as_posix()
         shell_entries.extend(
             RuntimeShellTensor(
@@ -463,22 +460,6 @@ def write_runtime_bundle(
             newline="\n",
         )
         open_runtime_bundle(temporary, verify_hashes=True)
-        if destination.exists():
-            backup = destination.with_name(f".{destination.name}-previous")
-            if backup.exists():
-                raise RuntimeBundleError(f"runtime bundle replacement backup exists: {backup}")
-            os.replace(destination, backup)
-            try:
-                os.replace(temporary, destination)
-            except BaseException:
-                os.replace(backup, destination)
-                raise
-            shutil.rmtree(backup)
-        else:
-            os.replace(temporary, destination)
-    finally:
-        if temporary.exists():
-            shutil.rmtree(temporary)
     return open_runtime_bundle(destination, verify_hashes=True)
 
 
@@ -564,7 +545,7 @@ def load_transformers_runtime(
         by_shard[tensor.shard].append(tensor)
     with torch.no_grad():
         for shard, tensors in sorted(by_shard.items()):
-            with safe_open(opened.root / shard, framework="pt", device="cpu") as handle:
+            with SAFETENSORS.open(opened.root / shard) as handle:
                 for tensor in tensors:
                     value = handle.get_tensor(tensor.name)
                     target_value = state[tensor.name] if tensor.kind == "state" else buffers[tensor.name]

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import gc
 import hashlib
 import json
 import math
@@ -22,6 +21,7 @@ from nanoquant.domain.linear_math import parse_torch_dtype
 from nanoquant.infrastructure.device_lease import wait_for_device_lease
 from nanoquant.infrastructure.frozen_model_loader import LoadedFrozenModel, load_frozen_run
 from nanoquant.infrastructure.io_utils import atomic_write_json, hash_file
+from nanoquant.infrastructure.memory_cleanup import release_memory
 from nanoquant.infrastructure.resource_usage import peak_process_memory_bytes
 from nanoquant.runtime import (
     CudaPackedBackend,
@@ -308,10 +308,7 @@ def _case(
 
 
 def _release_device_memory() -> None:
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        torch.cuda.synchronize()
+    release_memory("cuda" if torch.cuda.is_available() else "cpu", synchronize=True)
 
 
 def _base_model(request: ShortDecodeBenchmarkRequest, device: torch.device) -> nn.Module:

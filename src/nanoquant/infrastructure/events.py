@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Literal, Protocol, TextIO
 from uuid import uuid4
 
+from nanoquant.domain.constants import EVENT_SCHEMA_VERSION
 from nanoquant.infrastructure.compression_progress import CompressionProgress, ProgressAction
 from nanoquant.infrastructure.environment import SECRET_PATTERN
 from nanoquant.infrastructure.io_utils import safe_replace
@@ -593,7 +594,7 @@ class EventRouter:
     ) -> Event:
         self._sequence += 1
         return Event(
-            1,
+            EVENT_SCHEMA_VERSION,
             datetime.now(timezone.utc).isoformat(),
             self.run_id,
             self._sequence,

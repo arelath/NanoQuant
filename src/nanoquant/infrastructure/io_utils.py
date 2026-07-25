@@ -5,8 +5,12 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import tempfile
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
 
@@ -53,6 +57,80 @@ def safe_replace(
                 raise
         return False
     return False
+
+
+@dataclass(slots=True)
+class AtomicWorkspace:
+    """Stage a directory tree beside its destination and publish it atomically.
+
+    Existing destinations are rejected by default because replacing a non-empty
+    directory is not atomic on every supported platform. Callers that implement
+    a separately validated backup protocol may opt in to replacement.
+    """
+
+    destination: Path
+    replace_existing: bool = False
+    prefix: str | None = None
+    _temporary: Path | None = None
+    _published: bool = False
+
+    def __enter__(self) -> Path:
+        destination = self.destination.resolve()
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if destination.exists() and not self.replace_existing:
+            raise FileExistsError(f"atomic workspace destination already exists: {destination}")
+        self.destination = destination
+        self._temporary = Path(
+            tempfile.mkdtemp(
+                prefix=self.prefix or f".{destination.name}-",
+                dir=destination.parent,
+            )
+        )
+        return self._temporary
+
+    def publish(self) -> Path:
+        if self._temporary is None:
+            raise RuntimeError("atomic workspace has not been entered")
+        if self._published:
+            raise RuntimeError("atomic workspace was already published")
+        if self.destination.exists():
+            if not self.replace_existing:
+                raise FileExistsError(
+                    f"atomic workspace destination already exists: {self.destination}"
+                )
+            backup = self.destination.with_name(f".{self.destination.name}.backup")
+            if backup.exists():
+                raise FileExistsError(f"atomic workspace backup already exists: {backup}")
+            safe_replace(self.destination, backup)
+            try:
+                safe_replace(self._temporary, self.destination)
+            except BaseException:
+                safe_replace(backup, self.destination)
+                raise
+            shutil.rmtree(backup)
+        else:
+            safe_replace(self._temporary, self.destination)
+        self._published = True
+        return self.destination
+
+    def __exit__(self, _type: object, _value: object, _traceback: object) -> None:
+        if self._temporary is not None and self._temporary.exists():
+            shutil.rmtree(self._temporary, ignore_errors=True)
+
+
+@contextmanager
+def atomic_workspace(
+    destination: str | Path,
+    *,
+    replace_existing: bool = False,
+    prefix: str | None = None,
+) -> Iterator[Path]:
+    """Yield a staging directory, publishing it on successful context exit."""
+
+    transaction = AtomicWorkspace(Path(destination), replace_existing, prefix)
+    with transaction as temporary:
+        yield temporary
+        transaction.publish()
 
 
 def atomic_write_json(

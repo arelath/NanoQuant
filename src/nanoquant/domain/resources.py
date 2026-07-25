@@ -6,6 +6,8 @@ from dataclasses import dataclass, replace
 
 import torch
 
+from nanoquant.domain.errors import ErrorCode, coded_message
+
 
 def peak_device_memory_bytes(device: str | torch.device) -> int:
     """Return the CUDA allocator high-water mark that governs future capacity."""
@@ -78,7 +80,16 @@ class ResourcePlan:
 class ResourceAdmissionError(RuntimeError):
     """Raised when even a stage's minimum execution shape cannot fit."""
 
-    code = "RES001"
+    code = ErrorCode.RESOURCE_ADMISSION
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: ErrorCode = ErrorCode.RESOURCE_ADMISSION,
+    ) -> None:
+        self.code = code
+        super().__init__(coded_message(code, message))
 
 
 @dataclass(frozen=True, slots=True)
@@ -472,9 +483,15 @@ def revise_memory_plan_after_oom(
     """Create one finite, lower-memory adaptive revision after rollback."""
 
     if plan.mode != "adaptive":
-        raise ResourceAdmissionError("RES002 fixed memory plans cannot be revised after OOM")
+        raise ResourceAdmissionError(
+            "fixed memory plans cannot be revised after OOM",
+            code=ErrorCode.RESOURCE_EXHAUSTED,
+        )
     if stage == "model_load":
-        raise ResourceAdmissionError("RES002 model-load OOM cannot be recovered by reducing a physical batch")
+        raise ResourceAdmissionError(
+            "model-load OOM cannot be recovered by reducing a physical batch",
+            code=ErrorCode.RESOURCE_EXHAUSTED,
+        )
     action_set = set(allowed_actions)
     allow_batch_reduction = bool(action_set & {"reduce_batch_size", "reduce_stage_batch_size"})
     allow_cache_eviction = bool(
@@ -520,7 +537,10 @@ def revise_memory_plan_after_oom(
         changed_batches = True
     cache_changed = allow_cache_eviction and plan.activation_gpu_cache != "off"
     if not changed_batches and not cache_changed:
-        raise ResourceAdmissionError("RES002 adaptive memory fallbacks are exhausted at batch one")
+        raise ResourceAdmissionError(
+            "adaptive memory fallbacks are exhausted at batch one",
+            code=ErrorCode.RESOURCE_EXHAUSTED,
+        )
     new_cache = "off" if not changed_batches else plan.activation_gpu_cache
     old_stage_peak = max(stage.predicted_gpu_bytes for stage in plan.stages)
     cache_bytes = max(0, plan.peak_gpu_bytes - old_stage_peak) if new_cache != "off" else 0

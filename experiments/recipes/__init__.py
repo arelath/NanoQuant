@@ -2,6 +2,13 @@
 
 from nanoquant.compression_export_workflow import HuggingFaceUploadConfig
 
+from ._declarative import (
+    DECLARATIVE_EXPERIMENT_SCHEMA_VERSION,
+    DeclarativeExperiment,
+    ExperimentWorkflowKind,
+    experiment_to_dict,
+    load_declarative_experiment,
+)
 from ._experiment import (
     BaselineKind,
     BaselineRef,
@@ -16,6 +23,7 @@ from ._experiment import (
     define_rank_expansion_experiment,
     experiment_callable_main,
     experiment_main,
+    run_experiment,
 )
 from .base_compression import (
     ARCHITECTURE_PROTECTED_RECONSTRUCTION_COMPRESSION_TEMPLATE,
@@ -41,6 +49,9 @@ from .base_compression import (
 )
 
 __all__ = [
+    "DECLARATIVE_EXPERIMENT_SCHEMA_VERSION",
+    "DeclarativeExperiment",
+    "ExperimentWorkflowKind",
     "ARCHITECTURE_PROTECTED_RECONSTRUCTION_COMPRESSION_TEMPLATE",
     "BASE_COMPRESSION_TEMPLATE",
     "BaselineKind",
@@ -75,4 +86,7 @@ __all__ = [
     "define_rank_expansion_experiment",
     "experiment_callable_main",
     "experiment_main",
+    "experiment_to_dict",
+    "load_declarative_experiment",
+    "run_experiment",
 ]

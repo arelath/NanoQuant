@@ -18,6 +18,7 @@ from nanoquant.application.quantization_stages import (
 )
 from nanoquant.application.stages import StageContext, execute_stage
 from nanoquant.config.schema import ADMMConfig, BiasCorrectionConfig, LowRankPatchConfig
+from nanoquant.domain.factorization import AdmmParameters
 from nanoquant.domain.models import (
     ArtifactRef,
     BlockId,
@@ -126,11 +127,20 @@ def test_outlier_factorization_and_scale_fit_stages_commit_typed_results(tmp_pat
 def test_residual_probe_uses_configured_inner_iterations(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     observed: list[tuple[int, bool]] = []
 
-    def factorize(weight: torch.Tensor, *_args: object, **kwargs: object) -> SimpleNamespace:
-        observed.append((kwargs["inner_iterations"], kwargs["transpose_wide"]))
+    def factorize(
+        weight: torch.Tensor,
+        *_args: object,
+        **_kwargs: object,
+    ) -> SimpleNamespace:
+        parameters = _args[-1]
+        assert isinstance(parameters, AdmmParameters)
+        observed.append((parameters.inner_iterations, parameters.transpose_wide))
         return SimpleNamespace(reconstruction=torch.zeros_like(weight))
 
-    monkeypatch.setattr("nanoquant.application.quantization_stages.factorize_admm", factorize)
+    monkeypatch.setattr(
+        "nanoquant.application.quantization_stages.factorize_admm_with_parameters",
+        factorize,
+    )
     context, tensors = _context(tmp_path)
     refs = tensors.put(
         "residual-probe-fixture",

@@ -9,8 +9,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import torch
-from safetensors import safe_open
-from safetensors.torch import save_file
 
 from nanoquant.application.distillation import (
     DistillationOptimizerState,
@@ -21,6 +19,7 @@ from nanoquant.domain.models import ArtifactRef
 
 from .artifacts import LocalArtifactStore
 from .io_utils import safe_replace
+from .safetensors_io import SAFETENSORS
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,7 +77,7 @@ def commit_distillation_checkpoint(
         )
     with artifacts.begin_write("distillation-checkpoint") as writer:
         with artifacts.recorder.phase("write"):
-            save_file(tensors, writer.path / "state.safetensors")
+            SAFETENSORS.save(tensors, writer.path / "state.safetensors")
             (writer.path / "checkpoint.json").write_text(encoded, encoding="utf-8")
         descriptor = writer.commit()
     reference = ArtifactRef("distillation-checkpoint", descriptor.artifact_id, descriptor.schema_version)
@@ -104,7 +103,7 @@ def load_distillation_checkpoint(
         raise ValueError("distillation checkpoint does not match the requested run/protocol")
     parameter_values = []
     optimizer_states = []
-    with safe_open(root / "state.safetensors", framework="pt", device="cpu") as handle:
+    with SAFETENSORS.open(root / "state.safetensors") as handle:
         for item in manifest["parameters"]:
             name = str(item["name"])
             prefix = str(item["prefix"])

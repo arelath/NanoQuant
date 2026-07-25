@@ -5,16 +5,12 @@ from __future__ import annotations
 import json
 import math
 import os
-import shutil
-import tempfile
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, cast
 
 import torch
-from safetensors import safe_open
-from safetensors.torch import save_file
 
 from nanoquant.runtime.artifact import (
     MINIMUM_RUNTIME_VERSION,
@@ -28,6 +24,8 @@ from nanoquant.runtime.artifact import (
 )
 from nanoquant.runtime.backend import DeviceLike, QuantizedLinearSpec
 from nanoquant.runtime.codec import decode_dataclass
+from nanoquant.runtime.constants import RUNTIME_ARTIFACT_SCHEMA_VERSION
+from nanoquant.runtime.io_utils import atomic_output_directory
 from nanoquant.runtime.logical import LogicalLayerState, canonical_torch_dtype, parse_torch_dtype
 from nanoquant.runtime.packed import (
     PACKED_TENSOR_NAMESPACE,
@@ -37,9 +35,9 @@ from nanoquant.runtime.packed import (
     packed_word_count,
 )
 from nanoquant.runtime.reference import FactorizedReferenceBackend, PackedReferenceBackend
-from nanoquant.runtime.safetensors_io import load_tensors
+from nanoquant.runtime.safetensors_io import SAFETENSORS, load_tensors
 
-PACKED_DESCRIPTOR_SCHEMA_VERSION = 1
+PACKED_DESCRIPTOR_SCHEMA_VERSION = RUNTIME_ARTIFACT_SCHEMA_VERSION
 PACKED_ARTIFACT_FORMAT = "nanoquant-packed-model"
 _MAXIMUM_DESCRIPTOR_BYTES = 16 * 1024 * 1024
 _PACKED_TENSOR_ROLES = (
@@ -295,7 +293,7 @@ def _write_block_shard(
         layer_entries.append(PackedLayerEntry(state.spec, tuple(entries)))
     relative = f"weights/block-{index:05d}.safetensors"
     shard = temporary / relative
-    save_file(tensors, shard)
+    SAFETENSORS.save(tensors, shard)
     return PackedBlockEntry(
         index,
         relative,
@@ -316,9 +314,7 @@ def write_packed_artifact_stream(
     destination = Path(output)
     if destination.exists():
         raise FileExistsError(f"packed artifact output already exists: {destination}")
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = Path(tempfile.mkdtemp(prefix=".nanoquant-packed-", dir=destination.parent))
-    try:
+    with atomic_output_directory(destination, prefix=".nanoquant-packed-") as temporary:
         (temporary / "weights").mkdir()
         entries: list[PackedBlockEntry] = []
         names: set[str] = set()
@@ -356,10 +352,6 @@ def write_packed_artifact_stream(
             stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, destination)
-    finally:
-        if temporary.exists():
-            shutil.rmtree(temporary)
     return open_packed_artifact(destination)
 
 
@@ -414,7 +406,7 @@ def open_packed_artifact(
         if len(declared) != sum(len(layer.tensors) for layer in block.layers):
             raise PackedArtifactError(f"packed artifact tensor key is duplicated: {block.path}")
         try:
-            with safe_open(shard, framework="pt", device="cpu") as handle:
+            with SAFETENSORS.open(shard) as handle:
                 if set(handle.keys()) != set(declared):
                     raise PackedArtifactError(f"packed artifact shard tensor inventory differs: {block.path}")
                 for key, tensor in declared.items():

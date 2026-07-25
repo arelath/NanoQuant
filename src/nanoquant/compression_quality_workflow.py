@@ -16,6 +16,7 @@ from nanoquant.compression_export_workflow import (
 from nanoquant.config.codec import config_hash, to_dict
 from nanoquant.config.schema import ExecutorKind, RunConfig
 from nanoquant.config.validation import ValidationPhase, raise_for_issues, validate
+from nanoquant.domain.constants import BackendType
 from nanoquant.infrastructure.huggingface_model_card import load_huggingface_model_card_metadata
 from nanoquant.infrastructure.huggingface_upload import (
     ensure_huggingface_model_repository,
@@ -78,7 +79,7 @@ class CompressionQualityExperiment:
     local_files_only: bool = False
     maximum_wddm_shared_gib: float | None = None
     restore_completed_blocks: bool = True
-    quality_backend: str | None = "factorized"
+    quality_backend: str | None = BackendType.FACTORIZED.value
     large_model_guards: bool = False
     llamacpp_quality: bool = False
     llama_cpp_root: Path | None = None
@@ -95,7 +96,11 @@ class CompressionQualityExperiment:
             not math.isfinite(self.maximum_wddm_shared_gib) or self.maximum_wddm_shared_gib < 0
         ):
             raise ValueError("maximum WDDM shared memory must be finite and non-negative")
-        if self.quality_backend not in {None, "factorized", "dense"}:
+        if self.quality_backend not in {
+            None,
+            BackendType.FACTORIZED.value,
+            BackendType.DENSE.value,
+        }:
             raise ValueError("quality backend must be factorized, dense, or disabled")
         if self.quality_backend is None and not self.llamacpp_quality:
             raise ValueError("disabled PyTorch candidate quality requires llama.cpp quality")
@@ -202,7 +207,7 @@ def execute_compression_quality_experiment(
         revision=str(config.model.revision),
         run_output=resolved.inputs.output,
         device=config.runtime.compute_device,
-        backend=experiment.quality_backend or "factorized",
+        backend=experiment.quality_backend or BackendType.FACTORIZED.value,
         use_global_tuning=config.distillation.enabled,
         wikitext_samples=experiment.wikitext_samples,
         wikitext_sequence_length=experiment.wikitext_sequence_length,

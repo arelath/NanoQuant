@@ -11,6 +11,7 @@ import time
 from dataclasses import asdict
 from pathlib import Path
 
+from nanoquant.domain.errors import ErrorCode, coded_message
 from nanoquant.domain.models import ArtifactType
 from nanoquant.domain.profiling import NULL_RECORDER, PhaseRecorder
 from nanoquant.infrastructure.io_utils import atomic_write_json, hash_file, safe_replace
@@ -18,7 +19,10 @@ from nanoquant.ports.artifact_store import ArtifactDescriptor, ArtifactFile
 
 
 class ArtifactCorruptionError(IOError):
-    pass
+    code = ErrorCode.ARTIFACT_CORRUPTION
+
+    def __init__(self, message: str) -> None:
+        super().__init__(coded_message(self.code, message))
 
 
 class LocalArtifactWriter:

@@ -12,8 +12,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import torch
-from safetensors import safe_open
-from safetensors.torch import save_file
 
 from nanoquant.application.tuning import (
     TuningOptimizerState,
@@ -21,6 +19,7 @@ from nanoquant.application.tuning import (
 )
 from nanoquant.config.codec import from_dict, to_dict
 from nanoquant.infrastructure.io_utils import safe_replace
+from nanoquant.infrastructure.safetensors_io import SAFETENSORS
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,7 +138,7 @@ def save_tuning_checkpoint(
                     "has_kahan_compensation": optimizer.kahan_compensation is not None,
                 }
             )
-        save_file(tensors, temporary / "state.safetensors")
+        SAFETENSORS.save(tensors, temporary / "state.safetensors")
         manifest = {
             "schema_version": 2,
             "identity": to_dict(identity),
@@ -201,7 +200,7 @@ def active_tuning_checkpoint(
     parameter_values = []
     best_parameter_values = []
     optimizer_states = []
-    with safe_open(generation_root / "state.safetensors", framework="pt", device="cpu") as handle:
+    with SAFETENSORS.open(generation_root / "state.safetensors") as handle:
         for item in manifest["parameters"]:
             name = str(item["name"])
             prefix = str(item["prefix"])

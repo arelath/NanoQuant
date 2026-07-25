@@ -7,15 +7,14 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 import torch
-from safetensors import safe_open
-from safetensors.torch import save_file
 from torch import nn
 
-from nanoquant.domain.factorization import factorize_admm
+from nanoquant.domain.factorization import AdmmParameters, factorize_admm_with_parameters
 from nanoquant.domain.metrics import reconstruction_metrics
 from nanoquant.domain.models import ArtifactRef, LayerId, ReconstructionMetrics
 
 from .artifacts import LocalArtifactStore
+from .safetensors_io import SAFETENSORS
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,7 +64,7 @@ def capture_layer(
         "device": device,
     }
     with artifacts.begin_write("layer-fixture") as writer:
-        save_file(tensors, writer.path / "tensors.safetensors")
+        SAFETENSORS.save(tensors, writer.path / "tensors.safetensors")
         (writer.path / "fixture.json").write_text(json.dumps(metadata, sort_keys=True, indent=2), encoding="utf-8")
         descriptor = writer.commit()
     return ArtifactRef("layer-fixture", descriptor.artifact_id, 1)
@@ -80,19 +79,21 @@ def replay_layer(
     device = str(metadata.get("device", "cpu"))
     if device.startswith("cuda") and not torch.cuda.is_available():
         raise RuntimeError("captured layer replay requires CUDA")
-    with safe_open(root / "tensors.safetensors", framework="pt", device="cpu") as tensors:
+    with SAFETENSORS.open(root / "tensors.safetensors") as tensors:
         weight = tensors.get_tensor("weight").to(device)
         residual = tensors.get_tensor("residual_weight").to(device)
         input_importance = tensors.get_tensor("input_importance").to(device)
         output_importance = tensors.get_tensor("output_importance").to(device)
-        result = factorize_admm(
+        result = factorize_admm_with_parameters(
             residual,
             input_importance,
             output_importance,
             int(metadata["rank"]),
             torch.Generator(device=device).manual_seed(int(metadata["logical_seed"])),
-            outer_iterations=int(metadata["outer_iterations"]),
-            inner_iterations=int(metadata["inner_iterations"]),
+            AdmmParameters(
+                outer_iterations=int(metadata["outer_iterations"]),
+                inner_iterations=int(metadata["inner_iterations"]),
+            ),
         )
         metrics = reconstruction_metrics(weight, result.reconstruction, input_importance, output_importance)
         if "accepted_reconstruction" in tensors.keys():
@@ -133,7 +134,7 @@ def capture_block(
         "accepted_loss": float((accepted_outputs.float() - teacher_targets.float()).square().mean()),
     }
     with artifacts.begin_write("block-fixture") as writer:
-        save_file(tensors, writer.path / "tensors.safetensors")
+        SAFETENSORS.save(tensors, writer.path / "tensors.safetensors")
         (writer.path / "fixture.json").write_text(json.dumps(metadata, sort_keys=True, indent=2), encoding="utf-8")
         descriptor = writer.commit()
     return ArtifactRef("block-fixture", descriptor.artifact_id, 1)
@@ -146,7 +147,7 @@ def replay_block(
     root = artifacts.path_for(reference.artifact_id)
     metadata = json.loads((root / "fixture.json").read_text(encoding="utf-8"))
     block = factory()
-    with safe_open(root / "tensors.safetensors", framework="pt", device="cpu") as tensors:
+    with SAFETENSORS.open(root / "tensors.safetensors") as tensors:
         state = {key: tensors.get_tensor(f"state.{key}") for key in metadata["state_keys"]}
         block.load_state_dict(state, strict=True)
         inputs = tensors.get_tensor("inputs")

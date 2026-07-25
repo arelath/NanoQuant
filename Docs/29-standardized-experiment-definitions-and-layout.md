@@ -251,3 +251,21 @@ appears once, the canonical prefix cannot be forgotten, and all workflows share 
 The deliberate tradeoff is that numbered launcher files are no longer tiny import shims: they are executable,
 reviewable experiment specifications. Reuse happens through unnumbered templates and typed builders in `recipes`,
 while concrete campaign intent stays next to the command that runs it.
+
+## Declarative execution
+
+Implemented on 2026-07-25. Standard workflow definitions now have a strict YAML/JSON envelope codec in
+`experiments/recipes/_declarative.py` and can be executed through:
+
+```powershell
+python experiments/run_experiment.py experiments/030-example.yaml
+```
+
+The envelope records its schema version, workflow kind, complete identity, resolved `RunConfig`, and typed workflow
+payload. Loading rejects unknown fields, future schemas, workflow/type mismatches, and a filename that differs from
+the canonical experiment identity. Declarative files use the same `ExperimentDefinition` validation and workflow
+dispatcher as Python definitions, so paths, resume identities, and output contracts do not fork.
+
+Numbered Python launchers remain supported as immutable chronological provenance adapters, as required by the
+architecture. New generated sweeps and data-only experiments can use YAML/JSON without adding another orchestration
+script; retained historical launchers do not need to be deleted or rewritten to gain the declarative execution path.

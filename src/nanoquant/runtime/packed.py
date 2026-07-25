@@ -7,9 +7,10 @@ from dataclasses import dataclass
 import torch
 
 from nanoquant.runtime.backend import QuantizedLinearSpec
+from nanoquant.runtime.constants import PackedLayout
 from nanoquant.runtime.logical import LogicalLayerState, canonical_torch_dtype, parse_torch_dtype
 
-PACKED_LAYOUT_VERSION = "llama.cpp-i32-lsb-v1"
+PACKED_LAYOUT_VERSION = PackedLayout.LLAMA_CPP_I32_LSB_V1.value
 PACKED_WORD_BITS = 32
 PACKED_WORD_DTYPE = "int32"
 PACKED_TENSOR_NAMESPACE = f"layouts.{PACKED_LAYOUT_VERSION}"

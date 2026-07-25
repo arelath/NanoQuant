@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import hashlib
 import json
-import types
-from dataclasses import MISSING, fields, is_dataclass, replace
+from dataclasses import fields, is_dataclass, replace
 from difflib import get_close_matches
 from enum import Enum
+from functools import cache
 from pathlib import Path
-from typing import Any, TypeVar, Union, cast, get_args, get_origin, get_type_hints
+from typing import Any, TypeVar, cast, get_args, get_origin, get_type_hints
 
 import yaml
+from pydantic import ConfigDict, TypeAdapter, ValidationError
 
 from .schema import RunConfig
 
@@ -26,86 +27,79 @@ class ConfigDecodeError(ValueError):
         super().__init__(f"{path}: {message}")
 
 
-def _decode(value: Any, annotation: Any, path: str) -> Any:
+def _configure_dataclass_tree(annotation: Any, seen: set[type[object]] | None = None) -> None:
+    """Apply fail-closed Pydantic settings to plain dataclass contracts."""
+
+    visited = set() if seen is None else seen
     origin = get_origin(annotation)
-    args = get_args(annotation)
-    if origin in (Union, types.UnionType):
-        if value is None and type(None) in args:
-            return None
-        errors: list[str] = []
-        for candidate in (arg for arg in args if arg is not type(None)):
-            try:
-                return _decode(value, candidate, path)
-            except (ConfigDecodeError, TypeError, ValueError) as exc:
-                errors.append(str(exc))
-        raise ConfigDecodeError(path, f"does not match any allowed type ({'; '.join(errors)})")
-    if origin is tuple:
-        if not isinstance(value, (list, tuple)):
-            raise ConfigDecodeError(path, "expected an array")
-        element_type = args[0] if args else Any
-        if len(args) > 1 and args[1] is not Ellipsis and len(args) != len(value):
-            raise ConfigDecodeError(path, f"expected {len(args)} elements")
-        return tuple(
-            _decode(
-                item,
-                element_type if not args or (len(args) == 2 and args[1] is Ellipsis) else args[index],
-                f"{path}[{index}]",
-            )
-            for index, item in enumerate(value)
-        )
-    if isinstance(annotation, type) and issubclass(annotation, Enum):
-        try:
-            return annotation(value)
-        except ValueError as exc:
-            allowed = ", ".join(repr(member.value) for member in annotation)
-            raise ConfigDecodeError(path, f"expected one of {allowed}; got {value!r}") from exc
-    if isinstance(annotation, type) and is_dataclass(annotation):
-        if not isinstance(value, dict):
-            raise ConfigDecodeError(path, "expected an object")
-        return from_dict(annotation, value, path=path)
-    if annotation is Any:
-        return value
-    if annotation is bool:
-        if type(value) is not bool:
-            raise ConfigDecodeError(path, "expected a boolean")
-        return value
-    if annotation is int:
-        if type(value) is not int:
-            raise ConfigDecodeError(path, "expected an integer")
-        return value
-    if annotation is float:
-        if type(value) not in (int, float):
-            raise ConfigDecodeError(path, "expected a number")
-        return float(value)
-    if annotation is str:
-        if not isinstance(value, str):
-            raise ConfigDecodeError(path, "expected a string")
-        return value
-    return value
+    if origin is not None:
+        for argument in get_args(annotation):
+            _configure_dataclass_tree(argument, visited)
+        return
+    if not isinstance(annotation, type) or not is_dataclass(annotation) or annotation in visited:
+        return
+    visited.add(annotation)
+    cast(Any, annotation).__pydantic_config__ = ConfigDict(extra="forbid")
+    for hint in get_type_hints(annotation).values():
+        _configure_dataclass_tree(hint, visited)
+
+
+@cache
+def _adapter(annotation: Any) -> TypeAdapter[Any]:
+    _configure_dataclass_tree(annotation)
+    return TypeAdapter(annotation)
+
+
+def _render_location(path: str, location: tuple[int | str, ...]) -> str:
+    rendered = path
+    for part in location:
+        rendered += f"[{part}]" if isinstance(part, int) else f".{part}"
+    return rendered
+
+
+def _annotation_at(annotation: Any, location: tuple[int | str, ...]) -> Any:
+    current = annotation
+    for part in location[:-1]:
+        origin = get_origin(current)
+        if origin is not None:
+            arguments = tuple(item for item in get_args(current) if item is not type(None))
+            current = arguments[0] if arguments else Any
+        if isinstance(part, int):
+            continue
+        if isinstance(current, type) and is_dataclass(current):
+            current = get_type_hints(current).get(part, Any)
+    return current
+
+
+def _decode(value: Any, annotation: Any, path: str) -> Any:
+    try:
+        payload = json.dumps(value, allow_nan=True)
+        return _adapter(annotation).validate_json(payload, strict=True)
+    except ValidationError as exc:
+        error = exc.errors(include_url=False)[0]
+        location = tuple(error["loc"])
+        error_path = _render_location(path, location)
+        message = str(error["msg"])
+        if error["type"] == "unexpected_keyword_argument" and location:
+            parent = _annotation_at(annotation, location)
+            if isinstance(parent, type) and is_dataclass(parent):
+                names = tuple(field.name for field in fields(parent))
+                unknown = str(location[-1])
+                suggestion = get_close_matches(unknown, names, n=1, cutoff=0.55)
+                if suggestion:
+                    message = f"unknown field; did you mean {suggestion[0]!r}?"
+                else:
+                    message = "unknown field"
+        raise ConfigDecodeError(error_path, message) from exc
+    except (TypeError, ValueError) as exc:
+        raise ConfigDecodeError(path, str(exc)) from exc
 
 
 def from_dict(cls: type[T], data: dict[str, Any], *, path: str = "config") -> T:
-    """Decode *data* to a dataclass, rejecting every unknown field."""
+    """Decode *data* through a cached strict Pydantic dataclass adapter."""
     if not is_dataclass(cls):
         raise TypeError(f"{cls!r} is not a dataclass type")
-    field_map = {field.name: field for field in fields(cls)}
-    unknown = sorted(set(data) - set(field_map))
-    if unknown:
-        name = unknown[0]
-        suggestion = get_close_matches(name, field_map, n=1, cutoff=0.55)
-        suffix = f"; did you mean {suggestion[0]!r}?" if suggestion else ""
-        raise ConfigDecodeError(f"{path}.{name}", f"unknown field{suffix}")
-    hints = get_type_hints(cls)
-    kwargs: dict[str, Any] = {}
-    for name, field in field_map.items():
-        if name in data:
-            kwargs[name] = _decode(data[name], hints[name], f"{path}.{name}")
-        elif field.default is MISSING and field.default_factory is MISSING:
-            raise ConfigDecodeError(f"{path}.{name}", "required field is missing")
-    try:
-        return cls(**kwargs)
-    except (TypeError, ValueError) as exc:
-        raise ConfigDecodeError(path, str(exc)) from exc
+    return cast(T, _decode(data, cls, path))
 
 
 def to_dict(value: Any) -> Any:

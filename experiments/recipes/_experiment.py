@@ -17,6 +17,7 @@ from nanoquant.compression_export_workflow import (
 )
 from nanoquant.compression_quality_workflow import CompressionQualityExperiment
 from nanoquant.config.schema import IntentConfig, RunConfig
+from nanoquant.domain.constants import BackendType
 from nanoquant.quality_evaluation import QualityEvaluationRequest
 from nanoquant.quality_evaluation_workflow import QualityEvaluationExperiment
 from nanoquant.rank_expansion_experiment import RankExpansionExperiment
@@ -338,7 +339,7 @@ def define_compression_quality_experiment(
     export: CompressionExportPolicy | None = None,
     maximum_wddm_shared_gib: float | None = None,
     restore_completed_blocks: bool = True,
-    quality_backend: str | None = "factorized",
+    quality_backend: str | None = BackendType.FACTORIZED.value,
     large_model_guards: bool = False,
     llamacpp_quality: bool = False,
     llamacpp_quality_parallel: int = 4,

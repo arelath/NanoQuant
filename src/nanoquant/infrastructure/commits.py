@@ -8,8 +8,6 @@ from dataclasses import dataclass
 from typing import Any, cast
 
 import torch
-from safetensors import safe_open
-from safetensors.torch import save_file
 
 from nanoquant.config.codec import from_dict, to_dict
 from nanoquant.domain.models import (
@@ -23,6 +21,7 @@ from nanoquant.domain.models import (
     LayerResult,
     SharedInputGroupResult,
 )
+from nanoquant.infrastructure.safetensors_io import SAFETENSORS
 
 from .artifacts import LocalArtifactStore
 
@@ -149,22 +148,22 @@ def load_block_activations(
     root = artifacts.path_for(reference.artifact_id)
     legacy = root / "activations.safetensors"
     if legacy.exists():
-        with safe_open(legacy, framework="pt", device="cpu") as handle:
+        with SAFETENSORS.open(legacy) as handle:
             teacher = handle.get_tensor("teacher_outputs")
             compressed = handle.get_tensor("compressed_outputs")
     elif (root / "teacher-activations.safetensors").exists():
-        with safe_open(root / "teacher-activations.safetensors", framework="pt", device="cpu") as handle:
+        with SAFETENSORS.open(root / "teacher-activations.safetensors") as handle:
             teacher = handle.get_tensor("teacher_outputs")
-        with safe_open(root / "compressed-activations.safetensors", framework="pt", device="cpu") as handle:
+        with SAFETENSORS.open(root / "compressed-activations.safetensors") as handle:
             compressed = handle.get_tensor("compressed_outputs")
     else:
         payload = _payload(reference, artifacts, "block-result.json")
         generation = from_dict(ArtifactRef, payload["activation_generation"], path="activation_generation")
         artifacts.validate(generation.artifact_id)
         generation_root = artifacts.path_for(generation.artifact_id)
-        with safe_open(generation_root / "teacher-activations.safetensors", framework="pt", device="cpu") as handle:
+        with SAFETENSORS.open(generation_root / "teacher-activations.safetensors") as handle:
             teacher = handle.get_tensor("teacher_outputs")
-        with safe_open(generation_root / "compressed-activations.safetensors", framework="pt", device="cpu") as handle:
+        with SAFETENSORS.open(generation_root / "compressed-activations.safetensors") as handle:
             compressed = handle.get_tensor("compressed_outputs")
     if device != "cpu":
         teacher = teacher.to(device)
@@ -281,11 +280,11 @@ def commit_block(
         encoded_activation_core = json.dumps(activation_core, sort_keys=True, indent=2)
     with artifacts.begin_write(ArtifactTypes.ACTIVATION_GENERATION) as writer:
         with artifacts.recorder.phase("write"):
-            save_file(
+            SAFETENSORS.save(
                 {"teacher_outputs": teacher_outputs.detach().cpu().contiguous()},
                 writer.path / "teacher-activations.safetensors",
             )
-            save_file(
+            SAFETENSORS.save(
                 {"compressed_outputs": compressed_outputs.detach().cpu().contiguous()},
                 writer.path / "compressed-activations.safetensors",
             )

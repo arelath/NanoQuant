@@ -65,6 +65,7 @@ def test_recipes_contain_only_generic_reusable_definitions() -> None:
     root = Path("experiments/recipes")
     assert {path.relative_to(root).as_posix() for path in root.rglob("*.py")} == {
         "__init__.py",
+        "_declarative.py",
         "_delta.py",
         "_experiment.py",
         "base_compression.py",

@@ -60,6 +60,30 @@ SCHEDULES: dict[str, Callable[[float], float]] = {
 }
 
 
+@dataclass(frozen=True, slots=True)
+class AdmmParameters:
+    """Numerical ADMM policy passed as one immutable parameter object."""
+
+    outer_iterations: int = 400
+    inner_iterations: int = 5
+    regularization: float = 3e-2
+    penalty_schedule: str = "cubic"
+    convergence_check_interval: int = 100
+    early_stop_tolerance: float | None = None
+    epsilon: float = 1e-12
+    transpose_wide: bool = False
+
+    def __post_init__(self) -> None:
+        if self.outer_iterations < 0 or self.inner_iterations <= 0:
+            raise ValueError("iteration settings are invalid")
+        if self.convergence_check_interval <= 0:
+            raise ValueError("convergence check interval must be positive")
+        if self.regularization < 0 or self.epsilon <= 0:
+            raise ValueError("ADMM regularization and epsilon are invalid")
+        if self.penalty_schedule not in SCHEDULES:
+            raise ValueError(f"unknown penalty schedule: {self.penalty_schedule}")
+
+
 def _sign(value: torch.Tensor) -> torch.Tensor:
     # The comparison already allocates the branch predicate. Convert that
     # result in place instead of allocating two full-size +/-1 branch tensors
@@ -343,3 +367,33 @@ def factorize_admm(
             tuple(trace),
         )
     return result
+
+
+def factorize_admm_with_parameters(
+    weight: torch.Tensor,
+    input_importance: torch.Tensor,
+    output_importance: torch.Tensor,
+    rank: int,
+    generator: torch.Generator,
+    parameters: AdmmParameters,
+    *,
+    recorder: PhaseRecorder = NULL_RECORDER,
+) -> ADMMResult:
+    """Execute ADMM using a cohesive numerical policy object."""
+
+    return factorize_admm(
+        weight,
+        input_importance,
+        output_importance,
+        rank,
+        generator,
+        outer_iterations=parameters.outer_iterations,
+        inner_iterations=parameters.inner_iterations,
+        regularization=parameters.regularization,
+        penalty_schedule=parameters.penalty_schedule,
+        convergence_check_interval=parameters.convergence_check_interval,
+        early_stop_tolerance=parameters.early_stop_tolerance,
+        epsilon=parameters.epsilon,
+        recorder=recorder,
+        transpose_wide=parameters.transpose_wide,
+    )

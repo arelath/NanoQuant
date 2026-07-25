@@ -61,6 +61,7 @@ from nanoquant.application.quantization_stages import (
 from nanoquant.application.reconstruction_report import render_reconstruction_tables
 from nanoquant.application.retry_loop import AcceptedFactorization, run_factorization_attempts
 from nanoquant.application.stages import StageContext, execute_stage
+from nanoquant.application.telemetry import TelemetryContext
 from nanoquant.application.tuning import (
     EpochLossMode,
     TuningRequest,
@@ -100,7 +101,7 @@ from nanoquant.config.schema import (
     SharedInputGroupConfig,
 )
 from nanoquant.domain.calibration_math import weighted_group_output_importance
-from nanoquant.domain.factorization import factorize_admm
+from nanoquant.domain.factorization import AdmmParameters, factorize_admm_with_parameters
 from nanoquant.domain.linear_math import chunk_slices
 from nanoquant.domain.metrics import reconstruction_metrics
 from nanoquant.domain.models import (
@@ -263,41 +264,13 @@ def _logged_operation(
     operation: str,
     **fields: object,
 ) -> Iterator[None]:
-    """Emit a bounded lifecycle pair and preserve failure location/context."""
+    """Compatibility adapter over the unified telemetry operation context."""
 
-    started = time.perf_counter()
-    cast(Any, events).emit(
-        "resident-quantization",
-        "info",
-        f"{operation}.started",
-        **fields,
-    )
-    try:
+    with TelemetryContext(events, "resident-quantization").operation(
+        operation,
+        fields=fields,
+    ):
         yield
-    except BaseException as exc:
-        if not hasattr(exc, "nanoquant_operation"):
-            try:
-                exc.__dict__["nanoquant_operation"] = operation
-            except Exception:
-                pass
-        cast(Any, events).emit(
-            "resident-quantization",
-            "error",
-            f"{operation}.failed",
-            wall_seconds=time.perf_counter() - started,
-            error_type=type(exc).__name__,
-            error=str(exc),
-            **fields,
-        )
-        raise
-    else:
-        cast(Any, events).emit(
-            "resident-quantization",
-            "info",
-            f"{operation}.completed",
-            wall_seconds=time.perf_counter() - started,
-            **fields,
-        )
 
 
 @contextmanager
@@ -2734,19 +2707,21 @@ def _run_reconstruction_rank_probes(
                 probe_output: torch.Tensor = probe_output_importance,
             ) -> Any:
                 generator = torch.Generator(device=request.device).manual_seed(probe_seed)
-                return factorize_admm(
+                return factorize_admm_with_parameters(
                     probe_weight,
                     probe_input,
                     probe_output,
                     rank,
                     generator,
-                    outer_iterations=probe_admm.outer_iterations,
-                    inner_iterations=probe_admm.inner_iterations,
-                    regularization=probe_admm.regularization,
-                    penalty_schedule=probe_admm.penalty_schedule,
-                    convergence_check_interval=probe_admm.convergence_check_interval,
-                    early_stop_tolerance=probe_admm.early_stop_tolerance,
-                    transpose_wide=probe_admm.transpose_wide,
+                    AdmmParameters(
+                        outer_iterations=probe_admm.outer_iterations,
+                        inner_iterations=probe_admm.inner_iterations,
+                        regularization=probe_admm.regularization,
+                        penalty_schedule=probe_admm.penalty_schedule,
+                        convergence_check_interval=probe_admm.convergence_check_interval,
+                        early_stop_tolerance=probe_admm.early_stop_tolerance,
+                        transpose_wide=probe_admm.transpose_wide,
+                    ),
                 )
 
             with recorder.phase("rank_probe", unit=unit_id):
@@ -3805,6 +3780,117 @@ class _ResidentBlockWork:
     deferred_slice: bool
 
 
+@dataclass(frozen=True, slots=True)
+class QuantizationStateManager:
+    """Own durable progress discovery and model/activation hydration."""
+
+    request: ResidentQuantizationRequest
+    events: EventSink
+    recorder: PhaseRecorder
+    run_id: str
+    artifacts: LocalArtifactStore
+    tensors: LocalTensorStore
+    environment: _ResidentEnvironment
+
+    def restore(
+        self,
+        plan: QuantizationPlan,
+        persisted_plan: PersistedPlan,
+        initial_inputs: torch.Tensor,
+    ) -> _ResidentResumeState:
+        return _restore_committed_state(
+            self.request,
+            self.events,
+            self.recorder,
+            self.run_id,
+            self.artifacts,
+            self.tensors,
+            self.environment,
+            plan,
+            persisted_plan,
+            initial_inputs,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class BlockQuantizer:
+    """Prepare isolated resident block work with one cohesive execution context."""
+
+    request: ResidentQuantizationRequest
+    events: EventSink
+    recorder: PhaseRecorder
+    micro_recorder: PhaseRecorder
+    environment: _ResidentEnvironment
+    calibration: PersistedCalibration
+    tensors: LocalTensorStore
+    captured_metadata: dict[str, object]
+
+    @staticmethod
+    def pending(
+        blocks: tuple[BlockPlan, ...],
+        completed_block_indexes: set[int],
+    ) -> Iterator[BlockPlan]:
+        return (
+            block
+            for block in blocks
+            if block.block.index not in completed_block_indexes
+        )
+
+    def prepare(
+        self,
+        block_plan: BlockPlan,
+        teacher_inputs: torch.Tensor,
+        compressed_inputs: torch.Tensor,
+        completed_block_indexes: set[int],
+    ) -> _ResidentBlockWork:
+        return _process_resident_block(
+            self.request,
+            self.events,
+            self.recorder,
+            self.micro_recorder,
+            self.environment,
+            block_plan,
+            self.calibration,
+            self.tensors,
+            teacher_inputs,
+            compressed_inputs,
+            self.captured_metadata,
+            completed_block_indexes,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class LayerQuantizer:
+    """Execute outlier selection, factorization, and scale fit for one owner."""
+
+    request: ResidentQuantizationRequest
+    context: StageContext
+    config_hash: str
+    factor_stage: FactorizationAttemptStage
+    outlier_stage: OutlierSelectionStage
+    scale_stage: ScaleFitStage
+    recorder: PhaseRecorder = NULL_RECORDER
+
+    def factorize(
+        self,
+        layer_plan: LayerPlan,
+        source_weight: TensorRef,
+        budget: BudgetState,
+    ) -> tuple[AcceptedFactorization, OutlierSelectionResult, ScaleFitResult | None]:
+        return _run_resident_factorization_attempts(
+            layer_plan,
+            source_weight,
+            self.request,
+            budget,
+            self.context,
+            self.config_hash,
+            self.factor_stage,
+            self.outlier_stage,
+            self.scale_stage,
+            self.recorder,
+        )
+
+
 def _setup_resident_environment(
     request: ResidentQuantizationRequest,
     events: EventSink,
@@ -4228,7 +4314,34 @@ def _commit_resident_report(
     return ArtifactRef("resident-quantization-report", descriptor.artifact_id, descriptor.schema_version)
 
 
+@dataclass(frozen=True, slots=True)
+class ResidentQuantizationPipeline:
+    """Formal resident pipeline entry point over resumable state transitions."""
+
+    request: ResidentQuantizationRequest
+    events: EventSink
+    recorder: PhaseRecorder
+    run_id: str
+
+    def run(self) -> ResidentQuantizationResult:
+        return _execute_resident_quantization_pipeline(
+            self.request,
+            self.events,
+            self.recorder,
+            self.run_id,
+        )
+
+
 def _run_resident_quantization_impl(
+    request: ResidentQuantizationRequest,
+    events: EventSink,
+    recorder: PhaseRecorder,
+    run_id: str,
+) -> ResidentQuantizationResult:
+    return ResidentQuantizationPipeline(request, events, recorder, run_id).run()
+
+
+def _execute_resident_quantization_pipeline(
     request: ResidentQuantizationRequest,
     events: EventSink,
     recorder: PhaseRecorder,
@@ -4760,7 +4873,7 @@ def _run_resident_quantization_impl(
                 blocks=len(plan.blocks),
                 planned_bits=plan.planned_cost.total,
             )
-    resume = _restore_committed_state(
+    state_manager = QuantizationStateManager(
         request,
         events,
         recorder,
@@ -4768,10 +4881,8 @@ def _run_resident_quantization_impl(
         artifacts,
         tensors,
         environment,
-        plan,
-        persisted_plan,
-        initial_inputs,
     )
+    resume = state_manager.restore(plan, persisted_plan, initial_inputs)
     config_hash = resume.config_hash
     identity = resume.identity
     journal = resume.journal
@@ -4880,22 +4991,31 @@ def _run_resident_quantization_impl(
         "float16": torch.float16,
         "bfloat16": torch.bfloat16,
     }[request.low_rank_patch.storage_dtype.value]
+    block_quantizer = BlockQuantizer(
+        request,
+        events,
+        recorder,
+        micro_recorder,
+        environment,
+        calibration,
+        tensors,
+        captured_metadata,
+    )
+    layer_quantizer = LayerQuantizer(
+        request,
+        context,
+        config_hash,
+        factor_stage,
+        outlier_stage,
+        scale_stage,
+        recorder,
+    )
 
-    for block_plan in plan.blocks:
-        if block_plan.block.index in completed_block_indexes:
-            continue
-        block_work = _process_resident_block(
-            request,
-            events,
-            recorder,
-            micro_recorder,
-            environment,
+    for block_plan in block_quantizer.pending(plan.blocks, completed_block_indexes):
+        block_work = block_quantizer.prepare(
             block_plan,
-            calibration,
-            tensors,
             teacher_inputs,
             compressed_inputs,
-            captured_metadata,
             completed_block_indexes,
         )
         block_started = block_work.started
@@ -5054,17 +5174,8 @@ def _run_resident_quantization_impl(
                     )
                     continue
                 with _profile_layer_phase(recorder, block_index, group_plan.name, "factorize"):
-                    accepted, outliers, fitted = _run_resident_factorization_attempts(
-                        synthetic_plan,
-                        source_ref,
-                        request,
-                        budget,
-                        context,
-                        config_hash,
-                        factor_stage,
-                        outlier_stage,
-                        scale_stage,
-                        recorder,
+                    accepted, outliers, fitted = layer_quantizer.factorize(
+                        synthetic_plan, source_ref, budget
                     )
                 factorized = accepted.result
                 bias_correction = _run_bias_correction(
@@ -5441,17 +5552,8 @@ def _run_resident_quantization_impl(
                     )
                     continue
                 with _profile_layer_phase(recorder, block_index, layer_plan.layer.path, "factorize"):
-                    accepted, outliers, fitted = _run_resident_factorization_attempts(
-                        layer_plan,
-                        source_ref,
-                        request,
-                        budget,
-                        context,
-                        config_hash,
-                        factor_stage,
-                        outlier_stage,
-                        scale_stage,
-                        recorder,
+                    accepted, outliers, fitted = layer_quantizer.factorize(
+                        layer_plan, source_ref, budget
                     )
                 with _profile_layer_phase(recorder, block_index, layer_plan.layer.path, "materialize"):
                     factorized = accepted.result
@@ -6357,18 +6459,18 @@ def _run_resident_factorization_slice_impl(
         )
         scale_stage = ScaleFitStage(request.scale_fit, device=request.device)
         bias_stage = BiasCorrectionStage(request.bias_correction, device=request.device)
-        with source.read_tensor(layer_plan.source_weight, device="cpu") as source_weight:
-            source_ref = tensors.put("source-layer", {"weight": source_weight})["weight"]
-        accepted, outliers, fitted = _run_resident_factorization_attempts(
-            layer_plan,
-            source_ref,
+        layer_quantizer = LayerQuantizer(
             request,
-            budget,
             context,
             config_hash,
             factor_stage,
             outlier_stage,
             scale_stage,
+        )
+        with source.read_tensor(layer_plan.source_weight, device="cpu") as source_weight:
+            source_ref = tensors.put("source-layer", {"weight": source_weight})["weight"]
+        accepted, outliers, fitted = layer_quantizer.factorize(
+            layer_plan, source_ref, budget
         )
         factorized = accepted.result
         bias_correction = _run_bias_correction(

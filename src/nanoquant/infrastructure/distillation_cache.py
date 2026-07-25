@@ -9,8 +9,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import torch
-from safetensors import safe_open
-from safetensors.torch import save_file
 
 from nanoquant.application.distillation import TopKTeacherBatch, TopKTeacherCache
 from nanoquant.config.codec import from_dict, to_dict
@@ -18,6 +16,7 @@ from nanoquant.domain.models import ArtifactRef
 
 from .artifacts import LocalArtifactStore
 from .io_utils import safe_replace
+from .safetensors_io import SAFETENSORS
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,7 +75,7 @@ def commit_teacher_epoch(
         )
     with artifacts.begin_write("topk-teacher-epoch") as writer:
         with artifacts.recorder.phase("write"):
-            save_file(values, writer.path / "targets.safetensors")
+            SAFETENSORS.save(values, writer.path / "targets.safetensors")
             (writer.path / "epoch.json").write_text(encoded, encoding="utf-8")
         descriptor = writer.commit()
     reference = ArtifactRef("topk-teacher-epoch", descriptor.artifact_id, descriptor.schema_version)
@@ -97,7 +96,7 @@ def load_teacher_epoch(
     if observed_identity != identity:
         raise ValueError("teacher-cache artifact identity does not match the requested protocol")
     batches = []
-    with safe_open(root / "targets.safetensors", framework="pt", device="cpu") as handle:
+    with SAFETENSORS.open(root / "targets.safetensors") as handle:
         for batch in manifest["batches"]:
             prefix = str(batch["prefix"])
             batches.append(

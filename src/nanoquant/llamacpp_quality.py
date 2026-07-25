@@ -7,9 +7,7 @@ import json
 import math
 import os
 import struct
-import subprocess
 import tempfile
-import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,6 +23,11 @@ from nanoquant.infrastructure.io_utils import atomic_write_json, hash_file
 from nanoquant.infrastructure.resource_usage import (
     GpuProcessMemoryMonitor,
     process_memory_snapshot,
+)
+from nanoquant.infrastructure.subprocess_interop import (
+    LlamaCppInterop,
+    SubprocessInterop,
+    SubprocessRequest,
 )
 from nanoquant.quality_evaluation import (
     PreparedQualityInputs,
@@ -122,13 +125,11 @@ def _resolve_runner(request: LlamaCppQualityRequest) -> Path:
 
 def _git_capture(root: Path) -> dict[str, object]:
     def capture(*arguments: str) -> str:
-        completed = subprocess.run(
-            ("git", "-C", str(root), *arguments),
-            check=True,
-            capture_output=True,
-            text=True,
+        result = SubprocessInterop().run(
+            SubprocessRequest(("git", "-C", str(root), *arguments))
         )
-        return completed.stdout.strip()
+        result.require_success("git provenance capture")
+        return result.stdout.strip()
 
     return {
         "repository": capture("config", "--get", "remote.origin.url"),
@@ -344,51 +345,19 @@ def _run(
         "--batch-threads",
         str(request.batch_threads),
     )
-    environment = os.environ.copy()
-    binary_directories = (
-        request.llama_cpp_root / "build" / "bin",
-        request.llama_cpp_root / "build" / "bin" / "Release",
-    )
-    environment["PATH"] = os.pathsep.join(
-        (str(runner.parent), *(str(path) for path in binary_directories), environment.get("PATH", ""))
-    )
-    if os.name != "nt":
-        environment["LD_LIBRARY_PATH"] = os.pathsep.join(
-            (*(str(path) for path in binary_directories), environment.get("LD_LIBRARY_PATH", ""))
-        )
+    interop = LlamaCppInterop(request.llama_cpp_root)
     print(
         "llama.cpp GGUF quality started: "
         f"model={request.gguf} parallel={request.parallel} gpu_layers={request.gpu_layers}",
         flush=True,
     )
-    process = subprocess.Popen(
-        command,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        env=environment,
+    child = interop.start_streaming(
+        interop.request(command, environment=interop.runtime_environment(runner)),
+        on_stderr=lambda line: print(line, flush=True),
     )
-    assert process.stderr is not None
-    lines: list[str] = []
-
-    def drain_stderr() -> None:
-        assert process.stderr is not None
-        for line in process.stderr:
-            rendered = line.rstrip()
-            lines.append(rendered)
-            print(rendered, flush=True)
-
-    stderr_thread = threading.Thread(
-        target=drain_stderr,
-        name="nanoquant-llamacpp-quality-stderr",
-        daemon=True,
-    )
-    stderr_thread.start()
     gpu_monitor = None
     try:
-        gpu_monitor = GpuProcessMemoryMonitor(process.pid)
+        gpu_monitor = GpuProcessMemoryMonitor(child.pid)
     except (OSError, AttributeError):
         pass
     peak_device_bytes = 0
@@ -398,7 +367,7 @@ def _run(
     def sample_resources() -> None:
         nonlocal peak_device_bytes, peak_device_shared_bytes, peak_host_bytes
         try:
-            host = process_memory_snapshot(process.pid)
+            host = process_memory_snapshot(child.pid)
         except (OSError, FileNotFoundError, ProcessLookupError):
             host = None
         if host is not None:
@@ -411,16 +380,15 @@ def _run(
                 gpu.peak_shared_bytes,
             )
 
-    while process.poll() is None:
+    while child.poll() is None:
         sample_resources()
         time.sleep(0.05)
     sample_resources()
-    return_code = process.wait()
-    stderr_thread.join()
-    if return_code != 0:
-        detail = "\n".join(lines[-20:])
+    completed = child.wait()
+    if completed.returncode != 0:
+        detail = "\n".join(completed.stderr.splitlines()[-20:])
         raise RuntimeError(
-            f"llama.cpp GGUF quality runner failed with exit code {return_code}:\n{detail}"
+            f"llama.cpp GGUF quality runner failed with exit code {completed.returncode}:\n{detail}"
         )
     return _RunnerResourceMetrics(
         peak_device_bytes or None,

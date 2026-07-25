@@ -13,9 +13,19 @@ from typing import Any, cast
 
 import torch
 
+from nanoquant.domain.errors import ErrorCode, coded_message
 from nanoquant.domain.linear_math import parse_torch_dtype
 from nanoquant.domain.resources import ResourcePlan
 from nanoquant.infrastructure.io_utils import atomic_write_json, hash_file, safe_replace
+
+
+class ActivationStoreCorruptionError(OSError):
+    """A persisted activation generation failed identity or content validation."""
+
+    code = ErrorCode.ACTIVATION_CORRUPTION
+
+    def __init__(self, message: str) -> None:
+        super().__init__(coded_message(self.code, message))
 
 
 class MemoryActivationStore:
@@ -169,14 +179,14 @@ class MmapActivationStore:
         except (OSError, json.JSONDecodeError) as exc:
             raise KeyError(f"activation is not stored: {key}") from exc
         if value.get("key") != key:
-            raise OSError("ACT001 activation descriptor identity mismatch")
+            raise ActivationStoreCorruptionError("activation descriptor identity mismatch")
         data = self._data(key)
         if (
             not data.is_file()
             or data.stat().st_size != value.get("bytes")
             or "sha256:" + hash_file(data) != value.get("content_hash")
         ):
-            raise OSError("ACT001 activation generation is corrupt")
+            raise ActivationStoreCorruptionError("activation generation is corrupt")
         return cast(dict[str, Any], value)
 
     @contextmanager
@@ -186,7 +196,9 @@ class MmapActivationStore:
         try:
             dtype = parse_torch_dtype(dtype_name)
         except ValueError as exc:
-            raise OSError(f"ACT001 unsupported activation dtype: {dtype_name}") from exc
+            raise ActivationStoreCorruptionError(
+                f"unsupported activation dtype: {dtype_name}"
+            ) from exc
         shape = tuple(int(value) for value in metadata["shape"])
         numel = 1
         for dimension in shape:

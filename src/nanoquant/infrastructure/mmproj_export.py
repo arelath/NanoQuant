@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 import sys
 import tempfile
 from collections.abc import Mapping
@@ -13,6 +12,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from nanoquant.infrastructure.io_utils import atomic_write_json, hash_canonical_text_file, hash_file
+from nanoquant.infrastructure.subprocess_interop import LlamaCppInterop
 from nanoquant.runtime import PACKED_REFERENCE_COMMIT
 
 MMPROJ_EXPORT_SCHEMA_VERSION = 1
@@ -82,11 +82,9 @@ print(json.dumps({
     'tensor_types': sorted({tensor.tensor_type.name.lower() for tensor in reader.tensors}),
 }))
 """
-    completed = subprocess.run(
-        (str(Path(python_executable)), "-c", program, str(gguf_python), str(output)),
-        capture_output=True,
-        text=True,
-        check=False,
+    interop = LlamaCppInterop(reference)
+    completed = interop.run(
+        interop.request((Path(python_executable), "-c", program, gguf_python, output))
     )
     if completed.returncode != 0:
         detail = completed.stderr.strip() or completed.stdout.strip()
@@ -209,7 +207,12 @@ def export_mmproj_bfloat16(
         with stdout_path.open("w", encoding="utf-8", newline="\n") as stdout, stderr_path.open(
             "w", encoding="utf-8", newline="\n"
         ) as stderr:
-            completed = subprocess.run(command, stdout=stdout, stderr=stderr, check=False)
+            interop = LlamaCppInterop(reference)
+            completed = interop.run(
+                interop.request(command, environment=interop.converter_environment(converter)),
+                stdout=stdout,
+                stderr=stderr,
+            )
         if completed.returncode != 0:
             raise RuntimeError(
                 f"llama.cpp mmproj converter failed with exit code {completed.returncode}; see {stderr_path}"

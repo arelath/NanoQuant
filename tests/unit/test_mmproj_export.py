@@ -71,7 +71,7 @@ def test_mmproj_export_is_bfloat16_validated_and_resumable(
         )
 
     monkeypatch.setattr(mmproj_export, "hash_canonical_text_file", pinned_hash)
-    monkeypatch.setattr(mmproj_export.subprocess, "run", fake_run)
+    monkeypatch.setattr("nanoquant.infrastructure.subprocess_interop.subprocess.run", fake_run)
 
     first = export_mmproj_bfloat16(snapshot, output, reference)
     second = export_mmproj_bfloat16(snapshot, output, reference)

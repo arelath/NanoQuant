@@ -109,7 +109,7 @@ Path(a.outfile).write_bytes(b'GGUF-fixture')
             Path(command[-2]).write_bytes(b"GGUF-q8_0")
         return subprocess.CompletedProcess(command, 0)
 
-    monkeypatch.setattr(gguf_export.subprocess, "run", fake_run)
+    monkeypatch.setattr("nanoquant.infrastructure.subprocess_interop.subprocess.run", fake_run)
     def inspect(path, *_args):  # type: ignore[no-untyped-def]
         candidate = Path(path)
         output_type = (

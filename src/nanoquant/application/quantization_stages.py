@@ -10,7 +10,11 @@ import torch
 from nanoquant.application.low_rank_patch import fit_low_rank_patch_family
 from nanoquant.application.stages import StageContext
 from nanoquant.config.schema import ADMMConfig, BiasCorrectionConfig, LowRankPatchConfig, ScaleFitConfig
-from nanoquant.domain.factorization import ADMMTracePoint, factorize_admm
+from nanoquant.domain.factorization import (
+    AdmmParameters,
+    ADMMTracePoint,
+    factorize_admm_with_parameters,
+)
 from nanoquant.domain.linear_math import functional_dense_reconstruction
 from nanoquant.domain.metrics import reconstruction_metrics
 from nanoquant.domain.models import (
@@ -102,15 +106,17 @@ class OutlierSelectionStage:
                 elif request.plan.selector == "residual":
 
                     def probe(value: torch.Tensor, rank: int, generator: torch.Generator) -> torch.Tensor:
-                        return factorize_admm(
+                        return factorize_admm_with_parameters(
                             value,
                             input_importance,
                             output_importance,
                             rank,
                             generator,
-                            outer_iterations=self.residual_probe_iterations,
-                            inner_iterations=self.residual_probe_inner_iterations,
-                            transpose_wide=self.transpose_wide,
+                            AdmmParameters(
+                                outer_iterations=self.residual_probe_iterations,
+                                inner_iterations=self.residual_probe_inner_iterations,
+                                transpose_wide=self.transpose_wide,
+                            ),
                         ).reconstruction
 
                     scores = residual_probe_scores(
@@ -236,20 +242,22 @@ class FactorizationAttemptStage:
                 if request.generator_state is not None:
                     with context.tensor_store.read(request.generator_state, "cpu") as state:
                         generator.set_state(state)
-                result = factorize_admm(
+                result = factorize_admm_with_parameters(
                     residual,
                     input_importance,
                     output_importance,
                     request.rank,
                     generator,
-                    outer_iterations=self.admm.outer_iterations,
-                    inner_iterations=self.admm.inner_iterations,
-                    regularization=self.admm.regularization,
-                    penalty_schedule=self.admm.penalty_schedule,
-                    convergence_check_interval=self.admm.convergence_check_interval,
-                    early_stop_tolerance=self.admm.early_stop_tolerance,
+                    AdmmParameters(
+                        outer_iterations=self.admm.outer_iterations,
+                        inner_iterations=self.admm.inner_iterations,
+                        regularization=self.admm.regularization,
+                        penalty_schedule=self.admm.penalty_schedule,
+                        convergence_check_interval=self.admm.convergence_check_interval,
+                        early_stop_tolerance=self.admm.early_stop_tolerance,
+                        transpose_wide=self.admm.transpose_wide,
+                    ),
                     recorder=self.recorder,
-                    transpose_wide=self.admm.transpose_wide,
                 )
                 metrics = reconstruction_metrics(
                     residual,

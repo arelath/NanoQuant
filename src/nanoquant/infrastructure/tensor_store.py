@@ -8,12 +8,11 @@ from contextlib import contextmanager
 from typing import Any, cast
 
 import torch
-from safetensors import safe_open
-from safetensors.torch import save_file
 
 from nanoquant.domain.models import ArtifactRef, TensorRef, TensorSpec
 
 from .artifacts import LocalArtifactStore
+from .safetensors_io import SAFETENSORS
 
 
 def _tensor_hash(value: torch.Tensor) -> str:
@@ -40,7 +39,7 @@ class LocalTensorStore:
             content_hashes = {key: _tensor_hash(value) for key, value in copied.items()}
         with self.artifacts.begin_write(artifact_type) as writer:
             with self.artifacts.recorder.phase("write"):
-                save_file(copied, writer.path / "tensors.safetensors")
+                SAFETENSORS.save(copied, writer.path / "tensors.safetensors")
             descriptor = writer.commit()
         artifact = ArtifactRef(artifact_type, descriptor.artifact_id, descriptor.schema_version)
         references = {
@@ -66,7 +65,7 @@ class LocalTensorStore:
         stat = path.stat()
         signature = (stat.st_size, stat.st_mtime_ns)
         verification_key = (reference.artifact.artifact_id, reference.key, reference.content_hash)
-        with safe_open(path, framework="pt", device="cpu") as handle:
+        with SAFETENSORS.open(path) as handle:
             if reference.key not in handle.keys():
                 raise KeyError(f"tensor key not in artifact: {reference.key}")
             value = handle.get_tensor(reference.key)

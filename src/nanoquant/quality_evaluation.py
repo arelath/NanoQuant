@@ -29,6 +29,7 @@ from nanoquant.application.task_evaluation import (
     pinned_legacy_multiple_choice_tasks,
 )
 from nanoquant.config.codec import to_dict
+from nanoquant.domain.constants import BackendType
 from nanoquant.infrastructure.device_lease import acquire_device_lease
 from nanoquant.infrastructure.device_memory import SharedDeviceMemoryMonitor
 from nanoquant.infrastructure.frozen_model_loader import LoadedFrozenModel, load_frozen_run
@@ -72,7 +73,7 @@ class QualityEvaluationRequest:
     revision: str
     run_output: Path
     device: str = "cuda:0"
-    backend: str = "factorized"
+    backend: str = BackendType.FACTORIZED.value
     use_global_tuning: bool = True
     wikitext_samples: int = 16
     wikitext_sequence_length: int = 128
@@ -88,7 +89,10 @@ class QualityEvaluationRequest:
     def __post_init__(self) -> None:
         if not self.source or not self.revision:
             raise ValueError("quality evaluation model source and revision are required")
-        if self.backend not in {"factorized", "dense"}:
+        if self.backend not in {
+            BackendType.FACTORIZED.value,
+            BackendType.DENSE.value,
+        }:
             raise ValueError("quality evaluation backend is unsupported")
         if self.wikitext_samples <= 0 or self.wikitext_sequence_length < 2:
             raise ValueError("quality evaluation WikiText dimensions are invalid")

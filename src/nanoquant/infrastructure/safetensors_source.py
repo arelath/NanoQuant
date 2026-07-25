@@ -10,10 +10,10 @@ from pathlib import Path, PurePosixPath
 from typing import cast
 
 import torch
-from safetensors import safe_open
 
 from nanoquant.domain.models import CheckpointInventory, CheckpointTensorMetadata, SourceTensor, TensorSpec
 from nanoquant.infrastructure.io_utils import hash_file
+from nanoquant.infrastructure.safetensors_io import SAFETENSORS
 
 
 class SourceIntegrityError(IOError):
@@ -60,7 +60,7 @@ class SafetensorsModelSource:
             raise SourceIntegrityError("snapshot contains no safetensors weights")
         discovered: dict[str, str] = {}
         for shard_path in shards:
-            with safe_open(shard_path, framework="pt", device="cpu") as handle:
+            with SAFETENSORS.open(shard_path) as handle:
                 for key in handle.keys():
                     if key in discovered:
                         raise SourceIntegrityError(f"tensor appears in multiple shards: {key}")
@@ -96,7 +96,7 @@ class SafetensorsModelSource:
         metadata: list[CheckpointTensorMetadata] = []
         for shard in sorted(grouped):
             content_hash = f"sha256:{self._hash(shard)}" if self.verify_hashes else None
-            with safe_open(self.snapshot / shard, framework="pt", device="cpu") as handle:
+            with SAFETENSORS.open(self.snapshot / shard) as handle:
                 actual = set(handle.keys())
                 expected = set(grouped[shard])
                 if actual != expected:
@@ -151,6 +151,6 @@ class SafetensorsModelSource:
             raise KeyError(f"tensor is not in source inventory: {source_key}") from exc
         if self.verify_hashes:
             self._verify_unchanged(shard)
-        with safe_open(self.snapshot / shard, framework="pt", device="cpu") as handle:
+        with SAFETENSORS.open(self.snapshot / shard) as handle:
             tensor = handle.get_tensor(source_key)
             yield tensor if device == "cpu" else tensor.to(device)

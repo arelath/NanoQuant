@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from nanoquant.domain.errors import ErrorCode
+
 
 @dataclass(frozen=True, slots=True)
 class DiagnosticDefinition:
-    code: str
+    code: ErrorCode | str
     title: str
     remediation: str
     documentation: str
@@ -17,24 +19,29 @@ REGISTRY: dict[str, DiagnosticDefinition] = {}
 
 
 def register(definition: DiagnosticDefinition) -> None:
-    if definition.code in REGISTRY:
-        raise ValueError(f"diagnostic code already registered: {definition.code}")
-    REGISTRY[definition.code] = definition
+    code = definition.code.value if isinstance(definition.code, ErrorCode) else definition.code
+    if code in REGISTRY:
+        raise ValueError(f"diagnostic code already registered: {code}")
+    REGISTRY[code] = definition
 
 
-def get(code: str) -> DiagnosticDefinition:
+def get(code: ErrorCode | str) -> DiagnosticDefinition:
+    key = code.value if isinstance(code, ErrorCode) else code
     try:
-        return REGISTRY[code]
+        return REGISTRY[key]
     except KeyError as exc:
-        raise KeyError(f"unregistered diagnostic code: {code}") from exc
+        raise KeyError(f"unregistered diagnostic code: {key}") from exc
 
 
 for _definition in (
     DiagnosticDefinition(
-        "ART001", "Artifact corruption", "Restore or recompute the artifact.", "Docs/10-artifacts-and-compatibility.md"
+        ErrorCode.ARTIFACT_CORRUPTION,
+        "Artifact corruption",
+        "Restore or recompute the artifact.",
+        "Docs/10-artifacts-and-compatibility.md",
     ),
     DiagnosticDefinition(
-        "CFG001",
+        ErrorCode.CONFIG_SCHEMA,
         "Unsupported schema",
         "Migrate the recipe to a supported schema.",
         "Docs/03-configuration-reference.md",
@@ -46,13 +53,13 @@ for _definition in (
         "Docs/adr/0007-calibration-and-objective-support.md",
     ),
     DiagnosticDefinition(
-        "RUN001",
+        ErrorCode.RUN_LEASE,
         "Active run lease",
         "Wait for the process or explicitly fork the run.",
         "Docs/03-configuration-and-runs.md",
     ),
     DiagnosticDefinition(
-        "SRC001",
+        ErrorCode.SOURCE_UNSUPPORTED,
         "Unsupported model variant",
         "Select a registered adapter/checkpoint variant.",
         "Docs/02-architecture.md",

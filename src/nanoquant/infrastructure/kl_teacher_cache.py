@@ -8,13 +8,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import torch
-from safetensors import safe_open
-from safetensors.torch import save_file
 
 from nanoquant.config.codec import to_dict
 from nanoquant.domain.models import ArtifactRef, ArtifactTypes
 from nanoquant.infrastructure.artifacts import LocalArtifactStore
 from nanoquant.infrastructure.io_utils import atomic_write_json
+from nanoquant.infrastructure.safetensors_io import SAFETENSORS
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,7 +66,7 @@ def load_active_kl_teacher_cache(
     if not math.isfinite(baseline_nll):
         raise ValueError("KL teacher-cache baseline NLL is not finite")
     batch_count = int(manifest["batch_count"])
-    with safe_open(artifact_root / "log-probs.safetensors", framework="pt", device="cpu") as handle:
+    with SAFETENSORS.open(artifact_root / "log-probs.safetensors") as handle:
         expected_keys = tuple(f"batch_{index:04d}" for index in range(batch_count))
         if tuple(sorted(handle.keys())) != expected_keys:
             raise ValueError("KL teacher-cache tensor keys are incomplete")
@@ -103,7 +102,7 @@ def commit_active_kl_teacher_cache(
     tensor_bytes = sum(value.numel() * value.element_size() for value in values.values())
     artifacts = _store(cache_root)
     with artifacts.begin_write(ArtifactTypes.KL_TEACHER_CACHE) as writer:
-        save_file(values, writer.path / "log-probs.safetensors")
+        SAFETENSORS.save(values, writer.path / "log-probs.safetensors")
         (writer.path / "cache.json").write_text(
             json.dumps(
                 {

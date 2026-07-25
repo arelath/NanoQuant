@@ -6,8 +6,6 @@ import json
 from pathlib import Path
 
 import torch
-from safetensors import safe_open
-from safetensors.torch import save_file
 
 from nanoquant.application.calibration import (
     CausalOnlineCalibrationState,
@@ -15,6 +13,7 @@ from nanoquant.application.calibration import (
     OnlineAccumulatorSnapshot,
 )
 from nanoquant.infrastructure.io_utils import safe_replace
+from nanoquant.infrastructure.safetensors_io import SAFETENSORS
 
 
 def save_causal_calibration_state(path: str | Path, state: CausalOnlineCalibrationState) -> None:
@@ -50,7 +49,7 @@ def save_causal_calibration_state(path: str | Path, state: CausalOnlineCalibrati
     }
     tensor_tmp = root / "state.safetensors.tmp"
     manifest_tmp = root / "manifest.json.tmp"
-    save_file(tensors, tensor_tmp)
+    SAFETENSORS.save(tensors, tensor_tmp)
     manifest_tmp.write_text(json.dumps(manifest, sort_keys=True, indent=2), encoding="utf-8")
     safe_replace(tensor_tmp, root / "state.safetensors")
     safe_replace(manifest_tmp, root / "manifest.json")
@@ -62,7 +61,7 @@ def load_causal_calibration_state(path: str | Path) -> CausalOnlineCalibrationSt
     if manifest.get("schema_version") not in {1, 2, 3}:
         raise ValueError("unsupported causal calibration checkpoint schema")
     layers = []
-    with safe_open(root / "state.safetensors", framework="pt", device="cpu") as handle:
+    with SAFETENSORS.open(root / "state.safetensors") as handle:
         for index, layer in enumerate(manifest["layers"]):
             snapshots = []
             for side in ("inputs", "outputs"):

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import shutil
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -12,7 +11,7 @@ from nanoquant.config.codec import from_dict, to_dict
 from nanoquant.domain.models import ArtifactRef
 from nanoquant.infrastructure.artifact_gc import ARTIFACT_ID_PATTERN, TEXT_SUFFIXES
 from nanoquant.infrastructure.artifacts import LocalArtifactStore
-from nanoquant.infrastructure.io_utils import atomic_write_json, safe_replace
+from nanoquant.infrastructure.io_utils import AtomicWorkspace, atomic_write_json
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,18 +60,11 @@ def _copy_validated_artifact(
     if target.is_dir():
         destination.validate(artifact_id)
         return sum(member.bytes for member in descriptor.files)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    staging = Path(tempfile.mkdtemp(prefix="preprocessing-import-", dir=destination.temporary_root))
-    try:
+    transaction = AtomicWorkspace(target, prefix="preprocessing-import-")
+    with transaction as staging:
         shutil.copytree(source.path_for(artifact_id), staging, dirs_exist_ok=True)
-        if target.exists():
-            shutil.rmtree(staging)
-        else:
-            safe_replace(staging, target)
-        destination.validate(artifact_id)
-    finally:
-        if staging.exists():
-            shutil.rmtree(staging)
+        transaction.publish()
+    destination.validate(artifact_id)
     return sum(member.bytes for member in descriptor.files)
 
 

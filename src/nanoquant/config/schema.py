@@ -9,6 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 
+from nanoquant.domain.constants import CONFIG_SCHEMA_VERSION
+
 
 class StringEnum(str, Enum):
     """String-valued enum with stable serialized values."""
@@ -615,7 +617,7 @@ class OutputConfig:
 @dataclass(frozen=True, slots=True)
 class RunConfig:
     model: ModelConfig
-    schema_version: int = 1
+    schema_version: int = CONFIG_SCHEMA_VERSION
     intent: IntentConfig = field(default_factory=IntentConfig)
     dataset: DatasetConfig = field(default_factory=DatasetConfig)
     reproducibility: ReproducibilityConfig = field(default_factory=ReproducibilityConfig)
