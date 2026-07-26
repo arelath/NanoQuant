@@ -180,6 +180,7 @@ def test_cached_topk_distillation_is_bounded_deterministic_and_improves_student(
         seed=10,
     )
 
+    cache_progress: list[tuple[str, dict[str, object]]] = []
     cache = cache_topk_teacher_targets(
         teacher,
         tokens,
@@ -188,6 +189,7 @@ def test_cached_topk_distillation_is_bounded_deterministic_and_improves_student(
         config,
         device="cpu",
         pad_token_id=0,
+        progress=lambda event, fields: cache_progress.append((event, dict(fields))),
     )
     repeated = cache_topk_teacher_targets(
         teacher,
@@ -209,6 +211,7 @@ def test_cached_topk_distillation_is_bounded_deterministic_and_improves_student(
         pad_token_id=0,
     )
     untouched_embedding = student.embedding.weight.detach().clone()
+    training_progress: list[tuple[str, dict[str, object]]] = []
     metrics = distill_topk(
         student,
         tokens,
@@ -218,6 +221,7 @@ def test_cached_topk_distillation_is_bounded_deterministic_and_improves_student(
         config,
         lambda name, _parameter: name == "projection.weight",
         device="cpu",
+        progress=lambda event, fields: training_progress.append((event, dict(fields))),
     )
 
     assert cache.bytes > 0
@@ -244,6 +248,26 @@ def test_cached_topk_distillation_is_bounded_deterministic_and_improves_student(
     assert metrics.selected_parameter_count == 1
     assert metrics.epoch_losses[-1] < metrics.epoch_losses[0]
     assert torch.equal(student.embedding.weight, untouched_embedding)
+    assert [event for event, _fields in cache_progress].count(
+        "teacher_cache.batch_completed"
+    ) == 32
+    assert cache_progress[0] == (
+        "teacher_cache.epoch_started",
+        {"epoch": 0, "epochs": 8, "total_batches": 4},
+    )
+    assert cache_progress[-1][0] == "teacher_cache.epoch_completed"
+    assert [event for event, _fields in training_progress].count(
+        "training.batch_completed"
+    ) == 32
+    assert training_progress[0][0] == "training.started"
+    assert training_progress[-1] == (
+        "training.completed",
+        {
+            "completed_steps": 32,
+            "total_steps": 32,
+            "final_epoch_loss": metrics.epoch_losses[-1],
+        },
+    )
 
 
 def test_topk_distillation_resume_restores_adam_and_scheduler_exactly() -> None:

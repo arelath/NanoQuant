@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import random
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import TypeAlias
 
@@ -21,6 +21,7 @@ from nanoquant.domain.profiling import NULL_RECORDER, PhaseRecorder
 
 HiddenStatesFunction = Callable[[nn.Module, torch.Tensor], torch.Tensor]
 ParameterSelector = Callable[[str, nn.Parameter], bool]
+DistillationProgressSink = Callable[[str, Mapping[str, object]], None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -246,6 +247,7 @@ def cache_topk_teacher_targets(
     target_mask: torch.Tensor | None = None,
     target_weights: torch.Tensor | None = None,
     recorder: PhaseRecorder = NULL_RECORDER,
+    progress: DistillationProgressSink | None = None,
 ) -> TopKTeacherCache:
     epochs = []
     cache_bytes = 0
@@ -262,6 +264,7 @@ def cache_topk_teacher_targets(
             target_mask=target_mask,
             target_weights=target_weights,
             recorder=recorder,
+            progress=progress,
         )
         epochs.append(batches)
         cache_bytes += epoch_bytes
@@ -281,6 +284,7 @@ def cache_topk_teacher_epoch(
     target_mask: torch.Tensor | None = None,
     target_weights: torch.Tensor | None = None,
     recorder: PhaseRecorder = NULL_RECORDER,
+    progress: DistillationProgressSink | None = None,
 ) -> tuple[tuple[TopKTeacherBatch, ...], int]:
     if token_ids.ndim != 2 or token_ids.shape[0] == 0:
         raise ValueError("distillation token IDs must be a non-empty rank-two tensor")
@@ -333,9 +337,18 @@ def cache_topk_teacher_epoch(
                     epoch_plan.append((indices.clone(), selected))
     batches = []
     cache_bytes = 0
+    if progress is not None:
+        progress(
+            "teacher_cache.epoch_started",
+            {
+                "epoch": epoch_index,
+                "epochs": config.epochs,
+                "total_batches": len(epoch_plan),
+            },
+        )
     teacher.eval()
     with torch.no_grad():
-        for indices, selected in epoch_plan:
+        for batch_index, (indices, selected) in enumerate(epoch_plan):
             if recorder is NULL_RECORDER:
                 batch = cpu_tokens.index_select(0, indices).to(device)
                 teacher_hidden = hidden_states(teacher, batch)
@@ -396,7 +409,30 @@ def cache_topk_teacher_epoch(
                     weights_cpu,
                 )
             )
+            if progress is not None:
+                progress(
+                    "teacher_cache.batch_completed",
+                    {
+                        "epoch": epoch_index,
+                        "epochs": config.epochs,
+                        "completed_batches": batch_index + 1,
+                        "total_batches": len(epoch_plan),
+                        "selected_tokens": selected.numel(),
+                        "cache_bytes": cache_bytes,
+                    },
+                )
     recorder.add("distillation.teacher_cache_bytes", cache_bytes)
+    if progress is not None:
+        progress(
+            "teacher_cache.epoch_completed",
+            {
+                "epoch": epoch_index,
+                "epochs": config.epochs,
+                "completed_batches": len(batches),
+                "total_batches": len(epoch_plan),
+                "cache_bytes": cache_bytes,
+            },
+        )
     return tuple(batches), cache_bytes
 
 
@@ -413,6 +449,7 @@ def distill_topk(
     resume: DistillationResumeState | None = None,
     checkpoint_sink: DistillationCheckpointSink | None = None,
     recorder: PhaseRecorder = NULL_RECORDER,
+    progress: DistillationProgressSink | None = None,
 ) -> DistillationMetrics:
     if len(teacher_cache.epochs) != config.epochs:
         raise ValueError("teacher target cache epoch count does not match distillation config")
@@ -473,11 +510,33 @@ def distill_topk(
     steps = starting_steps
     starting_epoch = 0 if resume is None else resume.completed_epochs
     student.train()
+    if progress is not None:
+        progress(
+            "training.started",
+            {
+                "epochs": config.epochs,
+                "starting_epoch": starting_epoch,
+                "completed_steps": starting_steps,
+                "total_steps": total_steps,
+                "selected_parameters": len(selected_parameters),
+            },
+        )
     try:
         for epoch_index, epoch in enumerate(teacher_cache.epochs[starting_epoch:], start=starting_epoch):
             with recorder.phase("epoch", epoch=epoch_index):
                 total_loss = 0.0
-                for target in epoch:
+                if progress is not None:
+                    progress(
+                        "training.epoch_started",
+                        {
+                            "epoch": epoch_index,
+                            "epochs": config.epochs,
+                            "total_batches": len(epoch),
+                            "completed_steps": steps,
+                            "total_steps": total_steps,
+                        },
+                    )
+                for batch_index, target in enumerate(epoch):
                     if recorder is NULL_RECORDER:
                         sample_indices = torch.tensor(target.sample_indices, dtype=torch.long)
                         batch = cpu_tokens.index_select(0, sample_indices).to(device)
@@ -532,9 +591,38 @@ def distill_topk(
                             scheduler.step()
                         recorder.add("distillation.steps", 1)
                         recorder.add("distillation.tokens", selected_tokens.numel())
-                    total_loss += float(loss.detach())
+                    batch_loss = float(loss.detach())
+                    total_loss += batch_loss
                     steps += 1
-                epoch_losses.append(total_loss / max(1, len(epoch)))
+                    if progress is not None:
+                        progress(
+                            "training.batch_completed",
+                            {
+                                "epoch": epoch_index,
+                                "epochs": config.epochs,
+                                "completed_batches": batch_index + 1,
+                                "total_batches": len(epoch),
+                                "completed_steps": steps,
+                                "total_steps": total_steps,
+                                "selected_tokens": selected_tokens.numel(),
+                                "batch_loss": batch_loss,
+                                "epoch_mean_loss": total_loss / (batch_index + 1),
+                                "learning_rate": scheduler.get_last_lr()[0],
+                            },
+                        )
+                epoch_loss = total_loss / max(1, len(epoch))
+                epoch_losses.append(epoch_loss)
+                if progress is not None:
+                    progress(
+                        "training.epoch_completed",
+                        {
+                            "epoch": epoch_index,
+                            "epochs": config.epochs,
+                            "completed_steps": steps,
+                            "total_steps": total_steps,
+                            "epoch_mean_loss": epoch_loss,
+                        },
+                    )
                 if checkpoint_sink is not None:
                     with recorder.phase("checkpoint_snapshot"):
                         optimizer_states = capture_optimizer_state(optimizer, selected_parameters)
@@ -554,4 +642,13 @@ def distill_topk(
         for parameter in student.parameters():
             parameter.requires_grad_(prior_requires_grad[id(parameter)])
         student.eval()
+    if progress is not None:
+        progress(
+            "training.completed",
+            {
+                "completed_steps": steps,
+                "total_steps": total_steps,
+                "final_epoch_loss": None if not epoch_losses else epoch_losses[-1],
+            },
+        )
     return DistillationMetrics(tuple(epoch_losses), steps, len(selected_parameters), teacher_cache.bytes)

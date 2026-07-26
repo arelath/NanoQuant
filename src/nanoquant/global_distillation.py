@@ -61,6 +61,7 @@ from nanoquant.infrastructure.distillation_checkpoint import (
     active_distillation_checkpoint,
     commit_distillation_checkpoint,
 )
+from nanoquant.infrastructure.distillation_progress import DistillationProgressLogger
 from nanoquant.infrastructure.frozen_model_loader import LoadedFrozenModel, load_frozen_run
 from nanoquant.infrastructure.global_tuning import activate_global_tuning, commit_global_tuning
 from nanoquant.infrastructure.hf_language_model import load_causal_language_model
@@ -342,6 +343,7 @@ def _run_global_topk_distillation(
     recorder: PhaseRecorder,
 ) -> GlobalDistillationRunResult:
     started = time.perf_counter()
+    progress = DistillationProgressLogger()
     if request.interrupt_after_epoch_commits is not None and request.interrupt_after_epoch_commits <= 0:
         raise ValueError("distillation epoch interrupt count must be positive")
     if not 0.0 <= request.initial_cooldown_seconds < float("inf"):
@@ -349,6 +351,9 @@ def _run_global_topk_distillation(
     if not 0.0 <= request.epoch_cooldown_seconds < float("inf"):
         raise ValueError("distillation epoch cooldown must be finite and non-negative")
     if request.initial_cooldown_seconds:
+        progress.status(
+            f"waiting {request.initial_cooldown_seconds:g}s before loading models to let memory settle"
+        )
         time.sleep(request.initial_cooldown_seconds)
     tokens = _tokens(request.token_ids)
     snapshot_selection = select_block_snapshot_tokens(
@@ -389,6 +394,11 @@ def _run_global_topk_distillation(
     micro_recorder = recorder if request.profiling.level is ProfilingLevel.MICRO else NULL_RECORDER
     artifacts = LocalArtifactStore(request.run_output / "artifacts", recorder=micro_recorder)
     tensors = LocalTensorStore(artifacts)
+    progress.status(
+        f"starting global top-k distillation: samples={tokens.shape[0]}, "
+        f"sequence_length={tokens.shape[1]}, epochs={request.config.epochs}"
+    )
+    progress.status("loading the frozen student model")
     with recorder.phase("load_frozen"):
         loaded = load_frozen_run(
             request.run_output,
@@ -415,9 +425,14 @@ def _run_global_topk_distillation(
         request.config.epochs,
         replace_mismatched=request.replace_existing_global_tuning,
     )
+    completed_cache_epochs = sum(reference is not None for reference in cache_journal.epochs)
+    progress.status(
+        f"teacher cache resume state: {completed_cache_epochs}/{request.config.epochs} epochs complete"
+    )
     # The teacher is required even when its top-k cache is complete because
     # block snapshots compare pre- and post-KD states against the same hidden
     # outputs. Only the bounded snapshot selection is retained in host memory.
+    progress.status("loading the BF16 teacher model")
     with recorder.phase("teacher_load"):
         teacher = load_causal_language_model(
             request.snapshot,
@@ -426,6 +441,7 @@ def _run_global_topk_distillation(
         ).to(request.device)
     cast(Any, teacher).config.use_cache = False
     teacher_head = _lm_head(teacher)
+    progress.status("capturing the teacher block-output reference")
     with recorder.phase("block_snapshot_teacher"):
         teacher_reference = capture_block_output_reference(
             teacher,
@@ -450,7 +466,9 @@ def _run_global_topk_distillation(
                 target_mask=request.distillation_target_mask,
                 target_weights=request.distillation_weights,
                 recorder=micro_recorder,
+                progress=progress,
             )
+            progress.status(f"committing teacher cache epoch {epoch_index + 1}/{request.config.epochs}")
             with recorder.phase("commit"):
                 committed_epoch = commit_teacher_epoch(epoch_index, batches, cache_identity, artifacts)
                 cache_journal = record_teacher_epoch(
@@ -462,9 +480,11 @@ def _run_global_topk_distillation(
     teacher.cpu()
     del teacher_head, teacher
     release_memory(request.device)
+    progress.status("teacher cache complete; loading cached top-k targets")
     with recorder.phase("teacher_cache_load"):
         teacher_cache = materialize_teacher_cache(cache_journal, artifacts)
 
+    progress.status("moving the student model to the training device")
     with recorder.phase("student_setup"):
         student = loaded.model
         cast(Any, student).config.use_cache = False
@@ -476,6 +496,7 @@ def _run_global_topk_distillation(
             if callable(enable_input_gradients):
                 enable_input_gradients()
         student.to(request.device)
+    progress.status("measuring the pre-distillation block snapshot")
     with recorder.phase("block_snapshot_pre_kd"):
         pre_kd_block_losses = measure_block_output_mse(
             student,
@@ -498,13 +519,24 @@ def _run_global_topk_distillation(
 
     def checkpoint_sink(state: DistillationResumeState) -> None:
         nonlocal epoch_commits
+        progress.status(
+            f"saving training checkpoint for epoch "
+            f"{state.completed_epochs}/{request.config.epochs}"
+        )
         with recorder.phase("checkpoint_commit", epoch=state.completed_epochs):
             committed_checkpoint = commit_distillation_checkpoint(state, checkpoint_identity, artifacts)
             activate_distillation_checkpoint(request.run_output, committed_checkpoint.reference)
+        progress.status(
+            f"training checkpoint saved for epoch "
+            f"{state.completed_epochs}/{request.config.epochs}"
+        )
         epoch_commits += 1
         if request.interrupt_after_epoch_commits is not None and epoch_commits >= request.interrupt_after_epoch_commits:
             raise InterruptedError(f"requested interruption after {epoch_commits} distillation epoch checkpoint(s)")
         if state.completed_epochs < request.config.epochs and request.epoch_cooldown_seconds:
+            progress.status(
+                f"waiting {request.epoch_cooldown_seconds:g}s before the next training epoch"
+            )
             time.sleep(request.epoch_cooldown_seconds)
 
     try:
@@ -521,6 +553,7 @@ def _run_global_topk_distillation(
                 resume=None if active_checkpoint is None else active_checkpoint.state,
                 checkpoint_sink=checkpoint_sink,
                 recorder=micro_recorder,
+                progress=progress,
             )
     except BaseException:
         try:
@@ -530,6 +563,7 @@ def _run_global_topk_distillation(
             # held until this cleanup attempt returns.
             pass
         raise
+    progress.status("measuring the post-distillation block snapshot")
     with recorder.phase("block_snapshot_post_kd"):
         post_kd_block_losses = measure_block_output_mse(
             student,
@@ -550,6 +584,7 @@ def _run_global_topk_distillation(
     with recorder.phase("offload"):
         _offload_student(student, request.device)
 
+    progress.status("freezing and committing the distilled model")
     with recorder.phase("freeze"):
         tuned_blocks = _freeze_tuned_blocks(loaded, trainable, tensors)
         parameter_map = dict(student.named_parameters())
@@ -577,6 +612,7 @@ def _run_global_topk_distillation(
     with recorder.phase("commit"):
         committed = commit_global_tuning(result, artifacts)
         activate_global_tuning(request.run_output, committed.reference)
+    progress.status("global top-k distillation complete")
     return GlobalDistillationRunResult(committed.reference, result, metrics)
 
 
