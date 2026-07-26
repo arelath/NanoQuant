@@ -244,6 +244,7 @@ def test_compression_quality_runs_quality_before_huggingface_upload_and_publicat
     assert not quality_requests[0].stream_base_model
     assert quality_requests[0].local_files_only is False
     assert quality_requests[0].reasoning_sequence_length == 1024
+    assert quality_requests[0].reasoning_batch_size == 1
     assert rendered_payloads[0]["deployment_storage"] == {
         "bf16_checkpoint_bytes": 1_000,
         "packed_quantized_layer_bytes": 25,

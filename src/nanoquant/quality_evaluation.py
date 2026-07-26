@@ -96,6 +96,7 @@ class QualityEvaluationRequest:
     reasoning_samples_per_mode: int = 8
     reasoning_sequence_length: int = 512
     maximum_thinking_degradation_ratio: float = 1.10
+    reasoning_batch_size: int = 1
 
     def __post_init__(self) -> None:
         if not self.source or not self.revision:
@@ -122,7 +123,11 @@ class QualityEvaluationRequest:
         if any(mode is ReasoningMode.RAW for mode in self.reasoning_modes):
             raise ValueError("raw is not a chat reasoning evaluation mode")
         if self.reasoning_modes:
-            if self.reasoning_samples_per_mode <= 0 or self.reasoning_sequence_length < 2:
+            if (
+                self.reasoning_samples_per_mode <= 0
+                or self.reasoning_sequence_length < 2
+                or self.reasoning_batch_size <= 0
+            ):
                 raise ValueError("quality reasoning dimensions are invalid")
             available = {item.mode for item in self.reasoning_behavior_slices}
             if not set(self.reasoning_modes) <= available:
@@ -419,13 +424,15 @@ def _evaluate_model(
         reasoning_started = time.perf_counter()
         total_nll = 0.0
         token_count = 0
-        for start in range(0, prepared_reasoning.input_ids.shape[0], request.wikitext_batch_size):
-            token_ids = prepared_reasoning.input_ids[start : start + request.wikitext_batch_size].to(request.device)
+        for start in range(0, prepared_reasoning.input_ids.shape[0], request.reasoning_batch_size):
+            token_ids = prepared_reasoning.input_ids[
+                start : start + request.reasoning_batch_size
+            ].to(request.device)
             attention_mask = prepared_reasoning.attention_mask[
-                start : start + request.wikitext_batch_size
+                start : start + request.reasoning_batch_size
             ].to(request.device)
             target_mask = prepared_reasoning.target_mask[
-                start : start + request.wikitext_batch_size
+                start : start + request.reasoning_batch_size
             ].to(request.device)
             logits = guarded_logits(token_ids, attention_mask)
             selected_logits = logits[:, :-1, :][target_mask[:, :-1]]
@@ -439,6 +446,7 @@ def _evaluate_model(
             )
             total_nll += float(losses)
             token_count += int(selected_targets.numel())
+            del losses, selected_targets, selected_logits, logits
         if token_count == 0:
             raise ValueError(f"quality reasoning mode {mode} contains no response targets")
         mean_nll = total_nll / token_count
@@ -755,6 +763,7 @@ def execute_quality_evaluation(
                     "reasoning_modes": tuple(mode.value for mode in request.reasoning_modes),
                     "reasoning_samples_per_mode": request.reasoning_samples_per_mode,
                     "reasoning_sequence_length": request.reasoning_sequence_length,
+                    "reasoning_batch_size": request.reasoning_batch_size,
                     "reasoning_partition": request.reasoning_partition,
                     "reasoning_input_identities": tuple(item.identity for item in inputs.reasoning),
                 }

@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 
 import nanoquant.quality_evaluation_workflow as workflow
+from nanoquant.config.schema import BehaviorSliceConfig, DatasetSourceConfig, ReasoningMode
 from nanoquant.quality_evaluation import QualityEvaluationRequest
 from nanoquant.quality_evaluation_workflow import (
     QualityEvaluationExperiment,
@@ -31,6 +32,21 @@ def test_quality_evaluation_request_rejects_ambiguous_protocols(tmp_path: Path) 
         replace(request, task_names=("piqa", "piqa"))
     with pytest.raises(ValueError, match="unsupported"):
         replace(request, task_names=("gsm8k",))
+    with pytest.raises(ValueError, match="reasoning dimensions"):
+        replace(
+            request,
+            reasoning_modes=(ReasoningMode.THINKING,),
+            reasoning_behavior_slices=(
+                BehaviorSliceConfig(
+                    "thinking",
+                    ReasoningMode.THINKING,
+                    DatasetSourceConfig("fixture/reasoning", revision="pinned"),
+                    "openr1_generations",
+                    1.0,
+                ),
+            ),
+            reasoning_batch_size=0,
+        )
 
 
 def test_experiment002_uses_the_full_common_quality_protocol() -> None:

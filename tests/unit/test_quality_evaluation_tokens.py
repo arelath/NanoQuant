@@ -2,14 +2,19 @@ from __future__ import annotations
 
 import sys
 from contextlib import nullcontext
+from dataclasses import replace
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any
 
 import pytest
 import torch
+from torch import nn
 
 from nanoquant import quality_evaluation
+from nanoquant.application.evaluation import CausalEvaluationResult
+from nanoquant.config.schema import ReasoningMode
+from nanoquant.infrastructure.hf_calibration_dataset import PreparedBehaviorEvaluation
 
 
 def test_quality_padding_falls_back_to_eos_for_tokenizers_without_pad_tokens() -> None:
@@ -212,3 +217,85 @@ def test_reasoning_comparison_rejects_hidden_thinking_regression() -> None:
         "thinking",
         "non_thinking",
     }
+
+
+def test_reasoning_nll_uses_independent_batches_without_changing_score(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    class FixtureModel(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.config = SimpleNamespace(use_cache=True)
+
+    tokens = torch.tensor(
+        (
+            (0, 1, 2, 3, 4),
+            (1, 2, 3, 4, 5),
+            (2, 3, 4, 5, 6),
+            (3, 4, 5, 6, 0),
+        ),
+        dtype=torch.long,
+    )
+    reasoning = PreparedBehaviorEvaluation(
+        ReasoningMode.THINKING,
+        tokens,
+        torch.ones_like(tokens, dtype=torch.bool),
+        torch.tensor(((True, True, False, True, False),) * 4),
+        "sha256:fixture-reasoning",
+    )
+    inputs = quality_evaluation.PreparedQualityInputs(
+        torch.tensor(((0, 1),), dtype=torch.long),
+        "fixture-fingerprint",
+        None,
+        0,
+        "sha256:" + "a" * 64,
+        (),
+        (reasoning,),
+    )
+    monkeypatch.setattr(
+        quality_evaluation,
+        "evaluate_causal_nll",
+        lambda *_args, **_kwargs: CausalEvaluationResult(0.0, 0.0, 1.0, 1, 1, 1),
+    )
+    observed_batches: list[int] = []
+
+    def fixture_model_logits(_model: nn.Module) -> Any:
+        def logits(batch: torch.Tensor, _attention_mask: torch.Tensor | None) -> torch.Tensor:
+            observed_batches.append(batch.shape[0])
+            vocabulary = torch.arange(7, dtype=torch.float32).view(1, 1, 7)
+            return vocabulary.expand(batch.shape[0], batch.shape[1], 7) + batch.unsqueeze(-1) * 0.01
+
+        return logits
+
+    monkeypatch.setattr(quality_evaluation, "model_logits", fixture_model_logits)
+    request = quality_evaluation.QualityEvaluationRequest(
+        tmp_path / "snapshot",
+        "fixture/model",
+        "revision",
+        tmp_path / "run",
+        device="cpu",
+        wikitext_samples=1,
+        wikitext_sequence_length=2,
+        wikitext_batch_size=4,
+        task_names=("piqa",),
+        reasoning_batch_size=1,
+    )
+
+    bounded = quality_evaluation._evaluate_model("fixture", FixtureModel(), request, inputs)
+    bounded_batches = tuple(observed_batches)
+    observed_batches.clear()
+    combined = quality_evaluation._evaluate_model(
+        "fixture",
+        FixtureModel(),
+        replace(request, reasoning_batch_size=4),
+        inputs,
+    )
+
+    assert bounded_batches == (1, 1, 1, 1)
+    assert observed_batches == [4]
+    assert bounded["reasoning"][0]["token_count"] == combined["reasoning"][0]["token_count"]
+    assert bounded["reasoning"][0]["total_negative_log_likelihood"] == pytest.approx(
+        combined["reasoning"][0]["total_negative_log_likelihood"],
+        abs=1e-5,
+    )

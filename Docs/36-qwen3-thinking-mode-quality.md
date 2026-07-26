@@ -30,6 +30,8 @@ The mode-aware recovery slice is implemented in the rewrite:
 - Experiments 030 and 031 use 1,024-token held-out reasoning windows. The pinned OpenR1 quick partition contains
   only six complete records at the generic 512-token default; 1,024 tokens supplies a deterministic margin above
   the eight-record gate while leaving Experiment 030's completed compression and distillation identities unchanged.
+  PyTorch scores these long, vocabulary-wide reasoning records one sample at a time independently of the WikiText
+  batch size, bounding the logits and FP32 cross-entropy workspace on 12 GiB devices.
 
 The selected external thinking source is `open-r1/OpenR1-Math-220k` at revision
 `e4e141ec9dea9f8326f4d347be56105859b2bd68`; the recipe accepts only complete generations marked correct when that
