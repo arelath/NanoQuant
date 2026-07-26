@@ -119,6 +119,15 @@ def test_repository_interactive_catalog_is_loaded_from_yaml() -> None:
         if model.family.startswith("qwen3")
         for marker in ("-Base", "SAE-", "-FP8", "-GGUF", "-GPTQ", "-AWQ", "-MLX")
     )
+    assert all(
+        all(
+            item.teacher_trace_generation is not None
+            for item in model.template.dataset.behavior_slices
+            if item.mode.value in {"thinking", "non_thinking"}
+        )
+        for model in INTERACTIVE_RECOMMENDED_MODELS
+        if model.family.startswith("qwen3")
+    )
 
 
 def test_interactive_catalog_rejects_unknown_fields(tmp_path: Path) -> None:

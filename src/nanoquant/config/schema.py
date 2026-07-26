@@ -186,6 +186,16 @@ class DatasetSourceConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class TeacherTraceGenerationConfig:
+    """Deterministic source-model generation for complete chat behavior turns."""
+
+    implementation: str = "hf-greedy-qwen3-v1"
+    maximum_new_tokens: int = 1536
+    minimum_new_tokens: int = 16
+    maximum_attempt_multiplier: int = 20
+
+
+@dataclass(frozen=True, slots=True)
 class BehaviorSliceConfig:
     name: str
     mode: ReasoningMode
@@ -196,6 +206,7 @@ class BehaviorSliceConfig:
     prompt_target_weight: float = 0.0
     partition: str = "train"
     minimum_valid_tokens: int | None = None
+    teacher_trace_generation: TeacherTraceGenerationConfig | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -90,6 +90,37 @@ def validate(config: RunConfig, phase: ValidationPhase = ValidationPhase.PRE_RES
         "dataset.behavior_slices",
         "record format is unsupported",
     )
+    trace_slices = tuple(item for item in behavior_slices if item.teacher_trace_generation is not None)
+    require(
+        all(
+            item.mode.value in {"thinking", "non_thinking"}
+            and item.record_format == "ultrachat_messages"
+            for item in trace_slices
+        ),
+        "CFG101",
+        "dataset.behavior_slices",
+        "teacher outputs require a chat-mode UltraChat message slice",
+    )
+    require(
+        all(
+            bool(trace.implementation.strip())
+            and trace.minimum_new_tokens > 0
+            and trace.maximum_new_tokens >= trace.minimum_new_tokens
+            and trace.maximum_attempt_multiplier > 0
+            for item in trace_slices
+            for trace in (item.teacher_trace_generation,)
+            if trace is not None
+        ),
+        "CFG102",
+        "dataset.behavior_slices",
+        "teacher-trace generation limits and implementation must be valid",
+    )
+    require(
+        not trace_slices or bool(config.model.revision),
+        "CFG103",
+        "model.revision",
+        "teacher-trace generation requires a pinned teacher model revision",
+    )
     require(
         all(item.partition in {"train", "quick", "final"} for item in behavior_slices),
         "CFG099",

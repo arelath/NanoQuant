@@ -24,6 +24,7 @@ from nanoquant.config.schema import (
     ProfilingLevel,
     ReasoningMode,
     RunConfig,
+    TeacherTraceGenerationConfig,
 )
 from nanoquant.config.validation import ValidationPhase, validate
 
@@ -86,6 +87,42 @@ def test_behavior_slices_and_reasoning_modes_round_trip_and_validate() -> None:
 
     assert not validate(config)
     assert from_dict(RunConfig, to_dict(config)) == config
+
+
+def test_teacher_trace_generation_is_pinned_and_only_valid_for_thinking_ultrachat() -> None:
+    source = DatasetSourceConfig("fixture/ultrachat", revision="pinned")
+    base = RunConfig(ModelConfig("Qwen/Qwen3", revision="teacher-revision"))
+    trace = TeacherTraceGenerationConfig(maximum_new_tokens=128, minimum_new_tokens=8)
+    valid = replace(
+        base,
+        dataset=DatasetConfig(
+            behavior_slices=(
+                BehaviorSliceConfig(
+                    "thinking",
+                    ReasoningMode.THINKING,
+                    source,
+                    "ultrachat_messages",
+                    1.0,
+                    teacher_trace_generation=trace,
+                ),
+            )
+        ),
+    )
+
+    assert validate(valid) == ()
+    assert from_dict(RunConfig, to_dict(valid)) == valid
+    wrong_mode = replace(
+        valid,
+        dataset=replace(
+            valid.dataset,
+            behavior_slices=(
+                replace(valid.dataset.behavior_slices[0], mode=ReasoningMode.RAW),
+            ),
+        ),
+    )
+    unpinned = replace(valid, model=replace(valid.model, revision=None))
+    assert {issue.code for issue in validate(wrong_mode)} == {"CFG101"}
+    assert {issue.code for issue in validate(unpinned)} == {"CFG103"}
 
 
 def test_unknown_path_has_full_path_and_suggestion() -> None:

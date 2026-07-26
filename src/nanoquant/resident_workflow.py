@@ -683,6 +683,9 @@ def resolve_resident_experiment_inputs(config: RunConfig, *, launcher_path: str 
             seed=config.dataset.selection_seed,
             preparation_id=config_hash(config),
             dataset_config=config.dataset,
+            teacher_source=config.model.source,
+            teacher_revision=str(config.model.revision),
+            generation_device=config.runtime.compute_device,
         )
         if config.dataset.behavior_slices
         else load_or_prepare_calibration(

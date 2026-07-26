@@ -7,7 +7,13 @@ import pytest
 import torch
 
 import nanoquant.infrastructure.hf_calibration_dataset as calibration_module
-from nanoquant.config.schema import BehaviorSliceConfig, DatasetConfig, DatasetSourceConfig, ReasoningMode
+from nanoquant.config.schema import (
+    BehaviorSliceConfig,
+    DatasetConfig,
+    DatasetSourceConfig,
+    ReasoningMode,
+    TeacherTraceGenerationConfig,
+)
 from nanoquant.domain.models import ArtifactRef
 from nanoquant.infrastructure.hf_calibration_dataset import (
     PinnedCalibrationDataset,
@@ -19,6 +25,7 @@ from nanoquant.infrastructure.hf_calibration_dataset import (
     load_pinned_calibration,
     materialize_pinned_calibration,
 )
+from nanoquant.infrastructure.teacher_trace_generation import PreparedTeacherTraces
 from nanoquant.ports.chat_behavior import RenderedBehaviorRecord
 
 
@@ -177,6 +184,103 @@ def test_behavior_preparation_logs_slice_and_artifact_milestones(
         "artifact_persist_started",
         "completed",
     ]
+
+
+def test_teacher_outputs_expand_until_complete_record_packing_meets_token_floor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class TeacherTokenizer:
+        pad_token_id = 0
+        eos_token_id = 1
+
+    class Behavior:
+        supported_modes = (ReasoningMode.THINKING, ReasoningMode.NON_THINKING)
+
+        @staticmethod
+        def policy_identity(_tokenizer: object) -> str:
+            return "sha256:fixture-policy"
+
+        @staticmethod
+        def render_completed(
+            _tokenizer: object,
+            _messages: object,
+            _mode: ReasoningMode,
+            *,
+            assistant_target_weight: float,
+            prompt_target_weight: float,
+        ) -> RenderedBehaviorRecord:
+            del prompt_target_weight
+            return RenderedBehaviorRecord(
+                (7,) * 40,
+                (2,) * 40,
+                (2,) * 40,
+                (assistant_target_weight > 0,) * 40,
+                (assistant_target_weight,) * 40,
+            )
+
+    source = DatasetSourceConfig("fixture/ultrachat", revision="pinned")
+    config = DatasetConfig(
+        behavior_slices=(
+            BehaviorSliceConfig(
+                "non-thinking",
+                ReasoningMode.NON_THINKING,
+                source,
+                "ultrachat_messages",
+                1.0,
+                minimum_valid_tokens=150,
+                teacher_trace_generation=TeacherTraceGenerationConfig(),
+            ),
+        )
+    )
+    requested_counts: list[int] = []
+
+    def traces(*_args: object, count: int, **_kwargs: object) -> PreparedTeacherTraces:
+        requested_counts.append(count)
+        messages = tuple(
+            (
+                {"role": "user", "content": f"prompt {index}"},
+                {"role": "assistant", "content": f"answer {index}"},
+            )
+            for index in range(count)
+        )
+        return PreparedTeacherTraces(
+            messages,
+            ArtifactRef("teacher-trace-dataset", "sha256-" + "3" * 64, 1),
+            "sha256:teacher-identity",
+            tuple(f"sha256:response-{index}" for index in range(count)),
+        )
+
+    monkeypatch.setattr(
+        calibration_module.AutoTokenizer,
+        "from_pretrained",
+        lambda *_args, **_kwargs: TeacherTokenizer(),
+    )
+    monkeypatch.setattr(calibration_module, "chat_behavior_for_snapshot", lambda _snapshot: Behavior())
+    monkeypatch.setattr(
+        calibration_module,
+        "_load_behavior_source",
+        lambda _item, _seed: iter(({"messages": []},)),
+    )
+    monkeypatch.setattr(calibration_module, "prepare_teacher_traces", traces)
+    events: list[str] = []
+
+    prepared = calibration_module.prepare_behavior_calibration(
+        tmp_path / "snapshot",
+        tmp_path / "run",
+        config,
+        sample_count=2,
+        sequence_length=100,
+        seed=0,
+        teacher_source="Qwen/fixture",
+        teacher_revision="teacher-revision",
+        generation_device="cpu",
+        progress=lambda event, _fields: events.append(event),
+    )
+
+    assert requested_counts == [2, 4]
+    assert int(prepared.attention_mask.sum()) == 160
+    assert "teacher_trace_expansion_required" in events
 
 
 def _fixture_calibration(artifact_id: str = "sha256-" + "1" * 64) -> PinnedCalibrationDataset:

@@ -25,6 +25,7 @@ from nanoquant.config.schema import (
     RunConfig,
     SharedInputFactorizationConfig,
     SharedInputGroupConfig,
+    TeacherTraceGenerationConfig,
     TuningEpochLossMode,
 )
 
@@ -502,6 +503,43 @@ QWEN_3_8B_DUAL_MODE_COMPRESSION_TEMPLATE = config_delta(
     ),
 )
 
+_QWEN_TEACHER_TRACE_SLICES = (
+    _QWEN_DUAL_MODE_SLICES[0],
+    replace(
+        _QWEN_DUAL_MODE_SLICES[1],
+        teacher_trace_generation=TeacherTraceGenerationConfig(),
+    ),
+    BehaviorSliceConfig(
+        "thinking",
+        ReasoningMode.THINKING,
+        DatasetSourceConfig(
+            "HuggingFaceH4/ultrachat_200k",
+            revision="8049631c405ae6576f93f445c6b8166f76f5505a",
+            split="train_sft",
+        ),
+        "ultrachat_messages",
+        0.50,
+        minimum_valid_tokens=256 // 2 * 2048,
+        teacher_trace_generation=TeacherTraceGenerationConfig(),
+    ),
+)
+
+QWEN_3_0_6B_TEACHER_TRACE_COMPRESSION_TEMPLATE = config_delta(
+    QWEN_3_0_6B_DUAL_MODE_COMPRESSION_TEMPLATE,
+    dataset=config_delta(
+        QWEN_3_0_6B_DUAL_MODE_COMPRESSION_TEMPLATE.dataset,
+        sources=tuple(item.source for item in _QWEN_TEACHER_TRACE_SLICES),
+        formatting="qwen3-ultrachat-teacher-traces-v1",
+        behavior_slices=_QWEN_TEACHER_TRACE_SLICES,
+    ),
+)
+
+QWEN_3_8B_TEACHER_TRACE_COMPRESSION_TEMPLATE = config_delta(
+    QWEN_3_0_6B_TEACHER_TRACE_COMPRESSION_TEMPLATE,
+    model=QWEN_3_8B_COMPRESSION_TEMPLATE.model,
+    evaluation=QWEN_3_8B_DUAL_MODE_COMPRESSION_TEMPLATE.evaluation,
+)
+
 
 _INTERACTIVE_GEMMA_3_1B_TEMPLATE = apply_overrides(
     ARCHITECTURE_PROTECTED_RECONSTRUCTION_COMPRESSION_TEMPLATE,
@@ -565,7 +603,7 @@ _INTERACTIVE_QWEN_REVISIONS = {
 
 def _interactive_qwen_template(source: str, revision: str) -> RunConfig:
     return apply_overrides(
-        QWEN_3_8B_DUAL_MODE_COMPRESSION_TEMPLATE,
+        QWEN_3_8B_TEACHER_TRACE_COMPRESSION_TEMPLATE,
         {
             "model.source": source,
             "model.revision": revision,
@@ -581,8 +619,8 @@ _INTERACTIVE_QWEN_TEMPLATES = {
 }
 
 _INTERACTIVE_TEMPLATES = {
-    "Qwen/Qwen3-0.6B": QWEN_3_0_6B_DUAL_MODE_COMPRESSION_TEMPLATE,
-    "Qwen/Qwen3-8B": QWEN_3_8B_DUAL_MODE_COMPRESSION_TEMPLATE,
+    "Qwen/Qwen3-0.6B": QWEN_3_0_6B_TEACHER_TRACE_COMPRESSION_TEMPLATE,
+    "Qwen/Qwen3-8B": QWEN_3_8B_TEACHER_TRACE_COMPRESSION_TEMPLATE,
     **_INTERACTIVE_QWEN_TEMPLATES,
     "unsloth/gemma-3-270m-it": _INTERACTIVE_GEMMA_3_270M_TEMPLATE,
     "google/gemma-3-1b-it": _INTERACTIVE_GEMMA_3_1B_TEMPLATE,
@@ -646,9 +684,11 @@ __all__ = [
     "MODEL_REVISION",
     "QWEN_3_0_6B_COMPRESSION_TEMPLATE",
     "QWEN_3_0_6B_DUAL_MODE_COMPRESSION_TEMPLATE",
+    "QWEN_3_0_6B_TEACHER_TRACE_COMPRESSION_TEMPLATE",
     "QWEN_3_0_6B_MODEL_REVISION",
     "QWEN_3_8B_COMPRESSION_TEMPLATE",
     "QWEN_3_8B_DUAL_MODE_COMPRESSION_TEMPLATE",
+    "QWEN_3_8B_TEACHER_TRACE_COMPRESSION_TEMPLATE",
     "QWEN_3_8B_MODEL_REVISION",
     "RECONSTRUCTION_AWARE_STACKED_QKV_COMPRESSION_TEMPLATE",
     "STACKED_QKV_COMPRESSION_TEMPLATE",

@@ -315,6 +315,10 @@ def prepare_quality_inputs(
             sample_count=request.reasoning_samples_per_mode,
             sequence_length=request.reasoning_sequence_length,
             seed=91_700 + mode_index,
+            output=request.run_output,
+            teacher_source=request.source,
+            teacher_revision=request.revision,
+            generation_device=request.device,
         )
         reasoning.append(prepared_reasoning)
         _emit_progress(

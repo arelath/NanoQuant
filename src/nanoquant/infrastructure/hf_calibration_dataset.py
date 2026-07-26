@@ -22,6 +22,7 @@ from nanoquant.infrastructure.artifacts import ArtifactCorruptionError, LocalArt
 from nanoquant.infrastructure.chat_behaviors import chat_behavior_for_snapshot
 from nanoquant.infrastructure.io_utils import atomic_write_json
 from nanoquant.infrastructure.safetensors_io import load_tensors
+from nanoquant.infrastructure.teacher_trace_generation import prepare_teacher_traces
 from nanoquant.infrastructure.tensor_store import LocalTensorStore
 from nanoquant.ports.chat_behavior import ReasoningModeId, RenderedBehaviorRecord, TokenRole, tensor_sha256
 
@@ -435,11 +436,20 @@ def _pack_behavior_records(
         if len(record.input_ids) > sequence_length:
             rejected_length += 1
         else:
-            candidates = [
-                (sequence_length - bin_tokens[index] - len(record.input_ids), index)
+            empty_candidates = [
+                index
                 for index in range(count)
-                if bin_tokens[index] + len(record.input_ids) <= sequence_length
+                if not bins[index] and len(record.input_ids) <= sequence_length
             ]
+            candidates = (
+                [(sequence_length - len(record.input_ids), empty_candidates[0])]
+                if empty_candidates
+                else [
+                    (sequence_length - bin_tokens[index] - len(record.input_ids), index)
+                    for index in range(count)
+                    if bin_tokens[index] + len(record.input_ids) <= sequence_length
+                ]
+            )
             if candidates:
                 _remaining, selected = min(candidates)
                 bins[selected].append(record)
@@ -572,6 +582,9 @@ def prepare_behavior_calibration(
     sample_count: int,
     sequence_length: int,
     seed: int,
+    teacher_source: str | None = None,
+    teacher_revision: str | None = None,
+    generation_device: str = "cuda:0",
     progress: BehaviorPreparationProgress = _console_behavior_progress,
 ) -> PinnedCalibrationDataset:
     """Prepare the versioned, mode-aware Qwen3 behavior artifact."""
@@ -618,6 +631,7 @@ def prepare_behavior_calibration(
     ordered_receipts: list[dict[str, object]] = []
     summaries: list[dict[str, object]] = []
     source_revisions: list[tuple[str, str]] = []
+    teacher_trace_artifacts: list[dict[str, object]] = []
     for slice_index, (item, count) in enumerate(zip(slices, counts, strict=True)):
         slice_started = time.perf_counter()
         progress(
@@ -665,58 +679,144 @@ def prepare_behavior_calibration(
                 seed=seed + slice_index,
             )
         else:
-            scanned_records = 0
-            rendered_record_count = 0
-            scan_report_interval = max(500, count * 2)
-
-            def rendered_records(
-                source_records: Iterable[dict[str, object]] = records,
-                slice_config: BehaviorSliceConfig = item,
-                report_every: int = scan_report_interval,
-                started_at: float = slice_started,
-            ) -> Iterable[RenderedBehaviorRecord]:
-                nonlocal rejected_schema, rendered_record_count, scanned_records
-                for record in source_records:
-                    scanned_records += 1
-                    try:
-                        if slice_config.record_format == "openr1_generations":
-                            messages = _openr1_messages(record)
-                        elif slice_config.record_format == "ultrachat_messages":
-                            messages = cast(list[dict[str, object]], record.get("messages") or [])
-                        else:
-                            raise ValueError(f"unsupported chat record format: {slice_config.record_format}")
-                        rendered = behavior.render_completed(
+            if item.teacher_trace_generation is not None:
+                if not teacher_source or not teacher_revision:
+                    raise ValueError(
+                        "teacher-trace calibration requires a pinned teacher source and revision"
+                    )
+                trace_count = count
+                required_valid_tokens = item.minimum_valid_tokens or count
+                while True:
+                    traces = prepare_teacher_traces(
+                        snapshot,
+                        output,
+                        item,
+                        tokenizer,
+                        behavior,
+                        records,
+                        teacher_source=teacher_source,
+                        teacher_revision=teacher_revision,
+                        count=trace_count,
+                        sequence_length=sequence_length,
+                        seed=seed + slice_index,
+                        device=generation_device,
+                        progress=progress,
+                    )
+                    rendered_values = [
+                        behavior.render_completed(
                             tokenizer,
-                            messages,
-                            slice_config.mode,
-                            assistant_target_weight=slice_config.assistant_target_weight,
-                            prompt_target_weight=slice_config.prompt_target_weight,
+                            list(messages),
+                            item.mode,
+                            assistant_target_weight=item.assistant_target_weight,
+                            prompt_target_weight=item.prompt_target_weight,
                         )
-                        rendered_record_count += 1
-                        yield rendered
-                    except (TypeError, ValueError):
-                        rejected_schema += 1
-                    finally:
-                        if scanned_records % report_every == 0:
-                            progress(
-                                "record_scan_progress",
-                                {
-                                    "slice": slice_config.name,
-                                    "source_records_scanned": scanned_records,
-                                    "rendered_records": rendered_record_count,
-                                    "rejected_schema": rejected_schema,
-                                    "elapsed_seconds": time.perf_counter() - started_at,
-                                },
-                            )
+                        for messages in traces.messages
+                    ]
+                    rendered_tokens = sum(len(rendered.input_ids) for rendered in rendered_values)
+                    if rendered_tokens < required_valid_tokens:
+                        mean_tokens = max(rendered_tokens / len(rendered_values), 1.0)
+                        trace_count = max(
+                            trace_count + count,
+                            int(required_valid_tokens / mean_tokens * 1.05) + 1,
+                        )
+                        progress(
+                            "teacher_trace_expansion_required",
+                            {
+                                "slice": item.name,
+                                "generated_records": len(rendered_values),
+                                "rendered_tokens": rendered_tokens,
+                                "required_valid_tokens": required_valid_tokens,
+                                "next_record_target": trace_count,
+                            },
+                        )
+                        continue
+                    windows, receipts, rejected_length = _pack_behavior_records(
+                        rendered_values,
+                        count=count,
+                        sequence_length=sequence_length,
+                        pad_token_id=pad_token_id,
+                        slice_name=item.name,
+                        progress=progress,
+                    )
+                    packed_valid_tokens = sum(sum(window[1]) for window in windows)
+                    if packed_valid_tokens >= required_valid_tokens:
+                        break
+                    trace_count += count
+                    progress(
+                        "teacher_trace_expansion_required",
+                        {
+                            "slice": item.name,
+                            "generated_records": len(rendered_values),
+                            "rendered_tokens": rendered_tokens,
+                            "packed_valid_tokens": packed_valid_tokens,
+                            "required_valid_tokens": required_valid_tokens,
+                            "next_record_target": trace_count,
+                        },
+                    )
+                teacher_trace_artifacts.append(
+                    {
+                        "slice": item.name,
+                        "partition": item.partition,
+                        "identity": traces.identity,
+                        "artifact_id": traces.reference.artifact_id,
+                        "generated_record_count": trace_count,
+                    }
+                )
+            else:
+                scanned_records = 0
+                rendered_record_count = 0
+                scan_report_interval = max(500, count * 2)
 
-            windows, receipts, rejected_length = _pack_behavior_records(
-                rendered_records(),
-                count=count,
-                sequence_length=sequence_length,
-                pad_token_id=pad_token_id,
-                slice_name=item.name,
-                progress=progress,
-            )
+                def rendered_records(
+                    source_records: Iterable[dict[str, object]] = records,
+                    slice_config: BehaviorSliceConfig = item,
+                    report_every: int = scan_report_interval,
+                    started_at: float = slice_started,
+                ) -> Iterable[RenderedBehaviorRecord]:
+                    nonlocal rejected_schema, rendered_record_count, scanned_records
+                    for record in source_records:
+                        scanned_records += 1
+                        try:
+                            if slice_config.record_format == "openr1_generations":
+                                messages = _openr1_messages(record)
+                            elif slice_config.record_format == "ultrachat_messages":
+                                messages = cast(list[dict[str, object]], record.get("messages") or [])
+                            else:
+                                raise ValueError(
+                                    f"unsupported chat record format: {slice_config.record_format}"
+                                )
+                            rendered = behavior.render_completed(
+                                tokenizer,
+                                messages,
+                                slice_config.mode,
+                                assistant_target_weight=slice_config.assistant_target_weight,
+                                prompt_target_weight=slice_config.prompt_target_weight,
+                            )
+                            rendered_record_count += 1
+                            yield rendered
+                        except (TypeError, ValueError):
+                            rejected_schema += 1
+                        finally:
+                            if scanned_records % report_every == 0:
+                                progress(
+                                    "record_scan_progress",
+                                    {
+                                        "slice": slice_config.name,
+                                        "source_records_scanned": scanned_records,
+                                        "rendered_records": rendered_record_count,
+                                        "rejected_schema": rejected_schema,
+                                        "elapsed_seconds": time.perf_counter() - started_at,
+                                    },
+                                )
+
+                windows, receipts, rejected_length = _pack_behavior_records(
+                    rendered_records(),
+                    count=count,
+                    sequence_length=sequence_length,
+                    pad_token_id=pad_token_id,
+                    slice_name=item.name,
+                    progress=progress,
+                )
         valid_tokens = sum(sum(window[1]) for window in windows)
         target_tokens = sum(sum(window[4]) for window in windows)
         if item.minimum_valid_tokens is not None and valid_tokens < item.minimum_valid_tokens:
@@ -817,6 +917,7 @@ def prepare_behavior_calibration(
         "tensor_names": sorted(tensor_values),
         "ordered_record_receipts": ordered_receipts,
         "slice_summaries": summaries,
+        "teacher_trace_artifacts": teacher_trace_artifacts,
     }
     with artifacts.begin_write("calibration-dataset-manifest") as writer:
         (writer.path / "manifest.json").write_text(
@@ -854,6 +955,11 @@ def prepare_behavior_evaluation(
     sample_count: int,
     sequence_length: int,
     seed: int,
+    output: str | Path | None = None,
+    teacher_source: str | None = None,
+    teacher_revision: str | None = None,
+    generation_device: str = "cuda:0",
+    progress: BehaviorPreparationProgress = _console_behavior_progress,
 ) -> PreparedBehaviorEvaluation:
     """Prepare a disjoint held-out chat slice for response-token NLL."""
 
@@ -868,6 +974,29 @@ def prepare_behavior_evaluation(
     if not isinstance(pad_token_id, int):
         raise ValueError("behavior evaluation requires a scalar pad or EOS token ID")
     records = _load_behavior_source(item, seed)
+    teacher_trace_identity = None
+    if item.teacher_trace_generation is not None:
+        if output is None or not teacher_source or not teacher_revision:
+            raise ValueError(
+                "teacher-trace evaluation requires output, teacher source, and teacher revision"
+            )
+        traces = prepare_teacher_traces(
+            snapshot,
+            output,
+            item,
+            tokenizer,
+            behavior,
+            records,
+            teacher_source=teacher_source,
+            teacher_revision=teacher_revision,
+            count=sample_count,
+            sequence_length=sequence_length,
+            seed=seed,
+            device=generation_device,
+            progress=progress,
+        )
+        teacher_trace_identity = traces.identity
+        records = ({"messages": list(messages)} for messages in traces.messages)
 
     def rendered_records() -> Iterable[RenderedBehaviorRecord]:
         for record in records:
@@ -910,6 +1039,7 @@ def prepare_behavior_evaluation(
             "implementation": "behavior-evaluation-v1",
             "slice": to_dict(item),
             "chat_policy": behavior.policy_identity(tokenizer),
+            "teacher_trace_identity": teacher_trace_identity,
             "ordered_records": receipts,
             "input_hash": tensor_sha256(input_ids, attention_mask, target_mask),
         }
@@ -926,13 +1056,16 @@ def load_or_prepare_calibration(
     seed: int = 0,
     preparation_id: str | None = None,
     dataset_config: DatasetConfig | None = None,
+    teacher_source: str | None = None,
+    teacher_revision: str | None = None,
+    generation_device: str = "cuda:0",
 ) -> PinnedCalibrationDataset:
     """Load this run's generated calibration tokens, or create them when needed."""
 
     output = Path(output)
     receipt_path = output / CALIBRATION_RECEIPT_NAME
     mode_aware = dataset_config is not None and bool(dataset_config.behavior_slices)
-    requested = {
+    requested: dict[str, object] = {
         "sample_count": sample_count,
         "sequence_length": sequence_length,
         "seed": seed,
@@ -947,6 +1080,14 @@ def load_or_prepare_calibration(
             }
         ),
     }
+    if (
+        dataset_config is not None
+        and any(item.teacher_trace_generation is not None for item in dataset_config.behavior_slices)
+    ):
+        requested["teacher_trace_request"] = {
+            "teacher_source": teacher_source,
+            "teacher_revision": teacher_revision,
+        }
     if mode_aware:
         _console_behavior_progress(
             "cache_lookup_started",
@@ -999,6 +1140,9 @@ def load_or_prepare_calibration(
             sample_count=sample_count,
             sequence_length=sequence_length,
             seed=seed,
+            teacher_source=teacher_source,
+            teacher_revision=teacher_revision,
+            generation_device=generation_device,
         )
     else:
         calibration = prepare_experiment018_calibration(

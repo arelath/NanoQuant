@@ -17,6 +17,13 @@ The mode-aware recovery slice is implemented in the rewrite:
   mode-unaware.
 - Conversational records are packed without splitting; over-length records are rejected. Hash-partitioned `train`,
   `quick`, and `final` selections prevent the prepared evaluation slice from overlapping training by content.
+- New Qwen recipes generate both chat slices from the exact pinned BF16 source model over pinned
+  `HuggingFaceH4/ultrachat_200k` prompts. Preparation discards UltraChat's final assistant answer and stores the
+  source model's complete replacement turn—mode-specific preamble, response, and end-of-turn—as one indivisible
+  record.
+- Teacher generation is deterministic greedy decoding and separately resumable. Every attempted prompt is durably
+  journaled; accepted prompt/response hashes and complete turns are committed in an immutable
+  `teacher-trace-dataset` artifact. Train, quick, and final partitions have distinct identities.
 - Top-k teacher caches, resumable checkpoints, and global-tuning identities include the response-target policy.
   Weighted KD consumes the prepared assistant-response mask while legacy recipes retain their original objective.
 - PyTorch and llama.cpp quality paths score held-out thinking and non-thinking response tokens independently and
@@ -25,21 +32,24 @@ The mode-aware recovery slice is implemented in the rewrite:
   unsupported model family.
 - `tools/audit_qwen3_behavior.py` records the exact pinned prompt tokens and audits role/mode counts in a prepared
   calibration artifact before CUDA work.
-- Experiment 030 is the pinned Qwen3 0.6B 25/25/50 recovery canary. Experiment 031 applies the same recipe to Qwen3
-  8B with serial llama.cpp scoring. Neither experiment automatically publishes to Hugging Face.
+- Experiments 030 and 031 remain immutable historical OpenR1 recipes. Newly launched interactive Qwen compression
+  runs use the UltraChat teacher-trace recipe; their configuration and calibration identities cannot resume or
+  adopt commits from those numbered experiments.
 - Experiments 030 and 031 use 1,024-token held-out reasoning windows. The pinned OpenR1 quick partition contains
   only six complete records at the generic 512-token default; 1,024 tokens supplies a deterministic margin above
   the eight-record gate while leaving Experiment 030's completed compression and distillation identities unchanged.
   PyTorch scores these long, vocabulary-wide reasoning records one sample at a time independently of the WikiText
   batch size, bounding the logits and FP32 cross-entropy workspace on 12 GiB devices.
 
-The selected external thinking source is `open-r1/OpenR1-Math-220k` at revision
-`e4e141ec9dea9f8326f4d347be56105859b2bd68`; the recipe accepts only complete generations marked correct when that
-signal is available. The raw and UltraChat inputs retain their existing pinned revisions.
+The historical Experiment 030/031 thinking source is `open-r1/OpenR1-Math-220k` at revision
+`e4e141ec9dea9f8326f4d347be56105859b2bd68`. It is retained only for reproducibility, not as the default for new
+Qwen runs, because its math-only selection caused the observed specialization. The replacement prompt source is
+`HuggingFaceH4/ultrachat_200k` at revision `8049631c405ae6576f93f445c6b8166f76f5505a`; each run's exact pinned
+source model generates the responses.
 
-This implementation does not close the issue by itself. The paired BF16/Experiment 028 diagnostic, generated
-mode-compliance and objective-task suites, Experiment 030 ablations, complete Experiment 031 run, artifact audit,
-and publication review remain real-model gates under Sections 9, 10, and 14.
+This implementation does not close the issue by itself. A paired BF16/control diagnostic, generated mode-compliance
+and objective-task suites, teacher-trace 0.6B canary, 8B confirmation, artifact audit, and publication review remain
+real-model gates under Sections 9, 10, and 14.
 
 ## 1. Decision summary
 
@@ -172,7 +182,7 @@ class BehaviorSliceConfig:
     prompt_target_weight: float = 0.0
     partition: str = "train"
     minimum_valid_tokens: int | None = None
-    trace_generation: TraceGenerationConfig | None = None
+    teacher_trace_generation: TeacherTraceGenerationConfig | None = None
 ```
 
 `BehaviorSliceConfig` belongs with dataset preparation configuration. Generic numerical stages consume prepared
@@ -223,18 +233,24 @@ The 0.6B canary should establish whether a smaller budget preserves the same
 quality, but a lower-cost run must be labeled as an ablation rather than described as additive coverage. The accepted
 8B recipe records both target fractions and absolute per-slice token counts.
 
-The 25/25/50 mixture is an initial experiment, not a permanent universal constant. Ablations may move it, but every
-change creates a new dataset identity and experiment. Promotion must show the quality tradeoff in all three slices.
+The 25/25/50 mixture is an initial recipe, not a permanent universal constant. Ablations may move it, but every
+change creates a new dataset and run/experiment identity. Promotion must show the quality tradeoff in all three
+slices.
 
-### 6.3 Thinking traces
+### 6.3 Teacher-generated chat responses
 
 A thinking prompt alone is not thinking training data. The prepared sequence must contain the source model's
 reasoning rollout and final answer.
 
-The preferred trace sources, in order, are:
+The selected source is responses generated by the exact pinned BF16 source model from pinned UltraChat prompts.
+External reasoning corpora remain useful for explicit ablations, but are not the default: OpenR1 demonstrated that
+a structurally valid, math-heavy trace corpus can still specialize the compressed model to a narrow task family.
 
-1. a pinned, license-compatible dataset whose reasoning fields can be rendered losslessly by the Qwen3 adapter;
-2. traces generated offline by the exact pinned BF16 source model from a pinned prompt corpus.
+For each UltraChat record, preserve the conversation prefix through its final user turn and discard the dataset's
+final assistant response. Render that prefix with `enable_thinking=True`, then generate until the source model emits
+its recognized end-of-turn token. The accepted assistant turn must come wholly from that one generation. Never
+combine a generated thinking span with UltraChat's original answer; that creates a transition the teacher never
+produced and can make the reasoning and answer contradict one another.
 
 For BF16-generated traces, persist a receipt containing:
 
@@ -248,27 +264,44 @@ For BF16-generated traces, persist a receipt containing:
 - termination reason and validation result.
 
 Use source-model traces, not candidate-model self-generated traces. Candidate traces would make early quantization
-errors part of the target distribution. Trace generation may be sampled if a representative source configuration is
-required, but all sampling parameters and per-record seeds must be explicit. A deterministic greedy corpus is the
-simplest first canary.
+errors part of the target distribution. Sampling may be added in a future separately identified ablation, with all
+parameters and per-record seeds explicit. The implemented default is deterministic greedy decoding with one beam
+and no sampling.
 
 Reject traces with missing or empty thinking spans, missing final answers, non-finite source logits, truncation before
 the final answer, repeated delimiter loops, or an unrecognized termination. Retain rejection counts and reasons.
 Do not silently replace rejected thinking records with ordinary answers.
 
-Reasoning sources must be normalized into a structured final assistant response before template rendering. A source
-may provide a separate reasoning field or inline `<think>` delimiters; the adapter converts either form to one
-canonical representation and prevents double-wrapping. License review, field-schema validation, and a small
-source-style comparison are required before pinning an external corpus. If its traces do not match the BF16 Qwen3
-activation and delimiter distribution closely enough to pass the 0.6B canary, use pinned BF16-generated traces
-instead.
+Generated tokens are parsed into one structured final assistant response and immediately rendered again through the
+pinned adapter. A record is accepted only if that round trip preserves the generated token sequence, apart from
+template-added trailing structural whitespace. This prevents double-wrapping and proves that calibration consumes
+the complete reasoning and answer emitted by the teacher.
+
+The resumable state is append-only:
+
+1. Hash the full UltraChat source record and rendered generation prompt.
+2. Skip source hashes already present in the matching journal.
+3. Generate one complete source-model assistant response.
+4. Validate EOS termination, one non-empty thinking span, a non-empty final answer, sequence-length fit, and template
+   round-trip identity.
+5. Flush and `fsync` the accepted or rejected attempt before moving to another prompt.
+6. Once the requested partition count is complete, commit the accepted records and ordered hashes as a
+   content-addressed artifact and write a small active receipt.
+
+The journal identity includes teacher source and revision, prompt dataset source/revision/split/partition, mode,
+chat-policy hash, sequence length, seed, generation implementation, and token limits. Record count is deliberately
+not semantic: preparation may extend the same deterministic ordered corpus when complete-record packing has not yet
+met its token floor. Each committed artifact and active receipt records its actual count. A crash or count extension
+resumes the same identity; any semantic change starts a different journal and invalidates downstream calibration.
 
 ### 6.4 Record-aware packing
 
 Conversation records are rendered independently and then packed as indivisible units. Deterministic bin packing may
-place multiple complete short conversations in one sequence with explicit end-of-turn boundaries, but it must never
-start a fixed-length window in the middle of a reasoning record. Raw-text slices continue to use ordinary
-deterministic stream windows.
+place multiple complete short teacher conversations in a window with explicit end-of-turn boundaries, but it never
+splits or splices a teacher response. Empty bins receive one record before best-fit filling, and generation expands
+resumably until packing meets the slice's absolute valid-token floor. Thus concise non-thinking teacher answers do
+not silently reduce the retained non-thinking token budget. Raw-text slices continue to use ordinary deterministic
+stream windows.
 
 A conversational record longer than `model.sequence_length` is not truncated mid-reasoning. For generated traces,
 the generation protocol should reserve space for the prompt, delimiters, final answer, and end-of-turn token and stop
@@ -282,10 +315,11 @@ record ratio while losing most useful reasoning tokens to length filtering.
 
 ### 6.5 Non-thinking records
 
-Non-thinking records use the same pinned prompt distribution where practical, rendered with
-`enable_thinking=False`. Their generation prefix includes Qwen3's empty `<think></think>` preamble. Responses may
-come from a pinned instruction dataset or the BF16 source model, but the final stored tokens must pass the adapter's
-empty-span invariant.
+Non-thinking records use the same pinned UltraChat prompt distribution, rendered with `enable_thinking=False`.
+Their generation prefix includes Qwen3's empty `<think></think>` preamble, and the complete final answer is generated
+by the same pinned BF16 source model used as the distillation teacher. UltraChat's original final assistant response
+is discarded rather than mixed with the teacher's behavior. The accepted record must terminate normally, contain a
+non-empty answer, emit no additional thinking delimiters, and round-trip through the adapter's empty-span invariant.
 
 Using matched prompts for thinking and non-thinking slices makes mode-specific activation and quality differences
 measurable without conflating them with prompt selection.
@@ -518,12 +552,13 @@ a new documented experiment.
 
 1. Promote the Phase A smoke evaluators to the standard/full prompt-parity, mode-compliance, paired-logit, and
    generated-task suites.
-2. Use Experiment 030, while that number remains available, for the Qwen3 0.6B recovery: retain Experiment 028 as
-   its control and compare current data, mode-aware data without global KD, and mode-aware data with global KD.
+2. Treat retained Experiment 030 as the OpenR1 0.6B recovery result. Run the UltraChat teacher-trace recipe under a
+   new interactive run identity and retain Experiments 028 and 030 as controls.
 3. Select the smallest recipe that passes both mode gates at the same BPW without reducing the declared control token
    coverage.
-4. Use Experiment 031 for the Qwen3 8B confirmation, inheriting the accepted Experiment 030 behavior recipe and
-   Experiment 029's serial llama.cpp quality policy where that measured CUDA constraint still applies.
+4. Treat Experiment 031 as the historical OpenR1 8B definition. Confirm an accepted UltraChat teacher-trace recipe
+   in a new run identity, retaining Experiment 029's serial llama.cpp quality policy where that measured CUDA
+   constraint still applies.
 5. Publish a replacement artifact and model card only after the 8B GGUF deployment gates pass.
 
 ### Phase E — Publication migration
@@ -586,7 +621,7 @@ Tiny fixtures validate mechanics only. They cannot close the Qwen3 behavioral ga
 | Thinking traces dominate tokens and regress concise answers | Allocate by valid tokens, gate modes separately, and ablate the mixture |
 | Additive thinking coverage substantially increases calibration cost | Prove the mechanism with the budget-preserving 0.6B run, then ablate total tokens without mislabeling reduced-coverage runs |
 | Trace generation is expensive | Generate once from pinned BF16, commit bounded shards, and reuse only by exact identity |
-| An external trace style differs from Qwen3 behavior | Validate rendered spans and activation/fidelity statistics; fall back to pinned BF16-generated Qwen3 traces |
+| A narrow external trace corpus overfits one task family | Generate responses from pinned BF16 over broad UltraChat prompts and keep external corpora as explicit ablations |
 | Long traces truncate before the answer | Reject incomplete records and report completion/token distributions |
 | Multi-turn rendering strips earlier reasoning | Treat the final assistant response as the supervised reasoning unit and validate the rendered tokens |
 | Empty tags are mistaken for reasoning data | Enforce a non-empty-span invariant for every thinking record |

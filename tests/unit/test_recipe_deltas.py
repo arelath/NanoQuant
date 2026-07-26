@@ -68,3 +68,16 @@ def test_first_generation_experiments_inherit_the_attention_rank_policy() -> Non
         for definition in definitions
     )
     assert len({config_hash(definition.config) for definition in definitions}) == 12
+
+
+def test_historical_qwen_experiments_keep_their_openr1_identity() -> None:
+    for number in (30, 31):
+        definition = load_experiment(number)
+        thinking = next(
+            item
+            for item in definition.config.dataset.behavior_slices
+            if item.mode.value == "thinking"
+        )
+        assert thinking.source.name == "open-r1/OpenR1-Math-220k"
+        assert thinking.record_format == "openr1_generations"
+        assert thinking.teacher_trace_generation is None
