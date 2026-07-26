@@ -83,6 +83,7 @@ class CompressionQualityExperiment:
     llamacpp_quality: bool = False
     llama_cpp_root: Path | None = None
     llamacpp_quality_parallel: int = 4
+    reasoning_sequence_length_override: int | None = None
 
     def __post_init__(self) -> None:
         if self.wikitext_samples <= 0 or self.wikitext_sequence_length < 2:
@@ -107,6 +108,11 @@ class CompressionQualityExperiment:
             raise ValueError("llama.cpp quality requires a llama.cpp repository root")
         if self.llamacpp_quality_parallel <= 0:
             raise ValueError("llama.cpp quality parallel sequence count must be positive")
+        if (
+            self.reasoning_sequence_length_override is not None
+            and self.reasoning_sequence_length_override < 2
+        ):
+            raise ValueError("quality reasoning sequence length must be at least two")
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,6 +159,13 @@ def execute_compression_quality_experiment(
 ) -> dict[str, Any]:
     """Compress the pinned model, then compare BF16 and frozen quality."""
 
+    reasoning_sequence_length = (
+        config.evaluation.reasoning_sequence_length
+        if experiment.reasoning_sequence_length_override is None
+        else experiment.reasoning_sequence_length_override
+    )
+    if reasoning_sequence_length > config.model.sequence_length:
+        raise ValueError("quality reasoning sequence length exceeds the model sequence length")
     if experiment.large_model_guards:
         if config.runtime.executor not in {ExecutorKind.CPU_OFFLOAD, ExecutorKind.STREAMING}:
             raise ValueError("large-model compression requires cpu_offload or streaming execution")
@@ -216,7 +229,7 @@ def execute_compression_quality_experiment(
             else "quick"
         ),
         reasoning_samples_per_mode=config.evaluation.reasoning_samples_per_mode,
-        reasoning_sequence_length=config.evaluation.reasoning_sequence_length,
+        reasoning_sequence_length=reasoning_sequence_length,
         maximum_thinking_degradation_ratio=config.evaluation.maximum_thinking_degradation_ratio,
     )
     prepared_quality = (

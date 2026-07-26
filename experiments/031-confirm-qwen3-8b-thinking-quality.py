@@ -44,6 +44,7 @@ EXPERIMENT = define_compression_quality_experiment(
     quality_backend=None,
     llamacpp_quality=True,
     llamacpp_quality_parallel=1,
+    reasoning_sequence_length_override=1024,
     export=CompressionExportPolicy(
         release_name="qwen3-8b-dual-mode-exp031",
         runtime_family="qwen",

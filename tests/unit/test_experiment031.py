@@ -18,6 +18,7 @@ def test_experiment031_scales_dual_mode_recipe_with_serial_deployment_quality() 
     assert config031.evaluation.reasoning_modes == config030.evaluation.reasoning_modes
     assert config031.evaluation.default_tier.value == "full"
     assert workflow031.llamacpp_quality_parallel == 1
+    assert workflow031.reasoning_sequence_length_override == 1024
     assert workflow031.export.huggingface is None
     assert workflow031.export.gguf_output == Path(
         "Results/031/qwen3-8b-dual-mode-exp031-nanoquant.gguf"

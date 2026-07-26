@@ -27,6 +27,9 @@ The mode-aware recovery slice is implemented in the rewrite:
   calibration artifact before CUDA work.
 - Experiment 030 is the pinned Qwen3 0.6B 25/25/50 recovery canary. Experiment 031 applies the same recipe to Qwen3
   8B with serial llama.cpp scoring. Neither experiment automatically publishes to Hugging Face.
+- Experiments 030 and 031 use 1,024-token held-out reasoning windows. The pinned OpenR1 quick partition contains
+  only six complete records at the generic 512-token default; 1,024 tokens supplies a deterministic margin above
+  the eight-record gate while leaving Experiment 030's completed compression and distillation identities unchanged.
 
 The selected external thinking source is `open-r1/OpenR1-Math-220k` at revision
 `e4e141ec9dea9f8326f4d347be56105859b2bd68`; the recipe accepts only complete generations marked correct when that

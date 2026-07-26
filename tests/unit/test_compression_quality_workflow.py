@@ -34,6 +34,11 @@ def test_llamacpp_is_required_when_pytorch_candidate_quality_is_disabled() -> No
         replace(_EXPERIMENT, quality_backend=None)
 
 
+def test_reasoning_sequence_length_override_must_be_valid() -> None:
+    with pytest.raises(ValueError, match="at least two"):
+        replace(_EXPERIMENT, reasoning_sequence_length_override=1)
+
+
 def test_compression_quality_runs_quality_before_huggingface_upload_and_publication(
     tmp_path: Path,
     monkeypatch,
@@ -106,6 +111,7 @@ def test_compression_quality_runs_quality_before_huggingface_upload_and_publicat
         quality_backend=None,
         llamacpp_quality=True,
         llama_cpp_root=tmp_path / "llama.cpp",
+        reasoning_sequence_length_override=1024,
     )
     def complete(*_args, **kwargs):  # type: ignore[no-untyped-def]
         assert "defer_huggingface" not in kwargs
@@ -237,6 +243,7 @@ def test_compression_quality_runs_quality_before_huggingface_upload_and_publicat
     assert quality_requests[0].packed_artifact is None
     assert not quality_requests[0].stream_base_model
     assert quality_requests[0].local_files_only is False
+    assert quality_requests[0].reasoning_sequence_length == 1024
     assert rendered_payloads[0]["deployment_storage"] == {
         "bf16_checkpoint_bytes": 1_000,
         "packed_quantized_layer_bytes": 25,

@@ -28,6 +28,8 @@ def test_experiment030_is_additive_dual_mode_recovery_canary() -> None:
         ReasoningMode.THINKING,
         ReasoningMode.NON_THINKING,
     )
+    assert config.evaluation.reasoning_sequence_length == 512
+    assert workflow.reasoning_sequence_length_override == 1024
     assert config.distillation.enabled
     assert workflow.llamacpp_quality
     assert workflow.export.huggingface is None
