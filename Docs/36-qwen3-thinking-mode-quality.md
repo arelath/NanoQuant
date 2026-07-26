@@ -32,20 +32,19 @@ The mode-aware recovery slice is implemented in the rewrite:
   unsupported model family.
 - `tools/audit_qwen3_behavior.py` records the exact pinned prompt tokens and audits role/mode counts in a prepared
   calibration artifact before CUDA work.
-- Experiments 030 and 031 remain immutable historical OpenR1 recipes. Newly launched interactive Qwen compression
-  runs use the UltraChat teacher-trace recipe; their configuration and calibration identities cannot resume or
-  adopt commits from those numbered experiments.
-- Experiments 030 and 031 use 1,024-token held-out reasoning windows. The pinned OpenR1 quick partition contains
-  only six complete records at the generic 512-token default; 1,024 tokens supplies a deterministic margin above
-  the eight-record gate while leaving Experiment 030's completed compression and distillation identities unchanged.
-  PyTorch scores these long, vocabulary-wide reasoning records one sample at a time independently of the WikiText
-  batch size, bounding the logits and FP32 cross-entropy workspace on 12 GiB devices.
+- Experiments 030 and 031 now use the UltraChat teacher-output templates for both chat modes, matching the
+  interactive Qwen defaults. The retained completed Experiment 030 evidence was produced by its earlier OpenR1
+  configuration and remains immutable historical evidence; its config hash and data-dependent commits are
+  intentionally incompatible with the updated launcher.
+- Experiments 030 and 031 retain 1,024-token held-out reasoning windows to admit more complete generated responses.
+  PyTorch scores these long, vocabulary-wide records one sample at a time independently of the WikiText batch size,
+  bounding the logits and FP32 cross-entropy workspace on 12 GiB devices.
 
-The historical Experiment 030/031 thinking source is `open-r1/OpenR1-Math-220k` at revision
-`e4e141ec9dea9f8326f4d347be56105859b2bd68`. It is retained only for reproducibility, not as the default for new
-Qwen runs, because its math-only selection caused the observed specialization. The replacement prompt source is
-`HuggingFaceH4/ultrachat_200k` at revision `8049631c405ae6576f93f445c6b8166f76f5505a`; each run's exact pinned
-source model generates the responses.
+The retained pre-change Experiment 030 evidence used `open-r1/OpenR1-Math-220k` at revision
+`e4e141ec9dea9f8326f4d347be56105859b2bd68`. It remains only for reproducibility because its math-only selection
+caused the observed specialization. The active Experiment 030/031 prompt source is
+`HuggingFaceH4/ultrachat_200k` at revision `8049631c405ae6576f93f445c6b8166f76f5505a`; each experiment's exact
+pinned source model generates both chat-mode responses.
 
 This implementation does not close the issue by itself. A paired BF16/control diagnostic, generated mode-compliance
 and objective-task suites, teacher-trace 0.6B canary, 8B confirmation, artifact audit, and publication review remain
@@ -552,21 +551,21 @@ a new documented experiment.
 
 1. Promote the Phase A smoke evaluators to the standard/full prompt-parity, mode-compliance, paired-logit, and
    generated-task suites.
-2. Treat retained Experiment 030 as the OpenR1 0.6B recovery result. Run the UltraChat teacher-trace recipe under a
-   new interactive run identity and retain Experiments 028 and 030 as controls.
+2. Run the updated Experiment 030 definition as the UltraChat teacher-output 0.6B recovery canary. Retain
+   Experiment 028 and the pre-change Experiment 030 artifacts as controls; do not adopt their data-dependent
+   commits.
 3. Select the smallest recipe that passes both mode gates at the same BPW without reducing the declared control token
    coverage.
-4. Treat Experiment 031 as the historical OpenR1 8B definition. Confirm an accepted UltraChat teacher-trace recipe
-   in a new run identity, retaining Experiment 029's serial llama.cpp quality policy where that measured CUDA
-   constraint still applies.
+4. Use the updated Experiment 031 definition to confirm the accepted UltraChat teacher-output recipe at 8B,
+   retaining Experiment 029's serial llama.cpp quality policy where that measured CUDA constraint still applies.
 5. Publish a replacement artifact and model card only after the 8B GGUF deployment gates pass.
 
 ### Phase E — Publication migration
 
-Retained local Results 028/029 artifacts, receipts, reports, and evidence are immutable historical records. A fixed
-artifact receives its new experiment identity and hashes. In an existing Hugging Face repository, publish it as a
-new commit with an explicitly versioned filename or release revision, make the corrected artifact the model card's
-recommended download, and label the old file as non-thinking-only legacy output. Do not rewrite the old local
+Retained local Results 028/029 and pre-change Experiment 030 artifacts, receipts, reports, and evidence are immutable
+historical records. A fixed artifact receives new configuration and content hashes. In an existing Hugging Face
+repository, publish it as a new commit with an explicitly versioned filename or release revision, make the corrected
+artifact the model card's recommended download, and label the old file as legacy output. Do not rewrite an old local
 receipt or imply that its hash now names corrected bytes.
 
 The replacement keeps the source tokenizer chat template and thinking default. Until it lands, model cards show

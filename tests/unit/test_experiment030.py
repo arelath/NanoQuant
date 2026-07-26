@@ -24,6 +24,12 @@ def test_experiment030_is_additive_dual_mode_recovery_canary() -> None:
     )
     assert config.dataset.behavior_slices[0].minimum_valid_tokens == 256 // 2 * 2048
     assert config.dataset.behavior_slices[1].minimum_valid_tokens == 256 // 2 * 2048
+    assert config.dataset.behavior_slices[2].minimum_valid_tokens == 256 // 2 * 2048
+    assert all(
+        item.source.name == "HuggingFaceH4/ultrachat_200k"
+        and item.teacher_trace_generation is not None
+        for item in config.dataset.behavior_slices[1:]
+    )
     assert config.evaluation.reasoning_modes == (
         ReasoningMode.THINKING,
         ReasoningMode.NON_THINKING,
@@ -34,7 +40,7 @@ def test_experiment030_is_additive_dual_mode_recovery_canary() -> None:
     assert workflow.llamacpp_quality
     assert workflow.export.huggingface is None
     assert workflow.export.gguf_output == Path(
-        "Results/030/qwen3-0-6b-dual-mode-exp030-nanoquant.gguf"
+        "Results/030/qwen3-0-6b-teacher-dual-mode-exp030-nanoquant.gguf"
     )
 
 

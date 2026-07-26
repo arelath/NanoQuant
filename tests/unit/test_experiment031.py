@@ -21,5 +21,5 @@ def test_experiment031_scales_dual_mode_recipe_with_serial_deployment_quality() 
     assert workflow031.reasoning_sequence_length_override == 1024
     assert workflow031.export.huggingface is None
     assert workflow031.export.gguf_output == Path(
-        "Results/031/qwen3-8b-dual-mode-exp031-nanoquant.gguf"
+        "Results/031/qwen3-8b-teacher-dual-mode-exp031-nanoquant.gguf"
     )

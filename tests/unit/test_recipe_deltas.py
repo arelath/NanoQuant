@@ -70,14 +70,18 @@ def test_first_generation_experiments_inherit_the_attention_rank_policy() -> Non
     assert len({config_hash(definition.config) for definition in definitions}) == 12
 
 
-def test_historical_qwen_experiments_keep_their_openr1_identity() -> None:
+def test_qwen_recovery_experiments_use_teacher_outputs_for_both_chat_modes() -> None:
     for number in (30, 31):
         definition = load_experiment(number)
-        thinking = next(
+        chat_slices = tuple(
             item
             for item in definition.config.dataset.behavior_slices
-            if item.mode.value == "thinking"
+            if item.mode.value in {"thinking", "non_thinking"}
         )
-        assert thinking.source.name == "open-r1/OpenR1-Math-220k"
-        assert thinking.record_format == "openr1_generations"
-        assert thinking.teacher_trace_generation is None
+        assert {item.mode.value for item in chat_slices} == {"thinking", "non_thinking"}
+        assert all(
+            item.source.name == "HuggingFaceH4/ultrachat_200k"
+            and item.record_format == "ultrachat_messages"
+            and item.teacher_trace_generation is not None
+            for item in chat_slices
+        )
