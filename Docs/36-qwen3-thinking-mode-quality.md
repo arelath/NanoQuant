@@ -267,6 +267,24 @@ errors part of the target distribution. Sampling may be added in a future separa
 parameters and per-record seeds explicit. The implemented default is deterministic greedy decoding with one beam
 and no sampling.
 
+Teacher generation has two explicit, identity-bearing implementations. The retained
+`hf-greedy-qwen3-v1` path loads the pinned checkpoint through Transformers and generates one prompt at a time so
+existing receipts remain reproducible. New Qwen 0.6B interactive runs use
+`llamacpp-server-greedy-qwen3-v1`: convert the same pinned checkpoint once to a BF16 GGUF in the ignored local
+teacher-model cache, start the pinned local `llama-server` with four continuously batched slots, and issue concurrent
+greedy completions. Requests pass the Hugging Face-rendered prompt as raw token IDs and require raw generated token
+IDs in return. Prompt caching and every sampling or repetition penalty are disabled. Startup compares representative
+llama.cpp and Hugging Face tokenizer results; every response still passes the complete-token template round trip,
+EOS, mode-delimiter, and sequence-length checks below. The backend name participates in trace and experiment
+identity, so switching runtimes cannot silently reuse or overwrite evidence from the serial implementation.
+
+The llama.cpp server owns the normal cross-process device lease for its complete lifetime. Conversion and server
+startup emit progress events, the converted BF16 GGUF is reused only when its snapshot/converter signature and size
+match, requests reject context truncation or changed prompt-token counts, and accepted/rejected attempts are flushed
+to the existing source-ordered journal. A batch may finish concurrently, but journal and artifact order remains the
+deterministic UltraChat source order. A crash can repeat an uncommitted in-flight batch; it cannot skip a source
+record or commit a partial assistant response.
+
 Reject traces with missing or empty thinking spans, missing final answers, non-finite source logits, truncation before
 the final answer, repeated delimiter loops, or an unrecognized termination. Retain rejection counts and reasons.
 Do not silently replace rejected thinking records with ordinary answers.

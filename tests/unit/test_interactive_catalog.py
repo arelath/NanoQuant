@@ -10,6 +10,7 @@ from recipes import INTERACTIVE_RECOMMENDED_MODELS
 from recipes._interactive_catalog import load_interactive_recommended_models
 
 from nanoquant.config.codec import ConfigDecodeError
+from nanoquant.config.schema import LLAMACPP_TEACHER_TRACE_IMPLEMENTATION
 from nanoquant.interactive_compression import _slug as interactive_slug
 
 
@@ -77,6 +78,21 @@ def test_repository_interactive_catalog_is_loaded_from_yaml() -> None:
     assert all(
         model.variant_label == model.source.rsplit("/", 1)[-1]
         for model in INTERACTIVE_RECOMMENDED_MODELS
+    )
+    qwen_0_6b = next(
+        model
+        for model in INTERACTIVE_RECOMMENDED_MODELS
+        if model.source == "Qwen/Qwen3-0.6B"
+    )
+    generated = tuple(
+        item.teacher_trace_generation
+        for item in qwen_0_6b.template.dataset.behavior_slices
+        if item.teacher_trace_generation is not None
+    )
+    assert generated
+    assert all(
+        item.implementation == LLAMACPP_TEACHER_TRACE_IMPLEMENTATION
+        for item in generated
     )
     qwen_sources = tuple(
         model.source

@@ -185,6 +185,9 @@ class DatasetSourceConfig:
     weight: float = 1.0
 
 
+LLAMACPP_TEACHER_TRACE_IMPLEMENTATION = "llamacpp-server-greedy-qwen3-v1"
+
+
 @dataclass(frozen=True, slots=True)
 class TeacherTraceGenerationConfig:
     """Deterministic source-model generation for complete chat behavior turns."""

@@ -7,6 +7,7 @@ import json
 import os
 import time
 from collections.abc import Callable, Iterable, Iterator, Mapping
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,12 +18,17 @@ from torch import nn
 from transformers.models.auto.configuration_auto import AutoConfig
 
 from nanoquant.config.codec import semantic_hash, to_dict
-from nanoquant.config.schema import BehaviorSliceConfig, ReasoningMode
+from nanoquant.config.schema import (
+    LLAMACPP_TEACHER_TRACE_IMPLEMENTATION,
+    BehaviorSliceConfig,
+    ReasoningMode,
+)
 from nanoquant.domain.models import ArtifactRef
 from nanoquant.infrastructure.artifacts import LocalArtifactStore
 from nanoquant.infrastructure.device_lease import acquire_device_lease
 from nanoquant.infrastructure.hf_language_model import load_causal_language_model
 from nanoquant.infrastructure.io_utils import atomic_write_json
+from nanoquant.infrastructure.llamacpp_teacher_generation import open_llamacpp_teacher_session
 from nanoquant.infrastructure.memory_cleanup import release_memory
 from nanoquant.ports.chat_behavior import ChatBehaviorPort, RenderedBehaviorRecord, tensor_sha256
 
@@ -31,6 +37,23 @@ TeacherTraceProgress = Callable[[str, Mapping[str, object]], None]
 
 class GenerateTokens(Protocol):
     def __call__(self, prompt: tuple[int, ...], maximum_new_tokens: int) -> tuple[int, ...]: ...
+
+
+@dataclass(frozen=True, slots=True)
+class _GenerationBackend:
+    generate: GenerateTokens
+    eos_token_ids: frozenset[int]
+    parallelism: int = 1
+
+
+@dataclass(slots=True)
+class _PendingAttempt:
+    result: dict[str, object]
+    started: float
+    prompt: list[dict[str, object]] | None = None
+    prompt_ids: tuple[int, ...] | None = None
+    maximum_new_tokens: int | None = None
+    future: Future[tuple[int, ...]] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -252,6 +275,251 @@ def _open_generation_session(
             release_memory(device)
 
 
+@contextmanager
+def _open_teacher_generation_backend(
+    snapshot: Path,
+    tokenizer: Any,
+    device: str,
+    *,
+    implementation: str,
+    sequence_length: int,
+    progress: TeacherTraceProgress | None,
+) -> Iterator[_GenerationBackend]:
+    if implementation == "hf-greedy-qwen3-v1":
+        with _open_generation_session(snapshot, tokenizer, device) as (generate, eos_ids):
+            yield _GenerationBackend(generate, eos_ids)
+        return
+    if implementation == LLAMACPP_TEACHER_TRACE_IMPLEMENTATION:
+        with open_llamacpp_teacher_session(
+            snapshot,
+            tokenizer,
+            device=device,
+            sequence_length=sequence_length,
+            progress=progress,
+        ) as session:
+            yield _GenerationBackend(
+                session.generate,
+                session.eos_token_ids,
+                session.parallelism,
+            )
+        return
+    raise ValueError(f"unsupported teacher-trace generation implementation: {implementation}")
+
+
+def _prepare_pending_attempt(
+    source_record: dict[str, object],
+    *,
+    attempt: int,
+    source_hash: str,
+    tokenizer: Any,
+    behavior: ChatBehaviorPort,
+    item: BehaviorSliceConfig,
+    sequence_length: int,
+    maximum_new_tokens: int,
+    minimum_new_tokens: int,
+    accepted_records: int,
+    target_records: int,
+    progress: TeacherTraceProgress | None,
+) -> _PendingAttempt:
+    started = time.perf_counter()
+    result: dict[str, object] = {
+        "schema_version": 1,
+        "kind": "attempt",
+        "attempt": attempt,
+        "source_hash": source_hash,
+    }
+    pending = _PendingAttempt(result, started)
+    try:
+        prompt = _ultrachat_prompt(source_record)
+        prompt_ids = behavior.render_generation_prompt(
+            tokenizer,
+            prompt,
+            item.mode,
+        )
+        available = sequence_length - len(prompt_ids)
+        request_tokens = min(maximum_new_tokens, available)
+        if request_tokens < minimum_new_tokens:
+            raise ValueError("teacher prompt leaves too little room for a complete response")
+        pending.prompt = prompt
+        pending.prompt_ids = prompt_ids
+        pending.maximum_new_tokens = request_tokens
+        if progress is not None:
+            progress(
+                "teacher_trace_prompt_started",
+                {
+                    "slice": item.name,
+                    "partition": item.partition,
+                    "attempt": attempt,
+                    "accepted_records": accepted_records,
+                    "target_records": target_records,
+                    "prompt_tokens": len(prompt_ids),
+                    "maximum_new_tokens": request_tokens,
+                },
+            )
+    except (TypeError, ValueError) as exc:
+        result.update(
+            {
+                "status": "rejected",
+                "reason_type": type(exc).__name__,
+                "reason": str(exc),
+            }
+        )
+    return pending
+
+
+def _complete_pending_attempts(
+    pending: list[_PendingAttempt],
+    *,
+    backend: _GenerationBackend,
+    tokenizer: Any,
+    behavior: ChatBehaviorPort,
+    item: BehaviorSliceConfig,
+    minimum_new_tokens: int,
+    sequence_length: int,
+    journal_path: Path,
+    accepted: list[dict[str, object]],
+    target_records: int,
+    generation_started: float,
+    progress: TeacherTraceProgress | None,
+) -> None:
+    generated = [item for item in pending if item.prompt_ids is not None]
+    if backend.parallelism > 1 and generated:
+        with ThreadPoolExecutor(
+            max_workers=backend.parallelism,
+            thread_name_prefix="nanoquant-teacher",
+        ) as executor:
+            for candidate in generated:
+                if candidate.maximum_new_tokens is None:
+                    raise RuntimeError("teacher generation request has no token limit")
+                prompt_ids = candidate.prompt_ids
+                if prompt_ids is None:
+                    raise RuntimeError("teacher generation request has no prompt tokens")
+                candidate.future = executor.submit(
+                    backend.generate,
+                    prompt_ids,
+                    candidate.maximum_new_tokens,
+                )
+            _finish_pending_attempts(
+                pending,
+                backend=backend,
+                tokenizer=tokenizer,
+                behavior=behavior,
+                item=item,
+                minimum_new_tokens=minimum_new_tokens,
+                sequence_length=sequence_length,
+                journal_path=journal_path,
+                accepted=accepted,
+                target_records=target_records,
+                generation_started=generation_started,
+                progress=progress,
+            )
+        return
+    _finish_pending_attempts(
+        pending,
+        backend=backend,
+        tokenizer=tokenizer,
+        behavior=behavior,
+        item=item,
+        minimum_new_tokens=minimum_new_tokens,
+        sequence_length=sequence_length,
+        journal_path=journal_path,
+        accepted=accepted,
+        target_records=target_records,
+        generation_started=generation_started,
+        progress=progress,
+    )
+
+
+def _finish_pending_attempts(
+    pending: list[_PendingAttempt],
+    *,
+    backend: _GenerationBackend,
+    tokenizer: Any,
+    behavior: ChatBehaviorPort,
+    item: BehaviorSliceConfig,
+    minimum_new_tokens: int,
+    sequence_length: int,
+    journal_path: Path,
+    accepted: list[dict[str, object]],
+    target_records: int,
+    generation_started: float,
+    progress: TeacherTraceProgress | None,
+) -> None:
+    for candidate in pending:
+        result = candidate.result
+        if candidate.prompt_ids is not None:
+            if candidate.prompt is None or candidate.maximum_new_tokens is None:
+                raise RuntimeError("teacher generation request is incomplete")
+            try:
+                complete_ids = (
+                    candidate.future.result()
+                    if candidate.future is not None
+                    else backend.generate(
+                        candidate.prompt_ids,
+                        candidate.maximum_new_tokens,
+                    )
+                )
+                messages, rendered, generated_ids = _completed_teacher_turn(
+                    tokenizer,
+                    behavior,
+                    candidate.prompt,
+                    candidate.prompt_ids,
+                    complete_ids,
+                    backend.eos_token_ids,
+                    item.mode,
+                )
+                if len(generated_ids) < minimum_new_tokens:
+                    raise ValueError("teacher response is shorter than the configured minimum")
+                if len(rendered.input_ids) > sequence_length:
+                    raise ValueError("teacher response exceeds the behavior sequence length")
+                response_hash = tensor_sha256(torch.tensor(generated_ids, dtype=torch.long))
+                result.update(
+                    {
+                        "status": "accepted",
+                        "messages": messages,
+                        "prompt_token_hash": tensor_sha256(
+                            torch.tensor(candidate.prompt_ids, dtype=torch.long)
+                        ),
+                        "response_token_hash": response_hash,
+                        "complete_token_hash": tensor_sha256(
+                            torch.tensor(complete_ids, dtype=torch.long)
+                        ),
+                        "prompt_tokens": len(candidate.prompt_ids),
+                        "response_tokens": len(generated_ids),
+                        "stop_reason": "eos",
+                    }
+                )
+            except (TypeError, ValueError) as exc:
+                result.update(
+                    {
+                        "status": "rejected",
+                        "reason_type": type(exc).__name__,
+                        "reason": str(exc),
+                    }
+                )
+        result["elapsed_seconds"] = time.perf_counter() - candidate.started
+        _append_journal(journal_path, result)
+        if result["status"] == "accepted":
+            accepted.append(result)
+        attempt = int(cast(Any, result["attempt"]))
+        if progress is not None and (
+            result["status"] == "accepted" or attempt == 1 or attempt % 10 == 0
+        ):
+            progress(
+                "teacher_trace_generation_progress",
+                {
+                    "slice": item.name,
+                    "partition": item.partition,
+                    "accepted_records": len(accepted),
+                    "attempted_records": attempt,
+                    "rejected_records": attempt - len(accepted),
+                    "target_records": target_records,
+                    "last_status": result["status"],
+                    "elapsed_seconds": time.perf_counter() - generation_started,
+                },
+            )
+
+
 def _append_journal(path: Path, payload: Mapping[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     encoded = json.dumps(
@@ -406,105 +674,75 @@ def prepare_teacher_traces(
         )
 
     if len(accepted) < count and attempts < maximum_attempts:
-        with _open_generation_session(Path(snapshot), tokenizer, device) as (generate, eos_ids):
-            for source_record in records:
+        with _open_teacher_generation_backend(
+            Path(snapshot),
+            tokenizer,
+            device,
+            implementation=generation.implementation,
+            sequence_length=sequence_length,
+            progress=progress,
+        ) as backend:
+            pending: list[_PendingAttempt] = []
+            source_iterator = iter(records)
+            while len(accepted) < count and attempts < maximum_attempts:
+                try:
+                    source_record = next(source_iterator)
+                except StopIteration:
+                    break
                 source_hash = _canonical_hash(source_record)
                 if source_hash in attempted:
                     continue
                 attempted.add(source_hash)
                 attempts += 1
-                attempt_started = time.perf_counter()
-                result: dict[str, object] = {
-                    "schema_version": 1,
-                    "kind": "attempt",
-                    "attempt": attempts,
-                    "source_hash": source_hash,
-                }
-                try:
-                    prompt = _ultrachat_prompt(source_record)
-                    prompt_ids = behavior.render_generation_prompt(
-                        tokenizer,
-                        prompt,
-                        item.mode,
+                pending.append(
+                    _prepare_pending_attempt(
+                        source_record,
+                        attempt=attempts,
+                        source_hash=source_hash,
+                        tokenizer=tokenizer,
+                        behavior=behavior,
+                        item=item,
+                        sequence_length=sequence_length,
+                        maximum_new_tokens=generation.maximum_new_tokens,
+                        minimum_new_tokens=generation.minimum_new_tokens,
+                        accepted_records=len(accepted),
+                        target_records=count,
+                        progress=progress,
                     )
-                    available = sequence_length - len(prompt_ids)
-                    maximum_new_tokens = min(generation.maximum_new_tokens, available)
-                    if maximum_new_tokens < generation.minimum_new_tokens:
-                        raise ValueError("teacher prompt leaves too little room for a complete response")
-                    if progress is not None:
-                        progress(
-                            "teacher_trace_prompt_started",
-                            {
-                                "slice": item.name,
-                                "partition": item.partition,
-                                "attempt": attempts,
-                                "accepted_records": len(accepted),
-                                "target_records": count,
-                                "prompt_tokens": len(prompt_ids),
-                                "maximum_new_tokens": maximum_new_tokens,
-                            },
-                        )
-                    complete_ids = generate(prompt_ids, maximum_new_tokens)
-                    messages, rendered, generated_ids = _completed_teacher_turn(
-                        tokenizer,
-                        behavior,
-                        prompt,
-                        prompt_ids,
-                        complete_ids,
-                        eos_ids,
-                        item.mode,
-                    )
-                    if len(generated_ids) < generation.minimum_new_tokens:
-                        raise ValueError("teacher response is shorter than the configured minimum")
-                    if len(rendered.input_ids) > sequence_length:
-                        raise ValueError("teacher response exceeds the behavior sequence length")
-                    response_hash = tensor_sha256(torch.tensor(generated_ids, dtype=torch.long))
-                    result.update(
-                        {
-                            "status": "accepted",
-                            "messages": messages,
-                            "prompt_token_hash": tensor_sha256(
-                                torch.tensor(prompt_ids, dtype=torch.long)
-                            ),
-                            "response_token_hash": response_hash,
-                            "complete_token_hash": tensor_sha256(
-                                torch.tensor(complete_ids, dtype=torch.long)
-                            ),
-                            "prompt_tokens": len(prompt_ids),
-                            "response_tokens": len(generated_ids),
-                            "stop_reason": "eos",
-                        }
-                    )
-                except (TypeError, ValueError) as exc:
-                    result.update(
-                        {
-                            "status": "rejected",
-                            "reason_type": type(exc).__name__,
-                            "reason": str(exc),
-                        }
-                    )
-                result["elapsed_seconds"] = time.perf_counter() - attempt_started
-                _append_journal(journal_path, result)
-                if result["status"] == "accepted":
-                    accepted.append(result)
-                if progress is not None and (
-                    result["status"] == "accepted" or attempts == 1 or attempts % 10 == 0
-                ):
-                    progress(
-                        "teacher_trace_generation_progress",
-                        {
-                            "slice": item.name,
-                            "partition": item.partition,
-                            "accepted_records": len(accepted),
-                            "attempted_records": attempts,
-                            "rejected_records": attempts - len(accepted),
-                            "target_records": count,
-                            "last_status": result["status"],
-                            "elapsed_seconds": time.perf_counter() - started,
-                        },
-                    )
-                if len(accepted) >= count or attempts >= maximum_attempts:
-                    break
+                )
+                if len(pending) < backend.parallelism and attempts < maximum_attempts:
+                    continue
+                _complete_pending_attempts(
+                    pending,
+                    backend=backend,
+                    tokenizer=tokenizer,
+                    behavior=behavior,
+                    item=item,
+                    minimum_new_tokens=generation.minimum_new_tokens,
+                    sequence_length=sequence_length,
+                    journal_path=journal_path,
+                    accepted=accepted,
+                    target_records=count,
+                    generation_started=started,
+                    progress=progress,
+                )
+                pending.clear()
+            if pending and len(accepted) < count:
+                _complete_pending_attempts(
+                    pending,
+                    backend=backend,
+                    tokenizer=tokenizer,
+                    behavior=behavior,
+                    item=item,
+                    minimum_new_tokens=generation.minimum_new_tokens,
+                    sequence_length=sequence_length,
+                    journal_path=journal_path,
+                    accepted=accepted,
+                    target_records=count,
+                    generation_started=started,
+                    progress=progress,
+                )
+                pending.clear()
     if len(accepted) < count:
         raise ValueError(
             f"teacher trace generation produced {len(accepted)} complete records; expected {count} "

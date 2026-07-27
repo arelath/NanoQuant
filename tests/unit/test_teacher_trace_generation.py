@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +12,7 @@ import pytest
 
 import nanoquant.infrastructure.teacher_trace_generation as trace_module
 from nanoquant.config.schema import (
+    LLAMACPP_TEACHER_TRACE_IMPLEMENTATION,
     BehaviorSliceConfig,
     DatasetSourceConfig,
     ReasoningMode,
@@ -283,3 +286,75 @@ def test_non_thinking_generation_uses_the_complete_teacher_answer_without_reason
     assert extended.identity == prepared.identity
     assert len(extended.messages) == 2
     assert extended.reference != prepared.reference
+
+
+def test_llamacpp_teacher_implementation_generates_prompts_concurrently_in_source_order(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tokenizer = TraceTokenizer()
+    behavior = Qwen3ChatBehavior()
+    barrier = threading.Barrier(2)
+    worker_names: list[str] = []
+
+    @contextmanager
+    def open_backend(
+        _snapshot: Path,
+        _tokenizer: TraceTokenizer,
+        _device: str,
+        *,
+        implementation: str,
+        sequence_length: int,
+        progress: object,
+    ) -> Iterator[trace_module._GenerationBackend]:
+        assert implementation == LLAMACPP_TEACHER_TRACE_IMPLEMENTATION
+        assert sequence_length == 512
+        assert progress is None
+
+        def generate(prompt: tuple[int, ...], _maximum: int) -> tuple[int, ...]:
+            worker_names.append(threading.current_thread().name)
+            barrier.wait(timeout=5)
+            rendered = tokenizer.decode(prompt)
+            label = "first" if "First prompt" in rendered else "second"
+            suffix = tokenizer.encode(
+                f"<think>\nreasoning {label}\n</think>\n\nanswer {label}<|im_end|>"
+            )
+            return (*prompt, *suffix)
+
+        yield trace_module._GenerationBackend(generate, frozenset({1}), parallelism=2)
+
+    monkeypatch.setattr(trace_module, "_open_teacher_generation_backend", open_backend)
+    item = replace(
+        _slice(),
+        teacher_trace_generation=replace(
+            _slice().teacher_trace_generation,
+            implementation=LLAMACPP_TEACHER_TRACE_IMPLEMENTATION,
+        ),
+    )
+
+    prepared = prepare_teacher_traces(
+        tmp_path / "snapshot",
+        tmp_path / "run",
+        item,
+        tokenizer,
+        behavior,
+        _records(),
+        teacher_source="Qwen/Qwen3-0.6B",
+        teacher_revision="teacher-revision",
+        count=2,
+        sequence_length=512,
+        seed=7,
+        device="cuda",
+    )
+
+    assert [turn[-1]["content"] for turn in prepared.messages] == [
+        "answer first",
+        "answer second",
+    ]
+    assert len(set(worker_names)) == 2
+    journal = next((tmp_path / "run" / "state" / "teacher-traces").glob("*.jsonl"))
+    attempts = [
+        json.loads(line)
+        for line in journal.read_text(encoding="utf-8").splitlines()[1:]
+    ]
+    assert [record["attempt"] for record in attempts] == [1, 2]

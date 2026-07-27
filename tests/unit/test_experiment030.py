@@ -30,6 +30,11 @@ def test_experiment030_is_additive_dual_mode_recovery_canary() -> None:
         and item.teacher_trace_generation is not None
         for item in config.dataset.behavior_slices[1:]
     )
+    assert all(
+        item.teacher_trace_generation is not None
+        and item.teacher_trace_generation.implementation == "hf-greedy-qwen3-v1"
+        for item in config.dataset.behavior_slices[1:]
+    )
     assert config.evaluation.reasoning_modes == (
         ReasoningMode.THINKING,
         ReasoningMode.NON_THINKING,
