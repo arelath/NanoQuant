@@ -1,6 +1,9 @@
 import json
 from pathlib import Path
 
+import pytest
+
+from nanoquant.config.codec import semantic_hash
 from nanoquant.infrastructure.artifacts import LocalArtifactStore
 from tools.rollover_completed_experiment import execute_rollover, plan_rollover
 
@@ -119,3 +122,30 @@ def test_rollover_without_new_calibration_starts_with_an_empty_fresh_run(
         plan.run_archive / "artifacts",
         use_persistent_validation_cache=False,
     ).validate(old_calibration)
+
+
+def test_rollover_compares_expected_hash_with_embedded_canonical_run_config(
+    tmp_path: Path,
+) -> None:
+    run = tmp_path / "evidence" / "030" / "030-fixture"
+    run.mkdir(parents=True)
+    canonical = {"schema_version": 1, "model": {"source": "fixture/model"}}
+    expected_hash = semantic_hash(canonical)
+    (run / "manifest.json").write_text(
+        json.dumps(
+            {
+                "status": "completed",
+                "config_hash": "sha256:" + "a" * 64,
+                "resolved_config": {"canonical_run_config": canonical},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="already matches"):
+        plan_rollover(
+            run,
+            tmp_path / "outputs" / "030",
+            tmp_path / "Results" / "030",
+            expected_config_hash=expected_hash,
+        )

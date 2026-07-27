@@ -16,6 +16,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from nanoquant.config.codec import semantic_hash
 from nanoquant.infrastructure.artifact_gc import ARTIFACT_ID_PATTERN, TEXT_SUFFIXES
 from nanoquant.infrastructure.artifacts import LocalArtifactStore
 from nanoquant.infrastructure.io_utils import atomic_write_json
@@ -45,6 +46,16 @@ def _read_object(path: Path, label: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError(f"{label} must contain a JSON object: {path}")
     return value
+
+
+def _preparation_config_hash(manifest: dict[str, Any]) -> str:
+    resolved_config = manifest.get("resolved_config")
+    if isinstance(resolved_config, dict) and "canonical_run_config" in resolved_config:
+        canonical_run_config = resolved_config["canonical_run_config"]
+        if not isinstance(canonical_run_config, dict):
+            raise ValueError("resident manifest canonical_run_config must contain a JSON object")
+        return semantic_hash(canonical_run_config)
+    return str(manifest.get("config_hash") or "")
 
 
 def _artifact_references(store: LocalArtifactStore, artifact_id: str) -> set[str]:
@@ -96,7 +107,7 @@ def plan_rollover(
         raise ValueError(f"run is actively leased and cannot be rolled over: {run}")
 
     manifest = _read_object(run / "manifest.json", "resident manifest")
-    stored_hash = str(manifest.get("config_hash") or "")
+    stored_hash = _preparation_config_hash(manifest)
     if manifest.get("status") != "completed":
         raise ValueError("rollover requires a completed resident manifest")
     if not stored_hash.startswith("sha256:") or len(stored_hash) != 71:

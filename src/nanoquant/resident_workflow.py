@@ -17,7 +17,7 @@ from huggingface_hub import snapshot_download
 from transformers.models.auto.tokenization_auto import AutoTokenizer
 
 from nanoquant.application.distillation import DistillationMetrics, TopKDistillationConfig
-from nanoquant.config.codec import config_hash, from_dict
+from nanoquant.config.codec import config_hash, from_dict, semantic_hash
 from nanoquant.config.schema import (
     ActivationGpuCacheMode,
     ActivationStorageConfig,
@@ -668,6 +668,12 @@ def _reject_incompatible_run_before_preparation(output: Path, expected_config_ha
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         stored_config_hash = str(manifest["config_hash"])
+        resolved_config = manifest.get("resolved_config")
+        if isinstance(resolved_config, dict) and "canonical_run_config" in resolved_config:
+            canonical_run_config = resolved_config["canonical_run_config"]
+            if not isinstance(canonical_run_config, dict):
+                raise TypeError("canonical_run_config must be an object")
+            stored_config_hash = semantic_hash(canonical_run_config)
     except (KeyError, OSError, TypeError, json.JSONDecodeError) as exc:
         raise ValueError(f"existing resident manifest is invalid: {manifest_path}") from exc
     if stored_config_hash == expected_config_hash:

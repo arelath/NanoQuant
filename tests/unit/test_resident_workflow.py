@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
@@ -9,7 +10,7 @@ import torch
 
 import nanoquant.resident_quantization as resident
 import nanoquant.resident_workflow as workflow
-from nanoquant.config.codec import from_dict
+from nanoquant.config.codec import from_dict, to_dict
 from nanoquant.config.schema import (
     ActivationGpuCacheMode,
     ActivationStorageConfig,
@@ -354,6 +355,47 @@ def test_zero_argument_resolution_rejects_incompatible_run_before_calibration(
 
     with pytest.raises(ValueError, match="before calibration preparation.*rollover"):
         resolve_resident_experiment_inputs(config, launcher_path=launcher)
+
+
+def test_zero_argument_resolution_accepts_matching_canonical_config_in_resident_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = tmp_path / "repository"
+    launcher = repository / "experiments" / "001-compress-gemma-3-1b-it.py"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text("# fixture\n", encoding="utf-8")
+    snapshot = repository / "snapshot"
+    snapshot.mkdir()
+    config = replace(_resident_config(), model=replace(_resident_config().model, source=str(snapshot)))
+    output = repository / "evidence" / "001" / config.intent.name
+    output.mkdir(parents=True)
+    (output / "manifest.json").write_text(
+        json.dumps(
+            {
+                "config_hash": "sha256:resident-execution-request",
+                "resolved_config": {"canonical_run_config": to_dict(config)},
+            }
+        ),
+        encoding="utf-8",
+    )
+    tokens = torch.arange(256 * 16, dtype=torch.long).reshape(256, 16)
+    observed: dict[str, object] = {}
+
+    def load_calibration(*_args: object, **kwargs: object) -> Any:
+        observed["preparation_id"] = kwargs["preparation_id"]
+        return type("Calibration", (), {"input_ids": tokens})()
+
+    monkeypatch.setattr(workflow, "load_or_prepare_calibration", load_calibration)
+    monkeypatch.setattr(workflow, "load_repository_dotenv", lambda _path: True)
+    monkeypatch.setattr(
+        workflow.AutoTokenizer,
+        "from_pretrained",
+        lambda *_args, **_kwargs: type("Tokenizer", (), {"pad_token_id": 7})(),
+    )
+
+    resolve_resident_experiment_inputs(config, launcher_path=launcher)
+
+    assert observed == {"preparation_id": workflow.config_hash(config)}
 
 
 def test_workflow_manifest_completes_only_with_global_tuning_artifact(tmp_path: Path) -> None:
