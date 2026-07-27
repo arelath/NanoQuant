@@ -329,6 +329,33 @@ def test_zero_argument_resolution_generates_run_local_calibration(
     }
 
 
+def test_zero_argument_resolution_rejects_incompatible_run_before_calibration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = tmp_path / "repository"
+    launcher = repository / "experiments" / "001-compress-gemma-3-1b-it.py"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text("# fixture\n", encoding="utf-8")
+    snapshot = repository / "snapshot"
+    snapshot.mkdir()
+    config = replace(_resident_config(), model=replace(_resident_config().model, source=str(snapshot)))
+    output = repository / "evidence" / "001" / config.intent.name
+    output.mkdir(parents=True)
+    (output / "manifest.json").write_text(
+        '{"config_hash":"sha256:incompatible"}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        workflow,
+        "load_or_prepare_calibration",
+        lambda *_args, **_kwargs: pytest.fail("calibration must not start"),
+    )
+    monkeypatch.setattr(workflow, "load_repository_dotenv", lambda _path: True)
+
+    with pytest.raises(ValueError, match="before calibration preparation.*rollover"):
+        resolve_resident_experiment_inputs(config, launcher_path=launcher)
+
+
 def test_workflow_manifest_completes_only_with_global_tuning_artifact(tmp_path: Path) -> None:
     inputs = _inputs(tmp_path)
     directory = RunDirectory(inputs.output.parent, inputs.output.name)

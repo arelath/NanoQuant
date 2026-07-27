@@ -8,6 +8,7 @@ global-distillation requests used by tools, numbered runfiles, and Python caller
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -658,6 +659,26 @@ def _transition_workflow_manifest(
     directory.write_manifest(transition(manifest, status, artifacts=artifacts, failure=failure))
 
 
+def _reject_incompatible_run_before_preparation(output: Path, expected_config_hash: str) -> None:
+    """Fail before expensive data preparation when a run path belongs to another config."""
+
+    manifest_path = output / "manifest.json"
+    if not manifest_path.is_file():
+        return
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        stored_config_hash = str(manifest["config_hash"])
+    except (KeyError, OSError, TypeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"existing resident manifest is invalid: {manifest_path}") from exc
+    if stored_config_hash == expected_config_hash:
+        return
+    raise ValueError(
+        "existing resident run configuration differs from the current experiment before "
+        "calibration preparation; preserve or roll over the old run with "
+        "tools/rollover_completed_experiment.py"
+    )
+
+
 def resolve_resident_experiment_inputs(config: RunConfig, *, launcher_path: str | Path) -> ResolvedResidentInputs:
     """Resolve a zero-argument runfile's model and run-local calibration tokens."""
 
@@ -674,6 +695,8 @@ def resolve_resident_experiment_inputs(config: RunConfig, *, launcher_path: str 
     if not registry_root.is_absolute():
         registry_root = repository_root / registry_root
     output = registry_root / config.intent.name
+    preparation_hash = config_hash(config)
+    _reject_incompatible_run_before_preparation(output, preparation_hash)
     calibration = (
         load_or_prepare_calibration(
             snapshot,
@@ -681,7 +704,7 @@ def resolve_resident_experiment_inputs(config: RunConfig, *, launcher_path: str 
             sample_count=config.calibration.sample_count,
             sequence_length=config.model.sequence_length,
             seed=config.dataset.selection_seed,
-            preparation_id=config_hash(config),
+            preparation_id=preparation_hash,
             dataset_config=config.dataset,
             teacher_source=config.model.source,
             teacher_revision=str(config.model.revision),
@@ -694,7 +717,7 @@ def resolve_resident_experiment_inputs(config: RunConfig, *, launcher_path: str 
             sample_count=config.calibration.sample_count,
             sequence_length=config.model.sequence_length,
             seed=config.dataset.selection_seed,
-            preparation_id=config_hash(config),
+            preparation_id=preparation_hash,
         )
     )
     tokens = calibration.input_ids

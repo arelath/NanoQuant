@@ -293,6 +293,15 @@ not semantic: preparation may extend the same deterministic ordered corpus when 
 met its token floor. Each committed artifact and active receipt records its actual count. A crash or count extension
 resumes the same identity; any semantic change starts a different journal and invalidates downstream calibration.
 
+Changing a numbered experiment after its resident run has completed also changes the run configuration hash. The
+old resident manifest must not be combined with the new calibration identity. Before starting expensive preparation,
+resolution fails with an instruction to run `tools/rollover_completed_experiment.py`. The tool is dry-run by
+default, archives the old run plus its `outputs/NNN` and `Results/NNN` trees, and creates a fresh canonical run
+directory. If a complete calibration receipt already matches the new configuration, as can happen when upgrading a
+mixed directory created by older code, the tool validates and retains only that receipt's transitive artifact graph
+and teacher-trace journal. Otherwise the fresh run starts without calibration and prepares it normally. The archived
+resident evidence is never deleted or treated as resumable under the new configuration.
+
 ### 6.4 Record-aware packing
 
 Conversation records are rendered independently and then packed as indivisible units. Deterministic bin packing may
