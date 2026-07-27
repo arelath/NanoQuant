@@ -8,6 +8,8 @@ import pytest
 import torch
 
 import nanoquant.llamacpp_quality as llamacpp_quality
+from nanoquant.config.schema import ReasoningMode
+from nanoquant.infrastructure.hf_calibration_dataset import PreparedBehaviorEvaluation
 from nanoquant.llamacpp_quality import (
     LlamaCppQualityRequest,
     execute_llamacpp_quality_evaluation,
@@ -60,6 +62,13 @@ def test_llamacpp_quality_is_protocol_matched_and_identity_resumable(
     gguf = tmp_path / "model.gguf"
     gguf.write_bytes(b"GGUF fixture")
     output = tmp_path / "gguf-quality.json"
+    reasoning = PreparedBehaviorEvaluation(
+        ReasoningMode.THINKING,
+        torch.tensor(((6, 7, 8),), dtype=torch.long),
+        torch.ones((1, 3), dtype=torch.bool),
+        torch.tensor(((False, True, False),), dtype=torch.bool),
+        "sha256:reasoning",
+    )
     prepared = PreparedQualityInputs(
         torch.tensor(((1, 2, 3), (1, 4, 5)), dtype=torch.long),
         "wikitext-fingerprint",
@@ -67,6 +76,7 @@ def test_llamacpp_quality_is_protocol_matched_and_identity_resumable(
         0,
         "sha256:" + "a" * 64,
         (),
+        (reasoning,),
     )
     quality_request = QualityEvaluationRequest(
         tmp_path,
@@ -87,6 +97,17 @@ def test_llamacpp_quality_is_protocol_matched_and_identity_resumable(
             "sample_count": 2,
         },
         "tasks": [],
+        "reasoning": [
+            {
+                "mode": ReasoningMode.THINKING.value,
+                "identity": reasoning.identity,
+                "total_negative_log_likelihood": 1.0,
+                "mean_negative_log_likelihood": 1.0,
+                "perplexity": math.e,
+                "token_count": 1,
+                "sample_count": 1,
+            }
+        ],
     }
     monkeypatch.setattr(
         llamacpp_quality,
@@ -109,9 +130,10 @@ def test_llamacpp_quality_is_protocol_matched_and_identity_resumable(
         calls.append(input_path.read_bytes())
         with output_path.open("wb") as destination:
             destination.write(b"NQQO0001")
-            destination.write(struct.pack("<I", 2))
+            destination.write(struct.pack("<I", 3))
             destination.write(struct.pack("<dI", 1.0, 2))
             destination.write(struct.pack("<dI", 3.0, 2))
+            destination.write(struct.pack("<dI", 10.0, 1))
         return llamacpp_quality._RunnerResourceMetrics(
             400,
             50,
@@ -140,7 +162,10 @@ def test_llamacpp_quality_is_protocol_matched_and_identity_resumable(
 
     assert result["passed"] is True
     assert result["results"]["gguf"]["wikitext"]["token_count"] == 4
+    assert result["results"]["gguf"]["wikitext"]["total_negative_log_likelihood"] == 4.0
+    assert result["results"]["gguf"]["wikitext"]["mean_negative_log_likelihood"] == 1.0
     assert result["results"]["gguf"]["wikitext"]["perplexity"] == math.e
+    assert result["results"]["gguf"]["reasoning"][0]["mean_negative_log_likelihood"] == 10.0
     assert result["results"]["gguf"]["peak_device_bytes"] == 400
     assert result["results"]["gguf"]["peak_device_shared_bytes"] == 50
     assert result["results"]["gguf"]["peak_host_bytes"] == 800

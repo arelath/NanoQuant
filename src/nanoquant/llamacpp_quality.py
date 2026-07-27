@@ -549,9 +549,11 @@ def execute_llamacpp_quality_evaluation(
         scores = _read_scores(output_path, len(sequences))
         wikitext_count = prepared.wikitext_tokens.shape[0]
         wikitext_scores = scores[:wikitext_count]
-        total_nll = sum(score.negative_log_likelihood for score in wikitext_scores)
-        total_tokens = sum(score.token_count for score in wikitext_scores)
-        mean_nll = total_nll / total_tokens
+        wikitext_total_nll = sum(
+            score.negative_log_likelihood for score in wikitext_scores
+        )
+        wikitext_total_tokens = sum(score.token_count for score in wikitext_scores)
+        wikitext_mean_nll = wikitext_total_nll / wikitext_total_tokens
         offset = wikitext_count
         tasks = []
         for prepared_task, candidates, truncated in zip(
@@ -577,17 +579,19 @@ def execute_llamacpp_quality_evaluation(
         for prepared_reasoning in prepared.reasoning:
             selected_scores = scores[offset : offset + prepared_reasoning.input_ids.shape[0]]
             offset += prepared_reasoning.input_ids.shape[0]
-            total_nll = sum(score.negative_log_likelihood for score in selected_scores)
-            token_count = sum(score.token_count for score in selected_scores)
-            mean_nll = total_nll / token_count
+            reasoning_total_nll = sum(
+                score.negative_log_likelihood for score in selected_scores
+            )
+            reasoning_token_count = sum(score.token_count for score in selected_scores)
+            reasoning_mean_nll = reasoning_total_nll / reasoning_token_count
             reasoning.append(
                 {
                     "mode": prepared_reasoning.mode.value,
                     "identity": prepared_reasoning.identity,
-                    "total_negative_log_likelihood": total_nll,
-                    "mean_negative_log_likelihood": mean_nll,
-                    "perplexity": math.exp(mean_nll),
-                    "token_count": token_count,
+                    "total_negative_log_likelihood": reasoning_total_nll,
+                    "mean_negative_log_likelihood": reasoning_mean_nll,
+                    "perplexity": math.exp(reasoning_mean_nll),
+                    "token_count": reasoning_token_count,
                     "sample_count": len(selected_scores),
                 }
             )
@@ -595,10 +599,10 @@ def execute_llamacpp_quality_evaluation(
         candidate_result: dict[str, Any] = {
             "label": "gguf",
             "wikitext": {
-                "total_negative_log_likelihood": total_nll,
-                "mean_negative_log_likelihood": mean_nll,
-                "perplexity": math.exp(mean_nll),
-                "token_count": total_tokens,
+                "total_negative_log_likelihood": wikitext_total_nll,
+                "mean_negative_log_likelihood": wikitext_mean_nll,
+                "perplexity": math.exp(wikitext_mean_nll),
+                "token_count": wikitext_total_tokens,
                 "window_count": wikitext_count,
                 "sample_count": wikitext_count,
             },
