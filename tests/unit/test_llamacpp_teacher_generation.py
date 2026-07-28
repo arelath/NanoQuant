@@ -115,3 +115,28 @@ def test_prebuilt_teacher_gguf_is_reused_without_conversion(
 
     assert selected == gguf.resolve()
     assert events[0][0] == "teacher_llamacpp_prebuilt_reused"
+
+
+def test_huggingface_snapshot_gguf_symlink_preserves_logical_filename(
+    tmp_path: Path,
+) -> None:
+    cache = tmp_path / "models--unsloth--Qwen3-8B-GGUF"
+    snapshot = cache / "snapshots" / "revision"
+    blobs = cache / "blobs"
+    snapshot.mkdir(parents=True)
+    blobs.mkdir()
+    blob = blobs / "content-addressed-name-without-extension"
+    blob.write_bytes(b"prebuilt")
+    gguf = snapshot / "Qwen3-8B-UD-Q8_K_XL.gguf"
+    gguf.symlink_to(blob)
+
+    selected = teacher._resolve_teacher_gguf(
+        snapshot,
+        tmp_path / "llama.cpp",
+        gguf,
+        None,
+    )
+
+    assert selected == gguf.absolute()
+    assert selected.suffix == ".gguf"
+    assert selected.resolve() == blob.resolve()

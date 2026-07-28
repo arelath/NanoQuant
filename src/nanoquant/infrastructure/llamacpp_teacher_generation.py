@@ -338,15 +338,34 @@ def _resolve_teacher_gguf(
 ) -> Path:
     if gguf_path is None:
         return _prepare_bfloat16_gguf(snapshot, root, progress)
-    gguf = Path(gguf_path).resolve(strict=True)
+    snapshot_path = Path(os.path.abspath(snapshot))
+    gguf = Path(os.path.abspath(gguf_path))
     if gguf.suffix.lower() != ".gguf":
         raise ValueError(f"prebuilt teacher model is not a GGUF file: {gguf}")
     try:
-        gguf.relative_to(snapshot)
+        gguf.relative_to(snapshot_path)
     except ValueError as exc:
         raise ValueError(
             f"prebuilt teacher GGUF is outside its pinned snapshot: {gguf}"
         ) from exc
+    resolved = gguf.resolve(strict=True)
+    if not resolved.is_file():
+        raise ValueError(f"prebuilt teacher model is not a file: {gguf}")
+    try:
+        resolved.relative_to(snapshot_path)
+    except ValueError:
+        cache_root = snapshot_path.parent.parent
+        blob_root = cache_root / "blobs"
+        if snapshot_path.parent.name != "snapshots":
+            raise ValueError(
+                f"prebuilt teacher GGUF link leaves its pinned snapshot: {gguf}"
+            ) from None
+        try:
+            resolved.relative_to(blob_root)
+        except ValueError as exc:
+            raise ValueError(
+                f"prebuilt teacher GGUF link leaves its Hugging Face cache: {gguf}"
+            ) from exc
     if progress is not None:
         progress(
             "teacher_llamacpp_prebuilt_reused",
