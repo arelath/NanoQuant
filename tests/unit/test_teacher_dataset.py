@@ -45,7 +45,7 @@ def _settings():
             "teacher-revision",
             "unsloth/Qwen3-8B",
             "tokenizer-revision",
-            "Qwen3-8B-BF16.gguf",
+            "Qwen3-8B-UD-Q8_K_XL.gguf",
             "llamacpp-server-greedy-qwen3-v1",
             "cpu",
         ),
@@ -146,7 +146,7 @@ def test_parameterized_tool_exposes_teacher_source_subset_mode_resume_and_upload
             "--teacher-tokenizer",
             "unsloth/Qwen3-8B",
             "--teacher-gguf-file",
-            "Qwen3-8B-BF16.gguf",
+            "Qwen3-8B-UD-Q8_K_XL.gguf",
             "--source-dataset",
             "owner/conversations",
             "--source-config",
@@ -169,7 +169,7 @@ def test_parameterized_tool_exposes_teacher_source_subset_mode_resume_and_upload
 
     assert args.teacher_model == "unsloth/Qwen3-8B-GGUF"
     assert args.teacher_tokenizer == "unsloth/Qwen3-8B"
-    assert args.teacher_gguf_file == "Qwen3-8B-BF16.gguf"
+    assert args.teacher_gguf_file == "Qwen3-8B-UD-Q8_K_XL.gguf"
     assert args.source_dataset == "owner/conversations"
     assert args.source_config == "default"
     assert args.messages_column == "conversation"
@@ -180,15 +180,13 @@ def test_parameterized_tool_exposes_teacher_source_subset_mode_resume_and_upload
     assert args.public
 
 
-def test_unsloth_gguf_snapshot_downloads_only_the_selected_bf16_shards(
+def test_unsloth_gguf_snapshot_downloads_only_the_selected_ud_q8_file(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     snapshot = tmp_path / "snapshot"
-    shard_root = snapshot / "BF16"
-    shard_root.mkdir(parents=True)
-    for index in (1, 2):
-        (shard_root / f"Qwen3-32B-BF16-{index:05d}-of-00002.gguf").write_bytes(b"gguf")
+    snapshot.mkdir()
+    (snapshot / "Qwen3-32B-UD-Q8_K_XL.gguf").write_bytes(b"gguf")
     calls: list[dict[str, object]] = []
 
     def download(**kwargs: object) -> str:
@@ -201,7 +199,7 @@ def test_unsloth_gguf_snapshot_downloads_only_the_selected_bf16_shards(
         "model-revision",
         "unsloth/Qwen3-32B",
         "tokenizer-revision",
-        "BF16/Qwen3-32B-BF16-00001-of-00002.gguf",
+        "Qwen3-32B-UD-Q8_K_XL.gguf",
     )
 
     assert teacher_dataset.resolve_teacher_snapshot(teacher) == snapshot.resolve()
@@ -209,20 +207,21 @@ def test_unsloth_gguf_snapshot_downloads_only_the_selected_bf16_shards(
         {
             "repo_id": "unsloth/Qwen3-32B-GGUF",
             "revision": "model-revision",
-            "allow_patterns": ["BF16/Qwen3-32B-BF16-*-of-00002.gguf"],
+            "allow_patterns": ["Qwen3-32B-UD-Q8_K_XL.gguf"],
         }
     ]
 
 
-def test_gguf_auto_detection_ignores_mmproj_and_selects_the_first_model_shard() -> None:
+def test_gguf_auto_detection_selects_ud_q8_and_ignores_other_quantizations() -> None:
     class Api:
         @staticmethod
         def list_repo_files(_source: str, *, revision: str) -> list[str]:
             assert revision == "revision"
             return [
-                "BF16/Qwen3.5-27B-BF16-00002-of-00002.gguf",
-                "mmproj-BF16.gguf",
-                "BF16/Qwen3.5-27B-BF16-00001-of-00002.gguf",
+                "Qwen3.5-27B-BF16.gguf",
+                "mmproj-UD-Q8_K_XL.gguf",
+                "Qwen3.5-27B-Q4_K_M.gguf",
+                "Qwen3.5-27B-UD-Q8_K_XL.gguf",
             ]
 
     assert teacher_dataset.resolve_gguf_filename(
@@ -230,7 +229,50 @@ def test_gguf_auto_detection_ignores_mmproj_and_selects_the_first_model_shard() 
         "revision",
         None,
         api=Api(),  # type: ignore[arg-type]
-    ) == "BF16/Qwen3.5-27B-BF16-00001-of-00002.gguf"
+    ) == "Qwen3.5-27B-UD-Q8_K_XL.gguf"
+
+
+def test_unsloth_teacher_requires_an_explicit_prebuilt_gguf_selection() -> None:
+    common = (
+        "unsloth/Qwen3-8B-GGUF",
+        "teacher-revision",
+        "unsloth/Qwen3-8B",
+        "tokenizer-revision",
+    )
+
+    with pytest.raises(ValueError, match="explicit GGUF"):
+        TeacherModel(*common)
+
+
+def test_promoted_teacher_catalog_uses_only_ud_q8_ggufs() -> None:
+    catalog_path = (
+        Path(__file__).resolve().parents[2] / "tools" / "teacher_dataset_models.yaml"
+    )
+
+    catalog = teacher_dataset.load_teacher_catalog(catalog_path)
+
+    assert catalog
+    assert all(model.gguf_filename.endswith("-UD-Q8_K_XL.gguf") for model in catalog)
+    assert next(model for model in catalog if model.default).source == "unsloth/Qwen3-8B-GGUF"
+
+
+def test_promoted_teacher_catalog_rejects_another_quantization(tmp_path: Path) -> None:
+    catalog_path = tmp_path / "models.yaml"
+    catalog_path.write_text(
+        """
+families:
+  - id: qwen3
+    variants:
+      - source: unsloth/Qwen3-8B-GGUF
+        tokenizer_source: unsloth/Qwen3-8B
+        gguf_filename: Qwen3-8B-Q4_K_M.gguf
+        default: true
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="UD-Q8_K_XL"):
+        teacher_dataset.load_teacher_catalog(catalog_path)
 
 
 class _Behavior:
@@ -255,7 +297,7 @@ def _fake_trace_preparer(
 ) -> PreparedTeacherTraces:
     assert kwargs["count"] == 2
     assert str(kwargs["source_adapter_identity"]).startswith("sha256:")
-    assert kwargs["teacher_gguf_file"] == "Qwen3-8B-BF16.gguf"
+    assert kwargs["teacher_gguf_file"] == "Qwen3-8B-UD-Q8_K_XL.gguf"
     assert kwargs["teacher_tokenizer_source"] == "unsloth/Qwen3-8B"
     assert kwargs["teacher_tokenizer_revision"] == "tokenizer-revision"
     mode = item.mode
@@ -332,7 +374,7 @@ def test_execution_publishes_huggingface_ready_mode_configs_and_reuses_completio
     ]
     assert thinking[0]["messages"][-1]["reasoning_content"] == "reasoning 0"
     assert thinking[0]["teacher_model"] == "unsloth/Qwen3-8B-GGUF"
-    assert thinking[0]["teacher_gguf_file"] == "Qwen3-8B-BF16.gguf"
+    assert thinking[0]["teacher_gguf_file"] == "Qwen3-8B-UD-Q8_K_XL.gguf"
     assert thinking[0]["tokenizer_model"] == "unsloth/Qwen3-8B"
     card = (dataset_root / "README.md").read_text(encoding="utf-8")
     assert "config_name: all" in card
@@ -429,7 +471,7 @@ class _RevisionApi:
     def list_repo_files(source: str, *, revision: str) -> list[str]:
         assert source == "unsloth/Qwen3-8B-GGUF"
         assert revision == "resolved-teacher-revision"
-        return ["Qwen3-8B-BF16.gguf"]
+        return ["Qwen3-8B-UD-Q8_K_XL.gguf"]
 
 
 def test_interactive_menu_defaults_to_small_dual_mode_larger_teacher_and_persists_before_run(
@@ -461,7 +503,7 @@ def test_interactive_menu_defaults_to_small_dual_mode_larger_teacher_and_persist
     assert settings.teacher.revision == "resolved-teacher-revision"
     assert settings.teacher.tokenizer_source == "unsloth/Qwen3-8B"
     assert settings.teacher.tokenizer_revision == "resolved-tokenizer-revision"
-    assert settings.teacher.gguf_filename == "Qwen3-8B-BF16.gguf"
+    assert settings.teacher.gguf_filename == "Qwen3-8B-UD-Q8_K_XL.gguf"
     assert settings.generation.samples_per_mode == 512
     assert settings.generation.modes == (
         ReasoningMode.THINKING,

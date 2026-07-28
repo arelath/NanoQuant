@@ -60,7 +60,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--teacher-gguf-file",
-        help="BF16 GGUF entrypoint; auto-detected for a -GGUF teacher repository",
+        help="UD-Q8_K_XL GGUF entrypoint; auto-detected for a -GGUF teacher repository",
     )
     parser.add_argument(
         "--source-dataset",

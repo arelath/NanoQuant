@@ -95,7 +95,7 @@ def test_prebuilt_teacher_gguf_is_reused_without_conversion(
 ) -> None:
     snapshot = tmp_path / "snapshot"
     snapshot.mkdir()
-    gguf = snapshot / "Qwen3-8B-BF16.gguf"
+    gguf = snapshot / "Qwen3-8B-UD-Q8_K_XL.gguf"
     gguf.write_bytes(b"prebuilt")
     events: list[tuple[str, object]] = []
     monkeypatch.setattr(

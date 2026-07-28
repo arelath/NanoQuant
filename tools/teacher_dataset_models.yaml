@@ -5,57 +5,57 @@ families:
     variants:
       - source: unsloth/Qwen3-0.6B-GGUF
         tokenizer_source: unsloth/Qwen3-0.6B
-        gguf_filename: Qwen3-0.6B-BF16.gguf
+        gguf_filename: Qwen3-0.6B-UD-Q8_K_XL.gguf
 
       - source: unsloth/Qwen3-1.7B-GGUF
         tokenizer_source: unsloth/Qwen3-1.7B
-        gguf_filename: Qwen3-1.7B-BF16.gguf
+        gguf_filename: Qwen3-1.7B-UD-Q8_K_XL.gguf
 
       - source: unsloth/Qwen3-4B-GGUF
         tokenizer_source: unsloth/Qwen3-4B
-        gguf_filename: Qwen3-4B-BF16.gguf
+        gguf_filename: Qwen3-4B-UD-Q8_K_XL.gguf
 
       - source: unsloth/Qwen3-8B-GGUF
         tokenizer_source: unsloth/Qwen3-8B
-        gguf_filename: Qwen3-8B-BF16.gguf
+        gguf_filename: Qwen3-8B-UD-Q8_K_XL.gguf
         default: true
 
       - source: unsloth/Qwen3-14B-GGUF
         tokenizer_source: unsloth/Qwen3-14B
-        gguf_filename: Qwen3-14B-BF16.gguf
+        gguf_filename: Qwen3-14B-UD-Q8_K_XL.gguf
 
       - source: unsloth/Qwen3-32B-GGUF
         tokenizer_source: unsloth/Qwen3-32B
-        gguf_filename: BF16/Qwen3-32B-BF16-00001-of-00002.gguf
+        gguf_filename: Qwen3-32B-UD-Q8_K_XL.gguf
 
   - id: qwen3-5
     label: Qwen3.5
     variants:
       - source: unsloth/Qwen3.5-0.8B-GGUF
         tokenizer_source: unsloth/Qwen3.5-0.8B
-        gguf_filename: Qwen3.5-0.8B-BF16.gguf
+        gguf_filename: Qwen3.5-0.8B-UD-Q8_K_XL.gguf
 
       - source: unsloth/Qwen3.5-2B-GGUF
         tokenizer_source: unsloth/Qwen3.5-2B
-        gguf_filename: Qwen3.5-2B-BF16.gguf
+        gguf_filename: Qwen3.5-2B-UD-Q8_K_XL.gguf
 
       - source: unsloth/Qwen3.5-4B-GGUF
         tokenizer_source: unsloth/Qwen3.5-4B
-        gguf_filename: Qwen3.5-4B-BF16.gguf
+        gguf_filename: Qwen3.5-4B-UD-Q8_K_XL.gguf
 
       - source: unsloth/Qwen3.5-9B-GGUF
         tokenizer_source: unsloth/Qwen3.5-9B
-        gguf_filename: Qwen3.5-9B-BF16.gguf
+        gguf_filename: Qwen3.5-9B-UD-Q8_K_XL.gguf
         default: true
 
       - source: unsloth/Qwen3.5-27B-GGUF
         tokenizer_source: unsloth/Qwen3.5-27B
-        gguf_filename: BF16/Qwen3.5-27B-BF16-00001-of-00002.gguf
+        gguf_filename: Qwen3.5-27B-UD-Q8_K_XL.gguf
 
   - id: qwen3-6
     label: Qwen3.6
     variants:
       - source: unsloth/Qwen3.6-27B-GGUF
         tokenizer_source: unsloth/Qwen3.6-27B
-        gguf_filename: BF16/Qwen3.6-27B-BF16-00001-of-00002.gguf
+        gguf_filename: Qwen3.6-27B-UD-Q8_K_XL.gguf
         default: true

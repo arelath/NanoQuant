@@ -165,6 +165,8 @@ class TeacherModel:
                 raise ValueError("teacher GGUF filename must be a safe relative GGUF path")
             if self.implementation != LLAMACPP_TEACHER_TRACE_IMPLEMENTATION:
                 raise ValueError("prebuilt GGUF teachers require the llama.cpp backend")
+        if self.source.lower().endswith("-gguf") and self.gguf_filename is None:
+            raise ValueError("prebuilt GGUF teacher repositories require an explicit GGUF file")
 
 
 @dataclass(frozen=True, slots=True)
@@ -382,7 +384,7 @@ def resolve_gguf_filename(
     *,
     api: HfApi | None = None,
 ) -> str | None:
-    """Resolve the BF16 GGUF entrypoint for a GGUF repository."""
+    """Resolve the prebuilt UD-Q8_K_XL entrypoint for a GGUF repository."""
 
     if requested is not None and requested.strip():
         resolved_request = requested.strip().replace("\\", "/")
@@ -424,7 +426,7 @@ def resolve_gguf_filename(
         value
         for value in client.list_repo_files(source, revision=revision)
         if value.lower().endswith(".gguf")
-        and "bf16" in value.lower()
+        and "ud-q8_k_xl" in value.lower()
         and not Path(value).name.lower().startswith("mmproj-")
     ]
     entrypoints = [
@@ -434,7 +436,7 @@ def resolve_gguf_filename(
     ]
     if len(entrypoints) != 1:
         raise ValueError(
-            f"expected exactly one BF16 GGUF entrypoint in {source}@{revision}; "
+            f"expected exactly one UD-Q8_K_XL GGUF entrypoint in {source}@{revision}; "
             f"found {entrypoints}"
         )
     return entrypoints[0]
@@ -1125,6 +1127,10 @@ def load_teacher_catalog(path: str | Path) -> tuple[TeacherCatalogModel, ...]:
                 or not str(variant.get("gguf_filename") or "").strip()
             ):
                 raise ValueError(f"interactive model family {family_id!r} has an invalid variant")
+            if "ud-q8_k_xl" not in str(variant["gguf_filename"]).lower():
+                raise ValueError(
+                    f"interactive model family {family_id!r} must use a UD-Q8_K_XL GGUF"
+                )
             models.append(
                 TeacherCatalogModel(
                     family_id,
@@ -1268,7 +1274,7 @@ def _choose_teacher(
             or default_tokenizer
         )
         gguf_filename = console.input(
-            "BF16 GGUF filename [auto-detect, blank for safetensors]: "
+            "UD-Q8_K_XL GGUF filename [auto-detect for a -GGUF repository]: "
         ).strip()
         return TeacherCatalogModel(
             "custom",
@@ -1450,7 +1456,7 @@ def run_interactive_teacher_dataset(
     console.write(
         f"  Tokenizer:       {selected_teacher.tokenizer_source}@{tokenizer_revision}"
     )
-    console.write(f"  GGUF:            {gguf_filename or 'convert the pinned checkpoint'}")
+    console.write(f"  GGUF:            {gguf_filename or 'prepare the pinned checkpoint'}")
     console.write(f"  Modes:           {', '.join(mode.value for mode in modes)}")
     console.write(f"  Samples/mode:    {samples}")
     console.write(f"  Backend:         {implementation}")

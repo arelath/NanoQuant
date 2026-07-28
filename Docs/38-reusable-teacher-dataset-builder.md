@@ -8,11 +8,12 @@ Thinking-model compression should not spend hours regenerating the same teacher 
 `tools/build_teacher_dataset.py` creates a small, pinned, reusable conversational dataset first. Compression runs can
 then consume the uploaded `messages` records without loading a teacher model or repeating generation.
 
-The builder initially supports Qwen3-family chat templates. Its promoted menu uses Unsloth's prebuilt BF16 GGUF
-repositories, such as `unsloth/Qwen3-8B-GGUF`, and the matching Unsloth tokenizer repository. It can use a larger
-member of the same family—such as Qwen3-8B instead of Qwen3-0.6B—as the teacher. That is a deliberate
-teacher-transfer target, not an exact source-model reproduction, and the GGUF model, tokenizer, file, and revisions
-remain visible in the manifest.
+The builder initially supports Qwen3-family chat templates. Its promoted menu uses Unsloth's prebuilt
+`UD-Q8_K_XL` GGUF files, such as `Qwen3-8B-UD-Q8_K_XL.gguf` from `unsloth/Qwen3-8B-GGUF`, and the matching
+Unsloth tokenizer repository. These files are loaded directly; the builder does not convert or requantize them. It
+can use a larger member of the same family—such as Qwen3-8B instead of Qwen3-0.6B—as the teacher. That is a
+deliberate teacher-transfer target, not an exact source-model reproduction, and the GGUF model, tokenizer, file,
+quantization, and revisions remain visible in the manifest.
 
 ## Default scope
 
@@ -56,7 +57,7 @@ The menu proceeds in this order:
 7. **Maximum complete sequence length.** Default: 2,048 tokens. A response that cannot finish within the limit is
    rejected rather than truncated mid-reasoning.
 8. **Generation backend.**
-   - llama.cpp server over the selected prebuilt Unsloth BF16 GGUF, default;
+   - llama.cpp server over the selected prebuilt Unsloth `UD-Q8_K_XL` GGUF, default;
    - Transformers greedy generation.
 9. **Generation device.** Default: `cuda`.
 10. **Hugging Face upload.** Upload after local completion is the default. The user chooses the dataset repository
@@ -76,7 +77,7 @@ Example using Qwen3-8B to produce a small dual-mode dataset:
   --output evidence\teacher-datasets\qwen3-8b-ultrachat-512 `
   --teacher-model unsloth/Qwen3-8B-GGUF `
   --teacher-tokenizer unsloth/Qwen3-8B `
-  --teacher-gguf-file Qwen3-8B-BF16.gguf `
+  --teacher-gguf-file Qwen3-8B-UD-Q8_K_XL.gguf `
   --mode both `
   --samples-per-mode 512 `
   --backend llamacpp `
@@ -99,7 +100,7 @@ Useful parameters include:
 | `--teacher-revision` | Pinned teacher commit | current commit is resolved once |
 | `--teacher-tokenizer` | Matching tokenizer/chat-template repository | teacher ID without `-GGUF` |
 | `--teacher-tokenizer-revision` | Pinned tokenizer commit | current commit is resolved once |
-| `--teacher-gguf-file` | BF16 GGUF entrypoint | auto-detected for `-GGUF` repositories |
+| `--teacher-gguf-file` | Prebuilt `UD-Q8_K_XL` GGUF entrypoint | auto-detected for `-GGUF` repositories |
 | `--source-dataset` | Conversational prompt dataset | UltraChat 200K |
 | `--source-revision` | Pinned dataset commit | pinned UltraChat revision or resolved commit |
 | `--source-config` | Dataset configuration/subset | none |
@@ -188,9 +189,11 @@ A response is accepted only when it:
 - fits as a complete record within the sequence limit;
 - round-trips through the pinned teacher chat template.
 
-For Unsloth teachers, snapshot download is restricted to the selected BF16 GGUF (including every shard for a sharded
-entrypoint) and the small matching tokenizer/config files. The llama.cpp backend loads that GGUF directly; it does
-not download every quantization in the repository or reconvert safetensors.
+For Unsloth teachers, snapshot download is restricted to the selected `UD-Q8_K_XL` GGUF and the small matching
+tokenizer/config files. The promoted catalog names the exact file for every model. The llama.cpp backend loads that
+GGUF directly; it does not download the other quantizations in the repository and does not convert or requantize the
+selected model. Catalog loading fails closed if a promoted Unsloth teacher names another quantization. Existing
+settings remain immutable and resume their explicitly recorded file instead of being silently migrated.
 
 The builder uploads only after all requested local mode files and their manifest have been atomically published.
 Public upload is never the default because prompt and model licensing and generated content must be reviewed first.
