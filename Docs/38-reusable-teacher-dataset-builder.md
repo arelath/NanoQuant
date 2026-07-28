@@ -189,6 +189,10 @@ A response is accepted only when it:
 - fits as a complete record within the sequence limit;
 - round-trips through the pinned teacher chat template.
 
+The llama.cpp server allocates two internal decode positions beyond the configured sequence limit for every parallel
+slot. Those positions are runtime headroom, not dataset tokens. If llama.cpp still reports a prompt/response context
+limit, that source record is journaled as rejected and generation continues instead of aborting the resumable run.
+
 For Unsloth teachers, snapshot download is restricted to the selected `UD-Q8_K_XL` GGUF and the small matching
 tokenizer/config files. The promoted catalog names the exact file for every model. The llama.cpp backend loads that
 GGUF directly; it does not download the other quantizations in the repository and does not convert or requantize the

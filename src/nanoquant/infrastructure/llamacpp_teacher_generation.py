@@ -26,6 +26,7 @@ from nanoquant.infrastructure.subprocess_interop import (
 
 LlamaCppTeacherProgress = Callable[[str, Mapping[str, object]], None]
 LLAMACPP_TEACHER_PARALLELISM = 4
+LLAMACPP_TEACHER_CONTEXT_HEADROOM = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,7 +62,7 @@ class LlamaCppTeacherSession:
             timeout=self.timeout_seconds,
         )
         if bool(response.get("truncated")):
-            raise RuntimeError("llama.cpp teacher truncated the prompt or response context")
+            raise ValueError("llama.cpp teacher reached the prompt or response context limit")
         tokens = response.get("tokens")
         if not isinstance(tokens, list) or any(not isinstance(value, int) for value in tokens):
             raise RuntimeError("llama.cpp teacher returned invalid token IDs")
@@ -253,6 +254,12 @@ def _available_port() -> int:
         return int(listener.getsockname()[1])
 
 
+def _server_context_size(sequence_length: int, parallelism: int) -> int:
+    """Allocate two internal decode positions beyond each accepted sequence."""
+
+    return (sequence_length + LLAMACPP_TEACHER_CONTEXT_HEADROOM) * parallelism
+
+
 def _wait_until_ready(
     endpoint: str,
     process: StreamingSubprocess,
@@ -399,7 +406,7 @@ def open_llamacpp_teacher_session(
         "--model",
         gguf,
         "--ctx-size",
-        str(sequence_length * parallelism),
+        str(_server_context_size(sequence_length, parallelism)),
         "--parallel",
         str(parallelism),
         "--cont-batching",

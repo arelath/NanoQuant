@@ -142,6 +142,67 @@ def _session(*, fail_after: int | None = None, thinking: bool = True) -> Any:
     return open_session
 
 
+def test_llamacpp_context_limit_rejects_one_record_without_aborting_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tokenizer = TraceTokenizer()
+    behavior = Qwen3ChatBehavior()
+
+    @contextmanager
+    def open_backend(*_args: object, **_kwargs: object) -> Iterator[trace_module._GenerationBackend]:
+        calls = 0
+
+        def generate(prompt: tuple[int, ...], _maximum: int) -> tuple[int, ...]:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise ValueError("llama.cpp teacher reached the response context limit")
+            suffix = tokenizer.encode(
+                "<think>\na coherent teacher trace\n</think>\n\nteacher answer<|im_end|>"
+            )
+            return (*prompt, *suffix)
+
+        yield trace_module._GenerationBackend(
+            generate,
+            frozenset({tokenizer.eos_token_id}),
+        )
+
+    monkeypatch.setattr(trace_module, "_open_teacher_generation_backend", open_backend)
+    item = replace(
+        _slice(),
+        teacher_trace_generation=replace(
+            _slice().teacher_trace_generation,
+            implementation=LLAMACPP_TEACHER_TRACE_IMPLEMENTATION,
+        ),
+    )
+
+    prepared = prepare_teacher_traces(
+        tmp_path / "snapshot",
+        tmp_path / "run",
+        item,
+        tokenizer,
+        behavior,
+        _records(),
+        teacher_source="unsloth/Qwen3-8B-GGUF",
+        teacher_revision="teacher-revision",
+        count=1,
+        sequence_length=512,
+        seed=7,
+        device="cuda",
+        teacher_gguf_file="Qwen3-8B-UD-Q8_K_XL.gguf",
+    )
+
+    assert prepared.messages[0][-1]["content"] == "teacher answer"
+    journal = next((tmp_path / "run" / "state" / "teacher-traces").glob("*.jsonl"))
+    attempts = [
+        json.loads(line)
+        for line in journal.read_text(encoding="utf-8").splitlines()[1:]
+    ]
+    assert [record["status"] for record in attempts] == ["rejected", "accepted"]
+    assert attempts[0]["reason_type"] == "ValueError"
+
+
 def test_teacher_trace_generation_resumes_and_commits_whole_teacher_turns(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

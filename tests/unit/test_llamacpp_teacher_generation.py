@@ -46,7 +46,7 @@ def test_llamacpp_teacher_session_sends_exact_greedy_token_request(
     assert payload["return_tokens"] is True
 
 
-def test_llamacpp_teacher_session_rejects_context_truncation(
+def test_llamacpp_teacher_session_marks_context_truncation_as_a_rejected_record(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
@@ -63,8 +63,12 @@ def test_llamacpp_teacher_session_rejects_context_truncation(
         parallelism=4,
     )
 
-    with pytest.raises(RuntimeError, match="truncated"):
+    with pytest.raises(ValueError, match="context limit"):
         session.generate((10, 20), 128)
+
+
+def test_llamacpp_server_context_includes_per_slot_decode_headroom() -> None:
+    assert teacher._server_context_size(2048, 4) == 8200
 
 
 def test_llamacpp_teacher_session_rejects_changed_prompt_token_count(
