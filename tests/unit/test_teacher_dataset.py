@@ -8,6 +8,7 @@ from typing import Any
 
 import build_teacher_dataset as teacher_tool
 import pytest
+import yaml
 
 import nanoquant.teacher_dataset as teacher_dataset
 from nanoquant.config.schema import ReasoningMode
@@ -40,9 +41,12 @@ def _settings():
             "train_sft",
         ),
         teacher=TeacherModel(
-            "Qwen/Qwen3-8B",
+            "unsloth/Qwen3-8B-GGUF",
             "teacher-revision",
-            "hf-greedy-qwen3-v1",
+            "unsloth/Qwen3-8B",
+            "tokenizer-revision",
+            "Qwen3-8B-BF16.gguf",
+            "llamacpp-server-greedy-qwen3-v1",
             "cpu",
         ),
         generation=TeacherDatasetGeneration(
@@ -82,6 +86,30 @@ def test_teacher_dataset_settings_are_tamper_evident(tmp_path: Path) -> None:
         load_teacher_dataset_settings(path)
 
 
+def test_schema_one_settings_migrate_teacher_tokenizer_identity(tmp_path: Path) -> None:
+    body = teacher_dataset._settings_body(_settings())
+    body["schema_version"] = 1
+    teacher = body["teacher"]
+    teacher["source"] = "Qwen/Qwen3-8B"
+    teacher["revision"] = "official-revision"
+    teacher.pop("tokenizer_source")
+    teacher.pop("tokenizer_revision")
+    teacher.pop("gguf_filename")
+    digest = teacher_dataset.semantic_hash(body)
+    path = tmp_path / TEACHER_DATASET_SETTINGS_NAME
+    path.write_text(
+        yaml.safe_dump({"settings_hash": digest, **body}, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    loaded, observed = load_teacher_dataset_settings(path)
+
+    assert observed == digest
+    assert loaded.teacher.tokenizer_source == "Qwen/Qwen3-8B"
+    assert loaded.teacher.tokenizer_revision == "official-revision"
+    assert loaded.teacher.gguf_filename is None
+
+
 def test_prompt_normalizer_accepts_common_chat_schemas_and_rejects_incomplete_turns() -> None:
     normalized = normalize_prompt_record(
         {
@@ -114,7 +142,11 @@ def test_parameterized_tool_exposes_teacher_source_subset_mode_resume_and_upload
             "--output",
             "evidence/teacher-datasets/example",
             "--teacher-model",
-            "Qwen/Qwen3-8B",
+            "unsloth/Qwen3-8B-GGUF",
+            "--teacher-tokenizer",
+            "unsloth/Qwen3-8B",
+            "--teacher-gguf-file",
+            "Qwen3-8B-BF16.gguf",
             "--source-dataset",
             "owner/conversations",
             "--source-config",
@@ -135,7 +167,9 @@ def test_parameterized_tool_exposes_teacher_source_subset_mode_resume_and_upload
         ]
     )
 
-    assert args.teacher_model == "Qwen/Qwen3-8B"
+    assert args.teacher_model == "unsloth/Qwen3-8B-GGUF"
+    assert args.teacher_tokenizer == "unsloth/Qwen3-8B"
+    assert args.teacher_gguf_file == "Qwen3-8B-BF16.gguf"
     assert args.source_dataset == "owner/conversations"
     assert args.source_config == "default"
     assert args.messages_column == "conversation"
@@ -144,6 +178,59 @@ def test_parameterized_tool_exposes_teacher_source_subset_mode_resume_and_upload
     assert args.backend == "transformers"
     assert args.hub_repo == "owner/generated-responses"
     assert args.public
+
+
+def test_unsloth_gguf_snapshot_downloads_only_the_selected_bf16_shards(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = tmp_path / "snapshot"
+    shard_root = snapshot / "BF16"
+    shard_root.mkdir(parents=True)
+    for index in (1, 2):
+        (shard_root / f"Qwen3-32B-BF16-{index:05d}-of-00002.gguf").write_bytes(b"gguf")
+    calls: list[dict[str, object]] = []
+
+    def download(**kwargs: object) -> str:
+        calls.append(dict(kwargs))
+        return str(snapshot)
+
+    monkeypatch.setattr(teacher_dataset, "snapshot_download", download)
+    teacher = TeacherModel(
+        "unsloth/Qwen3-32B-GGUF",
+        "model-revision",
+        "unsloth/Qwen3-32B",
+        "tokenizer-revision",
+        "BF16/Qwen3-32B-BF16-00001-of-00002.gguf",
+    )
+
+    assert teacher_dataset.resolve_teacher_snapshot(teacher) == snapshot.resolve()
+    assert calls == [
+        {
+            "repo_id": "unsloth/Qwen3-32B-GGUF",
+            "revision": "model-revision",
+            "allow_patterns": ["BF16/Qwen3-32B-BF16-*-of-00002.gguf"],
+        }
+    ]
+
+
+def test_gguf_auto_detection_ignores_mmproj_and_selects_the_first_model_shard() -> None:
+    class Api:
+        @staticmethod
+        def list_repo_files(_source: str, *, revision: str) -> list[str]:
+            assert revision == "revision"
+            return [
+                "BF16/Qwen3.5-27B-BF16-00002-of-00002.gguf",
+                "mmproj-BF16.gguf",
+                "BF16/Qwen3.5-27B-BF16-00001-of-00002.gguf",
+            ]
+
+    assert teacher_dataset.resolve_gguf_filename(
+        "unsloth/Qwen3.5-27B-GGUF",
+        "revision",
+        None,
+        api=Api(),  # type: ignore[arg-type]
+    ) == "BF16/Qwen3.5-27B-BF16-00001-of-00002.gguf"
 
 
 class _Behavior:
@@ -168,6 +255,9 @@ def _fake_trace_preparer(
 ) -> PreparedTeacherTraces:
     assert kwargs["count"] == 2
     assert str(kwargs["source_adapter_identity"]).startswith("sha256:")
+    assert kwargs["teacher_gguf_file"] == "Qwen3-8B-BF16.gguf"
+    assert kwargs["teacher_tokenizer_source"] == "unsloth/Qwen3-8B"
+    assert kwargs["teacher_tokenizer_revision"] == "tokenizer-revision"
     mode = item.mode
     values = []
     messages = []
@@ -224,7 +314,8 @@ def test_execution_publishes_huggingface_ready_mode_configs_and_reuses_completio
     events: list[str] = []
     assert execute_teacher_dataset(
         settings_path,
-        snapshot_resolver=lambda _source, _revision: tmp_path / "snapshot",
+        snapshot_resolver=lambda _teacher: tmp_path / "snapshot",
+        tokenizer_snapshot_resolver=lambda _source, _revision: tmp_path / "tokenizer",
         source_loader=lambda _source, _seed: (),
         trace_preparer=_fake_trace_preparer,
         progress=lambda event, _fields: events.append(event),
@@ -240,7 +331,9 @@ def test_execution_publishes_huggingface_ready_mode_configs_and_reuses_completio
         for line in (dataset_root / "data" / "thinking.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     assert thinking[0]["messages"][-1]["reasoning_content"] == "reasoning 0"
-    assert thinking[0]["teacher_model"] == "Qwen/Qwen3-8B"
+    assert thinking[0]["teacher_model"] == "unsloth/Qwen3-8B-GGUF"
+    assert thinking[0]["teacher_gguf_file"] == "Qwen3-8B-BF16.gguf"
+    assert thinking[0]["tokenizer_model"] == "unsloth/Qwen3-8B"
     card = (dataset_root / "README.md").read_text(encoding="utf-8")
     assert "config_name: all" in card
     assert "config_name: thinking" in card
@@ -294,7 +387,8 @@ def test_completed_dataset_uploads_as_a_private_dataset_repository_and_reuses_re
     assert execute_teacher_dataset(
         settings_path,
         api=api,  # type: ignore[arg-type]
-        snapshot_resolver=lambda _source, _revision: tmp_path / "snapshot",
+        snapshot_resolver=lambda _teacher: tmp_path / "snapshot",
+        tokenizer_snapshot_resolver=lambda _source, _revision: tmp_path / "tokenizer",
         source_loader=lambda _source, _seed: (),
         trace_preparer=_fake_trace_preparer,
         progress=lambda _event, _fields: None,
@@ -325,8 +419,17 @@ def test_completed_dataset_uploads_as_a_private_dataset_repository_and_reuses_re
 class _RevisionApi:
     @staticmethod
     def model_info(source: str) -> SimpleNamespace:
-        assert source == "Qwen/Qwen3-8B"
-        return SimpleNamespace(sha="resolved-teacher-revision")
+        revisions = {
+            "unsloth/Qwen3-8B-GGUF": "resolved-teacher-revision",
+            "unsloth/Qwen3-8B": "resolved-tokenizer-revision",
+        }
+        return SimpleNamespace(sha=revisions[source])
+
+    @staticmethod
+    def list_repo_files(source: str, *, revision: str) -> list[str]:
+        assert source == "unsloth/Qwen3-8B-GGUF"
+        assert revision == "resolved-teacher-revision"
+        return ["Qwen3-8B-BF16.gguf"]
 
 
 def test_interactive_menu_defaults_to_small_dual_mode_larger_teacher_and_persists_before_run(
@@ -334,14 +437,13 @@ def test_interactive_menu_defaults_to_small_dual_mode_larger_teacher_and_persist
 ) -> None:
     catalog = (
         Path(__file__).resolve().parents[2]
-        / "experiments"
-        / "recipes"
-        / "interactive_recommended_models.yaml"
+        / "tools"
+        / "teacher_dataset_models.yaml"
     )
     dispatched: list[Path] = []
     outputs: list[str] = []
 
-    # UltraChat, Qwen3, default Qwen3-8B, both modes, 512 rows, 2048 tokens,
+    # UltraChat, Qwen3, default Unsloth Qwen3-8B GGUF, both modes, 512 rows, 2048 tokens,
     # llama.cpp, CUDA, no upload, start.
     result = run_interactive_teacher_dataset(
         tmp_path,
@@ -355,8 +457,11 @@ def test_interactive_menu_defaults_to_small_dual_mode_larger_teacher_and_persist
     assert result == 0
     assert len(dispatched) == 1
     settings, _digest = load_teacher_dataset_settings(dispatched[0])
-    assert settings.teacher.source == "Qwen/Qwen3-8B"
+    assert settings.teacher.source == "unsloth/Qwen3-8B-GGUF"
     assert settings.teacher.revision == "resolved-teacher-revision"
+    assert settings.teacher.tokenizer_source == "unsloth/Qwen3-8B"
+    assert settings.teacher.tokenizer_revision == "resolved-tokenizer-revision"
+    assert settings.teacher.gguf_filename == "Qwen3-8B-BF16.gguf"
     assert settings.generation.samples_per_mode == 512
     assert settings.generation.modes == (
         ReasoningMode.THINKING,

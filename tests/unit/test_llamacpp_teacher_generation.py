@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -86,3 +87,31 @@ def test_llamacpp_teacher_session_rejects_changed_prompt_token_count(
 
     with pytest.raises(RuntimeError, match="prompt-token count"):
         session.generate((10, 20), 128)
+
+
+def test_prebuilt_teacher_gguf_is_reused_without_conversion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    gguf = snapshot / "Qwen3-8B-BF16.gguf"
+    gguf.write_bytes(b"prebuilt")
+    events: list[tuple[str, object]] = []
+    monkeypatch.setattr(
+        teacher,
+        "_prepare_bfloat16_gguf",
+        lambda *_args: (_ for _ in ()).throw(
+            AssertionError("prebuilt Unsloth GGUF must not be converted")
+        ),
+    )
+
+    selected = teacher._resolve_teacher_gguf(
+        snapshot,
+        tmp_path / "llama.cpp",
+        gguf,
+        lambda event, fields: events.append((event, fields)),
+    )
+
+    assert selected == gguf.resolve()
+    assert events[0][0] == "teacher_llamacpp_prebuilt_reused"

@@ -283,6 +283,7 @@ def _open_teacher_generation_backend(
     *,
     implementation: str,
     sequence_length: int,
+    teacher_gguf_file: str | None,
     progress: TeacherTraceProgress | None,
 ) -> Iterator[_GenerationBackend]:
     if implementation == "hf-greedy-qwen3-v1":
@@ -295,6 +296,7 @@ def _open_teacher_generation_backend(
             tokenizer,
             device=device,
             sequence_length=sequence_length,
+            gguf_path=None if teacher_gguf_file is None else snapshot / teacher_gguf_file,
             progress=progress,
         ) as session:
             yield _GenerationBackend(
@@ -623,6 +625,9 @@ def prepare_teacher_traces(
     seed: int,
     device: str,
     source_adapter_identity: str | None = None,
+    teacher_gguf_file: str | None = None,
+    teacher_tokenizer_source: str | None = None,
+    teacher_tokenizer_revision: str | None = None,
     progress: TeacherTraceProgress | None = None,
 ) -> PreparedTeacherTraces:
     """Generate, validate, checkpoint, and commit coherent teacher turns."""
@@ -643,6 +648,15 @@ def prepare_teacher_traces(
     }
     if source_adapter_identity is not None:
         identity_payload["source_adapter_identity"] = source_adapter_identity
+    if teacher_gguf_file is not None:
+        identity_payload["teacher_gguf_file"] = teacher_gguf_file
+    if (teacher_tokenizer_source is None) != (teacher_tokenizer_revision is None):
+        raise ValueError("teacher tokenizer source and revision must be provided together")
+    if teacher_tokenizer_source is not None:
+        identity_payload["teacher_tokenizer"] = {
+            "source": teacher_tokenizer_source,
+            "revision": teacher_tokenizer_revision,
+        }
     identity = semantic_hash(identity_payload)
     output_path = Path(output)
     reused = _load_artifact(output_path, identity, count)
@@ -683,6 +697,7 @@ def prepare_teacher_traces(
             device,
             implementation=generation.implementation,
             sequence_length=sequence_length,
+            teacher_gguf_file=teacher_gguf_file,
             progress=progress,
         ) as backend:
             pending: list[_PendingAttempt] = []

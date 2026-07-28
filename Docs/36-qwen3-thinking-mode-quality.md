@@ -19,8 +19,9 @@ The mode-aware recovery slice is implemented in the rewrite:
   `quick`, and `final` selections prevent the prepared evaluation slice from overlapping training by content.
 - `tools/build_teacher_dataset.py` now moves teacher response generation out of individual compression runs. It
   creates a small pinned subset (512 accepted records per mode by default), publishes separate thinking and
-  non-thinking Hugging Face configurations, resumes from the existing per-attempt journal, and can use a larger
-  Qwen family member as the explicit teacher. See
+  non-thinking Hugging Face configurations, resumes from the existing per-attempt journal, and uses promoted
+  Unsloth BF16 GGUF teachers such as `unsloth/Qwen3-8B-GGUF`. A larger Qwen family member can be the explicit
+  teacher. See
   [Reusable Teacher-Response Dataset Builder](38-reusable-teacher-dataset-builder.md).
 - A consuming Qwen recipe reads the uploaded complete `messages` turn directly and has no
   `teacher_trace_generation` setting. The uploaded dataset revision, teacher source/revision, prompt source/revision,

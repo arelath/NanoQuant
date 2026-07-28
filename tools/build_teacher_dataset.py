@@ -28,6 +28,7 @@ from nanoquant.teacher_dataset import (
     execute_teacher_dataset,
     new_teacher_dataset_settings,
     resolve_dataset_revision,
+    resolve_gguf_filename,
     resolve_model_revision,
     run_interactive_teacher_dataset,
     write_teacher_dataset_settings,
@@ -49,6 +50,18 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", type=Path, help="new run directory")
     parser.add_argument("--teacher-model", help="Hugging Face teacher model ID")
     parser.add_argument("--teacher-revision", help="teacher commit; resolved when omitted")
+    parser.add_argument(
+        "--teacher-tokenizer",
+        help="matching tokenizer repository; defaults to the teacher without a -GGUF suffix",
+    )
+    parser.add_argument(
+        "--teacher-tokenizer-revision",
+        help="tokenizer commit; resolved when omitted",
+    )
+    parser.add_argument(
+        "--teacher-gguf-file",
+        help="BF16 GGUF entrypoint; auto-detected for a -GGUF teacher repository",
+    )
     parser.add_argument(
         "--source-dataset",
         default=ULTRACHAT_DATASET,
@@ -139,6 +152,21 @@ def _create_settings(args: argparse.Namespace) -> Path:
         source_revision = ULTRACHAT_REVISION
     source_revision = resolve_dataset_revision(args.source_dataset, source_revision)
     teacher_revision = resolve_model_revision(args.teacher_model, args.teacher_revision)
+    default_tokenizer = (
+        args.teacher_model[:-5]
+        if args.teacher_model.lower().endswith("-gguf")
+        else args.teacher_model
+    )
+    tokenizer_source = args.teacher_tokenizer or default_tokenizer
+    tokenizer_revision = resolve_model_revision(
+        tokenizer_source,
+        args.teacher_tokenizer_revision,
+    )
+    gguf_filename = resolve_gguf_filename(
+        args.teacher_model,
+        teacher_revision,
+        args.teacher_gguf_file,
+    )
     implementation = (
         LLAMACPP_TEACHER_TRACE_IMPLEMENTATION
         if args.backend == "llamacpp"
@@ -164,6 +192,9 @@ def _create_settings(args: argparse.Namespace) -> Path:
         teacher=TeacherModel(
             args.teacher_model,
             teacher_revision,
+            tokenizer_source,
+            tokenizer_revision,
+            gguf_filename,
             implementation,
             args.device,
         ),
@@ -194,7 +225,7 @@ def main(argv: list[str] | None = None) -> int:
     supplied = arguments if arguments is not None else sys.argv[1:]
     try:
         if args.interactive or not supplied:
-            catalog = repository_root / "experiments" / "recipes" / "interactive_recommended_models.yaml"
+            catalog = repository_root / "tools" / "teacher_dataset_models.yaml"
             return run_interactive_teacher_dataset(repository_root, catalog)
         if args.resume is not None:
             explicit_options = {

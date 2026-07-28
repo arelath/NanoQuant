@@ -330,6 +330,31 @@ def _stop_server(process: StreamingSubprocess) -> None:
         process.wait()
 
 
+def _resolve_teacher_gguf(
+    snapshot: Path,
+    root: Path,
+    gguf_path: str | Path | None,
+    progress: LlamaCppTeacherProgress | None,
+) -> Path:
+    if gguf_path is None:
+        return _prepare_bfloat16_gguf(snapshot, root, progress)
+    gguf = Path(gguf_path).resolve(strict=True)
+    if gguf.suffix.lower() != ".gguf":
+        raise ValueError(f"prebuilt teacher model is not a GGUF file: {gguf}")
+    try:
+        gguf.relative_to(snapshot)
+    except ValueError as exc:
+        raise ValueError(
+            f"prebuilt teacher GGUF is outside its pinned snapshot: {gguf}"
+        ) from exc
+    if progress is not None:
+        progress(
+            "teacher_llamacpp_prebuilt_reused",
+            {"gguf": str(gguf), "bytes": gguf.stat().st_size},
+        )
+    return gguf
+
+
 @contextmanager
 def open_llamacpp_teacher_session(
     snapshot: str | Path,
@@ -337,13 +362,14 @@ def open_llamacpp_teacher_session(
     *,
     device: str,
     sequence_length: int,
+    gguf_path: str | Path | None = None,
     progress: LlamaCppTeacherProgress | None = None,
 ) -> Iterator[LlamaCppTeacherSession]:
     """Convert once, run one parallel local server, and yield an exact-token client."""
 
     snapshot_path = Path(snapshot).resolve()
     root = _llama_cpp_root()
-    gguf = _prepare_bfloat16_gguf(snapshot_path, root, progress)
+    gguf = _resolve_teacher_gguf(snapshot_path, root, gguf_path, progress)
     server = _server_executable(root)
     parallelism = LLAMACPP_TEACHER_PARALLELISM
     port = _available_port()

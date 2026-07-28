@@ -44,7 +44,7 @@ from nanoquant.infrastructure.teacher_trace_generation import (
 )
 from nanoquant.ports.chat_behavior import ChatBehaviorPort
 
-TEACHER_DATASET_SETTINGS_SCHEMA_VERSION = 1
+TEACHER_DATASET_SETTINGS_SCHEMA_VERSION = 2
 TEACHER_DATASET_ARTIFACT_SCHEMA_VERSION = 1
 TEACHER_DATASET_SETTINGS_KIND = "teacher_response_dataset"
 TEACHER_DATASET_SETTINGS_NAME = "settings.yaml"
@@ -60,7 +60,8 @@ DEFAULT_SAMPLES_PER_MODE = 512
 TeacherDatasetProgress = Callable[[str, Mapping[str, object]], None]
 TeacherTracePreparer = Callable[..., PreparedTeacherTraces]
 SourceRecordLoader = Callable[["TeacherPromptSource", int], Iterable[dict[str, object]]]
-SnapshotResolver = Callable[[str, str], Path]
+SnapshotResolver = Callable[["TeacherModel"], Path]
+TokenizerSnapshotResolver = Callable[[str, str], Path]
 InputFn = Callable[[str], str]
 WriteFn = Callable[[str], None]
 ExecuteFn = Callable[[Path], int]
@@ -133,12 +134,20 @@ class TeacherModel:
 
     source: str
     revision: str
+    tokenizer_source: str
+    tokenizer_revision: str
+    gguf_filename: str | None = None
     implementation: str = LLAMACPP_TEACHER_TRACE_IMPLEMENTATION
     device: str = "cuda"
 
     def __post_init__(self) -> None:
-        if not self.source.strip() or not self.revision.strip():
-            raise ValueError("teacher model source and revision are required")
+        if (
+            not self.source.strip()
+            or not self.revision.strip()
+            or not self.tokenizer_source.strip()
+            or not self.tokenizer_revision.strip()
+        ):
+            raise ValueError("teacher model and tokenizer sources and revisions are required")
         if self.implementation not in {
             "hf-greedy-qwen3-v1",
             LLAMACPP_TEACHER_TRACE_IMPLEMENTATION,
@@ -146,6 +155,16 @@ class TeacherModel:
             raise ValueError(f"unsupported teacher generation backend: {self.implementation!r}")
         if not self.device.strip():
             raise ValueError("teacher generation device is required")
+        if self.gguf_filename is not None:
+            relative = Path(self.gguf_filename)
+            if (
+                relative.is_absolute()
+                or ".." in relative.parts
+                or relative.suffix.lower() != ".gguf"
+            ):
+                raise ValueError("teacher GGUF filename must be a safe relative GGUF path")
+            if self.implementation != LLAMACPP_TEACHER_TRACE_IMPLEMENTATION:
+                raise ValueError("prebuilt GGUF teachers require the llama.cpp backend")
 
 
 @dataclass(frozen=True, slots=True)
@@ -221,6 +240,9 @@ class TeacherCatalogModel:
     family: str
     family_label: str
     source: str
+    tokenizer_source: str
+    gguf_filename: str
+    default: bool = False
 
     @property
     def label(self) -> str:
@@ -292,6 +314,20 @@ def load_teacher_dataset_settings(
             f"teacher dataset settings hash mismatch: {source}; "
             f"expected={expected}, observed={observed}"
         )
+    if payload.get("schema_version") == 1:
+        teacher = payload.get("teacher")
+        if not isinstance(teacher, dict):
+            raise ValueError("legacy teacher dataset settings have no teacher object")
+        teacher_source = teacher.get("source")
+        teacher_revision = teacher.get("revision")
+        if not isinstance(teacher_source, str) or not isinstance(teacher_revision, str):
+            raise ValueError("legacy teacher dataset settings have no pinned teacher")
+        migrated_teacher = dict(teacher)
+        migrated_teacher["tokenizer_source"] = teacher_source
+        migrated_teacher["tokenizer_revision"] = teacher_revision
+        migrated_teacher["gguf_filename"] = None
+        payload["teacher"] = migrated_teacher
+        payload["schema_version"] = TEACHER_DATASET_SETTINGS_SCHEMA_VERSION
     settings = from_dict(
         TeacherDatasetSettings,
         cast(dict[str, Any], payload),
@@ -339,8 +375,125 @@ def resolve_dataset_revision(source: str, revision: str | None, *, api: HfApi | 
     return resolved
 
 
-def resolve_teacher_snapshot(source: str, revision: str) -> Path:
-    return Path(snapshot_download(repo_id=source, revision=revision)).resolve()
+def resolve_gguf_filename(
+    source: str,
+    revision: str,
+    requested: str | None,
+    *,
+    api: HfApi | None = None,
+) -> str | None:
+    """Resolve the BF16 GGUF entrypoint for a GGUF repository."""
+
+    if requested is not None and requested.strip():
+        resolved_request = requested.strip().replace("\\", "/")
+        if source.lower().endswith("-gguf"):
+            client = api or HfApi()
+            files = set(client.list_repo_files(source, revision=revision))
+            if resolved_request not in files:
+                raise FileNotFoundError(
+                    f"requested teacher GGUF is absent from {source}@{revision}: "
+                    f"{resolved_request}"
+                )
+            match = re.match(
+                r"^(.*)-00001-of-(\d{5})\.gguf$",
+                resolved_request,
+                flags=re.IGNORECASE,
+            )
+            if match is not None:
+                expected = int(match.group(2))
+                present = sum(
+                    bool(
+                        re.fullmatch(
+                            re.escape(match.group(1))
+                            + rf"-\d{{5}}-of-{re.escape(match.group(2))}\.gguf",
+                            value,
+                            flags=re.IGNORECASE,
+                        )
+                    )
+                    for value in files
+                )
+                if present != expected:
+                    raise FileNotFoundError(
+                        f"requested teacher GGUF has {present} of {expected} repository shards"
+                    )
+        return resolved_request
+    if not source.lower().endswith("-gguf"):
+        return None
+    client = api or HfApi()
+    candidates = [
+        value
+        for value in client.list_repo_files(source, revision=revision)
+        if value.lower().endswith(".gguf")
+        and "bf16" in value.lower()
+        and not Path(value).name.lower().startswith("mmproj-")
+    ]
+    entrypoints = [
+        value
+        for value in candidates
+        if "-of-" not in value.lower() or "-00001-of-" in value.lower()
+    ]
+    if len(entrypoints) != 1:
+        raise ValueError(
+            f"expected exactly one BF16 GGUF entrypoint in {source}@{revision}; "
+            f"found {entrypoints}"
+        )
+    return entrypoints[0]
+
+
+def _gguf_download_pattern(filename: str) -> str:
+    match = re.match(r"^(.*)-\d{5}-of-(\d{5})\.gguf$", filename, flags=re.IGNORECASE)
+    if match is None:
+        return filename
+    return f"{match.group(1)}-*-of-{match.group(2)}.gguf"
+
+
+def _validate_gguf_snapshot(snapshot: Path, filename: str) -> None:
+    entrypoint = snapshot / filename
+    if not entrypoint.is_file():
+        raise FileNotFoundError(f"pinned Unsloth teacher GGUF is missing: {entrypoint}")
+    match = re.match(r"^(.*)-00001-of-(\d{5})\.gguf$", filename, flags=re.IGNORECASE)
+    if match is None:
+        return
+    expected = int(match.group(2))
+    found = tuple(entrypoint.parent.glob(f"{Path(match.group(1)).name}-*-of-{match.group(2)}.gguf"))
+    if len(found) != expected:
+        raise FileNotFoundError(
+            f"pinned Unsloth teacher GGUF has {len(found)} of {expected} required shards"
+        )
+
+
+def resolve_teacher_snapshot(teacher: TeacherModel) -> Path:
+    patterns = None
+    if teacher.gguf_filename is not None:
+        patterns = [_gguf_download_pattern(teacher.gguf_filename)]
+    snapshot = Path(
+        snapshot_download(
+            repo_id=teacher.source,
+            revision=teacher.revision,
+            allow_patterns=patterns,
+        )
+    ).resolve()
+    if teacher.gguf_filename is not None:
+        _validate_gguf_snapshot(snapshot, teacher.gguf_filename)
+    return snapshot
+
+
+def resolve_tokenizer_snapshot(source: str, revision: str) -> Path:
+    return Path(
+        snapshot_download(
+            repo_id=source,
+            revision=revision,
+            allow_patterns=[
+                "config.json",
+                "generation_config.json",
+                "tokenizer.json",
+                "tokenizer_config.json",
+                "special_tokens_map.json",
+                "chat_template.jinja",
+                "*.model",
+            ],
+        )
+    ).resolve()
 
 
 def _normalized_role(value: object) -> str:
@@ -536,6 +689,10 @@ This dataset contains complete deterministic responses from
 `{settings.teacher.source}` at revision `{settings.teacher.revision}` over a bounded subset of
 `{settings.prompt_source.name}` at revision `{settings.prompt_source.revision}`.
 
+The teacher backend loaded `{settings.teacher.gguf_filename or "the pinned safetensors checkpoint"}`. Prompt
+rendering used `{settings.teacher.tokenizer_source}` at revision
+`{settings.teacher.tokenizer_revision}`.
+
 The source dataset's final assistant answer was discarded. Each replacement assistant turn was generated wholly by
 the pinned teacher in its declared mode and accepted only after EOS, delimiter, non-empty-answer, sequence-length,
 and chat-template round-trip validation.
@@ -645,6 +802,9 @@ def _publish_dataset(
                         "source_hash": record["source_hash"],
                         "teacher_model": settings.teacher.source,
                         "teacher_revision": settings.teacher.revision,
+                        "teacher_gguf_file": settings.teacher.gguf_filename,
+                        "tokenizer_model": settings.teacher.tokenizer_source,
+                        "tokenizer_revision": settings.teacher.tokenizer_revision,
                         "generation_implementation": settings.teacher.implementation,
                         "prompt_token_hash": record["prompt_token_hash"],
                         "response_token_hash": record["response_token_hash"],
@@ -831,6 +991,7 @@ def execute_teacher_dataset(
     *,
     api: HfApi | None = None,
     snapshot_resolver: SnapshotResolver = resolve_teacher_snapshot,
+    tokenizer_snapshot_resolver: TokenizerSnapshotResolver = resolve_tokenizer_snapshot,
     source_loader: SourceRecordLoader = load_prompt_records,
     trace_preparer: TeacherTracePreparer = prepare_teacher_traces,
     progress: TeacherDatasetProgress = _console_progress,
@@ -857,12 +1018,13 @@ def execute_teacher_dataset(
                     "samples_per_mode": settings.generation.samples_per_mode,
                 },
             )
-            snapshot = snapshot_resolver(
-                settings.teacher.source,
-                settings.teacher.revision,
+            snapshot = snapshot_resolver(settings.teacher)
+            tokenizer_snapshot = tokenizer_snapshot_resolver(
+                settings.teacher.tokenizer_source,
+                settings.teacher.tokenizer_revision,
             )
-            tokenizer = AutoTokenizer.from_pretrained(snapshot, local_files_only=False)
-            behavior: ChatBehaviorPort = chat_behavior_for_snapshot(snapshot)
+            tokenizer = AutoTokenizer.from_pretrained(tokenizer_snapshot, local_files_only=False)
+            behavior: ChatBehaviorPort = chat_behavior_for_snapshot(tokenizer_snapshot)
             unsupported = set(settings.generation.modes) - set(behavior.supported_modes)
             if unsupported:
                 rendered = ", ".join(sorted(mode.value for mode in unsupported))
@@ -890,6 +1052,9 @@ def execute_teacher_dataset(
                     seed=settings.generation.seed,
                     device=settings.teacher.device,
                     source_adapter_identity=_source_adapter_identity(settings.prompt_source),
+                    teacher_gguf_file=settings.teacher.gguf_filename,
+                    teacher_tokenizer_source=settings.teacher.tokenizer_source,
+                    teacher_tokenizer_revision=settings.teacher.tokenizer_revision,
                     progress=progress,
                 )
                 progress(
@@ -936,7 +1101,7 @@ def execute_teacher_dataset(
 
 
 def load_teacher_catalog(path: str | Path) -> tuple[TeacherCatalogModel, ...]:
-    """Read reasoning-capable Qwen families from the existing ordered model catalog."""
+    """Read the ordered, prebuilt-GGUF teacher model catalog."""
 
     payload = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
     if not isinstance(payload, dict) or not isinstance(payload.get("families"), list):
@@ -953,17 +1118,31 @@ def load_teacher_catalog(path: str | Path) -> tuple[TeacherCatalogModel, ...]:
         if not isinstance(variants, list):
             raise ValueError(f"interactive model family {family_id!r} has no variants")
         for variant in variants:
-            if not isinstance(variant, dict) or not str(variant.get("source") or "").strip():
+            if (
+                not isinstance(variant, dict)
+                or not str(variant.get("source") or "").strip()
+                or not str(variant.get("tokenizer_source") or "").strip()
+                or not str(variant.get("gguf_filename") or "").strip()
+            ):
                 raise ValueError(f"interactive model family {family_id!r} has an invalid variant")
             models.append(
                 TeacherCatalogModel(
                     family_id,
                     family_label,
                     str(variant["source"]),
+                    str(variant["tokenizer_source"]),
+                    str(variant["gguf_filename"]),
+                    bool(variant.get("default", False)),
                 )
             )
     if not models:
         raise ValueError("interactive model catalog has no reasoning-capable teacher models")
+    for family, _label in _catalog_families(tuple(models)):
+        defaults = sum(model.default for model in models if model.family == family)
+        if defaults != 1:
+            raise ValueError(
+                f"teacher model family {family!r} must declare exactly one default"
+            )
     return tuple(models)
 
 
@@ -1072,7 +1251,7 @@ def _catalog_families(
 def _choose_teacher(
     console: TeacherDatasetConsole,
     catalog: tuple[TeacherCatalogModel, ...],
-) -> str:
+) -> TeacherCatalogModel:
     families = _catalog_families(catalog)
     console.write("Choose the teacher model family:")
     for index, (_family, label) in enumerate(families, start=1):
@@ -1083,22 +1262,33 @@ def _choose_teacher(
         value = console.input("Teacher model ID: ").strip()
         if not value:
             raise ValueError("teacher model ID is required")
-        return value
+        default_tokenizer = value[:-5] if value.lower().endswith("-gguf") else value
+        tokenizer_source = (
+            console.input(f"Tokenizer model [{default_tokenizer}]: ").strip()
+            or default_tokenizer
+        )
+        gguf_filename = console.input(
+            "BF16 GGUF filename [auto-detect, blank for safetensors]: "
+        ).strip()
+        return TeacherCatalogModel(
+            "custom",
+            "Custom",
+            value,
+            tokenizer_source,
+            gguf_filename,
+            True,
+        )
     family = families[family_choice - 1][0]
     variants = tuple(model for model in catalog if model.family == family)
     default_variant = next(
-        (
-            index
-            for index, model in enumerate(variants, start=1)
-            if model.label in {"Qwen3-8B", "Qwen3.5-9B", "Qwen3.6-27B"}
-        ),
+        (index for index, model in enumerate(variants, start=1) if model.default),
         1,
     )
     console.write(f"Choose a {families[family_choice - 1][1]} teacher:")
     for index, model in enumerate(variants, start=1):
         console.write(f"  {index}. {model.label}")
     choice = console.choose("Selection", len(variants), default=default_variant)
-    return variants[choice - 1].source
+    return variants[choice - 1]
 
 
 def _choose_prompt_source(
@@ -1194,7 +1384,7 @@ def run_interactive_teacher_dataset(
             return 0
 
     source, source_revision, split, subset, messages_column = _choose_prompt_source(console)
-    teacher_source = _choose_teacher(console, load_teacher_catalog(catalog_path))
+    selected_teacher = _choose_teacher(console, load_teacher_catalog(catalog_path))
     modes = _choose_modes(console)
     samples = console.positive_int(
         "Accepted responses per mode",
@@ -1205,13 +1395,24 @@ def run_interactive_teacher_dataset(
     device = console.input("Generation device [cuda]: ").strip() or "cuda"
     console.write("Resolving immutable Hugging Face revisions...")
     pinned_source_revision = resolve_dataset_revision(source, source_revision, api=api)
-    teacher_revision = resolve_model_revision(teacher_source, None, api=api)
+    teacher_revision = resolve_model_revision(selected_teacher.source, None, api=api)
+    tokenizer_revision = resolve_model_revision(
+        selected_teacher.tokenizer_source,
+        None,
+        api=api,
+    )
+    gguf_filename = resolve_gguf_filename(
+        selected_teacher.source,
+        teacher_revision,
+        selected_teacher.gguf_filename or None,
+        api=api,
+    )
 
     upload: TeacherDatasetUpload | None = None
     if console.yes_no("Upload the completed dataset to Hugging Face?", default=True):
         owner = authenticated_huggingface_owner(api=api)
         default_repo = (
-            f"{owner}/{_slug(_source_basename(teacher_source))}-"
+            f"{owner}/{_slug(_source_basename(selected_teacher.source))}-"
             f"{_slug(_source_basename(source))}-teacher-responses"
         )
         repo_id = console.input(f"Dataset repository [{default_repo}]: ").strip() or default_repo
@@ -1227,8 +1428,11 @@ def run_interactive_teacher_dataset(
             messages_column,
         ),
         teacher=TeacherModel(
-            teacher_source,
+            selected_teacher.source,
             teacher_revision,
+            selected_teacher.tokenizer_source,
+            tokenizer_revision,
+            gguf_filename,
             implementation,
             device,
         ),
@@ -1239,10 +1443,14 @@ def run_interactive_teacher_dataset(
         ),
         upload=upload,
     )
-    output = _new_output_path(root, teacher_source, samples, modes)
+    output = _new_output_path(root, selected_teacher.source, samples, modes)
     console.write("Ready to generate")
     console.write(f"  Prompt dataset:  {source}@{pinned_source_revision}")
-    console.write(f"  Teacher:         {teacher_source}@{teacher_revision}")
+    console.write(f"  Teacher:         {selected_teacher.source}@{teacher_revision}")
+    console.write(
+        f"  Tokenizer:       {selected_teacher.tokenizer_source}@{tokenizer_revision}"
+    )
+    console.write(f"  GGUF:            {gguf_filename or 'convert the pinned checkpoint'}")
     console.write(f"  Modes:           {', '.join(mode.value for mode in modes)}")
     console.write(f"  Samples/mode:    {samples}")
     console.write(f"  Backend:         {implementation}")
@@ -1285,7 +1493,10 @@ __all__ = [
     "new_teacher_dataset_settings",
     "normalize_prompt_record",
     "resolve_dataset_revision",
+    "resolve_gguf_filename",
     "resolve_model_revision",
+    "resolve_teacher_snapshot",
+    "resolve_tokenizer_snapshot",
     "run_interactive_teacher_dataset",
     "teacher_dataset_identity",
     "teacher_dataset_settings_hash",

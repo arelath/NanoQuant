@@ -8,9 +8,11 @@ Thinking-model compression should not spend hours regenerating the same teacher 
 `tools/build_teacher_dataset.py` creates a small, pinned, reusable conversational dataset first. Compression runs can
 then consume the uploaded `messages` records without loading a teacher model or repeating generation.
 
-The builder initially supports Qwen3-family chat templates. It can use a larger member of the same family—such as
-Qwen3-8B instead of Qwen3-0.6B—as the teacher. That is a deliberate teacher-transfer target, not an exact
-source-model reproduction, and the teacher model and revision remain visible in every row and in the manifest.
+The builder initially supports Qwen3-family chat templates. Its promoted menu uses Unsloth's prebuilt BF16 GGUF
+repositories, such as `unsloth/Qwen3-8B-GGUF`, and the matching Unsloth tokenizer repository. It can use a larger
+member of the same family—such as Qwen3-8B instead of Qwen3-0.6B—as the teacher. That is a deliberate
+teacher-transfer target, not an exact source-model reproduction, and the GGUF model, tokenizer, file, and revisions
+remain visible in the manifest.
 
 ## Default scope
 
@@ -43,10 +45,9 @@ The menu proceeds in this order:
    - UltraChat 200K is the default.
    - A custom Hugging Face conversational dataset can supply its ID, revision, split, configuration, and messages
      column.
-3. **Teacher family.** The ordered Qwen family list is read from
-   `experiments/recipes/interactive_recommended_models.yaml`.
-4. **Teacher size.** Qwen3-8B is the default Qwen3 teacher; larger or smaller listed variants and a custom model ID
-   are available.
+3. **Teacher family.** The ordered Unsloth Qwen GGUF list is read from `tools/teacher_dataset_models.yaml`.
+4. **Teacher size.** `unsloth/Qwen3-8B-GGUF` is the default Qwen3 teacher; larger or smaller listed variants and a
+   custom model ID are available.
 5. **Response modes.**
    - thinking and non-thinking, default;
    - thinking only;
@@ -55,7 +56,7 @@ The menu proceeds in this order:
 7. **Maximum complete sequence length.** Default: 2,048 tokens. A response that cannot finish within the limit is
    rejected rather than truncated mid-reasoning.
 8. **Generation backend.**
-   - llama.cpp server, default;
+   - llama.cpp server over the selected prebuilt Unsloth BF16 GGUF, default;
    - Transformers greedy generation.
 9. **Generation device.** Default: `cuda`.
 10. **Hugging Face upload.** Upload after local completion is the default. The user chooses the dataset repository
@@ -73,7 +74,9 @@ Example using Qwen3-8B to produce a small dual-mode dataset:
 ```powershell
 .\.venv\Scripts\python.exe tools\build_teacher_dataset.py `
   --output evidence\teacher-datasets\qwen3-8b-ultrachat-512 `
-  --teacher-model Qwen/Qwen3-8B `
+  --teacher-model unsloth/Qwen3-8B-GGUF `
+  --teacher-tokenizer unsloth/Qwen3-8B `
+  --teacher-gguf-file Qwen3-8B-BF16.gguf `
   --mode both `
   --samples-per-mode 512 `
   --backend llamacpp `
@@ -94,6 +97,9 @@ Useful parameters include:
 | --- | --- | --- |
 | `--teacher-model` | Teacher model ID | required outside the menu |
 | `--teacher-revision` | Pinned teacher commit | current commit is resolved once |
+| `--teacher-tokenizer` | Matching tokenizer/chat-template repository | teacher ID without `-GGUF` |
+| `--teacher-tokenizer-revision` | Pinned tokenizer commit | current commit is resolved once |
+| `--teacher-gguf-file` | BF16 GGUF entrypoint | auto-detected for `-GGUF` repositories |
 | `--source-dataset` | Conversational prompt dataset | UltraChat 200K |
 | `--source-revision` | Pinned dataset commit | pinned UltraChat revision or resolved commit |
 | `--source-config` | Dataset configuration/subset | none |
@@ -129,7 +135,8 @@ evidence/teacher-datasets/<run>/
   completion.json
 ```
 
-An immutable settings hash covers the source, teacher, modes, generation limits, device/backend, and upload request.
+An immutable settings hash covers the source, GGUF teacher and file, tokenizer, modes, generation limits,
+device/backend, and upload request.
 The reusable dataset identity excludes only its publication destination and creation timestamp. Existing local data
 is revalidated by size and SHA-256 before reuse. Two processes cannot own the same run directory concurrently.
 
@@ -146,7 +153,7 @@ Every row includes:
 - `messages`, compatible with NanoQuant's `ultrachat_messages` record format;
 - `mode`;
 - prompt source/revision/split/subset and source-record hash;
-- teacher model/revision and generation implementation;
+- teacher GGUF repository/revision/file, tokenizer repository/revision, and generation implementation;
 - prompt, response, and complete-token hashes;
 - prompt/response token counts and stop reason.
 
@@ -180,6 +187,10 @@ A response is accepted only when it:
 - has a non-empty final answer and, for thinking mode, a non-empty reasoning span;
 - fits as a complete record within the sequence limit;
 - round-trips through the pinned teacher chat template.
+
+For Unsloth teachers, snapshot download is restricted to the selected BF16 GGUF (including every shard for a sharded
+entrypoint) and the small matching tokenizer/config files. The llama.cpp backend loads that GGUF directly; it does
+not download every quantization in the repository or reconvert safetensors.
 
 The builder uploads only after all requested local mode files and their manifest have been atomically published.
 Public upload is never the default because prompt and model licensing and generated content must be reviewed first.

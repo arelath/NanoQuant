@@ -305,10 +305,12 @@ def test_llamacpp_teacher_implementation_generates_prompts_concurrently_in_sourc
         *,
         implementation: str,
         sequence_length: int,
+        teacher_gguf_file: str | None,
         progress: object,
     ) -> Iterator[trace_module._GenerationBackend]:
         assert implementation == LLAMACPP_TEACHER_TRACE_IMPLEMENTATION
         assert sequence_length == 512
+        assert teacher_gguf_file is None
         assert progress is None
 
         def generate(prompt: tuple[int, ...], _maximum: int) -> tuple[int, ...]:
