@@ -622,6 +622,7 @@ def prepare_teacher_traces(
     sequence_length: int,
     seed: int,
     device: str,
+    source_adapter_identity: str | None = None,
     progress: TeacherTraceProgress | None = None,
 ) -> PreparedTeacherTraces:
     """Generate, validate, checkpoint, and commit coherent teacher turns."""
@@ -640,6 +641,8 @@ def prepare_teacher_traces(
         "seed": seed,
         "generation": to_dict(generation),
     }
+    if source_adapter_identity is not None:
+        identity_payload["source_adapter_identity"] = source_adapter_identity
     identity = semantic_hash(identity_payload)
     output_path = Path(output)
     reused = _load_artifact(output_path, identity, count)
