@@ -68,6 +68,16 @@ The menu proceeds in this order:
 Settings are written before model loading. An interruption preserves accepted/rejected attempt journals, and the
 next invocation continues without skipping or regenerating committed responses.
 
+For CUDA llama.cpp generation, prompt parallelism is selected at server startup from `4`, `2`, or `1`. The selector
+reads live free/total VRAM through the standard `torch.cuda.mem_get_info` meter in a short-lived helper process,
+subtracts the selected GGUF size, and requires at least 4 GiB of remaining headroom for four slots or 2 GiB for two
+slots at a 2,048-token sequence length. The helper exits before llama.cpp starts, so its CUDA context does not retain
+VRAM. Longer contexts scale those thresholds proportionally. If GPU memory cannot be measured, one slot is the safe
+default. The `teacher_llamacpp_parallelism_selected` progress event records the decision and its inputs.
+
+Set `NANOQUANT_LLAMA_CPP_PARALLELISM=1`, `2`, or `4` to override adaptation for a controlled run. CPU generation
+continues to default to four slots.
+
 ## Parameterized use
 
 Example using Qwen3-8B to produce a small dual-mode dataset:
@@ -189,9 +199,10 @@ A response is accepted only when it:
 - fits as a complete record within the sequence limit;
 - round-trips through the pinned teacher chat template.
 
-The llama.cpp server allocates two internal decode positions beyond the configured sequence limit for every parallel
-slot. Those positions are runtime headroom, not dataset tokens. If llama.cpp still reports a prompt/response context
-limit, that source record is journaled as rejected and generation continues instead of aborting the resumable run.
+The llama.cpp server allocates two internal decode positions beyond the configured sequence limit for every selected
+parallel slot. Those positions are runtime headroom, not dataset tokens. If llama.cpp still reports a prompt/response
+context limit, that source record is journaled as rejected and generation continues instead of aborting the
+resumable run.
 
 For Unsloth teachers, snapshot download is restricted to the selected `UD-Q8_K_XL` GGUF and the small matching
 tokenizer/config files. The promoted catalog names the exact file for every model. The llama.cpp backend loads that

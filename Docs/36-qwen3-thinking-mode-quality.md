@@ -288,15 +288,17 @@ deterministic greedy decoding with one beam and no sampling.
 Teacher generation has two explicit, identity-bearing implementations. The retained
 `hf-greedy-qwen3-v1` path loads the pinned checkpoint through Transformers and generates one prompt at a time so
 existing receipts remain reproducible. The reusable builder uses `llamacpp-server-greedy-qwen3-v1` with the exact
-pinned Unsloth `UD-Q8_K_XL` file: it downloads only that file, starts the pinned local `llama-server` with four
-continuously batched slots, and issues concurrent greedy completions. It never passes the selected Unsloth model
-through a converter or quantizer. The older inline-generation path may still prepare a BF16 GGUF from its pinned
-checkpoint so its existing receipts remain reproducible. Requests pass the Hugging Face-rendered prompt as raw token
-IDs and require raw generated token IDs in return. Prompt caching and every sampling or repetition penalty are
-disabled. Startup compares representative llama.cpp and Hugging Face tokenizer results; every response still passes
-the complete-token template round trip, EOS, mode-delimiter, and sequence-length checks below. The backend name and
-exact GGUF filename participate in trace and dataset identity, so changing runtimes or quantizations cannot silently
-reuse or overwrite evidence.
+pinned Unsloth `UD-Q8_K_XL` file: it downloads only that file, starts the pinned local `llama-server`, and selects
+one, two, or four continuously batched slots from live VRAM headroom. Tight cards therefore preserve GPU offload
+instead of forcing four simultaneous contexts. The selected count and memory inputs are logged, and an environment
+override can pin the count for controlled comparisons. The builder never passes the selected Unsloth model through
+a converter or quantizer. The older inline-generation path may still prepare a BF16 GGUF from its pinned checkpoint
+so its existing receipts remain reproducible. Requests pass the Hugging Face-rendered prompt as raw token IDs and
+require raw generated token IDs in return. Prompt caching and every sampling or repetition penalty are disabled.
+Startup compares representative llama.cpp and Hugging Face tokenizer results; every response still passes the
+complete-token template round trip, EOS, mode-delimiter, and sequence-length checks below. The backend name and exact
+GGUF filename participate in trace and dataset identity, so changing runtimes or quantizations cannot silently reuse
+or overwrite evidence.
 
 The llama.cpp server owns the normal cross-process device lease for its complete lifetime. Download and server
 startup emit progress events. The reusable path validates and loads the pinned prebuilt GGUF directly; legacy

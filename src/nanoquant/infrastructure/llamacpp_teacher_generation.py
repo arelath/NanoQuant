@@ -22,11 +22,24 @@ from nanoquant.infrastructure.io_utils import atomic_write_json, hash_file
 from nanoquant.infrastructure.subprocess_interop import (
     LlamaCppInterop,
     StreamingSubprocess,
+    SubprocessInterop,
+    SubprocessRequest,
 )
 
 LlamaCppTeacherProgress = Callable[[str, Mapping[str, object]], None]
-LLAMACPP_TEACHER_PARALLELISM = 4
+LLAMACPP_TEACHER_PARALLELISM_CANDIDATES = (4, 2, 1)
 LLAMACPP_TEACHER_CONTEXT_HEADROOM = 2
+LLAMACPP_TEACHER_PARALLELISM_ENV = "NANOQUANT_LLAMA_CPP_PARALLELISM"
+_GIB = 2**30
+
+
+@dataclass(frozen=True, slots=True)
+class _ParallelismSelection:
+    parallelism: int
+    reason: str
+    gguf_bytes: int
+    gpu_free_bytes: int | None = None
+    gpu_total_bytes: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -260,6 +273,74 @@ def _server_context_size(sequence_length: int, parallelism: int) -> int:
     return (sequence_length + LLAMACPP_TEACHER_CONTEXT_HEADROOM) * parallelism
 
 
+def _query_cuda_memory(device: str) -> tuple[int, int] | None:
+    probe = (
+        "import sys, torch; "
+        "free, total = torch.cuda.mem_get_info(sys.argv[1]); "
+        "print(f'{free},{total}')"
+    )
+    result = SubprocessInterop().run(
+        SubprocessRequest(
+            (
+                sys.executable,
+                "-c",
+                probe,
+                device,
+            )
+        )
+    )
+    if result.returncode:
+        return None
+    try:
+        free_bytes, total_bytes = (
+            int(value.strip()) for value in result.stdout.splitlines()[-1].split(",")
+        )
+    except (IndexError, TypeError, ValueError):
+        return None
+    return free_bytes, total_bytes
+
+
+def _select_parallelism(
+    gguf_bytes: int,
+    device: str,
+    sequence_length: int,
+    *,
+    gpu_memory: tuple[int, int] | None = None,
+) -> _ParallelismSelection:
+    override = os.environ.get(LLAMACPP_TEACHER_PARALLELISM_ENV)
+    if override is not None:
+        try:
+            selected = int(override)
+        except ValueError as exc:
+            raise ValueError(
+                f"{LLAMACPP_TEACHER_PARALLELISM_ENV} must be 1, 2, or 4"
+            ) from exc
+        if selected not in LLAMACPP_TEACHER_PARALLELISM_CANDIDATES:
+            raise ValueError(f"{LLAMACPP_TEACHER_PARALLELISM_ENV} must be 1, 2, or 4")
+        return _ParallelismSelection(selected, "environment_override", gguf_bytes)
+    if device == "cpu":
+        return _ParallelismSelection(4, "cpu_default", gguf_bytes)
+    observed = gpu_memory if gpu_memory is not None else _query_cuda_memory(device)
+    if observed is None:
+        return _ParallelismSelection(1, "gpu_memory_unavailable", gguf_bytes)
+    free_bytes, total_bytes = observed
+    headroom = free_bytes - gguf_bytes
+    context_scale = max(1.0, sequence_length / 2048)
+    if headroom >= int(4 * _GIB * context_scale):
+        selected = 4
+    elif headroom >= int(2 * _GIB * context_scale):
+        selected = 2
+    else:
+        selected = 1
+    return _ParallelismSelection(
+        selected,
+        "adaptive_vram",
+        gguf_bytes,
+        free_bytes,
+        total_bytes,
+    )
+
+
 def _wait_until_ready(
     endpoint: str,
     process: StreamingSubprocess,
@@ -397,34 +478,47 @@ def open_llamacpp_teacher_session(
     root = _llama_cpp_root()
     gguf = _resolve_teacher_gguf(snapshot_path, root, gguf_path, progress)
     server = _server_executable(root)
-    parallelism = LLAMACPP_TEACHER_PARALLELISM
-    port = _available_port()
-    endpoint = f"http://127.0.0.1:{port}"
     interop = LlamaCppInterop(root)
-    command = (
-        server,
-        "--model",
-        gguf,
-        "--ctx-size",
-        str(_server_context_size(sequence_length, parallelism)),
-        "--parallel",
-        str(parallelism),
-        "--cont-batching",
-        "--no-context-shift",
-        "--host",
-        "127.0.0.1",
-        "--port",
-        str(port),
-        "--offline",
-        "--no-webui",
-        "--log-verbosity",
-        "2",
-        "--gpu-layers",
-        "0" if device == "cpu" else "auto",
-    )
     lease = nullcontext() if device == "cpu" else acquire_device_lease(device)
     started = time.perf_counter()
     with lease:
+        selection = _select_parallelism(gguf.stat().st_size, device, sequence_length)
+        parallelism = selection.parallelism
+        port = _available_port()
+        endpoint = f"http://127.0.0.1:{port}"
+        command = (
+            server,
+            "--model",
+            gguf,
+            "--ctx-size",
+            str(_server_context_size(sequence_length, parallelism)),
+            "--parallel",
+            str(parallelism),
+            "--cont-batching",
+            "--no-context-shift",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(port),
+            "--offline",
+            "--no-webui",
+            "--log-verbosity",
+            "2",
+            "--gpu-layers",
+            "0" if device == "cpu" else "auto",
+        )
+        if progress is not None:
+            progress(
+                "teacher_llamacpp_parallelism_selected",
+                {
+                    "parallelism": parallelism,
+                    "reason": selection.reason,
+                    "gguf_bytes": selection.gguf_bytes,
+                    "gpu_free_bytes": selection.gpu_free_bytes,
+                    "gpu_total_bytes": selection.gpu_total_bytes,
+                    "sequence_length": sequence_length,
+                },
+            )
         process = interop.start_streaming(
             interop.request(
                 command,
