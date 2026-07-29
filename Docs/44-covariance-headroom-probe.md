@@ -144,19 +144,19 @@ blocks, or runtime cost. Down projection also remains unmeasured because its
 
 Those limitations do not weaken the decision the probe was designed to make:
 the diagonal input approximation leaves material, broad, held-out same-rank
-headroom. A format change is still unauthorized. The next experiment should
-test whether the existing factor representation can capture some of this
-headroom by optimizing binary factors against a covariance-aware objective.
-That route changes fit-time math without adding a dense runtime transform,
-storage, or inference arithmetic. A structured input-Hadamard transform
-remains a fallback if covariance-weighted factor optimization cannot realize
-the bound.
+headroom. A format change is still unauthorized. In the pre-registered order
+from `NextQualityLevers.md` §12–13, the next experiment is the cheaper
+input-only structured-Hadamard screen. It tests whether decorrelating inputs
+makes the existing diagonal objective materially closer to the covariance
+floor. Only if that screen fails to close useful headroom should the
+medium-sized generalized covariance-ADMM solve be built.
 
 ### Verdict
 
-Promote a runtime-compatible covariance-weighted factorization screen. Start
-with O, gate, up, and fused QKV on blocks 0, 12, and 24 at identical ranks and
-physical bits, then evaluate disjoint held-out block outputs and joint-splice
-KL. Do not add down projection or alter the persisted format until the smaller
-groups demonstrate that binary optimization realizes a meaningful fraction
-of the 41.53% real-valued headroom.
+Promote an input-only structured-Hadamard screen on O, gate, up, and fused QKV
+for blocks 0, 12, and 24 at identical ranks and factor bits, with down
+projection held identical between arms. Evaluate disjoint held-out covariance
+error, block outputs, and joint-splice KL. If Hadamard fails, promote a
+runtime-compatible covariance-weighted binary factorization screen. Do not add
+down projection or alter the persisted format until one of the smaller-input
+approaches realizes a meaningful fraction of the 41.53% real-valued headroom.
