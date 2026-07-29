@@ -6,8 +6,10 @@ from nanoquant.domain.planning import factor_bit_cost
 from tools.probe_factor_grouping import (
     GroupSpec,
     MemberSpec,
+    _group_cache_key,
     _unique_input_profile_count,
     adjacent_topologies,
+    attention_partition_topologies,
     attention_topologies,
     maximum_rank_for_budget,
     requested_topologies,
@@ -38,6 +40,46 @@ def test_attention_rank_shift_moves_capacity_from_qk_to_vo() -> None:
 
     assert reciprocal.variant == "candidate-qk-plus-vo-vo-shift-64"
     assert [group.rank_adjustment for group in reciprocal.groups] == [-64, 64]
+
+
+def test_attention_partitions_enumerate_bell_four_once() -> None:
+    topologies = attention_partition_topologies(7)
+
+    assert len(topologies) == 15
+    assert topologies[0].variant == "partition-qkv-o"
+    assert {topology.variant for topology in topologies} >= {
+        "partition-qkv-o",
+        "partition-qk-vo",
+        "partition-q-k-v-o",
+        "partition-qkvo",
+    }
+    canonical_partitions = set()
+    for topology in topologies:
+        labels = []
+        covered = []
+        for group in topology.groups:
+            member_labels = tuple(sorted(member.label for member in group.members))
+            labels.append(member_labels)
+            covered.extend(member_labels)
+        assert sorted(covered) == ["7:k", "7:o^T", "7:q", "7:v"]
+        canonical_partitions.add(tuple(sorted(labels)))
+    assert len(canonical_partitions) == 15
+
+
+def test_attention_partition_cache_reuses_identical_member_subsets() -> None:
+    topologies = attention_partition_topologies(7)
+    qk_with_singletons = next(
+        topology for topology in topologies if topology.variant == "partition-qk-v-o"
+    )
+    qk_with_vo = next(topology for topology in topologies if topology.variant == "partition-qk-vo")
+    first_group = next(group for group in qk_with_singletons.groups if group.label == "qk")
+    second_group = next(group for group in qk_with_vo.groups if group.label == "qk")
+
+    assert _group_cache_key(qk_with_singletons, first_group, 586) == _group_cache_key(
+        qk_with_vo,
+        second_group,
+        586,
+    )
 
 
 def test_reciprocal_group_charges_distinct_fisher_input_profiles() -> None:
@@ -83,6 +125,31 @@ def test_requested_topologies_expands_selected_arms_only() -> None:
         "attention-reciprocal|5|candidate-qk-plus-vo",
         "adjacent-up|10-11|current-separate",
         "adjacent-up|10-11|candidate-shared",
+    ]
+
+
+def test_requested_topologies_expands_all_attention_partitions() -> None:
+    topologies = requested_topologies(
+        ("attention-partitions",),
+        (5,),
+        (),
+    )
+
+    assert len(topologies) == 15
+    assert all(topology.comparison == "attention-partitions" for topology in topologies)
+
+
+def test_requested_topologies_filters_attention_partitions() -> None:
+    topologies = requested_topologies(
+        ("attention-partitions",),
+        (5,),
+        (),
+        attention_partition_variants=("partition-qkv-o", "partition-qv-ko"),
+    )
+
+    assert [topology.variant for topology in topologies] == [
+        "partition-qkv-o",
+        "partition-qv-ko",
     ]
 
 

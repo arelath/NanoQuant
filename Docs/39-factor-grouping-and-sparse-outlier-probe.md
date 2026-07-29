@@ -166,6 +166,11 @@ be layer-local.
   within-block attention partitions and demonstrate a held-out block-level
   gain. No production boundary changes are justified by this probe alone.
 
+The exhaustive partition screen is now complete in
+[40-attention-partition-topology-probe.md](40-attention-partition-topology-probe.md).
+It found fixed QV/KO to be a stable corrected-Fisher reconstruction win, while
+retaining held-out functional quality as the next gate.
+
 ## Post-factorization residual follow-up
 
 The sparse idea was subsequently tested directly with

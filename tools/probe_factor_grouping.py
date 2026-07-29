@@ -40,6 +40,7 @@ PROJECTION_PATHS = {
 }
 SUPPORTED_ARMS = (
     "attention-reciprocal",
+    "attention-partitions",
     "adjacent-qkv",
     "adjacent-gate",
     "adjacent-up",
@@ -169,6 +170,52 @@ def attention_topologies(block: int, vo_rank_shift: int = 0) -> tuple[TopologySp
     )
 
 
+def attention_partition_topologies(block: int) -> tuple[TopologySpec, ...]:
+    """Return every set partition of Q, K, V, and transposed O once."""
+
+    members = {
+        "q": MemberSpec(block, "q"),
+        "k": MemberSpec(block, "k"),
+        "v": MemberSpec(block, "v"),
+        "o": MemberSpec(block, "o", True),
+    }
+    # Canonical Bell(4) enumeration. Keep the adopted qkv+o topology first so
+    # reports and tests have one stable baseline.
+    partitions = (
+        (("q", "k", "v"), ("o",)),
+        (("q",), ("k",), ("v",), ("o",)),
+        (("q", "k"), ("v",), ("o",)),
+        (("q", "v"), ("k",), ("o",)),
+        (("q", "o"), ("k",), ("v",)),
+        (("k", "v"), ("q",), ("o",)),
+        (("k", "o"), ("q",), ("v",)),
+        (("v", "o"), ("q",), ("k",)),
+        (("q", "k"), ("v", "o")),
+        (("q", "v"), ("k", "o")),
+        (("q", "o"), ("k", "v")),
+        (("q", "k", "o"), ("v",)),
+        (("q", "v", "o"), ("k",)),
+        (("k", "v", "o"), ("q",)),
+        (("q", "k", "v", "o"),),
+    )
+    result: list[TopologySpec] = []
+    for partition in partitions:
+        labels = tuple("".join(names) for names in partition)
+        groups = tuple(
+            GroupSpec(label, tuple(members[name] for name in names))
+            for label, names in zip(labels, partition, strict=True)
+        )
+        result.append(
+            TopologySpec(
+                "attention-partitions",
+                "partition-" + "-".join(labels),
+                str(block),
+                groups,
+            )
+        )
+    return tuple(result)
+
+
 def adjacent_topologies(projection: str, first: int, second: int) -> tuple[TopologySpec, TopologySpec]:
     if projection not in {"qkv", "gate", "up", "down"}:
         raise ValueError(f"unsupported adjacent projection group: {projection}")
@@ -201,6 +248,7 @@ def requested_topologies(
     attention_blocks: tuple[int, ...],
     adjacent_pairs: tuple[tuple[int, int], ...],
     reciprocal_vo_rank_shifts: tuple[int, ...] = (0,),
+    attention_partition_variants: tuple[str, ...] = (),
 ) -> tuple[TopologySpec, ...]:
     result: list[TopologySpec] = []
     if "attention-reciprocal" in arms:
@@ -209,6 +257,20 @@ def requested_topologies(
             result.append(current)
             for shift in reciprocal_vo_rank_shifts:
                 result.append(attention_topologies(block, shift)[1])
+    if "attention-partitions" in arms:
+        for block in attention_blocks:
+            candidates = attention_partition_topologies(block)
+            if attention_partition_variants:
+                available = {topology.variant for topology in candidates}
+                unknown = sorted(set(attention_partition_variants) - available)
+                if unknown:
+                    raise ValueError(f"unknown attention partition variants: {', '.join(unknown)}")
+                candidates = tuple(
+                    topology
+                    for topology in candidates
+                    if topology.variant in attention_partition_variants
+                )
+            result.extend(candidates)
     for arm in arms:
         if not arm.startswith("adjacent-"):
             continue
@@ -248,6 +310,10 @@ def _parse_arms(value: str) -> tuple[str, ...]:
     if unknown:
         raise argparse.ArgumentTypeError(f"unsupported probe arms: {', '.join(unknown)}")
     return result
+
+
+def _parse_names(value: str) -> tuple[str, ...]:
+    return tuple(item.strip() for item in value.split(",") if item.strip())
 
 
 def _member_shape(handle: Any, member: MemberSpec) -> tuple[int, int]:
@@ -338,7 +404,7 @@ def _write_output(path: Path, payload: dict[str, Any]) -> None:
 
 def _group_cache_key(topology: TopologySpec, group: GroupSpec, rank: int) -> str:
     members = ",".join(member.label for member in group.members)
-    return f"{topology.comparison}|{topology.location}|{topology.variant}|{group.label}|r{rank}|{members}"
+    return f"{topology.comparison}|{topology.location}|group|r{rank}|{members}"
 
 
 def load_calibration_profiles(
@@ -616,6 +682,23 @@ def _comparison_lines(topologies: dict[str, Any]) -> tuple[str, ...]:
     lines: list[str] = []
     for (comparison, location), variants in sorted(grouped.items()):
         ordered = sorted(variants, key=lambda item: str(item["variant"]))
+        if comparison == "attention-partitions" and len(ordered) > 2:
+            baseline = next(
+                (item for item in ordered if item["variant"] == "partition-qkv-o"),
+                None,
+            )
+            if baseline is None:
+                continue
+            best = min(ordered, key=lambda item: float(item["normalized_rmse"]))
+            delta = (
+                float(best["normalized_rmse"]) / float(baseline["normalized_rmse"]) - 1.0
+            ) * 100
+            lines.append(
+                f"{comparison} {location}: baseline={baseline['normalized_rmse']:.6f} "
+                f"best={best['variant']}:{best['normalized_rmse']:.6f}, delta={delta:+.2f}%, "
+                f"bpw={baseline['actual_bpw']:.6f}/{best['actual_bpw']:.6f}"
+            )
+            continue
         if len(ordered) != 2:
             continue
         baseline = next((item for item in ordered if str(item["variant"]).startswith("current-")), None)
@@ -657,6 +740,7 @@ def run(args: argparse.Namespace) -> int:
         args.attention_blocks,
         args.adjacent_pairs,
         args.reciprocal_vo_rank_shifts,
+        args.attention_partition_variants,
     )
     if not topologies:
         raise ValueError("the selected arms and block arguments produce no probe topologies")
@@ -717,6 +801,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--calibration-state", type=Path)
     parser.add_argument("--calibration-shrinkage", type=float, default=0.6)
     parser.add_argument("--reciprocal-vo-rank-shifts", type=_parse_ints, default=(0,))
+    parser.add_argument("--attention-partition-variants", type=_parse_names, default=())
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="cuda:0")
     return parser
