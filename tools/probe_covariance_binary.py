@@ -822,8 +822,21 @@ def _reconstruction_set(
             )
         unit_members.append((key, tuple(layers)))
         unit_errors.append((key, group_error / max(group_target, 1e-30)))
-    if len(reconstructions) != 21 or len({item.layer for item in reconstructions}) != 21:
-        raise ValueError("covariance reconstruction inventory must contain three complete blocks")
+    blocks = {item.layer.block.index for item in reconstructions}
+    expected_layers = len(blocks) * len(PROJECTION_PATHS)
+    if (
+        len(reconstructions) != expected_layers
+        or len({item.layer for item in reconstructions}) != expected_layers
+    ):
+        raise ValueError("covariance reconstruction inventory must contain complete blocks")
+    for block in blocks:
+        paths = {
+            item.layer.path
+            for item in reconstructions
+            if item.layer.block.index == block
+        }
+        if paths != set(PROJECTION_PATHS.values()):
+            raise ValueError(f"covariance reconstruction block {block} is incomplete")
     return SpliceReconstructionSet(
         tuple(reconstructions),
         tuple(unit_members),
@@ -839,6 +852,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--model-revision", default=PINNED_MODEL_REVISION)
     parser.add_argument("--blocks", type=_parse_ints, default=(0, 12, 24))
+    parser.add_argument("--block-output-blocks", type=_parse_ints)
+    parser.add_argument("--full-only", action="store_true")
     parser.add_argument("--fit-tokens", type=int, default=2048)
     parser.add_argument("--held-out-tokens", type=int, default=2048)
     parser.add_argument("--wikitext-samples", type=int, default=12)
@@ -867,8 +882,8 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def run(args: argparse.Namespace) -> int:
-    if args.blocks != (0, 12, 24):
-        raise ValueError("the first covariance-binary screen requires blocks 0, 12, and 24")
+    if not args.blocks or len(set(args.blocks)) != len(args.blocks) or any(block < 0 for block in args.blocks):
+        raise ValueError("covariance-binary blocks must be unique non-negative indices")
     if (
         args.fit_tokens <= 0
         or args.held_out_tokens <= 0
@@ -896,6 +911,9 @@ def run(args: argparse.Namespace) -> int:
     expected_blocks = adapter.decoder_block_count_from_config(config)
     if any(block >= expected_blocks for block in args.blocks):
         raise ValueError("requested block is outside the model")
+    block_output_blocks = args.block_output_blocks or args.blocks
+    if any(block not in args.blocks for block in block_output_blocks):
+        raise ValueError("block-output blocks must be a subset of factorized blocks")
     covariance_samples = math.ceil(
         (args.fit_tokens + args.held_out_tokens) / args.sequence_length
     )
@@ -1005,11 +1023,11 @@ def run(args: argparse.Namespace) -> int:
         output_tokens = functional_tokens[: args.block_output_samples]
         output_reference = _capture_outputs(
             teacher,
-            {block: decoder_blocks[block] for block in args.blocks},
+            {block: decoder_blocks[block] for block in block_output_blocks},
             output_tokens,
             device=args.device,
         )
-        arms = ("full", *(f"block:{block}" for block in args.blocks))
+        arms = ("full",) if args.full_only else ("full", *(f"block:{block}" for block in args.blocks))
         kl_results = {}
         block_outputs = {}
         teacher_batches: tuple[torch.Tensor, ...] | None = None
@@ -1073,6 +1091,8 @@ def run(args: argparse.Namespace) -> int:
         "model_source": MODEL_SOURCE,
         "model_revision": args.model_revision,
         "blocks": list(args.blocks),
+        "block_output_blocks": list(block_output_blocks),
+        "functional_arms": list(arms),
         "refined_groups": sorted(TRANSFORMED_GROUPS),
         "held_identical_group": "down",
         "representation": "diag(post) @ B_left @ diag(mid) @ B_right @ diag(pre)",

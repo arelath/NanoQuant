@@ -6,11 +6,13 @@ import torch
 from nanoquant.domain.metrics import dense_hessian_squared_error
 from nanoquant.domain.scale_fit import reconstruct
 from tools.probe_covariance_binary import (
+    _reconstruction_set,
     fit_covariance_scales,
     left_flip_deltas,
     refine_covariance_signs,
     right_flip_deltas,
 )
+from tools.probe_input_hadamard import block_groups
 
 
 def _fixture() -> tuple[torch.Tensor, ...]:
@@ -179,4 +181,32 @@ def test_covariance_refinement_rejects_shape_and_setting_errors() -> None:
             covariance,
             output,
             left_steps=-1,
+        )
+
+
+def test_covariance_reconstruction_inventory_accepts_any_complete_block_count() -> None:
+    groups = block_groups(4)
+    results = {
+        f"4:{group.label}": {
+            "evaluation": {
+                "original_error": 1.0,
+                "original_target": 2.0,
+            }
+        }
+        for group in groups
+    }
+    members = {
+        f"4:{group.label}": tuple(
+            (member, torch.ones((1, 1)), 1.0) for member in group.members
+        )
+        for group in groups
+    }
+
+    reconstruction = _reconstruction_set(results, members)
+
+    assert len(reconstruction.layers) == 7
+    with pytest.raises(ValueError, match="complete blocks"):
+        _reconstruction_set(
+            {key: value for key, value in results.items() if key != "4:down"},
+            {key: value for key, value in members.items() if key != "4:down"},
         )

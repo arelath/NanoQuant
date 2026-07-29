@@ -1,7 +1,7 @@
 # Covariance-Aware Binary Refinement Screen
 
 **Date:** 2026-07-29
-**Status:** completed; promoted at 32 left-sign steps
+**Status:** representative screen passed at 32 left-sign steps; full-model composition pending
 **Model:** pinned `google/gemma-3-1b-it` revision
 `dcc83ea841ab6100d6b47a070329e1ba4cf78752`
 
@@ -190,3 +190,41 @@ whether local improvements compose across the whole model before this math is
 routed into resident quantization. Down projection needs a low-rank,
 block-diagonal, or sample-space covariance solve and remains a separate
 follow-up rather than silently using a 6,912-wide dense pre-scale system.
+
+## Pre-registered full-model composition follow-up
+
+The generalized harness accepts any inventory of complete blocks. The
+full-model follow-up uses all 26 blocks, retains the selected 32-left-step and
+16-right-batch setting, evaluates only the complete-model splice, and limits
+isolated output captures to blocks 0, 12, and 24. This avoids 26 redundant
+single-block language-model evaluations while retaining early/middle/late
+diagnostics.
+
+The primary gate remains at least a 5% full-splice joint-KL reduction with the
+paired 95% interval entirely below zero. Supporting gates are:
+
+- at least 20% aggregate held-out covariance error-energy reduction;
+- candidate NLL no more than 0.01 nats/token above the diagonal baseline on
+  the exact same retained sequences;
+- exact equality of ranks, factor bits, token hashes, and down reconstructions;
+- no early/middle/late isolated block-output regression.
+
+Passing authorizes integration behind an explicit resident option and a
+complete compression experiment. Failing stops production work until the
+composition failure is localized.
+
+```powershell
+$snapshot = 'C:\Users\pdykstra\.cache\huggingface\hub\models--google--gemma-3-1b-it\snapshots\dcc83ea841ab6100d6b47a070329e1ba4cf78752'
+$blocks = (0..25) -join ','
+.\.venv\Scripts\python.exe tools\probe_covariance_binary.py `
+  --model "$snapshot\model.safetensors" `
+  --snapshot $snapshot `
+  --calibration-state evidence\m4\gemma-cce-fisher-state `
+  --output evidence\m4\covariance-binary-probe\blocks-0-25-depth32.json `
+  --blocks $blocks `
+  --block-output-blocks 0,12,24 `
+  --full-only `
+  --left-flip-steps 32 `
+  --right-flip-batches 16 `
+  --local-files-only
+```
