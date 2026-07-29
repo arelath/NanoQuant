@@ -59,6 +59,19 @@ The promotion threshold is a 20% aggregate reduction in held-out error energy
 for the full-covariance floor relative to the diagonal floor. Per-group results
 are retained to show whether a gain is broad or localized.
 
+The pinned snapshot's single safetensors file was checked for the representative
+QKV, O, and MLP tensor names. The queued command is:
+
+```powershell
+$snapshot = 'C:\Users\pdykstra\.cache\huggingface\hub\models--google--gemma-3-1b-it\snapshots\dcc83ea841ab6100d6b47a070329e1ba4cf78752'
+.\.venv\Scripts\python.exe tools\probe_covariance_headroom.py `
+  --model "$snapshot\model.safetensors" `
+  --snapshot $snapshot `
+  --calibration-state evidence\m4\gemma-cce-fisher-state `
+  --output evidence\m4\covariance-headroom-probe\blocks-0-12-24.json `
+  --local-files-only
+```
+
 Passing this bound does not authorize a format change. It promotes either an
 input-Hadamard screen or a runtime-compatible weighted-ADMM design. Failing the
 bound closes both directions for the tested groups.

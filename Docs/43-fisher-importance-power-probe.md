@@ -51,6 +51,19 @@ Ruff: clean
 mypy: clean
 ```
 
+The pinned snapshot is a single safetensors file and exposes the expected
+`model.layers.*` tensor names. The queued representative command is:
+
+```powershell
+$snapshot = 'C:\Users\pdykstra\.cache\huggingface\hub\models--google--gemma-3-1b-it\snapshots\dcc83ea841ab6100d6b47a070329e1ba4cf78752'
+.\.venv\Scripts\python.exe tools\probe_importance_power.py `
+  --model "$snapshot\model.safetensors" `
+  --snapshot $snapshot `
+  --calibration-state evidence\m4\gemma-cce-fisher-state `
+  --output evidence\m4\importance-power-probe\blocks-0-12-24.json `
+  --local-files-only
+```
+
 No exponent arm has run yet. Experiment 032 currently owns the CUDA device,
 and overlapping a second reconstruction probe would invalidate runtime and
 memory evidence.
