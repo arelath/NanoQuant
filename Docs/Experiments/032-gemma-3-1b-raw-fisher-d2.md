@@ -2,7 +2,9 @@
 
 ## Status
 
-**Prepared; complete run pending.**
+**In progress.** The raw-Fisher uniform control and its exact-unit KL profile
+completed on 2026-07-29. The KL-allocated candidate is running; complete
+compression, export, and quality results remain pending.
 
 - Model: `google/gemma-3-1b-it`
 - Launcher:
@@ -46,4 +48,46 @@ change, so the 13.13% static KL gain is not assumed to transfer.
 
 ## Result
 
-Pending.
+### Completed control and profile
+
+The raw-Fisher uniform control completed all 26 blocks:
+
+- 156 durable journal records, including 26 block commits;
+- resident compression time: 2:10:09;
+- final block entry loss: 2380.173584;
+- final block committed loss: 1939.293457;
+- control run artifact:
+  `sha256-e6dafe60222fb09d123b35f2af4e2ba503f5af6d7194988015e83f9d33a0c460`.
+
+The resumable exact-unit KL profile then completed all 162 arms. Its profile
+key is
+`sha256:ab870f3438dd7f4023bb17523fa1f6140504127041cfce58b49e3996877e2a92`
+and its artifact is
+`sha256-3ec0557df912a4af652d4ea6e290c3b1f683edd4b06d128c0d1cd674a8f56ee9`.
+
+The exact-unit measurements also provide preliminary evidence of exploitable
+cross-block structure:
+
+| Projection type | Mean unit KL | Coefficient of variation | Adjacent-block Pearson |
+| --- | ---: | ---: | ---: |
+| `mlp.down_proj` | 0.071911 | 0.350 | 0.625 |
+| `mlp.gate_proj` | 0.040913 | 0.616 | 0.840 |
+| `mlp.up_proj` | 0.040620 | 0.446 | 0.841 |
+| `self_attn.attn_qkv` | 0.024226 | 0.570 | 0.434 |
+| `self_attn.o_proj` | 0.026989 | 0.560 | 0.448 |
+
+Across blocks, the exact-unit KL vectors for `mlp.gate_proj` and
+`mlp.up_proj` have Pearson correlation 0.943. `mlp.down_proj` has the largest
+mean sensitivity, while the smallest exact-unit arms are concentrated in
+late-block attention. This supports block-aware allocation and confirms that
+nearby blocks are not independent, but it does not justify tying their
+weights or ranks: the coefficients of variation remain substantial and the
+complete D2 allocator must still prove that using the individual measurements
+improves end quality.
+
+### Pending
+
+The candidate is currently running its resumable 130-unit measured rank-probe
+stage. The final verdict remains pending candidate block completion, strict
+artifact validation, export, effective BPW measurement, and the retained
+WikiText quality comparison.
