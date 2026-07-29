@@ -304,6 +304,18 @@ up, and fused QKV on blocks 0, 12, and 24; hold ranks, factor bits, output Fishe
 and downstream evaluation fixed. Down projection remains out of the first dense-covariance
 screen because its 6,912-wide input metric is a separate memory problem.
 
+**2026-07-29 measured binary-format result: passed.** Direct dense-covariance scale solves and
+bounded exact sign-coordinate descent preserve the existing five-tensor representation and exact
+0.999472370 BPW payload. At the selected 32-left-step/16-right-batch depth, held-out covariance
+error falls 30.94% and representative three-block joint KL falls 10.47%, with the paired absolute
+95% interval `[-0.06022, -0.02112]`. All twelve refined groups and all three isolated block
+outputs improve. A 128-step check raises covariance reduction only to 32.11% while weakening KL
+gain to 8.78%, so bounded refinement is better than convergence on the local proxy. The simple
+warm-start solver already captures 74.5% of §7's real-valued headroom; a more complex continuous
+generalized ADMM is no longer the first implementation choice. Promote a 26-block full-splice
+screen at the 32/16 setting, with down still held identical. See
+[Covariance-Aware Binary Refinement Screen](../46-covariance-binary-refinement-screen.md).
+
 ### 14. Per-head factorization of attention matrices (expected to lose)
 
 For the record: splitting q/k/v per head before factorization is the semantic version of column

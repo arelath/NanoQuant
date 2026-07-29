@@ -1,7 +1,7 @@
 # Covariance-Aware Binary Refinement Screen
 
 **Date:** 2026-07-29
-**Status:** harness validated; pinned GPU measurement pending
+**Status:** completed; promoted at 32 left-sign steps
 **Model:** pinned `google/gemma-3-1b-it` revision
 `dcc83ea841ab6100d6b47a070329e1ba4cf78752`
 
@@ -108,4 +108,85 @@ $snapshot = 'C:\Users\pdykstra\.cache\huggingface\hub\models--google--gemma-3-1b
 
 ## Result
 
-Pending the pinned GPU run.
+The pre-registered run and two bounded depth checks completed on 2026-07-29
+without an overlapping NanoQuant worker. All arms use exactly 80,468,496
+factor bits, or 0.999472370 BPW, with identical ranks and tensor-identical
+down projections.
+
+### Retained artifacts
+
+| Left steps / right batches | Artifact | SHA-256 |
+| ---: | --- | --- |
+| 8 / 8 | `evidence/m4/covariance-binary-probe/blocks-0-12-24.json` | `cae84a589d6d6e3e6edf48e954f4b152cf4ae3075b2416c3877efd6e426caac1` |
+| 32 / 16 | `evidence/m4/covariance-binary-probe/blocks-0-12-24-depth32.json` | `b752b77acbd80cd5fda5241e4a36a6d94c0da94e8c04cc357bc82101693d8576` |
+| 128 / 32 | `evidence/m4/covariance-binary-probe/blocks-0-12-24-depth128.json` | `7bd2d5a4759da6e10f7ba099c0dea7ecd2fc98a94c6621e1b21e32563b47b33e` |
+
+### Depth selection
+
+| Left steps / right batches | Held-out covariance error reduction | Joint KL reduction | Absolute joint-KL 95% interval |
+| ---: | ---: | ---: | ---: |
+| 8 / 8 | 22.28% | 6.88% | `[-0.03837, -0.01702]` |
+| **32 / 16** | **30.94%** | **10.47%** | **`[-0.06022, -0.02112]`** |
+| 128 / 32 | 32.11% | 8.78% | `[-0.05149, -0.01774]` |
+
+The pre-registered 8-step arm passes both gates. Extending to 32 steps improves
+both metrics substantially. At 128 steps, the local covariance metric gains
+only another 1.18 percentage points while joint KL gives back 1.69 percentage
+points. This is the expected signature of over-optimizing the local proxy, so
+32 steps is the promoted bounded setting rather than “run to convergence.”
+
+### Selected 32-step result
+
+| Aggregate metric | Plain diagonal | Covariance refined | Change |
+| --- | ---: | ---: | ---: |
+| Original-space normalized RMSE | 0.620157 | 0.665852 | +7.37% |
+| Fit-covariance normalized RMSE | 0.140635 | 0.097462 | error energy −51.96% |
+| Held-out covariance normalized RMSE | 0.150204 | 0.124825 | error energy **−30.94%** |
+| Joint-splice KL | 0.398949 | 0.357165 | **−10.47%** |
+| Joint-splice NLL | 4.058265 | 4.059764 | +0.001499 |
+
+The original-space regression is not treated as a contradiction. This solver
+is deliberately trading parameter-space fidelity for directions observed in
+the activation covariance. The nearly neutral joint NLL and strongly improved
+teacher KL show why an unweighted Frobenius gate would reject a functionally
+better reconstruction.
+
+All projection families improve on held-out covariance:
+
+| Projection | Mean error-energy reduction | Range over blocks 0/12/24 |
+| --- | ---: | ---: |
+| O | **35.29%** | 28.07% to 47.11% |
+| Up | 27.25% | 22.75% to 32.02% |
+| Gate | 26.83% | 21.49% to 31.44% |
+| Fused QKV | 25.46% | 21.93% to 29.25% |
+
+Isolated block-output normalized RMSE improves by 10.58% at block 0, 16.08%
+at block 12, and 5.57% at block 24. The isolated KL intervals for all three
+blocks are also entirely below zero. This is broad evidence rather than one
+late-block outlier.
+
+The scale-only first pass reduces the aggregate regularized fit objective by
+4.45%. Signs account for most of the accessible gain: after 32 left steps and
+16 right batches, the fit objective is 49.43% lower, and the final scale pass
+takes it to 50.09% lower. This identifies covariance-guided binary selection,
+not merely a better scale solve, as the operative mechanism.
+
+The incremental refinement took 2.53 seconds over the twelve refined groups
+in this representative run, with a maximum allocated device footprint of
+521,184,768 bytes. These are screen measurements rather than production
+benchmarks, but they show that a direct bounded refinement is much cheaper
+than a second 400-iteration ADMM pass.
+
+### Verdict
+
+Promote covariance-aware binary refinement with 32 left-sign steps and 16
+bounded right-sign batches. It captures 74.5% of the 41.53% real-valued
+held-out covariance headroom while preserving the exact format and bit count,
+and it passes the pre-registered functional gate with margin.
+
+The next gate is a complete 26-block splice screen using the same bounded
+setting, still leaving down projection identical. That run must establish
+whether local improvements compose across the whole model before this math is
+routed into resident quantization. Down projection needs a low-rank,
+block-diagonal, or sample-space covariance solve and remains a separate
+follow-up rather than silently using a 6,912-wide dense pre-scale system.
