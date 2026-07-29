@@ -11,6 +11,8 @@ from nanoquant.config.schema import (
     ADMMConfig,
     ExecutorKind,
     LayerRankBudgetConfig,
+    ObjectiveConfig,
+    ObjectiveKind,
     ObservabilityConfig,
     ProfilingConfig,
     ProfilingLevel,
@@ -81,6 +83,19 @@ def test_admm_orientation_invalidates_commit_identity() -> None:
 
     assert resident._resident_config_hash(request) != resident._resident_config_hash(
         replace(request, admm=ADMMConfig(outer_iterations=1, inner_iterations=1, transpose_wide=True))
+    )
+
+
+def test_covariance_refinement_invalidates_commit_identity() -> None:
+    request = ResidentQuantizationRequest(
+        Path("snapshot"), Path("output"), "fixture/model", "revision", ((1, 2, 3),), device="cpu"
+    )
+
+    assert resident._resident_config_hash(request) != resident._resident_config_hash(
+        replace(
+            request,
+            covariance_refinement=ObjectiveConfig(kind=ObjectiveKind.DENSE_HESSIAN),
+        )
     )
 
 

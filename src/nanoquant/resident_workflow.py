@@ -27,7 +27,6 @@ from nanoquant.config.schema import (
     DType,
     ExecutorKind,
     MemoryPolicyMode,
-    ObjectiveConfig,
     ObjectiveKind,
     ResourceLimitsConfig,
     RunConfig,
@@ -151,10 +150,18 @@ def _validate_supported_recipe(config: RunConfig) -> None:
         "automatic calibration fallback is not yet composed",
     )
     _require(
-        config.calibration.objective == ObjectiveConfig(kind=ObjectiveKind.DIAGONAL),
-        "calibration.objective",
-        "the resident engine currently builds the diagonal objective",
+        config.calibration.objective.kind in {ObjectiveKind.DIAGONAL, ObjectiveKind.DENSE_HESSIAN},
+        "calibration.objective.kind",
+        "the resident engine supports diagonal calibration or dense covariance refinement",
     )
+    if config.calibration.objective.kind is ObjectiveKind.DENSE_HESSIAN:
+        _require(
+            config.calibration.objective.block_size is None
+            and config.calibration.objective.low_rank is None
+            and config.calibration.objective.sampling.max_tokens_per_layer > 0,
+            "calibration.objective",
+            "dense covariance refinement requires positive sampling rows and no block/low-rank shape",
+        )
     _require(
         config.calibration.accumulation_dtype is DType.FLOAT32,
         "calibration.accumulation_dtype",
@@ -393,6 +400,11 @@ def resident_request_from_config(
         scale_fit=config.factorization.scale_fit,
         bias_correction=config.factorization.bias_correction,
         low_rank_patch=config.factorization.low_rank_patch,
+        covariance_refinement=(
+            config.calibration.objective
+            if config.calibration.objective.kind is ObjectiveKind.DENSE_HESSIAN
+            else None
+        ),
         factorized_tuning_epochs=factorized.loop.epochs if factorized.loop.enabled else 0,
         factorized_tuning_batch_size=factorized.loop.batch_size,
         factorized_tuning_learning_rate=factorized_lr,

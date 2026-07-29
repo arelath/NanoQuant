@@ -17,6 +17,7 @@ from nanoquant.config.schema import (
     CalibrationMethod,
     DistillationLoss,
     ExecutorKind,
+    ObjectiveKind,
     RunConfig,
 )
 from nanoquant.domain.models import ArtifactRef
@@ -112,6 +113,23 @@ def test_resident_mapping_rejects_unimplemented_semantics(tmp_path: Path) -> Non
 
     with pytest.raises(ValueError, match="only top_k is implemented"):
         resident_request_from_config(unsupported, _inputs(tmp_path))
+
+
+def test_resident_recipe_maps_dense_objective_to_covariance_refinement(tmp_path: Path) -> None:
+    base = _resident_config()
+    objective = replace(
+        base.calibration.objective,
+        kind=ObjectiveKind.DENSE_HESSIAN,
+        sampling=replace(
+            base.calibration.objective.sampling,
+            max_tokens_per_layer=8192,
+        ),
+    )
+    config = replace(base, calibration=replace(base.calibration, objective=objective))
+
+    request = resident_request_from_config(config, _inputs(tmp_path))
+
+    assert request.covariance_refinement == objective
 
 
 def test_cpu_offload_mapping_requires_large_model_guards(tmp_path: Path) -> None:

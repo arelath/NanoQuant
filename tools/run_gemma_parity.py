@@ -12,6 +12,7 @@ from recipes import BASE_COMPRESSION_TEMPLATE
 
 from nanoquant.config.schema import (
     ActivationRetention,
+    ObjectiveKind,
     ObservabilityConfig,
     ProfilingConfig,
     ProfilingLevel,
@@ -60,6 +61,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--interrupt-after-block-commits", type=int)
     parser.add_argument("--interrupt-after-factorized-tuning-epoch-commits", type=int)
     parser.add_argument("--samples", type=int, default=256)
+    parser.add_argument("--covariance-refinement", action="store_true")
+    parser.add_argument("--covariance-fit-rows", type=int, default=8192)
     parser.add_argument("--admm-outer-iterations", type=int, default=800)
     parser.add_argument("--admm-inner-iterations", type=int, default=5)
     parser.add_argument(
@@ -130,7 +133,22 @@ def main() -> None:
     config = replace(
         base,
         intent=replace(base.intent, experiment_number=None, name=args.output.name),
-        calibration=replace(base.calibration, sample_count=args.samples),
+        calibration=replace(
+            base.calibration,
+            sample_count=args.samples,
+            objective=replace(
+                base.calibration.objective,
+                kind=(
+                    ObjectiveKind.DENSE_HESSIAN
+                    if args.covariance_refinement
+                    else ObjectiveKind.DIAGONAL
+                ),
+                sampling=replace(
+                    base.calibration.objective.sampling,
+                    max_tokens_per_layer=args.covariance_fit_rows,
+                ),
+            ),
+        ),
         reproducibility=replace(base.reproducibility, seed=args.seed),
         factorization=replace(
             base.factorization,

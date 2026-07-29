@@ -15,6 +15,9 @@ from nanoquant.config.schema import (
     ADMMConfig,
     AllocationStrategy,
     ExecutorKind,
+    HessianSamplingConfig,
+    ObjectiveConfig,
+    ObjectiveKind,
     ProfilingConfig,
     ProfilingLevel,
     RankResponseSource,
@@ -37,6 +40,47 @@ from nanoquant.resident_quantization import (
 )
 from nanoquant.resident_replay import capture_and_replay_resident_layer
 from nanoquant.runtime import RuntimeModelMetadata, convert_logical_to_packed
+
+
+def test_resident_covariance_refinement_is_explicit_and_persisted(tmp_path: Path) -> None:
+    snapshot = tmp_path / "snapshot"
+    config = Gemma3TextConfig(
+        vocab_size=32,
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=4,
+    )
+    Gemma3ForCausalLM(config).save_pretrained(snapshot, safe_serialization=True)
+    output = tmp_path / "run"
+    request = ResidentQuantizationRequest(
+        snapshot,
+        output,
+        "fixture/gemma3",
+        "pinned-test-revision",
+        ((1, 2, 3, 4),),
+        device="cpu",
+        target_bpw=8.0,
+        rank_multiple=1,
+        admm=ADMMConfig(outer_iterations=2, inner_iterations=1),
+        covariance_refinement=ObjectiveConfig(
+            kind=ObjectiveKind.DENSE_HESSIAN,
+            sampling=HessianSamplingConfig(max_tokens_per_layer=4),
+        ),
+        profiling=ProfilingConfig(level=ProfilingLevel.OFF),
+        registry_root=tmp_path / "runs",
+    )
+
+    result = run_resident_quantization(request)
+
+    assert len(result.blocks) == 1
+    events = [json.loads(line) for line in (output / "events.jsonl").read_text().splitlines()]
+    names = [event["name"] for event in events]
+    assert names.count("covariance_refinement.captured") == 1
+    assert names.count("covariance_refinement.completed") == 7
+    assert load_completed_resident_quantization(request).identity == result.identity
 
 
 def test_resident_quantization_commits_complete_transformers_model(

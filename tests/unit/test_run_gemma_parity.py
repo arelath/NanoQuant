@@ -14,6 +14,8 @@ def test_parity_launcher_inherits_logical_tuning_batch_for_microbatch_default() 
     assert args.nonfactorized_tuning_batch_size == 8
     assert args.post_block_refit_batch_size == 8
     assert args.tuning_microbatch_size is None
+    assert args.covariance_refinement is False
+    assert args.covariance_fit_rows == 8192
     assert args.output == Path("run")
 
 

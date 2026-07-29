@@ -27,7 +27,7 @@ from nanoquant.application.calibration_artifacts import (
     build_objectives,
     persist_calibration,
 )
-from nanoquant.application.covariance import SplitDenseCovarianceAccumulator
+from nanoquant.application.covariance import DenseCovarianceAccumulator, SplitDenseCovarianceAccumulator
 from nanoquant.application.device_batches import iter_device_batches
 from nanoquant.application.kl_budget import (
     interaction_corrected_unit_kl_anchors,
@@ -83,6 +83,7 @@ from nanoquant.config.schema import (
     LayerRankBudgetConfig,
     LowRankPatchConfig,
     ObjectiveConfig,
+    ObjectiveKind,
     ObservabilityConfig,
     OutlierConfig,
     ProfilingConfig,
@@ -101,6 +102,7 @@ from nanoquant.config.schema import (
     SharedInputGroupConfig,
 )
 from nanoquant.domain.calibration_math import weighted_group_output_importance
+from nanoquant.domain.covariance_refinement import refine_binary_factors_under_covariance
 from nanoquant.domain.factorization import AdmmParameters, factorize_admm_with_parameters
 from nanoquant.domain.linear_math import chunk_slices
 from nanoquant.domain.metrics import reconstruction_metrics
@@ -133,6 +135,7 @@ from nanoquant.domain.models import (
     ReconstructionRankDecision,
     ScaleFitRequest,
     ScaleFitResult,
+    ScaleState,
     SharedInputGroupCandidate,
     SharedInputGroupPlan,
     SharedInputGroupResult,
@@ -141,6 +144,7 @@ from nanoquant.domain.models import (
     TensorRef,
     TensorSpec,
 )
+from nanoquant.domain.objectives import regularize_covariance
 from nanoquant.domain.outliers import reconstruct_with_outliers
 from nanoquant.domain.planning import (
     RankResponseSegment,
@@ -210,7 +214,8 @@ from nanoquant.infrastructure.tuning_checkpoint import (
 from nanoquant.ports.event_sink import EventSink, LayerCommittedPayload, emit_layer_committed
 from nanoquant.ports.model_adapter import ModelAdapter
 
-RESIDENT_ALGORITHM_VERSION = 49
+RESIDENT_ALGORITHM_VERSION = 50
+COVARIANCE_REFINEMENT_MAX_INPUT_FEATURES = 2048
 _THROUGHPUT_PROBE_REPETITIONS = 5
 _THROUGHPUT_PROBE_WARMUP_WORKLOADS = 3
 _THROUGHPUT_PROBE_WORKLOADS_PER_SAMPLE = 2
@@ -358,6 +363,7 @@ class ResidentQuantizationRequest:
     scale_fit: ScaleFitConfig = ScaleFitConfig(enabled=False)
     bias_correction: BiasCorrectionConfig = BiasCorrectionConfig()
     low_rank_patch: LowRankPatchConfig = LowRankPatchConfig()
+    covariance_refinement: ObjectiveConfig | None = None
     factorized_tuning_epochs: int = 0
     factorized_tuning_batch_size: int = 8
     factorized_tuning_learning_rate: float = 1e-5
@@ -822,6 +828,99 @@ def _capture_low_rank_patch_statistics(
         refs["fit_input_mean"],
         refs["held_out_input_mean"],
     )
+
+
+@torch.no_grad()
+def _capture_covariance_refinement_metrics(
+    request: ResidentQuantizationRequest,
+    adapter: Any,
+    block: nn.Module,
+    block_plan: BlockPlan,
+    inputs: torch.Tensor,
+    metadata: dict[str, object],
+    tensors: LocalTensorStore,
+    events: EventSink,
+) -> dict[str, TensorRef]:
+    config = request.covariance_refinement
+    if config is None:
+        return {}
+    if config.kind is not ObjectiveKind.DENSE_HESSIAN:
+        raise ValueError("resident covariance refinement requires the dense-Hessian objective")
+    fit_rows = config.sampling.max_tokens_per_layer
+    if fit_rows <= 0:
+        raise ValueError("resident covariance refinement requires positive fit rows")
+    capture_specs: dict[str, tuple[str, int]] = {}
+    for group in block_plan.shared_input_groups:
+        if group.in_features <= COVARIANCE_REFINEMENT_MAX_INPUT_FEATURES:
+            capture_specs[group.name] = (group.members[0].layer.path, group.in_features)
+    for layer in block_plan.layers:
+        if layer.source_weight.spec.shape[1] <= COVARIANCE_REFINEMENT_MAX_INPUT_FEATURES:
+            capture_specs[layer.layer.path] = (
+                layer.layer.path,
+                layer.source_weight.spec.shape[1],
+            )
+    if not capture_specs:
+        return {}
+    accumulators = {
+        unit: DenseCovarianceAccumulator(
+            width,
+            fit_rows,
+            device=request.device,
+        )
+        for unit, (_path, width) in capture_specs.items()
+    }
+
+    def capture(unit: str, positional: tuple[object, ...]) -> None:
+        if not positional or not isinstance(positional[0], torch.Tensor):
+            raise TypeError(f"covariance refinement input is not a tensor: {unit}")
+        accumulators[unit].update(positional[0])
+
+    rows_per_sample = math.prod(inputs.shape[1:-1]) if inputs.ndim > 2 else 1
+    required_samples = math.ceil(fit_rows / rows_per_sample)
+    if required_samples > inputs.shape[0]:
+        raise ValueError(
+            f"covariance refinement requires {fit_rows} rows but only "
+            f"{inputs.shape[0] * rows_per_sample} are available"
+        )
+    with ExitStack() as stack:
+        for unit, (path, _width) in capture_specs.items():
+            handle = block.get_submodule(path).register_forward_pre_hook(
+                lambda _module, positional, unit=unit: capture(unit, positional)
+            )
+            stack.callback(handle.remove)
+        output = _run_block_batched(
+            adapter,
+            block,
+            inputs[:required_samples],
+            metadata,
+            min(request.block_forward_batch_size, required_samples),
+            "cpu",
+        )
+        del output
+    regularization = config.regularization
+    result = {}
+    for unit, accumulator in accumulators.items():
+        covariance, _mean = accumulator.materialize()
+        covariance = regularize_covariance(
+            covariance,
+            damp_fraction=regularization.diagonal_damp_fraction,
+            identity_shrinkage=regularization.identity_shrinkage,
+            diagonal_blend=regularization.diagonal_blend,
+        )
+        result[unit] = tensors.put(
+            "covariance-refinement-metric",
+            {"covariance": covariance},
+        )["covariance"]
+    events.emit(
+        "resident-quantization",
+        "info",
+        "covariance_refinement.captured",
+        block=block_plan.block.index,
+        fit_rows=fit_rows,
+        units=sorted(result),
+        skipped_max_input_features=COVARIANCE_REFINEMENT_MAX_INPUT_FEATURES,
+    )
+    return result
 
 
 def _inventory_block_elements(block: Any) -> int:
@@ -1895,6 +1994,115 @@ def _account_for_patch_acceptance(
     )
 
 
+def _run_covariance_refinement(
+    request: ResidentQuantizationRequest,
+    accepted: AcceptedFactorization,
+    fitted: ScaleFitResult | None,
+    residual_weight: TensorRef,
+    objective: ObjectiveSpec,
+    outliers: OutlierSelectionResult,
+    covariance: TensorRef | None,
+    context: StageContext,
+) -> tuple[AcceptedFactorization, ScaleFitResult | None]:
+    if covariance is None:
+        return accepted, fitted
+    started = time.perf_counter()
+    factorized = accepted.result
+    scales = factorized.factors.scales
+    if scales.mid is None:
+        raise ValueError("covariance refinement requires an explicit mid scale")
+    with (
+        context.tensor_store.read(residual_weight, request.device) as target,
+        context.tensor_store.read(factorized.factors.left_binary, request.device) as left,
+        context.tensor_store.read(factorized.factors.right_binary, request.device) as right,
+        context.tensor_store.read(scales.pre, request.device) as scale_pre,
+        context.tensor_store.read(scales.mid, request.device) as scale_mid,
+        context.tensor_store.read(scales.post, request.device) as scale_post,
+        context.tensor_store.read(covariance, request.device) as metric,
+        context.tensor_store.read(objective.input_importance, request.device) as input_importance,
+        context.tensor_store.read(objective.output_importance, request.device) as output_importance,
+        context.tensor_store.read(outliers.indices, request.device) as protected_columns,
+    ):
+        refined = refine_binary_factors_under_covariance(
+            target,
+            left,
+            right,
+            scale_pre,
+            scale_mid,
+            scale_post,
+            metric,
+            output_importance,
+            protected_columns=protected_columns,
+        )
+        refs = context.tensor_store.put(
+            "covariance-binary-refinement",
+            {
+                "left_binary": refined.left_binary,
+                "right_binary": refined.right_binary,
+                "scale_pre": refined.scale_pre,
+                "scale_mid": refined.scale_mid,
+                "scale_post": refined.scale_post,
+            },
+        )
+        new_scales = ScaleState(
+            refs["scale_pre"],
+            refs["scale_mid"],
+            refs["scale_post"],
+        )
+        metrics = reconstruction_metrics(
+            target,
+            refined.reconstruction,
+            input_importance,
+            output_importance,
+            objective_mode=objective.kind,
+        )
+    factors = replace(
+        factorized.factors,
+        left_latent=refs["left_binary"],
+        right_latent=refs["right_binary"],
+        left_binary=refs["left_binary"],
+        right_binary=refs["right_binary"],
+        scales=new_scales,
+    )
+    wall_seconds = time.perf_counter() - started
+    result = replace(
+        factorized,
+        factors=factors,
+        metrics=metrics,
+        wall_seconds=factorized.wall_seconds + wall_seconds,
+        peak_workspace_bytes=max(
+            factorized.peak_workspace_bytes,
+            peak_device_memory_bytes(request.device) if request.device.startswith("cuda") else 0,
+        ),
+    )
+    if fitted is not None:
+        fitted = replace(fitted, scales=new_scales, after=metrics)
+    context.events.emit(
+        "resident-quantization",
+        "info",
+        "covariance_refinement.completed",
+        block=factorized.layer.block.index,
+        layer=factorized.layer.path,
+        before_covariance_error=refined.before_error,
+        after_covariance_error=refined.after_error,
+        covariance_error_reduction=(
+            (refined.before_error - refined.after_error) / max(refined.before_error, 1e-30)
+        ),
+        left_flips=refined.left_flips,
+        right_flips=refined.right_flips,
+        wall_seconds=wall_seconds,
+    )
+    return (
+        replace(
+            accepted,
+            result=result,
+            wall_seconds=accepted.wall_seconds + wall_seconds,
+            peak_workspace_bytes=max(accepted.peak_workspace_bytes, result.peak_workspace_bytes),
+        ),
+        fitted,
+    )
+
+
 def _resident_config_hash(request: ResidentQuantizationRequest) -> str:
     adaptive_memory = request.memory_plan is not None and request.memory_plan.mode == "adaptive"
     semantic_config = {
@@ -1924,6 +2132,7 @@ def _resident_config_hash(request: ResidentQuantizationRequest) -> str:
         "scale_fit": request.scale_fit,
         "bias_correction": request.bias_correction,
         "low_rank_patch": request.low_rank_patch,
+        "covariance_refinement": request.covariance_refinement,
         "factorized_tuning_epochs": request.factorized_tuning_epochs,
         "factorized_tuning_batch_size": request.factorized_tuning_batch_size,
         "factorized_tuning_learning_rate": request.factorized_tuning_learning_rate,
@@ -5067,6 +5276,16 @@ def _execute_resident_quantization_pipeline(
                 required=request.activation_gpu_cache is ActivationGpuCacheMode.BOTH,
             )
 
+        covariance_refinement_metrics = _capture_covariance_refinement_metrics(
+            request,
+            adapter,
+            working_block,
+            block_plan,
+            teacher_inputs,
+            metadata,
+            tensors,
+            events,
+        )
         unit_schedule = block_plan.unit_order or (
             tuple(group.name for group in block_plan.shared_input_groups)
             + tuple(layer.layer.path for layer in block_plan.layers)
@@ -5176,6 +5395,16 @@ def _execute_resident_quantization_pipeline(
                 with _profile_layer_phase(recorder, block_index, group_plan.name, "factorize"):
                     accepted, outliers, fitted = layer_quantizer.factorize(
                         synthetic_plan, source_ref, budget
+                    )
+                    accepted, fitted = _run_covariance_refinement(
+                        request,
+                        accepted,
+                        fitted,
+                        outliers.residual_weight,
+                        synthetic_plan.objective,
+                        outliers,
+                        covariance_refinement_metrics.get(group_plan.name),
+                        context,
                     )
                 factorized = accepted.result
                 bias_correction = _run_bias_correction(
@@ -5554,6 +5783,16 @@ def _execute_resident_quantization_pipeline(
                 with _profile_layer_phase(recorder, block_index, layer_plan.layer.path, "factorize"):
                     accepted, outliers, fitted = layer_quantizer.factorize(
                         layer_plan, source_ref, budget
+                    )
+                    accepted, fitted = _run_covariance_refinement(
+                        request,
+                        accepted,
+                        fitted,
+                        outliers.residual_weight,
+                        layer_plan.objective,
+                        outliers,
+                        covariance_refinement_metrics.get(layer_plan.layer.path),
+                        context,
                     )
                 with _profile_layer_phase(recorder, block_index, layer_plan.layer.path, "materialize"):
                     factorized = accepted.result
