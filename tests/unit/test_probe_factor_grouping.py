@@ -7,6 +7,7 @@ from tools.probe_factor_grouping import (
     GroupSpec,
     MemberSpec,
     _group_cache_key,
+    _materialized_member_reconstructions,
     _unique_input_profile_count,
     adjacent_topologies,
     attention_partition_topologies,
@@ -104,6 +105,24 @@ def test_shared_qk_group_reuses_equivalent_fisher_input_profile() -> None:
     }
 
     assert _unique_input_profile_count(group, profiles) == 1
+
+
+def test_materialized_reconstructions_restore_transposed_member_orientation() -> None:
+    group = GroupSpec(
+        "q-o",
+        (
+            MemberSpec(7, "q"),
+            MemberSpec(7, "o", True),
+        ),
+    )
+    stacked = torch.arange(18, dtype=torch.float32).reshape(6, 3)
+
+    q, o = _materialized_member_reconstructions(group, stacked, (2, 4))
+
+    assert q.weight.shape == (2, 3)
+    assert torch.equal(q.weight, stacked[:2])
+    assert o.weight.shape == (3, 4)
+    assert torch.equal(o.weight, stacked[2:].mT)
 
 
 def test_adjacent_down_shares_the_output_axis_by_transposing_members() -> None:

@@ -149,7 +149,7 @@ The heterogeneous per-block oracle additionally requires five topology kinds.
 Its 0.316% advantage over a two-topology policy is unlikely to justify that
 format and tuning complexity without a much larger held-out quality gain.
 
-## Decision and next gate
+## Matrix-stage decision and next gate
 
 - Record fixed QV/KO as a **successful reconstruction candidate**. It is the
   only universally applied alternative among all 15 partitions that beats
@@ -170,3 +170,14 @@ format and tuning complexity without a much larger held-out quality gain.
 The broad compression goal remains open. This result identifies a real new
 candidate and also falsifies 13 fixed alternatives, but it is not sufficient
 evidence for a production format change.
+
+## Functional-gate outcome
+
+The next gate is now complete in
+[Document 41](41-attention-partition-functional-gate.md). QV/KO fails decisively:
+it raises full-attention held-out teacher KL by 27.29%, with a paired 95%
+interval wholly above zero, and worsens isolated attention-output RMSE by about
+19.5% in both tested high-gain blocks. QV/KO is therefore a successful
+matrix-objective probe but a rejected compression topology. The per-block
+matrix oracle must not be promoted without a new operator-level selection
+objective.

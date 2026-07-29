@@ -107,6 +107,14 @@ class ProbeProtocol:
     calibration_shrinkage: float = 0.0
 
 
+@dataclass(frozen=True, slots=True)
+class MaterializedMemberReconstruction:
+    """One original-orientation dense member retained for functional probes."""
+
+    member: MemberSpec
+    weight: torch.Tensor
+
+
 def maximum_rank_for_budget(
     out_features: int,
     in_features: int,
@@ -521,6 +529,29 @@ def _restore_original_space(
     return members[0] if len(members) == 1 else torch.cat(members, dim=0)
 
 
+def _materialized_member_reconstructions(
+    group: GroupSpec,
+    original_prediction: torch.Tensor,
+    member_rows: tuple[int, ...],
+) -> tuple[MaterializedMemberReconstruction, ...]:
+    if len(group.members) != len(member_rows) or sum(member_rows) != original_prediction.shape[0]:
+        raise ValueError("materialized reconstruction rows do not match the group")
+    result: list[MaterializedMemberReconstruction] = []
+    offset = 0
+    for member, rows in zip(group.members, member_rows, strict=True):
+        weight = original_prediction[offset : offset + rows]
+        if member.transpose:
+            weight = weight.mT
+        result.append(
+            MaterializedMemberReconstruction(
+                member,
+                weight.detach().to(device="cpu").contiguous(),
+            )
+        )
+        offset += rows
+    return tuple(result)
+
+
 def _error_metrics(target: torch.Tensor, prediction: torch.Tensor, member_rows: tuple[int, ...]) -> dict[str, Any]:
     difference = target.float() - prediction.float()
     total_error = float(difference.square().sum())
@@ -548,13 +579,15 @@ def _error_metrics(target: torch.Tensor, prediction: torch.Tensor, member_rows: 
     }
 
 
-def execute_group(
+def execute_group_with_reconstruction(
     handle: Any,
     topology: TopologySpec,
     group: GroupSpec,
     protocol: ProbeProtocol,
     profiles: dict[str, tuple[torch.Tensor, torch.Tensor]] | None,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], tuple[MaterializedMemberReconstruction, ...]]:
+    """Run one group and retain its fitted dense members in original orientation."""
+
     out_features, in_features, source_elements = group_shape(handle, group)
     target_bits = math.floor(source_elements * protocol.target_bpw)
     rank, extra_scale_bits = _planned_group_rank(handle, group, protocol, profiles)
@@ -613,6 +646,11 @@ def execute_group(
     fitted_metrics = _error_metrics(target, fitted.reconstruction, member_rows)
     original_prediction = _restore_original_space(fitted.reconstruction, member_rows, normalizers)
     original_metrics = _error_metrics(raw_target, original_prediction, member_rows)
+    reconstructions = _materialized_member_reconstructions(
+        group,
+        original_prediction,
+        member_rows,
+    )
     peak_bytes = int(torch.cuda.max_memory_allocated(protocol.device)) if protocol.device.startswith("cuda") else 0
     iterations_completed = factorized.iterations_completed
     scale_fit_accepted = fitted.accepted
@@ -620,7 +658,7 @@ def execute_group(
     del factorized, fitted, target, raw_target, original_prediction, input_importance, output_importance
     if protocol.device.startswith("cuda"):
         torch.cuda.empty_cache()
-    return {
+    result = {
         "group_key": group_key,
         "label": group.label,
         "members": [asdict(member) | {"label": member.label} for member in group.members],
@@ -641,6 +679,27 @@ def execute_group(
         "wall_seconds": wall_seconds,
         "peak_device_bytes": peak_bytes,
     }
+    return result, reconstructions
+
+
+def execute_group(
+    handle: Any,
+    topology: TopologySpec,
+    group: GroupSpec,
+    protocol: ProbeProtocol,
+    profiles: dict[str, tuple[torch.Tensor, torch.Tensor]] | None,
+) -> dict[str, Any]:
+    """Run one scalar probe group without retaining its dense reconstruction."""
+
+    result, reconstructions = execute_group_with_reconstruction(
+        handle,
+        topology,
+        group,
+        protocol,
+        profiles,
+    )
+    del reconstructions
+    return result
 
 
 def summarize_topology(topology: TopologySpec, group_results: tuple[dict[str, Any], ...]) -> dict[str, Any]:
