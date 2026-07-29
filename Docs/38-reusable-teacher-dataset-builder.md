@@ -78,6 +78,24 @@ default. The `teacher_llamacpp_parallelism_selected` progress event records the 
 Set `NANOQUANT_LLAMA_CPP_PARALLELISM=1`, `2`, or `4` to override adaptation for a controlled run. CPU generation
 continues to default to four slots.
 
+The promoted CUDA runtime uses explicit flash attention, F16 K/V cache, and a 768 MiB llama.cpp fit target. The
+settings were selected on the retained Qwen3-8B `UD-Q8_K_XL` workload with
+`tools/benchmark_llamacpp_teacher_settings.py`:
+
+| Candidate | Short generation | Complete-response check | Decision |
+| --- | ---: | --- | --- |
+| Flash auto, F16 KV, fit 1,024 | baseline | 2,639/2,639 reference tokens | superseded |
+| Flash on, F16 KV, fit 768 | 3.2–8.5% faster in three paired runs | 2,639/2,639 exact | promoted |
+| Flash on, F16 KV, fit 512 | inconsistent/neutral | short prefixes exact | rejected |
+| Flash on, Q8 K/V | about 3× faster | diverged at tokens 99 and 159; one response missed EOS | rejected |
+| Flash on, Q8 K only | about 16% faster | short response diverged | rejected |
+| Flash on, Q8 V only | slower | short prefixes exact | rejected |
+
+The benchmark uses real accepted UltraChat prompts from the resumable journal, raw token requests, and greedy-token
+comparison. Its JSON output is updated after every candidate. WDDM activity made absolute throughput variable, so
+promotion relies on back-to-back relative results and exact complete-response agreement rather than comparing
+isolated headline rates.
+
 ## Parameterized use
 
 Example using Qwen3-8B to produce a small dual-mode dataset:

@@ -43,6 +43,31 @@ class _ParallelismSelection:
 
 
 @dataclass(frozen=True, slots=True)
+class LlamaCppTeacherRuntimeOptions:
+    """Non-sampling llama.cpp execution controls used by generation and benchmarks."""
+
+    flash_attention: str = "on"
+    cache_type_k: str = "f16"
+    cache_type_v: str = "f16"
+    fit_target_mib: int = 768
+    parallelism: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.flash_attention not in {"on", "off", "auto"}:
+            raise ValueError("llama.cpp flash attention must be on, off, or auto")
+        cache_types = {"f32", "f16", "bf16", "q8_0", "q4_0", "q4_1", "iq4_nl", "q5_0", "q5_1"}
+        if self.cache_type_k not in cache_types or self.cache_type_v not in cache_types:
+            raise ValueError("llama.cpp KV cache type is unsupported")
+        if self.fit_target_mib <= 0:
+            raise ValueError("llama.cpp fit target must be positive")
+        if (
+            self.parallelism is not None
+            and self.parallelism not in LLAMACPP_TEACHER_PARALLELISM_CANDIDATES
+        ):
+            raise ValueError("llama.cpp parallelism must be 1, 2, or 4")
+
+
+@dataclass(frozen=True, slots=True)
 class LlamaCppTeacherSession:
     """Exact-token completion client for one local llama.cpp server."""
 
@@ -470,6 +495,8 @@ def open_llamacpp_teacher_session(
     device: str,
     sequence_length: int,
     gguf_path: str | Path | None = None,
+    runtime_options: LlamaCppTeacherRuntimeOptions | None = None,
+    server_log: Callable[[str], None] | None = None,
     progress: LlamaCppTeacherProgress | None = None,
 ) -> Iterator[LlamaCppTeacherSession]:
     """Convert once, run one parallel local server, and yield an exact-token client."""
@@ -479,10 +506,19 @@ def open_llamacpp_teacher_session(
     gguf = _resolve_teacher_gguf(snapshot_path, root, gguf_path, progress)
     server = _server_executable(root)
     interop = LlamaCppInterop(root)
+    options = runtime_options or LlamaCppTeacherRuntimeOptions()
     lease = nullcontext() if device == "cpu" else acquire_device_lease(device)
     started = time.perf_counter()
     with lease:
-        selection = _select_parallelism(gguf.stat().st_size, device, sequence_length)
+        selection = (
+            _ParallelismSelection(
+                options.parallelism,
+                "runtime_override",
+                gguf.stat().st_size,
+            )
+            if options.parallelism is not None
+            else _select_parallelism(gguf.stat().st_size, device, sequence_length)
+        )
         parallelism = selection.parallelism
         port = _available_port()
         endpoint = f"http://127.0.0.1:{port}"
@@ -503,9 +539,17 @@ def open_llamacpp_teacher_session(
             "--offline",
             "--no-webui",
             "--log-verbosity",
-            "2",
+            "3" if server_log is not None else "2",
             "--gpu-layers",
             "0" if device == "cpu" else "auto",
+            "--flash-attn",
+            options.flash_attention,
+            "--cache-type-k",
+            options.cache_type_k,
+            "--cache-type-v",
+            options.cache_type_v,
+            "--fit-target",
+            str(options.fit_target_mib),
         )
         if progress is not None:
             progress(
@@ -517,13 +561,19 @@ def open_llamacpp_teacher_session(
                     "gpu_free_bytes": selection.gpu_free_bytes,
                     "gpu_total_bytes": selection.gpu_total_bytes,
                     "sequence_length": sequence_length,
+                    "flash_attention": options.flash_attention,
+                    "cache_type_k": options.cache_type_k,
+                    "cache_type_v": options.cache_type_v,
+                    "fit_target_mib": options.fit_target_mib,
                 },
             )
         process = interop.start_streaming(
             interop.request(
                 command,
                 environment=interop.runtime_environment(server),
-            )
+            ),
+            on_stdout=server_log,
+            on_stderr=server_log,
         )
         try:
             _wait_until_ready(endpoint, process, timeout_seconds=300.0)
@@ -546,5 +596,6 @@ def open_llamacpp_teacher_session(
 
 __all__ = [
     "LlamaCppTeacherSession",
+    "LlamaCppTeacherRuntimeOptions",
     "open_llamacpp_teacher_session",
 ]

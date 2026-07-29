@@ -154,7 +154,14 @@ def test_selected_parallelism_controls_server_slots_and_context(
             return command
 
         @staticmethod
-        def start_streaming(_request: object) -> Process:
+        def start_streaming(
+            _request: object,
+            *,
+            on_stdout: object,
+            on_stderr: object,
+        ) -> Process:
+            observed["on_stdout"] = on_stdout
+            observed["on_stderr"] = on_stderr
             return Process()
 
     monkeypatch.setattr(teacher, "_llama_cpp_root", lambda: tmp_path)
@@ -185,6 +192,10 @@ def test_selected_parallelism_controls_server_slots_and_context(
     command = tuple(str(value) for value in observed["command"])  # type: ignore[arg-type]
     assert command[command.index("--parallel") + 1] == "2"
     assert command[command.index("--ctx-size") + 1] == "4100"
+    assert command[command.index("--flash-attn") + 1] == "on"
+    assert command[command.index("--cache-type-k") + 1] == "f16"
+    assert command[command.index("--cache-type-v") + 1] == "f16"
+    assert command[command.index("--fit-target") + 1] == "768"
     selected = next(fields for event, fields in events if event.endswith("parallelism_selected"))
     assert isinstance(selected, dict)
     assert selected["parallelism"] == 2

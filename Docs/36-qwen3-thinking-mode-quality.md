@@ -291,14 +291,16 @@ existing receipts remain reproducible. The reusable builder uses `llamacpp-serve
 pinned Unsloth `UD-Q8_K_XL` file: it downloads only that file, starts the pinned local `llama-server`, and selects
 one, two, or four continuously batched slots from live VRAM headroom. Tight cards therefore preserve GPU offload
 instead of forcing four simultaneous contexts. The selected count and memory inputs are logged, and an environment
-override can pin the count for controlled comparisons. The builder never passes the selected Unsloth model through
-a converter or quantizer. The older inline-generation path may still prepare a BF16 GGUF from its pinned checkpoint
-so its existing receipts remain reproducible. Requests pass the Hugging Face-rendered prompt as raw token IDs and
-require raw generated token IDs in return. Prompt caching and every sampling or repetition penalty are disabled.
-Startup compares representative llama.cpp and Hugging Face tokenizer results; every response still passes the
-complete-token template round trip, EOS, mode-delimiter, and sequence-length checks below. The backend name and exact
-GGUF filename participate in trace and dataset identity, so changing runtimes or quantizations cannot silently reuse
-or overwrite evidence.
+override can pin the count for controlled comparisons. Retained-prompt benchmarking promotes explicit flash
+attention, F16 K/V cache, and a 768 MiB fit target. Q8 KV was rejected despite substantially higher throughput
+because it changed greedy responses and caused one response to miss EOS. The builder never passes the selected
+Unsloth model through a converter or quantizer. The older inline-generation path may still prepare a BF16 GGUF from
+its pinned checkpoint so its existing receipts remain reproducible. Requests pass the Hugging Face-rendered prompt
+as raw token IDs and require raw generated token IDs in return. Prompt caching and every sampling or repetition
+penalty are disabled. Startup compares representative llama.cpp and Hugging Face tokenizer results; every response
+still passes the complete-token template round trip, EOS, mode-delimiter, and sequence-length checks below. The
+backend name and exact GGUF filename participate in trace and dataset identity, so changing runtimes or quantizations
+cannot silently reuse or overwrite evidence.
 
 The llama.cpp server owns the normal cross-process device lease for its complete lifetime. Download and server
 startup emit progress events. The reusable path validates and loads the pinned prebuilt GGUF directly; legacy
