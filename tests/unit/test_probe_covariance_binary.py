@@ -6,6 +6,7 @@ import torch
 from nanoquant.domain.metrics import dense_hessian_squared_error
 from nanoquant.domain.scale_fit import reconstruct
 from tools.probe_covariance_binary import (
+    _parser,
     _reconstruction_set,
     fit_covariance_scales,
     left_flip_deltas,
@@ -210,3 +211,22 @@ def test_covariance_reconstruction_inventory_accepts_any_complete_block_count() 
             {key: value for key, value in results.items() if key != "4:down"},
             {key: value for key, value in members.items() if key != "4:down"},
         )
+
+
+def test_covariance_probe_parser_retains_diagonal_blend() -> None:
+    args = _parser().parse_args(
+        [
+            "--model",
+            "model.safetensors",
+            "--snapshot",
+            "snapshot",
+            "--calibration-state",
+            "calibration",
+            "--output",
+            "result.json",
+            "--covariance-diagonal-blend",
+            "0.5",
+        ]
+    )
+
+    assert args.covariance_diagonal_blend == 0.5

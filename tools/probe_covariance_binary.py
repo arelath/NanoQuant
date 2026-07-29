@@ -606,6 +606,7 @@ def _group_pair(
     held_out_covariance: torch.Tensor | None,
     *,
     damp_fraction: float,
+    covariance_diagonal_blend: float,
     covariance_scale_passes: int,
     left_flip_steps: int,
     right_flip_batches: int,
@@ -627,6 +628,7 @@ def _group_pair(
         else regularize_covariance(
             fit_covariance.to(protocol.device),
             damp_fraction=damp_fraction,
+            diagonal_blend=covariance_diagonal_blend,
         )
     )
     diagonal = raw_input if regularized is None else regularized.diagonal().clone()
@@ -873,6 +875,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--right-flip-batches", type=int, default=8)
     parser.add_argument("--right-flip-batch-size", type=int, default=128)
     parser.add_argument("--damp-fraction", type=float, default=0.01)
+    parser.add_argument("--covariance-diagonal-blend", type=float, default=0.0)
     parser.add_argument("--covariance-promotion-threshold", type=float, default=0.10)
     parser.add_argument("--minimum-relative-kl-gain", type=float, default=0.05)
     parser.add_argument("--seed", type=int, default=0)
@@ -899,7 +902,11 @@ def run(args: argparse.Namespace) -> int:
         or args.right_flip_batch_size <= 0
     ):
         raise ValueError("covariance-binary refinement settings are invalid")
-    if args.damp_fraction < 0 or not 0 <= args.covariance_promotion_threshold <= 1:
+    if (
+        args.damp_fraction < 0
+        or not 0 <= args.covariance_diagonal_blend <= 1
+        or not 0 <= args.covariance_promotion_threshold <= 1
+    ):
         raise ValueError("covariance-binary thresholds are invalid")
     if not 0 <= args.minimum_relative_kl_gain <= 1:
         raise ValueError("minimum relative KL gain must be in [0, 1]")
@@ -987,6 +994,7 @@ def run(args: argparse.Namespace) -> int:
                         None if pair is None else pair[0],
                         None if pair is None else pair[1],
                         damp_fraction=args.damp_fraction,
+                        covariance_diagonal_blend=args.covariance_diagonal_blend,
                         covariance_scale_passes=args.covariance_scale_passes,
                         left_flip_steps=args.left_flip_steps,
                         right_flip_batches=args.right_flip_batches,
@@ -1107,6 +1115,7 @@ def run(args: argparse.Namespace) -> int:
             "covariance_slice_hash": _token_hash(covariance_tokens),
             "functional_slice_hash": _token_hash(functional_tokens),
             "damp_fraction": args.damp_fraction,
+            "covariance_diagonal_blend": args.covariance_diagonal_blend,
             "covariance_scale_passes": args.covariance_scale_passes,
             "left_flip_steps": args.left_flip_steps,
             "right_flip_batches": args.right_flip_batches,

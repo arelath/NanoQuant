@@ -1,7 +1,7 @@
 # Covariance-Aware Binary Refinement Screen
 
 **Date:** 2026-07-29
-**Status:** representative screen passed at 32 left-sign steps; full-model composition pending
+**Status:** full-model primary gate passed; covariance-support threshold narrowly missed
 **Model:** pinned `google/gemma-3-1b-it` revision
 `dcc83ea841ab6100d6b47a070329e1ba4cf78752`
 
@@ -228,3 +228,60 @@ $blocks = (0..25) -join ','
   --right-flip-batches 16 `
   --local-files-only
 ```
+
+### Full-model result
+
+The 26-block run completed in 13.2 minutes and retained:
+
+`evidence/m4/covariance-binary-probe/blocks-0-25-depth32.json`
+
+Its SHA-256 is
+`b8f9832015e403aea67cfa3430663dd9182894b06da7d4fd8f08234ee4096823`.
+Both arms use exactly 697,393,632 physical bits over 697,761,792 source
+weights, or 0.999472370 BPW.
+
+| Full-model metric | Plain diagonal | Covariance refined | Change |
+| --- | ---: | ---: | ---: |
+| Original-space normalized RMSE | 0.612809 | 0.657627 | +7.31% |
+| Fit-covariance normalized RMSE | 0.189562 | 0.141932 | error energy −43.94% |
+| Held-out covariance normalized RMSE | 0.193750 | 0.175330 | error energy **−18.11%** |
+| Joint-splice KL | 4.086728 | 3.214561 | **−21.34%** |
+| Joint-splice NLL | 7.069564 | 6.194533 | **−0.875030** |
+
+The absolute joint-KL change is −0.872167 nats/token with paired 95% interval
+`[-0.936826, -0.806091]`. This decisively passes the primary gate. NLL improves
+by far more than the allowed 0.01 regression, and isolated block-output RMSE
+again improves at blocks 0, 12, and 24 by 10.58%, 16.08%, and 5.57%.
+
+The generic payload promotion field uses the harness's original 10% covariance
+threshold and is therefore `true`. Against the stricter 20% threshold
+pre-registered specifically for this full-model follow-up, the 18.11% result
+is a 1.89-point supporting-gate miss. It is recorded as such rather than
+post-hoc relabeled as a pass.
+
+The miss is not a localized composition failure:
+
+- all 104 refined block/groups improve held-out covariance error;
+- all 26 block aggregates improve, ranging from 11.20% to 31.12%;
+- mean group reductions are 30.78% for O, 20.42% for up, 19.61% for gate,
+  and 17.63% for fused QKV;
+- the three retained isolated block outputs and the full language-model
+  metrics all improve.
+
+Instead, the fit/held gap points to covariance-estimation noise. Across all
+refined groups, the regularized fit objective falls 42.44%, while the disjoint
+held-out objective falls 18.11%. The bounded refinement itself takes 22.49
+seconds across 104 groups and peaks at 520,607,744 allocated device bytes;
+the baseline ADMM work takes 730.36 seconds.
+
+### Full-model verdict
+
+The functional composition question passes strongly, but production
+integration remains paused under the literal pre-registered rule because the
+supporting covariance threshold missed. The failure has been localized to
+fit-to-held generalization rather than a block or projection regression. The
+next bounded experiment therefore shrinks only the off-diagonal fit
+covariance on the three weakest blocks. Its diagonal, baseline reconstruction,
+rank inventory, bits, and downstream protocol remain fixed. An independently
+selected shrinkage must then rerun the 26-block screen before resident
+integration.
