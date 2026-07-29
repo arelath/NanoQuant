@@ -165,3 +165,94 @@ be layer-local.
 - Before changing the resident schema or algorithm version, test the remaining
   within-block attention partitions and demonstrate a held-out block-level
   gain. No production boundary changes are justified by this probe alone.
+
+## Post-factorization residual follow-up
+
+The sparse idea was subsequently tested directly with
+`tools/probe_sparse_residual.py`. This follow-up compares additive patches on
+the same production-ADMM, two-pass scale-fitted residual:
+
+- column arm: BF16 values for complete residual columns plus one I32 index per
+  column;
+- sparse arm: BF16 residual entries plus one flattened I32 coordinate per
+  entry;
+- budget: exact factor bits plus patch bits at no more than 1.0 BPW;
+- selection: oracle corrected-CCE diagonal-Fisher error on the retained
+  256-sample state;
+- factor funding: reduce logical factor rank enough to pay the complete patch
+  cost before fitting, so neither arm receives extra model bits.
+
+The primary output is
+`evidence/m4/sparse-residual-probe/cce-results.json`. It covers all seven
+projection types in blocks 0, 12, and 24 at budgets equivalent to 0, 1, 2, 4,
+and 8 columns.
+
+### Representation efficiency
+
+At the smallest nonzero budget, sparse entries are clearly more efficient than
+columns when both patch the same residual:
+
+| Projection | Factor ranks displaced | Sparse entries | Sparse/column recovered-error ratio | Rank-loss penalty recovered by sparse patch | Final weighted RMSE vs no patch |
+|---|---:|---:|---:|---:|---:|
+| Q | 8 | 342 | 4.69x | 29.6% | +0.626% |
+| K | 3 | 86 | 2.73x | 29.3% | +0.690% |
+| V | 3 | 86 | 3.07x | 35.6% | +0.522% |
+| O | 9 | 384 | 4.21x | 26.8% | +0.732% |
+| Gate | 14 | 2,304 | 5.60x | 31.7% | +0.615% |
+| Up | 14 | 2,304 | 7.22x | 40.5% | +0.544% |
+| Down | 2 | 384 | 5.37x | 80.5% | +0.026% |
+
+Thus the original hypothesis is directionally correct: isolated residual
+entries buy substantially more error reduction per patch bit than whole
+columns. The gain is nevertheless insufficient to pay for the binary-factor
+rank that those bits displace. All seven three-depth aggregates regress, and
+budgets equivalent to 2, 4, or 8 columns regress progressively more. Raw
+Frobenius RMSE also regresses for every projection and tested budget.
+
+### Full down-projection boundary test
+
+Down is the only near-break-even type because a one-column-equivalent patch
+displaces only two factor ranks. The I32-coordinate arm was expanded to all 26
+blocks:
+
+| Measure | Result |
+|---|---:|
+| Individually improved blocks | 7 of 26 |
+| Mean per-block weighted RMSE change | +0.0182% |
+| Median per-block weighted RMSE change | +0.0265% |
+| Global weighted RMSE change | +0.0172% |
+| Sparse/column recovered-error ratio | 4.96x |
+
+The column arm improves no block. A theoretical compact-coordinate ceiling
+then used 23 bits per flattened coordinate, the information minimum for the
+7,962,624-entry down matrices. This raises the sparse count from 384 to 473
+entries per layer and improves 11 of 26 blocks, but global weighted RMSE still
+regresses by 0.0019%. Such bit packing would also be less kernel-friendly than
+I32 coordinates.
+
+Five apparent winners were repeated with two independent ADMM seeds:
+
+| Block | Seed 0 | Seed 1 | Seed 2 |
+|---|---:|---:|---:|
+| 4 | -0.0391% | -0.0514% | -0.0547% |
+| 10 | -0.0152% | -0.0234% | -0.0032% |
+| 12 | -0.0142% | -0.0068% | -0.0109% |
+| 17 | -0.0055% | +0.0070% | +0.0127% |
+| 22 | -0.0173% | +0.0177% | +0.0135% |
+
+Only blocks 4, 10, and 12 retain the sign of their extremely small improvement.
+The magnitude is below a credible held-out or runtime adoption threshold.
+
+### Residual-patch decision
+
+- Sparse residual entries decisively dominate residual columns as a
+  representation, so future patch research should not default to columns.
+- At the tested 1.0-BPW operating point, both residual patch forms lose to
+  spending the same bits on binary-factor rank. Do not add a sparse-entry
+  schema, artifact, or runtime kernel.
+- The result is an in-sample oracle for sparse selection. Held-out selection
+  could only weaken it, so no expensive block-output or full-model arm is
+  justified.
+- Revisit only if another constraint creates otherwise unusable sub-rank budget
+  fragments, an existing sparse kernel makes coordinates effectively free, or
+  the factor-rank response changes materially at a different BPW.
