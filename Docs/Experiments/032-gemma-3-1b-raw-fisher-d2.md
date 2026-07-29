@@ -2,10 +2,13 @@
 
 ## Status
 
-**In progress.** The raw-Fisher uniform control, exact-unit KL profile, and
-candidate measured rank-response profile completed on 2026-07-29. The
-KL-allocated candidate is compressing blocks; complete compression, export,
-and quality results remain pending.
+**Completed and rejected on 2026-07-29.** The full raw-Fisher candidate
+completed compression, global distillation, logical and packed export, GGUF
+export, and the retained quality suite. Its artifact graph passes strict
+validation and its effective BPW is marginally lower than Experiment 022, but
+its protocol-matched WikiText perplexity is 7.22% worse. Zero Fisher
+shrinkage must therefore not replace Experiment 022's 0.6 setting in the D2
+recipe.
 
 - Model: `google/gemma-3-1b-it`
 - Launcher:
@@ -210,9 +213,135 @@ activations. The retained final WikiText evaluator must decide whether the
 regressions are objective-scale artifacts, local errors repaired by later
 blocks and distillation, or a real raw-Fisher quality cost.
 
-### Pending
+### Complete-run integrity and export
 
-The candidate is currently compressing its 26 blocks. The final verdict
-remains pending candidate block completion, strict artifact validation,
-export, effective BPW measurement, and the retained WikiText quality
-comparison.
+The candidate completed 26 blocks, 130 quantized layers, and 2,048 global
+top-k distillation steps. Independent strict validation passed:
+
+- 156 active journal records under one commit identity;
+- 26 contiguous block records and 130 committed layers;
+- 713 transitive artifacts freshly hash-validated;
+- 9,375,377,822 validated resident artifact bytes;
+- 111,552 total rank and no retry bits;
+- exact 26-block, 130-layer logical and packed representations;
+- 89,475,600 packed quantized-layer bytes;
+- a 417,335,488-byte GGUF with SHA-256
+  `a04dce58f36922323294ecc9028c071c447bbe23ec159815780a9dfa30809d0b`.
+
+The strict report is
+`evidence/032/032-raw-fisher-d2-compress-and-benchmark-gemma-3-1b-it/strict-validation.json`.
+The complete export summary is
+`Results/032/gemma-3-1b-it-nanoquant.export-summary.json`.
+
+Final effective BPW is **1.024436744**, versus **1.024494712** for
+Experiment 022. This is a reduction of 0.000057968 BPW. The packed payload
+and complete GGUF are each 5,056 bytes smaller than Experiment 022, so the
+storage gate passes, but the difference is operationally negligible.
+
+### Decisive retained quality result
+
+Experiment 032 and Experiment 022 use the same pinned model and revision,
+tokenizer hash, 64-by-128 WikiText protocol, and WikiText token hash
+`sha256:ef19dc950344a837a1fd6e087c451ed9b26234408e85d0b0e3da4f6c7045ff27`.
+The comparison is therefore protocol matched:
+
+| Metric | Experiment 022 | Experiment 032 | Delta |
+| --- | ---: | ---: | ---: |
+| Effective BPW | 1.024494712 | **1.024436744** | -0.000057968 |
+| WikiText mean NLL | **5.431758** | 5.501507 | +0.069750 |
+| WikiText perplexity | **228.550618** | 245.061068 | **+16.510450 (+7.22%)** |
+| BF16 perplexity | 96.459609 | 96.459609 | identical |
+
+The primary success criterion fails. Raw Fisher's 13.13% held-out KL
+advantage in the static paired probe does not survive allocation,
+factorization, layer/block tuning, global distillation, and final model
+evaluation. The static probe remains useful for rejecting plain Frobenius as
+a local selection metric, but it is not sufficient evidence for promoting a
+Fisher transform into the full recipe.
+
+The six 200-example retention tasks are mixed:
+
+| Task | Experiment 022 | Experiment 032 | Delta |
+| --- | ---: | ---: | ---: |
+| PIQA `acc_norm` | 0.605 | 0.635 | +0.030 |
+| ARC Easy `acc_norm` | 0.380 | 0.380 | 0.000 |
+| ARC Challenge `acc_norm` | 0.215 | 0.250 | +0.035 |
+| HellaSwag `acc_norm` | 0.460 | 0.445 | -0.015 |
+| WinoGrande `acc` | 0.520 | 0.535 | +0.015 |
+| BoolQ `acc` | 0.635 | 0.640 | +0.005 |
+
+Four task point estimates improve, one ties, and one regresses. These small
+limited-task samples are secondary and cannot overturn the much denser
+8,128-token WikiText regression. The complete quality result is in
+`Results/032/032-raw-fisher-d2-compress-and-benchmark-gemma-3-1b-it-quality.json`.
+
+### Why the early trajectory did not transfer
+
+The completed candidate remains better than its raw-Fisher uniform control at
+all 26 resident block boundaries. Its normalized boundary loss is lower by
+16.81% on average and 13.58% at the median, with a range from 2.02% to 33.46%
+lower. This confirms that measured D2 allocation is useful *within the
+raw-Fisher objective*. It does not show that raw Fisher is better than the
+shrunken-Fisher recipe because the uniform control has no retained final
+quality evaluation.
+
+The global-distillation artifact provides a stronger cross-run diagnostic.
+Experiment 022 and 032 have identical distillation token, protocol, and
+block-snapshot hashes. Before distillation, raw Fisher has lower block
+snapshot loss in only 5/26 blocks; its mean and median deltas are +3.06% and
++6.35%. After distillation, it is lower in 10/26 blocks, but its mean and
+median remain +2.42% and +4.61% worse. The final top-k training loss is also
+higher:
+
+| Distillation diagnostic | Experiment 022 | Experiment 032 |
+| --- | ---: | ---: |
+| Steps | 2,048 | 2,048 |
+| Final epoch mean top-k loss | **1.940916** | 1.967622 |
+| Blocks with lower post-KD snapshot loss | — | 10/26 vs 022 |
+| Mean post-KD block-loss delta vs 022 | — | +2.42% |
+| Median post-KD block-loss delta vs 022 | — | +4.61% |
+
+The allocation safety diagnostics point in the same direction without
+proving causality. Experiment 032 accepted 21 units above the unweighted raw
+error threshold, compared with 9 in Experiment 022:
+
+| Unit type | Experiment 032 threshold exceptions | Typical ranks |
+| --- | ---: | --- |
+| `mlp.gate_proj` | 11 | 576, 640, 672 |
+| `mlp.up_proj` | 8 | 576, 608, 672 |
+| fused QKV | 1 | 480 |
+| `self_attn.o_proj` | 1 | 512 |
+
+All 21 units remained below the weighted-error threshold, allocation retries
+were disabled in both complete recipes, and no extra bits were spent. The
+count partly reflects raw Fisher's deliberate willingness to sacrifice
+unweighted mass, so it is not itself a failure. It does show that the
+raw-Fisher response profile drove more units—especially gate/up
+projections—to the edge of the plan. Together with the worse matched
+post-distillation snapshots and final perplexity, it argues against promoting
+zero shrinkage.
+
+### Runtime and memory
+
+| Measurement | Experiment 022 | Experiment 032 | Delta |
+| --- | ---: | ---: | ---: |
+| Complete compression | 10,520.70 s | 12,625.98 s | +20.01% |
+| Resident quantization | 8,954.51 s | 10,235.40 s | +14.30% |
+| Global distillation | 1,501.10 s | 2,306.06 s | +53.62% |
+| Complete workflow wall time | 10,673.57 s | 12,890.58 s | +20.77% |
+| Peak CUDA allocator bytes | 9,196,011,520 | **9,120,514,048** | -0.82% |
+| Peak process host bytes | **15,339,757,568** | 15,363,756,032 | +0.16% |
+| Resident artifact bytes | **12,169,508,380** | 12,267,974,376 | +0.81% |
+
+The runs occurred at different times on the same workstation, so timing
+deltas include system and I/O conditions and are descriptive rather than an
+algorithmic benchmark. Raw Fisher did not provide a meaningful resource
+advantage that could compensate for its quality loss.
+
+## Verdict
+
+Reject zero Fisher shrinkage for the current D2 compression recipe. Retain
+Experiment 022's 0.6 shrinkage baseline while probing intermediate importance
+exponents/shrinkage transforms. The next probe must use held-out functional
+metrics and should treat a promising local result only as a gate to a
+complete retained-quality run, not as a promotion decision.
