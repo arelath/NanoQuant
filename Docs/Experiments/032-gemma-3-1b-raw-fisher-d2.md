@@ -2,9 +2,10 @@
 
 ## Status
 
-**In progress.** The raw-Fisher uniform control and its exact-unit KL profile
-completed on 2026-07-29. The KL-allocated candidate is running; complete
-compression, export, and quality results remain pending.
+**In progress.** The raw-Fisher uniform control, exact-unit KL profile, and
+candidate measured rank-response profile completed on 2026-07-29. The
+KL-allocated candidate is compressing blocks; complete compression, export,
+and quality results remain pending.
 
 - Model: `google/gemma-3-1b-it`
 - Launcher:
@@ -85,9 +86,55 @@ weights or ranks: the coefficients of variation remain substantial and the
 complete D2 allocator must still prove that using the individual measurements
 improves end quality.
 
+### Completed candidate rank-response profile and plan
+
+The candidate completed all 130 resumable rank probes in 1430.58 seconds. Each
+unit measured the calibration-weighted objective at its baseline rank and at
+aligned lower and upper ranks, rather than borrowing a type-wide decay curve.
+The resulting profile artifact is
+`sha256-2a97ce9bba5bf86e76b9b59cc8eca615152464d99323be36749b95b62300dfd2`.
+
+The finalized candidate plan is
+`sha256-71d1bd677956bbdc78691a62d884339273948f814c093b58d7505b6134903ad9`.
+It contains 111,552 total unit ranks, 390 outlier columns, and 714,812,818
+planned bits. Against Experiment 022 at the same target, raw Fisher changes 36
+of 130 unit ranks while retaining the same outlier count:
+
+| Projection type | Changed units | Rank delta vs 022 | Planned-bit delta |
+| --- | ---: | ---: | ---: |
+| `mlp.down_proj` | 7/26 | +64 | +517,120 |
+| `mlp.gate_proj` | 11/26 | +704 | +5,688,320 |
+| `mlp.up_proj` | 12/26 | -672 | -5,429,760 |
+| `self_attn.attn_qkv` | 3/26 | -224 | -605,696 |
+| `self_attn.o_proj` | 3/26 | -96 | -210,432 |
+| **Total** | **36/130** | **-224** | **-40,448** |
+
+The largest individual move is block 9 `mlp.up_proj`, from rank 1088 in
+Experiment 022 to 864 here. The candidate therefore satisfies the planned-cost
+side of the no-higher-BPW gate, although final effective BPW still requires
+completed artifacts and export.
+
+The completed measurements show that the allocation signals are related but
+not interchangeable:
+
+| Signal pair over 130 units | Spearman correlation |
+| --- | ---: |
+| Exact-unit KL vs final rank | 0.815 |
+| Exact-unit KL vs baseline weighted normalized squared error | 0.260 |
+| Exact-unit KL vs lower-rank response slope | -0.344 |
+| Exact-unit KL vs upper-rank response slope | -0.325 |
+
+Raw-Fisher and Experiment 022 exact-unit KL values preserve nearly the same
+ordering (Spearman 0.966; median raw/022 ratio 0.993). The changed allocation
+therefore does not come from a wholesale change in functional sensitivity
+order. It comes from combining those anchors with the new raw-Fisher
+reconstruction errors and measured response slopes. This supports retaining
+all three signals rather than replacing the measured allocator with a single
+per-type or per-block heuristic.
+
 ### Pending
 
-The candidate is currently running its resumable 130-unit measured rank-probe
-stage. The final verdict remains pending candidate block completion, strict
-artifact validation, export, effective BPW measurement, and the retained
-WikiText quality comparison.
+The candidate is currently compressing its 26 blocks. The final verdict
+remains pending candidate block completion, strict artifact validation,
+export, effective BPW measurement, and the retained WikiText quality
+comparison.
