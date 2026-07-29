@@ -1,6 +1,6 @@
 # Experiment archive
 
-This directory is the durable record of NanoQuant Rewrite experiments 001 through 031. It records the question each
+This directory is the durable record of NanoQuant Rewrite experiments 001 through 032. It records the question each
 experiment asked, the method used, the retained result, and the lesson that should survive removal of the Python
 launchers.
 
@@ -48,6 +48,7 @@ task-evaluation protocol, and Experiments 028 and 030 added Qwen-specific deploy
 | [029](029-qwen3-8b-planned.md) | Not run | Qwen3 8B | Serial llama.cpp evaluation was designed, but never measured. |
 | [030](030-qwen3-0-6b-thinking-recovery.md) | Completed | Qwen3 0.6B | Teacher traces alone did not recover either mode; the relative mode guard was insufficient. |
 | [031](031-qwen3-8b-thinking-confirmation-planned.md) | Not run | Qwen3 8B | The planned scale confirmation has no empirical result. |
+| [032](032-gemma-3-1b-raw-fisher-d2.md) | Prepared | Gemma 3 1B IT | The complete raw-Fisher D2 quality gate is ready to run against Experiment 022. |
 
 The original launchers were under `experiments/`. Retained measurements remain under `Results/` and `evidence/`;
 architecture and decision records remain elsewhere in `Docs/`.
