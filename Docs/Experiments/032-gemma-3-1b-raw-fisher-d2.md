@@ -192,6 +192,24 @@ propagate their own compressed activations and use their own calibration
 receipts, so only the retained, token-identity-checked model-level evaluator
 can establish a cross-run quality win.
 
+### Halfway trajectory is positive against control but mixed against 022
+
+At 13 of 26 durable candidate blocks, every normalized boundary is below the
+corresponding raw-Fisher uniform-control boundary. The mean improvement is
+26.40%, the median is 27.24%, and the range is 15.68% to 33.46%. No layer has
+spent retry bits, so these gains have not silently exceeded the planned
+budget.
+
+The diagnostic comparison with Experiment 022 is less uniform. Experiment
+032 is lower at 11 of the first 13 recorded boundaries and has a mean delta of
+-13.02%, but block 10 is 19.82% higher and block 12 is 45.36% higher. Those
+middle-depth regressions prevent treating the early trajectory as proof of a
+complete quality win. As above, this is not a protocol-matched comparison:
+each run has its own calibration receipt and propagated compressed
+activations. The retained final WikiText evaluator must decide whether the
+regressions are objective-scale artifacts, local errors repaired by later
+blocks and distillation, or a real raw-Fisher quality cost.
+
 ### Pending
 
 The candidate is currently compressing its 26 blocks. The final verdict
