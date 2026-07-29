@@ -1,7 +1,7 @@
 # Diagonal versus Full-Covariance Headroom Probe
 
 **Date:** 2026-07-29
-**Status:** harness prepared; GPU measurement queued
+**Status:** completed; covariance-aware follow-up promoted
 **Model:** pinned `google/gemma-3-1b-it` revision
 `dcc83ea841ab6100d6b47a070329e1ba4cf78752`
 
@@ -85,9 +85,78 @@ CPU tests cover:
 - a correlated synthetic case with a known 90% rank-one error reduction;
 - dimension validation.
 
-The CUDA measurement remains queued behind Experiment 032 and the already
-committed Fisher exponent screen.
+The CUDA measurement ran after Experiment 032 and the Fisher exponent screen
+released the device. The probe acquired the cross-process lease and completed
+without an overlapping NanoQuant worker.
 
 ## Result
 
-Pending.
+The probe completed on 2026-07-29 and decisively passed the pre-registered
+20% aggregate threshold. The retained artifact is:
+
+`evidence/m4/covariance-headroom-probe/blocks-0-12-24.json`
+
+Its SHA-256 is
+`a4c352b0b2b01f9588167588f0c597c3e8d166527e03676efec1dc8594c868e3`.
+
+### Aggregate bound
+
+| Same-rank real-valued floor | Fit normalized RMSE | Held-out normalized RMSE |
+| --- | ---: | ---: |
+| Diagonal input objective | 0.047902 | 0.052059 |
+| Full fit covariance | **0.004258** | **0.039808** |
+
+On disjoint held-out rows, the full-covariance floor reduces error energy by
+**41.53%** relative to the diagonal floor. Eleven of twelve individual groups
+also clear the 20% threshold. The much larger fit reduction is not treated as
+the result; it shows that the dense covariance solution can overfit its fit
+moment. The held-out reduction is the promotion evidence.
+
+### Distribution by projection
+
+| Projection group | Mean held-out error-energy reduction | Range over blocks 0/12/24 | Groups above 20% |
+| --- | ---: | ---: | ---: |
+| O projection | **65.80%** | 60.71% to 74.79% | 3/3 |
+| Gate projection | 35.52% | 24.01% to 48.50% | 3/3 |
+| Up projection | 34.34% | 22.12% to 43.18% | 3/3 |
+| Fused QKV | 22.62% | 12.22% to 28.47% | 2/3 |
+
+The only non-promoting group is block 0 fused QKV:
+
+| Group | Rank | Diagonal held-out RMSE | Covariance held-out RMSE | Error-energy reduction |
+| --- | ---: | ---: | ---: | ---: |
+| Block 0 fused QKV | 638 | 0.049328 | 0.046216 | 12.22% |
+
+This is not an isolated late-block effect. O, gate, and up pass in every
+representative block, and fused QKV passes in the middle and late blocks.
+O projection has the clearest headroom despite its 1,024-wide input axis.
+This is an input-side result and is independent of Experiment 032's
+output-Fisher transform comparison; it identifies a separate approximation
+gap rather than explaining the raw-Fisher failure after the fact.
+
+### Interpretation and limitation
+
+The 41.53% result is a decision bound, not an expected end-to-end gain. It
+uses the best real-valued rank-r reconstruction and does not include binary
+factor constraints, scale fitting, tuning, error propagation through all 26
+blocks, or runtime cost. Down projection also remains unmeasured because its
+6,912-wide dense covariance is outside the cheap probe workspace.
+
+Those limitations do not weaken the decision the probe was designed to make:
+the diagonal input approximation leaves material, broad, held-out same-rank
+headroom. A format change is still unauthorized. The next experiment should
+test whether the existing factor representation can capture some of this
+headroom by optimizing binary factors against a covariance-aware objective.
+That route changes fit-time math without adding a dense runtime transform,
+storage, or inference arithmetic. A structured input-Hadamard transform
+remains a fallback if covariance-weighted factor optimization cannot realize
+the bound.
+
+### Verdict
+
+Promote a runtime-compatible covariance-weighted factorization screen. Start
+with O, gate, up, and fused QKV on blocks 0, 12, and 24 at identical ranks and
+physical bits, then evaluate disjoint held-out block outputs and joint-splice
+KL. Do not add down projection or alter the persisted format until the smaller
+groups demonstrate that binary optimization realizes a meaningful fraction
+of the 41.53% real-valued headroom.
