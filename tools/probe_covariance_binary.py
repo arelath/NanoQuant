@@ -858,6 +858,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--full-only", action="store_true")
     parser.add_argument("--fit-tokens", type=int, default=2048)
     parser.add_argument("--held-out-tokens", type=int, default=2048)
+    parser.add_argument("--covariance-reserved-samples", type=int)
     parser.add_argument("--wikitext-samples", type=int, default=12)
     parser.add_argument("--block-output-samples", type=int, default=4)
     parser.add_argument("--sequence-length", type=int, default=512)
@@ -924,14 +925,17 @@ def run(args: argparse.Namespace) -> int:
     covariance_samples = math.ceil(
         (args.fit_tokens + args.held_out_tokens) / args.sequence_length
     )
+    reserved_samples = args.covariance_reserved_samples or covariance_samples
+    if reserved_samples < covariance_samples:
+        raise ValueError("reserved covariance samples do not cover fit and held-out rows")
     all_tokens, dataset_fingerprint, _bos = _wikitext_tokens(
         args.snapshot,
-        samples=covariance_samples + args.wikitext_samples,
+        samples=reserved_samples + args.wikitext_samples,
         sequence_length=args.sequence_length,
         local_files_only=args.local_files_only,
     )
     covariance_tokens = all_tokens[:covariance_samples]
-    functional_tokens = all_tokens[covariance_samples:]
+    functional_tokens = all_tokens[reserved_samples:]
     protocol = ProbeProtocol(
         1,
         args.model_revision,
@@ -1108,6 +1112,7 @@ def run(args: argparse.Namespace) -> int:
             **to_dict(protocol),
             "fit_tokens": args.fit_tokens,
             "held_out_tokens": args.held_out_tokens,
+            "covariance_reserved_samples": reserved_samples,
             "wikitext_samples": args.wikitext_samples,
             "block_output_samples": args.block_output_samples,
             "sequence_length": args.sequence_length,

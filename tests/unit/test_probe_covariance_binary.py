@@ -226,7 +226,10 @@ def test_covariance_probe_parser_retains_diagonal_blend() -> None:
             "result.json",
             "--covariance-diagonal-blend",
             "0.5",
+            "--covariance-reserved-samples",
+            "20",
         ]
     )
 
     assert args.covariance_diagonal_blend == 0.5
+    assert args.covariance_reserved_samples == 20
