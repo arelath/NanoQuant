@@ -173,6 +173,16 @@ held-out calibration split (important: the α=1 arm will always win in-sample).
 
 ### 7. Measure the diagonal-vs-full-covariance gap (decision experiment)
 
+**2026-07-29 evidence and implementation update.** Error anatomy already found
+that 63–93% of the remaining functional error lies in the top 256 activation
+directions and therefore promoted covariance-aware work qualitatively. The
+missing controlled same-rank bound is now implemented in
+`tools/probe_covariance_headroom.py`: it compares diagonal and dense-covariance
+real rank floors on disjoint activation rows at production bit-budget ranks.
+The pre-registered protocol and 20% promotion threshold are documented in
+[Diagonal versus Full-Covariance Headroom Probe](../44-covariance-headroom-probe.md).
+It is queued behind the active complete run and Fisher exponent screen.
+
 **Mechanism.** Input weighting uses only the diagonal of the activation second moment. The full
 objective is `‖(Ŵ−W)Lᵀ‖_F` with `L = chol(XᵀX)` — off-diagonal correlations matter when
 activations are strongly correlated (they are: residual streams have large principal components).
