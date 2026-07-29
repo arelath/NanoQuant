@@ -153,6 +153,13 @@ uniform weighting failed badly. See
 An `imp^α` sweep remains distinct and untested, but it should use raw Fisher as
 its baseline and must beat it on paired held-out KL.
 
+**2026-07-29 implementation update.** The mean-preserving analysis harness is
+now available as `tools/probe_importance_power.py`, with `α ∈ {0.5, 0.75, 1}`
+pre-registered on complete blocks 0/12/24. It deliberately remains unexecuted
+while the complete raw-Fisher Experiment 032 owns the GPU. The protocol and
+promotion rule are recorded in
+[Fisher Importance Power-Exponent Probe](../43-fisher-importance-power-probe.md).
+
 **Mechanism.** Raw E[x²] weights with 8000× dynamic range may over-concentrate the fit on a few
 channels, sacrificing everything else — classic risk of unregularized importance weighting (GPTQ
 uses Hessian dampening for the same reason). A tempered weight `imp^α` with α ∈ [0.5, 1]
