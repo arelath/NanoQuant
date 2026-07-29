@@ -132,6 +132,43 @@ reconstruction errors and measured response slopes. This supports retaining
 all three signals rather than replacing the measured allocator with a single
 per-type or per-block heuristic.
 
+### Same-rank prefix exposes the objective tradeoff
+
+Blocks 0 through 6 use exactly the same 35 unit ranks in Experiment 032 and
+Experiment 022, and neither run spent retry ranks there. This prefix therefore
+provides a controlled comparison of the reconstruction selected by each
+Fisher objective before allocation differences begin at block 7.
+
+Raw Fisher increases objective-independent, unweighted weight-reconstruction
+error for every one of the 35 same-rank units:
+
+| Projection type | Same-rank units | Raw-Fisher unweighted-error delta |
+| --- | ---: | ---: |
+| `mlp.down_proj` | 7 | +20.54% |
+| `mlp.gate_proj` | 7 | +17.83% |
+| `mlp.up_proj` | 7 | +15.21% |
+| `self_attn.attn_qkv` | 7 | +36.64% |
+| `self_attn.o_proj` | 7 | +64.18% |
+| **All units** | **35** | **+30.88%** |
+
+The overall median increase is 21.83%, with a range from +11.49% to +92.08%.
+This is not a raw-Fisher failure: the paired held-out probe in Document 42
+already found 13.13% lower full-model KL for raw Fisher at identical BPW.
+Instead, the same-rank result demonstrates that raw Fisher deliberately
+sacrifices considerably more low-importance Frobenius mass, especially in
+`o_proj`, to preserve the directions the functional objective values. Plain
+Frobenius error would reject every raw-Fisher unit and select the worse
+held-out model, so it is falsified as a promotion or allocation metric for
+this recipe.
+
+Within Experiment 032's raw-Fisher objective, the first seven D2 block
+boundaries have 27.16% to 33.46% lower normalized error than its uniform
+control (mean 29.96% lower). This is encouraging evidence that the measured
+allocation spends its early-block budget effectively, but it is not a
+substitute for the retained WikiText comparison: the control and candidate
+have different per-block ranks and their resident boundary metrics are not
+the final model-level evaluator.
+
 ### Pending
 
 The candidate is currently compressing its 26 blocks. The final verdict
