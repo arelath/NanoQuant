@@ -169,6 +169,29 @@ substitute for the retained WikiText comparison: the control and candidate
 have different per-block ranks and their resident boundary metrics are not
 the final model-level evaluator.
 
+### Redistributed blocks pass the resident gates
+
+The first three blocks with rank changes relative to Experiment 022 also
+completed without retries:
+
+| Block | Raw-Fisher rank changes vs 022 | Normalized boundary delta vs raw-Fisher uniform control |
+| ---: | --- | ---: |
+| 7 | `gate_proj` +64 | -32.09% |
+| 8 | `gate_proj` +64; `up_proj` -96 | -24.77% |
+| 9 | `gate_proj` +64; `up_proj` -224 | -23.73% |
+
+Block 9 is the largest individual redistribution in the plan. Its rank-864
+`up_proj` passed on the first attempt with raw error 0.41688 and weighted error
+0.13310, both below the 0.5 acceptance thresholds. The measured allocator can
+therefore remove 224 ranks from that unit without triggering the safety retry
+that would erase the planned bit saving.
+
+Experiment 032's block-9 normalized boundary error is also 9.82% below
+Experiment 022's recorded boundary, but this is diagnostic only. The runs
+propagate their own compressed activations and use their own calibration
+receipts, so only the retained, token-identity-checked model-level evaluator
+can establish a cross-run quality win.
+
 ### Pending
 
 The candidate is currently compressing its 26 blocks. The final verdict
