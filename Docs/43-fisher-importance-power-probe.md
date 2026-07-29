@@ -1,7 +1,7 @@
 # Fisher Importance Power-Exponent Probe
 
 **Date:** 2026-07-29
-**Status:** harness validated; GPU measurement pending Experiment 032
+**Status:** completed; no exponent promoted
 **Model:** pinned `google/gemma-3-1b-it` revision
 `dcc83ea841ab6100d6b47a070329e1ba4cf78752`
 
@@ -64,13 +64,13 @@ $snapshot = 'C:\Users\pdykstra\.cache\huggingface\hub\models--google--gemma-3-1b
   --local-files-only
 ```
 
-No exponent arm has run yet. Experiment 032 currently owns the CUDA device,
-and overlapping a second reconstruction probe would invalidate runtime and
-memory evidence.
+The measurement ran after Experiment 032 released the CUDA device. No
+overlapping NanoQuant worker was active, and the probe acquired the
+cross-process CUDA lease before loading model tensors.
 
 ## Pre-registered screen
 
-The first screen will use:
+The pre-registered screen used:
 
 - exponents `{0.5, 0.75, 1.0}`;
 - complete projection inventories for blocks `{0, 12, 24}`;
@@ -97,4 +97,62 @@ remains the selected importance transform.
 
 ## Result
 
-Pending GPU availability after Experiment 032.
+The three-arm probe completed on 2026-07-29. The retained JSON artifact is:
+
+`evidence/m4/importance-power-probe/blocks-0-12-24.json`
+
+Its SHA-256 is
+`f38b05a66a319ee028e076b7cefe4f4b6f6f0a72f1ef237f4327a711f1fe440b`.
+All arms used exactly 80,468,496 physical bits over 80,510,976 source
+elements, or 0.999472370 BPW. They used identical ranks, seeds, block
+topology, and held-out tokens.
+
+### Primary joint-splice gate
+
+| Exponent | Joint KL, nats/token | Delta vs raw | Relative delta | Paired 95% interval | Pass |
+| ---: | ---: | ---: | ---: | ---: | --- |
+| 1.0 raw baseline | 0.370512 | — | — | — | baseline |
+| 0.75 | 0.362486 | -0.008027 | -2.17% | [-0.035181, +0.014686] | **no** |
+| 0.5 | 0.429138 | +0.058625 | +15.82% | [+0.032420, +0.082241] | **no; worse** |
+
+`alpha=0.5` is decisively harmful: its entire interval is above zero. The
+`alpha=0.75` point estimate is modestly better than raw Fisher, but its
+interval crosses zero. It therefore fails the pre-registered requirement
+that the complete interval be below zero.
+
+The isolated block KL comparisons agree with that decision:
+
+| Exponent | Block 0 delta vs raw | Block 12 delta vs raw | Block 24 delta vs raw |
+| ---: | ---: | ---: | ---: |
+| 0.75 | -0.84%, interval crosses zero | -1.78%, interval crosses zero | -0.82%, interval crosses zero |
+| 0.5 | **+30.34%, confidently worse** | +5.18%, interval crosses zero | +0.14%, interval crosses zero |
+
+All three `alpha=0.75` block point estimates favor tempering, but none is
+individually significant and the pre-registered joint gate remains the
+promotion criterion. Running a complete 26-block confirmation after this
+failed screen would weaken the protocol by selecting on noise.
+
+### Supporting reconstruction evidence
+
+| Exponent | Original-weight normalized RMSE | Isolated block-output RMSE delta vs raw: block 0 / 12 / 24 |
+| ---: | ---: | --- |
+| 1.0 | 0.619068 | baseline |
+| 0.75 | 0.591424 | +2.78% / -4.50% / +0.28% |
+| 0.5 | 0.569630 | +22.56% / -1.95% / +4.34% |
+
+Tempering monotonically improves unweighted original-weight RMSE while
+`alpha=0.5` decisively worsens functional KL. This independently reinforces
+the Experiment 032 conclusion that plain Frobenius reconstruction error is
+not a valid promotion metric. The mean-preserving transform did remove the
+intended dynamic range, but preserving more unweighted mass did not preserve
+model behavior.
+
+### Verdict
+
+Reject power tempering at `alpha=0.5` and do not promote `alpha=0.75`.
+Within the nonlinear raw-Fisher family, `alpha=1` remains the statistically
+supported endpoint. This does **not** promote raw Fisher into the compression
+recipe: Experiment 032's complete retained evaluation already rejected raw
+Fisher against Experiment 022's 0.6 linear shrinkage. The production baseline
+therefore remains Experiment 022, and the next independent direction is the
+pre-registered covariance-headroom probe.
