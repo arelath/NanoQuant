@@ -316,6 +316,18 @@ generalized ADMM is no longer the first implementation choice. Promote a 26-bloc
 screen at the 32/16 setting, with down still held identical. See
 [Covariance-Aware Binary Refinement Screen](../46-covariance-binary-refinement-screen.md).
 
+**2026-07-29 full-model confirmation: all gates passed after covariance sample sizing.** The
+initial 2,048-row full screen cut joint KL by 21.34% but narrowly missed its stricter 20%
+held-out covariance gate at 18.11%. Off-diagonal shrinkage was rejected because it traded away
+too much functional gain. A pre-registered sample-size screen selected 8,192 fit rows, and the
+independent 26-block rerun then reduced held-out covariance error by 24.06%, joint KL by 12.85%
+with absolute interval `[-0.55902, -0.39131]`, and NLL by 0.45577 nats/token. All 104 refined
+groups, all 26 block aggregates, and early/middle/late block outputs improve at exactly
+0.999472370 BPW. Promote resident integration behind an explicit option and a complete
+compression/export/quality run. Down projection remains unchanged until its 6,912-wide metric
+has a separately validated scalable representation. See
+[Dense-Covariance Sample-Size Screen](../48-covariance-sample-size-screen.md).
+
 ### 14. Per-head factorization of attention matrices (expected to lose)
 
 For the record: splitting q/k/v per head before factorization is the semantic version of column

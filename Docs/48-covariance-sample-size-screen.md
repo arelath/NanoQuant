@@ -126,3 +126,22 @@ $blocks = (0..25) -join ','
   --right-flip-batches 16 `
   --local-files-only
 ```
+
+### Independent 26-block confirmation
+
+The selected 8,192-row setting passed the complete rerun:
+
+`evidence/m4/covariance-binary-probe/blocks-0-25-fit-8192-depth32.json`
+
+SHA-256:
+`ef2160e67185f089912100f8218fdc53ab74f8f99d251a2222917b9655f129f6`.
+
+It reduces aggregate held-out covariance error by 24.06%, joint-splice KL by
+12.85%, and NLL by 0.455772 nats/token. The joint-KL interval is wholly
+negative at `[-0.559022, -0.391311]`. All 104 refined groups, all 26 block
+aggregates, and all three retained block-output checks improve. Bits remain
+exactly 697,393,632, or 0.999472370 BPW.
+
+The selected sample count therefore clears the previously missed support gate
+without sacrificing the functional result. Promote explicit resident
+integration and a complete compression experiment.

@@ -1,7 +1,7 @@
 # Covariance-Aware Binary Refinement Screen
 
 **Date:** 2026-07-29
-**Status:** full-model primary gate passed; covariance-support threshold narrowly missed
+**Status:** all full-model gates passed with 8,192 covariance fit rows
 **Model:** pinned `google/gemma-3-1b-it` revision
 `dcc83ea841ab6100d6b47a070329e1ba4cf78752`
 
@@ -285,3 +285,40 @@ covariance on the three weakest blocks. Its diagonal, baseline reconstruction,
 rank inventory, bits, and downstream protocol remain fixed. An independently
 selected shrinkage must then rerun the 26-block screen before resident
 integration.
+
+### Final independent composition gate
+
+The shrinkage screen rejected nonzero diagonal blending, while the
+sample-size screen selected 8,192 fit rows. The independently reserved
+20-sequence full-model rerun is:
+
+`evidence/m4/covariance-binary-probe/blocks-0-25-fit-8192-depth32.json`
+
+Its SHA-256 is
+`ef2160e67185f089912100f8218fdc53ab74f8f99d251a2222917b9655f129f6`.
+
+| Final full-model metric | Plain diagonal | Covariance refined | Change |
+| --- | ---: | ---: | ---: |
+| Original-space normalized RMSE | 0.612011 | 0.647000 | +5.72% |
+| Fit-covariance normalized RMSE | 0.191669 | 0.158113 | error energy −31.95% |
+| Held-out covariance normalized RMSE | 0.192925 | 0.168122 | error energy **−24.06%** |
+| Joint-splice KL | 3.663641 | 3.192687 | **−12.85%** |
+| Joint-splice NLL | 5.986675 | 5.530903 | **−0.455772** |
+
+The absolute joint-KL delta is −0.470954 nats/token with paired 95% interval
+`[-0.559022, -0.391311]`. Isolated block-output RMSE improves by 11.86%,
+10.46%, and 3.91% at blocks 0, 12, and 24. All 104 refined groups and all 26
+block aggregates improve held-out covariance error. The weakest block is
+still positive at 19.47%; projection means are 35.94% for O, 24.77% for up,
+23.77% for gate, and 21.75% for fused QKV.
+
+Both arms retain exactly 697,393,632 physical factor bits and
+0.999472370 BPW. The functional-slice hash is
+`sha256:3170679947482c658dfc542028a143d81f371d9c51b8e036050b21cd5e5ca07a`.
+The refinement takes 20.74 seconds over 104 groups, versus 684.23 seconds of
+baseline ADMM work, and peaks at 520,601,088 allocated device bytes.
+
+This rerun clears every pre-registered composition gate, including the
+previously missed 20% held-out threshold. Covariance-aware binary refinement
+is therefore promoted for resident integration behind an explicit option,
+followed by a complete compression run and normal quality/export validation.
