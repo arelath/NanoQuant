@@ -145,18 +145,18 @@ blocks, or runtime cost. Down projection also remains unmeasured because its
 Those limitations do not weaken the decision the probe was designed to make:
 the diagonal input approximation leaves material, broad, held-out same-rank
 headroom. A format change is still unauthorized. In the pre-registered order
-from `NextQualityLevers.md` §12–13, the next experiment is the cheaper
-input-only structured-Hadamard screen. It tests whether decorrelating inputs
-makes the existing diagonal objective materially closer to the covariance
-floor. Only if that screen fails to close useful headroom should the
-medium-sized generalized covariance-ADMM solve be built.
+from `NextQualityLevers.md` §12–13, the cheaper input-only
+structured-Hadamard screen ran next. It did not close useful headroom: at
+identical ranks and bits, its three seeds increased held-out covariance error
+energy by 76.29% to 79.18% and joint-splice KL by 46.56% to 57.35%. Those
+results are retained in
+[Document 45](45-input-hadamard-covariance-screen.md). The medium-sized
+generalized covariance-weighted binary-factor solve is therefore promoted.
 
 ### Verdict
 
-Promote an input-only structured-Hadamard screen on O, gate, up, and fused QKV
-for blocks 0, 12, and 24 at identical ranks and factor bits, with down
-projection held identical between arms. Evaluate disjoint held-out covariance
-error, block outputs, and joint-splice KL. If Hadamard fails, promote a
-runtime-compatible covariance-weighted binary factorization screen. Do not add
-down projection or alter the persisted format until one of the smaller-input
-approaches realizes a meaningful fraction of the 41.53% real-valued headroom.
+The input-only structured-Hadamard screen has failed decisively. Promote a
+runtime-compatible covariance-weighted binary-factorization screen on O,
+gate, up, and fused QKV for blocks 0, 12, and 24. Keep down projection and the
+persisted format unchanged until the smaller-input screen realizes a
+meaningful fraction of the 41.53% real-valued headroom.

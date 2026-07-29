@@ -278,6 +278,16 @@ input-Hadamard + diagonal weighting vs plain diagonal weighting on 3 blocks, act
 If §7 finds a small gap, skip permanently. **New synthesis — the old falsification does not
 cover this configuration.**
 
+**2026-07-29 measured result: decisively falsified.** The controlled three-block,
+three-seed screen retained exactly 80,468,496 factor bits and identical ranks. All three
+Hadamard candidates increased held-out covariance error energy by 76.29%–79.18% and increased
+joint-splice KL by 46.56%–57.35%; every paired joint-KL interval was entirely worse. None of
+36 transformed block/group cases improved the held-out covariance metric, and all nine isolated
+block-output RMSE comparisons worsened. The transform may still decorrelate activations, but the
+current binary-factor and diagonal-scale representation loses more exploitable coordinate
+structure than decorrelation saves. Close this path for the current format; see
+[Input-Only Hadamard Covariance Screen](../45-input-hadamard-covariance-screen.md).
+
 ### 13. Full-covariance (weighted) ADMM
 
 **Mechanism.** The real fitter for §7's objective: ADMM where the least-squares subproblems carry
@@ -285,6 +295,14 @@ cover this configuration.**
 binary projections stay elementwise. Medium build, touches `factorization.py` math.
 **Gate:** only if §7 shows ≥20% headroom left by diagonal weighting AND §12's cheap
 transform doesn't close it.
+
+**2026-07-29 gate result: promoted.** Section 7 measured 41.53% aggregate same-rank
+held-out error-energy headroom under full covariance, while §12's format-preserving transform
+moved strongly in the wrong direction. Build an analysis-only covariance-weighted binary
+factorization screen before changing production schemas or runtime behavior. Start with O, gate,
+up, and fused QKV on blocks 0, 12, and 24; hold ranks, factor bits, output Fisher, scale fitting,
+and downstream evaluation fixed. Down projection remains out of the first dense-covariance
+screen because its 6,912-wide input metric is a separate memory problem.
 
 ### 14. Per-head factorization of attention matrices (expected to lose)
 
