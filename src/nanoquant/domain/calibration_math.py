@@ -141,7 +141,7 @@ def shrink_importance(value: torch.Tensor, shrinkage: float) -> torch.Tensor:
     if not 0 <= shrinkage <= 1:
         raise ValueError("shrinkage must be in [0, 1]")
     result = value.detach().clone()
-    if 0 < shrinkage < 1 and result.numel():
+    if shrinkage > 0 and result.numel():
         mean = result.mean()
         result.mul_(1 - shrinkage).add_(mean * shrinkage)
     return result

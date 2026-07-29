@@ -103,6 +103,7 @@ def test_activation_math_known_values_and_shrinkage() -> None:
     assert robust_tau(value, percentile=0.5) == 5
     assert torch.equal(activation_square_mean(value), torch.tensor([4.5, 10.0]))
     assert torch.equal(shrink_importance(torch.tensor([1.0, 3.0]), 0.5), torch.tensor([1.5, 2.5]))
+    assert torch.equal(shrink_importance(torch.tensor([1.0, 3.0]), 1.0), torch.tensor([2.0, 2.0]))
 
 
 def test_activation_square_mean_matches_legacy_512_token_partial_accumulation() -> None:

@@ -143,6 +143,16 @@ layer-output error. **Expected gain:** small-to-moderate, but free and permanent
 
 ### 6. Weight exponent tuning (imp^α, α ≤ 1)
 
+**2026-07-29 measured update.** The production setting uses a different
+regularizer—linear shrinkage toward the vector mean—but its held-out sweep
+directly tests the same concern about extreme importance values. Contrary to the
+over-concentration hypothesis, raw Fisher (`shrinkage=0`) beat the recipe's 0.6
+shrinkage by 13.13% full-model KL at identical BPW; overshrinkage and true
+uniform weighting failed badly. See
+[Fisher Importance Shrinkage Functional Probe](../42-fisher-importance-shrinkage-probe.md).
+An `imp^α` sweep remains distinct and untested, but it should use raw Fisher as
+its baseline and must beat it on paired held-out KL.
+
 **Mechanism.** Raw E[x²] weights with 8000× dynamic range may over-concentrate the fit on a few
 channels, sacrificing everything else — classic risk of unregularized importance weighting (GPTQ
 uses Hessian dampening for the same reason). A tempered weight `imp^α` with α ∈ [0.5, 1]
