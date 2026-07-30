@@ -6,10 +6,17 @@ from nanoquant.domain.planning import factor_bit_cost
 from nanoquant.domain.sign_word_codebook import (
     FullSignCodebook,
     ProductSignCodebook,
+    _assign_corrected_flat_words,
+    apply_single_word_flip,
+    apply_word_flips,
+    asymmetric_sign_word_codebook_bit_cost,
+    corrected_asymmetric_codebook_bit_cost,
     decode_product_codebook,
     decode_sign_codebook,
     factorize_sign_word_codebook_admm,
+    maximum_asymmetric_codebook_rank_for_budget,
     maximum_codebook_rank_for_budget,
+    maximum_corrected_asymmetric_rank_for_budget,
     sign_word_codebook_bit_cost,
 )
 
@@ -23,6 +30,104 @@ def test_codebook_rank_stays_within_free_word_budget() -> None:
     assert sign_word_codebook_bit_cost(1152, 6912, rank8, index_width=8).total <= baseline
     assert sign_word_codebook_bit_cost(1152, 6912, rank8 + 32, index_width=8).total > baseline
     assert sign_word_codebook_bit_cost(1152, 6912, rank12, index_width=12).total <= baseline
+
+
+def test_right_only_codebook_charges_free_left_words() -> None:
+    baseline = factor_bit_cost(1152, 6912, 970, scale_bits=16).total
+    rank = maximum_asymmetric_codebook_rank_for_budget(
+        1152,
+        6912,
+        baseline,
+        left_index_width=None,
+        right_index_width=12,
+    )
+
+    assert rank == 2048
+    assert asymmetric_sign_word_codebook_bit_cost(
+        1152,
+        6912,
+        rank,
+        left_index_width=None,
+        right_index_width=12,
+    ).total <= baseline
+
+
+def test_single_flip_codebook_charges_positions_and_decodes() -> None:
+    baseline = factor_bit_cost(1152, 6912, 970, scale_bits=16).total
+    rank = maximum_corrected_asymmetric_rank_for_budget(
+        1152,
+        6912,
+        baseline,
+        left_index_width=None,
+        right_index_width=12,
+        right_flip_bits=5,
+    )
+    cost = corrected_asymmetric_codebook_bit_cost(
+        1152,
+        6912,
+        rank,
+        left_index_width=None,
+        right_index_width=12,
+        right_flip_bits=5,
+    )
+    decoded = apply_single_word_flip(
+        torch.ones((2, 35)),
+        torch.tensor([[3, 2], [7, 0]], dtype=torch.int8),
+    )
+
+    assert rank == 1568
+    assert cost.total <= baseline
+    assert decoded[0, 3] == -1
+    assert decoded[0, 34] == -1
+    assert int((decoded == -1).sum()) == 4
+
+
+def test_multiple_flip_positions_use_combinatorial_widths() -> None:
+    baseline = factor_bit_cost(1152, 6912, 970, scale_bits=16).total
+    rank2 = maximum_corrected_asymmetric_rank_for_budget(
+        1152,
+        6912,
+        baseline,
+        left_index_width=None,
+        right_index_width=12,
+        right_flip_bits=9,
+    )
+    rank3 = maximum_corrected_asymmetric_rank_for_budget(
+        1152,
+        6912,
+        baseline,
+        left_index_width=None,
+        right_index_width=12,
+        right_flip_bits=13,
+    )
+    decoded = apply_word_flips(
+        torch.ones((1, 32)),
+        torch.tensor([[[2, 19]]], dtype=torch.int8),
+    )
+
+    assert rank2 == 1344
+    assert rank3 == 1152
+    assert decoded[0, 2] == -1
+    assert decoded[0, 19] == -1
+    assert int((decoded == -1).sum()) == 2
+
+
+def test_joint_assignment_can_prefer_a_farther_base_codeword() -> None:
+    values = torch.ones((1, 32))
+    values[0, 0] = 10
+    table = torch.ones((2, 32))
+    table[1, 0] = -1
+
+    assignments, positions, _ = _assign_corrected_flat_words(
+        values,
+        table,
+        flips_per_word=1,
+        update=False,
+        batch_words=1,
+    )
+
+    assert int(assignments[0]) == 1
+    assert int(positions[0, 0]) == 0
 
 
 def test_product_codebook_decodes_two_half_indices() -> None:
@@ -88,3 +193,55 @@ def test_codebook_admm_exports_only_decodable_words() -> None:
     assert torch.equal(decoded_left, result.factors.left_binary)
     assert torch.equal(decoded_right, result.factors.right_binary)
     assert torch.isfinite(result.factors.reconstruction).all()
+
+
+def test_codebook_admm_can_leave_left_factor_free() -> None:
+    generator = torch.Generator().manual_seed(41)
+    result = factorize_sign_word_codebook_admm(
+        torch.randn((4, 32), generator=generator),
+        torch.ones(32),
+        torch.ones(4),
+        4,
+        torch.Generator().manual_seed(43),
+        index_bits=2,
+        outer_iterations=2,
+        inner_iterations=2,
+        codebook_update_interval=1,
+        codebook_mode="full",
+        constrain_left=False,
+    )
+
+    assert result.left_codebook is None
+    assert result.left_indices is None
+    assert result.right_codebook is not None
+    assert result.right_indices is not None
+    assert torch.isfinite(result.factors.reconstruction).all()
+
+
+def test_codebook_admm_exports_single_flip_corrections() -> None:
+    generator = torch.Generator().manual_seed(47)
+    result = factorize_sign_word_codebook_admm(
+        torch.randn((4, 32), generator=generator),
+        torch.ones(32),
+        torch.ones(4),
+        4,
+        torch.Generator().manual_seed(53),
+        index_bits=2,
+        outer_iterations=2,
+        inner_iterations=2,
+        codebook_update_interval=1,
+        codebook_mode="full",
+        constrain_left=False,
+        right_flips_per_word=1,
+    )
+
+    assert result.right_codebook is not None
+    assert result.right_indices is not None
+    assert result.right_flip_positions is not None
+    decoded = decode_sign_codebook(
+        result.right_indices,
+        result.right_codebook,
+        result.factors.right_binary.shape[1],
+    )
+    corrected = apply_single_word_flip(decoded, result.right_flip_positions)
+    assert torch.equal(corrected, result.factors.right_binary)

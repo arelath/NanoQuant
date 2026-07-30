@@ -13,11 +13,12 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import cast
 
 import torch
 
 from .factorization import SCHEDULES, ADMMResult, ADMMTracePoint
+
+CORRECTED_ASSIGNMENT_CANDIDATES = 16
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,10 +89,12 @@ class SignWordCodebookADMMResult:
     """Constrained factors plus their exact codebook representation."""
 
     factors: ADMMResult
-    left_codebook: SignCodebook
-    right_codebook: SignCodebook
-    left_indices: torch.Tensor
-    right_indices: torch.Tensor
+    left_codebook: SignCodebook | None
+    right_codebook: SignCodebook | None
+    left_indices: torch.Tensor | None
+    right_indices: torch.Tensor | None
+    left_flip_positions: torch.Tensor | None
+    right_flip_positions: torch.Tensor | None
 
 
 def sign_word_codebook_bit_cost(
@@ -150,6 +153,157 @@ def maximum_codebook_rank_for_budget(
         rank += rank_multiple
     if accepted <= 0:
         raise ValueError("target budget cannot fund one aligned codebook rank")
+    return accepted
+
+
+def asymmetric_sign_word_codebook_bit_cost(
+    out_features: int,
+    in_features: int,
+    rank: int,
+    *,
+    left_index_width: int | None,
+    right_index_width: int | None,
+    scale_width: int = 16,
+    word_width: int = 32,
+) -> SignWordCodebookCost:
+    """Charge independently compressed factors; ``None`` stores free words."""
+
+    if min(out_features, in_features, rank) <= 0:
+        raise ValueError("codebook cost dimensions and rank must be positive")
+    if scale_width < 0 or word_width <= 0:
+        raise ValueError("codebook cost widths are invalid")
+    for width in (left_index_width, right_index_width):
+        if width is not None and width <= 0:
+            raise ValueError("codebook index widths must be positive")
+    left_words = out_features * math.ceil(rank / word_width)
+    right_words = rank * math.ceil(in_features / word_width)
+    left_width = word_width if left_index_width is None else left_index_width
+    right_width = word_width if right_index_width is None else right_index_width
+    table_bits = sum(
+        (1 << width) * word_width
+        for width in (left_index_width, right_index_width)
+        if width is not None
+    )
+    return SignWordCodebookCost(
+        index_bits=left_words * left_width + right_words * right_width,
+        scale_bits=scale_width * (out_features + in_features + rank),
+        codebook_bits=table_bits,
+        word_count=left_words + right_words,
+    )
+
+
+def maximum_asymmetric_codebook_rank_for_budget(
+    out_features: int,
+    in_features: int,
+    target_bits: int,
+    *,
+    left_index_width: int | None,
+    right_index_width: int | None,
+    rank_multiple: int = 32,
+    scale_width: int = 16,
+) -> int:
+    """Return the largest aligned asymmetric-codebook rank in the budget."""
+
+    if target_bits <= 0 or rank_multiple <= 0:
+        raise ValueError("codebook rank budget and multiple must be positive")
+    rank = rank_multiple
+    accepted = 0
+    while True:
+        cost = asymmetric_sign_word_codebook_bit_cost(
+            out_features,
+            in_features,
+            rank,
+            left_index_width=left_index_width,
+            right_index_width=right_index_width,
+            scale_width=scale_width,
+        )
+        if cost.total > target_bits:
+            break
+        accepted = rank
+        rank += rank_multiple
+    if accepted <= 0:
+        raise ValueError("target budget cannot fund one aligned asymmetric rank")
+    return accepted
+
+
+def corrected_asymmetric_codebook_bit_cost(
+    out_features: int,
+    in_features: int,
+    rank: int,
+    *,
+    left_index_width: int | None,
+    right_index_width: int | None,
+    left_flip_bits: int = 0,
+    right_flip_bits: int = 0,
+    scale_width: int = 16,
+    word_width: int = 32,
+) -> SignWordCodebookCost:
+    """Charge asymmetric codebooks plus fixed-width correction positions."""
+
+    base = asymmetric_sign_word_codebook_bit_cost(
+        out_features,
+        in_features,
+        rank,
+        left_index_width=left_index_width,
+        right_index_width=right_index_width,
+        scale_width=scale_width,
+        word_width=word_width,
+    )
+    if left_flip_bits < 0 or right_flip_bits < 0:
+        raise ValueError("correction widths must not be negative")
+    if (left_flip_bits and left_index_width is None) or (
+        right_flip_bits and right_index_width is None
+    ):
+        raise ValueError("correction streams require a codebook on that factor")
+    left_words = out_features * math.ceil(rank / word_width)
+    right_words = rank * math.ceil(in_features / word_width)
+    return SignWordCodebookCost(
+        index_bits=(
+            base.index_bits
+            + left_words * left_flip_bits
+            + right_words * right_flip_bits
+        ),
+        scale_bits=base.scale_bits,
+        codebook_bits=base.codebook_bits,
+        word_count=base.word_count,
+    )
+
+
+def maximum_corrected_asymmetric_rank_for_budget(
+    out_features: int,
+    in_features: int,
+    target_bits: int,
+    *,
+    left_index_width: int | None,
+    right_index_width: int | None,
+    left_flip_bits: int = 0,
+    right_flip_bits: int = 0,
+    rank_multiple: int = 32,
+    scale_width: int = 16,
+) -> int:
+    """Return the largest corrected-codebook rank within ``target_bits``."""
+
+    if target_bits <= 0 or rank_multiple <= 0:
+        raise ValueError("codebook rank budget and multiple must be positive")
+    rank = rank_multiple
+    accepted = 0
+    while True:
+        cost = corrected_asymmetric_codebook_bit_cost(
+            out_features,
+            in_features,
+            rank,
+            left_index_width=left_index_width,
+            right_index_width=right_index_width,
+            left_flip_bits=left_flip_bits,
+            right_flip_bits=right_flip_bits,
+            scale_width=scale_width,
+        )
+        if cost.total > target_bits:
+            break
+        accepted = rank
+        rank += rank_multiple
+    if accepted <= 0:
+        raise ValueError("target budget cannot fund one corrected aligned rank")
     return accepted
 
 
@@ -417,6 +571,199 @@ def _assign_full_words(
     return decoded, indices, updated
 
 
+def _assign_corrected_flat_words(
+    values: torch.Tensor,
+    table: torch.Tensor,
+    *,
+    flips_per_word: int,
+    update: bool,
+    batch_words: int,
+    candidate_count: int = CORRECTED_ASSIGNMENT_CANDIDATES,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Jointly choose a nearby codeword and its best fixed-count corrections."""
+
+    if values.ndim != 2 or values.shape[1] != 32:
+        raise ValueError("corrected assignment requires flat 32-sign words")
+    if not 1 <= flips_per_word <= 3:
+        raise ValueError("corrected assignment supports one to three flips")
+    candidates = min(candidate_count, table.shape[0])
+    assignments = torch.empty(
+        values.shape[0],
+        dtype=torch.int64,
+        device=values.device,
+    )
+    flip_positions = torch.empty(
+        (values.shape[0], flips_per_word),
+        dtype=torch.int8,
+        device=values.device,
+    )
+    sums = torch.zeros_like(table, dtype=torch.float32) if update else None
+    counts = (
+        torch.zeros(table.shape[0], dtype=torch.int64, device=values.device)
+        if update
+        else None
+    )
+    table32 = table.float()
+    for start in range(0, values.shape[0], batch_words):
+        stop = min(values.shape[0], start + batch_words)
+        batch = values[start:stop].float()
+        scores = batch @ table32.mT
+        candidate_scores, candidate_indices = scores.topk(candidates, dim=1)
+        candidate_entries = table32[candidate_indices]
+        gains = -2 * batch.unsqueeze(1) * candidate_entries
+        flip_gains, candidate_flips = gains.topk(flips_per_word, dim=2)
+        corrected_scores = candidate_scores + flip_gains.sum(dim=2)
+        choices = corrected_scores.argmax(dim=1)
+        rows = torch.arange(batch.shape[0], device=values.device)
+        selected = candidate_indices[rows, choices]
+        selected_flips = candidate_flips[rows, choices]
+        assignments[start:stop] = selected
+        flip_positions[start:stop] = selected_flips.to(torch.int8)
+        if sums is not None and counts is not None:
+            transformed = batch.clone()
+            for offset in range(flips_per_word):
+                transformed[rows, selected_flips[:, offset]] *= -1
+            sums.index_add_(0, selected, transformed)
+            counts.index_add_(
+                0,
+                selected,
+                torch.ones_like(selected, dtype=torch.int64),
+            )
+    if sums is None or counts is None:
+        return assignments, flip_positions, table
+    updated = table.clone()
+    populated = counts > 0
+    updated[populated] = _sign(sums[populated]).to(table.dtype)
+    final_assignments, final_positions, _ = _assign_corrected_flat_words(
+        values,
+        updated,
+        flips_per_word=flips_per_word,
+        update=False,
+        batch_words=batch_words,
+        candidate_count=candidate_count,
+    )
+    return final_assignments, final_positions, updated
+
+
+def _assign_corrected_full_words(
+    weighted_value: torch.Tensor,
+    codebook: FullSignCodebook,
+    *,
+    flips_per_word: int,
+    update: bool,
+    batch_words: int,
+) -> tuple[torch.Tensor, torch.Tensor, FullSignCodebook, torch.Tensor]:
+    rows, columns = weighted_value.shape
+    words = math.ceil(columns / 32)
+    padded_columns = words * 32
+    padded = torch.zeros(
+        (rows, padded_columns),
+        dtype=weighted_value.dtype,
+        device=weighted_value.device,
+    )
+    padded[:, :columns] = weighted_value
+    word_values = padded.reshape(-1, 32).contiguous()
+    assignments, positions, entries = _assign_corrected_flat_words(
+        word_values,
+        codebook.entries,
+        flips_per_word=flips_per_word,
+        update=update,
+        batch_words=batch_words,
+    )
+    updated = FullSignCodebook(codebook.index_bits, entries)
+    indices = assignments.reshape(rows, words).to(torch.int32)
+    shaped_positions = positions.reshape(rows, words, flips_per_word)
+    if flips_per_word == 1:
+        shaped_positions = shaped_positions.squeeze(-1)
+    decoded = decode_sign_codebook(indices, updated, padded_columns)[:, :columns]
+    corrected = apply_word_flips(decoded, shaped_positions)
+    return corrected, indices, updated, shaped_positions
+
+
+def apply_word_flips(
+    decoded: torch.Tensor,
+    flip_positions: torch.Tensor,
+) -> torch.Tensor:
+    """Flip indexed signs in every row-major 32-sign word."""
+
+    rows, columns = decoded.shape
+    words = math.ceil(columns / 32)
+    if flip_positions.ndim not in {2, 3}:
+        raise ValueError("flip positions must have one or more positions per word")
+    if tuple(flip_positions.shape[:2]) != (rows, words):
+        raise ValueError("flip-position shape does not match decoded words")
+    positions_per_word = 1 if flip_positions.ndim == 2 else flip_positions.shape[2]
+    if positions_per_word <= 0:
+        raise ValueError("flip positions must have one or more positions per word")
+    if torch.any((flip_positions < 0) | (flip_positions >= 32)):
+        raise ValueError("flip positions must lie in [0, 32)")
+    if flip_positions.ndim == 3:
+        ordered = flip_positions.sort(dim=2).values
+        if torch.any(ordered[:, :, 1:] == ordered[:, :, :-1]):
+            raise ValueError("flip positions within a word must be distinct")
+    padded_columns = words * 32
+    if padded_columns != columns:
+        padded = torch.ones(
+            (rows, padded_columns),
+            dtype=decoded.dtype,
+            device=decoded.device,
+        )
+        padded[:, :columns] = decoded
+    else:
+        padded = decoded.clone()
+    word_values = padded.reshape(rows * words, 32)
+    positions = flip_positions.reshape(rows * words, positions_per_word).to(
+        torch.int64
+    )
+    row_indices = torch.arange(word_values.shape[0], device=decoded.device)
+    for offset in range(positions_per_word):
+        word_values[row_indices, positions[:, offset]] *= -1
+    return word_values.reshape(rows, padded_columns)[:, :columns].contiguous()
+
+
+def apply_single_word_flip(
+    decoded: torch.Tensor,
+    flip_positions: torch.Tensor,
+) -> torch.Tensor:
+    """Compatibility wrapper for the one-correction representation."""
+
+    return apply_word_flips(decoded, flip_positions)
+
+
+def _apply_best_word_flips(
+    weighted_value: torch.Tensor,
+    decoded: torch.Tensor,
+    flips_per_word: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    rows, columns = decoded.shape
+    words = math.ceil(columns / 32)
+    padded_columns = words * 32
+    padded_value = torch.zeros(
+        (rows, padded_columns),
+        dtype=weighted_value.dtype,
+        device=weighted_value.device,
+    )
+    padded_value[:, :columns] = weighted_value
+    padded_decoded = torch.ones(
+        (rows, padded_columns),
+        dtype=decoded.dtype,
+        device=decoded.device,
+    )
+    padded_decoded[:, :columns] = decoded
+    gain = (
+        -2
+        * padded_value.reshape(rows, words, 32)
+        * padded_decoded.reshape(rows, words, 32)
+    )
+    if padded_columns != columns:
+        valid = torch.arange(padded_columns, device=decoded.device) < columns
+        gain = gain.masked_fill(~valid.reshape(words, 32), -torch.inf)
+    positions = gain.topk(flips_per_word, dim=-1).indices.to(torch.int8)
+    if flips_per_word == 1:
+        positions = positions.squeeze(-1)
+    return apply_word_flips(decoded, positions), positions
+
+
 def _project(
     value: torch.Tensor,
     codebook: SignCodebook | None,
@@ -426,9 +773,11 @@ def _project(
     generator: torch.Generator,
     epsilon: float,
     assignment_batch_words: int,
+    flips_per_word: int,
 ) -> tuple[
     torch.Tensor,
     SignCodebook | None,
+    torch.Tensor | None,
     torch.Tensor | None,
 ]:
     row_magnitude, column_magnitude = _rank_one_magnitudes(
@@ -439,8 +788,11 @@ def _project(
     )
     magnitude = torch.outer(row_magnitude, column_magnitude)
     if codebook is None:
-        return magnitude * _sign(value), None, None
+        if flips_per_word:
+            raise ValueError("word corrections require a codebook")
+        return magnitude * _sign(value), None, None, None
     weighted = value.float() * magnitude.float()
+    flip_positions = None
     if isinstance(codebook, ProductSignCodebook):
         decoded, indices, product_updated = _assign_product_words(
             weighted,
@@ -449,15 +801,37 @@ def _project(
             batch_words=assignment_batch_words,
         )
         updated: SignCodebook = product_updated
+        if 1 <= flips_per_word <= 3:
+            decoded, flip_positions = _apply_best_word_flips(
+                weighted,
+                decoded,
+                flips_per_word,
+            )
     else:
-        decoded, indices, full_updated = _assign_full_words(
-            weighted,
-            codebook,
-            update=update_codebook,
-            batch_words=assignment_batch_words,
-        )
+        if flips_per_word:
+            (
+                decoded,
+                indices,
+                full_updated,
+                flip_positions,
+            ) = _assign_corrected_full_words(
+                weighted,
+                codebook,
+                flips_per_word=flips_per_word,
+                update=update_codebook,
+                batch_words=assignment_batch_words,
+            )
+        else:
+            decoded, indices, full_updated = _assign_full_words(
+                weighted,
+                codebook,
+                update=update_codebook,
+                batch_words=assignment_batch_words,
+            )
         updated = full_updated
-    return magnitude * decoded.to(value.dtype), updated, indices
+    if flips_per_word < 0 or flips_per_word > 3:
+        raise ValueError("only zero to three corrections per word are supported")
+    return magnitude * decoded.to(value.dtype), updated, indices, flip_positions
 
 
 def _solve(
@@ -522,13 +896,22 @@ def _index_metrics(indices: torch.Tensor, index_bits: int) -> dict[str, float | 
     }
 
 
-def codebook_index_metrics(result: SignWordCodebookADMMResult) -> dict[str, dict[str, float | int]]:
+def codebook_index_metrics(
+    result: SignWordCodebookADMMResult,
+) -> dict[str, dict[str, float | int | bool]]:
     """Summarize actual fixed-width codebook utilization."""
 
-    return {
-        "left": _index_metrics(result.left_indices, result.left_codebook.index_bits),
-        "right": _index_metrics(result.right_indices, result.right_codebook.index_bits),
-    }
+    metrics: dict[str, dict[str, float | int | bool]] = {}
+    for side, indices, codebook in (
+        ("left", result.left_indices, result.left_codebook),
+        ("right", result.right_indices, result.right_codebook),
+    ):
+        metrics[side] = (
+            {"free_words": True}
+            if indices is None or codebook is None
+            else _index_metrics(indices, codebook.index_bits)
+        )
+    return metrics
 
 
 def factorize_sign_word_codebook_admm(
@@ -546,8 +929,13 @@ def factorize_sign_word_codebook_admm(
     convergence_check_interval: int = 100,
     codebook_update_interval: int = 10,
     codebook_freeze_fraction: float = 0.5,
+    codebook_warmup_fraction: float = 0.0,
     assignment_batch_words: int = 65_536,
     codebook_mode: str = "product",
+    constrain_left: bool = True,
+    constrain_right: bool = True,
+    left_flips_per_word: int = 0,
+    right_flips_per_word: int = 0,
     epsilon: float = 1e-12,
 ) -> SignWordCodebookADMMResult:
     """Jointly fit over-complete factors constrained to fixed-width codebooks."""
@@ -560,6 +948,19 @@ def factorize_sign_word_codebook_admm(
         raise ValueError("index bits must be positive and even")
     if codebook_mode not in {"product", "full"}:
         raise ValueError("codebook mode must be 'product' or 'full'")
+    if not constrain_left and not constrain_right:
+        raise ValueError("at least one factor must use a codebook")
+    if left_flips_per_word not in {0, 1, 2, 3} or right_flips_per_word not in {
+        0,
+        1,
+        2,
+        3,
+    }:
+        raise ValueError("only zero to three corrections per word are supported")
+    if (left_flips_per_word and not constrain_left) or (
+        right_flips_per_word and not constrain_right
+    ):
+        raise ValueError("word corrections require a constrained factor")
     if (
         outer_iterations <= 0
         or inner_iterations <= 0
@@ -567,8 +968,11 @@ def factorize_sign_word_codebook_admm(
         or codebook_update_interval <= 0
     ):
         raise ValueError("iteration settings must be positive")
-    if not 0 <= codebook_freeze_fraction <= 1:
-        raise ValueError("codebook freeze fraction must lie in [0, 1]")
+    if (
+        not 0 <= codebook_warmup_fraction <= codebook_freeze_fraction <= 1
+        or codebook_warmup_fraction >= 1
+    ):
+        raise ValueError("codebook warmup/freeze fractions are invalid")
     try:
         schedule = SCHEDULES[penalty_schedule]
     except KeyError as exc:
@@ -595,21 +999,36 @@ def factorize_sign_word_codebook_admm(
         device=weight.device,
         generator=generator,
     )
-    left_codebook = _random_codebook(
-        index_bits,
-        weight.device,
-        dtype,
-        generator,
-        codebook_mode,
+    left_template = (
+        _random_codebook(
+            index_bits,
+            weight.device,
+            dtype,
+            generator,
+            codebook_mode,
+        )
+        if constrain_left
+        else None
     )
-    right_codebook = _random_codebook(
-        index_bits,
-        weight.device,
-        dtype,
-        generator,
-        codebook_mode,
+    right_template = (
+        _random_codebook(
+            index_bits,
+            weight.device,
+            dtype,
+            generator,
+            codebook_mode,
+        )
+        if constrain_right
+        else None
     )
-    left_projected, left_codebook_value, left_indices_value = _project(
+    left_codebook = left_template if codebook_warmup_fraction == 0 else None
+    right_codebook = right_template if codebook_warmup_fraction == 0 else None
+    (
+        left_projected,
+        left_codebook_value,
+        left_indices_value,
+        left_flip_positions,
+    ) = _project(
         left,
         left_codebook,
         update_codebook=True,
@@ -617,8 +1036,14 @@ def factorize_sign_word_codebook_admm(
         generator=generator,
         epsilon=epsilon,
         assignment_batch_words=assignment_batch_words,
+        flips_per_word=left_flips_per_word,
     )
-    right_projected, right_codebook_value, right_indices_value = _project(
+    (
+        right_projected,
+        right_codebook_value,
+        right_indices_value,
+        right_flip_positions,
+    ) = _project(
         right,
         right_codebook,
         update_codebook=True,
@@ -626,14 +1051,19 @@ def factorize_sign_word_codebook_admm(
         generator=generator,
         epsilon=epsilon,
         assignment_batch_words=assignment_batch_words,
+        flips_per_word=right_flips_per_word,
     )
-    left_codebook = cast(SignCodebook, left_codebook_value)
-    right_codebook = cast(SignCodebook, right_codebook_value)
-    left_indices = cast(torch.Tensor, left_indices_value)
-    right_indices = cast(torch.Tensor, right_indices_value)
+    left_codebook = left_codebook_value
+    right_codebook = right_codebook_value
+    left_indices = left_indices_value
+    right_indices = right_indices_value
     left_dual = left - left_projected
     right_dual = right - right_projected
     trace: list[ADMMTracePoint] = []
+    activation_iteration = max(
+        1,
+        math.floor(outer_iterations * codebook_warmup_fraction),
+    )
     for iteration in range(outer_iterations):
         rho = schedule(iteration / max(1, outer_iterations))
         right_norm = right_projected.norm(dim=1).clamp_min(epsilon)
@@ -658,12 +1088,26 @@ def factorize_sign_word_codebook_admm(
         )
         previous_left = left_projected
         previous_right = right_projected
+        completed = iteration + 1
         update_ceiling = math.floor(outer_iterations * codebook_freeze_fraction)
-        update = (
-            (iteration + 1) % codebook_update_interval == 0
-            and iteration + 1 <= update_ceiling
+        activate = (
+            codebook_warmup_fraction > 0
+            and completed == activation_iteration
         )
-        left_projected, left_codebook_value, left_indices_value = _project(
+        if activate:
+            left_codebook = left_template
+            right_codebook = right_template
+        update = activate or (
+            completed % codebook_update_interval == 0
+            and completed <= update_ceiling
+            and completed >= activation_iteration
+        )
+        (
+            left_projected,
+            left_codebook_value,
+            left_indices_value,
+            left_flip_positions,
+        ) = _project(
             left + left_dual,
             left_codebook,
             update_codebook=update,
@@ -671,8 +1115,14 @@ def factorize_sign_word_codebook_admm(
             generator=generator,
             epsilon=epsilon,
             assignment_batch_words=assignment_batch_words,
+            flips_per_word=left_flips_per_word,
         )
-        right_projected, right_codebook_value, right_indices_value = _project(
+        (
+            right_projected,
+            right_codebook_value,
+            right_indices_value,
+            right_flip_positions,
+        ) = _project(
             right + right_dual,
             right_codebook,
             update_codebook=update,
@@ -680,11 +1130,12 @@ def factorize_sign_word_codebook_admm(
             generator=generator,
             epsilon=epsilon,
             assignment_batch_words=assignment_batch_words,
+            flips_per_word=right_flips_per_word,
         )
-        left_codebook = cast(SignCodebook, left_codebook_value)
-        right_codebook = cast(SignCodebook, right_codebook_value)
-        left_indices = cast(torch.Tensor, left_indices_value)
-        right_indices = cast(torch.Tensor, right_indices_value)
+        left_codebook = left_codebook_value
+        right_codebook = right_codebook_value
+        left_indices = left_indices_value
+        right_indices = right_indices_value
         if update:
             # Updating the discrete feasible set invalidates the accumulated
             # multiplier.  Restart the dual residual at the new projection;
@@ -695,7 +1146,6 @@ def factorize_sign_word_codebook_admm(
         else:
             left_dual.add_(left - left_projected)
             right_dual.add_(right - right_projected)
-        completed = iteration + 1
         if iteration == 0 or completed % convergence_check_interval == 0 or completed == outer_iterations:
             primal = float((left - left_projected).norm() + (right - right_projected).norm())
             dual_residual = float(
@@ -725,8 +1175,30 @@ def factorize_sign_word_codebook_admm(
         generator,
         epsilon,
     )
-    left_binary = decode_sign_codebook(left_indices, left_codebook, rank).to(dtype)
-    right_binary = decode_sign_codebook(right_indices, right_codebook, weight.shape[1]).to(dtype)
+    left_binary = (
+        _sign(left_export)
+        if left_indices is None or left_codebook is None
+        else decode_sign_codebook(left_indices, left_codebook, rank).to(dtype)
+    )
+    right_binary = (
+        _sign(right_export)
+        if right_indices is None or right_codebook is None
+        else decode_sign_codebook(
+            right_indices,
+            right_codebook,
+            weight.shape[1],
+        ).to(dtype)
+    )
+    if left_flip_positions is not None:
+        left_binary = apply_word_flips(
+            left_binary,
+            left_flip_positions,
+        )
+    if right_flip_positions is not None:
+        right_binary = apply_word_flips(
+            right_binary,
+            right_flip_positions,
+        )
     scale_mid = (right_u * left_u).to(dtype)
     scale_pre = scale_pre.to(dtype)
     scale_post = scale_post.to(dtype)
@@ -750,6 +1222,16 @@ def factorize_sign_word_codebook_admm(
         factors,
         left_codebook,
         right_codebook,
-        left_indices.contiguous(),
-        right_indices.contiguous(),
+        left_indices.contiguous() if left_indices is not None else None,
+        right_indices.contiguous() if right_indices is not None else None,
+        (
+            left_flip_positions.contiguous()
+            if left_flip_positions is not None
+            else None
+        ),
+        (
+            right_flip_positions.contiguous()
+            if right_flip_positions is not None
+            else None
+        ),
     )

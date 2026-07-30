@@ -3,6 +3,11 @@
 **Date:** 2026-07-30
 **Status:** completed; equal-bit reconstruction screen failed
 
+**Follow-up:** [Sparse-Corrected Asymmetric Sign Codes](53-sparse-corrected-sign-code-screen.md)
+retains this rejection for pure codebooks but finds a new passing
+reconstruction candidate by leaving U free and adding two sparse V-word
+corrections.
+
 ## Question
 
 Section 3 of
