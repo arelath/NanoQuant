@@ -58,6 +58,21 @@ def _parse_ints(value: str) -> tuple[int, ...]:
     return result
 
 
+def _parse_floats(value: str) -> tuple[float, ...]:
+    result = tuple(
+        float(item.strip()) for item in value.split(",") if item.strip()
+    )
+    if (
+        not result
+        or len(result) != len(set(result))
+        or any(item <= 0 for item in result)
+    ):
+        raise argparse.ArgumentTypeError(
+            "selection thresholds must be unique positive fractions"
+        )
+    return result
+
+
 def _dtype(config: dict[str, object]) -> torch.dtype:
     return {
         "bfloat16": torch.bfloat16,
@@ -92,6 +107,45 @@ def _reconstruction_set(
     )
 
 
+def _select_blocks(
+    reconstructions: SpliceReconstructionSet,
+    blocks: tuple[int, ...],
+) -> SpliceReconstructionSet:
+    selected = frozenset(blocks)
+    layers = tuple(
+        layer
+        for layer in reconstructions.layers
+        if layer.layer.block.index in selected
+    )
+    if len(layers) != len(selected):
+        raise ValueError("selected splice blocks do not map one-to-one to layers")
+    units = tuple(
+        (unit, members)
+        for unit, members in reconstructions.unit_members
+        if members and all(member.block.index in selected for member in members)
+    )
+    errors = tuple(
+        (unit, error)
+        for unit, error in reconstructions.unit_weighted_normalized_squared_errors
+        if any(candidate == unit for candidate, _members in units)
+    )
+    return SpliceReconstructionSet(layers, units, errors)
+
+
+def _select_token_window(
+    tokens: torch.Tensor,
+    *,
+    offset: int,
+    samples: int,
+) -> torch.Tensor:
+    if tokens.ndim != 2 or offset < 0 or samples <= 0:
+        raise ValueError("held-out token window is invalid")
+    selected = tokens[offset : offset + samples]
+    if selected.shape[0] != samples:
+        raise ValueError("held-out token inventory is shorter than requested")
+    return selected
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", type=Path, required=True)
@@ -101,6 +155,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-revision", default=PINNED_MODEL_REVISION)
     parser.add_argument("--block", type=int, default=12)
     parser.add_argument("--blocks", type=_parse_ints)
+    parser.add_argument("--selection-thresholds", type=_parse_floats)
     parser.add_argument("--baseline-rank", type=int, default=970)
     parser.add_argument("--candidate-rank", type=int)
     parser.add_argument("--right-free-rows", type=int, default=0)
@@ -118,6 +173,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--scale-fit-passes", type=int, default=2)
     parser.add_argument("--calibration-shrinkage", type=float, default=0.6)
     parser.add_argument("--wikitext-samples", type=int, default=12)
+    parser.add_argument("--wikitext-offset", type=int, default=0)
     parser.add_argument("--sequence-length", type=int, default=512)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="cuda:0")
@@ -134,7 +190,11 @@ def run(args: argparse.Namespace) -> int:
         or args.right_free_rows >= args.candidate_rank
     ):
         raise ValueError("candidate rank/free-row configuration is invalid")
-    if args.wikitext_samples <= 0 or args.sequence_length < 2:
+    if (
+        args.wikitext_samples <= 0
+        or args.wikitext_offset < 0
+        or args.sequence_length < 2
+    ):
         raise ValueError("held-out token dimensions are invalid")
     config_payload = json.loads(
         (args.snapshot / "config.json").read_text(encoding="utf-8")
@@ -304,16 +364,47 @@ def run(args: argparse.Namespace) -> int:
             )
             gc.collect()
             torch.cuda.empty_cache()
-        reconstruction_sets = {
+        all_reconstruction_sets = {
             "free_words": _reconstruction_set(baseline_entries),
             "corrected_codebook": _reconstruction_set(candidate_entries),
         }
+        selection_specs: list[tuple[str, float | None, tuple[int, ...]]] = []
+        if args.selection_thresholds is None:
+            selection_specs.append(("full", None, blocks))
+        else:
+            for threshold in args.selection_thresholds:
+                selected = tuple(
+                    block
+                    for block in blocks
+                    if (
+                        1
+                        - reconstruction_metrics[str(block)][
+                            "corrected_codebook"
+                        ]["weighted_normalized_rmse"]
+                        / reconstruction_metrics[str(block)]["free_words"][
+                            "weighted_normalized_rmse"
+                        ]
+                    )
+                    >= threshold
+                )
+                if not selected:
+                    raise ValueError(
+                        f"selection threshold {threshold} selects no blocks"
+                    )
+                selection_specs.append(
+                    (f"weighted_gain_ge_{threshold:.6g}", threshold, selected)
+                )
 
         tokens, dataset_fingerprint, _bos = _wikitext_tokens(
             args.snapshot,
-            samples=args.wikitext_samples,
+            samples=args.wikitext_offset + args.wikitext_samples,
             sequence_length=args.sequence_length,
             local_files_only=args.local_files_only,
+        )
+        tokens = _select_token_window(
+            tokens,
+            offset=args.wikitext_offset,
+            samples=args.wikitext_samples,
         )
         teacher = load_causal_language_model(
             args.snapshot,
@@ -322,34 +413,76 @@ def run(args: argparse.Namespace) -> int:
             local_files_only=args.local_files_only,
         ).to(args.device)
         teacher.eval()
-        baseline_evaluator = DenseKlSpliceEvaluator(
-            teacher,
-            reconstruction_sets["free_words"],
-            tokens,
-            device=args.device,
-            batch_size=1,
-            token_chunk_size=128,
-            teacher_cache_mode="cpu",
-        )
-        teacher_nll, teacher_cache = baseline_evaluator.teacher_cache_state()
-        baseline_kl = baseline_evaluator("full")
-        candidate_evaluator = DenseKlSpliceEvaluator(
-            teacher,
-            reconstruction_sets["corrected_codebook"],
-            tokens,
-            device=args.device,
-            batch_size=1,
-            token_chunk_size=128,
-            teacher_cache_mode="cpu",
-        )
-        candidate_evaluator.install_teacher_cache(teacher_nll, teacher_cache)
-        candidate_kl = candidate_evaluator("full")
-        interval = paired_bootstrap_kl_delta(
-            baseline_kl,
-            candidate_kl,
-            seed=args.seed,
-        )
-        del teacher, baseline_evaluator, candidate_evaluator
+        teacher_nll = 0.0
+        teacher_cache: tuple[torch.Tensor, ...] = ()
+        selection_results: dict[str, dict[str, Any]] = {}
+        for name, threshold, selected_blocks in selection_specs:
+            reconstruction_sets = {
+                arm: _select_blocks(reconstructions, selected_blocks)
+                for arm, reconstructions in all_reconstruction_sets.items()
+            }
+            baseline_evaluator = DenseKlSpliceEvaluator(
+                teacher,
+                reconstruction_sets["free_words"],
+                tokens,
+                device=args.device,
+                batch_size=1,
+                token_chunk_size=128,
+                teacher_cache_mode="cpu",
+            )
+            if not teacher_cache:
+                teacher_nll, teacher_cache = (
+                    baseline_evaluator.teacher_cache_state()
+                )
+            else:
+                baseline_evaluator.install_teacher_cache(
+                    teacher_nll,
+                    teacher_cache,
+                )
+            baseline_kl = baseline_evaluator("full")
+            candidate_evaluator = DenseKlSpliceEvaluator(
+                teacher,
+                reconstruction_sets["corrected_codebook"],
+                tokens,
+                device=args.device,
+                batch_size=1,
+                token_chunk_size=128,
+                teacher_cache_mode="cpu",
+            )
+            candidate_evaluator.install_teacher_cache(
+                teacher_nll,
+                teacher_cache,
+            )
+            candidate_kl = candidate_evaluator("full")
+            interval = paired_bootstrap_kl_delta(
+                baseline_kl,
+                candidate_kl,
+                seed=args.seed,
+            )
+            selection_results[name] = {
+                "minimum_weighted_rmse_gain_fraction": threshold,
+                "blocks": list(selected_blocks),
+                "kl": {
+                    "free_words": to_dict(baseline_kl),
+                    "corrected_codebook": to_dict(candidate_kl),
+                },
+                "paired_candidate_minus_free_words": {
+                    "point_delta": interval.point_delta,
+                    "relative_delta": (
+                        interval.point_delta
+                        / baseline_kl.kl_nats_per_token
+                    ),
+                    "lower_delta": interval.lower_delta,
+                    "upper_delta": interval.upper_delta,
+                    "confidence": interval.confidence,
+                    "resamples": interval.resamples,
+                    "improved_with_confidence": (
+                        interval.point_delta < 0 and interval.upper_delta < 0
+                    ),
+                },
+            }
+            del baseline_evaluator, candidate_evaluator
+        del teacher
 
     cost = (
         mixed_right_corrected_codebook_bit_cost(
@@ -373,7 +506,7 @@ def run(args: argparse.Namespace) -> int:
         )
     )
     output: dict[str, Any] = {
-        "schema_version": 3,
+        "schema_version": 4,
         "status": "completed",
         "role": "analysis-only corrected-codebook splice gate",
         "model_source": MODEL_SOURCE,
@@ -383,6 +516,7 @@ def run(args: argparse.Namespace) -> int:
         "dataset_fingerprint": dataset_fingerprint,
         "dataset_slice_hash": _token_hash(tokens),
         "wikitext_samples": args.wikitext_samples,
+        "wikitext_offset": args.wikitext_offset,
         "sequence_length": args.sequence_length,
         "teacher_baseline_nll": teacher_nll,
         "candidate": {
@@ -396,34 +530,20 @@ def run(args: argparse.Namespace) -> int:
             "index_metrics_by_block": candidate_index_metrics,
         },
         "reconstruction_by_block": reconstruction_metrics,
-        "kl": {
-            "free_words": to_dict(baseline_kl),
-            "corrected_codebook": to_dict(candidate_kl),
-        },
-        "paired_candidate_minus_free_words": {
-            "point_delta": interval.point_delta,
-            "relative_delta": (
-                interval.point_delta / baseline_kl.kl_nats_per_token
-            ),
-            "lower_delta": interval.lower_delta,
-            "upper_delta": interval.upper_delta,
-            "confidence": interval.confidence,
-            "resamples": interval.resamples,
-            "improved_with_confidence": (
-                interval.point_delta < 0 and interval.upper_delta < 0
-            ),
-        },
+        "selection_results": selection_results,
     }
+    if args.selection_thresholds is None:
+        full = selection_results["full"]
+        output["kl"] = full["kl"]
+        output["paired_candidate_minus_free_words"] = full[
+            "paired_candidate_minus_free_words"
+        ]
     atomic_write_json(args.output, output)
     print(
         json.dumps(
             {
                 "reconstruction_by_block": output["reconstruction_by_block"],
-                "kl": {
-                    "free_words": baseline_kl.kl_nats_per_token,
-                    "corrected_codebook": candidate_kl.kl_nats_per_token,
-                },
-                "paired": output["paired_candidate_minus_free_words"],
+                "selection_results": output["selection_results"],
             },
             indent=2,
         )

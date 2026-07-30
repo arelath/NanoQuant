@@ -3,6 +3,10 @@
 **Date:** 2026-07-30
 **Status:** representative reconstruction and joint functional gates passed
 
+**Follow-up:** [Selective Mixed-V Down-Projection Screen](55-selective-mixed-v-down-projection.md)
+screens every `down_proj`, rejects uniform 26-block replacement, and confirms
+a six-block reconstruction-selected policy on two disjoint held-out windows.
+
 ## Question
 
 [Sparse-Corrected Asymmetric Sign Codes](53-sparse-corrected-sign-code-screen.md)

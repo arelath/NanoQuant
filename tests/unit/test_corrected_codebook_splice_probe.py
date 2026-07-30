@@ -1,0 +1,57 @@
+from __future__ import annotations
+
+import importlib
+import sys
+from pathlib import Path
+
+import pytest
+import torch
+
+from nanoquant.domain.models import BlockId, LayerId
+from nanoquant.infrastructure.kl_splice import (
+    SpliceReconstruction,
+    SpliceReconstructionSet,
+)
+
+
+def _probe_module() -> object:
+    tools = str(Path(__file__).resolve().parents[2] / "tools")
+    if tools not in sys.path:
+        sys.path.insert(0, tools)
+    return importlib.import_module("probe_corrected_codebook_splice")
+
+
+def test_splice_probe_selects_blocks_without_copying_other_layers() -> None:
+    probe = _probe_module()
+    first = LayerId(BlockId(0), "mlp.down_proj")
+    second = LayerId(BlockId(2), "mlp.down_proj")
+    reconstructions = SpliceReconstructionSet(
+        (
+            SpliceReconstruction(first, torch.ones((1, 1)), None, 1.0),
+            SpliceReconstruction(second, torch.ones((1, 1)), None, 2.0),
+        ),
+        (
+            ("0:mlp.down_proj", (first,)),
+            ("2:mlp.down_proj", (second,)),
+        ),
+        (
+            ("0:mlp.down_proj", 1.0),
+            ("2:mlp.down_proj", 2.0),
+        ),
+    )
+
+    selected = probe._select_blocks(reconstructions, (2,))
+
+    assert tuple(item.layer for item in selected.layers) == (second,)
+    assert selected.unit_members == (("2:mlp.down_proj", (second,)),)
+
+
+def test_splice_probe_selects_a_disjoint_token_window() -> None:
+    probe = _probe_module()
+    tokens = torch.arange(30).reshape(10, 3)
+
+    selected = probe._select_token_window(tokens, offset=4, samples=3)
+
+    assert torch.equal(selected, tokens[4:7])
+    with pytest.raises(ValueError, match="shorter"):
+        probe._select_token_window(tokens, offset=9, samples=2)
