@@ -17,6 +17,8 @@ from nanoquant.domain.sign_word_codebook import (
     maximum_asymmetric_codebook_rank_for_budget,
     maximum_codebook_rank_for_budget,
     maximum_corrected_asymmetric_rank_for_budget,
+    maximum_mixed_right_free_rows_for_budget,
+    mixed_right_corrected_codebook_bit_cost,
     sign_word_codebook_bit_cost,
 )
 
@@ -80,6 +82,29 @@ def test_single_flip_codebook_charges_positions_and_decodes() -> None:
     assert decoded[0, 3] == -1
     assert decoded[0, 34] == -1
     assert int((decoded == -1).sum()) == 4
+
+
+def test_mixed_right_budget_funds_an_aligned_free_prefix() -> None:
+    baseline = factor_bit_cost(1152, 6912, 970, scale_bits=16).total
+    free_rows = maximum_mixed_right_free_rows_for_budget(
+        1152,
+        6912,
+        1408,
+        baseline,
+        right_index_width=10,
+        right_flip_bits=9,
+    )
+    cost = mixed_right_corrected_codebook_bit_cost(
+        1152,
+        6912,
+        1408,
+        right_free_rows=free_rows,
+        right_index_width=10,
+        right_flip_bits=9,
+    )
+
+    assert free_rows == 128
+    assert cost.total <= baseline
 
 
 def test_multiple_flip_positions_use_combinatorial_widths() -> None:
@@ -245,3 +270,34 @@ def test_codebook_admm_exports_single_flip_corrections() -> None:
     )
     corrected = apply_single_word_flip(decoded, result.right_flip_positions)
     assert torch.equal(corrected, result.factors.right_binary)
+
+
+def test_codebook_admm_exports_a_free_right_prefix() -> None:
+    generator = torch.Generator().manual_seed(59)
+    result = factorize_sign_word_codebook_admm(
+        torch.randn((4, 32), generator=generator),
+        torch.ones(32),
+        torch.ones(4),
+        4,
+        torch.Generator().manual_seed(61),
+        index_bits=2,
+        outer_iterations=2,
+        inner_iterations=2,
+        codebook_update_interval=1,
+        codebook_mode="full",
+        constrain_left=False,
+        right_flips_per_word=1,
+        right_free_rows=1,
+    )
+
+    assert result.right_free_rows == 1
+    assert result.right_codebook is not None
+    assert result.right_indices is not None
+    assert result.right_flip_positions is not None
+    coded = decode_sign_codebook(
+        result.right_indices,
+        result.right_codebook,
+        result.factors.right_binary.shape[1],
+    )
+    corrected = apply_single_word_flip(coded, result.right_flip_positions)
+    assert torch.equal(corrected, result.factors.right_binary[1:])

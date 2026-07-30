@@ -4,6 +4,11 @@
 **Status:** reconstruction screen passed; functional promotion gate
 directionally favorable but statistically inconclusive
 
+**Follow-up:** [Mixed Free/Coded V Basis](54-mixed-free-coded-v-basis.md)
+replaces the all-coded candidate with a better mixed basis. Keeping 256 V
+components fully free improves every tested block and passes a 24-sequence
+three-block splice-KL gate.
+
 ## Question
 
 The pure fitted codebook and global progressive-fixing screens failed:

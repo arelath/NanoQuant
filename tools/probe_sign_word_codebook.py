@@ -46,6 +46,7 @@ from nanoquant.domain.sign_word_codebook import (
     maximum_asymmetric_codebook_rank_for_budget,
     maximum_codebook_rank_for_budget,
     maximum_corrected_asymmetric_rank_for_budget,
+    mixed_right_corrected_codebook_bit_cost,
     sign_word_codebook_bit_cost,
 )
 from nanoquant.infrastructure.device_lease import acquire_device_lease
@@ -70,6 +71,7 @@ class SignWordCodebookProtocol:
     projection: str
     baseline_rank: int
     candidate_rank: int | None
+    right_free_rows: int
     index_widths: tuple[int, ...]
     rank_multiple: int
     scale_bits: int
@@ -441,6 +443,7 @@ def _run_codebook(
             codebook_mode="full" if right_only else protocol.codebook_mode,
             constrain_left=not right_only,
             right_flips_per_word=corrections_per_word,
+            right_free_rows=protocol.right_free_rows,
         )
         factors = codebook_result.factors
         representation_metrics = {
@@ -468,14 +471,26 @@ def _run_codebook(
                 "maximum_position_frequency": float(probabilities.max()),
             }
         if corrected:
-            bit_cost = corrected_asymmetric_codebook_bit_cost(
-                weight.shape[0],
-                weight.shape[1],
-                rank,
-                left_index_width=None,
-                right_index_width=index_width,
-                right_flip_bits=correction_bits,
-                scale_width=protocol.scale_bits,
+            bit_cost = (
+                mixed_right_corrected_codebook_bit_cost(
+                    weight.shape[0],
+                    weight.shape[1],
+                    rank,
+                    right_free_rows=protocol.right_free_rows,
+                    right_index_width=index_width,
+                    right_flip_bits=correction_bits,
+                    scale_width=protocol.scale_bits,
+                )
+                if protocol.right_free_rows
+                else corrected_asymmetric_codebook_bit_cost(
+                    weight.shape[0],
+                    weight.shape[1],
+                    rank,
+                    left_index_width=None,
+                    right_index_width=index_width,
+                    right_flip_bits=correction_bits,
+                    scale_width=protocol.scale_bits,
+                )
             )
             arm_name = (
                 f"right_codebook_flip{corrections_per_word}_k{index_width}"
@@ -515,6 +530,7 @@ def _run_codebook(
     return {
         "arm": arm_name,
         "rank": rank,
+        "right_free_rows": protocol.right_free_rows,
         "rank_multiple_vs_baseline": rank / protocol.baseline_rank,
         "bit_cost": asdict(bit_cost),
         "total_bits": bit_cost.total,
@@ -606,13 +622,24 @@ def run(args: argparse.Namespace) -> int:
         or args.candidate_rank % args.rank_multiple
     ):
         raise ValueError("candidate rank must be positive and rank-aligned")
+    if args.right_free_rows < 0 or args.right_free_rows % args.rank_multiple:
+        raise ValueError("right free rows must be non-negative and rank-aligned")
+    if args.right_free_rows and (
+        args.candidate_rank is None
+        or args.right_free_rows >= args.candidate_rank
+        or not args.codebook_mode.startswith("full-right-flip")
+    ):
+        raise ValueError(
+            "right free rows require a larger explicit corrected-code rank"
+        )
     protocol = SignWordCodebookProtocol(
-        13,
+        15,
         args.model_revision,
         args.block,
         args.projection,
         args.baseline_rank,
         args.candidate_rank,
+        args.right_free_rows,
         args.index_widths,
         args.rank_multiple,
         args.scale_bits,
@@ -800,6 +827,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--projection", default="down")
     parser.add_argument("--baseline-rank", type=int, default=970)
     parser.add_argument("--candidate-rank", type=int)
+    parser.add_argument("--right-free-rows", type=int, default=0)
     parser.add_argument("--index-widths", type=_parse_ints, default=(8, 12))
     parser.add_argument("--rank-multiple", type=int, default=32)
     parser.add_argument("--scale-bits", type=int, default=16)
