@@ -1,7 +1,8 @@
 # Post-Refit Covariance Placement
 
 **Date:** 2026-07-29
-**Status:** bounded screen passed; production integration complete; Experiment 034 pending
+**Status:** bounded screen passed; complete production transfer failed the
+perplexity gate
 
 ## Question
 
@@ -92,7 +93,7 @@ Three disjoint 12×512 functional slices all improved:
 The aggregate interval used 50,000 paired bootstrap resamples. All ranks,
 outliers, patches, representation fields, and physical bits are identical.
 
-## Decision
+## Bounded-screen decision
 
 Promote only an explicit post-refit QKV placement for blocks 5, 11, 24, and
 25 to a numbered complete-run experiment. Do not enable all-group,
@@ -113,3 +114,71 @@ The selected block set is pinned-workload evidence, not a general
 architecture rule. A future general selector needs a held-out
 language-functional allocation stage rather than a covariance or block-output
 proxy.
+
+## Complete production transfer
+
+Experiment 034 completed the full resident, global-distillation, packed,
+checkpoint, GGUF, publication, and retained-quality lifecycle. Its interrupted
+resident run adopted the 48 valid layer/group commits through block 7 and
+replayed block 8 onward. Fresh strict validation then checked 712 artifacts,
+all 156 active journal records, and the contiguous 26-block prefix.
+
+The production calibration covariance reduced its own objective at every
+selected placement:
+
+| Block | Covariance error reduction |
+| ---: | ---: |
+| 5 | 6.45% |
+| 11 | 7.50% |
+| 24 | 5.09% |
+| 25 | 4.02% |
+
+These reductions are much smaller than the offline WikiText placement probe.
+The probe optimized covariance captured from its WikiText functional workload,
+whereas the resident path used the recipe's calibration stream. The selected
+blocks therefore did not transfer across covariance sources.
+
+The exact retained 64x128 WikiText comparison confirms the failure before
+global KD:
+
+| Metric | Experiment 022 | Experiment 034 | Change |
+| --- | ---: | ---: | ---: |
+| Pre-KD mean NLL | 5.611360 | 5.656276 | +0.044916 |
+| Pre-KD perplexity | 273.516089 | 286.081276 | +4.59% |
+| Post-KD perplexity | 228.550618 | 241.121781 | +5.50% |
+
+Global KD improved Experiment 034 from 286.08 to 241.12 perplexity, but did
+not erase the pre-KD regression. The complete-run result is better than the
+all-group Experiment 033 failure (272.56 perplexity), showing that selective
+placement contains the damage, not that it beats the D2 baseline.
+
+The six 200-row task checks are a mixed secondary signal: Experiment 034
+improved PIQA by 3.0 points, ARC Easy by 0.5, ARC Challenge by 1.0,
+HellaSwag by 0.5, and Winogrande by 4.0, while BoolQ tied Experiment 022.
+Their unweighted mean rose from 0.4692 to 0.4842. These small evaluations do
+not override the pre-registered exact WikiText failure.
+
+The representation cost remained effectively unchanged:
+
+| Measure | Experiment 022 | Experiment 034 |
+| --- | ---: | ---: |
+| Effective BPW | 1.024494712 | 1.024496179 |
+| Rank sum | 111,776 | 111,840 |
+| GGUF bytes | 417,334,656 | 417,340,672 |
+
+The tiny rank and byte difference comes from the fresh self-measured D2
+allocation, not a covariance-refinement payload. The method adds no persisted
+weight field, but the literal no-BPW-increase gate was not met.
+
+## Final decision
+
+Reject the selected post-refit covariance placement as a production default.
+It passes persistence, resume, artifact, and export gates and improves its
+local objective, but fails both the pre-KD and post-KD language-quality gates.
+Keep the option explicit for research only.
+
+The result also rejects selecting sparse factor edits using a covariance
+captured from a different workload. A future sparse residual or binary-edit
+selector must score candidates on held-out language behavior representative
+of the intended evaluation distribution, and must validate compositions
+rather than assuming singleton improvements add.
