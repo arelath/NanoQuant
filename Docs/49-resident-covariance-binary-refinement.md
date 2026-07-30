@@ -1,7 +1,7 @@
 # Resident Covariance-Aware Binary Refinement
 
 **Date:** 2026-07-29
-**Status:** implemented behind explicit dense-Hessian objective; complete Experiment 033 rejected
+**Status:** pre-tuning placement rejected; bounded post-refit QKV placement selected
 
 ## Promotion evidence
 
@@ -103,3 +103,13 @@ explicit and opt-in so a bounded same-rank study can compare refinement before
 tuning, after factorized tuning, and after post-block refit without changing
 the stored format. No further complete run is justified until one placement
 passes direct held-out output and language-functional gates.
+
+## Post-refit follow-up
+
+Document 50 completes that bounded study. Broad post-refit placement remains
+harmful, but fused-QKV-only refinement in blocks 5, 11, 24, and 25 passes
+three disjoint functional slices and improves exact complete-model pre-KD
+WikiText perplexity by 6.79%, with identical ranks, outliers, patches, and
+physical bits. This selected placement is authorized for an explicit
+production integration and numbered complete-run gate; it is not yet
+authorized as a default.
