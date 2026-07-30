@@ -405,6 +405,9 @@ def resident_request_from_config(
             if config.calibration.objective.kind is ObjectiveKind.DENSE_HESSIAN
             else None
         ),
+        post_refit_covariance_refinement=(
+            config.block_tuning.post_refit_covariance_refinement
+        ),
         factorized_tuning_epochs=factorized.loop.epochs if factorized.loop.enabled else 0,
         factorized_tuning_batch_size=factorized.loop.batch_size,
         factorized_tuning_learning_rate=factorized_lr,

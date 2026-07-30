@@ -18,6 +18,7 @@ from nanoquant.config.schema import (
     DistillationLoss,
     ExecutorKind,
     ObjectiveKind,
+    PostRefitCovarianceRefinementConfig,
     RunConfig,
 )
 from nanoquant.domain.models import ArtifactRef
@@ -130,6 +131,27 @@ def test_resident_recipe_maps_dense_objective_to_covariance_refinement(tmp_path:
     request = resident_request_from_config(config, _inputs(tmp_path))
 
     assert request.covariance_refinement == objective
+
+
+def test_resident_recipe_maps_post_refit_covariance_selection(tmp_path: Path) -> None:
+    base = _resident_config()
+    selected = PostRefitCovarianceRefinementConfig(
+        enabled=True,
+        block_indices=(5, 11, 24, 25),
+        shared_input_groups=("self_attn.attn_qkv",),
+    )
+    config = replace(
+        base,
+        block_tuning=replace(
+            base.block_tuning,
+            post_refit_covariance_refinement=selected,
+        ),
+    )
+
+    request = resident_request_from_config(config, _inputs(tmp_path))
+
+    assert request.covariance_refinement is None
+    assert request.post_refit_covariance_refinement == selected
 
 
 def test_cpu_offload_mapping_requires_large_model_guards(tmp_path: Path) -> None:

@@ -18,6 +18,7 @@ from nanoquant.config.schema import (
     HessianSamplingConfig,
     ObjectiveConfig,
     ObjectiveKind,
+    PostRefitCovarianceRefinementConfig,
     ProfilingConfig,
     ProfilingLevel,
     RankResponseSource,
@@ -80,6 +81,77 @@ def test_resident_covariance_refinement_is_explicit_and_persisted(tmp_path: Path
     names = [event["name"] for event in events]
     assert names.count("covariance_refinement.captured") == 1
     assert names.count("covariance_refinement.completed") == 7
+    assert load_completed_resident_quantization(request).identity == result.identity
+
+
+def test_resident_post_refit_covariance_refines_only_selected_group(
+    tmp_path: Path,
+) -> None:
+    snapshot = tmp_path / "snapshot"
+    config = Gemma3TextConfig(
+        vocab_size=32,
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=4,
+    )
+    Gemma3ForCausalLM(config).save_pretrained(snapshot, safe_serialization=True)
+    output = tmp_path / "run"
+    request = ResidentQuantizationRequest(
+        snapshot,
+        output,
+        "fixture/gemma3",
+        "pinned-test-revision",
+        ((1, 2, 3, 4),),
+        device="cpu",
+        target_bpw=8.0,
+        rank_multiple=1,
+        shared_input_groups=(
+            SharedInputGroupConfig(
+                "self_attn.attn_qkv",
+                (
+                    "self_attn.q_proj",
+                    "self_attn.k_proj",
+                    "self_attn.v_proj",
+                ),
+            ),
+        ),
+        admm=ADMMConfig(outer_iterations=2, inner_iterations=1),
+        post_block_refit_epochs=1,
+        post_block_refit_batch_size=1,
+        post_refit_covariance_refinement=PostRefitCovarianceRefinementConfig(
+            enabled=True,
+            block_indices=(0,),
+            shared_input_groups=("self_attn.attn_qkv",),
+            sampling=HessianSamplingConfig(max_tokens_per_layer=4),
+        ),
+        profiling=ProfilingConfig(level=ProfilingLevel.OFF),
+        registry_root=tmp_path / "runs",
+    )
+
+    result = run_resident_quantization(request)
+
+    assert len(result.blocks) == 1
+    events = [
+        json.loads(line)
+        for line in (output / "events.jsonl").read_text().splitlines()
+    ]
+    captures = [
+        event for event in events if event["name"] == "covariance_refinement.captured"
+    ]
+    completed = [
+        event
+        for event in events
+        if event["name"] == "post_refit_covariance_refinement.completed"
+    ]
+    assert len(captures) == 1
+    assert captures[0]["fields"]["placement"] == "post_refit"
+    assert captures[0]["fields"]["units"] == ["self_attn.attn_qkv"]
+    assert len(completed) == 1
+    assert completed[0]["fields"]["block"] == 0
+    assert completed[0]["fields"]["group"] == "self_attn.attn_qkv"
     assert load_completed_resident_quantization(request).identity == result.identity
 
 

@@ -20,6 +20,7 @@ from nanoquant.config.schema import (
     ModelConfig,
     ObjectiveKind,
     ObservabilityConfig,
+    PostRefitCovarianceRefinementConfig,
     ProfilingConfig,
     ProfilingLevel,
     ReasoningMode,
@@ -55,6 +56,36 @@ def test_round_trip_decodes_nested_enums_tuples_and_optionals() -> None:
     assert config.profiling.level is ProfilingLevel.MICRO
     assert config.profiling.trace_blocks == (3, 7)
     assert from_dict(RunConfig, to_dict(config)) == config
+
+
+def test_post_refit_covariance_selection_requires_refit_blocks_and_groups() -> None:
+    base = RunConfig(ModelConfig("x"))
+    selected = PostRefitCovarianceRefinementConfig(
+        enabled=True,
+        block_indices=(5, 11, 24, 25),
+        shared_input_groups=("self_attn.attn_qkv",),
+    )
+    missing_refit = replace(
+        base,
+        block_tuning=replace(
+            base.block_tuning,
+            post_refit_covariance_refinement=selected,
+        ),
+    )
+    enabled_refit = replace(
+        missing_refit,
+        block_tuning=replace(
+            missing_refit.block_tuning,
+            post_block_refit=replace(
+                missing_refit.block_tuning.post_block_refit,
+                enabled=True,
+                epochs=1,
+            ),
+        ),
+    )
+
+    assert {issue.code for issue in validate(missing_refit)} == {"CFG105"}
+    assert not validate(enabled_refit)
 
 
 def test_behavior_slices_and_reasoning_modes_round_trip_and_validate() -> None:

@@ -494,11 +494,27 @@ class PostBlockRefitConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class PostRefitCovarianceRefinementConfig:
+    enabled: bool = False
+    block_indices: tuple[int, ...] = ()
+    shared_input_groups: tuple[str, ...] = ()
+    sampling: HessianSamplingConfig = field(
+        default_factory=lambda: HessianSamplingConfig(max_tokens_per_layer=8192)
+    )
+    regularization: HessianRegularizationConfig = field(
+        default_factory=HessianRegularizationConfig
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class BlockTuningConfig:
     layer_order: tuple[str, ...] = ()
     non_factorized: NonFactorizedTuningConfig = field(default_factory=NonFactorizedTuningConfig)
     factorized: FactorizedTuningConfig = field(default_factory=FactorizedTuningConfig)
     post_block_refit: PostBlockRefitConfig = field(default_factory=PostBlockRefitConfig)
+    post_refit_covariance_refinement: PostRefitCovarianceRefinementConfig = field(
+        default_factory=PostRefitCovarianceRefinementConfig
+    )
     microbatch_size: int | None = None
     reset_seed_each_stage: bool = False
     restore_best_state: bool = True

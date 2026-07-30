@@ -649,6 +649,45 @@ def validate(config: RunConfig, phase: ValidationPhase = ValidationPhase.PRE_RES
         "block_tuning.post_block_refit.batch_size",
         "must be positive",
     )
+    post_refit_covariance = config.block_tuning.post_refit_covariance_refinement
+    require(
+        post_refit_covariance.enabled
+        == bool(
+            post_refit_covariance.block_indices
+            and post_refit_covariance.shared_input_groups
+        ),
+        "CFG104",
+        "block_tuning.post_refit_covariance_refinement",
+        "enabled refinement requires blocks and shared-input groups; configured selections require enabled=true",
+    )
+    require(
+        not post_refit_covariance.enabled or refit.enabled,
+        "CFG105",
+        "block_tuning.post_refit_covariance_refinement",
+        "post-refit covariance refinement requires post-block refit",
+    )
+    require(
+        len(post_refit_covariance.block_indices)
+        == len(set(post_refit_covariance.block_indices))
+        and all(index >= 0 for index in post_refit_covariance.block_indices),
+        "CFG106",
+        "block_tuning.post_refit_covariance_refinement.block_indices",
+        "block indices must be unique and non-negative",
+    )
+    require(
+        len(post_refit_covariance.shared_input_groups)
+        == len(set(post_refit_covariance.shared_input_groups))
+        and all(name.strip() for name in post_refit_covariance.shared_input_groups),
+        "CFG107",
+        "block_tuning.post_refit_covariance_refinement.shared_input_groups",
+        "shared-input group names must be non-empty and unique",
+    )
+    require(
+        post_refit_covariance.sampling.max_tokens_per_layer > 0,
+        "CFG108",
+        "block_tuning.post_refit_covariance_refinement.sampling.max_tokens_per_layer",
+        "must be positive",
+    )
     require(config.distillation.epochs > 0, "CFG025", "distillation.epochs", "must be positive")
     require(config.distillation.batch_size > 0, "CFG026", "distillation.batch_size", "must be positive")
     require(config.distillation.learning_rate > 0, "CFG027", "distillation.learning_rate", "must be positive")

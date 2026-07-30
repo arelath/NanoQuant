@@ -14,6 +14,7 @@ from nanoquant.config.schema import (
     ObjectiveConfig,
     ObjectiveKind,
     ObservabilityConfig,
+    PostRefitCovarianceRefinementConfig,
     ProfilingConfig,
     ProfilingLevel,
 )
@@ -95,6 +96,23 @@ def test_covariance_refinement_invalidates_commit_identity() -> None:
         replace(
             request,
             covariance_refinement=ObjectiveConfig(kind=ObjectiveKind.DENSE_HESSIAN),
+        )
+    )
+
+
+def test_post_refit_covariance_refinement_invalidates_commit_identity() -> None:
+    request = ResidentQuantizationRequest(
+        Path("snapshot"), Path("output"), "fixture/model", "revision", ((1, 2, 3),), device="cpu"
+    )
+
+    assert resident._resident_config_hash(request) != resident._resident_config_hash(
+        replace(
+            request,
+            post_refit_covariance_refinement=PostRefitCovarianceRefinementConfig(
+                enabled=True,
+                block_indices=(0,),
+                shared_input_groups=("self_attn.attn_qkv",),
+            ),
         )
     )
 

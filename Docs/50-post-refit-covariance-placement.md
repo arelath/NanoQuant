@@ -1,7 +1,7 @@
 # Post-Refit Covariance Placement
 
-**Date:** 2026-07-29  
-**Status:** bounded screen passed; production integration and complete-run gate pending
+**Date:** 2026-07-29
+**Status:** bounded screen passed; production integration complete; Experiment 034 pending
 
 ## Question
 
@@ -98,7 +98,10 @@ Promote only an explicit post-refit QKV placement for blocks 5, 11, 24, and
 25 to a numbered complete-run experiment. Do not enable all-group,
 all-late-block, all-QKV, or isolated-output-gated refinement.
 
-The complete-run gate must still prove:
+Resident algorithm version 51 implements this as the explicit
+`block_tuning.post_refit_covariance_refinement` option. Experiment 034 is the
+only recipe enabling it and selects the fused-QKV owner in blocks 5, 11, 24,
+and 25. The complete-run gate must still prove:
 
 1. deterministic resident persistence and resume;
 2. unchanged effective BPW and export validity;

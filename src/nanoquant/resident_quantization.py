@@ -86,6 +86,7 @@ from nanoquant.config.schema import (
     ObjectiveKind,
     ObservabilityConfig,
     OutlierConfig,
+    PostRefitCovarianceRefinementConfig,
     ProfilingConfig,
     ProfilingLevel,
     RankAllocationConfig,
@@ -214,7 +215,7 @@ from nanoquant.infrastructure.tuning_checkpoint import (
 from nanoquant.ports.event_sink import EventSink, LayerCommittedPayload, emit_layer_committed
 from nanoquant.ports.model_adapter import ModelAdapter
 
-RESIDENT_ALGORITHM_VERSION = 50
+RESIDENT_ALGORITHM_VERSION = 51
 COVARIANCE_REFINEMENT_MAX_INPUT_FEATURES = 2048
 _THROUGHPUT_PROBE_REPETITIONS = 5
 _THROUGHPUT_PROBE_WARMUP_WORKLOADS = 3
@@ -364,6 +365,9 @@ class ResidentQuantizationRequest:
     bias_correction: BiasCorrectionConfig = BiasCorrectionConfig()
     low_rank_patch: LowRankPatchConfig = LowRankPatchConfig()
     covariance_refinement: ObjectiveConfig | None = None
+    post_refit_covariance_refinement: PostRefitCovarianceRefinementConfig = (
+        PostRefitCovarianceRefinementConfig()
+    )
     factorized_tuning_epochs: int = 0
     factorized_tuning_batch_size: int = 8
     factorized_tuning_learning_rate: float = 1e-5
@@ -841,9 +845,24 @@ def _capture_covariance_refinement_metrics(
     tensors: LocalTensorStore,
     events: EventSink,
 ) -> dict[str, TensorRef]:
-    config = request.covariance_refinement
-    if config is None:
+    pre_tuning = request.covariance_refinement
+    post_refit = request.post_refit_covariance_refinement
+    post_refit_selected = (
+        post_refit.enabled and block_plan.block.index in post_refit.block_indices
+    )
+    if pre_tuning is not None and post_refit_selected:
+        raise ValueError("resident covariance refinement placements must not overlap")
+    if pre_tuning is None and not post_refit_selected:
         return {}
+    config = (
+        pre_tuning
+        if pre_tuning is not None
+        else ObjectiveConfig(
+            kind=ObjectiveKind.DENSE_HESSIAN,
+            sampling=post_refit.sampling,
+            regularization=post_refit.regularization,
+        )
+    )
     if config.kind is not ObjectiveKind.DENSE_HESSIAN:
         raise ValueError("resident covariance refinement requires the dense-Hessian objective")
     fit_rows = config.sampling.max_tokens_per_layer
@@ -851,14 +870,20 @@ def _capture_covariance_refinement_metrics(
         raise ValueError("resident covariance refinement requires positive fit rows")
     capture_specs: dict[str, tuple[str, int]] = {}
     for group in block_plan.shared_input_groups:
+        if (
+            post_refit_selected
+            and group.name not in post_refit.shared_input_groups
+        ):
+            continue
         if group.in_features <= COVARIANCE_REFINEMENT_MAX_INPUT_FEATURES:
             capture_specs[group.name] = (group.members[0].layer.path, group.in_features)
-    for layer in block_plan.layers:
-        if layer.source_weight.spec.shape[1] <= COVARIANCE_REFINEMENT_MAX_INPUT_FEATURES:
-            capture_specs[layer.layer.path] = (
-                layer.layer.path,
-                layer.source_weight.spec.shape[1],
-            )
+    if pre_tuning is not None:
+        for layer in block_plan.layers:
+            if layer.source_weight.spec.shape[1] <= COVARIANCE_REFINEMENT_MAX_INPUT_FEATURES:
+                capture_specs[layer.layer.path] = (
+                    layer.layer.path,
+                    layer.source_weight.spec.shape[1],
+                )
     if not capture_specs:
         return {}
     accumulators = {
@@ -918,6 +943,7 @@ def _capture_covariance_refinement_metrics(
         block=block_plan.block.index,
         fit_rows=fit_rows,
         units=sorted(result),
+        placement=("pre_tuning" if pre_tuning is not None else "post_refit"),
         skipped_max_input_features=COVARIANCE_REFINEMENT_MAX_INPUT_FEATURES,
     )
     return result
@@ -2103,6 +2129,113 @@ def _run_covariance_refinement(
     )
 
 
+def _post_refit_covariance_selected(
+    request: ResidentQuantizationRequest,
+    block: int,
+    group: str,
+) -> bool:
+    config = request.post_refit_covariance_refinement
+    return (
+        config.enabled
+        and block in config.block_indices
+        and group in config.shared_input_groups
+    )
+
+
+@torch.no_grad()
+def _run_post_refit_covariance_refinement(
+    request: ResidentQuantizationRequest,
+    block: int,
+    group: str,
+    trainable: TrainableSharedInputFactorGroup,
+    source_weight: TensorRef,
+    objectives: tuple[ObjectiveSpec, ...],
+    covariance: TensorRef | None,
+    context: StageContext,
+) -> None:
+    if not _post_refit_covariance_selected(request, block, group):
+        return
+    if covariance is None:
+        raise ValueError(f"post-refit covariance metric is missing for block {block} group {group}")
+    output_values = []
+    for objective in objectives:
+        with context.tensor_store.read(objective.output_importance, request.device) as value:
+            output_values.append(value.clone())
+    output_importance = torch.cat(output_values)
+    left = torch.where(trainable.left_latent.detach() >= 0, 1.0, -1.0)
+    right = torch.where(trainable.right_latent.detach() >= 0, 1.0, -1.0)
+    factor_weight = reconstruct(
+        left,
+        right,
+        trainable.scale_pre.detach(),
+        trainable.scale_mid.detach(),
+        trainable.scale_post.detach(),
+    )
+    addition = trainable.dense_weight().detach() - factor_weight
+    started = time.perf_counter()
+    with (
+        context.tensor_store.read(source_weight, request.device) as source,
+        context.tensor_store.read(covariance, request.device) as metric,
+    ):
+        refined = refine_binary_factors_under_covariance(
+            source - addition,
+            left,
+            right,
+            trainable.scale_pre,
+            trainable.scale_mid,
+            trainable.scale_post,
+            metric,
+            output_importance,
+            protected_columns=trainable.outlier_indices,
+        )
+    trainable.left_latent.copy_(
+        refined.left_binary.to(
+            device=trainable.left_latent.device,
+            dtype=trainable.left_latent.dtype,
+        )
+    )
+    trainable.right_latent.copy_(
+        refined.right_binary.to(
+            device=trainable.right_latent.device,
+            dtype=trainable.right_latent.dtype,
+        )
+    )
+    trainable.scale_pre.copy_(
+        refined.scale_pre.to(
+            device=trainable.scale_pre.device,
+            dtype=trainable.scale_pre.dtype,
+        )
+    )
+    trainable.scale_mid.copy_(
+        refined.scale_mid.to(
+            device=trainable.scale_mid.device,
+            dtype=trainable.scale_mid.dtype,
+        )
+    )
+    trainable.scale_post.copy_(
+        refined.scale_post.to(
+            device=trainable.scale_post.device,
+            dtype=trainable.scale_post.dtype,
+        )
+    )
+    context.events.emit(
+        "resident-quantization",
+        "info",
+        "post_refit_covariance_refinement.completed",
+        block=block,
+        group=group,
+        before_covariance_error=refined.before_error,
+        after_covariance_error=refined.after_error,
+        covariance_error_reduction=(
+            (refined.before_error - refined.after_error)
+            / max(refined.before_error, 1e-30)
+        ),
+        left_flips=refined.left_flips,
+        right_flips=refined.right_flips,
+        wall_seconds=time.perf_counter() - started,
+    )
+
+
 def _resident_config_hash(request: ResidentQuantizationRequest) -> str:
     adaptive_memory = request.memory_plan is not None and request.memory_plan.mode == "adaptive"
     semantic_config = {
@@ -2133,6 +2266,7 @@ def _resident_config_hash(request: ResidentQuantizationRequest) -> str:
         "bias_correction": request.bias_correction,
         "low_rank_patch": request.low_rank_patch,
         "covariance_refinement": request.covariance_refinement,
+        "post_refit_covariance_refinement": request.post_refit_covariance_refinement,
         "factorized_tuning_epochs": request.factorized_tuning_epochs,
         "factorized_tuning_batch_size": request.factorized_tuning_batch_size,
         "factorized_tuning_learning_rate": request.factorized_tuning_learning_rate,
@@ -3926,6 +4060,16 @@ def _validate_resident_request(request: ResidentQuantizationRequest) -> None:
         raise ValueError("resident quantization non-factorized tuning batch size must be positive")
     if request.post_block_refit_epochs > 0 and request.post_block_refit_batch_size <= 0:
         raise ValueError("resident quantization post-block refit batch size must be positive")
+    post_refit_covariance = request.post_refit_covariance_refinement
+    if post_refit_covariance.enabled and request.post_block_refit_epochs <= 0:
+        raise ValueError("post-refit covariance refinement requires post-block refit epochs")
+    if post_refit_covariance.enabled != bool(
+        post_refit_covariance.block_indices
+        and post_refit_covariance.shared_input_groups
+    ):
+        raise ValueError("post-refit covariance refinement requires explicit blocks and groups")
+    if request.covariance_refinement is not None and post_refit_covariance.enabled:
+        raise ValueError("pre-tuning and post-refit covariance refinement cannot both be enabled")
     if request.tuning_microbatch_size is not None and request.tuning_microbatch_size <= 0:
         raise ValueError("resident quantization tuning microbatch size must be positive")
     if request.post_block_refit_microbatch_size is not None and request.post_block_refit_microbatch_size <= 0:
@@ -6186,6 +6330,17 @@ def _execute_resident_quantization_pipeline(
                         tuning_forward,
                         tuning_recorder,
                     )
+            for group_result in group_results:
+                _run_post_refit_covariance_refinement(
+                    request,
+                    block_index,
+                    group_result.name,
+                    trainable_groups[group_result.name],
+                    quantization_targets[group_result.name],
+                    group_result.plan.objectives,
+                    covariance_refinement_metrics.get(group_result.name),
+                    context,
+                )
             refitted_states = []
             refitted_results = []
             for layer_result in layer_results:
