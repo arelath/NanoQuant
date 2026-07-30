@@ -4,6 +4,11 @@
 **Status:** full reconstruction screen passed; uniform application rejected;
 six-block selective policy passed disjoint functional confirmation
 
+**Follow-up:** [Mixed-V Seed and Runtime Acceptance](56-mixed-v-seed-runtime-acceptance.md)
+tightens the rule to 0.95%, selects five seed-stable blocks, confirms quality
+for three factorization seeds, and accepts load-time packed predecode as the
+execution policy.
+
 ## Question
 
 [Mixed Free/Coded V Basis](54-mixed-free-coded-v-basis.md) found that a
@@ -208,6 +213,10 @@ predeclared rule:
 
 On this model and calibration state, that selects blocks
 `0, 10, 11, 12, 16, 25`.
+
+The follow-up seed screen supersedes this exploratory inventory: block 16 is
+borderline under seeds 1 and 2, so the accepted rule is tightened to 0.95%
+and selects `0, 10, 11, 12, 25`.
 
 The rule passes:
 
