@@ -1,8 +1,8 @@
-"""Screen equal-bit fitted sign-word codebooks on one pinned Gemma matrix.
+"""Screen equal-bit compressed sign words on one pinned Gemma matrix.
 
 This is an analysis-only probe.  It does not introduce a packed schema or
-runtime.  Each codebook arm is constrained throughout ADMM, includes the full
-two-table decode cost, and spends the saved sign bits on aligned rank.
+runtime.  Fitted-table and progressively-fixed arms are constrained throughout
+ADMM and spend the saved sign bits on aligned rank.
 """
 
 from __future__ import annotations
@@ -24,6 +24,12 @@ from safetensors import safe_open
 from nanoquant.domain.calibration_math import shrink_importance
 from nanoquant.domain.factorization import AdmmParameters, factorize_admm_with_parameters
 from nanoquant.domain.planning import factor_bit_cost
+from nanoquant.domain.progressive_sign_fixing import (
+    ProgressiveSignConstraint,
+    factorize_progressive_sign_fixing_admm,
+    maximum_progressive_rank_for_budget,
+    progressive_sign_fixing_bit_cost,
+)
 from nanoquant.domain.scale_fit import fit_scales
 from nanoquant.domain.sign_word_codebook import (
     codebook_index_metrics,
@@ -62,6 +68,7 @@ class SignWordCodebookProtocol:
     convergence_check_interval: int
     codebook_update_interval: int
     codebook_freeze_fraction: float
+    progressive_warmup_fraction: float
     codebook_mode: str
     assignment_batch_words: int
     scale_fit_passes: int
@@ -268,60 +275,112 @@ def _run_codebook(
     index_width: int,
     target_bits: int,
 ) -> dict[str, Any]:
-    rank = maximum_codebook_rank_for_budget(
-        weight.shape[0],
-        weight.shape[1],
-        target_bits,
-        index_width=index_width,
-        rank_multiple=protocol.rank_multiple,
-        scale_width=protocol.scale_bits,
-    )
+    progressive = protocol.codebook_mode == "progressive"
+    if progressive:
+        rank = maximum_progressive_rank_for_budget(
+            weight.shape[0],
+            weight.shape[1],
+            target_bits,
+            variable_bits_per_word=index_width,
+            rank_multiple=protocol.rank_multiple,
+            scale_width=protocol.scale_bits,
+        )
+    else:
+        rank = maximum_codebook_rank_for_budget(
+            weight.shape[0],
+            weight.shape[1],
+            target_bits,
+            index_width=index_width,
+            rank_multiple=protocol.rank_multiple,
+            scale_width=protocol.scale_bits,
+        )
     generator = torch.Generator(device=protocol.device).manual_seed(
-        _logical_seed(protocol.seed, f"codebook-{index_width}-rank-{rank}")
+        _logical_seed(
+            protocol.seed,
+            f"{protocol.codebook_mode}-{index_width}-rank-{rank}",
+        )
     )
     if protocol.device.startswith("cuda"):
         torch.cuda.reset_peak_memory_stats(protocol.device)
         torch.cuda.synchronize(protocol.device)
     started = time.perf_counter()
-    factorized = factorize_sign_word_codebook_admm(
-        weight,
-        input_importance,
-        output_importance,
-        rank,
-        generator,
-        index_bits=index_width,
-        outer_iterations=protocol.outer_iterations,
-        inner_iterations=protocol.inner_iterations,
-        regularization=protocol.regularization,
-        penalty_schedule=protocol.penalty_schedule,
-        convergence_check_interval=protocol.convergence_check_interval,
-        codebook_update_interval=protocol.codebook_update_interval,
-        codebook_freeze_fraction=protocol.codebook_freeze_fraction,
-        assignment_batch_words=protocol.assignment_batch_words,
-        codebook_mode=protocol.codebook_mode,
-    )
+    bit_cost: Any
+    if progressive:
+        progressive_result = factorize_progressive_sign_fixing_admm(
+            weight,
+            input_importance,
+            output_importance,
+            rank,
+            generator,
+            variable_bits_per_word=index_width,
+            outer_iterations=protocol.outer_iterations,
+            inner_iterations=protocol.inner_iterations,
+            regularization=protocol.regularization,
+            penalty_schedule=protocol.penalty_schedule,
+            convergence_check_interval=protocol.convergence_check_interval,
+            fixing_warmup_fraction=protocol.progressive_warmup_fraction,
+            fixing_fraction=protocol.codebook_freeze_fraction,
+        )
+        factors = progressive_result.factors
+        representation_metrics: dict[str, Any] = {
+            "constraint_metrics": {
+                "left": _constraint_metrics(progressive_result.left_constraint),
+                "right": _constraint_metrics(progressive_result.right_constraint),
+            }
+        }
+        bit_cost = progressive_sign_fixing_bit_cost(
+            weight.shape[0],
+            weight.shape[1],
+            rank,
+            variable_bits_per_word=index_width,
+            scale_width=protocol.scale_bits,
+        )
+        arm_name = f"progressive_k{index_width}"
+    else:
+        codebook_result = factorize_sign_word_codebook_admm(
+            weight,
+            input_importance,
+            output_importance,
+            rank,
+            generator,
+            index_bits=index_width,
+            outer_iterations=protocol.outer_iterations,
+            inner_iterations=protocol.inner_iterations,
+            regularization=protocol.regularization,
+            penalty_schedule=protocol.penalty_schedule,
+            convergence_check_interval=protocol.convergence_check_interval,
+            codebook_update_interval=protocol.codebook_update_interval,
+            codebook_freeze_fraction=protocol.codebook_freeze_fraction,
+            assignment_batch_words=protocol.assignment_batch_words,
+            codebook_mode=protocol.codebook_mode,
+        )
+        factors = codebook_result.factors
+        representation_metrics = {
+            "index_metrics": codebook_index_metrics(codebook_result)
+        }
+        bit_cost = sign_word_codebook_bit_cost(
+            weight.shape[0],
+            weight.shape[1],
+            rank,
+            index_width=index_width,
+            scale_width=protocol.scale_bits,
+        )
+        arm_name = f"codebook_k{index_width}"
     fitted = fit_scales(
         weight,
-        factorized.factors.left_binary,
-        factorized.factors.right_binary,
-        factorized.factors.scale_pre,
-        factorized.factors.scale_mid,
-        factorized.factors.scale_post,
+        factors.left_binary,
+        factors.right_binary,
+        factors.scale_pre,
+        factors.scale_mid,
+        factors.scale_post,
         input_importance,
         output_importance,
         alternating_passes=protocol.scale_fit_passes,
     )
     if protocol.device.startswith("cuda"):
         torch.cuda.synchronize(protocol.device)
-    bit_cost = sign_word_codebook_bit_cost(
-        weight.shape[0],
-        weight.shape[1],
-        rank,
-        index_width=index_width,
-        scale_width=protocol.scale_bits,
-    )
     return {
-        "arm": f"codebook_k{index_width}",
+        "arm": arm_name,
         "rank": rank,
         "rank_multiple_vs_baseline": rank / protocol.baseline_rank,
         "bit_cost": asdict(bit_cost),
@@ -336,16 +395,35 @@ def _run_codebook(
             input_importance,
             output_importance,
         ),
-        "index_metrics": codebook_index_metrics(factorized),
+        **representation_metrics,
         "scale_fit_accepted": fitted.accepted,
         "scale_fit_rollback_reason": fitted.rollback_reason,
-        "trace": _trace(factorized.factors.trace),
+        "trace": _trace(factors.trace),
         "wall_seconds": time.perf_counter() - started,
         "peak_device_bytes": (
             int(torch.cuda.max_memory_allocated(protocol.device))
             if protocol.device.startswith("cuda")
             else 0
         ),
+    }
+
+
+def _constraint_metrics(constraint: ProgressiveSignConstraint) -> dict[str, Any]:
+    majorities = [decision.majority_fraction for decision in constraint.decisions]
+    return {
+        "fixed_count": constraint.fixed_count,
+        "fixed_positions": [
+            decision.position for decision in constraint.decisions
+        ],
+        "fixed_values": [
+            decision.value for decision in constraint.decisions
+        ],
+        "decisions": [asdict(decision) for decision in constraint.decisions],
+        "minimum_majority_fraction": min(majorities) if majorities else 0.0,
+        "mean_majority_fraction": (
+            sum(majorities) / len(majorities) if majorities else 0.0
+        ),
+        "maximum_majority_fraction": max(majorities) if majorities else 0.0,
     }
 
 
@@ -374,7 +452,7 @@ def run(args: argparse.Namespace) -> int:
     if args.baseline_rank <= 0 or any(width <= 0 or width % 2 for width in args.index_widths):
         raise ValueError("baseline rank must be positive and index widths positive/even")
     protocol = SignWordCodebookProtocol(
-        3,
+        6,
         args.model_revision,
         args.block,
         args.projection,
@@ -389,6 +467,7 @@ def run(args: argparse.Namespace) -> int:
         args.convergence_check_interval,
         args.codebook_update_interval,
         args.codebook_freeze_fraction,
+        args.progressive_warmup_fraction,
         args.codebook_mode,
         args.assignment_batch_words,
         args.scale_fit_passes,
@@ -441,18 +520,33 @@ def run(args: argparse.Namespace) -> int:
         else:
             print("reusing free-word baseline", flush=True)
         target_bits = int(baseline["total_bits"])
+        arm_prefix = (
+            "progressive"
+            if protocol.codebook_mode == "progressive"
+            else "codebook"
+        )
         for width in args.index_widths:
-            key = f"codebook_k{width}"
+            key = f"{arm_prefix}_k{width}"
             result = output["results"].get(key)
             if result is None:
-                rank = maximum_codebook_rank_for_budget(
-                    weight.shape[0],
-                    weight.shape[1],
-                    target_bits,
-                    index_width=width,
-                    rank_multiple=protocol.rank_multiple,
-                    scale_width=protocol.scale_bits,
-                )
+                if protocol.codebook_mode == "progressive":
+                    rank = maximum_progressive_rank_for_budget(
+                        weight.shape[0],
+                        weight.shape[1],
+                        target_bits,
+                        variable_bits_per_word=width,
+                        rank_multiple=protocol.rank_multiple,
+                        scale_width=protocol.scale_bits,
+                    )
+                else:
+                    rank = maximum_codebook_rank_for_budget(
+                        weight.shape[0],
+                        weight.shape[1],
+                        target_bits,
+                        index_width=width,
+                        rank_multiple=protocol.rank_multiple,
+                        scale_width=protocol.scale_bits,
+                    )
                 print(f"running {key} rank={rank}", flush=True)
                 result = _run_codebook(
                     weight,
@@ -476,7 +570,9 @@ def run(args: argparse.Namespace) -> int:
         output["decision_screen"] = {
             "candidate_arms": [
                 key
-                for key in (f"codebook_k{width}" for width in args.index_widths)
+                for key in (
+                    f"{arm_prefix}_k{width}" for width in args.index_widths
+                )
                 if float(
                     output["results"][key]["comparison_to_free_words"][
                         "weighted_error_energy_change_fraction"
@@ -510,7 +606,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--convergence-check-interval", type=int, default=100)
     parser.add_argument("--codebook-update-interval", type=int, default=10)
     parser.add_argument("--codebook-freeze-fraction", type=float, default=0.5)
-    parser.add_argument("--codebook-mode", choices=("product", "full"), default="product")
+    parser.add_argument("--progressive-warmup-fraction", type=float, default=0.25)
+    parser.add_argument(
+        "--codebook-mode",
+        choices=("product", "full", "progressive"),
+        default="product",
+    )
     parser.add_argument("--assignment-batch-words", type=int, default=65_536)
     parser.add_argument("--scale-fit-passes", type=int, default=2)
     parser.add_argument("--calibration-shrinkage", type=float, default=0.6)
