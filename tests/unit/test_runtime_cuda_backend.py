@@ -9,9 +9,11 @@ from transformers.models.gemma3.modeling_gemma3 import Gemma3ForCausalLM, apply_
 
 from nanoquant.infrastructure.device_lease import acquire_device_lease
 from nanoquant.runtime import (
+    MIXED_V_FORMAT_VERSION,
     CudaPackedBackend,
     GenerationRequest,
     LogicalLayerState,
+    MixedVLayerState,
     QuantizedLinearSpec,
     TransformersGenerationModel,
     WorkloadSpec,
@@ -19,6 +21,8 @@ from nanoquant.runtime import (
     generate,
     hybrid_cache_factory,
     pack_logical_layer,
+    pack_mixed_v_records,
+    pack_sign_matrix,
     plan_execution_workloads,
     prepare_execution_workloads,
 )
@@ -486,6 +490,56 @@ def test_cuda_packed_backend_matches_float32_operation(
     assert actual.dtype is torch.float32
     torch.testing.assert_close(actual.cpu(), expected, rtol=2e-5, atol=2e-4)
     assert torch.equal(actual, repeated)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_cuda_packed_backend_predecodes_mixed_v_once_during_preparation() -> None:
+    generator = torch.Generator().manual_seed(20260730)
+    spec = QuantizedLinearSpec(
+        "blocks.0.mlp.down_proj",
+        "nanoquant-v1",
+        64,
+        8,
+        7,
+        "float32",
+        "float32",
+    )
+    free_rows = 2
+    codebook = torch.randint(
+        0,
+        2**32,
+        (1024,),
+        generator=generator,
+        dtype=torch.int64,
+    ).to(torch.int32)
+    indices = torch.randint(0, 1024, (5, 2), generator=generator, dtype=torch.int32)
+    pair_ids = torch.randint(0, 496, (5, 2), generator=generator, dtype=torch.int32)
+    mixed = MixedVLayerState(
+        spec,
+        MIXED_V_FORMAT_VERSION,
+        free_rows,
+        pack_sign_matrix(
+            torch.where(torch.rand(8, 7, generator=generator) > 0.5, 1.0, -1.0)
+        ),
+        pack_sign_matrix(
+            torch.where(torch.rand(free_rows, 64, generator=generator) > 0.5, 1.0, -1.0)
+        ),
+        pack_mixed_v_records(indices, pair_ids),
+        codebook,
+        torch.randn(64, generator=generator),
+        torch.randn(7, generator=generator),
+        torch.randn(8, generator=generator),
+    )
+    packed = mixed.to_packed()
+    backend = CudaPackedBackend()
+    compact_prepared = backend.prepare(mixed, "cuda")
+    expanded_prepared = backend.prepare(packed, "cuda")
+    value = torch.randn(3, 64, generator=generator).cuda()
+
+    compact_output = backend.linear(value, compact_prepared)
+    expanded_output = backend.linear(value, expanded_prepared)
+
+    assert torch.equal(compact_output, expanded_output)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")

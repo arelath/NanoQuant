@@ -69,6 +69,33 @@ from nanoquant.runtime.llamacpp import (
     open_llamacpp_checkpoint,
 )
 from nanoquant.runtime.logical import LogicalLayerState, canonical_torch_dtype
+from nanoquant.runtime.mixed_v import (
+    MIXED_V_CODEBOOK_SIZE,
+    MIXED_V_CORRECTION_BITS,
+    MIXED_V_CORRECTION_PAIR_COUNT,
+    MIXED_V_FORMAT_VERSION,
+    MIXED_V_INDEX_BITS,
+    MIXED_V_RECORD_BITS,
+    MixedVLayerState,
+    decode_mixed_v_right_words,
+    mixed_v_correction_pair_table,
+    mixed_v_from_packed_words,
+    mixed_v_payload_word_count,
+    pack_mixed_v_records,
+    unpack_mixed_v_records,
+)
+from nanoquant.runtime.mixed_v_artifact import (
+    MIXED_V_ARTIFACT_FORMAT,
+    MIXED_V_ARTIFACT_SCHEMA_VERSION,
+    MIXED_V_DESCRIPTOR,
+    MIXED_V_TENSOR_NAMESPACE,
+    MixedVArtifactError,
+    MixedVArtifactManifest,
+    MixedVLayoutMetadata,
+    OpenMixedVArtifact,
+    open_mixed_v_artifact,
+    write_mixed_v_artifact,
+)
 from nanoquant.runtime.packed import (
     GGUF_TENSOR_SUFFIXES,
     PACKED_LAYOUT_VERSION,
@@ -153,6 +180,21 @@ from nanoquant.runtime.validation import (
 )
 
 __all__ = [
+    "MIXED_V_ARTIFACT_FORMAT",
+    "MIXED_V_ARTIFACT_SCHEMA_VERSION",
+    "MIXED_V_CODEBOOK_SIZE",
+    "MIXED_V_CORRECTION_BITS",
+    "MIXED_V_CORRECTION_PAIR_COUNT",
+    "MIXED_V_DESCRIPTOR",
+    "MIXED_V_FORMAT_VERSION",
+    "MIXED_V_INDEX_BITS",
+    "MIXED_V_RECORD_BITS",
+    "MIXED_V_TENSOR_NAMESPACE",
+    "MixedVArtifactError",
+    "MixedVArtifactManifest",
+    "MixedVLayerState",
+    "MixedVLayoutMetadata",
+    "OpenMixedVArtifact",
     "BackendCapabilities",
     "BackendPlan",
     "BackendPlanningError",
@@ -274,4 +316,12 @@ __all__ = [
     "unpack_sign_matrix",
     "TransformersGenerationModel",
     "transformers_decoder_module_paths",
+    "decode_mixed_v_right_words",
+    "mixed_v_correction_pair_table",
+    "mixed_v_from_packed_words",
+    "mixed_v_payload_word_count",
+    "open_mixed_v_artifact",
+    "pack_mixed_v_records",
+    "unpack_mixed_v_records",
+    "write_mixed_v_artifact",
 ]

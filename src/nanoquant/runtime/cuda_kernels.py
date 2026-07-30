@@ -9,6 +9,60 @@ import triton.language as tl
 
 
 @triton.jit
+def _decode_mixed_v_words(
+    free_right_words,
+    coded_payload,
+    codebook_words,
+    correction_pairs,
+    output_words,
+    TOTAL_WORDS: tl.constexpr,
+    FREE_ROWS: tl.constexpr,
+    WORDS_PER_ROW: tl.constexpr,
+    RECORD_BITS: tl.constexpr,
+    INDEX_BITS: tl.constexpr,
+    BLOCK_WORDS: tl.constexpr,
+):
+    offsets = tl.program_id(0) * BLOCK_WORDS + tl.arange(0, BLOCK_WORDS)
+    output_mask = offsets < TOTAL_WORDS
+    ranks = offsets // WORDS_PER_ROW
+    word_columns = offsets - ranks * WORDS_PER_ROW
+    free_mask = ranks < FREE_ROWS
+    free_words = tl.load(
+        free_right_words + ranks * WORDS_PER_ROW + word_columns,
+        mask=output_mask & free_mask,
+        other=0,
+    ).to(tl.uint32)
+
+    records = (ranks - FREE_ROWS) * WORDS_PER_ROW + word_columns
+    bit_offsets = records * RECORD_BITS
+    payload_words = bit_offsets // 32
+    shifts = bit_offsets & 31
+    coded_mask = output_mask & (~free_mask)
+    low = tl.load(coded_payload + payload_words, mask=coded_mask, other=0).to(tl.uint32)
+    crosses = shifts > 32 - RECORD_BITS
+    high = tl.load(
+        coded_payload + payload_words + 1,
+        mask=coded_mask & crosses,
+        other=0,
+    ).to(tl.uint32)
+    packed = low >> shifts
+    packed |= tl.where(crosses, high << ((32 - shifts) & 31), 0)
+    packed &= (1 << RECORD_BITS) - 1
+    indices = packed & ((1 << INDEX_BITS) - 1)
+    pair_ids = packed >> INDEX_BITS
+    base = tl.load(codebook_words + indices, mask=coded_mask, other=0).to(tl.uint32)
+    pair = tl.load(correction_pairs + pair_ids, mask=coded_mask, other=0).to(tl.uint32)
+    first = pair & 0xFF
+    second = (pair >> 8) & 0xFF
+    corrected = base ^ ((1 << first) | (1 << second))
+    tl.store(
+        output_words + offsets,
+        tl.where(free_mask, free_words, corrected),
+        mask=output_mask,
+    )
+
+
+@triton.jit
 def _nanoquant_stage1(
     value,
     right_words,
@@ -818,3 +872,39 @@ def launch_packed_linear(
         num_warps=4,
     )
     return output.view(*value.shape[:-1], n_out)
+
+
+def launch_decode_mixed_v_right_words(
+    free_right_words: torch.Tensor,
+    coded_payload: torch.Tensor,
+    codebook_words: torch.Tensor,
+    correction_pairs: torch.Tensor,
+    *,
+    rank: int,
+    words_per_row: int,
+    record_bits: int,
+    index_bits: int,
+) -> torch.Tensor:
+    """Expand compact mixed-V words once on the current CUDA stream."""
+
+    total_words = rank * words_per_row
+    output = torch.empty(
+        (rank, words_per_row),
+        dtype=torch.int32,
+        device=free_right_words.device,
+    )
+    _decode_mixed_v_words[(triton.cdiv(total_words, 256),)](
+        free_right_words,
+        coded_payload,
+        codebook_words,
+        correction_pairs,
+        output,
+        TOTAL_WORDS=total_words,
+        FREE_ROWS=free_right_words.shape[0],
+        WORDS_PER_ROW=words_per_row,
+        RECORD_BITS=record_bits,
+        INDEX_BITS=index_bits,
+        BLOCK_WORDS=256,
+        num_warps=4,
+    )
+    return output

@@ -19,9 +19,15 @@ from nanoquant.runtime.backend import (
     evaluate_capabilities,
 )
 from nanoquant.runtime.logical import canonical_torch_dtype
+from nanoquant.runtime.mixed_v import (
+    MIXED_V_INDEX_BITS,
+    MIXED_V_RECORD_BITS,
+    MixedVLayerState,
+    mixed_v_correction_pair_table,
+)
 from nanoquant.runtime.packed import PACKED_LAYOUT_VERSION, PackedLayerState
 
-CUDA_PACKED_BACKEND_VERSION = "1"
+CUDA_PACKED_BACKEND_VERSION = "2"
 CUDA_PACKED_REFERENCE_SHA256 = "5c87336c2b6b8fb33805c6ee6a8752d4bd364beed63fd4cca03c2b36be966619"
 _FLOAT_DTYPES = ("float16", "bfloat16", "float32")
 
@@ -191,8 +197,8 @@ class CudaPackedBackend:
         return result
 
     def prepare(self, state: RuntimeLayerState, device: DeviceLike) -> PreparedLayer:
-        if not isinstance(state, PackedLayerState):
-            raise TypeError("CUDA packed backend requires PackedLayerState")
+        if not isinstance(state, (PackedLayerState, MixedVLayerState)):
+            raise TypeError("CUDA packed backend requires PackedLayerState or MixedVLayerState")
         target = torch.device(device)
         if target.type != "cuda":
             raise ValueError("CUDA packed backend preparation requires a CUDA device")
@@ -200,10 +206,28 @@ class CudaPackedBackend:
             raise RuntimeError("CUDA is not available in this runtime")
         if target.index is None:
             target = torch.device("cuda", torch.cuda.current_device())
+        if isinstance(state, MixedVLayerState):
+            from nanoquant.runtime.cuda_kernels import launch_decode_mixed_v_right_words
+
+            free_right_words = state.free_right_words.to(device=target).contiguous()
+            coded_payload = state.coded_payload.to(device=target).contiguous()
+            codebook_words = state.codebook_words.to(device=target).contiguous()
+            right_words = launch_decode_mixed_v_right_words(
+                free_right_words,
+                coded_payload,
+                codebook_words,
+                mixed_v_correction_pair_table(device=target),
+                rank=state.spec.rank,
+                words_per_row=free_right_words.shape[1],
+                record_bits=MIXED_V_RECORD_BITS,
+                index_bits=MIXED_V_INDEX_BITS,
+            )
+        else:
+            right_words = state.right_words.to(device=target).contiguous()
         payload = _CudaPackedPayload(
             target,
             state.left_words.to(device=target).contiguous(),
-            state.right_words.to(device=target).contiguous(),
+            right_words,
             state.scale_pre.to(device=target).contiguous(),
             state.scale_mid.to(device=target).contiguous(),
             state.scale_post.to(device=target).contiguous(),

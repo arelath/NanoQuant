@@ -17,6 +17,7 @@ from nanoquant.runtime.backend import (
     evaluate_capabilities,
 )
 from nanoquant.runtime.logical import LogicalLayerState
+from nanoquant.runtime.mixed_v import MixedVLayerState
 from nanoquant.runtime.packed import PackedLayerState
 
 _FLOAT_DTYPES = ("float16", "bfloat16", "float32")
@@ -193,8 +194,10 @@ class PackedReferenceBackend:
         return _reference_support(op, workload)
 
     def prepare(self, state: RuntimeLayerState, device: DeviceLike) -> PreparedLayer:
-        if not isinstance(state, PackedLayerState):
-            raise TypeError("packed reference backend requires PackedLayerState")
+        if not isinstance(state, (PackedLayerState, MixedVLayerState)):
+            raise TypeError(
+                "packed reference backend requires PackedLayerState or MixedVLayerState"
+            )
         return PreparedLayer(
             self.name,
             self.version,

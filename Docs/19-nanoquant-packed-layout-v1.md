@@ -191,6 +191,11 @@ stable performance benchmark.
 
 ## Verification and compatibility boundary
 
+The optional mixed-V representation does not extend or reinterpret this layout. It is a separate SHA-bound overlay
+whose loader predecodes selected right factors into this exact canonical representation; see
+[57-mixed-v-packed-overlay-v1.md](57-mixed-v-packed-overlay-v1.md). Existing schema-1 artifacts and the GGUF bridge
+therefore remain unchanged.
+
 Unit coverage includes bit-boundary widths, exact LSB ordering, tail padding, aligned and unaligned row strides,
 all supported factor dtypes, bias, floating and scaled-I8 salient paths, incompatible-state rejection, exact tensor
 round trips, reference execution, descriptor corruption, future schemas, lazy loading, and overwrite rejection.

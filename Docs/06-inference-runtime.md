@@ -129,6 +129,12 @@ The exact mapping, padding/alignment rules, salient constraints, bias boundary, 
 defined in [19-nanoquant-packed-layout-v1.md](19-nanoquant-packed-layout-v1.md). Model-shell binding, deterministic
 generation, self-contained tokenizer/config packaging, and clean runtime-only installation are now implemented below.
 
+The selective mixed-V capacity experiment has a separate base-bound packed overlay rather than changing this frozen
+layout. Its 19-bit coded-right-factor stream is expanded once to canonical sign words during runtime preparation,
+while ordinary layers continue to load from the exact hashed base artifact. The format, validation, storage
+accounting, and current bundle boundary are defined in
+[57-mixed-v-packed-overlay-v1.md](57-mixed-v-packed-overlay-v1.md).
+
 The runtime bundle is a separately hashed, exact-inventory envelope around the packed artifact. It excludes all 182
 source dense linear weights, retains the 158 ordinary checkpoint tensors, and explicitly serializes three derived
 non-persistent Gemma buffers (embedding scale plus global/local RoPE frequencies). The latter is required because a
