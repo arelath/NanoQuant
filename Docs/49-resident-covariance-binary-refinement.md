@@ -1,7 +1,7 @@
 # Resident Covariance-Aware Binary Refinement
 
 **Date:** 2026-07-29
-**Status:** implemented behind explicit dense-Hessian objective; complete compression pending
+**Status:** implemented behind explicit dense-Hessian objective; complete Experiment 033 rejected
 
 ## Promotion evidence
 
@@ -67,3 +67,39 @@ Focused tests, Ruff, and full-source mypy pass. The next required gate is a
 numbered complete compression experiment using
 `execute_complete_compression`, followed by strict run validation, retained
 WikiText quality, BPW, memory, artifact, and resume comparisons.
+
+## Complete Experiment 033 gate
+
+Experiment 033 completed the required lifecycle, including recovery from a
+power-loss interruption, strict validation, global distillation, packing,
+GGUF export, retained quality, and an additional pre-KD WikiText evaluation.
+
+The implementation-level behavior succeeded:
+
+- 104/104 eligible resident groups reduced captured covariance error;
+- mean reduction was 39.25%, with a 27.08–69.16% range;
+- refinement added no representation fields and final effective BPW was
+  1.024427205, slightly below Experiment 022;
+- all 708 reachable artifacts validated under one commit identity;
+- resume reused five completed blocks and the activation boundary without
+  duplicating journal records.
+
+The quality promotion failed:
+
+| WikiText result | Experiment 022 | Experiment 033 | Regression |
+| --- | ---: | ---: | ---: |
+| Pre-KD perplexity | 273.516089 | 333.705584 | +22.01% |
+| Post-KD perplexity | 228.550618 | 272.560153 | +19.26% |
+
+The first seven blocks retain the same ranks, yet all seven resident boundary
+losses regress by 2.67–8.51%. This localizes a harmful interaction before the
+later D2 rank redistribution. Matched global-distillation block snapshots
+incorrectly favor the candidate before KD in 25/26 blocks, demonstrating that
+the snapshot proxy cannot replace direct language evaluation for this
+optimization.
+
+The pre-tuning placement is rejected for production. The code remains
+explicit and opt-in so a bounded same-rank study can compare refinement before
+tuning, after factorized tuning, and after post-block refit without changing
+the stored format. No further complete run is justified until one placement
+passes direct held-out output and language-functional gates.
