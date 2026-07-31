@@ -157,3 +157,47 @@ def test_splice_probe_composes_per_block_downstream_policy() -> None:
         probe._parse_representation_policy("0:mixed,12:free"),
     )
     assert [float(item.weight.item()) for item in hybrid.layers] == [13.0, 2.0]
+
+
+def test_splice_probe_reconstruction_identity_tracks_numerical_settings() -> None:
+    probe = _probe_module()
+    args = probe._parser().parse_args(
+        [
+            "--model",
+            "model.safetensors",
+            "--snapshot",
+            "snapshot",
+            "--calibration-state",
+            "calibration",
+            "--output",
+            "result.json",
+        ]
+    )
+
+    first = probe._reconstruction_cache_identity(
+        args,
+        model_sha256="model",
+        calibration_manifest_sha256="manifest",
+        calibration_state_sha256="state",
+        block=2,
+        projection="down",
+        projection_path="mlp.down_proj",
+        transposed=False,
+        factorization_shape=(2, 3),
+        rank=32,
+    )
+    args.outer_iterations += 1
+    second = probe._reconstruction_cache_identity(
+        args,
+        model_sha256="model",
+        calibration_manifest_sha256="manifest",
+        calibration_state_sha256="state",
+        block=2,
+        projection="down",
+        projection_path="mlp.down_proj",
+        transposed=False,
+        factorization_shape=(2, 3),
+        rank=32,
+    )
+
+    assert first != second

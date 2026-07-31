@@ -129,6 +129,11 @@ candidate, while retaining uniform mixed joint as the simpler tied option.
   reconstruction caching is the next implementation priority before
   expanding across all remaining depths.
 
+[Probe Reconstruction Cache](65-probe-reconstruction-cache.md) implements
+that content-keyed reuse with strict model/calibration/setting identity,
+atomic safetensors persistence, corruption rejection, and exact real-model
+KL replay.
+
 ## Evidence
 
 - `evidence/m4/sign-word-codebook-probe/downstream-refit/block2-mlp-mixed-k10-r1344-free256-800-gatewide-downinput50-fit48-val52-kl0-12.json`

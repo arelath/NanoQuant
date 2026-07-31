@@ -46,17 +46,22 @@ from nanoquant.domain.sign_word_codebook import (
 )
 from nanoquant.infrastructure.device_lease import acquire_device_lease
 from nanoquant.infrastructure.hf_language_model import load_causal_language_model
-from nanoquant.infrastructure.io_utils import atomic_write_json
+from nanoquant.infrastructure.io_utils import atomic_write_json, hash_file
 from nanoquant.infrastructure.kl_splice import (
     DenseKlSpliceEvaluator,
     SpliceReconstruction,
     SpliceReconstructionSet,
 )
 from nanoquant.infrastructure.model_adapters import adapter_for_config
+from nanoquant.infrastructure.probe_reconstruction_cache import (
+    ProbeReconstructionCache,
+    ProbeReconstructionCacheEntry,
+)
 from nanoquant.kl_budget_workflow import _token_hash
 from nanoquant.quality_evaluation import _wikitext_tokens
 
 MODEL_SOURCE = "google/gemma-3-1b-it"
+RECONSTRUCTION_CACHE_ALGORITHM_VERSION = 1
 
 
 def _parse_ints(value: str) -> tuple[int, ...]:
@@ -157,6 +162,57 @@ def _dtype(config: dict[str, object]) -> torch.dtype:
         "float16": torch.float16,
         "float32": torch.float32,
     }.get(cast(str, config.get("torch_dtype")), torch.float32)
+
+
+def _reconstruction_cache_identity(
+    args: argparse.Namespace,
+    *,
+    model_sha256: str,
+    calibration_manifest_sha256: str,
+    calibration_state_sha256: str,
+    block: int,
+    projection: str,
+    projection_path: str,
+    transposed: bool,
+    factorization_shape: tuple[int, int],
+    rank: int,
+) -> dict[str, object]:
+    return {
+        "schema": "corrected-codebook-splice-reconstruction",
+        "algorithm_version": RECONSTRUCTION_CACHE_ALGORITHM_VERSION,
+        "model_source": MODEL_SOURCE,
+        "model_revision": args.model_revision,
+        "model_sha256": model_sha256,
+        "calibration_manifest_sha256": calibration_manifest_sha256,
+        "calibration_state_sha256": calibration_state_sha256,
+        "block": block,
+        "projection": projection,
+        "projection_path": projection_path,
+        "transposed": transposed,
+        "factorization_shape": list(factorization_shape),
+        "baseline_rank": args.baseline_rank,
+        "candidate_rank": rank,
+        "right_free_rows": args.right_free_rows,
+        "index_width": args.index_width,
+        "corrections_per_word": args.corrections_per_word,
+        "correction_bits": args.correction_bits,
+        "outer_iterations": args.outer_iterations,
+        "inner_iterations": args.inner_iterations,
+        "regularization": args.regularization,
+        "penalty_schedule": args.penalty_schedule,
+        "convergence_check_interval": (
+            args.convergence_check_interval
+        ),
+        "codebook_update_interval": args.codebook_update_interval,
+        "codebook_freeze_fraction": args.codebook_freeze_fraction,
+        "assignment_batch_words": args.assignment_batch_words,
+        "corrected_assignment_candidates": (
+            args.corrected_assignment_candidates
+        ),
+        "scale_fit_passes": args.scale_fit_passes,
+        "calibration_shrinkage": args.calibration_shrinkage,
+        "seed": args.seed,
+    }
 
 
 def _module_at_path(block: torch.nn.Module, path: str) -> torch.nn.Module:
@@ -986,6 +1042,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--snapshot", type=Path, required=True)
     parser.add_argument("--calibration-state", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--reconstruction-cache", type=Path)
     parser.add_argument("--model-revision", default=PINNED_MODEL_REVISION)
     parser.add_argument("--projection", choices=tuple(PROJECTION_PATHS), default="down")
     parser.add_argument("--projections", type=_parse_projections)
@@ -1204,6 +1261,32 @@ def run(args: argparse.Namespace) -> int:
         convergence_check_interval=args.convergence_check_interval,
         transpose_wide=True,
     )
+    reconstruction_cache = (
+        ProbeReconstructionCache(args.reconstruction_cache)
+        if args.reconstruction_cache is not None
+        else None
+    )
+    cache_model_sha256 = ""
+    cache_calibration_manifest_sha256 = ""
+    cache_calibration_state_sha256 = ""
+    if reconstruction_cache is not None:
+        calibration_manifest = args.calibration_state / "manifest.json"
+        calibration_tensors = args.calibration_state / "state.safetensors"
+        if (
+            not calibration_manifest.is_file()
+            or not calibration_tensors.is_file()
+        ):
+            raise ValueError(
+                "reconstruction cache requires a complete calibration state"
+            )
+        cache_model_sha256 = hash_file(args.model)
+        cache_calibration_manifest_sha256 = hash_file(
+            calibration_manifest
+        )
+        cache_calibration_state_sha256 = hash_file(calibration_tensors)
+    cache_hits = 0
+    cache_misses = 0
+    cache_keys: dict[str, str] = {}
     with acquire_device_lease(args.device), safe_open(
         str(args.model),
         framework="pt",
@@ -1227,14 +1310,6 @@ def run(args: argparse.Namespace) -> int:
             ):
                 tensor_name = f"model.layers.{block}.{projection_path}.weight"
                 calibration_path = f"block.{block}.{projection_path}"
-                input_cpu, output_cpu = _load_profile(
-                    args.calibration_state,
-                    calibration_path,
-                    args.calibration_shrinkage,
-                )
-                weight = handle.get_tensor(tensor_name).to(args.device)
-                input_importance = input_cpu.to(args.device).float()
-                output_importance = output_cpu.to(args.device).float()
                 transpose_current = (
                     args.transpose_matrix
                     and not (
@@ -1243,13 +1318,18 @@ def run(args: argparse.Namespace) -> int:
                     )
                 )
                 transpose_by_projection[projection_path] = transpose_current
-                if transpose_current:
-                    weight = weight.mT.contiguous()
-                    input_importance, output_importance = (
-                        output_importance,
-                        input_importance,
+                source_weight = handle.get_tensor(tensor_name)
+                current_shape = (
+                    (
+                        int(source_weight.shape[1]),
+                        int(source_weight.shape[0]),
                     )
-                current_shape = (int(weight.shape[0]), int(weight.shape[1]))
+                    if transpose_current
+                    else (
+                        int(source_weight.shape[0]),
+                        int(source_weight.shape[1]),
+                    )
+                )
                 if matrix_shape != (0, 0) and current_shape != matrix_shape:
                     raise ValueError(
                         "joint projection splices require one factorization shape"
@@ -1260,6 +1340,127 @@ def run(args: argparse.Namespace) -> int:
                     if len(projections) == 1
                     else f"{block}:{projection}"
                 )
+                target_bits = factor_bit_cost(
+                    current_shape[0],
+                    current_shape[1],
+                    args.baseline_rank,
+                    scale_bits=16,
+                ).total
+                rank = maximum_corrected_asymmetric_rank_for_budget(
+                    current_shape[0],
+                    current_shape[1],
+                    target_bits,
+                    left_index_width=None,
+                    right_index_width=args.index_width,
+                    right_flip_bits=args.correction_bits,
+                    rank_multiple=32,
+                    scale_width=16,
+                )
+                if args.candidate_rank is not None:
+                    rank = args.candidate_rank
+                cache_identity = (
+                    _reconstruction_cache_identity(
+                        args,
+                        model_sha256=cache_model_sha256,
+                        calibration_manifest_sha256=(
+                            cache_calibration_manifest_sha256
+                        ),
+                        calibration_state_sha256=(
+                            cache_calibration_state_sha256
+                        ),
+                        block=block,
+                        projection=projection,
+                        projection_path=projection_path,
+                        transposed=transpose_current,
+                        factorization_shape=current_shape,
+                        rank=rank,
+                    )
+                    if reconstruction_cache is not None
+                    else None
+                )
+                cached = (
+                    reconstruction_cache.load(cache_identity)
+                    if (
+                        reconstruction_cache is not None
+                        and cache_identity is not None
+                    )
+                    else None
+                )
+                layer = LayerId(BlockId(block), projection_path)
+                if cached is not None:
+                    assert reconstruction_cache is not None
+                    assert cache_identity is not None
+                    if (
+                        cached.rank != rank
+                        or tuple(cached.baseline.shape)
+                        != tuple(source_weight.shape)
+                    ):
+                        raise ValueError(
+                            "cached reconstruction shape or rank is incompatible"
+                        )
+                    cache_hits += 1
+                    cache_keys[unit_key] = reconstruction_cache.key(
+                        cache_identity
+                    )
+                    baseline_metrics = cast(
+                        dict[str, float],
+                        cached.baseline_metrics,
+                    )
+                    candidate_metrics = cast(
+                        dict[str, float],
+                        cached.candidate_metrics,
+                    )
+                    candidate_index_metrics[unit_key] = cast(
+                        dict[
+                            str,
+                            dict[str, float | int | bool],
+                        ],
+                        cached.candidate_index_metrics,
+                    )
+                    baseline_entries.append(
+                        (
+                            layer,
+                            cached.baseline,
+                            float(
+                                baseline_metrics[
+                                    "weighted_normalized_rmse"
+                                ]
+                            ),
+                        )
+                    )
+                    candidate_entries.append(
+                        (
+                            layer,
+                            cached.candidate,
+                            float(
+                                candidate_metrics[
+                                    "weighted_normalized_rmse"
+                                ]
+                            ),
+                        )
+                    )
+                    reconstruction_metrics[unit_key] = {
+                        "free_words": baseline_metrics,
+                        "corrected_codebook": candidate_metrics,
+                    }
+                    del source_weight
+                    continue
+                if reconstruction_cache is not None:
+                    cache_misses += 1
+                input_cpu, output_cpu = _load_profile(
+                    args.calibration_state,
+                    calibration_path,
+                    args.calibration_shrinkage,
+                )
+                weight = source_weight.to(args.device)
+                input_importance = input_cpu.to(args.device).float()
+                output_importance = output_cpu.to(args.device).float()
+                if transpose_current:
+                    weight = weight.mT.contiguous()
+                    input_importance, output_importance = (
+                        output_importance,
+                        input_importance,
+                    )
                 baseline_generator = torch.Generator(device=args.device).manual_seed(
                     _logical_seed(args.seed, "free-word-baseline")
                 )
@@ -1288,24 +1489,6 @@ def run(args: argparse.Namespace) -> int:
                     input_importance,
                     output_importance,
                 )
-                target_bits = factor_bit_cost(
-                    weight.shape[0],
-                    weight.shape[1],
-                    args.baseline_rank,
-                    scale_bits=16,
-                ).total
-                rank = maximum_corrected_asymmetric_rank_for_budget(
-                    weight.shape[0],
-                    weight.shape[1],
-                    target_bits,
-                    left_index_width=None,
-                    right_index_width=args.index_width,
-                    right_flip_bits=args.correction_bits,
-                    rank_multiple=32,
-                    scale_width=16,
-                )
-                if args.candidate_rank is not None:
-                    rank = args.candidate_rank
                 candidate_generator = torch.Generator(device=args.device).manual_seed(
                     _logical_seed(
                         args.seed,
@@ -1356,12 +1539,39 @@ def run(args: argparse.Namespace) -> int:
                 candidate_index_metrics[unit_key] = codebook_index_metrics(
                     candidate_factors
                 )
-                layer = LayerId(BlockId(block), projection_path)
                 baseline_reconstruction = baseline_fit.reconstruction
                 candidate_reconstruction = candidate_fit.reconstruction
                 if transpose_current:
                     baseline_reconstruction = baseline_reconstruction.mT.contiguous()
                     candidate_reconstruction = candidate_reconstruction.mT.contiguous()
+                if (
+                    reconstruction_cache is not None
+                    and cache_identity is not None
+                ):
+                    cache_keys[unit_key] = reconstruction_cache.store(
+                        cache_identity,
+                        ProbeReconstructionCacheEntry(
+                            baseline=baseline_reconstruction,
+                            candidate=candidate_reconstruction,
+                            baseline_metrics=cast(
+                                dict[str, object],
+                                baseline_metrics,
+                            ),
+                            candidate_metrics=cast(
+                                dict[str, object],
+                                candidate_metrics,
+                            ),
+                            candidate_index_metrics=cast(
+                                dict[str, object],
+                                candidate_index_metrics[unit_key],
+                            ),
+                            rank=rank,
+                            matrix_shape=(
+                                int(baseline_reconstruction.shape[0]),
+                                int(baseline_reconstruction.shape[1]),
+                            ),
+                        ),
+                    )
                 baseline_entries.append(
                     (
                         layer,
@@ -1388,6 +1598,7 @@ def run(args: argparse.Namespace) -> int:
                     baseline_fit,
                     candidate_fit,
                     candidate_factors,
+                    source_weight,
                 )
                 gc.collect()
                 torch.cuda.empty_cache()
@@ -1781,9 +1992,35 @@ def run(args: argparse.Namespace) -> int:
         )
     )
     output: dict[str, Any] = {
-        "schema_version": 10,
+        "schema_version": 11,
         "status": "completed",
         "role": "analysis-only corrected-codebook splice gate",
+        "reconstruction_cache": {
+            "enabled": reconstruction_cache is not None,
+            "root": (
+                str(args.reconstruction_cache)
+                if args.reconstruction_cache is not None
+                else None
+            ),
+            "hits": cache_hits,
+            "misses": cache_misses,
+            "keys_by_unit": cache_keys,
+            "model_sha256": (
+                cache_model_sha256
+                if reconstruction_cache is not None
+                else None
+            ),
+            "calibration_manifest_sha256": (
+                cache_calibration_manifest_sha256
+                if reconstruction_cache is not None
+                else None
+            ),
+            "calibration_state_sha256": (
+                cache_calibration_state_sha256
+                if reconstruction_cache is not None
+                else None
+            ),
+        },
         "model_source": MODEL_SOURCE,
         "model_revision": args.model_revision,
         "blocks": list(blocks),
