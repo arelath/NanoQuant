@@ -110,8 +110,13 @@ def test_splice_probe_composes_per_block_downstream_policy() -> None:
     probe = _probe_module()
     first = LayerId(BlockId(0), "mlp.down_proj")
     second = LayerId(BlockId(12), "mlp.down_proj")
+    third = LayerId(BlockId(16), "mlp.down_proj")
 
-    def arm(first_value: float, second_value: float) -> SpliceReconstructionSet:
+    def arm(
+        first_value: float,
+        second_value: float,
+        third_value: float,
+    ) -> SpliceReconstructionSet:
         return SpliceReconstructionSet(
             (
                 SpliceReconstruction(
@@ -126,37 +131,58 @@ def test_splice_probe_composes_per_block_downstream_policy() -> None:
                     None,
                     1.0,
                 ),
+                SpliceReconstruction(
+                    third,
+                    torch.tensor([[third_value]]),
+                    None,
+                    1.0,
+                ),
             ),
-            (("0", (first,)), ("12", (second,))),
-            (("0", 1.0), ("12", 1.0)),
+            (("0", (first,)), ("12", (second,)), ("16", (third,))),
+            (("0", 1.0), ("12", 1.0), ("16", 1.0)),
         )
 
     sets = {}
     for prefix in ("free_words", "corrected_codebook"):
         offset = 0.0 if prefix == "free_words" else 10.0
-        sets[f"{prefix}_operator_refit"] = arm(1.0 + offset, 1.0 + offset)
+        sets[prefix] = arm(0.0 + offset, 0.0 + offset, 0.0 + offset)
+        sets[f"{prefix}_operator_refit"] = arm(
+            1.0 + offset,
+            1.0 + offset,
+            1.0 + offset,
+        )
         sets[f"{prefix}_operator_downstream_input_refit"] = arm(
+            2.0 + offset,
             2.0 + offset,
             2.0 + offset,
         )
         sets[f"{prefix}_operator_downstream_joint_refit"] = arm(
             3.0 + offset,
             3.0 + offset,
+            3.0 + offset,
         )
 
     result = probe._downstream_policy_sets(
         sets,
-        probe._parse_block_policy("0:joint,12:input"),
+        probe._parse_block_policy("0:joint,12:input,16:base"),
     )
 
     policy = result["corrected_codebook_operator_policy_refit"]
-    assert [float(item.weight.item()) for item in policy.layers] == [13.0, 12.0]
+    assert [float(item.weight.item()) for item in policy.layers] == [
+        13.0,
+        12.0,
+        10.0,
+    ]
 
     hybrid = probe._hybrid_representation_set(
         result,
-        probe._parse_representation_policy("0:mixed,12:free"),
+        probe._parse_representation_policy("0:mixed,12:free,16:mixed"),
     )
-    assert [float(item.weight.item()) for item in hybrid.layers] == [13.0, 2.0]
+    assert [float(item.weight.item()) for item in hybrid.layers] == [
+        13.0,
+        2.0,
+        10.0,
+    ]
 
 
 def test_splice_probe_reconstruction_identity_tracks_numerical_settings() -> None:

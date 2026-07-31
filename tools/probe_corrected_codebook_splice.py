@@ -100,7 +100,7 @@ def _parse_projections(value: str) -> tuple[str, ...]:
 
 
 def _parse_block_policy(value: str) -> tuple[tuple[int, str], ...]:
-    choices = {"operator", "output", "input", "joint"}
+    choices = {"base", "operator", "output", "input", "joint"}
     result = []
     for item in value.split(","):
         parts = item.strip().split(":", maxsplit=1)
@@ -117,7 +117,7 @@ def _parse_block_policy(value: str) -> tuple[tuple[int, str], ...]:
         choice = parts[1].strip()
         if block < 0 or choice not in choices:
             raise argparse.ArgumentTypeError(
-                "block policy choices are operator, output, input, or joint"
+                "block policy choices are base, operator, output, input, or joint"
             )
         result.append((block, choice))
     if not result or len({block for block, _choice in result}) != len(result):
@@ -874,6 +874,7 @@ def _downstream_policy_sets(
     result = dict(reconstruction_sets)
     for prefix in ("free_words", "corrected_codebook"):
         names = {
+            "base": prefix,
             "operator": f"{prefix}_operator_refit",
             "output": f"{prefix}_operator_downstream_refit",
             "input": f"{prefix}_operator_downstream_input_refit",
@@ -887,7 +888,7 @@ def _downstream_policy_sets(
             raise ValueError(
                 f"downstream policy requires unavailable arms: {sorted(missing)}"
             )
-        base = reconstruction_sets[names["operator"]]
+        base = reconstruction_sets[prefix]
         source_layers = {
             choice: {
                 item.layer: item
@@ -1223,7 +1224,10 @@ def run(args: argparse.Namespace) -> int:
             choice for _block, choice in args.downstream_policy
         }
         if (
-            not args.operator_scale_refit
+            (
+                bool(policy_choices - {"base"})
+                and not args.operator_scale_refit
+            )
             or (
                 "output" in policy_choices
                 and not args.downstream_scale_refit
@@ -1992,7 +1996,7 @@ def run(args: argparse.Namespace) -> int:
         )
     )
     output: dict[str, Any] = {
-        "schema_version": 11,
+        "schema_version": 12,
         "status": "completed",
         "role": "analysis-only corrected-codebook splice gate",
         "reconstruction_cache": {
