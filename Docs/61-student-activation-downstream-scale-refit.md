@@ -136,6 +136,11 @@ The coupled sequence now has two independently confirmed zero-bit stages:
 gate/up product-scale fitting followed by student-activation-aware down
 input-scale fitting.
 
+[Representative-Depth MLP Policy Composition](62-representative-depth-mlp-policy-composition.md)
+tests transfer at blocks 0 and 24, selects a heterogeneous block-0 joint plus
+block-12 input policy, and confirms that the two-block composition reduces
+KL by 9.77% across two entirely new evaluation inventories.
+
 ## Evidence
 
 - `evidence/m4/sign-word-codebook-probe/downstream-refit/block12-mlp-mixed-k10-r1344-free256-800-gatewide-down025-4-fit48-val52-kl0-12.json`

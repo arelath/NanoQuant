@@ -104,3 +104,43 @@ def test_splice_probe_composes_gated_down_outputs() -> None:
     expected = F.linear(gated, down_weight)
 
     assert torch.allclose(observed.float(), expected, atol=2e-2, rtol=2e-2)
+
+
+def test_splice_probe_composes_per_block_downstream_policy() -> None:
+    probe = _probe_module()
+    first = LayerId(BlockId(0), "mlp.down_proj")
+    second = LayerId(BlockId(12), "mlp.down_proj")
+
+    def arm(first_value: float, second_value: float) -> SpliceReconstructionSet:
+        return SpliceReconstructionSet(
+            (
+                SpliceReconstruction(
+                    first,
+                    torch.tensor([[first_value]]),
+                    None,
+                    1.0,
+                ),
+                SpliceReconstruction(
+                    second,
+                    torch.tensor([[second_value]]),
+                    None,
+                    1.0,
+                ),
+            ),
+            (("0", (first,)), ("12", (second,))),
+            (("0", 1.0), ("12", 1.0)),
+        )
+
+    sets = {}
+    for prefix in ("free_words", "corrected_codebook"):
+        sets[f"{prefix}_operator_refit"] = arm(1.0, 1.0)
+        sets[f"{prefix}_operator_downstream_input_refit"] = arm(2.0, 2.0)
+        sets[f"{prefix}_operator_downstream_joint_refit"] = arm(3.0, 3.0)
+
+    result = probe._downstream_policy_sets(
+        sets,
+        probe._parse_block_policy("0:joint,12:input"),
+    )
+
+    policy = result["corrected_codebook_operator_policy_refit"]
+    assert [float(item.weight.item()) for item in policy.layers] == [3.0, 2.0]

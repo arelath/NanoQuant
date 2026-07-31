@@ -94,6 +94,34 @@ def _parse_projections(value: str) -> tuple[str, ...]:
     return result
 
 
+def _parse_block_policy(value: str) -> tuple[tuple[int, str], ...]:
+    choices = {"operator", "output", "input", "joint"}
+    result = []
+    for item in value.split(","):
+        parts = item.strip().split(":", maxsplit=1)
+        if len(parts) != 2:
+            raise argparse.ArgumentTypeError(
+                "block policy entries must use block:choice"
+            )
+        try:
+            block = int(parts[0])
+        except ValueError as error:
+            raise argparse.ArgumentTypeError(
+                "block policy indices must be integers"
+            ) from error
+        choice = parts[1].strip()
+        if block < 0 or choice not in choices:
+            raise argparse.ArgumentTypeError(
+                "block policy choices are operator, output, input, or joint"
+            )
+        result.append((block, choice))
+    if not result or len({block for block, _choice in result}) != len(result):
+        raise argparse.ArgumentTypeError(
+            "block policy must contain unique block indices"
+        )
+    return tuple(result)
+
+
 def _dtype(config: dict[str, object]) -> torch.dtype:
     return {
         "bfloat16": torch.bfloat16,
@@ -753,6 +781,53 @@ def _downstream_input_refit_sets(
     return result, metrics
 
 
+def _downstream_policy_sets(
+    reconstruction_sets: dict[str, SpliceReconstructionSet],
+    policy: tuple[tuple[int, str], ...],
+) -> dict[str, SpliceReconstructionSet]:
+    policy_by_block = dict(policy)
+    result = dict(reconstruction_sets)
+    for prefix in ("free_words", "corrected_codebook"):
+        names = {
+            "operator": f"{prefix}_operator_refit",
+            "output": f"{prefix}_operator_downstream_refit",
+            "input": f"{prefix}_operator_downstream_input_refit",
+            "joint": f"{prefix}_operator_downstream_joint_refit",
+        }
+        required_names = {
+            names[choice] for choice in policy_by_block.values()
+        }
+        missing = required_names - reconstruction_sets.keys()
+        if missing:
+            raise ValueError(
+                f"downstream policy requires unavailable arms: {sorted(missing)}"
+            )
+        base = reconstruction_sets[names["operator"]]
+        source_layers = {
+            choice: {
+                item.layer: item
+                for item in reconstruction_sets[names[choice]].layers
+            }
+            for choice in set(policy_by_block.values())
+        }
+        replacements = {}
+        for item in base.layers:
+            choice = policy_by_block.get(item.layer.block.index)
+            if choice is None:
+                continue
+            source = source_layers[choice].get(item.layer)
+            if source is None:
+                raise ValueError(
+                    "downstream policy source inventory is incomplete"
+                )
+            replacements[item.layer] = source.weight
+        result[f"{prefix}_operator_policy_refit"] = _replace_weights(
+            base,
+            replacements,
+        )
+    return result
+
+
 def _reconstruction_set(
     values: list[tuple[LayerId, torch.Tensor, float]],
 ) -> SpliceReconstructionSet:
@@ -901,6 +976,7 @@ def _parser() -> argparse.ArgumentParser:
         type=float,
         default=0.25,
     )
+    parser.add_argument("--downstream-policy", type=_parse_block_policy)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--local-files-only", action="store_true")
@@ -1009,6 +1085,31 @@ def run(args: argparse.Namespace) -> int:
             "operator fit, validation, and KL evaluation windows must be disjoint"
         )
     blocks = (args.block,) if args.blocks is None else args.blocks
+    if args.downstream_policy is not None:
+        policy_blocks = {
+            block for block, _choice in args.downstream_policy
+        }
+        if policy_blocks != set(blocks):
+            raise ValueError(
+                "downstream policy must choose every requested block"
+            )
+        policy_choices = {
+            choice for _block, choice in args.downstream_policy
+        }
+        if (
+            not args.operator_scale_refit
+            or (
+                "output" in policy_choices
+                and not args.downstream_scale_refit
+            )
+            or (
+                bool({"input", "joint"} & policy_choices)
+                and not args.downstream_input_scale_refit
+            )
+        ):
+            raise ValueError(
+                "downstream policy requires each selected refit arm"
+            )
     if any(
         block >= adapter.decoder_block_count_from_config(config)
         for block in blocks
@@ -1365,6 +1466,11 @@ def run(args: argparse.Namespace) -> int:
                 iterations=args.downstream_input_iterations,
                 learning_rate=args.downstream_input_learning_rate,
             )
+        if args.downstream_policy is not None:
+            all_reconstruction_sets = _downstream_policy_sets(
+                all_reconstruction_sets,
+                args.downstream_policy,
+            )
         teacher_nll = 0.0
         teacher_cache: tuple[torch.Tensor, ...] = ()
         selection_results: dict[str, dict[str, Any]] = {}
@@ -1516,6 +1622,34 @@ def run(args: argparse.Namespace) -> int:
                     candidate_joint_refit,
                     seed=args.seed,
                 )
+            if args.downstream_policy is not None:
+                baseline_policy = kl_results[
+                    "free_words_operator_policy_refit"
+                ]
+                candidate_policy = kl_results[
+                    "corrected_codebook_operator_policy_refit"
+                ]
+                selection_result[
+                    "paired_policy_candidate_minus_policy_free_words"
+                ] = _paired_payload(
+                    baseline_policy,
+                    candidate_policy,
+                    seed=args.seed,
+                )
+                selection_result[
+                    "paired_free_words_policy_minus_operator_refit"
+                ] = _paired_payload(
+                    baseline_refit,
+                    baseline_policy,
+                    seed=args.seed,
+                )
+                selection_result[
+                    "paired_candidate_policy_minus_operator_refit"
+                ] = _paired_payload(
+                    candidate_refit,
+                    candidate_policy,
+                    seed=args.seed,
+                )
             selection_results[name] = selection_result
         del teacher
 
@@ -1541,7 +1675,7 @@ def run(args: argparse.Namespace) -> int:
         )
     )
     output: dict[str, Any] = {
-        "schema_version": 8,
+        "schema_version": 9,
         "status": "completed",
         "role": "analysis-only corrected-codebook splice gate",
         "model_source": MODEL_SOURCE,
@@ -1616,6 +1750,14 @@ def run(args: argparse.Namespace) -> int:
             "learning_rate": args.downstream_input_learning_rate,
             "metrics": downstream_input_refit_metrics,
         },
+        "downstream_policy": (
+            {
+                str(block): choice
+                for block, choice in args.downstream_policy
+            }
+            if args.downstream_policy is not None
+            else None
+        ),
     }
     if args.selection_thresholds is None:
         full = selection_results["full"]
