@@ -122,6 +122,12 @@ The next useful extension is to refit `down_proj` against the resulting
 student gated activation. That adds another coupled degree of freedom while
 still changing only existing scale values.
 
+[Student-Activation Downstream Scale Refit](61-student-activation-downstream-scale-refit.md)
+tests that extension. A bounded refit of down's existing input-channel scale
+vector adds a confirmed 2.25-2.41% relative KL reduction after the gate/up
+refit, while output-scale-only and redundant input/output variants are
+rejected.
+
 ## Evidence
 
 - `evidence/m4/sign-word-codebook-probe/operator-refit/block12-gate-up-refit-wide-fit48-val52-kl0-12.json`

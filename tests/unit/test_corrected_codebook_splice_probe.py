@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 import torch
+from torch.nn import functional as F
 
 from nanoquant.domain.models import BlockId, LayerId
 from nanoquant.infrastructure.kl_splice import (
@@ -80,3 +81,26 @@ def test_splice_probe_accepts_multiple_projection_layers_per_block() -> None:
 
     assert tuple(item.layer for item in selected.layers) == (gate, up)
     assert probe._parse_projections("gate,up") == ("gate", "up")
+
+
+def test_splice_probe_composes_gated_down_outputs() -> None:
+    probe = _probe_module()
+    inputs = torch.tensor([[1.0, -0.5], [0.25, 2.0]])
+    gate_weight = torch.tensor([[0.5, 1.0], [-1.0, 0.25]])
+    up_weight = torch.tensor([[1.0, -0.25], [0.5, 0.75]])
+    down_weight = torch.tensor([[0.75, -0.5], [0.25, 1.0]])
+
+    observed = probe._gated_down_outputs(
+        inputs,
+        gate_weight,
+        up_weight,
+        down_weight,
+        device="cpu",
+    )
+    gated = F.silu(F.linear(inputs, gate_weight)) * F.linear(
+        inputs,
+        up_weight,
+    )
+    expected = F.linear(gated, down_weight)
+
+    assert torch.allclose(observed.float(), expected, atol=2e-2, rtol=2e-2)

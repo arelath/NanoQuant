@@ -29,6 +29,10 @@ from nanoquant.domain.factorization import (
 from nanoquant.domain.mlp_operator_refit import (
     coupled_mlp_output_normalized_rmse,
     fit_coupled_mlp_output_scales,
+    fit_linear_input_scales,
+    fit_linear_output_scales,
+    linear_input_scale_normalized_rmse,
+    linear_output_normalized_rmse,
 )
 from nanoquant.domain.models import BlockId, LayerId
 from nanoquant.domain.planning import factor_bit_cost
@@ -178,6 +182,41 @@ def _linear_outputs(
             .matmul(weight_device.mT)
         )
     return torch.cat(outputs)
+
+
+@torch.inference_mode()
+def _gated_outputs(
+    inputs: torch.Tensor,
+    gate_weight: torch.Tensor,
+    up_weight: torch.Tensor,
+    *,
+    device: str,
+) -> torch.Tensor:
+    gate = _linear_outputs(inputs, gate_weight, device=device)
+    up = _linear_outputs(inputs, up_weight, device=device)
+    result = torch.nn.functional.silu(gate.float()) * up.float()
+    del gate, up
+    return result
+
+
+@torch.inference_mode()
+def _gated_down_outputs(
+    inputs: torch.Tensor,
+    gate_weight: torch.Tensor,
+    up_weight: torch.Tensor,
+    down_weight: torch.Tensor,
+    *,
+    device: str,
+) -> torch.Tensor:
+    gated = _gated_outputs(
+        inputs,
+        gate_weight,
+        up_weight,
+        device=device,
+    )
+    result = _linear_outputs(gated, down_weight, device=device)
+    del gated
+    return result
 
 
 def _replace_weights(
@@ -363,6 +402,357 @@ def _operator_refit_sets(
     return result, metrics
 
 
+def _downstream_refit_sets(
+    teacher: torch.nn.Module,
+    blocks: tuple[int, ...],
+    fit_tokens: torch.Tensor,
+    validation_tokens: torch.Tensor,
+    reconstruction_sets: dict[str, SpliceReconstructionSet],
+    *,
+    device: str,
+    minimum_multiplier: float,
+    maximum_multiplier: float,
+) -> tuple[dict[str, SpliceReconstructionSet], dict[str, Any]]:
+    decoder = _decoder_blocks(teacher)
+    source_arms = (
+        "free_words_operator_refit",
+        "corrected_codebook_operator_refit",
+    )
+    replacements_by_arm: dict[str, dict[LayerId, torch.Tensor]] = {
+        arm: {} for arm in source_arms
+    }
+    metrics: dict[str, dict[str, Any]] = {
+        arm: {} for arm in source_arms
+    }
+    layers_by_arm = {
+        arm: {item.layer: item for item in reconstruction_sets[arm].layers}
+        for arm in source_arms
+    }
+    for block_index in blocks:
+        gate_id = LayerId(BlockId(block_index), PROJECTION_PATHS["gate"])
+        up_id = LayerId(BlockId(block_index), PROJECTION_PATHS["up"])
+        down_id = LayerId(BlockId(block_index), PROJECTION_PATHS["down"])
+        block = decoder[block_index]
+        gate_module = _module_at_path(block, PROJECTION_PATHS["gate"])
+        up_module = _module_at_path(block, PROJECTION_PATHS["up"])
+        down_module = _module_at_path(block, PROJECTION_PATHS["down"])
+        if not all(
+            isinstance(module, torch.nn.Linear)
+            for module in (gate_module, up_module, down_module)
+        ):
+            raise TypeError("downstream refit targets must be dense linear modules")
+        assert isinstance(gate_module, torch.nn.Linear)
+        assert isinstance(up_module, torch.nn.Linear)
+        assert isinstance(down_module, torch.nn.Linear)
+        fit_inputs = _capture_linear_inputs(
+            teacher,
+            gate_module,
+            fit_tokens,
+            device=device,
+        )
+        validation_inputs = _capture_linear_inputs(
+            teacher,
+            gate_module,
+            validation_tokens,
+            device=device,
+        )
+        teacher_fit = _gated_down_outputs(
+            fit_inputs,
+            gate_module.weight,
+            up_module.weight,
+            down_module.weight,
+            device=device,
+        )
+        teacher_validation = _gated_down_outputs(
+            validation_inputs,
+            gate_module.weight,
+            up_module.weight,
+            down_module.weight,
+            device=device,
+        )
+        for arm in source_arms:
+            by_layer = layers_by_arm[arm]
+            gate_item = by_layer.get(gate_id)
+            up_item = by_layer.get(up_id)
+            down_item = by_layer.get(down_id)
+            if gate_item is None or up_item is None or down_item is None:
+                raise ValueError(
+                    "downstream refit requires gate, up, and down reconstructions"
+                )
+            candidate_fit = _gated_down_outputs(
+                fit_inputs,
+                gate_item.weight,
+                up_item.weight,
+                down_item.weight,
+                device=device,
+            )
+            fitted = fit_linear_output_scales(
+                teacher_fit,
+                candidate_fit,
+                minimum_multiplier=minimum_multiplier,
+                maximum_multiplier=maximum_multiplier,
+            )
+            candidate_validation = _gated_down_outputs(
+                validation_inputs,
+                gate_item.weight,
+                up_item.weight,
+                down_item.weight,
+                device=device,
+            )
+            validation_before = linear_output_normalized_rmse(
+                teacher_validation,
+                candidate_validation,
+            )
+            validation_after = linear_output_normalized_rmse(
+                teacher_validation,
+                candidate_validation,
+                multiplier=fitted.multiplier,
+            )
+            replacements_by_arm[arm][down_id] = (
+                down_item.weight.float()
+                * fitted.multiplier.detach().cpu().reshape(-1, 1)
+            ).to(torch.bfloat16)
+            metrics[arm][str(block_index)] = {
+                "fit_before_normalized_rmse": fitted.before_normalized_rmse,
+                "fit_after_normalized_rmse": fitted.after_normalized_rmse,
+                "validation_before_normalized_rmse": validation_before,
+                "validation_after_normalized_rmse": validation_after,
+                "validation_change_fraction": (
+                    validation_after / validation_before - 1
+                ),
+                "multiplier_minimum": float(fitted.multiplier.min()),
+                "multiplier_maximum": float(fitted.multiplier.max()),
+            }
+            del candidate_fit, candidate_validation
+        del fit_inputs, validation_inputs, teacher_fit, teacher_validation
+        torch.cuda.empty_cache()
+    result = dict(reconstruction_sets)
+    for arm in source_arms:
+        result[f"{arm.removesuffix('_refit')}_downstream_refit"] = (
+            _replace_weights(
+                reconstruction_sets[arm],
+                replacements_by_arm[arm],
+            )
+        )
+    return result, metrics
+
+
+def _downstream_input_refit_sets(
+    teacher: torch.nn.Module,
+    blocks: tuple[int, ...],
+    fit_tokens: torch.Tensor,
+    validation_tokens: torch.Tensor,
+    reconstruction_sets: dict[str, SpliceReconstructionSet],
+    *,
+    device: str,
+    minimum_multiplier: float,
+    maximum_multiplier: float,
+    iterations: int,
+    learning_rate: float,
+) -> tuple[dict[str, SpliceReconstructionSet], dict[str, Any]]:
+    decoder = _decoder_blocks(teacher)
+    source_arms = (
+        "free_words_operator_refit",
+        "corrected_codebook_operator_refit",
+    )
+    input_replacements: dict[str, dict[LayerId, torch.Tensor]] = {
+        arm: {} for arm in source_arms
+    }
+    joint_replacements: dict[str, dict[LayerId, torch.Tensor]] = {
+        arm: {} for arm in source_arms
+    }
+    metrics: dict[str, dict[str, Any]] = {
+        arm: {} for arm in source_arms
+    }
+    layers_by_arm = {
+        arm: {item.layer: item for item in reconstruction_sets[arm].layers}
+        for arm in source_arms
+    }
+    for block_index in blocks:
+        gate_id = LayerId(BlockId(block_index), PROJECTION_PATHS["gate"])
+        up_id = LayerId(BlockId(block_index), PROJECTION_PATHS["up"])
+        down_id = LayerId(BlockId(block_index), PROJECTION_PATHS["down"])
+        block = decoder[block_index]
+        gate_module = _module_at_path(block, PROJECTION_PATHS["gate"])
+        up_module = _module_at_path(block, PROJECTION_PATHS["up"])
+        down_module = _module_at_path(block, PROJECTION_PATHS["down"])
+        if not all(
+            isinstance(module, torch.nn.Linear)
+            for module in (gate_module, up_module, down_module)
+        ):
+            raise TypeError(
+                "downstream input-refit targets must be dense linear modules"
+            )
+        assert isinstance(gate_module, torch.nn.Linear)
+        assert isinstance(up_module, torch.nn.Linear)
+        assert isinstance(down_module, torch.nn.Linear)
+        fit_inputs = _capture_linear_inputs(
+            teacher,
+            gate_module,
+            fit_tokens,
+            device=device,
+        )
+        validation_inputs = _capture_linear_inputs(
+            teacher,
+            gate_module,
+            validation_tokens,
+            device=device,
+        )
+        teacher_fit_gated = _gated_outputs(
+            fit_inputs,
+            gate_module.weight,
+            up_module.weight,
+            device=device,
+        )
+        teacher_validation_gated = _gated_outputs(
+            validation_inputs,
+            gate_module.weight,
+            up_module.weight,
+            device=device,
+        )
+        teacher_fit = _linear_outputs(
+            teacher_fit_gated,
+            down_module.weight,
+            device=device,
+        )
+        teacher_validation = _linear_outputs(
+            teacher_validation_gated,
+            down_module.weight,
+            device=device,
+        )
+        for arm in source_arms:
+            by_layer = layers_by_arm[arm]
+            gate_item = by_layer.get(gate_id)
+            up_item = by_layer.get(up_id)
+            down_item = by_layer.get(down_id)
+            if gate_item is None or up_item is None or down_item is None:
+                raise ValueError(
+                    "downstream input refit requires gate, up, and down"
+                )
+            candidate_fit_gated = _gated_outputs(
+                fit_inputs,
+                gate_item.weight,
+                up_item.weight,
+                device=device,
+            )
+            fitted = fit_linear_input_scales(
+                teacher_fit,
+                candidate_fit_gated,
+                down_item.weight.to(device),
+                minimum_multiplier=minimum_multiplier,
+                maximum_multiplier=maximum_multiplier,
+                iterations=iterations,
+                learning_rate=learning_rate,
+            )
+            input_weight = (
+                down_item.weight.float().to(device)
+                * fitted.multiplier.reshape(1, -1)
+            )
+            candidate_fit = _linear_outputs(
+                candidate_fit_gated,
+                input_weight,
+                device=device,
+            )
+            output_fitted = fit_linear_output_scales(
+                teacher_fit,
+                candidate_fit,
+                minimum_multiplier=minimum_multiplier,
+                maximum_multiplier=maximum_multiplier,
+            )
+            candidate_validation_gated = _gated_outputs(
+                validation_inputs,
+                gate_item.weight,
+                up_item.weight,
+                device=device,
+            )
+            validation_before = linear_input_scale_normalized_rmse(
+                teacher_validation,
+                candidate_validation_gated,
+                down_item.weight.to(device),
+            )
+            validation_input = linear_input_scale_normalized_rmse(
+                teacher_validation,
+                candidate_validation_gated,
+                down_item.weight.to(device),
+                multiplier=fitted.multiplier,
+            )
+            candidate_validation_input = _linear_outputs(
+                candidate_validation_gated,
+                input_weight,
+                device=device,
+            )
+            validation_joint = linear_output_normalized_rmse(
+                teacher_validation,
+                candidate_validation_input,
+                multiplier=output_fitted.multiplier,
+            )
+            input_replacements[arm][down_id] = (
+                down_item.weight.float()
+                * fitted.multiplier.detach().cpu().reshape(1, -1)
+            ).to(torch.bfloat16)
+            joint_replacements[arm][down_id] = (
+                input_replacements[arm][down_id].float()
+                * output_fitted.multiplier.detach().cpu().reshape(-1, 1)
+            ).to(torch.bfloat16)
+            metrics[arm][str(block_index)] = {
+                "fit_before_normalized_rmse": fitted.before_normalized_rmse,
+                "fit_input_normalized_rmse": fitted.after_normalized_rmse,
+                "fit_joint_normalized_rmse": (
+                    output_fitted.after_normalized_rmse
+                ),
+                "validation_before_normalized_rmse": validation_before,
+                "validation_input_normalized_rmse": validation_input,
+                "validation_joint_normalized_rmse": validation_joint,
+                "validation_input_change_fraction": (
+                    validation_input / validation_before - 1
+                ),
+                "validation_joint_change_fraction": (
+                    validation_joint / validation_before - 1
+                ),
+                "accepted_iterations": fitted.accepted_iterations,
+                "input_multiplier_minimum": float(
+                    fitted.multiplier.min()
+                ),
+                "input_multiplier_maximum": float(
+                    fitted.multiplier.max()
+                ),
+                "output_multiplier_minimum": float(
+                    output_fitted.multiplier.min()
+                ),
+                "output_multiplier_maximum": float(
+                    output_fitted.multiplier.max()
+                ),
+            }
+            del (
+                candidate_fit_gated,
+                candidate_fit,
+                candidate_validation_gated,
+                candidate_validation_input,
+                input_weight,
+            )
+        del (
+            fit_inputs,
+            validation_inputs,
+            teacher_fit_gated,
+            teacher_validation_gated,
+            teacher_fit,
+            teacher_validation,
+        )
+        torch.cuda.empty_cache()
+    result = dict(reconstruction_sets)
+    for arm in source_arms:
+        prefix = arm.removesuffix("_refit")
+        result[f"{prefix}_downstream_input_refit"] = _replace_weights(
+            reconstruction_sets[arm],
+            input_replacements[arm],
+        )
+        result[f"{prefix}_downstream_joint_refit"] = _replace_weights(
+            reconstruction_sets[arm],
+            joint_replacements[arm],
+        )
+    return result, metrics
+
+
 def _reconstruction_set(
     values: list[tuple[LayerId, torch.Tensor, float]],
 ) -> SpliceReconstructionSet:
@@ -493,6 +883,24 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--operator-maximum-gate-multiplier", type=float, default=1.5)
     parser.add_argument("--operator-minimum-up-multiplier", type=float, default=0.25)
     parser.add_argument("--operator-maximum-up-multiplier", type=float, default=4.0)
+    parser.add_argument("--downstream-scale-refit", action="store_true")
+    parser.add_argument("--downstream-input-scale-refit", action="store_true")
+    parser.add_argument(
+        "--downstream-minimum-output-multiplier",
+        type=float,
+        default=0.25,
+    )
+    parser.add_argument(
+        "--downstream-maximum-output-multiplier",
+        type=float,
+        default=4.0,
+    )
+    parser.add_argument("--downstream-input-iterations", type=int, default=20)
+    parser.add_argument(
+        "--downstream-input-learning-rate",
+        type=float,
+        default=0.25,
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--local-files-only", action="store_true")
@@ -527,8 +935,30 @@ def run(args: argparse.Namespace) -> int:
         else args.projections
     )
     projection_paths = tuple(PROJECTION_PATHS[item] for item in projections)
-    if args.operator_scale_refit and set(projections) != {"gate", "up"}:
-        raise ValueError("operator scale refit requires gate and up projections")
+    downstream_requested = (
+        args.downstream_scale_refit
+        or args.downstream_input_scale_refit
+    )
+    expected_operator_projections = (
+        {"gate", "up", "down"}
+        if downstream_requested
+        else {"gate", "up"}
+    )
+    if (
+        args.operator_scale_refit
+        and set(projections) != expected_operator_projections
+    ):
+        raise ValueError(
+            "operator scale refit requires its complete projection group"
+        )
+    if downstream_requested and (
+        not args.operator_scale_refit
+        or not args.transpose_matrix
+        or set(projections) != {"gate", "up", "down"}
+    ):
+        raise ValueError(
+            "downstream scale refit requires transposed gate/up plus down"
+        )
     if (
         args.operator_refit_offset < 0
         or args.operator_refit_samples <= 0
@@ -543,6 +973,12 @@ def run(args: argparse.Namespace) -> int:
         < args.operator_minimum_up_multiplier
         <= 1
         <= args.operator_maximum_up_multiplier
+        or not 0
+        < args.downstream_minimum_output_multiplier
+        <= 1
+        <= args.downstream_maximum_output_multiplier
+        or args.downstream_input_iterations <= 0
+        or args.downstream_input_learning_rate <= 0
     ):
         raise ValueError("operator scale-refit dataset settings are invalid")
     fit_inventory = set(
@@ -600,6 +1036,7 @@ def run(args: argparse.Namespace) -> int:
         ] = {}
         rank = 0
         matrix_shape = (0, 0)
+        transpose_by_projection: dict[str, bool] = {}
         for block in blocks:
             for projection, projection_path in zip(
                 projections,
@@ -616,7 +1053,15 @@ def run(args: argparse.Namespace) -> int:
                 weight = handle.get_tensor(tensor_name).to(args.device)
                 input_importance = input_cpu.to(args.device).float()
                 output_importance = output_cpu.to(args.device).float()
-                if args.transpose_matrix:
+                transpose_current = (
+                    args.transpose_matrix
+                    and not (
+                        downstream_requested
+                        and projection == "down"
+                    )
+                )
+                transpose_by_projection[projection_path] = transpose_current
+                if transpose_current:
                     weight = weight.mT.contiguous()
                     input_importance, output_importance = (
                         output_importance,
@@ -732,7 +1177,7 @@ def run(args: argparse.Namespace) -> int:
                 layer = LayerId(BlockId(block), projection_path)
                 baseline_reconstruction = baseline_fit.reconstruction
                 candidate_reconstruction = candidate_fit.reconstruction
-                if args.transpose_matrix:
+                if transpose_current:
                     baseline_reconstruction = baseline_reconstruction.mT.contiguous()
                     candidate_reconstruction = candidate_reconstruction.mT.contiguous()
                 baseline_entries.append(
@@ -851,6 +1296,8 @@ def run(args: argparse.Namespace) -> int:
         ).to(args.device)
         teacher.eval()
         operator_refit_metrics: dict[str, Any] = {}
+        downstream_refit_metrics: dict[str, Any] = {}
+        downstream_input_refit_metrics: dict[str, Any] = {}
         if args.operator_scale_refit:
             assert operator_fit_tokens is not None
             assert operator_validation_tokens is not None
@@ -876,6 +1323,47 @@ def run(args: argparse.Namespace) -> int:
                         args.operator_maximum_up_multiplier
                     ),
                 )
+            )
+        if args.downstream_scale_refit:
+            assert operator_fit_tokens is not None
+            assert operator_validation_tokens is not None
+            all_reconstruction_sets, downstream_refit_metrics = (
+                _downstream_refit_sets(
+                    teacher,
+                    blocks,
+                    operator_fit_tokens,
+                    operator_validation_tokens,
+                    all_reconstruction_sets,
+                    device=args.device,
+                    minimum_multiplier=(
+                        args.downstream_minimum_output_multiplier
+                    ),
+                    maximum_multiplier=(
+                        args.downstream_maximum_output_multiplier
+                    ),
+                )
+            )
+        if args.downstream_input_scale_refit:
+            assert operator_fit_tokens is not None
+            assert operator_validation_tokens is not None
+            (
+                all_reconstruction_sets,
+                downstream_input_refit_metrics,
+            ) = _downstream_input_refit_sets(
+                teacher,
+                blocks,
+                operator_fit_tokens,
+                operator_validation_tokens,
+                all_reconstruction_sets,
+                device=args.device,
+                minimum_multiplier=(
+                    args.downstream_minimum_output_multiplier
+                ),
+                maximum_multiplier=(
+                    args.downstream_maximum_output_multiplier
+                ),
+                iterations=args.downstream_input_iterations,
+                learning_rate=args.downstream_input_learning_rate,
             )
         teacher_nll = 0.0
         teacher_cache: tuple[torch.Tensor, ...] = ()
@@ -945,6 +1433,89 @@ def run(args: argparse.Namespace) -> int:
                     candidate_refit,
                     seed=args.seed,
                 )
+            if args.downstream_scale_refit:
+                baseline_downstream_refit = kl_results[
+                    "free_words_operator_downstream_refit"
+                ]
+                candidate_downstream_refit = kl_results[
+                    "corrected_codebook_operator_downstream_refit"
+                ]
+                selection_result[
+                    "paired_downstream_candidate_minus_downstream_free_words"
+                ] = _paired_payload(
+                    baseline_downstream_refit,
+                    candidate_downstream_refit,
+                    seed=args.seed,
+                )
+                selection_result[
+                    "paired_free_words_downstream_refit_minus_operator_refit"
+                ] = _paired_payload(
+                    baseline_refit,
+                    baseline_downstream_refit,
+                    seed=args.seed,
+                )
+                selection_result[
+                    "paired_candidate_downstream_refit_minus_operator_refit"
+                ] = _paired_payload(
+                    candidate_refit,
+                    candidate_downstream_refit,
+                    seed=args.seed,
+                )
+            if args.downstream_input_scale_refit:
+                baseline_input_refit = kl_results[
+                    "free_words_operator_downstream_input_refit"
+                ]
+                candidate_input_refit = kl_results[
+                    "corrected_codebook_operator_downstream_input_refit"
+                ]
+                baseline_joint_refit = kl_results[
+                    "free_words_operator_downstream_joint_refit"
+                ]
+                candidate_joint_refit = kl_results[
+                    "corrected_codebook_operator_downstream_joint_refit"
+                ]
+                selection_result[
+                    "paired_input_candidate_minus_input_free_words"
+                ] = _paired_payload(
+                    baseline_input_refit,
+                    candidate_input_refit,
+                    seed=args.seed,
+                )
+                selection_result[
+                    "paired_joint_candidate_minus_joint_free_words"
+                ] = _paired_payload(
+                    baseline_joint_refit,
+                    candidate_joint_refit,
+                    seed=args.seed,
+                )
+                selection_result[
+                    "paired_free_words_input_refit_minus_operator_refit"
+                ] = _paired_payload(
+                    baseline_refit,
+                    baseline_input_refit,
+                    seed=args.seed,
+                )
+                selection_result[
+                    "paired_candidate_input_refit_minus_operator_refit"
+                ] = _paired_payload(
+                    candidate_refit,
+                    candidate_input_refit,
+                    seed=args.seed,
+                )
+                selection_result[
+                    "paired_free_words_joint_refit_minus_operator_refit"
+                ] = _paired_payload(
+                    baseline_refit,
+                    baseline_joint_refit,
+                    seed=args.seed,
+                )
+                selection_result[
+                    "paired_candidate_joint_refit_minus_operator_refit"
+                ] = _paired_payload(
+                    candidate_refit,
+                    candidate_joint_refit,
+                    seed=args.seed,
+                )
             selection_results[name] = selection_result
         del teacher
 
@@ -970,7 +1541,7 @@ def run(args: argparse.Namespace) -> int:
         )
     )
     output: dict[str, Any] = {
-        "schema_version": 6,
+        "schema_version": 8,
         "status": "completed",
         "role": "analysis-only corrected-codebook splice gate",
         "model_source": MODEL_SOURCE,
@@ -978,7 +1549,12 @@ def run(args: argparse.Namespace) -> int:
         "blocks": list(blocks),
         "projection": projection_paths[0] if len(projection_paths) == 1 else None,
         "projections": list(projection_paths),
-        "transposed_for_factorization": args.transpose_matrix,
+        "transposed_for_factorization": (
+            next(iter(transpose_by_projection.values()))
+            if len(set(transpose_by_projection.values())) == 1
+            else None
+        ),
+        "transposed_by_projection": transpose_by_projection,
         "factorization_shape": list(matrix_shape),
         "dataset_fingerprint": dataset_fingerprint,
         "dataset_slice_hash": _token_hash(tokens),
@@ -1017,6 +1593,28 @@ def run(args: argparse.Namespace) -> int:
             "minimum_up_multiplier": args.operator_minimum_up_multiplier,
             "maximum_up_multiplier": args.operator_maximum_up_multiplier,
             "metrics": operator_refit_metrics,
+        },
+        "downstream_scale_refit": {
+            "enabled": args.downstream_scale_refit,
+            "minimum_output_multiplier": (
+                args.downstream_minimum_output_multiplier
+            ),
+            "maximum_output_multiplier": (
+                args.downstream_maximum_output_multiplier
+            ),
+            "metrics": downstream_refit_metrics,
+        },
+        "downstream_input_scale_refit": {
+            "enabled": args.downstream_input_scale_refit,
+            "minimum_multiplier": (
+                args.downstream_minimum_output_multiplier
+            ),
+            "maximum_multiplier": (
+                args.downstream_maximum_output_multiplier
+            ),
+            "iterations": args.downstream_input_iterations,
+            "learning_rate": args.downstream_input_learning_rate,
+            "metrics": downstream_input_refit_metrics,
         },
     }
     if args.selection_thresholds is None:
