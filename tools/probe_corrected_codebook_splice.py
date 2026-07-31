@@ -46,7 +46,11 @@ from nanoquant.domain.sign_word_codebook import (
 )
 from nanoquant.infrastructure.device_lease import acquire_device_lease
 from nanoquant.infrastructure.hf_language_model import load_causal_language_model
-from nanoquant.infrastructure.io_utils import atomic_write_json, hash_file
+from nanoquant.infrastructure.io_utils import (
+    atomic_workspace,
+    atomic_write_json,
+    hash_file,
+)
 from nanoquant.infrastructure.kl_splice import (
     DenseKlSpliceEvaluator,
     SpliceReconstruction,
@@ -57,6 +61,7 @@ from nanoquant.infrastructure.probe_reconstruction_cache import (
     ProbeReconstructionCache,
     ProbeReconstructionCacheEntry,
 )
+from nanoquant.infrastructure.safetensors_io import SAFETENSORS
 from nanoquant.kl_budget_workflow import _token_hash
 from nanoquant.quality_evaluation import _wikitext_tokens
 
@@ -950,6 +955,55 @@ def _hybrid_representation_set(
     return _replace_weights(base, replacements)
 
 
+def _export_reconstruction_set(
+    destination: Path,
+    arm: str,
+    reconstructions: SpliceReconstructionSet,
+) -> dict[str, object]:
+    tensors = {
+        (
+            f"model.layers.{item.layer.block.index}."
+            f"{item.layer.path}.weight"
+        ): (
+            item.weight.detach()
+            .to(device="cpu", dtype=torch.bfloat16)
+            .contiguous()
+        )
+        for item in reconstructions.layers
+    }
+    if not tensors or len(tensors) != len(reconstructions.layers):
+        raise ValueError(
+            "reconstruction export requires unique non-empty layers"
+        )
+    with atomic_workspace(destination) as temporary:
+        tensor_path = temporary / "weights.safetensors"
+        SAFETENSORS.save(tensors, tensor_path)
+        manifest = {
+            "schema_version": 1,
+            "arm": arm,
+            "layer_count": len(tensors),
+            "blocks": sorted(
+                {
+                    item.layer.block.index
+                    for item in reconstructions.layers
+                }
+            ),
+            "tensor_sha256": hash_file(tensor_path),
+            "tensors": {
+                name: {
+                    "shape": list(value.shape),
+                    "dtype": str(value.dtype).removeprefix("torch."),
+                }
+                for name, value in tensors.items()
+            },
+        }
+        atomic_write_json(temporary / "manifest.json", manifest)
+    return {
+        "directory": str(destination),
+        **manifest,
+    }
+
+
 def _reconstruction_set(
     values: list[tuple[LayerId, torch.Tensor, float]],
 ) -> SpliceReconstructionSet:
@@ -1043,6 +1097,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--snapshot", type=Path, required=True)
     parser.add_argument("--calibration-state", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--export-reconstruction-set", type=Path)
+    parser.add_argument("--export-arm")
     parser.add_argument("--reconstruction-cache", type=Path)
     parser.add_argument("--model-revision", default=PINNED_MODEL_REVISION)
     parser.add_argument("--projection", choices=tuple(PROJECTION_PATHS), default="down")
@@ -1113,6 +1169,10 @@ def _parser() -> argparse.ArgumentParser:
 def run(args: argparse.Namespace) -> int:
     if args.corrections_per_word not in {1, 2, 3}:
         raise ValueError("splice probe supports one to three corrections")
+    if (args.export_reconstruction_set is None) != (args.export_arm is None):
+        raise ValueError(
+            "reconstruction export requires both destination and arm"
+        )
     if args.candidate_rank is not None and (
         args.candidate_rank <= 0
         or args.right_free_rows < 0
@@ -1995,10 +2055,23 @@ def run(args: argparse.Namespace) -> int:
             scale_width=16,
         )
     )
+    reconstruction_export = None
+    if args.export_reconstruction_set is not None:
+        if args.export_arm not in all_reconstruction_sets:
+            raise ValueError(
+                f"reconstruction export arm is unavailable: {args.export_arm}"
+            )
+        reconstruction_export = _export_reconstruction_set(
+            args.export_reconstruction_set,
+            args.export_arm,
+            all_reconstruction_sets[args.export_arm],
+        )
+
     output: dict[str, Any] = {
-        "schema_version": 12,
+        "schema_version": 13,
         "status": "completed",
         "role": "analysis-only corrected-codebook splice gate",
+        "reconstruction_export": reconstruction_export,
         "reconstruction_cache": {
             "enabled": reconstruction_cache is not None,
             "root": (

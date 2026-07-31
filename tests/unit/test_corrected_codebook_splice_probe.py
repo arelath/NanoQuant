@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import importlib
+import json
 import sys
 from pathlib import Path
 
 import pytest
 import torch
+from safetensors import safe_open
 from torch.nn import functional as F
 
 from nanoquant.domain.models import BlockId, LayerId
+from nanoquant.infrastructure.io_utils import hash_file
 from nanoquant.infrastructure.kl_splice import (
     SpliceReconstruction,
     SpliceReconstructionSet,
@@ -183,6 +186,59 @@ def test_splice_probe_composes_per_block_downstream_policy() -> None:
         2.0,
         10.0,
     ]
+
+
+def test_splice_probe_exports_hashed_reconstruction_set(tmp_path: Path) -> None:
+    probe = _probe_module()
+    first = LayerId(BlockId(2), "mlp.gate_proj")
+    second = LayerId(BlockId(2), "mlp.up_proj")
+    reconstructions = SpliceReconstructionSet(
+        (
+            SpliceReconstruction(
+                first,
+                torch.tensor([[1.0, 2.0]]),
+                None,
+                1.0,
+            ),
+            SpliceReconstruction(
+                second,
+                torch.tensor([[3.0, 4.0]]),
+                None,
+                1.0,
+            ),
+        ),
+        (("2:gate", (first,)), ("2:up", (second,))),
+        (("2:gate", 1.0), ("2:up", 1.0)),
+    )
+
+    destination = tmp_path / "export"
+    receipt = probe._export_reconstruction_set(
+        destination,
+        "hybrid",
+        reconstructions,
+    )
+
+    manifest = json.loads(
+        (destination / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert receipt["arm"] == "hybrid"
+    assert manifest["layer_count"] == 2
+    assert manifest["blocks"] == [2]
+    assert manifest["tensor_sha256"] == hash_file(
+        destination / "weights.safetensors"
+    )
+    with safe_open(
+        destination / "weights.safetensors",
+        framework="pt",
+        device="cpu",
+    ) as handle:
+        assert set(handle.keys()) == {
+            "model.layers.2.mlp.gate_proj.weight",
+            "model.layers.2.mlp.up_proj.weight",
+        }
+        assert handle.get_tensor(
+            "model.layers.2.mlp.gate_proj.weight"
+        ).dtype == torch.bfloat16
 
 
 def test_splice_probe_reconstruction_identity_tracks_numerical_settings() -> None:

@@ -74,7 +74,7 @@ survives complete MLP replacement.
 ## Decision
 
 Accept the hybrid as the quality-first policy for a complete compressed MLP
-stack.
+stack within the untuned sign-word reconstruction family.
 
 - It covers all 78 MLP matrices across all 26 blocks.
 - Its representation and scale choices were fixed before both inventories.
@@ -82,6 +82,13 @@ stack.
 - It remains a partial-model result because all attention projections are
   still dense. Model-level BPW and perplexity claims require integrating the
   policy into a complete compression run.
+
+The subsequent
+[Complete MLP Frozen-Model Transfer Gate](68-complete-mlp-frozen-transfer-gate.md)
+rejects direct installation: the untuned logical overlay regresses retained
+Experiment 022 pre-KD perplexity from 273.87 to 1904.75. The policy remains
+useful format and initialization evidence, not a model-quality candidate
+until it receives resident tuning.
 
 ## Evidence
 
