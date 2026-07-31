@@ -439,3 +439,116 @@ Evidence:
 - `experiment022-postkd-coordinate-plus25-logical-validation.json`
 - `experiment022-postkd-coordinate-plus25-packed-validation.json`
 - `experiment022-postkd-coordinate-plus25-packed-quality.json`
+
+## Phase C execution results
+
+Phase C was executed against Experiment 022's original retained eight-epoch,
+411,041,792-byte top-k teacher cache. The six-block component overlay above was
+the initialization, and every raw factor, stored scale, outlier, patch, bias,
+norm, attention parameter, and non-MLP parameter remained frozen. The only
+optimizer variables were the 569,088 FP32 log-multipliers declared in this
+plan.
+
+### Stability correction and gradient gate
+
+The first smoke implementation multiplied BF16 activations by near-identity
+multipliers. That exposed a BF16 dead zone: the FP32 master values changed, but
+the cast activation multipliers still rounded to one, while subsequently
+folding the same values into BF16 component scales changed the model. This was
+not an acceptable deployment-faithful training path.
+
+The corrected forward dynamically materializes the rescaled BF16 factorized
+terms, including floating outliers and both correction-patch sides, before the
+factorized linear. It therefore executes the exact representation that folding
+will save. The repeated smoke then established:
+
+- all 26 parameter tensors in each of the four multiplier families received
+  finite, nonzero gradients at both the first and final checked steps;
+- no multiplier approached its safety bound;
+- eight steps improved held-out NLL by `-0.001962`, interval
+  `[-0.003570, -0.000200]`;
+- the saved folded replay and unfolded optimization forward had exactly zero
+  NLL difference.
+
+### Objective mismatch and checkpoint selection
+
+A full 2,048-step run used all eight retained teacher-cache epochs and monitored
+fresh validation sequences 72-79 every 64 steps. Teacher top-k KL continued to
+improve throughout training, but causal NLL was best after 64 steps and then
+steadily regressed. This is direct evidence that the retained top-k objective
+is not a sufficient checkpoint-selection metric for these multipliers.
+
+The full-run step-64 state improved NLL on validation sequences 80-103 by
+`-0.039404`, but full-vocabulary teacher KL regressed by `+0.033411`, interval
+`[+0.023689, +0.042220]`, so it was rejected. A shorter cosine-decayed
+64-step sweep retained the NLL gain with less movement. The `3e-4` candidate
+still showed a confirmed full-KL regression on validation sequences 104-151
+and was also rejected.
+
+The accepted setting is the conservative `1e-4` learning-rate, family-balanced
+identity penalty `100`, 64-step cosine-decayed candidate. Relative to the
+six-block incumbent it produced:
+
+| Inventory | NLL delta | Paired 95% interval | KL delta | Paired 95% interval |
+| --- | ---: | --- | ---: | --- |
+| Validation sequences 80-103, 24x512 | -0.013079 | [-0.015221, -0.011021] | -0.001261 | [-0.002838, +0.000253] |
+| Validation sequences 104-151, 48x512 | -0.011699 | [-0.012882, -0.010540] | +0.000883 | [-0.000123, +0.001898] |
+
+The NLL improvement confirms cleanly. The confirmation KL point estimate is a
+small regression, but its interval crosses zero, so it is not a statistically
+supported regression under the predeclared gate. The multiplier range remains
+very conservative: `0.996706` to `1.003299`, with every family median within
+`0.00003` of one and zero bound hits.
+
+### Folded representation and complete benchmark
+
+The accepted state folds into all 78 MLP projections. Its component overlay
+replaces 234 existing tensors and `3,115,008` bytes with exactly `3,115,008`
+bytes. Shapes, dtypes, packed bytes, and effective BPW are unchanged. The
+component tensor SHA-256 is
+`95902baa448c1ca153fd11db8f367bfced13e6e6d6e190fa39186cf8195e739e`.
+
+Fresh logical and packed validation reports:
+
+- 26 blocks, 130 layers, and 910 logical tensors;
+- logical weight bytes: `2,739,492,456`;
+- packed weight bytes: `89,480,656`;
+- effective BPW: `1.0244947118`, unchanged;
+- exact logical-to-packed conversion;
+- zero maximum reference error across 459,264 outputs;
+- packed descriptor SHA-256
+  `b1ec7016d305296c84e95e88041094ce2967b27f43fc5753fae81e2a504439a4`.
+
+The complete retained packed benchmark passed and reproduced the BF16 baseline,
+WikiText token hash, task inputs, and prompts:
+
+| Benchmark | Experiment 022 | Six-block incumbent | Phase C | Change vs six-block |
+| --- | ---: | ---: | ---: | ---: |
+| WikiText perplexity | 228.550618 | 172.377804 | **169.481866** | **-1.680%** |
+| PIQA `acc_norm` | 0.605 | 0.605 | 0.600 | -0.005 |
+| ARC-Easy `acc_norm` | 0.380 | 0.395 | 0.395 | 0.000 |
+| ARC-Challenge `acc_norm` | 0.215 | 0.250 | 0.240 | -0.010 |
+| HellaSwag `acc_norm` | 0.460 | 0.440 | 0.445 | +0.005 |
+| WinoGrande `acc` | 0.520 | 0.545 | **0.570** | +0.025 |
+| BoolQ `acc` | 0.635 | 0.630 | 0.625 | -0.005 |
+| Mean primary task score | 0.469167 | 0.477500 | **0.479167** | +0.001667 |
+
+Phase C lowers perplexity by 25.845% relative to Experiment 022 and by 1.680%
+relative to the already much stronger six-block model at identical packed
+bytes. Its primary task count is a net two correct answers higher than the
+six-block incumbent across 1,200 examples. Individual task movements remain
+too small to interpret strongly, but the complete benchmark rules out a broad
+task-quality tradeoff and accepts this conservative Phase C state as the new
+candidate.
+
+Phase C evidence:
+
+- `phaseC-global-multiplier-smoke-v2.json`
+- `phaseC-sweep-lr1e4-reg100.json`
+- `phaseC-global-multiplier-full.json`
+- `phaseC-global-multiplier-screen80-candidates-24x512-kl.json`
+- `phaseC-global-multiplier-confirm104-48x512-kl.json`
+- `phaseC-global-multiplier-lr1e4-confirm104-48x512-kl.json`
+- `experiment022-postkd-coordinate-plus25-phaseC-lr1e4-logical-validation.json`
+- `experiment022-postkd-coordinate-plus25-phaseC-lr1e4-packed-validation.json`
+- `experiment022-postkd-coordinate-plus25-phaseC-lr1e4-packed-quality.json`
