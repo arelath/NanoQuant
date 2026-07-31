@@ -361,6 +361,40 @@ def _replace_weights(
     )
 
 
+def _multiplier_summary(
+    multiplier: torch.Tensor,
+    *,
+    minimum: float,
+    maximum: float,
+) -> dict[str, object]:
+    values = multiplier.detach().float().reshape(-1).cpu()
+    if values.numel() <= 0 or not torch.isfinite(values).all():
+        raise ValueError("multiplier summary requires finite values")
+    quantiles = torch.quantile(
+        values,
+        torch.tensor((0.01, 0.05, 0.25, 0.5, 0.75, 0.95, 0.99)),
+    )
+    lower_count = int((values <= minimum).sum())
+    upper_count = int((values >= maximum).sum())
+    return {
+        "minimum": float(values.min()),
+        "maximum": float(values.max()),
+        "mean": float(values.mean()),
+        "quantiles": {
+            name: float(value)
+            for name, value in zip(
+                ("p01", "p05", "p25", "p50", "p75", "p95", "p99"),
+                quantiles,
+                strict=True,
+            )
+        },
+        "lower_bound_count": lower_count,
+        "upper_bound_count": upper_count,
+        "lower_bound_fraction": lower_count / values.numel(),
+        "upper_bound_fraction": upper_count / values.numel(),
+    }
+
+
 def _operator_refit_sets(
     teacher: torch.nn.Module,
     blocks: tuple[int, ...],
@@ -374,7 +408,18 @@ def _operator_refit_sets(
     maximum_gate_multiplier: float,
     minimum_up_multiplier: float,
     maximum_up_multiplier: float,
+    fit_inputs_by_block: dict[int, torch.Tensor] | None = None,
+    validation_inputs_by_block: dict[int, torch.Tensor] | None = None,
 ) -> tuple[dict[str, SpliceReconstructionSet], dict[str, Any]]:
+    if (fit_inputs_by_block is None) != (validation_inputs_by_block is None):
+        raise ValueError("external operator-refit inputs must be paired")
+    if fit_inputs_by_block is not None:
+        assert validation_inputs_by_block is not None
+        if (
+            set(blocks) - fit_inputs_by_block.keys()
+            or set(blocks) - validation_inputs_by_block.keys()
+        ):
+            raise ValueError("external operator-refit input inventory is incomplete")
     decoder = _decoder_blocks(teacher)
     result = dict(reconstruction_sets)
     metrics: dict[str, Any] = {}
@@ -397,17 +442,25 @@ def _operator_refit_sets(
                 torch.nn.Linear,
             ):
                 raise TypeError("operator refit targets must be dense linear modules")
-            fit_inputs = _capture_linear_inputs(
-                teacher,
-                gate_module,
-                fit_tokens,
-                device=device,
+            fit_inputs = (
+                _capture_linear_inputs(
+                    teacher,
+                    gate_module,
+                    fit_tokens,
+                    device=device,
+                )
+                if fit_inputs_by_block is None
+                else fit_inputs_by_block[block_index]
             )
-            validation_inputs = _capture_linear_inputs(
-                teacher,
-                gate_module,
-                validation_tokens,
-                device=device,
+            validation_inputs = (
+                _capture_linear_inputs(
+                    teacher,
+                    gate_module,
+                    validation_tokens,
+                    device=device,
+                )
+                if validation_inputs_by_block is None
+                else validation_inputs_by_block[block_index]
             )
             teacher_fit_gate = _linear_outputs(
                 fit_inputs,
@@ -498,6 +551,16 @@ def _operator_refit_sets(
                 ),
                 "up_multiplier_minimum": float(fitted.up_multiplier.min()),
                 "up_multiplier_maximum": float(fitted.up_multiplier.max()),
+                "gate_multiplier_distribution": _multiplier_summary(
+                    fitted.gate_multiplier,
+                    minimum=minimum_gate_multiplier,
+                    maximum=maximum_gate_multiplier,
+                ),
+                "up_multiplier_distribution": _multiplier_summary(
+                    fitted.up_multiplier,
+                    minimum=minimum_up_multiplier,
+                    maximum=maximum_up_multiplier,
+                ),
             }
             del (
                 fit_inputs,
@@ -530,7 +593,23 @@ def _downstream_refit_sets(
     device: str,
     minimum_multiplier: float,
     maximum_multiplier: float,
+    fit_inputs_by_block: dict[int, torch.Tensor] | None = None,
+    validation_inputs_by_block: dict[int, torch.Tensor] | None = None,
+    fit_targets_by_block: dict[int, torch.Tensor] | None = None,
+    validation_targets_by_block: dict[int, torch.Tensor] | None = None,
 ) -> tuple[dict[str, SpliceReconstructionSet], dict[str, Any]]:
+    if (fit_inputs_by_block is None) != (validation_inputs_by_block is None):
+        raise ValueError("external downstream-refit inputs must be paired")
+    if (fit_targets_by_block is None) != (validation_targets_by_block is None):
+        raise ValueError("external downstream-refit targets must be paired")
+    for inventory, label in (
+        (fit_inputs_by_block, "fit inputs"),
+        (validation_inputs_by_block, "validation inputs"),
+        (fit_targets_by_block, "fit targets"),
+        (validation_targets_by_block, "validation targets"),
+    ):
+        if inventory is not None and set(blocks) - inventory.keys():
+            raise ValueError(f"external downstream-refit {label} inventory is incomplete")
     decoder = _decoder_blocks(teacher)
     source_arms = (
         "free_words_operator_refit",
@@ -562,31 +641,47 @@ def _downstream_refit_sets(
         assert isinstance(gate_module, torch.nn.Linear)
         assert isinstance(up_module, torch.nn.Linear)
         assert isinstance(down_module, torch.nn.Linear)
-        fit_inputs = _capture_linear_inputs(
-            teacher,
-            gate_module,
-            fit_tokens,
-            device=device,
+        fit_inputs = (
+            _capture_linear_inputs(
+                teacher,
+                gate_module,
+                fit_tokens,
+                device=device,
+            )
+            if fit_inputs_by_block is None
+            else fit_inputs_by_block[block_index]
         )
-        validation_inputs = _capture_linear_inputs(
-            teacher,
-            gate_module,
-            validation_tokens,
-            device=device,
+        validation_inputs = (
+            _capture_linear_inputs(
+                teacher,
+                gate_module,
+                validation_tokens,
+                device=device,
+            )
+            if validation_inputs_by_block is None
+            else validation_inputs_by_block[block_index]
         )
-        teacher_fit = _gated_down_outputs(
-            fit_inputs,
-            gate_module.weight,
-            up_module.weight,
-            down_module.weight,
-            device=device,
+        teacher_fit = (
+            _gated_down_outputs(
+                fit_inputs,
+                gate_module.weight,
+                up_module.weight,
+                down_module.weight,
+                device=device,
+            )
+            if fit_targets_by_block is None
+            else fit_targets_by_block[block_index].to(device=device)
         )
-        teacher_validation = _gated_down_outputs(
-            validation_inputs,
-            gate_module.weight,
-            up_module.weight,
-            down_module.weight,
-            device=device,
+        teacher_validation = (
+            _gated_down_outputs(
+                validation_inputs,
+                gate_module.weight,
+                up_module.weight,
+                down_module.weight,
+                device=device,
+            )
+            if validation_targets_by_block is None
+            else validation_targets_by_block[block_index].to(device=device)
         )
         for arm in source_arms:
             by_layer = layers_by_arm[arm]
@@ -640,6 +735,11 @@ def _downstream_refit_sets(
                 ),
                 "multiplier_minimum": float(fitted.multiplier.min()),
                 "multiplier_maximum": float(fitted.multiplier.max()),
+                "multiplier_distribution": _multiplier_summary(
+                    fitted.multiplier,
+                    minimum=minimum_multiplier,
+                    maximum=maximum_multiplier,
+                ),
             }
             del candidate_fit, candidate_validation
         del fit_inputs, validation_inputs, teacher_fit, teacher_validation
@@ -667,7 +767,25 @@ def _downstream_input_refit_sets(
     maximum_multiplier: float,
     iterations: int,
     learning_rate: float,
+    fit_inputs_by_block: dict[int, torch.Tensor] | None = None,
+    validation_inputs_by_block: dict[int, torch.Tensor] | None = None,
+    fit_targets_by_block: dict[int, torch.Tensor] | None = None,
+    validation_targets_by_block: dict[int, torch.Tensor] | None = None,
 ) -> tuple[dict[str, SpliceReconstructionSet], dict[str, Any]]:
+    if (fit_inputs_by_block is None) != (validation_inputs_by_block is None):
+        raise ValueError("external downstream input-refit inputs must be paired")
+    if (fit_targets_by_block is None) != (validation_targets_by_block is None):
+        raise ValueError("external downstream input-refit targets must be paired")
+    for inventory, label in (
+        (fit_inputs_by_block, "fit inputs"),
+        (validation_inputs_by_block, "validation inputs"),
+        (fit_targets_by_block, "fit targets"),
+        (validation_targets_by_block, "validation targets"),
+    ):
+        if inventory is not None and set(blocks) - inventory.keys():
+            raise ValueError(
+                f"external downstream input-refit {label} inventory is incomplete"
+            )
     decoder = _decoder_blocks(teacher)
     source_arms = (
         "free_words_operator_refit",
@@ -704,40 +822,58 @@ def _downstream_input_refit_sets(
         assert isinstance(gate_module, torch.nn.Linear)
         assert isinstance(up_module, torch.nn.Linear)
         assert isinstance(down_module, torch.nn.Linear)
-        fit_inputs = _capture_linear_inputs(
-            teacher,
-            gate_module,
-            fit_tokens,
-            device=device,
+        fit_inputs = (
+            _capture_linear_inputs(
+                teacher,
+                gate_module,
+                fit_tokens,
+                device=device,
+            )
+            if fit_inputs_by_block is None
+            else fit_inputs_by_block[block_index]
         )
-        validation_inputs = _capture_linear_inputs(
-            teacher,
-            gate_module,
-            validation_tokens,
-            device=device,
+        validation_inputs = (
+            _capture_linear_inputs(
+                teacher,
+                gate_module,
+                validation_tokens,
+                device=device,
+            )
+            if validation_inputs_by_block is None
+            else validation_inputs_by_block[block_index]
         )
-        teacher_fit_gated = _gated_outputs(
-            fit_inputs,
-            gate_module.weight,
-            up_module.weight,
-            device=device,
-        )
-        teacher_validation_gated = _gated_outputs(
-            validation_inputs,
-            gate_module.weight,
-            up_module.weight,
-            device=device,
-        )
-        teacher_fit = _linear_outputs(
-            teacher_fit_gated,
-            down_module.weight,
-            device=device,
-        )
-        teacher_validation = _linear_outputs(
-            teacher_validation_gated,
-            down_module.weight,
-            device=device,
-        )
+        teacher_fit_gated = None
+        teacher_validation_gated = None
+        if fit_targets_by_block is None:
+            teacher_fit_gated = _gated_outputs(
+                fit_inputs,
+                gate_module.weight,
+                up_module.weight,
+                device=device,
+            )
+            teacher_fit = _linear_outputs(
+                teacher_fit_gated,
+                down_module.weight,
+                device=device,
+            )
+        else:
+            teacher_fit = fit_targets_by_block[block_index].to(device=device)
+        if validation_targets_by_block is None:
+            teacher_validation_gated = _gated_outputs(
+                validation_inputs,
+                gate_module.weight,
+                up_module.weight,
+                device=device,
+            )
+            teacher_validation = _linear_outputs(
+                teacher_validation_gated,
+                down_module.weight,
+                device=device,
+            )
+        else:
+            teacher_validation = validation_targets_by_block[block_index].to(
+                device=device
+            )
         for arm in source_arms:
             by_layer = layers_by_arm[arm]
             gate_item = by_layer.get(gate_id)
@@ -840,6 +976,16 @@ def _downstream_input_refit_sets(
                 "output_multiplier_maximum": float(
                     output_fitted.multiplier.max()
                 ),
+                "input_multiplier_distribution": _multiplier_summary(
+                    fitted.multiplier,
+                    minimum=minimum_multiplier,
+                    maximum=maximum_multiplier,
+                ),
+                "output_multiplier_distribution": _multiplier_summary(
+                    output_fitted.multiplier,
+                    minimum=minimum_multiplier,
+                    maximum=maximum_multiplier,
+                ),
             }
             del (
                 candidate_fit_gated,
@@ -848,14 +994,11 @@ def _downstream_input_refit_sets(
                 candidate_validation_input,
                 input_weight,
             )
-        del (
-            fit_inputs,
-            validation_inputs,
-            teacher_fit_gated,
-            teacher_validation_gated,
-            teacher_fit,
-            teacher_validation,
-        )
+        del fit_inputs, validation_inputs, teacher_fit, teacher_validation
+        if teacher_fit_gated is not None:
+            del teacher_fit_gated
+        if teacher_validation_gated is not None:
+            del teacher_validation_gated
         torch.cuda.empty_cache()
     result = dict(reconstruction_sets)
     for arm in source_arms:
