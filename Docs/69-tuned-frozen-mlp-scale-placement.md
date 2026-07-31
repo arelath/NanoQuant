@@ -182,13 +182,56 @@ artifact, so its measured effective BPW remains **1.0244947118**. A model-
 level evaluation loaded directly from the new packed artifact and reproduced
 216.533466 perplexity exactly on the same token hash.
 
+## Complete retained quality benchmark
+
+The single-sequence packed probe is not the completion gate. The final packed
+artifact was subsequently evaluated through the complete Experiment 022
+quality protocol:
+
+- 64 WikiText sequences of length 128, batch size 8;
+- 200 retained examples each for PIQA, ARC-Easy, ARC-Challenge, HellaSwag,
+  WinoGrande, and BoolQ;
+- task batch size 4;
+- resident BF16 reference and factorized packed candidate in the same run.
+
+The BF16 scores reproduced Experiment 022 exactly. The WikiText token hash,
+all task semantic keys, prompt hashes, and full task input identities also
+match the retained benchmark. The newer result schema additionally records
+the BOS, padding, and WikiText context policies explicitly.
+
+| Benchmark | BF16 | Experiment 022 packed | New packed | Change vs 022 |
+| --- | ---: | ---: | ---: | ---: |
+| WikiText perplexity | 96.459609 | 228.550618 | **216.241794** | **-5.386%** |
+| PIQA `acc_norm` | 0.720 | 0.605 | **0.630** | +0.025 |
+| ARC-Easy `acc_norm` | 0.605 | **0.380** | 0.370 | -0.010 |
+| ARC-Challenge `acc_norm` | 0.395 | 0.215 | **0.230** | +0.015 |
+| HellaSwag `acc_norm` | 0.585 | 0.460 | **0.485** | +0.025 |
+| WinoGrande `acc` | 0.625 | 0.520 | **0.525** | +0.005 |
+| BoolQ `acc` | 0.810 | 0.635 | **0.640** | +0.005 |
+| Mean primary task score | — | 0.469167 | **0.480000** | **+0.010833** |
+
+Five of six task scores improve. ARC-Easy loses two correct answers out of
+200; the other tasks gain a net fifteen, for a net gain of thirteen primary-
+metric correct answers across the 1,200 retained task examples. These small
+task movements should not be interpreted individually as statistically
+decisive, but the benchmark rules out a broad task-quality tradeoff behind the
+large perplexity improvement.
+
+The official batch-8 perplexity (216.241794) differs slightly from the earlier
+single-sequence probe (216.533466) because factorized BF16 execution is batch-
+shape sensitive. Comparisons above use the protocol-matched batch-8 values.
+The complete result reports `passed: true` and is bound to packed descriptor
+SHA-256 `a39d6085b2e1e55a820d6071b964cc3b6a9fecd51f15cdca6bc6fea66634f4de`.
+
 ## Decision
 
 Accept the post-KD five-block mapping as the new compressed-model candidate.
 It is a materially higher-quality model than Experiment 022: perplexity is
 5.275% lower at identical packed bytes and effective BPW, and the complete
 factorized, logical, and packed representations agree through their required
-parity gates.
+parity gates. The complete retained quality benchmark independently confirms
+a 5.386% protocol-matched perplexity reduction while improving five of six
+task scores and the mean task score.
 
 Further additions must be selected one at a time against this fixed post-KD
 base on fresh language-functional windows. Isolated MLP-output gains and the
@@ -212,3 +255,4 @@ retained 64x128 benchmark are not selection sets.
 - `evidence/m4/sign-word-codebook-probe/tuned-mlp-refit/experiment022-postkd-factor-components-v2-logical-validation.json`
 - `evidence/m4/sign-word-codebook-probe/tuned-mlp-refit/experiment022-postkd-factor-components-v2-packed-validation.json`
 - `evidence/m4/sign-word-codebook-probe/tuned-mlp-refit/experiment022-postkd-factor-components-v2-packed-direct64x128.json`
+- `evidence/m4/sign-word-codebook-probe/tuned-mlp-refit/experiment022-postkd-factor-components-v2-packed-quality.json`
