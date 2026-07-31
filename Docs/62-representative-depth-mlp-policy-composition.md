@@ -127,6 +127,11 @@ search must use a statistically gated per-block KL screen, confirm passing
 arms on an independent inventory, and reserve fresh sequences for each
 multi-block composition test.
 
+[Five-Block Composition-Scope MLP Policy](63-five-block-composition-scope-mlp-policy.md)
+expands that search through blocks 4, 8, 16, and 20. It finds that
+composition-scope uniform joint refitting beats the independently selected
+hybrid and confirms a 14.34% KL reduction for the five-block free-word arm.
+
 ## Evidence
 
 - `evidence/m4/sign-word-codebook-probe/downstream-refit/block0-mlp-mixed-k10-r1344-free256-800-gatewide-downinput50-fit48-val52-kl0-12.json`

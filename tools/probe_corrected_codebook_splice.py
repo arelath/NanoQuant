@@ -122,6 +122,35 @@ def _parse_block_policy(value: str) -> tuple[tuple[int, str], ...]:
     return tuple(result)
 
 
+def _parse_representation_policy(
+    value: str,
+) -> tuple[tuple[int, str], ...]:
+    result = []
+    for item in value.split(","):
+        parts = item.strip().split(":", maxsplit=1)
+        if len(parts) != 2:
+            raise argparse.ArgumentTypeError(
+                "representation policy entries must use block:choice"
+            )
+        try:
+            block = int(parts[0])
+        except ValueError as error:
+            raise argparse.ArgumentTypeError(
+                "representation policy indices must be integers"
+            ) from error
+        choice = parts[1].strip()
+        if block < 0 or choice not in {"free", "mixed"}:
+            raise argparse.ArgumentTypeError(
+                "representation policy choices are free or mixed"
+            )
+        result.append((block, choice))
+    if not result or len({block for block, _choice in result}) != len(result):
+        raise argparse.ArgumentTypeError(
+            "representation policy must contain unique block indices"
+        )
+    return tuple(result)
+
+
 def _dtype(config: dict[str, object]) -> torch.dtype:
     return {
         "bfloat16": torch.bfloat16,
@@ -828,6 +857,42 @@ def _downstream_policy_sets(
     return result
 
 
+def _hybrid_representation_set(
+    reconstruction_sets: dict[str, SpliceReconstructionSet],
+    policy: tuple[tuple[int, str], ...],
+) -> SpliceReconstructionSet:
+    names = {
+        "free": "free_words_operator_policy_refit",
+        "mixed": "corrected_codebook_operator_policy_refit",
+    }
+    missing = set(names.values()) - reconstruction_sets.keys()
+    if missing:
+        raise ValueError(
+            f"representation policy requires unavailable arms: {sorted(missing)}"
+        )
+    policy_by_block = dict(policy)
+    base = reconstruction_sets[names["mixed"]]
+    source_layers = {
+        choice: {
+            item.layer: item
+            for item in reconstruction_sets[name].layers
+        }
+        for choice, name in names.items()
+    }
+    replacements = {}
+    for item in base.layers:
+        choice = policy_by_block.get(item.layer.block.index)
+        if choice is None:
+            continue
+        source = source_layers[choice].get(item.layer)
+        if source is None:
+            raise ValueError(
+                "representation policy source inventory is incomplete"
+            )
+        replacements[item.layer] = source.weight
+    return _replace_weights(base, replacements)
+
+
 def _reconstruction_set(
     values: list[tuple[LayerId, torch.Tensor, float]],
 ) -> SpliceReconstructionSet:
@@ -977,6 +1042,10 @@ def _parser() -> argparse.ArgumentParser:
         default=0.25,
     )
     parser.add_argument("--downstream-policy", type=_parse_block_policy)
+    parser.add_argument(
+        "--representation-policy",
+        type=_parse_representation_policy,
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--local-files-only", action="store_true")
@@ -1109,6 +1178,18 @@ def run(args: argparse.Namespace) -> int:
         ):
             raise ValueError(
                 "downstream policy requires each selected refit arm"
+            )
+    if args.representation_policy is not None:
+        representation_blocks = {
+            block for block, _choice in args.representation_policy
+        }
+        if (
+            representation_blocks != set(blocks)
+            or args.downstream_policy is None
+        ):
+            raise ValueError(
+                "representation policy requires a downstream choice "
+                "for every requested block"
             )
     if any(
         block >= adapter.decoder_block_count_from_config(config)
@@ -1471,6 +1552,13 @@ def run(args: argparse.Namespace) -> int:
                 all_reconstruction_sets,
                 args.downstream_policy,
             )
+        if args.representation_policy is not None:
+            all_reconstruction_sets[
+                "hybrid_operator_policy_refit"
+            ] = _hybrid_representation_set(
+                all_reconstruction_sets,
+                args.representation_policy,
+            )
         teacher_nll = 0.0
         teacher_cache: tuple[torch.Tensor, ...] = ()
         selection_results: dict[str, dict[str, Any]] = {}
@@ -1650,6 +1738,24 @@ def run(args: argparse.Namespace) -> int:
                     candidate_policy,
                     seed=args.seed,
                 )
+            if args.representation_policy is not None:
+                hybrid_policy = kl_results[
+                    "hybrid_operator_policy_refit"
+                ]
+                selection_result[
+                    "paired_hybrid_minus_free_words_policy"
+                ] = _paired_payload(
+                    baseline_policy,
+                    hybrid_policy,
+                    seed=args.seed,
+                )
+                selection_result[
+                    "paired_hybrid_minus_corrected_codebook_policy"
+                ] = _paired_payload(
+                    candidate_policy,
+                    hybrid_policy,
+                    seed=args.seed,
+                )
             selection_results[name] = selection_result
         del teacher
 
@@ -1675,7 +1781,7 @@ def run(args: argparse.Namespace) -> int:
         )
     )
     output: dict[str, Any] = {
-        "schema_version": 9,
+        "schema_version": 10,
         "status": "completed",
         "role": "analysis-only corrected-codebook splice gate",
         "model_source": MODEL_SOURCE,
@@ -1756,6 +1862,14 @@ def run(args: argparse.Namespace) -> int:
                 for block, choice in args.downstream_policy
             }
             if args.downstream_policy is not None
+            else None
+        ),
+        "representation_policy": (
+            {
+                str(block): choice
+                for block, choice in args.representation_policy
+            }
+            if args.representation_policy is not None
             else None
         ),
     }

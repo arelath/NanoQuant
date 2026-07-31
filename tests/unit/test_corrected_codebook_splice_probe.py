@@ -133,9 +133,16 @@ def test_splice_probe_composes_per_block_downstream_policy() -> None:
 
     sets = {}
     for prefix in ("free_words", "corrected_codebook"):
-        sets[f"{prefix}_operator_refit"] = arm(1.0, 1.0)
-        sets[f"{prefix}_operator_downstream_input_refit"] = arm(2.0, 2.0)
-        sets[f"{prefix}_operator_downstream_joint_refit"] = arm(3.0, 3.0)
+        offset = 0.0 if prefix == "free_words" else 10.0
+        sets[f"{prefix}_operator_refit"] = arm(1.0 + offset, 1.0 + offset)
+        sets[f"{prefix}_operator_downstream_input_refit"] = arm(
+            2.0 + offset,
+            2.0 + offset,
+        )
+        sets[f"{prefix}_operator_downstream_joint_refit"] = arm(
+            3.0 + offset,
+            3.0 + offset,
+        )
 
     result = probe._downstream_policy_sets(
         sets,
@@ -143,4 +150,10 @@ def test_splice_probe_composes_per_block_downstream_policy() -> None:
     )
 
     policy = result["corrected_codebook_operator_policy_refit"]
-    assert [float(item.weight.item()) for item in policy.layers] == [3.0, 2.0]
+    assert [float(item.weight.item()) for item in policy.layers] == [13.0, 12.0]
+
+    hybrid = probe._hybrid_representation_set(
+        result,
+        probe._parse_representation_policy("0:mixed,12:free"),
+    )
+    assert [float(item.weight.item()) for item in hybrid.layers] == [13.0, 2.0]
