@@ -144,6 +144,11 @@ as the current five-block quality candidate.
 The 14.34% confirmed reduction is obtained by changing existing factor scale
 values only; it adds no bits or runtime operations to the rank-970 format.
 
+[Nine-Block Even-Depth Composition](64-nine-block-even-depth-composition.md)
+expands through block 24, confirms four more local policies, and validates a
+predeclared hybrid with 26.05% lower KL than the unrefitted free-word
+baseline across two new composition inventories.
+
 ## Evidence
 
 - `evidence/m4/sign-word-codebook-probe/downstream-refit/block4-mlp-mixed-k10-r1344-free256-800-gatewide-downinput50-fit48-val52-kl0-12.json`
