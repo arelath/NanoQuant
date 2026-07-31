@@ -55,3 +55,28 @@ def test_splice_probe_selects_a_disjoint_token_window() -> None:
     assert torch.equal(selected, tokens[4:7])
     with pytest.raises(ValueError, match="shorter"):
         probe._select_token_window(tokens, offset=9, samples=2)
+
+
+def test_splice_probe_accepts_multiple_projection_layers_per_block() -> None:
+    probe = _probe_module()
+    gate = LayerId(BlockId(2), "mlp.gate_proj")
+    up = LayerId(BlockId(2), "mlp.up_proj")
+    reconstructions = SpliceReconstructionSet(
+        (
+            SpliceReconstruction(gate, torch.ones((1, 1)), None, 1.0),
+            SpliceReconstruction(up, torch.ones((1, 1)), None, 2.0),
+        ),
+        (
+            ("2:mlp.gate_proj", (gate,)),
+            ("2:mlp.up_proj", (up,)),
+        ),
+        (
+            ("2:mlp.gate_proj", 1.0),
+            ("2:mlp.up_proj", 2.0),
+        ),
+    )
+
+    selected = probe._select_blocks(reconstructions, (2,))
+
+    assert tuple(item.layer for item in selected.layers) == (gate, up)
+    assert probe._parse_projections("gate,up") == ("gate", "up")

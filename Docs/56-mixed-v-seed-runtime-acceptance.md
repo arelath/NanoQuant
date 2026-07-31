@@ -228,3 +228,8 @@ but must preserve:
 Other projection shapes need their own equal-bit allocation and selection
 evidence. Acceptance here must not be generalized to every U/V orientation
 without measurement.
+
+[Mixed Dominant-Factor Projection Screen](58-mixed-dominant-factor-projection-screen.md)
+provides that first transfer test. It rejects attention projections, finds a
+joint gate/up opportunity in block 12, and shows that independent matrix RMSE
+does not yet select the pair robustly across decoder depth.

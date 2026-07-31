@@ -86,6 +86,10 @@ The overlay is a transition and validation artifact. Retaining it beside a compl
 duplicates the superseded selected-layer data on disk. A final self-contained bundle must omit those unreachable
 base payloads or use a composite shard writer before claiming model-file savings.
 
+The follow-up [projection-family screen](58-mixed-dominant-factor-projection-screen.md) fits tall `gate_proj` and
+`up_proj` matrices in transposed orientation. Its coded right factor is therefore the source matrix's left factor.
+Those research results do not fit this v1 right-factor-only schema and must not be written as mixed-V replacements.
+
 ## Runtime preparation
 
 `torch-packed-reference` accepts the compact state and expands it once before preparing its dense correctness

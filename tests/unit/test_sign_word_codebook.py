@@ -155,6 +155,33 @@ def test_joint_assignment_can_prefer_a_farther_base_codeword() -> None:
     assert int(positions[0, 0]) == 0
 
 
+def test_corrected_assignment_shortlist_controls_offline_search_depth() -> None:
+    values = torch.ones((1, 32))
+    values[0, 0] = 10
+    table = torch.ones((2, 32))
+    table[1, 0] = -1
+
+    nearest, _positions, _ = _assign_corrected_flat_words(
+        values,
+        table,
+        flips_per_word=1,
+        update=False,
+        batch_words=1,
+        candidate_count=1,
+    )
+    searched, _positions, _ = _assign_corrected_flat_words(
+        values,
+        table,
+        flips_per_word=1,
+        update=False,
+        batch_words=1,
+        candidate_count=2,
+    )
+
+    assert int(nearest[0]) == 0
+    assert int(searched[0]) == 1
+
+
 def test_product_codebook_decodes_two_half_indices() -> None:
     first = torch.ones((4, 16))
     second = torch.ones((4, 16))

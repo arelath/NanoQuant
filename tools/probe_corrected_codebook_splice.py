@@ -13,6 +13,7 @@ import _paths  # noqa: F401
 import torch
 from probe_sign_word_codebook import (
     PINNED_MODEL_REVISION,
+    PROJECTION_PATHS,
     _load_profile,
     _logical_seed,
     _metrics,
@@ -48,7 +49,6 @@ from nanoquant.kl_budget_workflow import _token_hash
 from nanoquant.quality_evaluation import _wikitext_tokens
 
 MODEL_SOURCE = "google/gemma-3-1b-it"
-PROJECTION_PATH = "mlp.down_proj"
 
 
 def _parse_ints(value: str) -> tuple[int, ...]:
@@ -69,6 +69,19 @@ def _parse_floats(value: str) -> tuple[float, ...]:
     ):
         raise argparse.ArgumentTypeError(
             "selection thresholds must be unique positive fractions"
+        )
+    return result
+
+
+def _parse_projections(value: str) -> tuple[str, ...]:
+    result = tuple(item.strip() for item in value.split(",") if item.strip())
+    if (
+        not result
+        or len(result) != len(set(result))
+        or any(item not in PROJECTION_PATHS for item in result)
+    ):
+        raise argparse.ArgumentTypeError(
+            "projections must be unique known projection names"
         )
     return result
 
@@ -117,8 +130,8 @@ def _select_blocks(
         for layer in reconstructions.layers
         if layer.layer.block.index in selected
     )
-    if len(layers) != len(selected):
-        raise ValueError("selected splice blocks do not map one-to-one to layers")
+    if {layer.layer.block.index for layer in layers} != selected:
+        raise ValueError("selected splice blocks do not map to reconstruction layers")
     units = tuple(
         (unit, members)
         for unit, members in reconstructions.unit_members
@@ -153,6 +166,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--calibration-state", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--model-revision", default=PINNED_MODEL_REVISION)
+    parser.add_argument("--projection", choices=tuple(PROJECTION_PATHS), default="down")
+    parser.add_argument("--projections", type=_parse_projections)
+    parser.add_argument("--transpose-matrix", action="store_true")
     parser.add_argument("--block", type=int, default=12)
     parser.add_argument("--blocks", type=_parse_ints)
     parser.add_argument("--selection-thresholds", type=_parse_floats)
@@ -170,6 +186,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--codebook-update-interval", type=int, default=10)
     parser.add_argument("--codebook-freeze-fraction", type=float, default=0.5)
     parser.add_argument("--assignment-batch-words", type=int, default=8192)
+    parser.add_argument("--corrected-assignment-candidates", type=int, default=16)
     parser.add_argument("--scale-fit-passes", type=int, default=2)
     parser.add_argument("--calibration-shrinkage", type=float, default=0.6)
     parser.add_argument("--wikitext-samples", type=int, default=12)
@@ -203,6 +220,12 @@ def run(args: argparse.Namespace) -> int:
         raise ValueError("model config must be a JSON object")
     config = cast(dict[str, object], config_payload)
     adapter = adapter_for_config(config)
+    projections = (
+        (args.projection,)
+        if args.projections is None
+        else args.projections
+    )
+    projection_paths = tuple(PROJECTION_PATHS[item] for item in projections)
     blocks = (args.block,) if args.blocks is None else args.blocks
     if any(
         block >= adapter.decoder_block_count_from_config(config)
@@ -230,140 +253,171 @@ def run(args: argparse.Namespace) -> int:
             dict[str, dict[str, float | int | bool]],
         ] = {}
         rank = 0
+        matrix_shape = (0, 0)
         for block in blocks:
-            tensor_name = f"model.layers.{block}.{PROJECTION_PATH}.weight"
-            calibration_path = f"block.{block}.{PROJECTION_PATH}"
-            input_cpu, output_cpu = _load_profile(
-                args.calibration_state,
-                calibration_path,
-                args.calibration_shrinkage,
-            )
-            weight = handle.get_tensor(tensor_name).to(args.device)
-            input_importance = input_cpu.to(args.device).float()
-            output_importance = output_cpu.to(args.device).float()
-            baseline_generator = torch.Generator(device=args.device).manual_seed(
-                _logical_seed(args.seed, "free-word-baseline")
-            )
-            baseline_factors = factorize_admm_with_parameters(
-                weight,
-                input_importance,
-                output_importance,
-                args.baseline_rank,
-                baseline_generator,
-                parameters,
-            )
-            baseline_fit = fit_scales(
-                weight,
-                baseline_factors.left_binary,
-                baseline_factors.right_binary,
-                baseline_factors.scale_pre,
-                baseline_factors.scale_mid,
-                baseline_factors.scale_post,
-                input_importance,
-                output_importance,
-                alternating_passes=args.scale_fit_passes,
-            )
-            baseline_metrics = _metrics(
-                weight,
-                baseline_fit.reconstruction,
-                input_importance,
-                output_importance,
-            )
-            target_bits = factor_bit_cost(
-                weight.shape[0],
-                weight.shape[1],
-                args.baseline_rank,
-                scale_bits=16,
-            ).total
-            rank = maximum_corrected_asymmetric_rank_for_budget(
-                weight.shape[0],
-                weight.shape[1],
-                target_bits,
-                left_index_width=None,
-                right_index_width=args.index_width,
-                right_flip_bits=args.correction_bits,
-                rank_multiple=32,
-                scale_width=16,
-            )
-            if args.candidate_rank is not None:
-                rank = args.candidate_rank
-            candidate_generator = torch.Generator(device=args.device).manual_seed(
-                _logical_seed(
-                    args.seed,
-                    f"full-right-flip{args.corrections_per_word}-"
-                    f"{args.index_width}-rank-{rank}",
+            for projection, projection_path in zip(
+                projections,
+                projection_paths,
+                strict=True,
+            ):
+                tensor_name = f"model.layers.{block}.{projection_path}.weight"
+                calibration_path = f"block.{block}.{projection_path}"
+                input_cpu, output_cpu = _load_profile(
+                    args.calibration_state,
+                    calibration_path,
+                    args.calibration_shrinkage,
                 )
-            )
-            candidate_factors = factorize_sign_word_codebook_admm(
-                weight,
-                input_importance,
-                output_importance,
-                rank,
-                candidate_generator,
-                index_bits=args.index_width,
-                outer_iterations=args.outer_iterations,
-                inner_iterations=args.inner_iterations,
-                regularization=args.regularization,
-                penalty_schedule=args.penalty_schedule,
-                convergence_check_interval=args.convergence_check_interval,
-                codebook_update_interval=args.codebook_update_interval,
-                codebook_freeze_fraction=args.codebook_freeze_fraction,
-                assignment_batch_words=args.assignment_batch_words,
-                codebook_mode="full",
-                constrain_left=False,
-                right_flips_per_word=args.corrections_per_word,
-                right_free_rows=args.right_free_rows,
-            )
-            candidate_fit = fit_scales(
-                weight,
-                candidate_factors.factors.left_binary,
-                candidate_factors.factors.right_binary,
-                candidate_factors.factors.scale_pre,
-                candidate_factors.factors.scale_mid,
-                candidate_factors.factors.scale_post,
-                input_importance,
-                output_importance,
-                alternating_passes=args.scale_fit_passes,
-            )
-            candidate_metrics = _metrics(
-                weight,
-                candidate_fit.reconstruction,
-                input_importance,
-                output_importance,
-            )
-            candidate_index_metrics[str(block)] = codebook_index_metrics(
-                candidate_factors
-            )
-            layer = LayerId(BlockId(block), PROJECTION_PATH)
-            baseline_entries.append(
-                (
-                    layer,
+                weight = handle.get_tensor(tensor_name).to(args.device)
+                input_importance = input_cpu.to(args.device).float()
+                output_importance = output_cpu.to(args.device).float()
+                if args.transpose_matrix:
+                    weight = weight.mT.contiguous()
+                    input_importance, output_importance = (
+                        output_importance,
+                        input_importance,
+                    )
+                current_shape = (int(weight.shape[0]), int(weight.shape[1]))
+                if matrix_shape != (0, 0) and current_shape != matrix_shape:
+                    raise ValueError(
+                        "joint projection splices require one factorization shape"
+                    )
+                matrix_shape = current_shape
+                unit_key = (
+                    str(block)
+                    if len(projections) == 1
+                    else f"{block}:{projection}"
+                )
+                baseline_generator = torch.Generator(device=args.device).manual_seed(
+                    _logical_seed(args.seed, "free-word-baseline")
+                )
+                baseline_factors = factorize_admm_with_parameters(
+                    weight,
+                    input_importance,
+                    output_importance,
+                    args.baseline_rank,
+                    baseline_generator,
+                    parameters,
+                )
+                baseline_fit = fit_scales(
+                    weight,
+                    baseline_factors.left_binary,
+                    baseline_factors.right_binary,
+                    baseline_factors.scale_pre,
+                    baseline_factors.scale_mid,
+                    baseline_factors.scale_post,
+                    input_importance,
+                    output_importance,
+                    alternating_passes=args.scale_fit_passes,
+                )
+                baseline_metrics = _metrics(
+                    weight,
                     baseline_fit.reconstruction,
-                    float(baseline_metrics["weighted_normalized_rmse"]),
+                    input_importance,
+                    output_importance,
                 )
-            )
-            candidate_entries.append(
-                (
-                    layer,
+                target_bits = factor_bit_cost(
+                    weight.shape[0],
+                    weight.shape[1],
+                    args.baseline_rank,
+                    scale_bits=16,
+                ).total
+                rank = maximum_corrected_asymmetric_rank_for_budget(
+                    weight.shape[0],
+                    weight.shape[1],
+                    target_bits,
+                    left_index_width=None,
+                    right_index_width=args.index_width,
+                    right_flip_bits=args.correction_bits,
+                    rank_multiple=32,
+                    scale_width=16,
+                )
+                if args.candidate_rank is not None:
+                    rank = args.candidate_rank
+                candidate_generator = torch.Generator(device=args.device).manual_seed(
+                    _logical_seed(
+                        args.seed,
+                        f"full-right-flip{args.corrections_per_word}-"
+                        f"{args.index_width}-rank-{rank}",
+                    )
+                )
+                candidate_factors = factorize_sign_word_codebook_admm(
+                    weight,
+                    input_importance,
+                    output_importance,
+                    rank,
+                    candidate_generator,
+                    index_bits=args.index_width,
+                    outer_iterations=args.outer_iterations,
+                    inner_iterations=args.inner_iterations,
+                    regularization=args.regularization,
+                    penalty_schedule=args.penalty_schedule,
+                    convergence_check_interval=args.convergence_check_interval,
+                    codebook_update_interval=args.codebook_update_interval,
+                    codebook_freeze_fraction=args.codebook_freeze_fraction,
+                    assignment_batch_words=args.assignment_batch_words,
+                    corrected_assignment_candidates=(
+                        args.corrected_assignment_candidates
+                    ),
+                    codebook_mode="full",
+                    constrain_left=False,
+                    right_flips_per_word=args.corrections_per_word,
+                    right_free_rows=args.right_free_rows,
+                )
+                candidate_fit = fit_scales(
+                    weight,
+                    candidate_factors.factors.left_binary,
+                    candidate_factors.factors.right_binary,
+                    candidate_factors.factors.scale_pre,
+                    candidate_factors.factors.scale_mid,
+                    candidate_factors.factors.scale_post,
+                    input_importance,
+                    output_importance,
+                    alternating_passes=args.scale_fit_passes,
+                )
+                candidate_metrics = _metrics(
+                    weight,
                     candidate_fit.reconstruction,
-                    float(candidate_metrics["weighted_normalized_rmse"]),
+                    input_importance,
+                    output_importance,
                 )
-            )
-            reconstruction_metrics[str(block)] = {
-                "free_words": baseline_metrics,
-                "corrected_codebook": candidate_metrics,
-            }
-            del (
-                weight,
-                input_importance,
-                output_importance,
-                baseline_factors,
-                baseline_fit,
-                candidate_fit,
-                candidate_factors,
-            )
-            gc.collect()
-            torch.cuda.empty_cache()
+                candidate_index_metrics[unit_key] = codebook_index_metrics(
+                    candidate_factors
+                )
+                layer = LayerId(BlockId(block), projection_path)
+                baseline_reconstruction = baseline_fit.reconstruction
+                candidate_reconstruction = candidate_fit.reconstruction
+                if args.transpose_matrix:
+                    baseline_reconstruction = baseline_reconstruction.mT.contiguous()
+                    candidate_reconstruction = candidate_reconstruction.mT.contiguous()
+                baseline_entries.append(
+                    (
+                        layer,
+                        baseline_reconstruction,
+                        float(baseline_metrics["weighted_normalized_rmse"]),
+                    )
+                )
+                candidate_entries.append(
+                    (
+                        layer,
+                        candidate_reconstruction,
+                        float(candidate_metrics["weighted_normalized_rmse"]),
+                    )
+                )
+                reconstruction_metrics[unit_key] = {
+                    "free_words": baseline_metrics,
+                    "corrected_codebook": candidate_metrics,
+                }
+                del (
+                    weight,
+                    input_importance,
+                    output_importance,
+                    baseline_factors,
+                    baseline_fit,
+                    candidate_fit,
+                    candidate_factors,
+                )
+                gc.collect()
+                torch.cuda.empty_cache()
         all_reconstruction_sets = {
             "free_words": _reconstruction_set(baseline_entries),
             "corrected_codebook": _reconstruction_set(candidate_entries),
@@ -376,16 +430,27 @@ def run(args: argparse.Namespace) -> int:
                 selected = tuple(
                     block
                     for block in blocks
-                    if (
-                        1
-                        - reconstruction_metrics[str(block)][
-                            "corrected_codebook"
-                        ]["weighted_normalized_rmse"]
-                        / reconstruction_metrics[str(block)]["free_words"][
-                            "weighted_normalized_rmse"
-                        ]
+                    if all(
+                        (
+                            1
+                            - reconstruction_metrics[
+                                (
+                                    str(block)
+                                    if len(projections) == 1
+                                    else f"{block}:{projection}"
+                                )
+                            ]["corrected_codebook"]["weighted_normalized_rmse"]
+                            / reconstruction_metrics[
+                                (
+                                    str(block)
+                                    if len(projections) == 1
+                                    else f"{block}:{projection}"
+                                )
+                            ]["free_words"]["weighted_normalized_rmse"]
+                        )
+                        >= threshold
+                        for projection in projections
                     )
-                    >= threshold
                 )
                 if not selected:
                     raise ValueError(
@@ -486,8 +551,8 @@ def run(args: argparse.Namespace) -> int:
 
     cost = (
         mixed_right_corrected_codebook_bit_cost(
-            1152,
-            6912,
+            matrix_shape[0],
+            matrix_shape[1],
             rank,
             right_free_rows=args.right_free_rows,
             right_index_width=args.index_width,
@@ -496,8 +561,8 @@ def run(args: argparse.Namespace) -> int:
         )
         if args.right_free_rows
         else corrected_asymmetric_codebook_bit_cost(
-            1152,
-            6912,
+            matrix_shape[0],
+            matrix_shape[1],
             rank,
             left_index_width=None,
             right_index_width=args.index_width,
@@ -506,13 +571,16 @@ def run(args: argparse.Namespace) -> int:
         )
     )
     output: dict[str, Any] = {
-        "schema_version": 4,
+        "schema_version": 5,
         "status": "completed",
         "role": "analysis-only corrected-codebook splice gate",
         "model_source": MODEL_SOURCE,
         "model_revision": args.model_revision,
         "blocks": list(blocks),
-        "projection": PROJECTION_PATH,
+        "projection": projection_paths[0] if len(projection_paths) == 1 else None,
+        "projections": list(projection_paths),
+        "transposed_for_factorization": args.transpose_matrix,
+        "factorization_shape": list(matrix_shape),
         "dataset_fingerprint": dataset_fingerprint,
         "dataset_slice_hash": _token_hash(tokens),
         "wikitext_samples": args.wikitext_samples,
@@ -525,8 +593,11 @@ def run(args: argparse.Namespace) -> int:
             "correction_bits": args.correction_bits,
             "rank": rank,
             "right_free_rows": args.right_free_rows,
+            "corrected_assignment_candidates": (
+                args.corrected_assignment_candidates
+            ),
             "bit_cost": asdict(cost),
-            "actual_bpw": cost.total / (1152 * 6912),
+            "actual_bpw": cost.total / (matrix_shape[0] * matrix_shape[1]),
             "index_metrics_by_block": candidate_index_metrics,
         },
         "reconstruction_by_block": reconstruction_metrics,

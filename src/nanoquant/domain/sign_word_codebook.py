@@ -729,6 +729,7 @@ def _assign_corrected_full_words(
     flips_per_word: int,
     update: bool,
     batch_words: int,
+    candidate_count: int = CORRECTED_ASSIGNMENT_CANDIDATES,
 ) -> tuple[torch.Tensor, torch.Tensor, FullSignCodebook, torch.Tensor]:
     rows, columns = weighted_value.shape
     words = math.ceil(columns / 32)
@@ -746,6 +747,7 @@ def _assign_corrected_full_words(
         flips_per_word=flips_per_word,
         update=update,
         batch_words=batch_words,
+        candidate_count=candidate_count,
     )
     updated = FullSignCodebook(codebook.index_bits, entries)
     indices = assignments.reshape(rows, words).to(torch.int32)
@@ -850,6 +852,7 @@ def _project(
     generator: torch.Generator,
     epsilon: float,
     assignment_batch_words: int,
+    corrected_assignment_candidates: int,
     flips_per_word: int,
     free_rows: int,
 ) -> tuple[
@@ -901,6 +904,7 @@ def _project(
                 flips_per_word=flips_per_word,
                 update=update_codebook,
                 batch_words=assignment_batch_words,
+                candidate_count=corrected_assignment_candidates,
             )
         else:
             decoded, indices, full_updated = _assign_full_words(
@@ -1047,6 +1051,7 @@ def factorize_sign_word_codebook_admm(
     codebook_freeze_fraction: float = 0.5,
     codebook_warmup_fraction: float = 0.0,
     assignment_batch_words: int = 65_536,
+    corrected_assignment_candidates: int = CORRECTED_ASSIGNMENT_CANDIDATES,
     codebook_mode: str = "product",
     constrain_left: bool = True,
     constrain_right: bool = True,
@@ -1095,6 +1100,7 @@ def factorize_sign_word_codebook_admm(
         or inner_iterations <= 0
         or convergence_check_interval <= 0
         or codebook_update_interval <= 0
+        or corrected_assignment_candidates <= 0
     ):
         raise ValueError("iteration settings must be positive")
     if (
@@ -1165,6 +1171,7 @@ def factorize_sign_word_codebook_admm(
         generator=generator,
         epsilon=epsilon,
         assignment_batch_words=assignment_batch_words,
+        corrected_assignment_candidates=corrected_assignment_candidates,
         flips_per_word=left_flips_per_word,
         free_rows=left_free_rows,
     )
@@ -1181,6 +1188,7 @@ def factorize_sign_word_codebook_admm(
         generator=generator,
         epsilon=epsilon,
         assignment_batch_words=assignment_batch_words,
+        corrected_assignment_candidates=corrected_assignment_candidates,
         flips_per_word=right_flips_per_word,
         free_rows=right_free_rows,
     )
@@ -1246,6 +1254,7 @@ def factorize_sign_word_codebook_admm(
             generator=generator,
             epsilon=epsilon,
             assignment_batch_words=assignment_batch_words,
+            corrected_assignment_candidates=corrected_assignment_candidates,
             flips_per_word=left_flips_per_word,
             free_rows=left_free_rows,
         )
@@ -1262,6 +1271,7 @@ def factorize_sign_word_codebook_admm(
             generator=generator,
             epsilon=epsilon,
             assignment_batch_words=assignment_batch_words,
+            corrected_assignment_candidates=corrected_assignment_candidates,
             flips_per_word=right_flips_per_word,
             free_rows=right_free_rows,
         )

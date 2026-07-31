@@ -84,8 +84,10 @@ class SignWordCodebookProtocol:
     codebook_warmup_fraction: float
     codebook_freeze_fraction: float
     progressive_warmup_fraction: float
+    transpose_matrix: bool
     codebook_mode: str
     assignment_batch_words: int
+    corrected_assignment_candidates: int
     scale_fit_passes: int
     calibration_shrinkage: float
     calibration_state: str
@@ -440,6 +442,9 @@ def _run_codebook(
             codebook_warmup_fraction=protocol.codebook_warmup_fraction,
             codebook_freeze_fraction=protocol.codebook_freeze_fraction,
             assignment_batch_words=protocol.assignment_batch_words,
+            corrected_assignment_candidates=(
+                protocol.corrected_assignment_candidates
+            ),
             codebook_mode="full" if right_only else protocol.codebook_mode,
             constrain_left=not right_only,
             right_flips_per_word=corrections_per_word,
@@ -462,7 +467,7 @@ def _run_codebook(
                 ),
                 "corrections_per_word": corrections_per_word,
                 "assignment_candidate_count": (
-                    CORRECTED_ASSIGNMENT_CANDIDATES
+                    protocol.corrected_assignment_candidates
                 ),
                 "position_entropy_bits": float(
                     -(probabilities[probabilities > 0]
@@ -633,7 +638,7 @@ def run(args: argparse.Namespace) -> int:
             "right free rows require a larger explicit corrected-code rank"
         )
     protocol = SignWordCodebookProtocol(
-        15,
+        16,
         args.model_revision,
         args.block,
         args.projection,
@@ -652,8 +657,10 @@ def run(args: argparse.Namespace) -> int:
         args.codebook_warmup_fraction,
         args.codebook_freeze_fraction,
         args.progressive_warmup_fraction,
+        args.transpose_matrix,
         args.codebook_mode,
         args.assignment_batch_words,
+        args.corrected_assignment_candidates,
         args.scale_fit_passes,
         args.calibration_shrinkage,
         str(args.calibration_state.resolve()),
@@ -679,6 +686,12 @@ def run(args: argparse.Namespace) -> int:
         weight = handle.get_tensor(tensor_name).to(args.device)
         input_importance = input_cpu.to(args.device).float()
         output_importance = output_cpu.to(args.device).float()
+        if args.transpose_matrix:
+            weight = weight.mT.contiguous()
+            input_importance, output_importance = (
+                output_importance,
+                input_importance,
+            )
         baseline = output["results"].get("free_words")
         if baseline is None:
             print("running free-word baseline", flush=True)
@@ -693,6 +706,7 @@ def run(args: argparse.Namespace) -> int:
                 "tensor_name": tensor_name,
                 "shape": list(weight.shape),
                 "source_elements": weight.numel(),
+                "transposed_from_source": args.transpose_matrix,
             }
             _write_output(args.output, output)
             print(
@@ -840,6 +854,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--codebook-warmup-fraction", type=float, default=0.0)
     parser.add_argument("--codebook-freeze-fraction", type=float, default=0.5)
     parser.add_argument("--progressive-warmup-fraction", type=float, default=0.25)
+    parser.add_argument("--transpose-matrix", action="store_true")
     parser.add_argument(
         "--codebook-mode",
         choices=(
@@ -855,6 +870,11 @@ def build_parser() -> argparse.ArgumentParser:
         default="product",
     )
     parser.add_argument("--assignment-batch-words", type=int, default=65_536)
+    parser.add_argument(
+        "--corrected-assignment-candidates",
+        type=int,
+        default=CORRECTED_ASSIGNMENT_CANDIDATES,
+    )
     parser.add_argument("--scale-fit-passes", type=int, default=2)
     parser.add_argument("--calibration-shrinkage", type=float, default=0.6)
     parser.add_argument("--seed", type=int, default=0)
