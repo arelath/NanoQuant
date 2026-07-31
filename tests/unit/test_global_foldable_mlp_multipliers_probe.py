@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import torch
 
-from nanoquant.application.layers import FactorizedReferenceLinear
-from tools.probe_global_foldable_mlp_multipliers import (
+from nanoquant.application.foldable_mlp_multipliers import (
     FoldableMultiplierLinear,
     InstalledMultipliers,
     family_identity_penalty,
     fold_global_mlp_multipliers,
 )
+from nanoquant.application.layers import FactorizedReferenceLinear
 
 
 class _Mlp(torch.nn.Module):

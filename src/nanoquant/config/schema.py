@@ -522,6 +522,20 @@ class BlockTuningConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class FoldableMlpMultiplierTuningConfig:
+    """Zero-byte post-KD continuation over covariantly foldable MLP multipliers."""
+
+    enabled: bool = False
+    steps: int = 64
+    learning_rate: float = 1e-4
+    identity_penalty: float = 100.0
+    gradient_clip: float = 1.0
+    multiplier_limit: float = 4.0
+    checkpoint_interval_steps: int = 16
+    gradient_checkpointing: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class DistillationConfig:
     enabled: bool = False
     loss: DistillationLoss = DistillationLoss.TOP_K
@@ -538,6 +552,9 @@ class DistillationConfig:
     optimizer_version: str = "legacy-optimi-adamw-v1"
     sampling_version: str = "legacy-python-device-rng-v1"
     teacher_targets_artifact: str | None = None
+    foldable_mlp_multipliers: FoldableMlpMultiplierTuningConfig = field(
+        default_factory=FoldableMlpMultiplierTuningConfig
+    )
 
 
 @dataclass(frozen=True, slots=True)

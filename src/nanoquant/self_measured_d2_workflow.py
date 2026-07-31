@@ -108,10 +108,13 @@ def _uniform_control_config(
     # as the final candidate. Otherwise the control measures the static uniform
     # point, as Experiments 021 and 022 did; global tuning then remains part of
     # only the final candidate/baseline comparison.
-    control_distillation = (
-        config.distillation
-        if tuned_operating_point
-        else replace(config.distillation, enabled=False)
+    control_distillation = replace(
+        config.distillation,
+        enabled=tuned_operating_point,
+        foldable_mlp_multipliers=replace(
+            config.distillation.foldable_mlp_multipliers,
+            enabled=False,
+        ),
     )
     control = replace(
         config,

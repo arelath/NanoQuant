@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 import time
 from dataclasses import dataclass
@@ -189,6 +190,7 @@ def execute_compression_quality_experiment(
     )
     workflow = complete.workflow
     exports = complete.exports
+    foldable_mlp_tuning = complete.foldable_mlp_tuning
     compression_seconds = time.perf_counter() - compression_started
     block_count = len(workflow.quantization.inventory.blocks)
     experiment_number = config.intent.experiment_number
@@ -340,6 +342,17 @@ def execute_compression_quality_experiment(
             "packed_quantized_layer_bytes": exports.packed["packed_weight_bytes"],
             "gguf_bytes": exports.gguf.bytes,
         },
+        "foldable_mlp_tuning": (
+            None
+            if foldable_mlp_tuning is None
+            else {
+                "protocol_hash": foldable_mlp_tuning.protocol_hash,
+                "tensor_sha256": foldable_mlp_tuning.tensor_sha256,
+                "steps_completed": foldable_mlp_tuning.steps_completed,
+                "report": str(foldable_mlp_tuning.report.resolve()),
+                "reused": foldable_mlp_tuning.reused,
+            }
+        ),
         "experiment": {
             "config_hash": config_hash(config),
             "resolved_config": to_dict(config),
@@ -422,6 +435,7 @@ def execute_compression_quality_experiment(
             "artifact_bytes": workflow.quantization.artifact_bytes,
             "reused_commit_count": workflow.quantization.reused_commit_count,
             "profile_artifacts": profiles,
+            "foldable_mlp_tuning": quality_payload["foldable_mlp_tuning"],
         },
         "exports": {
             "logical": exports.logical,
@@ -459,6 +473,15 @@ def execute_compression_quality_experiment(
             "global_distillation_seconds": (
                 None if workflow.distillation is None else workflow.distillation.result.wall_seconds
             ),
+            "foldable_mlp_tuning_seconds": (
+                None
+                if foldable_mlp_tuning is None
+                else float(
+                    json.loads(foldable_mlp_tuning.report.read_text(encoding="utf-8"))[
+                        "wall_seconds"
+                    ]
+                )
+            ),
             "quality_seconds": quality_seconds,
             "llamacpp_quality_seconds": llamacpp_quality_seconds,
             "wall_seconds": time.perf_counter() - wall_started,
@@ -485,6 +508,9 @@ def execute_compression_quality_experiment(
     atomic_write_json(resolved.summary_output, payload)
     profile_json = sorted(resolved.inputs.output.glob("profile*.json"))
     profile_markdown = sorted(resolved.inputs.output.glob("profile*.md"))
+    tuning_reports = (
+        () if foldable_mlp_tuning is None else (foldable_mlp_tuning.report,)
+    )
     publishable = (
         PublishableArtifact(exports.gguf.output, PublishableArtifactKind.MODEL),
         PublishableArtifact(exports.summary_output, PublishableArtifactKind.STATISTICS),
@@ -528,6 +554,10 @@ def execute_compression_quality_experiment(
             )
         ),
         PublishableArtifact(resolved.quality_markdown_output, PublishableArtifactKind.REPORT),
+        *(
+            PublishableArtifact(path, PublishableArtifactKind.STATISTICS)
+            for path in tuning_reports
+        ),
         *(PublishableArtifact(path, PublishableArtifactKind.STATISTICS) for path in profile_json),
         *(PublishableArtifact(path, PublishableArtifactKind.REPORT) for path in profile_markdown),
     )

@@ -11,6 +11,11 @@ from typing import Any, cast
 
 from nanoquant.config.codec import to_dict
 from nanoquant.config.schema import RunConfig
+from nanoquant.foldable_mlp_tuning import (
+    FoldableMlpTuningResult,
+    active_foldable_mlp_tuning,
+    run_foldable_mlp_tuning,
+)
 from nanoquant.infrastructure.gguf_export import (
     DEFAULT_OUTPUT_TENSOR_TYPE,
     DEFAULT_TOKEN_EMBEDDING_TYPE,
@@ -126,6 +131,7 @@ class CompressionExportResult:
 class CompleteCompressionResult:
     workflow: ResidentWorkflowResult
     exports: CompressionExportResult
+    foldable_mlp_tuning: FoldableMlpTuningResult | None = None
 
 
 def _repository_path(path: Path, repository_root: Path) -> Path:
@@ -262,6 +268,7 @@ def _ensure_logical_export(
     block_count: int,
     *,
     use_global_tuning: bool,
+    component_overlay: str | Path | None = None,
 ) -> dict[str, Any]:
     if resolved.logical_output.exists():
         artifact = open_logical_artifact(resolved.logical_output, verify_hashes=True)
@@ -275,6 +282,7 @@ def _ensure_logical_export(
             block_count,
             use_global_tuning=use_global_tuning,
             fresh_validation=True,
+            component_overlay=component_overlay,
         )
     return cast(
         dict[str, Any],
@@ -285,6 +293,7 @@ def _ensure_logical_export(
                 block_count,
                 use_global_tuning=use_global_tuning,
                 fresh_validation=True,
+                component_overlay=component_overlay,
             )
         ),
     )
@@ -449,6 +458,7 @@ def execute_compression_export(
     repository_root: str | Path,
     run_output: str | Path,
     snapshot: str | Path,
+    component_overlay: str | Path | None = None,
 ) -> CompressionExportResult:
     """Validate and export one complete committed run without recompressing it."""
 
@@ -456,6 +466,13 @@ def execute_compression_export(
     resolved = resolve_compression_export_recipe(recipe, root)
     _require_results_gguf_output(config, root, resolved.gguf_output)
     run = Path(run_output).resolve()
+    if config.distillation.foldable_mlp_multipliers.enabled:
+        active = active_foldable_mlp_tuning(run)
+        if active is None:
+            raise ValueError("configured foldable MLP tuning has no active component state")
+        if component_overlay is not None and Path(component_overlay).resolve() != active.overlay.resolve():
+            raise ValueError("compression export component overlay is not the active foldable MLP state")
+        component_overlay = active.overlay
     source_snapshot = Path(snapshot).resolve()
     block_count = _resolved_model_block_count(source_snapshot)
     metadata = _runtime_metadata(config, source_snapshot, resolved.runtime_family)
@@ -465,6 +482,7 @@ def execute_compression_export(
         metadata,
         block_count,
         use_global_tuning=config.distillation.enabled,
+        component_overlay=component_overlay,
     )
     packed = _ensure_packed_export(resolved)
     _adopt_legacy_gguf_export(config, resolved, root, source_snapshot)
@@ -552,6 +570,15 @@ def execute_complete_compression(
                 layer_order=config.block_tuning.layer_order,
             )
         workflow = execute_resident_workflow(config, inputs, execution_options)
+    foldable_mlp_tuning = None
+    component_overlay = None
+    if config.distillation.foldable_mlp_multipliers.enabled:
+        foldable_mlp_tuning = run_foldable_mlp_tuning(
+            config,
+            inputs.output,
+            inputs.snapshot,
+        )
+        component_overlay = foldable_mlp_tuning.overlay
     block_count = len(workflow.quantization.inventory.blocks)
     if block_count != resolved_block_count:
         raise ValueError(
@@ -564,8 +591,9 @@ def execute_complete_compression(
         repository_root=repository_root,
         run_output=inputs.output,
         snapshot=inputs.snapshot,
+        component_overlay=component_overlay,
     )
-    return CompleteCompressionResult(workflow, exports)
+    return CompleteCompressionResult(workflow, exports, foldable_mlp_tuning)
 
 
 __all__ = [

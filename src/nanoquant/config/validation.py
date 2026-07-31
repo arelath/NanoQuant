@@ -707,6 +707,49 @@ def validate(config: RunConfig, phase: ValidationPhase = ValidationPhase.PRE_RES
         "must be positive when provided",
     )
     require(config.distillation.weight_decay >= 0, "CFG033", "distillation.weight_decay", "must not be negative")
+    foldable = config.distillation.foldable_mlp_multipliers
+    require(
+        not foldable.enabled or config.distillation.enabled,
+        "CFG109",
+        "distillation.foldable_mlp_multipliers.enabled",
+        "requires global distillation",
+    )
+    require(
+        foldable.steps > 0,
+        "CFG110",
+        "distillation.foldable_mlp_multipliers.steps",
+        "must be positive",
+    )
+    require(
+        math.isfinite(foldable.learning_rate) and foldable.learning_rate > 0,
+        "CFG111",
+        "distillation.foldable_mlp_multipliers.learning_rate",
+        "must be finite and positive",
+    )
+    require(
+        math.isfinite(foldable.identity_penalty) and foldable.identity_penalty >= 0,
+        "CFG112",
+        "distillation.foldable_mlp_multipliers.identity_penalty",
+        "must be finite and non-negative",
+    )
+    require(
+        math.isfinite(foldable.gradient_clip) and foldable.gradient_clip > 0,
+        "CFG113",
+        "distillation.foldable_mlp_multipliers.gradient_clip",
+        "must be finite and positive",
+    )
+    require(
+        math.isfinite(foldable.multiplier_limit) and foldable.multiplier_limit > 1,
+        "CFG114",
+        "distillation.foldable_mlp_multipliers.multiplier_limit",
+        "must be finite and greater than one",
+    )
+    require(
+        foldable.checkpoint_interval_steps > 0,
+        "CFG115",
+        "distillation.foldable_mlp_multipliers.checkpoint_interval_steps",
+        "must be positive",
+    )
     require(
         config.evaluation.inline_quality_samples > 0, "CFG034", "evaluation.inline_quality_samples", "must be positive"
     )

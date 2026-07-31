@@ -330,6 +330,52 @@ def test_base_compression_requires_export_after_resident_completion(
     assert (launcher.parent.parent / "Results" / "003" / "weight-errors.md").is_file()
 
 
+def test_complete_compression_runs_foldable_mlp_stage_before_export(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    launcher = tmp_path / "repo" / "experiments" / "003.py"
+    inputs = ResolvedResidentInputs(
+        tmp_path / "snapshot",
+        tmp_path / "run",
+        tmp_path / "registry",
+        ((1, 2, 3),),
+        None,
+        launcher_path=launcher,
+    )
+    config = replace(
+        _CONFIG,
+        distillation=replace(
+            _CONFIG.distillation,
+            foldable_mlp_multipliers=replace(
+                _CONFIG.distillation.foldable_mlp_multipliers,
+                enabled=True,
+            ),
+        ),
+    )
+    resident = SimpleNamespace(quantization=SimpleNamespace(inventory=SimpleNamespace(blocks=(0, 1))))
+    overlay = tmp_path / "run" / "foldable-mlp-overlay"
+    calls: list[str] = []
+    monkeypatch.setattr(workflow, "_resolved_model_block_count", lambda *_args: 2)
+    monkeypatch.setattr(workflow, "execute_resident_workflow", lambda *_args: resident)
+    monkeypatch.setattr(
+        workflow,
+        "run_foldable_mlp_tuning",
+        lambda *_args: calls.append("tune") or SimpleNamespace(overlay=overlay),
+    )
+
+    def export(*_args, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append("export")
+        assert kwargs["component_overlay"] == overlay
+        return SimpleNamespace()
+
+    monkeypatch.setattr(workflow, "execute_compression_export", export)
+
+    workflow.execute_complete_compression(config, inputs, _recipe())
+
+    assert calls == ["tune", "export"]
+
+
 def test_complete_compression_rejects_workflow_depth_that_differs_from_model_config(
     tmp_path: Path,
     monkeypatch,
