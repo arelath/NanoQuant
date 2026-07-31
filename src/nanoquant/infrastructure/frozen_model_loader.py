@@ -20,6 +20,10 @@ from nanoquant.domain.models import ArtifactRef, ArtifactTypes, BlockResult
 from nanoquant.domain.profiling import NULL_RECORDER, PhaseRecorder
 from nanoquant.infrastructure.artifacts import LocalArtifactStore
 from nanoquant.infrastructure.commits import CommitIdentity, latest_complete_identity, load_committed_block
+from nanoquant.infrastructure.factorized_component_overlay import (
+    apply_factorized_component_overlay,
+    load_factorized_component_overlay,
+)
 from nanoquant.infrastructure.global_tuning import active_global_tuning, load_global_tuning
 from nanoquant.infrastructure.hf_language_model import load_causal_language_model
 from nanoquant.infrastructure.hf_model_protocol import HuggingFaceModel
@@ -67,8 +71,11 @@ def load_frozen_run(
     verify_hashes: bool = True,
     backend: str = "factorized",
     use_global_tuning: bool = True,
+    component_overlay: str | Path | None = None,
     recorder: PhaseRecorder = NULL_RECORDER,
 ) -> LoadedFrozenModel:
+    if component_overlay is not None and backend != "factorized":
+        raise ValueError("factorized component overlays require the factorized backend")
     run_output = Path(run_output)
     artifacts = LocalArtifactStore(run_output / "artifacts", recorder=recorder)
     tensors = LocalTensorStore(artifacts)
@@ -163,5 +170,16 @@ def load_frozen_run(
                         if value.shape != parameter.shape:
                             raise ValueError(f"global tuning parameter shape differs: {name}")
                         parameter.copy_(value.to(dtype=parameter.dtype))
+    if component_overlay is not None:
+        overlay = load_factorized_component_overlay(
+            component_overlay,
+            frozen_identity={
+                "model_hash": identity.model_hash,
+                "config_hash": identity.config_hash,
+                "plan_hash": identity.plan_hash,
+            },
+            global_tuning=global_tuning_ref,
+        )
+        apply_factorized_component_overlay(model, overlay)
     cast(HuggingFaceModel, model).config.use_cache = False
     return LoadedFrozenModel(model, committed, identity, global_tuning_ref)

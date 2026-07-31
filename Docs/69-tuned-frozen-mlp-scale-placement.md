@@ -117,15 +117,82 @@ That apparent gain does not generalize to the untouched sequences 308-319:
 KL regresses 1.490%, interval [+0.004481, +0.039919]. Blocks 11 and 21 are
 therefore exact-benchmark selection overfit and do not advance.
 
+## Post-KD five-block restart
+
+The pre-KD placement study was restarted from Experiment 022's final global-
+tuned state. Block 23 was the only new marginal addition that passed an
+untouched functional confirmation, producing the final mapping:
+
+```text
+0:output, 17:joint, 18:joint, 23:joint, 24:joint
+```
+
+Fresh post-KD functional windows confirmed the composition independently:
+
+| Inventory | Baseline NLL | Candidate NLL | Change | Paired 95% interval |
+| --- | ---: | ---: | ---: | ---: |
+| Sequences 344-355, 12x512 | 4.655256 | 4.571150 | **-1.807%** | **[-0.099091, -0.070154]** |
+| Sequences 356-379, 24x512 | 5.185110 | 5.097131 | **-1.697%** | **[-0.098016, -0.078506]** |
+
+On the exact 64x128 retained protocol, the dense reference overlay reduces
+perplexity from 228.590472 to 216.468670, a 5.303% reduction. Its paired NLL
+change is -0.054486 with interval [-0.064715, -0.044709].
+
+## Equal-size factor encoding
+
+The dense overlay is not the representation claim. Each selected matrix is a
+separable row/column rescale. The same transformation was encoded in the
+existing NanoQuant terms:
+
+- output multipliers replace `scale_post` and rescale existing outlier rows;
+- input multipliers replace `scale_pre` and rescale existing outlier columns;
+- a correction patch, when present, rescales its left/output and right/input
+  factors correspondingly.
+
+The selected Experiment 022 layers have BF16 outlier values and no patches.
+The durable component overlay replaces 45 tensors occupying 599,040 bytes
+with 599,040 bytes: zero changed shapes, zero changed dtypes, and zero payload-
+byte delta. It is hash-bound to component SHA-256
+`808ec038c948eadfd17b8a927a04d092fc5a199c439cec6b726efbedde822c13`,
+the frozen commit identity, and global-tuning artifact
+`sha256-86427bf8fcec089f56d925612642ff658ca925f54d75315703f10879dc5955cb`.
+
+Loading those saved component tensors—not the fit's in-memory values—gives
+216.533466 perplexity. The factor form differs from the dense reference by
+only +0.000299 NLL, with interval [-0.000754, +0.001297], so the remaining
+rounding difference is statistically indistinguishable on this protocol.
+
+## Logical and packed proof
+
+The component overlay was streamed through the complete deployment export:
+
+| Gate | Result |
+| --- | ---: |
+| Logical blocks / layers / tensors | 26 / 130 / 910 |
+| Logical weight bytes | 2,739,492,456 |
+| Fresh logical validation | **Exact** |
+| Packed weight bytes | **89,480,656** |
+| Packed storage ratio vs logical | 3.2663% |
+| Logical-to-packed conversion | **Exact** |
+| Packed reference maximum absolute error | **0.0** |
+| Packed reference output elements | 459,264 |
+
+The packed byte count is identical to the original Experiment 022 packed
+artifact, so its measured effective BPW remains **1.0244947118**. A model-
+level evaluation loaded directly from the new packed artifact and reproduced
+216.533466 perplexity exactly on the same token hash.
+
 ## Decision
 
-Accept the four-block mapping as the current zero-bit tuned-factor candidate.
-It is the first sign-word follow-up that improves the actual retained model,
-but its 0.36% perplexity gain is not yet a substantially higher-quality model.
+Accept the post-KD five-block mapping as the new compressed-model candidate.
+It is a materially higher-quality model than Experiment 022: perplexity is
+5.275% lower at identical packed bytes and effective BPW, and the complete
+factorized, logical, and packed representations agree through their required
+parity gates.
 
-Next search additions one at a time against this fixed base. Candidate
-selection must use language-functional behavior; isolated MLP-output gains
-alone are insufficient.
+Further additions must be selected one at a time against this fixed post-KD
+base on fresh language-functional windows. Isolated MLP-output gains and the
+retained 64x128 benchmark are not selection sets.
 
 ## Evidence
 
@@ -138,3 +205,10 @@ alone are insufficient.
 - `evidence/m4/sign-word-codebook-probe/tuned-mlp-refit/experiment022-prekd-blocks0-11-17-18-20-21-22-24-policy-fit48-val52-kl272-12.json`
 - `evidence/m4/sign-word-codebook-probe/tuned-mlp-refit/experiment022-prekd-blocks0-11-17-18-21-24-policy-direct64x128.json`
 - `evidence/m4/sign-word-codebook-probe/tuned-mlp-refit/experiment022-prekd-blocks0-11-17-18-21-24-policy-fit48-val52-kl308-12.json`
+- `evidence/m4/sign-word-codebook-probe/tuned-mlp-refit/experiment022-postkd-blocks0-17-18-23-24-policy-nll344-12x512.json`
+- `evidence/m4/sign-word-codebook-probe/tuned-mlp-refit/experiment022-postkd-blocks0-17-18-23-24-policy-nll356-24x512.json`
+- `evidence/m4/sign-word-codebook-probe/tuned-mlp-refit/experiment022-postkd-component-replay-direct64x128.json`
+- `evidence/m4/sign-word-codebook-probe/tuned-mlp-refit/experiment022-postkd-blocks0-17-18-23-24-factor-components-v2/manifest.json`
+- `evidence/m4/sign-word-codebook-probe/tuned-mlp-refit/experiment022-postkd-factor-components-v2-logical-validation.json`
+- `evidence/m4/sign-word-codebook-probe/tuned-mlp-refit/experiment022-postkd-factor-components-v2-packed-validation.json`
+- `evidence/m4/sign-word-codebook-probe/tuned-mlp-refit/experiment022-postkd-factor-components-v2-packed-direct64x128.json`

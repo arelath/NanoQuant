@@ -21,6 +21,7 @@ def main() -> None:
     parser.add_argument("--family", required=True)
     parser.add_argument("--config-hash", required=True)
     parser.add_argument("--tokenizer-hash", required=True)
+    parser.add_argument("--component-overlay", type=Path)
     parser.add_argument("--no-global-tuning", action="store_true")
     parser.add_argument(
         "--use-validation-cache",
@@ -41,6 +42,7 @@ def main() -> None:
         args.expected_blocks,
         use_global_tuning=not args.no_global_tuning,
         fresh_validation=not args.use_validation_cache,
+        component_overlay=args.component_overlay,
     )
     payload = asdict(result)
     payload["output"] = str(result.output)

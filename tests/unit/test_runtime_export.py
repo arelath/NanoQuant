@@ -38,6 +38,7 @@ from nanoquant.domain.models import (
 from nanoquant.infrastructure.artifacts import LocalArtifactStore
 from nanoquant.infrastructure.commits import CommitIdentity, commit_block
 from nanoquant.infrastructure.global_tuning import activate_global_tuning, commit_global_tuning
+from nanoquant.infrastructure.io_utils import hash_file
 from nanoquant.infrastructure.kl_splice import load_splice_reconstructions_from_run
 from nanoquant.infrastructure.progress import ProgressJournal
 from nanoquant.infrastructure.runtime_export import (
@@ -47,6 +48,7 @@ from nanoquant.infrastructure.runtime_export import (
     load_frozen_run_rank_inventory,
     validate_frozen_run_logical,
 )
+from nanoquant.infrastructure.safetensors_io import SAFETENSORS
 from nanoquant.infrastructure.tensor_store import LocalTensorStore
 from nanoquant.runtime import FactorizedReferenceBackend, RuntimeModelMetadata
 
@@ -445,6 +447,86 @@ def test_export_frozen_run_streams_active_global_tuning_into_runtime_artifact(tm
     assert validation.tensor_bytes > 0
     assert validation.global_tuning == result.global_tuning
     assert validation.exact
+
+
+def test_runtime_export_streams_factorized_component_replacements_at_equal_size(tmp_path: Path) -> None:
+    run, _committed, tuned = _run(tmp_path)
+    baseline = export_frozen_run_logical(run, tmp_path / "baseline", _metadata(), 2)
+    assert baseline.global_tuning is not None
+    state = tuned[0].quantized_layers[0]
+    assert state.outliers is not None
+    assert state.patch_left is not None and state.patch_right is not None
+    store = LocalTensorStore(LocalArtifactStore(run / "artifacts"))
+    with (
+        store.read(state.scales.pre) as scale_pre,
+        store.read(state.scales.post) as scale_post,
+        store.read(state.outliers.values) as outlier_values,
+        store.read(state.patch_left) as patch_left,
+        store.read(state.patch_right) as patch_right,
+    ):
+        tensors = {
+            "model.layers.0.linear.scale_pre": scale_pre.clone() * 2,
+            "model.layers.0.linear.scale_post": scale_post.clone() * 0.5,
+            "model.layers.0.linear.outlier_values": outlier_values.clone(),
+            "model.layers.0.linear.patch_left": patch_left.clone() * 0.5,
+            "model.layers.0.linear.patch_right": patch_right.clone() * 2,
+        }
+    overlay = tmp_path / "overlay"
+    overlay.mkdir()
+    tensor_path = overlay / "components.safetensors"
+    SAFETENSORS.save(tensors, tensor_path)
+    byte_count = sum(value.numel() * value.element_size() for value in tensors.values())
+    manifest = {
+        "schema_version": 2,
+        "semantics": "replace-existing-factorized-components",
+        "source_dense_tensor_sha256": "fixture-dense",
+        "frozen_identity": {
+            "model_hash": baseline.identity.model_hash,
+            "config_hash": baseline.identity.config_hash,
+            "plan_hash": baseline.identity.plan_hash,
+        },
+        "global_tuning": to_dict(baseline.global_tuning),
+        "policy": {"0": "joint"},
+        "tensor_sha256": hash_file(tensor_path),
+        "tensor_count": len(tensors),
+        "replaced_payload_bytes": byte_count,
+        "replacement_payload_bytes": byte_count,
+        "payload_byte_delta": 0,
+        "tensors": {
+            name: {
+                "shape": list(value.shape),
+                "dtype": str(value.dtype).removeprefix("torch."),
+            }
+            for name, value in tensors.items()
+        },
+    }
+    (overlay / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    result = export_frozen_run_logical(
+        run,
+        tmp_path / "component-logical",
+        _metadata(),
+        2,
+        component_overlay=overlay,
+    )
+    validation = validate_frozen_run_logical(
+        run,
+        result.output,
+        2,
+        component_overlay=overlay,
+    )
+
+    from nanoquant.runtime import open_logical_artifact
+
+    loaded = open_logical_artifact(result.output).load_layer("blocks.0.linear")
+    torch.testing.assert_close(loaded.scale_pre, tensors["model.layers.0.linear.scale_pre"])
+    torch.testing.assert_close(loaded.patch_left, tensors["model.layers.0.linear.patch_left"])
+    assert result.weight_bytes == baseline.weight_bytes
+    assert result.component_overlay_sha256 == manifest["tensor_sha256"]
+    assert validation.component_overlay_sha256 == manifest["tensor_sha256"]
+    assert validation.exact
+    with pytest.raises(ValueError, match="tensor differs"):
+        validate_frozen_run_logical(run, result.output, 2)
 
 
 def test_export_rejects_model_identity_mismatch_before_writing(tmp_path: Path) -> None:

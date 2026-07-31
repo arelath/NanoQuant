@@ -7,6 +7,7 @@ import json
 from dataclasses import asdict
 from pathlib import Path
 
+from nanoquant.infrastructure.io_utils import atomic_write_json
 from nanoquant.runtime import validate_packed_conversion, validate_packed_reference_parity
 
 
@@ -15,6 +16,7 @@ def main() -> None:
     parser.add_argument("--logical-artifact", type=Path, required=True)
     parser.add_argument("--packed-artifact", type=Path, required=True)
     parser.add_argument("--absolute-tolerance", type=float, default=0.0)
+    parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     conversion = asdict(
         validate_packed_conversion(args.logical_artifact, args.packed_artifact)
@@ -29,7 +31,10 @@ def main() -> None:
     for payload in (conversion, parity):
         for key in ("logical_artifact", "packed_artifact"):
             payload[key] = str(payload[key])
-    print(json.dumps({"conversion": conversion, "reference_parity": parity}, sort_keys=True, indent=2))
+    payload = {"conversion": conversion, "reference_parity": parity}
+    if args.output is not None:
+        atomic_write_json(args.output, payload)
+    print(json.dumps(payload, sort_keys=True, indent=2))
 
 
 if __name__ == "__main__":

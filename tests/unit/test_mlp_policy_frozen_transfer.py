@@ -125,3 +125,32 @@ def test_transfer_probe_combines_only_disjoint_overlays(tmp_path: Path) -> None:
     assert tuple(manifest["blocks"] for manifest in manifests) == ([0], [1])
     with pytest.raises(ValueError, match="duplicate layers"):
         probe._load_overlays((first, duplicate))
+
+
+def test_transfer_probe_bootstraps_paired_sequence_nll() -> None:
+    probe = _probe_module()
+    baseline = {
+        "mean_negative_log_likelihood": 2.0,
+        "sequences": [
+            {"mean_negative_log_likelihood": 1.0, "token_count": 4},
+            {"mean_negative_log_likelihood": 3.0, "token_count": 4},
+        ],
+    }
+    candidate = {
+        "mean_negative_log_likelihood": 1.5,
+        "sequences": [
+            {"mean_negative_log_likelihood": 0.5, "token_count": 4},
+            {"mean_negative_log_likelihood": 2.5, "token_count": 4},
+        ],
+    }
+
+    result = probe._paired_nll_payload(
+        baseline,
+        candidate,
+        resamples=100,
+    )
+
+    assert result["point_delta"] == -0.5
+    assert result["lower_delta"] == -0.5
+    assert result["upper_delta"] == -0.5
+    assert result["improved_with_confidence"] is True

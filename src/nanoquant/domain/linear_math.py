@@ -3,8 +3,92 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 
 import torch
+
+
+@dataclass(frozen=True, slots=True)
+class RescaledFactorizedTerms:
+    """Existing factorized payload terms after a dense row/column rescale."""
+
+    scale_pre: torch.Tensor
+    scale_post: torch.Tensor
+    outlier_values: torch.Tensor | None
+    patch_left: torch.Tensor | None
+    patch_right: torch.Tensor | None
+
+
+def rescale_factorized_terms(
+    scale_pre: torch.Tensor,
+    scale_post: torch.Tensor,
+    *,
+    input_multiplier: torch.Tensor | None = None,
+    output_multiplier: torch.Tensor | None = None,
+    outlier_indices: torch.Tensor | None = None,
+    outlier_values: torch.Tensor | None = None,
+    patch_left: torch.Tensor | None = None,
+    patch_right: torch.Tensor | None = None,
+) -> RescaledFactorizedTerms:
+    """Encode ``diag(output) @ W @ diag(input)`` without adding payload terms.
+
+    The low-rank body is rescaled through its existing pre/post vectors. Exact
+    outlier columns and optional correction patches must be rescaled as well;
+    changing only the low-rank scales would represent a different dense weight.
+    Results retain each payload tensor's original dtype and shape.
+    """
+
+    if scale_pre.ndim != 1 or scale_post.ndim != 1:
+        raise ValueError("factorized pre/post scales must be vectors")
+    if input_multiplier is None:
+        input_multiplier = torch.ones_like(scale_pre)
+    if output_multiplier is None:
+        output_multiplier = torch.ones_like(scale_post)
+    if input_multiplier.shape != scale_pre.shape or output_multiplier.shape != scale_post.shape:
+        raise ValueError("factorized rescale multipliers differ from the linear dimensions")
+    if not torch.isfinite(input_multiplier).all() or not torch.isfinite(output_multiplier).all():
+        raise ValueError("factorized rescale multipliers must be finite")
+    if (outlier_indices is None) != (outlier_values is None):
+        raise ValueError("factorized outlier indices and values must be paired")
+    if (patch_left is None) != (patch_right is None):
+        raise ValueError("factorized patch tensors must be paired")
+
+    def _scaled(value: torch.Tensor, multiplier: torch.Tensor) -> torch.Tensor:
+        return (value.float() * multiplier.to(device=value.device, dtype=torch.float32)).to(value.dtype)
+
+    scaled_outliers = None
+    if outlier_indices is not None and outlier_values is not None:
+        if not outlier_values.is_floating_point():
+            raise ValueError("factorized rescale requires floating-point outlier values")
+        if outlier_values.shape != (scale_post.numel(), outlier_indices.numel()):
+            raise ValueError("factorized outlier values differ from the linear dimensions")
+        selected_input = input_multiplier.index_select(
+            0,
+            outlier_indices.to(device=input_multiplier.device, dtype=torch.long),
+        )
+        outer = output_multiplier.reshape(-1, 1) * selected_input.reshape(1, -1)
+        scaled_outliers = _scaled(outlier_values, outer)
+
+    scaled_patch_left = scaled_patch_right = None
+    if patch_left is not None and patch_right is not None:
+        if (
+            patch_left.ndim != 2
+            or patch_right.ndim != 2
+            or patch_left.shape[0] != scale_post.numel()
+            or patch_right.shape[1] != scale_pre.numel()
+            or patch_left.shape[1] != patch_right.shape[0]
+        ):
+            raise ValueError("factorized patch tensors differ from the linear dimensions")
+        scaled_patch_left = _scaled(patch_left, output_multiplier.reshape(-1, 1))
+        scaled_patch_right = _scaled(patch_right, input_multiplier.reshape(1, -1))
+
+    return RescaledFactorizedTerms(
+        _scaled(scale_pre, input_multiplier),
+        _scaled(scale_post, output_multiplier),
+        scaled_outliers,
+        scaled_patch_left,
+        scaled_patch_right,
+    )
 
 
 def chunk_slices(length: int, chunk_size: int) -> Iterator[slice]:

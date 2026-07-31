@@ -21,6 +21,10 @@ from nanoquant.domain.models import (
 )
 from nanoquant.infrastructure.artifacts import LocalArtifactStore
 from nanoquant.infrastructure.commits import CommitIdentity, latest_complete_identity, load_committed_block
+from nanoquant.infrastructure.factorized_component_overlay import (
+    FactorizedComponentOverlay,
+    load_factorized_component_overlay,
+)
 from nanoquant.infrastructure.global_tuning import active_global_tuning, load_global_tuning
 from nanoquant.infrastructure.tensor_store import LocalTensorStore
 from nanoquant.runtime import (
@@ -43,6 +47,7 @@ class LogicalRunExportResult:
     block_count: int
     layer_count: int
     weight_bytes: int
+    component_overlay_sha256: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,6 +61,7 @@ class LogicalRunExportValidation:
     tensor_bytes: int
     weight_bytes: int
     exact: bool
+    component_overlay_sha256: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,6 +139,8 @@ def _runtime_state(
     frozen: FrozenNanoQuantState,
     tensors: LocalTensorStore,
     stack: ExitStack,
+    component_overlay: FactorizedComponentOverlay | None = None,
+    consumed_overlay_tensors: set[str] | None = None,
 ) -> LogicalLayerState:
     if frozen.logical_format != LOGICAL_FORMAT_VERSION:
         raise ValueError(
@@ -157,6 +165,49 @@ def _runtime_state(
         values = stack.enter_context(tensors.read(frozen.outliers.values))
         if frozen.outliers.scales is not None:
             outlier_scales = stack.enter_context(tensors.read(frozen.outliers.scales))
+    if component_overlay is not None:
+        prefix = f"model.layers.{frozen.layer.block.index}.{frozen.layer.path}."
+        replacements = {
+            name.removeprefix(prefix): value
+            for name, value in component_overlay.tensors.items()
+            if name.startswith(prefix)
+        }
+        if replacements:
+            expected = {"scale_pre", "scale_post"}
+            if values is not None:
+                expected.add("outlier_values")
+            if patch_left is not None:
+                expected.update({"patch_left", "patch_right"})
+            if set(replacements) != expected:
+                raise ValueError(
+                    f"component overlay terms are incomplete for "
+                    f"{frozen.layer.block.index}:{frozen.layer.path}"
+                )
+            originals = {
+                "scale_pre": scale_pre,
+                "scale_post": scale_post,
+                "outlier_values": values,
+                "patch_left": patch_left,
+                "patch_right": patch_right,
+            }
+            for role, replacement in replacements.items():
+                original = originals[role]
+                if (
+                    original is None
+                    or original.shape != replacement.shape
+                    or original.dtype != replacement.dtype
+                ):
+                    raise ValueError(
+                        f"component overlay term differs from the frozen payload: "
+                        f"{frozen.layer.block.index}:{frozen.layer.path}.{role}"
+                    )
+                if consumed_overlay_tensors is not None:
+                    consumed_overlay_tensors.add(prefix + role)
+            scale_pre = replacements["scale_pre"]
+            scale_post = replacements["scale_post"]
+            values = replacements.get("outlier_values", values)
+            patch_left = replacements.get("patch_left", patch_left)
+            patch_right = replacements.get("patch_right", patch_right)
     if left.ndim != 2 or right.ndim != 2:
         raise ValueError(f"frozen factors must be matrices: {frozen.layer.path}")
     if left.shape[1] != frozen.rank or right.shape[0] != frozen.rank:
@@ -257,7 +308,9 @@ def _runtime_group_state(
 def _stream_logical_blocks(
     blocks: Sequence[FrozenBlockState],
     tensors: LocalTensorStore,
+    component_overlay: FactorizedComponentOverlay | None = None,
 ) -> Iterator[tuple[int, list[LogicalLayerState]]]:
+    consumed_overlay_tensors: set[str] = set()
     for expected_index, block in enumerate(blocks):
         if block.block.index != expected_index:
             raise ValueError(
@@ -267,11 +320,23 @@ def _stream_logical_blocks(
             if any(state.layer.block != block.block for state in block.quantized_layers):
                 raise ValueError(f"frozen block {expected_index} contains a layer from another block")
             states = [
-                *[_runtime_state(state, tensors, stack) for state in block.quantized_layers],
+                *[
+                    _runtime_state(
+                        state,
+                        tensors,
+                        stack,
+                        component_overlay,
+                        consumed_overlay_tensors,
+                    )
+                    for state in block.quantized_layers
+                ],
                 *[_runtime_group_state(state, tensors, stack) for state in block.shared_input_groups],
             ]
             yield expected_index, states
             del states
+    if component_overlay is not None and consumed_overlay_tensors != set(component_overlay.tensors):
+        missing = sorted(set(component_overlay.tensors) - consumed_overlay_tensors)
+        raise ValueError(f"component overlay contains tensors outside the frozen layer inventory: {missing}")
 
 
 def _resolve_frozen_run(
@@ -360,6 +425,7 @@ def export_frozen_run_logical(
     *,
     use_global_tuning: bool = True,
     fresh_validation: bool = True,
+    component_overlay: str | Path | None = None,
 ) -> LogicalRunExportResult:
     """Export a complete committed run without loading a source model or using CUDA."""
 
@@ -378,10 +444,23 @@ def export_frozen_run_logical(
             "runtime model config hash does not match the committed run: "
             f"{model.config_hash} != {resolved.identity.model_hash}"
         )
+    loaded_overlay = (
+        None
+        if component_overlay is None
+        else load_factorized_component_overlay(
+            component_overlay,
+            frozen_identity={
+                "model_hash": resolved.identity.model_hash,
+                "config_hash": resolved.identity.config_hash,
+                "plan_hash": resolved.identity.plan_hash,
+            },
+            global_tuning=resolved.global_tuning,
+        )
+    )
     artifact = write_logical_artifact_stream(
         output,
         model,
-        _stream_logical_blocks(resolved.blocks, resolved.tensors),
+        _stream_logical_blocks(resolved.blocks, resolved.tensors, loaded_overlay),
     )
     return LogicalRunExportResult(
         artifact.root,
@@ -390,6 +469,7 @@ def export_frozen_run_logical(
         len(artifact.manifest.blocks),
         artifact.manifest.layer_count,
         artifact.manifest.weight_bytes,
+        None if loaded_overlay is None else str(loaded_overlay.manifest["tensor_sha256"]),
     )
 
 
@@ -489,6 +569,7 @@ def validate_frozen_run_logical(
     *,
     use_global_tuning: bool = True,
     fresh_validation: bool = True,
+    component_overlay: str | Path | None = None,
 ) -> LogicalRunExportValidation:
     """Prove every exported specification and tensor equals the selected frozen run."""
 
@@ -505,6 +586,19 @@ def validate_frozen_run_logical(
     )
     if artifact.manifest.model.config_hash != resolved.identity.model_hash:
         raise ValueError("logical artifact model config hash differs from the committed run")
+    loaded_overlay = (
+        None
+        if component_overlay is None
+        else load_factorized_component_overlay(
+            component_overlay,
+            frozen_identity={
+                "model_hash": resolved.identity.model_hash,
+                "config_hash": resolved.identity.config_hash,
+                "plan_hash": resolved.identity.plan_hash,
+            },
+            global_tuning=resolved.global_tuning,
+        )
+    )
     expected_names = [
         name
         for block in resolved.blocks
@@ -518,10 +612,20 @@ def validate_frozen_run_logical(
         raise ValueError("logical artifact layer inventory or ordering differs from the frozen run")
     tensor_count = 0
     tensor_bytes = 0
+    consumed_overlay_tensors: set[str] = set()
     for block in resolved.blocks:
         with ExitStack() as stack:
             expected_states = (
-                *(_runtime_state(state, resolved.tensors, stack) for state in block.quantized_layers),
+                *(
+                    _runtime_state(
+                        state,
+                        resolved.tensors,
+                        stack,
+                        loaded_overlay,
+                        consumed_overlay_tensors,
+                    )
+                    for state in block.quantized_layers
+                ),
                 *(_runtime_group_state(state, resolved.tensors, stack) for state in block.shared_input_groups),
             )
             for expected in expected_states:
@@ -539,6 +643,8 @@ def validate_frozen_run_logical(
                         tensor_count += 1
                         tensor_bytes += expected_value.numel() * expected_value.element_size()
             del actual, actual_value, actual_values, expected, expected_states, expected_value
+    if loaded_overlay is not None and consumed_overlay_tensors != set(loaded_overlay.tensors):
+        raise ValueError("component overlay contains tensors outside the frozen layer inventory")
     return LogicalRunExportValidation(
         artifact.root,
         resolved.identity,
@@ -549,4 +655,5 @@ def validate_frozen_run_logical(
         tensor_bytes,
         artifact.manifest.weight_bytes,
         True,
+        None if loaded_overlay is None else str(loaded_overlay.manifest["tensor_sha256"]),
     )
