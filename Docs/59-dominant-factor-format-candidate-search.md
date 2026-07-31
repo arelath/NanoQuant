@@ -192,3 +192,8 @@ refit down against the resulting student MLP activation. The block-12 joint
 splice gain in the previous screen is direct evidence that this coupling is
 real, while this format search shows that independent matrix reconstruction
 has reached a local capacity optimum.
+
+[Coupled MLP Operator-Scale Refit](60-coupled-mlp-operator-scale-refit.md)
+tests that next axis. The mixed block-12 gate/up pair gains a confirmed
+7.7-8.0% relative KL reduction at zero additional format bits, while the
+same refit does not pass disjoint confirmation on free-word factors.
