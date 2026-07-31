@@ -91,6 +91,32 @@ The eight-block composition regresses screen KL by 2.043% and NLL by
 0.018439. It is rejected without confirmation. The failure establishes a
 sharp composition boundary rather than a monotonic depth trend.
 
+## Marginal decomposition and six-block rejection
+
+Each of the four additions was exported separately and layered over the
+confirmed four-block overlay on the exact 64x128 gate:
+
+| Added block | Policy | Candidate perplexity | Change versus four-block candidate |
+| ---: | --- | ---: | ---: |
+| 11 | Operator | 272.115518 | -0.783972 |
+| 20 | Joint | 279.906692 | +7.007203 |
+| 21 | Joint | 272.222663 | -0.676826 |
+| 22 | Operator | 276.503678 | +3.604189 |
+
+Blocks 20 and 22 explain the eight-block reversal and are rejected. Blocks 11
+and 21 appear beneficial on the exact gate, and their six-block composition
+reaches 270.901199 perplexity, 1.085% below the Experiment 022 baseline.
+
+That apparent gain does not generalize to the untouched sequences 308-319:
+
+| Arm | KL | NLL |
+| --- | ---: | ---: |
+| Experiment 022 baseline | **1.548193** | **4.842978** |
+| Six-block policy | 1.571254 | 4.849836 |
+
+KL regresses 1.490%, interval [+0.004481, +0.039919]. Blocks 11 and 21 are
+therefore exact-benchmark selection overfit and do not advance.
+
 ## Decision
 
 Accept the four-block mapping as the current zero-bit tuned-factor candidate.
@@ -110,3 +136,5 @@ alone are insufficient.
 - `evidence/m4/sign-word-codebook-probe/tuned-mlp-refit/experiment022-prekd-blocks0-17-18-24-policy-fit48-val52-kl284-24.json`
 - `evidence/m4/sign-word-codebook-probe/tuned-mlp-refit/experiment022-prekd-blocks0-17-18-24-policy-direct64x128.json`
 - `evidence/m4/sign-word-codebook-probe/tuned-mlp-refit/experiment022-prekd-blocks0-11-17-18-20-21-22-24-policy-fit48-val52-kl272-12.json`
+- `evidence/m4/sign-word-codebook-probe/tuned-mlp-refit/experiment022-prekd-blocks0-11-17-18-21-24-policy-direct64x128.json`
+- `evidence/m4/sign-word-codebook-probe/tuned-mlp-refit/experiment022-prekd-blocks0-11-17-18-21-24-policy-fit48-val52-kl308-12.json`

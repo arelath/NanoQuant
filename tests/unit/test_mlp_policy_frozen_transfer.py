@@ -21,18 +21,18 @@ def _probe_module() -> object:
     return importlib.import_module("probe_mlp_policy_frozen_transfer")
 
 
-def _write_overlay(root: Path) -> None:
+def _write_overlay(root: Path, block: int = 0) -> None:
     root.mkdir()
     tensors = {
-        "model.layers.0.mlp.gate_proj.weight": torch.tensor(
+        f"model.layers.{block}.mlp.gate_proj.weight": torch.tensor(
             [[1.0, 2.0]],
             dtype=torch.bfloat16,
         ),
-        "model.layers.0.mlp.up_proj.weight": torch.tensor(
+        f"model.layers.{block}.mlp.up_proj.weight": torch.tensor(
             [[3.0, 4.0]],
             dtype=torch.bfloat16,
         ),
-        "model.layers.0.mlp.down_proj.weight": torch.tensor(
+        f"model.layers.{block}.mlp.down_proj.weight": torch.tensor(
             [[5.0]],
             dtype=torch.bfloat16,
         ),
@@ -45,7 +45,7 @@ def _write_overlay(root: Path) -> None:
                 "schema_version": 1,
                 "arm": "hybrid",
                 "layer_count": 3,
-                "blocks": [0],
+                "blocks": [block],
                 "tensor_sha256": hash_file(tensor_path),
                 "tensors": {
                     name: {
@@ -108,3 +108,20 @@ def test_transfer_probe_installs_dense_linear() -> None:
         block.mlp.gate_proj.bias,
         torch.tensor([0.25]),
     )
+
+
+def test_transfer_probe_combines_only_disjoint_overlays(tmp_path: Path) -> None:
+    probe = _probe_module()
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    duplicate = tmp_path / "duplicate"
+    _write_overlay(first, 0)
+    _write_overlay(second, 1)
+    _write_overlay(duplicate, 0)
+
+    tensors, manifests = probe._load_overlays((first, second))
+
+    assert len(tensors) == 6
+    assert tuple(manifest["blocks"] for manifest in manifests) == ([0], [1])
+    with pytest.raises(ValueError, match="duplicate layers"):
+        probe._load_overlays((first, duplicate))

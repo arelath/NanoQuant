@@ -38,6 +38,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-output", type=Path, required=True)
     parser.add_argument("--snapshot", type=Path, required=True)
     parser.add_argument("--overlay", type=Path, required=True)
+    parser.add_argument(
+        "--additional-overlay",
+        type=Path,
+        action="append",
+        default=[],
+    )
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--model-revision", default=PINNED_MODEL_REVISION)
     parser.add_argument("--samples", type=int, default=64)
@@ -88,6 +94,23 @@ def _load_overlay(
     ):
         raise ValueError("MLP policy overlay tensors are invalid")
     return tensors, manifest
+
+
+def _load_overlays(
+    overlays: tuple[Path, ...],
+) -> tuple[dict[str, torch.Tensor], tuple[dict[str, Any], ...]]:
+    tensors: dict[str, torch.Tensor] = {}
+    manifests = []
+    for overlay in overlays:
+        values, manifest = _load_overlay(overlay)
+        overlap = set(tensors) & set(values)
+        if overlap:
+            raise ValueError(
+                f"MLP policy overlays contain duplicate layers: {sorted(overlap)}"
+            )
+        tensors.update(values)
+        manifests.append({"directory": str(overlay), **manifest})
+    return tensors, tuple(manifests)
 
 
 def _module_parent(block: nn.Module, path: str) -> tuple[nn.Module, str]:
@@ -148,7 +171,8 @@ def _install_dense_linear(
 def run(args: argparse.Namespace) -> int:
     if args.samples <= 0 or args.sequence_length <= 1:
         raise ValueError("WikiText transfer protocol is invalid")
-    tensors, manifest = _load_overlay(args.overlay)
+    overlay_paths = (args.overlay, *args.additional_overlay)
+    tensors, manifests = _load_overlays(overlay_paths)
     tokens, dataset_fingerprint, bos_token_id = _protocol_tokens(
         args.snapshot,
         args.samples,
@@ -209,20 +233,14 @@ def run(args: argparse.Namespace) -> int:
     atomic_write_json(
         args.output,
         {
-            "schema_version": 1,
+            "schema_version": 2,
             "status": "completed",
             "role": "analysis-only MLP policy frozen-run transfer",
             "model_revision": args.model_revision,
             "run_output": str(args.run_output),
             "frozen_identity": identity,
             "use_global_tuning": args.use_global_tuning,
-            "overlay": {
-                "directory": str(args.overlay),
-                "arm": manifest["arm"],
-                "layer_count": manifest["layer_count"],
-                "blocks": manifest["blocks"],
-                "tensor_sha256": manifest["tensor_sha256"],
-            },
+            "overlays": manifests,
             "protocol": {
                 "samples": args.samples,
                 "sequence_length": args.sequence_length,
