@@ -188,3 +188,8 @@ confirmation. Because local gate/up gains did not predict the representative
 cross-block result, that rule should include a group-level calibration
 metric, such as block-output error after the gated activation, rather than
 only two independent matrix RMSE thresholds.
+
+[Dominant-Factor Format Candidate Search](59-dominant-factor-format-candidate-search.md)
+exhausts the nearby code-width, correction-count, banked-table, correction-tier,
+and opposite-factor alternatives. It retains k10 plus two corrections and
+moves the next search to operator-scope gate/up fitting.

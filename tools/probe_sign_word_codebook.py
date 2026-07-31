@@ -72,6 +72,9 @@ class SignWordCodebookProtocol:
     baseline_rank: int
     candidate_rank: int | None
     right_free_rows: int
+    right_codebook_banks: int
+    right_codebook_bank_axis: str
+    right_corrected_codebook_banks: int | None
     index_widths: tuple[int, ...]
     rank_multiple: int
     scale_bits: int
@@ -449,6 +452,11 @@ def _run_codebook(
             constrain_left=not right_only,
             right_flips_per_word=corrections_per_word,
             right_free_rows=protocol.right_free_rows,
+            right_codebook_banks=protocol.right_codebook_banks,
+            right_codebook_bank_axis=protocol.right_codebook_bank_axis,
+            right_corrected_codebook_banks=(
+                protocol.right_corrected_codebook_banks
+            ),
         )
         factors = codebook_result.factors
         representation_metrics = {
@@ -476,6 +484,15 @@ def _run_codebook(
                 "maximum_position_frequency": float(probabilities.max()),
             }
         if corrected:
+            corrected_rows = (
+                None
+                if protocol.right_corrected_codebook_banks is None
+                else math.ceil(
+                    (rank - protocol.right_free_rows)
+                    * protocol.right_corrected_codebook_banks
+                    / protocol.right_codebook_banks
+                )
+            )
             bit_cost = (
                 mixed_right_corrected_codebook_bit_cost(
                     weight.shape[0],
@@ -485,6 +502,8 @@ def _run_codebook(
                     right_index_width=index_width,
                     right_flip_bits=correction_bits,
                     scale_width=protocol.scale_bits,
+                    right_codebook_count=protocol.right_codebook_banks,
+                    right_corrected_rows=corrected_rows,
                 )
                 if protocol.right_free_rows
                 else corrected_asymmetric_codebook_bit_cost(
@@ -495,6 +514,7 @@ def _run_codebook(
                     right_index_width=index_width,
                     right_flip_bits=correction_bits,
                     scale_width=protocol.scale_bits,
+                    right_codebook_count=protocol.right_codebook_banks,
                 )
             )
             arm_name = (
@@ -620,8 +640,14 @@ def _comparison(result: dict[str, Any], baseline: dict[str, Any]) -> dict[str, f
 def run(args: argparse.Namespace) -> int:
     if args.projection not in PROJECTION_PATHS:
         raise ValueError(f"unknown projection: {args.projection}")
-    if args.baseline_rank <= 0 or any(width <= 0 or width % 2 for width in args.index_widths):
-        raise ValueError("baseline rank must be positive and index widths positive/even")
+    product_mode = not args.codebook_mode.startswith("full")
+    if args.baseline_rank <= 0 or any(
+        width <= 0 or (product_mode and width % 2)
+        for width in args.index_widths
+    ):
+        raise ValueError(
+            "baseline rank must be positive and index widths valid for the codebook"
+        )
     if args.candidate_rank is not None and (
         args.candidate_rank <= 0
         or args.candidate_rank % args.rank_multiple
@@ -637,14 +663,41 @@ def run(args: argparse.Namespace) -> int:
         raise ValueError(
             "right free rows require a larger explicit corrected-code rank"
         )
+    if (
+        args.right_codebook_banks <= 0
+        or args.right_codebook_banks & (args.right_codebook_banks - 1)
+        or (
+            args.right_codebook_banks != 1
+            and not args.codebook_mode.startswith("full")
+        )
+    ):
+        raise ValueError(
+            "right codebook banks must be a positive power of two in full mode"
+        )
+    if args.right_corrected_codebook_banks is not None and (
+        args.right_corrected_codebook_banks <= 0
+        or args.right_corrected_codebook_banks > args.right_codebook_banks
+        or args.right_free_rows == 0
+        or (
+            args.right_corrected_codebook_banks
+            != args.right_codebook_banks
+            and args.right_codebook_bank_axis != "row"
+        )
+    ):
+        raise ValueError(
+            "partial corrected banks require a valid row-banked prefix"
+        )
     protocol = SignWordCodebookProtocol(
-        16,
+        19,
         args.model_revision,
         args.block,
         args.projection,
         args.baseline_rank,
         args.candidate_rank,
         args.right_free_rows,
+        args.right_codebook_banks,
+        args.right_codebook_bank_axis,
+        args.right_corrected_codebook_banks,
         args.index_widths,
         args.rank_multiple,
         args.scale_bits,
@@ -842,6 +895,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--baseline-rank", type=int, default=970)
     parser.add_argument("--candidate-rank", type=int)
     parser.add_argument("--right-free-rows", type=int, default=0)
+    parser.add_argument("--right-codebook-banks", type=int, default=1)
+    parser.add_argument(
+        "--right-codebook-bank-axis",
+        choices=("word", "row"),
+        default="word",
+    )
+    parser.add_argument("--right-corrected-codebook-banks", type=int)
     parser.add_argument("--index-widths", type=_parse_ints, default=(8, 12))
     parser.add_argument("--rank-multiple", type=int, default=32)
     parser.add_argument("--scale-bits", type=int, default=16)

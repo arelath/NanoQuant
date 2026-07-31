@@ -81,7 +81,41 @@ class FullSignCodebook:
         return 1 << self.index_bits
 
 
-SignCodebook = ProductSignCodebook | FullSignCodebook
+@dataclass(frozen=True, slots=True)
+class BankedFullSignCodebook:
+    """Full sign tables selected implicitly by word position or component row."""
+
+    index_bits: int
+    entries: torch.Tensor
+    bank_axis: str = "word"
+
+    def __post_init__(self) -> None:
+        if self.index_bits <= 0:
+            raise ValueError("banked codebook index width must be positive")
+        if self.entries.ndim != 3:
+            raise ValueError("banked codebook entries must have three dimensions")
+        expected_tail = (1 << self.index_bits, 32)
+        if self.entries.shape[0] <= 1 or tuple(self.entries.shape[1:]) != expected_tail:
+            raise ValueError(
+                f"banked codebook must contain multiple {expected_tail} tables"
+            )
+        if self.entries.shape[0] & (self.entries.shape[0] - 1):
+            raise ValueError("banked codebook count must be a power of two")
+        if self.bank_axis not in {"word", "row"}:
+            raise ValueError("codebook bank axis must be 'word' or 'row'")
+        if not torch.all((self.entries == 1) | (self.entries == -1)):
+            raise ValueError("codebook entries must be signs")
+
+    @property
+    def entry_count(self) -> int:
+        return self.entries.shape[0] * (1 << self.index_bits)
+
+    @property
+    def bank_count(self) -> int:
+        return self.entries.shape[0]
+
+
+SignCodebook = ProductSignCodebook | FullSignCodebook | BankedFullSignCodebook
 
 
 @dataclass(frozen=True, slots=True)
@@ -239,6 +273,7 @@ def corrected_asymmetric_codebook_bit_cost(
     right_flip_bits: int = 0,
     scale_width: int = 16,
     word_width: int = 32,
+    right_codebook_count: int = 1,
 ) -> SignWordCodebookCost:
     """Charge asymmetric codebooks plus fixed-width correction positions."""
 
@@ -251,7 +286,11 @@ def corrected_asymmetric_codebook_bit_cost(
         scale_width=scale_width,
         word_width=word_width,
     )
-    if left_flip_bits < 0 or right_flip_bits < 0:
+    if (
+        left_flip_bits < 0
+        or right_flip_bits < 0
+        or right_codebook_count <= 0
+    ):
         raise ValueError("correction widths must not be negative")
     if (left_flip_bits and left_index_width is None) or (
         right_flip_bits and right_index_width is None
@@ -266,7 +305,16 @@ def corrected_asymmetric_codebook_bit_cost(
             + right_words * right_flip_bits
         ),
         scale_bits=base.scale_bits,
-        codebook_bits=base.codebook_bits,
+        codebook_bits=(
+            base.codebook_bits
+            + (
+                (right_codebook_count - 1)
+                * (1 << right_index_width)
+                * word_width
+                if right_index_width is not None
+                else 0
+            )
+        ),
         word_count=base.word_count,
     )
 
@@ -320,6 +368,8 @@ def mixed_right_corrected_codebook_bit_cost(
     scale_width: int = 16,
     word_width: int = 32,
     free_row_count_bits: int = 16,
+    right_codebook_count: int = 1,
+    right_corrected_rows: int | None = None,
 ) -> SignWordCodebookCost:
     """Charge free U, a free prefix of V rows, and corrected coded V rows."""
 
@@ -329,24 +379,30 @@ def mixed_right_corrected_codebook_bit_cost(
         right_index_width <= 0
         or right_flip_bits < 0
         or free_row_count_bits < 0
+        or right_codebook_count <= 0
     ):
         raise ValueError("mixed right-code widths are invalid")
     left_words = out_features * math.ceil(rank / word_width)
     right_words_per_row = math.ceil(in_features / word_width)
     coded_rows = rank - right_free_rows
+    corrected_rows = (
+        coded_rows if right_corrected_rows is None else right_corrected_rows
+    )
+    if not 0 <= corrected_rows <= coded_rows:
+        raise ValueError("corrected rows must lie within the coded-row suffix")
     right_words = rank * right_words_per_row
     payload_bits = (
         left_words * word_width
         + right_free_rows * right_words_per_row * word_width
-        + coded_rows
-        * right_words_per_row
-        * (right_index_width + right_flip_bits)
+        + coded_rows * right_words_per_row * right_index_width
+        + corrected_rows * right_words_per_row * right_flip_bits
     )
     return SignWordCodebookCost(
         index_bits=payload_bits,
         scale_bits=scale_width * (out_features + in_features + rank),
         codebook_bits=(
-            (1 << right_index_width) * word_width + free_row_count_bits
+            right_codebook_count * (1 << right_index_width) * word_width
+            + free_row_count_bits
         ),
         word_count=left_words + right_words,
     )
@@ -362,6 +418,7 @@ def maximum_mixed_right_free_rows_for_budget(
     right_flip_bits: int,
     free_row_multiple: int = 32,
     scale_width: int = 16,
+    right_codebook_count: int = 1,
 ) -> int:
     """Return the largest aligned free V prefix that fits the target budget."""
 
@@ -377,6 +434,7 @@ def maximum_mixed_right_free_rows_for_budget(
             right_index_width=right_index_width,
             right_flip_bits=right_flip_bits,
             scale_width=scale_width,
+            right_codebook_count=right_codebook_count,
         )
         if cost.total > target_bits:
             break
@@ -419,11 +477,44 @@ def decode_sign_codebook(
     expected_words = math.ceil(columns / 32)
     if indices.shape[1] != expected_words:
         raise ValueError("codebook index word count does not match columns")
-    decoded = codebook.entries[indices.to(torch.int64)].reshape(
-        indices.shape[0],
-        expected_words * 32,
-    )
+    if isinstance(codebook, BankedFullSignCodebook):
+        banks = (
+            _word_bank_indices(
+                expected_words,
+                codebook.bank_count,
+                indices.device,
+            ).reshape(1, -1)
+            if codebook.bank_axis == "word"
+            else _word_bank_indices(
+                indices.shape[0],
+                codebook.bank_count,
+                indices.device,
+            ).reshape(-1, 1)
+        )
+        decoded = codebook.entries[
+            banks,
+            indices.to(torch.int64),
+        ].reshape(indices.shape[0], expected_words * 32)
+    else:
+        decoded = codebook.entries[indices.to(torch.int64)].reshape(
+            indices.shape[0],
+            expected_words * 32,
+        )
     return decoded[:, :columns].contiguous()
+
+
+def _word_bank_indices(
+    words: int,
+    bank_count: int,
+    device: torch.device,
+) -> torch.Tensor:
+    if words <= 0 or bank_count <= 0 or bank_count > words:
+        raise ValueError("word-bank dimensions are invalid")
+    return torch.div(
+        torch.arange(words, device=device) * bank_count,
+        words,
+        rounding_mode="floor",
+    )
 
 
 def _sign(value: torch.Tensor) -> torch.Tensor:
@@ -476,13 +567,22 @@ def _random_codebook(
     dtype: torch.dtype,
     generator: torch.Generator,
     mode: str,
+    bank_count: int = 1,
+    bank_axis: str = "word",
 ) -> SignCodebook:
+    if bank_count <= 0 or bank_count & (bank_count - 1):
+        raise ValueError("codebook bank count must be a positive power of two")
     if mode == "full":
+        shape = (
+            (1 << index_bits, 32)
+            if bank_count == 1
+            else (bank_count, 1 << index_bits, 32)
+        )
         entries = (
             torch.randint(
                 0,
                 2,
-                (1 << index_bits, 32),
+                shape,
                 device=device,
                 generator=generator,
                 dtype=torch.int8,
@@ -491,7 +591,13 @@ def _random_codebook(
             .mul_(2)
             .sub_(1)
         )
-        return FullSignCodebook(index_bits, entries)
+        return (
+            FullSignCodebook(index_bits, entries)
+            if bank_count == 1
+            else BankedFullSignCodebook(index_bits, entries, bank_axis)
+        )
+    if bank_count != 1:
+        raise ValueError("only full codebooks support word banks")
     if mode != "product":
         raise ValueError(f"unsupported codebook mode: {mode}")
     half_entries = 1 << (index_bits // 2)
@@ -759,6 +865,145 @@ def _assign_corrected_full_words(
     return corrected, indices, updated, shaped_positions
 
 
+def _assign_banked_full_words(
+    weighted_value: torch.Tensor,
+    codebook: BankedFullSignCodebook,
+    *,
+    flips_per_word: int,
+    update: bool,
+    batch_words: int,
+    candidate_count: int = CORRECTED_ASSIGNMENT_CANDIDATES,
+    corrected_bank_count: int | None = None,
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    BankedFullSignCodebook,
+    torch.Tensor | None,
+]:
+    """Assign each word against the table implied by its column position."""
+
+    rows, columns = weighted_value.shape
+    words = math.ceil(columns / 32)
+    padded_columns = words * 32
+    padded = torch.zeros(
+        (rows, padded_columns),
+        dtype=weighted_value.dtype,
+        device=weighted_value.device,
+    )
+    padded[:, :columns] = weighted_value
+    word_values = padded.reshape(rows, words, 32)
+    indices = torch.empty((rows, words), dtype=torch.int32, device=weighted_value.device)
+    corrected_banks = (
+        codebook.bank_count
+        if corrected_bank_count is None
+        else corrected_bank_count
+    )
+    if not 1 <= corrected_banks <= codebook.bank_count:
+        raise ValueError("corrected bank count is outside the codebook")
+    if (
+        codebook.bank_axis != "row"
+        and corrected_banks not in {0, codebook.bank_count}
+    ):
+        raise ValueError("partial correction banking requires row banks")
+    corrected_rows = (
+        math.ceil(rows * corrected_banks / codebook.bank_count)
+        if codebook.bank_axis == "row"
+        else rows
+    )
+    positions = (
+        torch.empty(
+            (corrected_rows, words, flips_per_word),
+            dtype=torch.int8,
+            device=weighted_value.device,
+        )
+        if flips_per_word
+        else None
+    )
+    updated_entries = []
+    bank_ids = _word_bank_indices(
+        words if codebook.bank_axis == "word" else rows,
+        codebook.bank_count,
+        weighted_value.device,
+    )
+    for bank in range(codebook.bank_count):
+        bank_mask = bank_ids == bank
+        values = (
+            word_values[:, bank_mask, :]
+            if codebook.bank_axis == "word"
+            else word_values[bank_mask, :, :]
+        ).reshape(-1, 32).contiguous()
+        bank_flips = flips_per_word if bank < corrected_banks else 0
+        if bank_flips:
+            assigned, corrected_positions, entries = _assign_corrected_flat_words(
+                values,
+                codebook.entries[bank],
+                flips_per_word=bank_flips,
+                update=update,
+                batch_words=batch_words,
+                candidate_count=candidate_count,
+            )
+            assert positions is not None
+            if codebook.bank_axis == "word":
+                positions[:, bank_mask, :] = corrected_positions.reshape(
+                    rows,
+                    int(bank_mask.sum()),
+                    bank_flips,
+                )
+            else:
+                positions[bank_mask[:corrected_rows], :, :] = (
+                    corrected_positions.reshape(
+                    int(bank_mask.sum()),
+                    words,
+                    bank_flips,
+                )
+                )
+        else:
+            assigned, entries = _assign_half_words(
+                values,
+                codebook.entries[bank],
+                update=update,
+                batch_words=batch_words,
+            )
+            if update:
+                assigned, _ = _assign_half_words(
+                    values,
+                    entries,
+                    update=False,
+                    batch_words=batch_words,
+                )
+        if codebook.bank_axis == "word":
+            indices[:, bank_mask] = assigned.reshape(
+                rows,
+                int(bank_mask.sum()),
+            ).to(torch.int32)
+        else:
+            indices[bank_mask, :] = assigned.reshape(
+                int(bank_mask.sum()),
+                words,
+            ).to(torch.int32)
+        updated_entries.append(entries)
+    updated = BankedFullSignCodebook(
+        codebook.index_bits,
+        torch.stack(updated_entries),
+        codebook.bank_axis,
+    )
+    shaped_positions = positions
+    if shaped_positions is not None and flips_per_word == 1:
+        shaped_positions = shaped_positions.squeeze(-1)
+    decoded = decode_sign_codebook(indices, updated, padded_columns)[:, :columns]
+    corrected = (
+        torch.cat(
+            (
+                apply_word_flips(decoded[:corrected_rows], shaped_positions),
+                decoded[corrected_rows:],
+            )
+        )
+        if shaped_positions is not None
+        else decoded
+    )
+    return corrected, indices, updated, shaped_positions
+
+
 def apply_word_flips(
     decoded: torch.Tensor,
     flip_positions: torch.Tensor,
@@ -855,6 +1100,7 @@ def _project(
     corrected_assignment_candidates: int,
     flips_per_word: int,
     free_rows: int,
+    corrected_codebook_banks: int | None,
 ) -> tuple[
     torch.Tensor,
     SignCodebook | None,
@@ -891,7 +1137,7 @@ def _project(
                 decoded,
                 flips_per_word,
             )
-    else:
+    elif isinstance(codebook, FullSignCodebook):
         if flips_per_word:
             (
                 decoded,
@@ -914,6 +1160,16 @@ def _project(
                 batch_words=assignment_batch_words,
             )
         updated = full_updated
+    else:
+        decoded, indices, updated, flip_positions = _assign_banked_full_words(
+            coded_weighted,
+            codebook,
+            flips_per_word=flips_per_word,
+            update=update_codebook,
+            batch_words=assignment_batch_words,
+            candidate_count=corrected_assignment_candidates,
+            corrected_bank_count=corrected_codebook_banks,
+        )
     if free_rows:
         decoded = torch.cat((_sign(value[:free_rows]), decoded), dim=0)
     if flips_per_word < 0 or flips_per_word > 3:
@@ -937,7 +1193,13 @@ def _decode_factor(
         latent.dtype
     )
     if flip_positions is not None:
-        coded = apply_word_flips(coded, flip_positions)
+        corrected_rows = flip_positions.shape[0]
+        coded = torch.cat(
+            (
+                apply_word_flips(coded[:corrected_rows], flip_positions),
+                coded[corrected_rows:],
+            )
+        )
     if not free_rows:
         return coded
     return torch.cat((_sign(latent[:free_rows]), coded), dim=0)
@@ -1028,9 +1290,34 @@ def codebook_index_metrics(
         metrics[side] = (
             {"free_words": True}
             if indices is None or codebook is None
-            else _index_metrics(indices, codebook.index_bits)
+            else (
+                _index_metrics(
+                    indices
+                    + (
+                        _word_bank_indices(
+                            indices.shape[1],
+                            codebook.bank_count,
+                            indices.device,
+                        ).reshape(1, -1)
+                        if codebook.bank_axis == "word"
+                        else _word_bank_indices(
+                            indices.shape[0],
+                            codebook.bank_count,
+                            indices.device,
+                        ).reshape(-1, 1)
+                    )
+                    * (1 << codebook.index_bits),
+                    codebook.index_bits
+                    + int(math.log2(codebook.bank_count)),
+                )
+                if isinstance(codebook, BankedFullSignCodebook)
+                else _index_metrics(indices, codebook.index_bits)
+            )
         )
         metrics[side]["free_row_count"] = free_rows
+        if isinstance(codebook, BankedFullSignCodebook):
+            metrics[side]["implicit_codebook_banks"] = codebook.bank_count
+            metrics[side]["codebook_banks_by_row"] = codebook.bank_axis == "row"
     return metrics
 
 
@@ -1059,6 +1346,12 @@ def factorize_sign_word_codebook_admm(
     right_flips_per_word: int = 0,
     left_free_rows: int = 0,
     right_free_rows: int = 0,
+    left_codebook_banks: int = 1,
+    right_codebook_banks: int = 1,
+    left_codebook_bank_axis: str = "word",
+    right_codebook_bank_axis: str = "word",
+    left_corrected_codebook_banks: int | None = None,
+    right_corrected_codebook_banks: int | None = None,
     epsilon: float = 1e-12,
 ) -> SignWordCodebookADMMResult:
     """Jointly fit over-complete factors constrained to fixed-width codebooks."""
@@ -1067,10 +1360,62 @@ def factorize_sign_word_codebook_admm(
         raise ValueError("weight must be a matrix and rank positive")
     if input_importance.numel() != weight.shape[1] or output_importance.numel() != weight.shape[0]:
         raise ValueError("importance dimensions do not match weight")
-    if index_bits <= 0 or index_bits % 2:
-        raise ValueError("index bits must be positive and even")
     if codebook_mode not in {"product", "full"}:
         raise ValueError("codebook mode must be 'product' or 'full'")
+    if index_bits <= 0 or (codebook_mode == "product" and index_bits % 2):
+        raise ValueError(
+            "index bits must be positive and even for product codebooks"
+        )
+    for banks in (left_codebook_banks, right_codebook_banks):
+        if banks <= 0 or banks & (banks - 1):
+            raise ValueError("codebook bank counts must be positive powers of two")
+    if codebook_mode != "full" and (
+        left_codebook_banks != 1 or right_codebook_banks != 1
+    ):
+        raise ValueError("only full codebooks support word banks")
+    if left_codebook_bank_axis not in {"word", "row"} or (
+        right_codebook_bank_axis not in {"word", "row"}
+    ):
+        raise ValueError("codebook bank axes must be 'word' or 'row'")
+    if (
+        left_codebook_banks
+        > (
+            math.ceil(rank / 32)
+            if left_codebook_bank_axis == "word"
+            else weight.shape[0] - left_free_rows
+        )
+        or right_codebook_banks
+        > (
+            math.ceil(weight.shape[1] / 32)
+            if right_codebook_bank_axis == "word"
+            else rank - right_free_rows
+        )
+    ):
+        raise ValueError("codebook bank count exceeds the factor word count")
+    if (not constrain_left and left_codebook_banks != 1) or (
+        not constrain_right and right_codebook_banks != 1
+    ):
+        raise ValueError("free factors cannot declare codebook banks")
+    for corrected_banks, banks, axis in (
+        (
+            left_corrected_codebook_banks,
+            left_codebook_banks,
+            left_codebook_bank_axis,
+        ),
+        (
+            right_corrected_codebook_banks,
+            right_codebook_banks,
+            right_codebook_bank_axis,
+        ),
+    ):
+        if corrected_banks is not None and (
+            corrected_banks <= 0
+            or corrected_banks > banks
+            or (corrected_banks != banks and axis != "row")
+        ):
+            raise ValueError(
+                "partial corrected banks require a valid row-banked prefix"
+            )
     if not constrain_left and not constrain_right:
         raise ValueError("at least one factor must use a codebook")
     if left_flips_per_word not in {0, 1, 2, 3} or right_flips_per_word not in {
@@ -1141,6 +1486,8 @@ def factorize_sign_word_codebook_admm(
             dtype,
             generator,
             codebook_mode,
+            left_codebook_banks,
+            left_codebook_bank_axis,
         )
         if constrain_left
         else None
@@ -1152,6 +1499,8 @@ def factorize_sign_word_codebook_admm(
             dtype,
             generator,
             codebook_mode,
+            right_codebook_banks,
+            right_codebook_bank_axis,
         )
         if constrain_right
         else None
@@ -1174,6 +1523,7 @@ def factorize_sign_word_codebook_admm(
         corrected_assignment_candidates=corrected_assignment_candidates,
         flips_per_word=left_flips_per_word,
         free_rows=left_free_rows,
+        corrected_codebook_banks=left_corrected_codebook_banks,
     )
     (
         right_projected,
@@ -1191,6 +1541,7 @@ def factorize_sign_word_codebook_admm(
         corrected_assignment_candidates=corrected_assignment_candidates,
         flips_per_word=right_flips_per_word,
         free_rows=right_free_rows,
+        corrected_codebook_banks=right_corrected_codebook_banks,
     )
     left_codebook = left_codebook_value
     right_codebook = right_codebook_value
@@ -1257,6 +1608,7 @@ def factorize_sign_word_codebook_admm(
             corrected_assignment_candidates=corrected_assignment_candidates,
             flips_per_word=left_flips_per_word,
             free_rows=left_free_rows,
+            corrected_codebook_banks=left_corrected_codebook_banks,
         )
         (
             right_projected,
@@ -1274,6 +1626,7 @@ def factorize_sign_word_codebook_admm(
             corrected_assignment_candidates=corrected_assignment_candidates,
             flips_per_word=right_flips_per_word,
             free_rows=right_free_rows,
+            corrected_codebook_banks=right_corrected_codebook_banks,
         )
         left_codebook = left_codebook_value
         right_codebook = right_codebook_value
