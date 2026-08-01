@@ -97,3 +97,18 @@ independent block-local repair. Experiment 036 remains paused while a
 top-64-plus-tail objective is tested on the retained Experiment 035 pre-KD
 state. Only the remaining block-25 marginal after that repair can justify a
 revised production candidate.
+
+That objective ablation is complete. At 256 matched steps the tail-aware arm
+kept selected-token mass at 0.826 and improved full KL to 1.163, while the
+conditional control collapsed mass to 0.580 and worsened full KL to 1.378.
+Experiment 036 remains paused pending factor-compatible checkpoint export,
+the remaining block-25 marginal test, and the complete quality gate. See
+[75-topk-tail-kd-objective-ablation.md](../75-topk-tail-kd-objective-ablation.md).
+
+Those gates are now complete. Tail-aware KD improved WikiText perplexity from
+257.49 pre-KD to 188.72, but did not improve the retained six-task mean. More
+importantly, the fresh block-25 refit after tail-aware KD worsened untouched
+48x512 NLL by 0.05971 and full KL by 0.02022. This confirms that the earlier
+block-25 gain was compensation for the conditional-KD defect, not reusable
+initialization evidence. Experiment 036 remains paused; it should not inherit
+that compensator.

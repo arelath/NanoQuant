@@ -7,6 +7,16 @@ a fresh post-KD block-25 MLP scale refit improved much more than all other
 screened blocks. The audit treated the result as a possible measurement,
 overlay, or checkpoint error before attempting an architectural explanation.
 
+The recommended objective ablation is now complete. See
+[75-topk-tail-kd-objective-ablation.md](75-topk-tail-kd-objective-ablation.md).
+At 256 matched steps, the tail-aware arm improves held-out NLL and full KL
+while retaining 0.826 student mass on the teacher's top 64; the conditional
+control collapses that mass to 0.580 and worsens full KL despite improving its
+own conditional loss. The original fresh block-25 refit was then repeated
+from the tail-aware checkpoint and reversed from a large gain to a
+statistically clear NLL/KL regression. That closes the causal explanation:
+block 25 was compensating for the conditional objective's distribution error.
+
 ## Verdict
 
 The measured gain is real, but the original block-local interpretation was

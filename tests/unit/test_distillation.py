@@ -12,6 +12,8 @@ from nanoquant.application.distillation import (
     distill_topk,
     teacher_topk_logits,
     topk_distillation_loss,
+    topk_tail_distillation_loss,
+    vocabulary_logsumexp,
 )
 from nanoquant.config.schema import ProfilingConfig, ProfilingLevel
 from nanoquant.infrastructure.profiling import Profiler
@@ -96,6 +98,118 @@ def test_chunked_teacher_topk_matches_dense_logits() -> None:
 
     assert torch.allclose(values, expected_values)
     assert torch.equal(indices, expected_indices)
+
+
+def test_chunked_vocabulary_logsumexp_matches_dense_value_and_gradient() -> None:
+    generator = torch.Generator().manual_seed(5)
+    head = nn.Linear(5, 19, bias=True)
+    hidden = torch.randn(7, 5, generator=generator, requires_grad=True)
+    observed = vocabulary_logsumexp(
+        hidden,
+        head,
+        vocabulary_chunk_size=4,
+        token_chunk_size=3,
+        temperature=0.7,
+    )
+    expected = torch.logsumexp(head(hidden).float() / 0.7, dim=-1)
+
+    assert torch.allclose(observed, expected, atol=1e-6)
+    observed.sum().backward(retain_graph=True)
+    observed_gradient = hidden.grad.detach().clone()
+    hidden.grad = None
+    expected.sum().backward()
+    assert torch.allclose(observed_gradient, hidden.grad, atol=1e-6)
+
+
+def test_topk_tail_loss_detects_mass_shift_hidden_from_conditional_loss() -> None:
+    head = nn.Linear(4, 4, bias=False)
+    with torch.no_grad():
+        head.weight.copy_(torch.eye(4))
+    teacher_hidden = torch.tensor([[3.0, 2.0, 0.0, -1.0]])
+    shifted_student = torch.tensor([[1.0, 0.0, 0.0, -1.0]], requires_grad=True)
+    values, indices = torch.topk(teacher_hidden, 2, dim=-1)
+    teacher_normalizer = torch.logsumexp(teacher_hidden, dim=-1)
+    teacher_loss = topk_tail_distillation_loss(
+        teacher_hidden,
+        values,
+        indices,
+        teacher_normalizer,
+        head,
+        temperature=1.0,
+        vocabulary_chunk_size=2,
+        token_chunk_size=1,
+    )
+    shifted_loss = topk_tail_distillation_loss(
+        shifted_student,
+        values,
+        indices,
+        teacher_normalizer,
+        head,
+        temperature=1.0,
+        vocabulary_chunk_size=2,
+        token_chunk_size=1,
+    )
+    teacher_probabilities = torch.softmax(teacher_hidden, dim=-1)
+    shifted_log_probabilities = torch.log_softmax(shifted_student, dim=-1)
+    expected_shifted = -(
+        teacher_probabilities[:, :2] * shifted_log_probabilities[:, :2]
+    ).sum() - teacher_probabilities[:, 2:].sum() * torch.log(
+        shifted_log_probabilities[:, 2:].exp().sum()
+    )
+    conditional_teacher = topk_distillation_loss(
+        teacher_hidden,
+        values,
+        indices,
+        head,
+        temperature=1.0,
+        token_chunk_size=1,
+    )
+    conditional_shifted = topk_distillation_loss(
+        shifted_student,
+        values,
+        indices,
+        head,
+        temperature=1.0,
+        token_chunk_size=1,
+    )
+
+    assert float(conditional_shifted.detach()) == pytest.approx(
+        float(conditional_teacher.detach()),
+        abs=1e-7,
+    )
+    assert shifted_loss > teacher_loss
+    assert float(shifted_loss.detach()) == pytest.approx(float(expected_shifted.detach()), abs=1e-6)
+    shifted_loss.backward()
+    assert shifted_student.grad is not None
+    assert torch.isfinite(shifted_student.grad).all()
+
+
+def test_topk_tail_mass_weight_strengthens_mass_calibration_without_moving_optimum() -> None:
+    head = nn.Linear(4, 4, bias=False)
+    with torch.no_grad():
+        head.weight.copy_(torch.eye(4))
+    teacher_hidden = torch.tensor([[3.0, 2.0, 0.0, -1.0]])
+    shifted_student = torch.tensor([[1.0, 0.0, 0.0, -1.0]])
+    values, indices = torch.topk(teacher_hidden, 2, dim=-1)
+    teacher_normalizer = torch.logsumexp(teacher_hidden, dim=-1)
+
+    def loss(hidden: torch.Tensor, weight: float) -> torch.Tensor:
+        return topk_tail_distillation_loss(
+            hidden,
+            values,
+            indices,
+            teacher_normalizer,
+            head,
+            temperature=1.0,
+            vocabulary_chunk_size=2,
+            token_chunk_size=1,
+            mass_loss_weight=weight,
+        )
+
+    base_excess = loss(shifted_student, 1.0) - loss(teacher_hidden, 1.0)
+    weighted_excess = loss(shifted_student, 4.0) - loss(teacher_hidden, 4.0)
+
+    assert weighted_excess > base_excess
 
 
 def test_topk_loss_matches_selected_teacher_cross_entropy() -> None:

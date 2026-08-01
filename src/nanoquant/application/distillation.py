@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import random
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -192,6 +193,127 @@ def selected_lm_head_logits(
     if not pieces:
         return hidden_states.new_empty((0, vocabulary_indices.shape[-1]))
     return torch.cat(pieces, dim=0)
+
+
+def vocabulary_logsumexp(
+    hidden_states: torch.Tensor,
+    lm_head: nn.Module,
+    *,
+    vocabulary_chunk_size: int,
+    token_chunk_size: int,
+    temperature: float,
+) -> torch.Tensor:
+    """Compute differentiable full-vocabulary normalizers with bounded logits."""
+
+    weight = getattr(lm_head, "weight", None)
+    if not isinstance(weight, torch.Tensor) or weight.ndim != 2:
+        raise TypeError("distillation LM head must expose a rank-two weight")
+    bias = getattr(lm_head, "bias", None)
+    if bias is not None and not isinstance(bias, torch.Tensor):
+        raise TypeError("distillation LM-head bias is not a tensor")
+    if min(vocabulary_chunk_size, token_chunk_size) <= 0 or temperature <= 0:
+        raise ValueError("vocabulary log-normalizer chunk sizes and temperature must be positive")
+    pieces = []
+    for token_start in range(0, hidden_states.shape[0], token_chunk_size):
+        token_end = min(token_start + token_chunk_size, hidden_states.shape[0])
+        token_hidden = hidden_states[token_start:token_end]
+        normalizer: torch.Tensor | None = None
+        for vocabulary_start in range(0, weight.shape[0], vocabulary_chunk_size):
+            vocabulary_end = min(vocabulary_start + vocabulary_chunk_size, weight.shape[0])
+            chunk_bias = None if bias is None else bias[vocabulary_start:vocabulary_end]
+            logits = torch.nn.functional.linear(
+                token_hidden,
+                weight[vocabulary_start:vocabulary_end],
+                chunk_bias,
+            )
+            if temperature != 1.0:
+                logits = logits / temperature
+            chunk_normalizer = torch.logsumexp(logits.float(), dim=-1)
+            normalizer = (
+                chunk_normalizer
+                if normalizer is None
+                else torch.logaddexp(normalizer, chunk_normalizer)
+            )
+        if normalizer is None:
+            raise ValueError("distillation LM head has an empty vocabulary")
+        pieces.append(normalizer)
+    if not pieces:
+        return hidden_states.new_empty((0,), dtype=torch.float32)
+    return torch.cat(pieces)
+
+
+def topk_tail_distillation_loss(
+    student_hidden_states: torch.Tensor,
+    teacher_top_values: torch.Tensor,
+    teacher_top_indices: torch.Tensor,
+    teacher_log_normalizers: torch.Tensor,
+    lm_head: nn.Module,
+    *,
+    temperature: float,
+    vocabulary_chunk_size: int,
+    token_chunk_size: int,
+    mass_loss_weight: float = 1.0,
+    token_weights: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Cross entropy over teacher top-k entries plus one aggregated tail bucket."""
+
+    if mass_loss_weight <= 0:
+        raise ValueError("top-k tail mass loss weight must be positive")
+    if student_hidden_states.shape[0] == 0:
+        return student_hidden_states.sum() * 0
+    if (
+        teacher_top_values.ndim != 2
+        or teacher_top_indices.shape != teacher_top_values.shape
+        or teacher_top_values.shape[0] != student_hidden_states.shape[0]
+        or teacher_log_normalizers.shape != (student_hidden_states.shape[0],)
+    ):
+        raise ValueError("top-k tail distillation targets are not aligned")
+    selected_logits = selected_lm_head_logits(
+        student_hidden_states,
+        lm_head,
+        teacher_top_indices,
+        token_chunk_size=token_chunk_size,
+        temperature=temperature,
+    ).float()
+    student_log_normalizers = vocabulary_logsumexp(
+        student_hidden_states,
+        lm_head,
+        vocabulary_chunk_size=vocabulary_chunk_size,
+        token_chunk_size=token_chunk_size,
+        temperature=temperature,
+    )
+    teacher_top_log_probabilities = (
+        teacher_top_values.float() - teacher_log_normalizers.float().unsqueeze(-1)
+    )
+    teacher_top_probabilities = teacher_top_log_probabilities.exp()
+    teacher_top_mass = teacher_top_probabilities.sum(dim=-1).clamp(max=1 - 1e-7)
+    teacher_tail = (1 - teacher_top_mass).clamp_min(1e-12)
+    student_top_log_probabilities = selected_logits - student_log_normalizers.unsqueeze(-1)
+    student_top_log_mass = torch.logsumexp(student_top_log_probabilities, dim=-1).clamp(
+        max=math.log1p(-1e-7)
+    )
+    student_top_mass = student_top_log_mass.exp()
+    student_tail_log_probability = torch.log1p(-student_top_mass)
+    conditional_cross_entropy = -(
+        teacher_top_probabilities.to(student_top_log_probabilities.device)
+        * (student_top_log_probabilities - student_top_log_mass.unsqueeze(-1))
+    ).sum(dim=-1)
+    mass_cross_entropy = -teacher_top_mass.to(student_top_log_mass.device) * student_top_log_mass
+    mass_cross_entropy -= (
+        teacher_tail.to(student_tail_log_probability.device) * student_tail_log_probability
+    )
+    per_token = conditional_cross_entropy + mass_loss_weight * mass_cross_entropy
+    if token_weights is None:
+        loss = per_token.mean()
+    else:
+        weights = token_weights.to(device=per_token.device, dtype=per_token.dtype)
+        if weights.shape != per_token.shape:
+            raise ValueError("distillation token weights do not match selected tokens")
+        denominator = weights.sum()
+        if denominator <= 0:
+            raise ValueError("distillation token weights must contain a positive value")
+        loss = (per_token * weights).sum() / denominator
+    return loss if temperature == 1.0 else loss * temperature**2
 
 
 def topk_distillation_loss(
