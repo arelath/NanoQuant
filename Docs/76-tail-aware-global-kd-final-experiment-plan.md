@@ -2,9 +2,13 @@
 
 ## Status
 
-Planning and retained-state validation are complete through the independent
-non-WikiText gate. Production integration has not started, and no fresh full
-compression campaign is authorized yet.
+Production integration and the retained production-path replay are complete.
+The replay exposed a long-context mass-floor failure in the original 0.5
+candidate, then resolved it with a byte-neutral final-RMSNorm calibration.
+The calibrated candidate passes the broad WikiText-validation mass/NLL/KL
+gate, the complete retained quality benchmark, the pinned C4 gate, artifact
+validation, and normal factorized reload. A fresh full compression campaign
+has not started.
 
 Experiment 036 remains a paused historical control. Its transplanted
 composed-context seed and block-25 compensator are rejected. The eventual
@@ -29,7 +33,7 @@ The retained Experiment 035 pre-KD state supports the following conclusions:
    improves language modeling further but loses the task gain; 1.0 preserves
    mass more strongly but gives back both retained quality improvements.
 
-The selected retained checkpoint is therefore:
+The originally selected retained checkpoint was:
 
 | Field | Value |
 | --- | --- |
@@ -47,6 +51,14 @@ The selected retained checkpoint is therefore:
 
 This is a model-level candidate, not a universal default. The coefficient and
 schedule must remain explicit protocol fields.
+
+The production replay later showed that its 16x128 monitor overestimated
+selected-mass retention: the uncalibrated 0.5 endpoint has teacher-top-64 mass
+0.70838 on the predeclared 48x512 validation slice. The current production
+candidate therefore keeps the 0.5/256-step checkpoint and folds a 1.06 scalar
+into Gemma's final RMSNorm effective weight. This costs no extra model tensor,
+runtime operation, or effective BPW. See
+[77-tail-aware-production-replay-and-calibration.md](77-tail-aware-production-replay-and-calibration.md).
 
 ## Independent C4 gate
 
@@ -117,6 +129,13 @@ are green:
 
 ## Gate C: retained production-path replay
 
+**Status: passed by the calibrated production candidate.** The interrupted
+and uninterrupted arms converge to the same content-addressed epoch-8
+checkpoint, the normal factorized loader validates the derived global-tuning
+commit, the broad mass floor is 0.75418, and both the standard quality and C4
+gates are complete. The uncalibrated 0.5 checkpoint alone is rejected by the
+long-context mass floor.
+
 Run the production implementation from the retained Experiment 035 pre-KD
 state before spending on fresh factorization. This is distinct from the
 analysis checkpoint already evaluated.
@@ -139,6 +158,11 @@ The replay must:
 The C4 slice is a final gate, not a checkpoint-selection input.
 
 ## Gate D: fresh full experiment
+
+**Status: pending.** The fresh matched conditional-versus-tail-aware campaign
+must include the calibrated final-RMSNorm policy as an explicit, identity-bound
+Gemma recipe field or stage. It must not silently treat 1.06 as a universal
+default.
 
 Only after Gates A-C pass should a new numbered campaign start. It should
 factorize one fresh Gemma D2 frozen state, then branch that exact state into a
@@ -172,5 +196,8 @@ retained replay alone.
 - `evidence/035/experiment035-topk-tail-mass0p5-bounded8x32-monitor16-quality.json`
 - `evidence/035/experiment035-topk-tail-mass0p25-bounded8x32-monitor16-quality.json`
 - `evidence/035/experiment035-tail-mass-c4-validation104-48x512.json`
+- `evidence/035/experiment035-topk-tail-production-v2-folded-scale1p06-standard-validation104-48x512-kl.json`
+- `evidence/035/experiment035-topk-tail-production-v2-folded-scale1p06-standard-quality.json`
+- `evidence/035/experiment035-topk-tail-production-v2-folded-scale1p06-c4-validation104-48x512.json`
 - [74-block25-anomaly-and-topk-tail-mass-audit.md](74-block25-anomaly-and-topk-tail-mass-audit.md)
 - [75-topk-tail-kd-objective-ablation.md](75-topk-tail-kd-objective-ablation.md)
