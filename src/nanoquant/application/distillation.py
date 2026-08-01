@@ -370,6 +370,97 @@ def topk_tail_distillation_loss(
     return loss if temperature == 1.0 else loss * temperature**2
 
 
+def topk_mass_floor_distillation_loss(
+    student_hidden_states: torch.Tensor,
+    teacher_top_values: torch.Tensor,
+    teacher_top_indices: torch.Tensor,
+    teacher_log_normalizers: torch.Tensor,
+    lm_head: nn.Module,
+    *,
+    temperature: float,
+    vocabulary_chunk_size: int,
+    token_chunk_size: int,
+    minimum_teacher_mass_ratio: float,
+    mass_loss_weight: float = 1.0,
+    token_weights: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Conditional top-k CE plus a one-sided batch selected-mass floor.
+
+    Unlike :func:`topk_tail_distillation_loss`, the conditional term is the
+    original normalized top-k objective and the mass term has zero value and
+    gradient after the configured fraction of teacher selected mass is met.
+    """
+
+    if not math.isfinite(minimum_teacher_mass_ratio) or not 0 < minimum_teacher_mass_ratio <= 1:
+        raise ValueError("top-k mass-floor teacher-mass ratio must be in (0, 1]")
+    if not math.isfinite(mass_loss_weight) or mass_loss_weight <= 0:
+        raise ValueError("top-k mass-floor loss weight must be finite and positive")
+    if student_hidden_states.shape[0] == 0:
+        return student_hidden_states.sum() * 0
+    if (
+        teacher_top_values.ndim != 2
+        or teacher_top_indices.shape != teacher_top_values.shape
+        or teacher_top_values.shape[0] != student_hidden_states.shape[0]
+        or teacher_log_normalizers.shape != (student_hidden_states.shape[0],)
+    ):
+        raise ValueError("top-k mass-floor distillation targets are not aligned")
+
+    selected_logits = selected_lm_head_logits(
+        student_hidden_states,
+        lm_head,
+        teacher_top_indices,
+        token_chunk_size=token_chunk_size,
+        temperature=temperature,
+    ).float()
+    student_log_normalizers = vocabulary_logsumexp(
+        student_hidden_states,
+        lm_head,
+        vocabulary_chunk_size=vocabulary_chunk_size,
+        token_chunk_size=token_chunk_size,
+        temperature=temperature,
+    )
+    conditional_cross_entropy = -(
+        torch.softmax(teacher_top_values.float(), dim=-1).to(selected_logits.device)
+        * torch.log_softmax(selected_logits, dim=-1)
+    ).sum(dim=-1)
+    teacher_top_mass = (
+        teacher_top_values.float() - teacher_log_normalizers.float().unsqueeze(-1)
+    ).exp().sum(dim=-1)
+    student_top_mass = (
+        torch.logsumexp(selected_logits - student_log_normalizers.unsqueeze(-1), dim=-1)
+        .clamp(min=math.log(1e-12), max=math.log1p(-1e-7))
+        .exp()
+    )
+
+    if token_weights is None:
+        conditional_loss = conditional_cross_entropy.mean()
+        teacher_mass_mean = teacher_top_mass.mean()
+        student_mass_mean = student_top_mass.mean()
+    else:
+        weights = token_weights.to(
+            device=conditional_cross_entropy.device,
+            dtype=conditional_cross_entropy.dtype,
+        )
+        if weights.shape != conditional_cross_entropy.shape:
+            raise ValueError("distillation token weights do not match selected tokens")
+        denominator = weights.sum()
+        if denominator <= 0:
+            raise ValueError("distillation token weights must contain a positive value")
+        conditional_loss = (conditional_cross_entropy * weights).sum() / denominator
+        teacher_mass_mean = (teacher_top_mass.to(weights.device) * weights).sum() / denominator
+        student_mass_mean = (student_top_mass * weights).sum() / denominator
+
+    epsilon = 1e-7
+    target_mass = (teacher_mass_mean * minimum_teacher_mass_ratio).clamp(
+        min=epsilon,
+        max=1 - epsilon,
+    )
+    student_mass_mean = student_mass_mean.clamp(min=epsilon, max=1 - epsilon)
+    mass_deficit = torch.relu(torch.logit(target_mass) - torch.logit(student_mass_mean))
+    loss = conditional_loss + mass_loss_weight * mass_deficit
+    return loss if temperature == 1.0 else loss * temperature**2
+
+
 def topk_distillation_loss(
     student_hidden_states: torch.Tensor,
     teacher_top_values: torch.Tensor,

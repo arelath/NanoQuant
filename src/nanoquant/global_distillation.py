@@ -173,12 +173,21 @@ def _storage_dtype(name: str) -> torch.dtype:
 def _thaw_frozen_layers(
     loaded: LoadedFrozenModel,
     tensors: LocalTensorStore,
+    *,
+    frozen_states: tuple[FrozenBlockState, ...] | None = None,
 ) -> dict[tuple[int, str], TrainableFactorizedLinear]:
     editor = BlockEditor()
     freezer = LayerFreezer()
     trainable: dict[tuple[int, str], TrainableFactorizedLinear] = {}
-    for block_result, block in zip(loaded.blocks, _decoder_layers(loaded.model), strict=True):
-        for state in block_result.frozen_state.quantized_layers:
+    states = (
+        tuple(block_result.frozen_state for block_result in loaded.blocks)
+        if frozen_states is None
+        else frozen_states
+    )
+    if tuple(state.block.index for state in states) != tuple(range(len(loaded.blocks))):
+        raise ValueError("global distillation thaw states are not complete and contiguous")
+    for block_state, block in zip(states, _decoder_layers(loaded.model), strict=True):
+        for state in block_state.quantized_layers:
             frozen = freezer.load(
                 state,
                 tensors,
@@ -206,7 +215,7 @@ def _thaw_frozen_layers(
             )
             editor.install_trainable_layer(block, state.layer.path, module)
             trainable[(state.layer.block.index, state.layer.path)] = module
-        for group_state in block_result.frozen_state.shared_input_groups:
+        for group_state in block_state.shared_input_groups:
             frozen_group = SharedInputGroupFreezer().load(
                 group_state,
                 tensors,

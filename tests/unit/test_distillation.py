@@ -13,6 +13,7 @@ from nanoquant.application.distillation import (
     teacher_topk_logits,
     teacher_topk_logits_with_normalizers,
     topk_distillation_loss,
+    topk_mass_floor_distillation_loss,
     topk_tail_distillation_loss,
     vocabulary_logsumexp,
 )
@@ -304,6 +305,110 @@ def test_topk_tail_mass_weight_strengthens_mass_calibration_without_moving_optim
     weighted_excess = loss(shifted_student, 4.0) - loss(teacher_hidden, 4.0)
 
     assert weighted_excess > base_excess
+
+
+def test_topk_mass_floor_is_exactly_conditional_above_floor() -> None:
+    head = nn.Linear(4, 4, bias=False)
+    with torch.no_grad():
+        head.weight.copy_(torch.eye(4))
+    teacher_hidden = torch.tensor([[3.0, 2.0, 0.0, -1.0]])
+    student_hidden = teacher_hidden.detach().clone().requires_grad_(True)
+    values, indices = torch.topk(teacher_hidden, 2, dim=-1)
+    normalizer = torch.logsumexp(teacher_hidden, dim=-1)
+
+    conditional = topk_distillation_loss(
+        student_hidden,
+        values,
+        indices,
+        head,
+        temperature=1.0,
+        token_chunk_size=1,
+    )
+    conditional_gradient = torch.autograd.grad(conditional, student_hidden, retain_graph=True)[0]
+    constrained = topk_mass_floor_distillation_loss(
+        student_hidden,
+        values,
+        indices,
+        normalizer,
+        head,
+        temperature=1.0,
+        vocabulary_chunk_size=2,
+        token_chunk_size=1,
+        minimum_teacher_mass_ratio=0.8,
+        mass_loss_weight=0.5,
+    )
+    constrained_gradient = torch.autograd.grad(constrained, student_hidden)[0]
+
+    assert torch.equal(constrained.detach(), conditional.detach())
+    assert torch.equal(constrained_gradient, conditional_gradient)
+
+
+def test_topk_mass_floor_only_pushes_selected_mass_when_below_floor() -> None:
+    head = nn.Linear(4, 4, bias=False)
+    with torch.no_grad():
+        head.weight.copy_(torch.eye(4))
+    teacher_hidden = torch.tensor([[3.0, 2.0, 0.0, -1.0]])
+    # Preserve the selected-logit difference while shifting probability mass
+    # from selected entries to the aggregated tail.
+    student_hidden = torch.tensor([[1.0, 0.0, 1.0, 0.0]], requires_grad=True)
+    values, indices = torch.topk(teacher_hidden, 2, dim=-1)
+    normalizer = torch.logsumexp(teacher_hidden, dim=-1)
+
+    conditional = topk_distillation_loss(
+        student_hidden,
+        values,
+        indices,
+        head,
+        temperature=1.0,
+        token_chunk_size=1,
+    )
+    conditional_gradient = torch.autograd.grad(conditional, student_hidden, retain_graph=True)[0]
+    constrained = topk_mass_floor_distillation_loss(
+        student_hidden,
+        values,
+        indices,
+        normalizer,
+        head,
+        temperature=1.0,
+        vocabulary_chunk_size=2,
+        token_chunk_size=1,
+        minimum_teacher_mass_ratio=0.8,
+        mass_loss_weight=0.5,
+    )
+    constrained_gradient = torch.autograd.grad(constrained, student_hidden)[0]
+
+    assert constrained > conditional
+    assert torch.isfinite(constrained_gradient).all()
+    mass_gradient = constrained_gradient - conditional_gradient
+    assert torch.all(mass_gradient[0, :2] < 0)
+    assert torch.all(mass_gradient[0, 2:] > 0)
+
+
+def test_topk_mass_floor_validates_policy_and_token_weights() -> None:
+    head = nn.Linear(2, 3, bias=False)
+    hidden = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
+    values, indices = torch.topk(head(hidden), 2, dim=-1)
+    normalizers = torch.logsumexp(head(hidden), dim=-1)
+    common = {
+        "student_hidden_states": hidden,
+        "teacher_top_values": values,
+        "teacher_top_indices": indices,
+        "teacher_log_normalizers": normalizers,
+        "lm_head": head,
+        "temperature": 1.0,
+        "vocabulary_chunk_size": 2,
+        "token_chunk_size": 1,
+        "minimum_teacher_mass_ratio": 0.8,
+    }
+
+    with pytest.raises(ValueError, match="ratio"):
+        topk_mass_floor_distillation_loss(**(common | {"minimum_teacher_mass_ratio": 0.0}))
+    with pytest.raises(ValueError, match="weight"):
+        topk_mass_floor_distillation_loss(**common, mass_loss_weight=float("nan"))
+    with pytest.raises(ValueError, match="positive value"):
+        topk_mass_floor_distillation_loss(**common, token_weights=torch.zeros(2))
+    with pytest.raises(ValueError, match="match selected tokens"):
+        topk_mass_floor_distillation_loss(**common, token_weights=torch.ones(1))
 
 
 def test_topk_loss_matches_selected_teacher_cross_entropy() -> None:

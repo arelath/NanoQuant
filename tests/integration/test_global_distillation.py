@@ -21,6 +21,7 @@ from nanoquant.infrastructure.distillation_checkpoint import (
 )
 from nanoquant.infrastructure.frozen_model_loader import load_frozen_run
 from nanoquant.infrastructure.global_tuning import active_global_tuning, load_global_tuning
+from nanoquant.infrastructure.tensor_store import LocalTensorStore
 from nanoquant.resident_quantization import ResidentQuantizationRequest, run_resident_quantization
 
 
@@ -259,6 +260,19 @@ def test_complete_frozen_run_can_be_distilled_committed_and_reloaded(
     with torch.no_grad():
         after_logits = cast(Any, loaded.model)(input_ids=tokens, use_cache=False).logits.detach()
     assert not torch.equal(after_logits, before_logits)
+
+    tuned = load_global_tuning(distilled.reference, LocalArtifactStore(output / "artifacts"))
+    global_distillation_module._thaw_frozen_layers(
+        loaded,
+        LocalTensorStore(LocalArtifactStore(output / "artifacts")),
+        frozen_states=tuned.result.tuned_blocks,
+    )
+    after_thaw = dict(loaded.model.named_parameters())
+    assert parameter_values.keys() <= after_thaw.keys()
+    assert all(
+        torch.equal(after_thaw[name].detach().cpu(), value)
+        for name, value in parameter_values.items()
+    )
 
     pre_distillation = load_frozen_run(
         output,

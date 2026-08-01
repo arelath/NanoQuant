@@ -1,4 +1,4 @@
-"""Resume-safe top-k-plus-tail KD ablation on a retained pre-KD frozen run."""
+"""Resume-safe top-k KD objective ablations on a retained frozen run."""
 
 from __future__ import annotations
 
@@ -31,6 +31,7 @@ from nanoquant.application.distillation import (
     TopKDistillationConfig,
     TopKTeacherBatch,
     topk_distillation_loss,
+    topk_mass_floor_distillation_loss,
     topk_tail_distillation_loss,
     vocabulary_logsumexp,
 )
@@ -51,6 +52,7 @@ from nanoquant.infrastructure.distillation_checkpoint import (
     commit_distillation_checkpoint,
 )
 from nanoquant.infrastructure.frozen_model_loader import load_frozen_run
+from nanoquant.infrastructure.global_tuning import active_global_tuning, load_global_tuning
 from nanoquant.infrastructure.hf_language_model import load_causal_language_model
 from nanoquant.infrastructure.io_utils import atomic_workspace, atomic_write_json, hash_file
 from nanoquant.infrastructure.model_adapters import adapter_for_config
@@ -68,9 +70,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--epochs", type=int, default=8)
     parser.add_argument("--maximum-batches-per-epoch", type=int)
     parser.add_argument("--mass-loss-weight", type=float, default=1.0)
+    parser.add_argument("--minimum-teacher-mass-ratio", type=float, default=0.8)
     parser.add_argument(
         "--objective",
-        choices=("topk_tail", "conditional_topk"),
+        choices=("topk_tail", "conditional_topk", "mass_floor_correction"),
         default="topk_tail",
     )
     parser.add_argument("--monitor-split", choices=("test", "validation"), default="validation")
@@ -314,13 +317,14 @@ def _report_protocol(
     monitor_tokens: torch.Tensor,
 ) -> dict[str, object]:
     source_manifest = json.loads((args.run_output / "manifest.json").read_text(encoding="utf-8"))
-    return {
+    objective = {
+        "topk_tail": "teacher-top-k-plus-aggregated-tail-v1",
+        "conditional_topk": "teacher-conditional-top-k-control-v1",
+        "mass_floor_correction": "conditional-top-k-batch-logit-mass-floor-v1",
+    }[args.objective]
+    protocol = {
         "schema_version": 1,
-        "objective": (
-            "teacher-top-k-plus-aggregated-tail-v1"
-            if args.objective == "topk_tail"
-            else "teacher-conditional-top-k-control-v1"
-        ),
+        "objective": objective,
         "mass_loss_weight": args.mass_loss_weight,
         "source_run_output": str(args.run_output.resolve()),
         "source_resident_config_hash": source_manifest["config_hash"],
@@ -337,6 +341,13 @@ def _report_protocol(
         "monitor_sequence_length": args.monitor_sequence_length,
         "monitor_token_hash": _token_hash(monitor_tokens),
     }
+    if args.objective == "mass_floor_correction":
+        initializer = active_global_tuning(args.run_output)
+        if initializer is None:
+            raise ValueError("mass-floor correction requires an active global-tuning initializer")
+        protocol["minimum_teacher_mass_ratio"] = args.minimum_teacher_mass_ratio
+        protocol["initializer_global_tuning"] = to_dict(initializer)
+    return protocol
 
 
 def _load_report(path: Path, protocol: dict[str, object]) -> dict[str, object]:
@@ -364,6 +375,7 @@ def run(args: argparse.Namespace) -> int:
         )
         <= 0
         or args.monitor_offset < 0
+        or not 0 < args.minimum_teacher_mass_ratio <= 1
         or (
             args.maximum_batches_per_epoch is not None
             and args.maximum_batches_per_epoch <= 0
@@ -408,10 +420,12 @@ def run(args: argparse.Namespace) -> int:
                 device=args.device,
                 local_files_only=args.local_files_only,
             )
-            if args.objective == "topk_tail"
+            if args.objective in {"topk_tail", "mass_floor_correction"}
             else None
         )
         run_artifacts = LocalArtifactStore(args.run_output / "artifacts")
+        initializer = active_global_tuning(args.run_output)
+        use_initializer = args.objective == "mass_floor_correction"
         loaded = load_frozen_run(
             args.run_output,
             args.snapshot,
@@ -420,9 +434,18 @@ def run(args: argparse.Namespace) -> int:
             device="cpu",
             verify_hashes=False,
             backend="factorized",
-            use_global_tuning=False,
+            use_global_tuning=use_initializer,
         )
-        trainable = _thaw_frozen_layers(loaded, LocalTensorStore(run_artifacts))
+        initializer_states = None
+        if use_initializer:
+            if initializer is None or loaded.global_tuning != initializer:
+                raise ValueError("mass-floor correction initializer changed during setup")
+            initializer_states = load_global_tuning(initializer, run_artifacts).result.tuned_blocks
+        trainable = _thaw_frozen_layers(
+            loaded,
+            LocalTensorStore(run_artifacts),
+            frozen_states=initializer_states,
+        )
         selected_ids, _auxiliary = _selected_parameters(loaded.model, trainable)
         selected_parameters = [
             (name, parameter)
@@ -556,8 +579,8 @@ def run(args: argparse.Namespace) -> int:
                         None if target.token_weights is None else target.token_weights.to(args.device)
                     ),
                 }
-                loss = (
-                    topk_tail_distillation_loss(
+                if args.objective == "topk_tail":
+                    loss = topk_tail_distillation_loss(
                         hidden,
                         target.top_values.to(args.device),
                         target.top_indices.to(device=args.device, dtype=torch.long),
@@ -573,15 +596,32 @@ def run(args: argparse.Namespace) -> int:
                         mass_loss_weight=args.mass_loss_weight,
                         **common,
                     )
-                    if args.objective == "topk_tail"
-                    else topk_distillation_loss(
+                elif args.objective == "mass_floor_correction":
+                    loss = topk_mass_floor_distillation_loss(
+                        hidden,
+                        target.top_values.to(args.device),
+                        target.top_indices.to(device=args.device, dtype=torch.long),
+                        _target_normalizers(
+                            cast(tuple[tuple[torch.Tensor, ...], ...], normalizers),
+                            epoch_index,
+                            batch_index,
+                            target,
+                            device=args.device,
+                        ),
+                        _lm_head(student),
+                        vocabulary_chunk_size=config.vocabulary_chunk_size,
+                        minimum_teacher_mass_ratio=args.minimum_teacher_mass_ratio,
+                        mass_loss_weight=args.mass_loss_weight,
+                        **common,
+                    )
+                else:
+                    loss = topk_distillation_loss(
                         hidden,
                         target.top_values.to(args.device),
                         target.top_indices.to(device=args.device, dtype=torch.long),
                         _lm_head(student),
                         **common,
                     )
-                )
                 optimizer.zero_grad(set_to_none=True)
                 torch.autograd.backward(loss)
                 optimizer.step()
@@ -623,9 +663,11 @@ def run(args: argparse.Namespace) -> int:
             report["epoch_losses"] = epoch_losses
             report["wall_seconds"] = time.perf_counter() - started
             atomic_write_json(report_path, report)
-            objective_label = (
-                "tail-bucket" if args.objective == "topk_tail" else "conditional top-k"
-            )
+            objective_label = {
+                "topk_tail": "tail-bucket",
+                "conditional_topk": "conditional top-k",
+                "mass_floor_correction": "conditional mass-floor correction",
+            }[args.objective]
             print(
                 f"{objective_label} KD epoch {epoch_index + 1}/{config.epochs}: "
                 f"loss={epoch_loss:.6f}, steps={steps}",

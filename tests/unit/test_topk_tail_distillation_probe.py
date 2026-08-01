@@ -21,6 +21,26 @@ def test_objective_parser_supports_a_protocol_matched_conditional_control() -> N
     assert args.objective == "conditional_topk"
 
 
+def test_objective_parser_supports_a_warm_started_mass_floor_correction() -> None:
+    args = _parser().parse_args(
+        [
+            "--run-output",
+            "run",
+            "--snapshot",
+            "snapshot",
+            "--output-directory",
+            "output",
+            "--objective",
+            "mass_floor_correction",
+            "--minimum-teacher-mass-ratio",
+            "0.8",
+        ]
+    )
+
+    assert args.objective == "mass_floor_correction"
+    assert args.minimum_teacher_mass_ratio == 0.8
+
+
 def test_teacher_normalizer_protocol_is_bound_to_tokens_and_temperature() -> None:
     tokens = torch.tensor([[1, 2, 3], [4, 5, 6]])
     base = _normalizer_protocol(tokens, TopKDistillationConfig(), "revision")
