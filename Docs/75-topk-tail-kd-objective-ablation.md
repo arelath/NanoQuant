@@ -105,10 +105,11 @@ binary-mass weights:
 | Absolute tail-mass error | 0.132010 | 0.118801 | **0.103709** |
 | Block-25 output NRMSE | 0.337467 | 0.332815 | **0.301560** |
 
-The weighting sweep is a real tradeoff rather than a Pareto improvement.
-Increasing the mass term preserves more selected-token mass and local block
-fidelity, but gives back the NLL and full-KL improvement. The exact 1x
-objective remains the selected language-model candidate.
+The initial upward weighting sweep is a real tradeoff rather than a Pareto
+improvement. Increasing the mass term preserves more selected-token mass and
+local block fidelity, but gives back the NLL and full-KL improvement. The 1x
+objective was therefore the candidate carried into the first quality gate;
+the continuation below also tests coefficients below 1x.
 
 ## Complete retained quality gate
 
@@ -132,7 +133,52 @@ The canonical WikiText 64x128 and six-task 200-example gate produced:
 Tail-aware KD is a substantial language-model improvement over the pre-KD
 state and the defective conditional-KD endpoint. Its six-task mean, however,
 is essentially unchanged from pre-KD and below the conditional-KD arms. It is
-therefore not yet a production winner despite fixing the objective pathology.
+therefore not by itself a production winner despite fixing the objective
+pathology.
+
+## Coverage, duration, and sub-1x continuation
+
+The next probe held the optimizer at 256 total steps while changing how many
+distinct calibration batches those steps covered. A separate 128-step arm
+tested early stopping. All new arms used a larger 16x128 validation monitor;
+their materialized checkpoints passed the same complete 26-block,
+708-artifact audit before the canonical quality benchmark.
+
+| Schedule | Total steps | WikiText PPL | Mean task score |
+| --- | ---: | ---: | ---: |
+| 8 epochs x 32 batches | 256 | **188.715654** | **0.455000** |
+| 1 epoch x 128 batches | 128 | 207.313645 | 0.445833 |
+| 1 epoch x 256 batches | 256 | 188.317820 | 0.450833 |
+| 2 epochs x 128 batches | 256 | 189.854044 | 0.450000 |
+
+The 128-step arm undertrains. At 256 steps, broader calibration coverage moves
+WikiText by less than one PPL point and slightly lowers the task mean. Coverage
+is not the missing quality lever for this retained cache; the original 8x32
+schedule remains the better balanced schedule.
+
+The coefficient sweep was then extended below 1x on that schedule. A value of
+zero is the defective conditional-only objective, while 1x is the exact
+top-k-plus-tail cross entropy. Intermediate values retain the tail bucket but
+let conditional shape matching carry more of the update.
+
+| Mass coefficient | Held-out NLL | Held-out full KL | Student top-64 mass | Block-25 NRMSE | WikiText PPL | Mean task score |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1.00 | 3.868449* | 1.163367* | 0.825772* | 0.337467* | 188.715654 | 0.455000 |
+| **0.50** | **3.656679** | **1.233479** | 0.806770 | 0.393253 | 178.363145 | **0.462500** |
+| 0.25 | 3.638683 | 1.234190 | 0.769383 | 0.430556 | **169.960621** | 0.455000 |
+
+`*` The 1x monitor used the original 4x128 set, so its absolute monitor values
+are not directly comparable with the 16x128 values below it. The quality
+protocol is identical across all three rows.
+
+The 0.5x checkpoint is the first tail-aware candidate to improve both retained
+quality gates: relative to 1x it lowers PPL by 10.35 and raises the six-task
+mean by 0.0075; relative to pre-KD it lowers PPL by 79.12 and raises the task
+mean by 0.0058. The task gain is distributed across PIQA, HellaSwag,
+Winogrande, and BoolQ rather than coming from a single benchmark. Reducing the
+coefficient to 0.25 buys another 8.40 PPL but loses the entire task gain while
+tail-mass error and block-25 drift continue to grow. The selected coefficient
+is therefore 0.5, not the NLL-minimizing endpoint.
 
 ## Remaining block-25 marginal
 
@@ -165,28 +211,36 @@ student logits downward relative to the rest of the vocabulary. The much
 smaller block-25 drift supports the audit's explanation that the final MLP was
 absorbing a model-wide output-distribution error.
 
-However, the experiment also shows that the conditional objective has a useful
-early phase. At 32 steps it reaches lower held-out NLL than the tail-aware arm,
-although its full KL and mass calibration are already worse. The production
-policy should therefore compare checkpoints on held-out NLL and full or
-tail-bucket KL. Training loss cannot select the checkpoint in either arm.
+However, the experiment also shows that the conditional component carries a
+useful quality signal. At 32 steps it reaches lower held-out NLL than the exact
+tail-aware arm, although its full KL and mass calibration are already worse.
+At 256 steps, a 0.5 mass coefficient preserves enough of that signal to improve
+both retained quality gates without reverting to the zero-mass collapse. The
+production policy must therefore compare checkpoints on held-out NLL and full
+or tail-bucket KL, then require the secondary quality gate. Training loss or
+NLL alone would select the inferior 0.25 endpoint.
 
 ## Decision
 
-The objective diagnosis is confirmed, but neither tail-aware KD nor the old
-block-25 compensator should be promoted unchanged:
+The objective diagnosis is confirmed and the bounded 0.5x candidate clears
+both retained quality gates, but it is not yet integrated into the resident
+workflow:
 
 1. keep Experiment 036 paused;
 2. reject a full 2,048-step conditional continuation and reject a block-25
    refit after tail-aware KD;
-3. retain the exact 1x tail objective as the correct output-distribution loss;
-4. require held-out full-KL/NLL checkpoint selection, since training loss and
-   conditional KL select defective states;
-5. next test broader calibration coverage and shorter schedules against both
-   WikiText and the pinned secondary task gate, rather than increasing the
-   mass coefficient;
-6. integrate the objective into the production workflow only after one
-   candidate improves both language-model quality and the secondary gate.
+3. retain the exact tail bucket, but expose its binary mass term as an explicit
+   coefficient and select 0.5 for the current Gemma candidate;
+4. require held-out full-KL/NLL checkpoint selection followed by the secondary
+   quality gate, since training loss, conditional KL, and NLL alone select
+   defective or inferior states;
+5. reject broader-coverage and 128-step schedule changes for this cache;
+6. before changing the production default, confirm the 0.5 coefficient on a
+   second model or a larger independent task sample so the 0.0075 limited-task
+   gain is not treated as universal evidence;
+7. integrate the objective and checkpoint-selection policy only with explicit
+   model-level evidence; keep the coefficient configurable rather than
+   hard-coding Gemma's selected value.
 
 ## Evidence
 
@@ -199,6 +253,13 @@ block-25 compensator should be promoted unchanged:
 - `evidence/035/experiment035-topk-tail-mass4-bounded8x32/report.json`
 - `evidence/035/experiment035-topk-tail-kd-bounded8x32-derived-run/topk-tail-materialization.json`
 - `evidence/035/experiment035-topk-tail-kd-bounded8x32-quality.json`
+- `evidence/035/experiment035-topk-tail-kd-broad1x128-monitor16-quality.json`
+- `evidence/035/experiment035-topk-tail-kd-broad1x256-monitor16-quality.json`
+- `evidence/035/experiment035-topk-tail-kd-broad2x128-monitor16-quality.json`
+- `evidence/035/experiment035-topk-tail-mass0p5-bounded8x32-monitor16/report.json`
+- `evidence/035/experiment035-topk-tail-mass0p5-bounded8x32-monitor16-quality.json`
+- `evidence/035/experiment035-topk-tail-mass0p25-bounded8x32-monitor16/report.json`
+- `evidence/035/experiment035-topk-tail-mass0p25-bounded8x32-monitor16-quality.json`
 - `evidence/035/experiment035-prekd-quality.json`
 - `evidence/035/experiment035-tailkd-block25-teacher-context-fit380-val384-confirm412-48x512.json`
 
