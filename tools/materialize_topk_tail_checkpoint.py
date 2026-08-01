@@ -11,6 +11,7 @@ from pathlib import Path
 
 import _paths  # noqa: F401
 import torch
+from probe_distillation_checkpoint_tail_mass import discover_checkpoints
 from probe_mlp_policy_frozen_transfer import MODEL_SOURCE, PINNED_MODEL_REVISION
 
 from nanoquant.config.codec import from_dict, to_dict
@@ -38,6 +39,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-output", type=Path, required=True)
     parser.add_argument("--snapshot", type=Path, required=True)
     parser.add_argument("--checkpoint-output", type=Path, required=True)
+    parser.add_argument(
+        "--epoch",
+        type=int,
+        help="Materialize a specific durable epoch instead of the active checkpoint.",
+    )
     parser.add_argument("--derived-run-output", type=Path, required=True)
     parser.add_argument("--model-source", default=MODEL_SOURCE)
     parser.add_argument("--model-revision", default=PINNED_MODEL_REVISION)
@@ -61,7 +67,19 @@ def _hardlink_tree(source: Path, destination: Path) -> int:
     return linked
 
 
-def _load_checkpoint(checkpoint_output: Path) -> CommittedDistillationCheckpoint:
+def _load_checkpoint(
+    checkpoint_output: Path,
+    epoch: int | None = None,
+) -> CommittedDistillationCheckpoint:
+    if epoch is not None:
+        if epoch <= 0:
+            raise ValueError("materialized checkpoint epoch must be positive")
+        candidate = discover_checkpoints(checkpoint_output, {epoch})[0]
+        return load_distillation_checkpoint(
+            candidate.reference,
+            candidate.identity,
+            LocalArtifactStore(checkpoint_output / "artifacts"),
+        )
     pointer = from_dict(
         ArtifactRef,
         json.loads(
@@ -95,7 +113,7 @@ def run(args: argparse.Namespace) -> int:
     )
     if checkpoint_report.get("status") != "completed":
         raise ValueError("top-k tail checkpoint experiment is not complete")
-    checkpoint = _load_checkpoint(args.checkpoint_output)
+    checkpoint = _load_checkpoint(args.checkpoint_output, args.epoch)
     started = time.perf_counter()
     source_artifacts = LocalArtifactStore(source / "artifacts")
     loaded = load_frozen_run(
