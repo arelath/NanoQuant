@@ -112,3 +112,13 @@ importantly, the fresh block-25 refit after tail-aware KD worsened untouched
 block-25 gain was compensation for the conditional-KD defect, not reusable
 initialization evidence. Experiment 036 remains paused; it should not inherit
 that compensator.
+
+The selected 0.5 tail-mass coefficient has now also passed a pinned 48x512 C4
+gate against the exact 1.0 tail objective: paired NLL delta `-0.044465`
+(`[-0.050693, -0.038023]`) and full-KL delta `-0.018483`
+(`[-0.021759, -0.015215]`). This strengthens the global-KD direction but does
+not revive Experiment 036. The next full campaign must receive a new number
+and compare a production-integrated tail-aware global KD branch with a matched
+conditional branch from one fresh frozen factor state. The required staged
+gates are in
+[76-tail-aware-global-kd-final-experiment-plan.md](../76-tail-aware-global-kd-final-experiment-plan.md).

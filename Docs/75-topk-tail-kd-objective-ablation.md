@@ -180,6 +180,22 @@ coefficient to 0.25 buys another 8.40 PPL but loses the entire task gain while
 tail-mass error and block-25 drift continue to grow. The selected coefficient
 is therefore 0.5, not the NLL-minimizing endpoint.
 
+## Independent non-WikiText confirmation
+
+The selected candidate also passed the non-WikiText gate requested by the
+Experiment 035/036 review. On a pinned 48x512 C4 validation slice, 0.5x versus
+1x improves NLL by `-0.044465` with paired 95% interval
+`[-0.050693, -0.038023]` and full-vocabulary teacher KL by `-0.018483` with
+interval `[-0.021759, -0.015215]`. Its C4 perplexity is 144.165461 versus
+150.720479 at 1x and 191.963656 pre-KD.
+
+The 0.25 arm reaches 133.725278 C4 perplexity but remains rejected because it
+loses the six-task gain. C4 therefore confirms both that the tail-aware update
+generalizes beyond WikiText and that the 0.5 selection is a balanced-quality
+decision rather than the minimum-NLL choice. The exact protocol, hashes,
+production integration gates, and final fresh-campaign design are recorded in
+[76-tail-aware-global-kd-final-experiment-plan.md](76-tail-aware-global-kd-final-experiment-plan.md).
+
 ## Remaining block-25 marginal
 
 The exact fresh teacher-context block-25 refit was repeated from the
@@ -237,7 +253,8 @@ workflow:
 5. reject broader-coverage and 128-step schedule changes for this cache;
 6. before changing the production default, confirm the 0.5 coefficient on a
    second model or a larger independent task sample so the 0.0075 limited-task
-   gain is not treated as universal evidence;
+   gain is not treated as universal evidence; the independent C4 NLL/KL gate
+   has passed, but it is not a replacement for cross-model evidence;
 7. integrate the objective and checkpoint-selection policy only with explicit
    model-level evidence; keep the coefficient configurable rather than
    hard-coding Gemma's selected value.
@@ -260,6 +277,7 @@ workflow:
 - `evidence/035/experiment035-topk-tail-mass0p5-bounded8x32-monitor16-quality.json`
 - `evidence/035/experiment035-topk-tail-mass0p25-bounded8x32-monitor16/report.json`
 - `evidence/035/experiment035-topk-tail-mass0p25-bounded8x32-monitor16-quality.json`
+- `evidence/035/experiment035-tail-mass-c4-validation104-48x512.json`
 - `evidence/035/experiment035-prekd-quality.json`
 - `evidence/035/experiment035-tailkd-block25-teacher-context-fit380-val384-confirm412-48x512.json`
 
