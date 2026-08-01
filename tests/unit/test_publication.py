@@ -9,6 +9,7 @@ import pytest
 from nanoquant.infrastructure.publication import (
     PublishableArtifact,
     PublishableArtifactKind,
+    publish_artifacts,
     publish_experiment_artifacts,
     publish_run_artifacts,
 )
@@ -93,6 +94,41 @@ def test_publication_does_not_replace_unmanaged_result_file(tmp_path: Path) -> N
 def test_publication_requires_at_least_one_artifact(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="at least one"):
         publish_experiment_artifacts(tmp_path, 2, ())
+
+
+def test_publication_rejects_a_lexically_external_directory(tmp_path: Path) -> None:
+    source = tmp_path / "stats.json"
+    source.write_text("source", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="child of the repository Results"):
+        publish_artifacts(
+            tmp_path,
+            tmp_path / "outside" / "002",
+            (PublishableArtifact(source, PublishableArtifactKind.STATISTICS),),
+            experiment_number=2,
+        )
+
+
+def test_publication_allows_a_junctioned_results_child(tmp_path: Path) -> None:
+    source = tmp_path / "staging" / "stats.json"
+    source.parent.mkdir()
+    source.write_text("source", encoding="utf-8")
+    results = tmp_path / "Results"
+    results.mkdir()
+    destination = results / "042"
+    try:
+        destination.symlink_to(source.parent, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"directory links are unavailable: {exc}")
+
+    result = publish_experiment_artifacts(
+        tmp_path,
+        42,
+        (PublishableArtifact(source, PublishableArtifactKind.STATISTICS),),
+    )
+
+    assert result.results_directory == source.parent
+    assert os.path.samefile(source, destination / "stats.json")
 
 
 def test_interactive_publication_uses_non_numbered_owned_results_directory(

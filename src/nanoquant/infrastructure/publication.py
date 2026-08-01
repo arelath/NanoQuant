@@ -128,15 +128,20 @@ def publish_artifacts(
     if experiment_number is None and (run_name is None or not run_name.strip()):
         raise ValueError("non-experiment publication requires a run name")
     root = Path(repository_root).resolve()
-    destination_root = Path(results_directory)
-    if not destination_root.is_absolute():
-        destination_root = root / destination_root
-    destination_root = destination_root.resolve()
-    expected_results_root = (root / "Results").resolve()
-    if destination_root == expected_results_root or not destination_root.is_relative_to(
-        expected_results_root
+    lexical_destination = Path(results_directory)
+    if not lexical_destination.is_absolute():
+        lexical_destination = root / lexical_destination
+    lexical_destination = Path(os.path.abspath(lexical_destination))
+    lexical_results_root = Path(os.path.abspath(root / "Results"))
+    if lexical_destination == lexical_results_root or not lexical_destination.is_relative_to(
+        lexical_results_root
     ):
         raise ValueError("publication directory must be a child of the repository Results directory")
+    # Validate ownership against the caller's lexical repository path before
+    # resolving a deliberately junctioned experiment directory. This permits
+    # large outputs to live on another volume while retaining the Results/NNN
+    # contract, without allowing ``..`` or an arbitrary absolute destination.
+    destination_root = lexical_destination.resolve()
     destination_root.mkdir(parents=True, exist_ok=True)
     manifest = destination_root / "publication.json"
     previous = _previous_artifacts(manifest)
