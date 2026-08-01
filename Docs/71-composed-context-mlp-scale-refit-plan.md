@@ -552,3 +552,51 @@ Phase C evidence:
 - `experiment022-postkd-coordinate-plus25-phaseC-lr1e4-logical-validation.json`
 - `experiment022-postkd-coordinate-plus25-phaseC-lr1e4-packed-validation.json`
 - `experiment022-postkd-coordinate-plus25-phaseC-lr1e4-packed-quality.json`
+
+## Experiment 035 production-integration result
+
+Experiment 035 moved the foldable-multiplier method into the canonical complete
+compression workflow. The stage now runs after global top-k distillation and
+before logical export, checkpoints every 16 steps, writes a hash-bound active
+component state, and is mandatory input to fresh logical validation whenever
+enabled. The complete numbered workflow ran a fresh D2 campaign, all 26 block
+commits, global KD, the 64-step continuation, exact logical and packed export,
+GGUF conversion, and the full retained quality protocol.
+
+The integration contract passed:
+
+- fresh resident validation audited 708 transitive artifacts and all 26 blocks;
+- 64/64 multiplier steps completed with complete finite gradient coverage;
+- folded replay maximum absolute error was zero;
+- 234 tensors and `3,115,008` bytes replaced the same byte count;
+- logical and packed exports were exact;
+- effective BPW remained `1.0244947118`;
+- the full 64x128 plus six-task benchmark completed and passed its runtime
+  validity checks.
+
+Identity initialization did **not** pass the numerical advancement gate. On the
+untouched validation 104-151 confirmation, folded minus same-run post-KD NLL was
+`+0.000173`, interval `[-0.000564,+0.000881]`, and full-vocabulary KL was
+`+0.0000368`, interval `[-0.000550,+0.000605]`. The retained 128-token benchmark
+did move slightly (`221.035336` to `220.879050` perplexity), and mean task score
+moved `0.472500` to `0.474167`, but these small post-hoc gains do not override
+the predeclared held-out NLL gate.
+
+Relative to Experiment 022, Experiment 035 improves perplexity by 3.357% and
+mean task score by 0.005000. The same-run ablation shows that most of this gain
+comes from the fresh D2 campaign, not the multiplier continuation. Its packed
+payload is also eight bytes above Experiment 022 (`89,480,664` versus
+`89,480,656`) despite identical effective BPW and GGUF size. The foldable stage
+itself remains byte-neutral; the eight-byte difference is upstream packing
+variation from the fresh campaign.
+
+Decision: the production integration is accepted, but identity-only numerical
+policy is rejected. The confirmed six-block composed-context initialization
+remains essential: its Phase C perplexity is `169.481866`, far ahead of the
+identity-initialized `220.879050`. The next production experiment should
+integrate that composed-context coordinate initializer before running the
+conservative global continuation.
+
+Experiment 035 evidence is documented in
+`Docs/Experiments/035-foldable-mlp-d2-compression.md` and retained under
+`evidence/035`, `outputs/035`, and `Results/035`.

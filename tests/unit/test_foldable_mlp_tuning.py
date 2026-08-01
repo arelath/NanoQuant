@@ -8,6 +8,7 @@ from nanoquant.application.foldable_mlp_multipliers import InstalledMultipliers
 from nanoquant.foldable_mlp_tuning import (
     _checkpoint_state,
     _learning_rate,
+    _record_gradient_step,
     _restore_checkpoint,
 )
 
@@ -71,3 +72,11 @@ def test_foldable_mlp_checkpoint_restores_parameters_optimizer_and_progress(
 def test_foldable_mlp_cosine_schedule_reaches_zero() -> None:
     assert _learning_rate(1e-4, 0, 64) == 1e-4
     assert _learning_rate(1e-4, 64, 64) == 0.0
+
+
+def test_foldable_mlp_records_only_first_resumed_and_final_gradient_steps() -> None:
+    assert [
+        index
+        for index in range(16, 64)
+        if _record_gradient_step(index, starting_step=16, total_steps=64)
+    ] == [16, 63]

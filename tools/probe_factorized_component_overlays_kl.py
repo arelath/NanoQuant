@@ -32,11 +32,11 @@ from nanoquant.infrastructure.model_adapters import adapter_for_config
 from nanoquant.kl_budget_workflow import _token_hash
 
 
-def _parse_arm(value: str) -> tuple[str, Path]:
+def _parse_arm(value: str) -> tuple[str, Path | None]:
     name, separator, path = value.partition("=")
-    if not separator or not name.strip() or not path.strip():
-        raise argparse.ArgumentTypeError("component arm must use name=path")
-    return name.strip(), Path(path.strip())
+    if not name.strip() or (separator and not path.strip()):
+        raise argparse.ArgumentTypeError("component arm must use name or name=path")
+    return name.strip(), None if not separator else Path(path.strip())
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -165,10 +165,14 @@ def run(args: argparse.Namespace) -> int:
             if global_tuning is not None and observed_tuning != global_tuning:
                 raise ValueError("factorized component arms have different global tuning identities")
             global_tuning = observed_tuning
-            manifests[name] = {
-                "directory": str(path),
-                **json.loads((path / "manifest.json").read_text(encoding="utf-8")),
-            }
+            manifests[name] = (
+                None
+                if path is None
+                else {
+                    "directory": str(path),
+                    **json.loads((path / "manifest.json").read_text(encoding="utf-8")),
+                }
+            )
             results[name] = _evaluate_arm(
                 name,
                 teacher,

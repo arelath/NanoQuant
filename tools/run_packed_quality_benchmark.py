@@ -1,4 +1,4 @@
-"""Run the complete retained BF16-versus-packed quality benchmark."""
+"""Run the complete retained BF16-versus-frozen or packed quality benchmark."""
 
 from __future__ import annotations
 
@@ -24,7 +24,11 @@ DEFAULT_TASKS = (
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--packed-artifact", type=Path, required=True)
+    parser.add_argument(
+        "--packed-artifact",
+        type=Path,
+        help="optional packed artifact; omit it to evaluate the committed factorized run",
+    )
     parser.add_argument("--run-output", type=Path, required=True)
     parser.add_argument("--snapshot", type=Path, required=True)
     parser.add_argument("--source", required=True)

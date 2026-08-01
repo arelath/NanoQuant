@@ -242,6 +242,10 @@ def _learning_rate(base: float, completed_steps: int, total_steps: int) -> float
     return base * (1.0 + math.cos(math.pi * completed_steps / total_steps)) / 2.0
 
 
+def _record_gradient_step(index: int, starting_step: int, total_steps: int) -> bool:
+    return index == starting_step or index + 1 == total_steps
+
+
 def _export_overlay(
     destination: Path,
     tensors: dict[str, torch.Tensor],
@@ -378,6 +382,7 @@ def _run(config: RunConfig, run_output: Path, snapshot: Path) -> FoldableMlpTuni
     cpu_tokens = tokens.detach().cpu()
     log_limit = math.log(tuning.multiplier_limit)
     gradient_checks: list[dict[str, object]] = []
+    starting_step = completed
     student.train()
     for index in range(completed, tuning.steps):
         target = batches[index]
@@ -409,7 +414,7 @@ def _run(config: RunConfig, run_output: Path, snapshot: Path) -> FoldableMlpTuni
             for family in coverage.values()
         ):
             raise FloatingPointError(f"foldable MLP multiplier gradient coverage is invalid: {coverage}")
-        if index == completed or index + 1 == tuning.steps:
+        if _record_gradient_step(index, starting_step, tuning.steps):
             gradient_checks.append({"step": index + 1, "families": coverage})
         gradient_norm = torch.nn.utils.clip_grad_norm_(parameters, tuning.gradient_clip)
         if not torch.isfinite(loss) or not torch.isfinite(gradient_norm):
