@@ -3,7 +3,15 @@ from dataclasses import FrozenInstanceError, replace
 
 import pytest
 
-from nanoquant.config.codec import ConfigDecodeError, apply_overrides, canonical_json, from_dict, to_dict
+from nanoquant.config.codec import (
+    ConfigDecodeError,
+    apply_overrides,
+    canonical_json,
+    config_hash,
+    from_dict,
+    semantic_hash,
+    to_dict,
+)
 from nanoquant.config.migration import migrate_legacy, migration_inventory
 from nanoquant.config.resolution import resolve_config
 from nanoquant.config.schema import (
@@ -14,6 +22,7 @@ from nanoquant.config.schema import (
     BehaviorSliceConfig,
     DatasetConfig,
     DatasetSourceConfig,
+    DistillationLoss,
     DType,
     FoldableMlpMultiplierTuningConfig,
     KlSensitivityGranularity,
@@ -374,6 +383,45 @@ def test_foldable_mlp_initializer_path_and_hash_are_paired_and_pinned() -> None:
         ),
     )
     assert {issue.code for issue in validate(invalid_limit)} == {"CFG119"}
+
+
+def test_tail_distillation_batch_cap_and_mass_weight_validate() -> None:
+    base = RunConfig(ModelConfig("x"))
+    invalid_cap = replace(
+        base,
+        distillation=replace(base.distillation, maximum_batches_per_epoch=0),
+    )
+    invalid_weight = replace(
+        base,
+        distillation=replace(base.distillation, tail_mass_weight=math.inf),
+    )
+
+    assert {issue.code for issue in validate(invalid_cap)} == {"CFG109"}
+    assert {issue.code for issue in validate(invalid_weight)} == {"CFG110"}
+
+
+def test_noop_tail_fields_preserve_legacy_config_hash() -> None:
+    legacy = RunConfig(ModelConfig("x"))
+    legacy_payload = to_dict(legacy)
+    legacy_payload["distillation"].pop("maximum_batches_per_epoch")
+    legacy_payload["distillation"].pop("tail_mass_weight")
+    conditional_with_unused_tail_weight = replace(
+        legacy,
+        distillation=replace(legacy.distillation, tail_mass_weight=0.5),
+    )
+    tail = replace(
+        legacy,
+        distillation=replace(
+            legacy.distillation,
+            loss=DistillationLoss.TOP_K_TAIL,
+            maximum_batches_per_epoch=32,
+            tail_mass_weight=0.5,
+        ),
+    )
+
+    assert config_hash(legacy) == semantic_hash(legacy_payload)
+    assert config_hash(conditional_with_unused_tail_weight) == config_hash(legacy)
+    assert config_hash(tail) != config_hash(legacy)
 
 
 def test_legacy_migration_is_total_and_rejects_uninventoried_fields() -> None:

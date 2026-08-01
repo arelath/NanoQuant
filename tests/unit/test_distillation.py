@@ -11,6 +11,7 @@ from nanoquant.application.distillation import (
     cache_topk_teacher_targets,
     distill_topk,
     teacher_topk_logits,
+    teacher_topk_logits_with_normalizers,
     topk_distillation_loss,
     topk_tail_distillation_loss,
     vocabulary_logsumexp,
@@ -37,7 +38,10 @@ def _hidden(model: nn.Module, token_ids: torch.Tensor) -> torch.Tensor:
 
 
 def test_distillation_config_uses_legacy_zero_weight_decay() -> None:
+    assert TopKDistillationConfig().objective == "top_k"
     assert TopKDistillationConfig().weight_decay == 0.0
+    assert TopKDistillationConfig().maximum_batches_per_epoch is None
+    assert TopKDistillationConfig().tail_mass_weight == 1.0
     assert TopKDistillationConfig().sampling_version == "legacy-python-device-rng-v1"
 
 
@@ -98,6 +102,95 @@ def test_chunked_teacher_topk_matches_dense_logits() -> None:
 
     assert torch.allclose(values, expected_values)
     assert torch.equal(indices, expected_indices)
+
+    summary_values, summary_indices, log_normalizers = teacher_topk_logits_with_normalizers(
+        hidden,
+        head,
+        top_k=6,
+        vocabulary_chunk_size=4,
+        temperature=0.7,
+    )
+    assert torch.equal(summary_values, values)
+    assert torch.equal(summary_indices, indices)
+    assert torch.allclose(
+        log_normalizers,
+        torch.logsumexp(head(hidden).float() / 0.7, dim=-1),
+        atol=1e-6,
+    )
+
+
+def test_tail_cache_batch_cap_matches_prefix_of_uncapped_rng_plan() -> None:
+    torch.manual_seed(61)
+    teacher = ToyLanguageModel()
+    tokens = torch.arange(20).remainder(17).reshape(4, 5)
+    uncapped_config = TopKDistillationConfig(
+        objective="top_k_tail",
+        epochs=2,
+        batch_size=1,
+        top_k=3,
+        vocabulary_chunk_size=8,
+        token_chunk_size=4,
+        maximum_tokens_per_batch=2,
+        seed=7,
+    )
+    capped_config = TopKDistillationConfig(
+        objective="top_k_tail",
+        epochs=2,
+        batch_size=1,
+        top_k=3,
+        vocabulary_chunk_size=8,
+        token_chunk_size=4,
+        maximum_tokens_per_batch=2,
+        maximum_batches_per_epoch=2,
+        tail_mass_weight=0.5,
+        seed=7,
+    )
+
+    uncapped = cache_topk_teacher_targets(
+        teacher,
+        tokens,
+        teacher.lm_head,
+        _hidden,
+        uncapped_config,
+        device="cpu",
+        pad_token_id=None,
+    )
+    capped = cache_topk_teacher_targets(
+        teacher,
+        tokens,
+        teacher.lm_head,
+        _hidden,
+        capped_config,
+        device="cpu",
+        pad_token_id=None,
+    )
+
+    assert tuple(len(epoch) for epoch in capped.epochs) == (2, 2)
+    for capped_epoch, uncapped_epoch in zip(capped.epochs, uncapped.epochs, strict=True):
+        for capped_batch, uncapped_batch in zip(capped_epoch, uncapped_epoch[:2], strict=True):
+            assert capped_batch.sample_indices == uncapped_batch.sample_indices
+            assert torch.equal(capped_batch.token_indices, uncapped_batch.token_indices)
+            assert torch.equal(capped_batch.top_values, uncapped_batch.top_values)
+            assert torch.equal(capped_batch.top_indices, uncapped_batch.top_indices)
+            assert capped_batch.teacher_log_normalizers is not None
+            assert uncapped_batch.teacher_log_normalizers is not None
+            assert torch.equal(
+                capped_batch.teacher_log_normalizers,
+                uncapped_batch.teacher_log_normalizers,
+            )
+    expected_bytes = sum(
+        tensor.numel() * tensor.element_size()
+        for epoch in capped.epochs
+        for batch in epoch
+        for tensor in (
+            batch.token_indices,
+            batch.top_values,
+            batch.top_indices,
+            batch.teacher_log_normalizers,
+        )
+        if tensor is not None
+    )
+    assert capped.bytes == expected_bytes
 
 
 def test_chunked_vocabulary_logsumexp_matches_dense_value_and_gradient() -> None:
@@ -384,7 +477,10 @@ def test_cached_topk_distillation_is_bounded_deterministic_and_improves_student(
     )
 
 
-def test_topk_distillation_resume_restores_adam_and_scheduler_exactly() -> None:
+@pytest.mark.parametrize("objective", ["top_k", "top_k_tail"])
+def test_topk_distillation_resume_restores_adam_and_scheduler_exactly(
+    objective: str,
+) -> None:
     torch.manual_seed(11)
     teacher = ToyLanguageModel()
     initial_student = deepcopy(teacher)
@@ -392,6 +488,7 @@ def test_topk_distillation_resume_restores_adam_and_scheduler_exactly() -> None:
         initial_student.projection.weight.add_(0.2)
     tokens = torch.randint(1, 17, (6, 5), generator=torch.Generator().manual_seed(12))
     config = TopKDistillationConfig(
+        objective=objective,
         epochs=4,
         batch_size=2,
         learning_rate=0.025,

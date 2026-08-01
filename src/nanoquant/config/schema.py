@@ -115,6 +115,7 @@ class OutlierSelector(StringEnum):
 
 class DistillationLoss(StringEnum):
     TOP_K = "top_k"
+    TOP_K_TAIL = "top_k_tail"
     FULL_KL = "full_kl"
 
 
@@ -550,6 +551,8 @@ class DistillationConfig:
     vocabulary_chunk_size: int = 8192
     token_chunk_size: int = 128
     maximum_tokens_per_batch: int | None = 512
+    maximum_batches_per_epoch: int | None = None
+    tail_mass_weight: float = 1.0
     gradient_checkpointing: bool = True
     weight_decay: float = 0.0
     optimizer_version: str = "legacy-optimi-adamw-v1"

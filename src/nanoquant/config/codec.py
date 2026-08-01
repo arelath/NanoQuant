@@ -128,7 +128,17 @@ def semantic_hash(value: Any) -> str:
 
 
 def config_hash(config: RunConfig) -> str:
-    return semantic_hash(config)
+    payload = to_dict(config)
+    if not isinstance(payload, dict):
+        raise TypeError("run config did not encode as an object")
+    distillation = payload.get("distillation")
+    if isinstance(distillation, dict) and distillation.get("loss") == "top_k":
+        if distillation.get("maximum_batches_per_epoch") is None:
+            distillation.pop("maximum_batches_per_epoch", None)
+        # This coefficient is semantically inactive for the conditional-only
+        # objective, independent of the configured numeric value.
+        distillation.pop("tail_mass_weight", None)
+    return semantic_hash(payload)
 
 
 def load_config(path: str | Path) -> RunConfig:

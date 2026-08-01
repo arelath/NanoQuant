@@ -11,6 +11,7 @@ from transformers.models.gemma3.modeling_gemma3 import Gemma3ForCausalLM
 import nanoquant.global_distillation as global_distillation_module
 from nanoquant.application.distillation import TopKDistillationConfig
 from nanoquant.application.layers import TrainableFactorizedLinear
+from nanoquant.config.codec import semantic_hash, to_dict
 from nanoquant.config.schema import ADMMConfig, SharedInputGroupConfig
 from nanoquant.global_distillation import GlobalDistillationRequest, run_global_topk_distillation
 from nanoquant.infrastructure.artifacts import LocalArtifactStore
@@ -66,9 +67,11 @@ def test_global_distillation_selects_budgeted_side_tensors_but_not_binary_latent
     assert set(auxiliary) == {"norm.weight", "norm.bias"}
 
 
+@pytest.mark.parametrize("objective", ["top_k", "top_k_tail"])
 def test_complete_frozen_run_can_be_distilled_committed_and_reloaded(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    objective: str,
 ) -> None:
     snapshot = tmp_path / "snapshot"
     with torch.random.fork_rng():
@@ -138,6 +141,7 @@ def test_complete_frozen_run_can_be_distilled_committed_and_reloaded(
         "pinned-test-revision",
         tokens,
         TopKDistillationConfig(
+            objective=objective,
             epochs=3,
             batch_size=2,
             learning_rate=0.02,
@@ -147,6 +151,7 @@ def test_complete_frozen_run_can_be_distilled_committed_and_reloaded(
             maximum_tokens_per_batch=8,
             gradient_checkpointing=False,
             weight_decay=0.0,
+            tail_mass_weight=0.5,
         ),
         device="cpu",
         initial_cooldown_seconds=1.5,
@@ -158,6 +163,12 @@ def test_complete_frozen_run_can_be_distilled_committed_and_reloaded(
     distilled = run_global_topk_distillation(request)
     assert cooldowns == [1.5, 1.5, 3.25]
     assert offloads == ["cpu", "cpu"]
+    protocol = to_dict(request.config)
+    if objective == "top_k":
+        protocol.pop("objective")
+        protocol.pop("maximum_batches_per_epoch")
+        protocol.pop("tail_mass_weight")
+    assert distilled.result.protocol_hash == semantic_hash(protocol)
     profiles = [json.loads(path.read_text(encoding="utf-8")) for path in sorted(output.glob("profile*.json"))]
     distillation_profiles = [profile for profile in profiles if profile["run_id"] == "global-distillation"]
     assert len(distillation_profiles) == 2
@@ -184,6 +195,19 @@ def test_complete_frozen_run_can_be_distilled_committed_and_reloaded(
     cache_journal = json.loads((output / "global-distillation-cache.json").read_text(encoding="utf-8"))
     assert len(cache_journal["epochs"]) == 3
     assert all(reference is not None for reference in cache_journal["epochs"])
+    first_epoch_reference = cache_journal["epochs"][0]
+    assert isinstance(first_epoch_reference, dict)
+    first_epoch_manifest = json.loads(
+        (
+            LocalArtifactStore(output / "artifacts").path_for(
+                str(first_epoch_reference["artifact_id"])
+            )
+            / "epoch.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert first_epoch_manifest["schema_version"] == (
+        3 if objective == "top_k_tail" else 1
+    )
     persisted = load_global_tuning(distilled.reference, LocalArtifactStore(output / "artifacts"))
     assert persisted.result == distilled.result
     assert distilled.metrics.steps_completed == 6

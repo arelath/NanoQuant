@@ -94,9 +94,11 @@ global-distillation workflow:
    conditional checkpoint must never resume as a tail-aware run.
 5. Dispatch the existing conditional loss unchanged for `top_k`; dispatch the
    tested top-k-plus-tail math for `top_k_tail`.
-6. Increment the resident algorithm version when this semantic execution path
-   is integrated so shared-store orphan adoption cannot mix old and new
-   commits.
+6. Preserve the resident block algorithm version because quantization block
+   numerics are unchanged. Separate conditional and tail-aware teacher caches,
+   optimizer checkpoints, and global-tuning results through their objective-
+   bound protocol hashes; preserve old conditional hashes when every new field
+   is at its no-op default.
 
 ## Gate B: production tests
 

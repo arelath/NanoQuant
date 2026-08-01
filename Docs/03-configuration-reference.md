@@ -100,6 +100,7 @@ class OutlierSelector(StringEnum):
 
 class DistillationLoss(StringEnum):
     TOP_K = "top_k"
+    TOP_K_TAIL = "top_k_tail"
     FULL_KL = "full_kl"
 
 
@@ -458,6 +459,8 @@ class DistillationConfig:
     vocabulary_chunk_size: int = 8192
     token_chunk_size: int = 128
     maximum_tokens_per_batch: Optional[int] = 512
+    maximum_batches_per_epoch: Optional[int] = None
+    tail_mass_weight: float = 1.0
     gradient_checkpointing: bool = True
     weight_decay: float = 0.0
     optimizer_version: str = "legacy-optimi-adamw-v1"
@@ -475,6 +478,18 @@ controls no-gradient teacher propagation and loss snapshots.
 The block-level batch, microbatch, and replay fields are semantic because they can change optimizer arithmetic and legacy
 trajectory parity. Distillation also records optimizer and sampling protocol versions so a resume cannot silently
 adopt checkpoints produced by a different recurrence.
+
+`loss=top_k` preserves the legacy conditional teacher-top-k objective.
+`loss=top_k_tail` adds one aggregated vocabulary-tail bucket, caches the
+teacher full-vocabulary log-normalizer for every selected token, and applies
+`tail_mass_weight` to the binary selected-mass/tail-mass cross entropy. A
+weight of 1.0 is the exact top-k-plus-tail cross entropy; smaller positive
+values retain the tail constraint while emphasizing conditional shape.
+`maximum_batches_per_epoch` caps optimizer batches after deterministic target
+selection while still advancing the legacy sampling RNG through the full
+epoch, so later capped epochs match prefixes of the uncapped target plan. The
+loss, coefficient, cap, and cached-target schema are semantic resume identity
+inputs.
 
 ## 9. Runtime, storage, and resume
 

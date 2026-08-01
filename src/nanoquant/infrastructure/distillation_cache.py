@@ -47,6 +47,10 @@ def commit_teacher_epoch(
     identity: TeacherCacheIdentity,
     artifacts: LocalArtifactStore,
 ) -> CommittedTeacherEpoch:
+    has_token_weights = tuple(batch.token_weights is not None for batch in batches)
+    has_log_normalizers = tuple(batch.teacher_log_normalizers is not None for batch in batches)
+    if len(set(has_token_weights)) > 1 or len(set(has_log_normalizers)) > 1:
+        raise ValueError("teacher-target epoch batches must use one consistent schema")
     values: dict[str, torch.Tensor] = {}
     manifest_batches = []
     cache_bytes = 0
@@ -57,10 +61,20 @@ def commit_teacher_epoch(
         values[f"{prefix}.top_indices"] = batch.top_indices.contiguous()
         if batch.token_weights is not None:
             values[f"{prefix}.token_weights"] = batch.token_weights.contiguous()
+        if batch.teacher_log_normalizers is not None:
+            values[f"{prefix}.teacher_log_normalizers"] = (
+                batch.teacher_log_normalizers.contiguous()
+            )
         manifest_batches.append({"prefix": prefix, "sample_indices": list(batch.sample_indices)})
         cache_bytes += sum(
             tensor.numel() * tensor.element_size()
-            for tensor in (batch.token_indices, batch.top_values, batch.top_indices, batch.token_weights)
+            for tensor in (
+                batch.token_indices,
+                batch.top_values,
+                batch.top_indices,
+                batch.token_weights,
+                batch.teacher_log_normalizers,
+            )
             if tensor is not None
         )
     if not values:
@@ -68,10 +82,18 @@ def commit_teacher_epoch(
     with artifacts.recorder.phase("serialize"):
         encoded = json.dumps(
             {
-                "schema_version": 2 if any(batch.token_weights is not None for batch in batches) else 1,
+                "schema_version": (
+                    3
+                    if any(has_log_normalizers)
+                    else 2
+                    if any(has_token_weights)
+                    else 1
+                ),
                 "identity": to_dict(identity),
                 "epoch_index": epoch_index,
                 "bytes": cache_bytes,
+                "has_token_weights": any(has_token_weights),
+                "has_teacher_log_normalizers": any(has_log_normalizers),
                 "batches": manifest_batches,
             },
             sort_keys=True,
@@ -101,18 +123,29 @@ def load_teacher_epoch(
         raise ValueError("teacher-cache artifact identity does not match the requested protocol")
     batches = []
     schema_version = int(manifest.get("schema_version", 1))
+    has_token_weights = bool(
+        manifest.get("has_token_weights", schema_version == 2)
+    )
+    has_teacher_log_normalizers = bool(
+        manifest.get("has_teacher_log_normalizers", schema_version >= 3)
+    )
     with SAFETENSORS.open(root / "targets.safetensors") as handle:
         for batch in manifest["batches"]:
             prefix = str(batch["prefix"])
             batches.append(
                 TopKTeacherBatch(
-                    tuple(int(index) for index in batch["sample_indices"]),
-                    handle.get_tensor(f"{prefix}.token_indices"),
-                    handle.get_tensor(f"{prefix}.top_values"),
-                    handle.get_tensor(f"{prefix}.top_indices"),
-                    (
+                    sample_indices=tuple(int(index) for index in batch["sample_indices"]),
+                    token_indices=handle.get_tensor(f"{prefix}.token_indices"),
+                    top_values=handle.get_tensor(f"{prefix}.top_values"),
+                    top_indices=handle.get_tensor(f"{prefix}.top_indices"),
+                    token_weights=(
                         handle.get_tensor(f"{prefix}.token_weights")
-                        if schema_version >= 2
+                        if has_token_weights
+                        else None
+                    ),
+                    teacher_log_normalizers=(
+                        handle.get_tensor(f"{prefix}.teacher_log_normalizers")
+                        if has_teacher_log_normalizers
                         else None
                     ),
                 )

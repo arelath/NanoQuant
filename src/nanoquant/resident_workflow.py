@@ -17,7 +17,7 @@ from huggingface_hub import snapshot_download
 from transformers.models.auto.tokenization_auto import AutoTokenizer
 
 from nanoquant.application.distillation import DistillationMetrics, TopKDistillationConfig
-from nanoquant.config.codec import config_hash, from_dict, semantic_hash
+from nanoquant.config.codec import config_hash, from_dict
 from nanoquant.config.schema import (
     ActivationGpuCacheMode,
     ActivationStorageConfig,
@@ -283,7 +283,11 @@ def _validate_supported_recipe(config: RunConfig) -> None:
         )
     _require(config.output.artifact_root == "artifacts", "output.artifact_root", "resident artifacts are run-local")
     if config.distillation.enabled:
-        _require(config.distillation.loss is DistillationLoss.TOP_K, "distillation.loss", "only top_k is implemented")
+        _require(
+            config.distillation.loss in {DistillationLoss.TOP_K, DistillationLoss.TOP_K_TAIL},
+            "distillation.loss",
+            "only top_k and top_k_tail are implemented",
+        )
         _require(
             config.distillation.teacher_targets_artifact is None,
             "distillation.teacher_targets_artifact",
@@ -520,6 +524,7 @@ def distillation_request_from_config(
         distillation_target_mask=inputs.distillation_target_mask,
         distillation_weights=inputs.distillation_weights,
         config=TopKDistillationConfig(
+            objective=distillation.loss.value,
             epochs=distillation.epochs,
             batch_size=distillation.batch_size,
             learning_rate=distillation.learning_rate,
@@ -528,6 +533,8 @@ def distillation_request_from_config(
             vocabulary_chunk_size=distillation.vocabulary_chunk_size,
             token_chunk_size=distillation.token_chunk_size,
             maximum_tokens_per_batch=distillation.maximum_tokens_per_batch,
+            maximum_batches_per_epoch=distillation.maximum_batches_per_epoch,
+            tail_mass_weight=distillation.tail_mass_weight,
             gradient_checkpointing=distillation.gradient_checkpointing,
             weight_decay=distillation.weight_decay,
             seed=config.reproducibility.seed,
@@ -688,7 +695,9 @@ def _reject_incompatible_run_before_preparation(output: Path, expected_config_ha
             canonical_run_config = resolved_config["canonical_run_config"]
             if not isinstance(canonical_run_config, dict):
                 raise TypeError("canonical_run_config must be an object")
-            stored_config_hash = semantic_hash(canonical_run_config)
+            stored_config_hash = config_hash(
+                from_dict(RunConfig, canonical_run_config, path="manifest.resolved_config.canonical_run_config")
+            )
     except (KeyError, OSError, TypeError, json.JSONDecodeError) as exc:
         raise ValueError(f"existing resident manifest is invalid: {manifest_path}") from exc
     if stored_config_hash == expected_config_hash:

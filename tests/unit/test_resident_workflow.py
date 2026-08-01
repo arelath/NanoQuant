@@ -96,10 +96,13 @@ def test_resident_recipe_maps_implicit_model_kd_defaults(tmp_path: Path) -> None
     request = distillation_request_from_config(_resident_config(), _inputs(tmp_path))
 
     assert request.config.epochs == 8
+    assert request.config.objective == "top_k"
     assert request.config.batch_size == 1
     assert request.config.learning_rate == 1e-5
     assert request.config.top_k == 64
     assert request.config.maximum_tokens_per_batch == 512
+    assert request.config.maximum_batches_per_epoch is None
+    assert request.config.tail_mass_weight == 1.0
     assert request.config.gradient_checkpointing
     assert request.config.weight_decay == 0.0
     assert request.config.optimizer_version == "legacy-optimi-adamw-v1"
@@ -112,8 +115,27 @@ def test_resident_mapping_rejects_unimplemented_semantics(tmp_path: Path) -> Non
     config = _resident_config()
     unsupported = replace(config, distillation=replace(config.distillation, loss=DistillationLoss.FULL_KL))
 
-    with pytest.raises(ValueError, match="only top_k is implemented"):
+    with pytest.raises(ValueError, match="only top_k and top_k_tail are implemented"):
         resident_request_from_config(unsupported, _inputs(tmp_path))
+
+
+def test_resident_recipe_maps_tail_kd_protocol(tmp_path: Path) -> None:
+    base = _resident_config()
+    configured = replace(
+        base,
+        distillation=replace(
+            base.distillation,
+            loss=DistillationLoss.TOP_K_TAIL,
+            maximum_batches_per_epoch=32,
+            tail_mass_weight=0.5,
+        ),
+    )
+
+    request = distillation_request_from_config(configured, _inputs(tmp_path))
+
+    assert request.config.objective == "top_k_tail"
+    assert request.config.maximum_batches_per_epoch == 32
+    assert request.config.tail_mass_weight == 0.5
 
 
 def test_resident_recipe_maps_dense_objective_to_covariance_refinement(tmp_path: Path) -> None:

@@ -706,6 +706,20 @@ def validate(config: RunConfig, phase: ValidationPhase = ValidationPhase.PRE_RES
         "distillation.maximum_tokens_per_batch",
         "must be positive when provided",
     )
+    require(
+        config.distillation.maximum_batches_per_epoch is None
+        or config.distillation.maximum_batches_per_epoch > 0,
+        "CFG109",
+        "distillation.maximum_batches_per_epoch",
+        "must be positive when provided",
+    )
+    require(
+        math.isfinite(config.distillation.tail_mass_weight)
+        and config.distillation.tail_mass_weight > 0,
+        "CFG110",
+        "distillation.tail_mass_weight",
+        "must be finite and positive",
+    )
     require(config.distillation.weight_decay >= 0, "CFG033", "distillation.weight_decay", "must not be negative")
     foldable = config.distillation.foldable_mlp_multipliers
     require(

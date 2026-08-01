@@ -364,10 +364,18 @@ def _run_global_topk_distillation(
         denominator_floor=request.block_snapshot_denominator_floor,
     )
     token_bytes = tokens.contiguous().view(torch.uint8).numpy().tobytes()
-    protocol_hash = semantic_hash(request.config)
-    teacher_protocol = to_dict(request.config)
-    if not isinstance(teacher_protocol, dict):
+    protocol = to_dict(request.config)
+    if not isinstance(protocol, dict):
         raise TypeError("distillation config did not encode as an object")
+    if protocol.get("objective") == "top_k":
+        protocol.pop("objective")
+        if protocol.get("maximum_batches_per_epoch") is None:
+            protocol.pop("maximum_batches_per_epoch")
+        # This coefficient is semantically inactive for the conditional-only
+        # objective, independent of the configured numeric value.
+        protocol.pop("tail_mass_weight")
+    protocol_hash = semantic_hash(protocol)
+    teacher_protocol = dict(protocol)
     teacher_protocol.pop("optimizer_version")
     # Teacher-cache schema v1 included weight decay even though it cannot
     # affect teacher targets. Normalize it to the original protocol value so

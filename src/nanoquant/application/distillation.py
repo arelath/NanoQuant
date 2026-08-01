@@ -27,6 +27,7 @@ DistillationProgressSink = Callable[[str, Mapping[str, object]], None]
 
 @dataclass(frozen=True, slots=True)
 class TopKDistillationConfig:
+    objective: str = "top_k"
     epochs: int = 8
     batch_size: int = 1
     learning_rate: float = 1e-5
@@ -35,6 +36,8 @@ class TopKDistillationConfig:
     vocabulary_chunk_size: int = 8192
     token_chunk_size: int = 128
     maximum_tokens_per_batch: int | None = 512
+    maximum_batches_per_epoch: int | None = None
+    tail_mass_weight: float = 1.0
     gradient_checkpointing: bool = True
     weight_decay: float = 0.0
     seed: int = 0
@@ -42,6 +45,8 @@ class TopKDistillationConfig:
     sampling_version: str = "legacy-python-device-rng-v1"
 
     def __post_init__(self) -> None:
+        if self.objective not in {"top_k", "top_k_tail"}:
+            raise ValueError("unsupported distillation objective")
         if self.epochs <= 0 or self.batch_size <= 0:
             raise ValueError("distillation epochs and batch size must be positive")
         if self.learning_rate <= 0 or self.temperature <= 0:
@@ -50,6 +55,10 @@ class TopKDistillationConfig:
             raise ValueError("distillation chunk sizes and top-k must be positive")
         if self.maximum_tokens_per_batch is not None and self.maximum_tokens_per_batch <= 0:
             raise ValueError("distillation maximum tokens per batch must be positive when provided")
+        if self.maximum_batches_per_epoch is not None and self.maximum_batches_per_epoch <= 0:
+            raise ValueError("distillation maximum batches per epoch must be positive when provided")
+        if not math.isfinite(self.tail_mass_weight) or self.tail_mass_weight <= 0:
+            raise ValueError("distillation tail mass weight must be finite and positive")
         if self.weight_decay < 0:
             raise ValueError("distillation weight decay cannot be negative")
         if self.optimizer_version != "legacy-optimi-adamw-v1":
@@ -65,6 +74,7 @@ class TopKTeacherBatch:
     top_values: torch.Tensor
     top_indices: torch.Tensor
     token_weights: torch.Tensor | None = None
+    teacher_log_normalizers: torch.Tensor | None = None
 
     def __post_init__(self) -> None:
         if not self.sample_indices:
@@ -86,6 +96,16 @@ class TopKTeacherBatch:
                 raise ValueError("teacher target weights must be cached on CPU")
             if not torch.isfinite(self.token_weights).all() or (self.token_weights < 0).any():
                 raise ValueError("teacher target weights must be finite and non-negative")
+        if self.teacher_log_normalizers is not None:
+            if (
+                self.teacher_log_normalizers.ndim != 1
+                or self.teacher_log_normalizers.shape != self.token_indices.shape
+            ):
+                raise ValueError("teacher log normalizers must align with token indices")
+            if self.teacher_log_normalizers.device.type != "cpu":
+                raise ValueError("teacher log normalizers must be cached on CPU")
+            if not torch.isfinite(self.teacher_log_normalizers).all():
+                raise ValueError("teacher log normalizers must be finite")
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,14 +151,14 @@ def select_kd_token_indices(
 
 
 @torch.no_grad()
-def teacher_topk_logits(
+def teacher_topk_logits_with_normalizers(
     hidden_states: torch.Tensor,
     lm_head: nn.Module,
     *,
     top_k: int,
     vocabulary_chunk_size: int,
     temperature: float,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     weight = getattr(lm_head, "weight", None)
     if not isinstance(weight, torch.Tensor) or weight.ndim != 2:
         raise TypeError("distillation LM head must expose a rank-two weight")
@@ -148,12 +168,19 @@ def teacher_topk_logits(
     requested_k = min(top_k, weight.shape[0])
     best_values: torch.Tensor | None = None
     best_indices: torch.Tensor | None = None
+    log_normalizers: torch.Tensor | None = None
     for start in range(0, weight.shape[0], vocabulary_chunk_size):
         end = min(start + vocabulary_chunk_size, weight.shape[0])
         chunk_bias = None if bias is None else bias[start:end]
         logits = torch.nn.functional.linear(hidden_states, weight[start:end], chunk_bias)
         if temperature != 1.0:
             logits = logits / temperature
+        chunk_log_normalizers = torch.logsumexp(logits.float(), dim=-1)
+        log_normalizers = (
+            chunk_log_normalizers
+            if log_normalizers is None
+            else torch.logaddexp(log_normalizers, chunk_log_normalizers)
+        )
         chunk_k = min(requested_k, logits.shape[-1])
         values, indices = torch.topk(logits, chunk_k, dim=-1)
         indices = indices + start
@@ -164,9 +191,28 @@ def teacher_topk_logits(
         merged_indices = torch.cat((best_indices, indices), dim=-1)
         best_values, order = torch.topk(merged_values, requested_k, dim=-1)
         best_indices = merged_indices.gather(-1, order)
-    if best_values is None or best_indices is None:
+    if best_values is None or best_indices is None or log_normalizers is None:
         raise ValueError("distillation LM head has an empty vocabulary")
-    return best_values, best_indices
+    return best_values, best_indices, log_normalizers
+
+
+@torch.no_grad()
+def teacher_topk_logits(
+    hidden_states: torch.Tensor,
+    lm_head: nn.Module,
+    *,
+    top_k: int,
+    vocabulary_chunk_size: int,
+    temperature: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    values, indices, _log_normalizers = teacher_topk_logits_with_normalizers(
+        hidden_states,
+        lm_head,
+        top_k=top_k,
+        vocabulary_chunk_size=vocabulary_chunk_size,
+        temperature=temperature,
+    )
+    return values, indices
 
 
 def selected_lm_head_logits(
@@ -455,7 +501,11 @@ def cache_topk_teacher_epoch(
                     selected = valid.index_select(0, permutation)
                 else:
                     selected = valid
-                if current_epoch == epoch_index and selected.numel() > 0:
+                within_batch_cap = (
+                    config.maximum_batches_per_epoch is None
+                    or len(epoch_plan) < config.maximum_batches_per_epoch
+                )
+                if current_epoch == epoch_index and selected.numel() > 0 and within_batch_cap:
                     epoch_plan.append((indices.clone(), selected))
     batches = []
     cache_bytes = 0
@@ -476,16 +526,31 @@ def cache_topk_teacher_epoch(
                 teacher_hidden = hidden_states(teacher, batch)
                 teacher_hidden = teacher_hidden.reshape(-1, teacher_hidden.shape[-1])
                 teacher_hidden = teacher_hidden.index_select(0, selected.to(teacher_hidden.device))
-                values, vocabulary_indices = teacher_topk_logits(
-                    teacher_hidden,
-                    lm_head,
-                    top_k=config.top_k,
-                    vocabulary_chunk_size=config.vocabulary_chunk_size,
-                    temperature=config.temperature,
-                )
+                if config.objective == "top_k_tail":
+                    values, vocabulary_indices, teacher_log_normalizers = (
+                        teacher_topk_logits_with_normalizers(
+                            teacher_hidden,
+                            lm_head,
+                            top_k=config.top_k,
+                            vocabulary_chunk_size=config.vocabulary_chunk_size,
+                            temperature=config.temperature,
+                        )
+                    )
+                else:
+                    values, vocabulary_indices = teacher_topk_logits(
+                        teacher_hidden,
+                        lm_head,
+                        top_k=config.top_k,
+                        vocabulary_chunk_size=config.vocabulary_chunk_size,
+                        temperature=config.temperature,
+                    )
+                    teacher_log_normalizers = None
                 selected_cpu = selected.cpu()
                 values_cpu = values.cpu()
                 vocabulary_indices_cpu = vocabulary_indices.to(device="cpu", dtype=torch.int32)
+                teacher_log_normalizers_cpu = (
+                    None if teacher_log_normalizers is None else teacher_log_normalizers.cpu()
+                )
                 weights_cpu = (
                     None
                     if cpu_target_weights is None
@@ -499,17 +564,32 @@ def cache_topk_teacher_epoch(
                     teacher_hidden = teacher_hidden.reshape(-1, teacher_hidden.shape[-1])
                     teacher_hidden = teacher_hidden.index_select(0, selected.to(teacher_hidden.device))
                 with recorder.phase("topk"):
-                    values, vocabulary_indices = teacher_topk_logits(
-                        teacher_hidden,
-                        lm_head,
-                        top_k=config.top_k,
-                        vocabulary_chunk_size=config.vocabulary_chunk_size,
-                        temperature=config.temperature,
-                    )
+                    if config.objective == "top_k_tail":
+                        values, vocabulary_indices, teacher_log_normalizers = (
+                            teacher_topk_logits_with_normalizers(
+                                teacher_hidden,
+                                lm_head,
+                                top_k=config.top_k,
+                                vocabulary_chunk_size=config.vocabulary_chunk_size,
+                                temperature=config.temperature,
+                            )
+                        )
+                    else:
+                        values, vocabulary_indices = teacher_topk_logits(
+                            teacher_hidden,
+                            lm_head,
+                            top_k=config.top_k,
+                            vocabulary_chunk_size=config.vocabulary_chunk_size,
+                            temperature=config.temperature,
+                        )
+                        teacher_log_normalizers = None
                 with recorder.phase("d2h"):
                     selected_cpu = selected.cpu()
                     values_cpu = values.cpu()
                     vocabulary_indices_cpu = vocabulary_indices.to(device="cpu", dtype=torch.int32)
+                    teacher_log_normalizers_cpu = (
+                        None if teacher_log_normalizers is None else teacher_log_normalizers.cpu()
+                    )
                     weights_cpu = (
                         None
                         if cpu_target_weights is None
@@ -519,7 +599,13 @@ def cache_topk_teacher_epoch(
                 recorder.add("distillation.teacher_tokens", selected.numel())
             cache_bytes += sum(
                 value.numel() * value.element_size()
-                for value in (selected_cpu, values_cpu, vocabulary_indices_cpu, weights_cpu)
+                for value in (
+                    selected_cpu,
+                    values_cpu,
+                    vocabulary_indices_cpu,
+                    weights_cpu,
+                    teacher_log_normalizers_cpu,
+                )
                 if value is not None
             )
             batches.append(
@@ -529,6 +615,7 @@ def cache_topk_teacher_epoch(
                     values_cpu,
                     vocabulary_indices_cpu,
                     weights_cpu,
+                    teacher_log_normalizers_cpu,
                 )
             )
             if progress is not None:
@@ -556,6 +643,41 @@ def cache_topk_teacher_epoch(
             },
         )
     return tuple(batches), cache_bytes
+
+
+def _configured_distillation_loss(
+    student_hidden: torch.Tensor,
+    target: TopKTeacherBatch,
+    lm_head: nn.Module,
+    config: TopKDistillationConfig,
+    *,
+    device: str | torch.device,
+) -> torch.Tensor:
+    token_weights = None if target.token_weights is None else target.token_weights.to(device)
+    if config.objective == "top_k":
+        return topk_distillation_loss(
+            student_hidden,
+            target.top_values.to(device),
+            target.top_indices.to(device=device, dtype=torch.long),
+            lm_head,
+            temperature=config.temperature,
+            token_chunk_size=config.token_chunk_size,
+            token_weights=token_weights,
+        )
+    if target.teacher_log_normalizers is None:
+        raise ValueError("top-k tail distillation requires teacher log normalizers")
+    return topk_tail_distillation_loss(
+        student_hidden,
+        target.top_values.to(device),
+        target.top_indices.to(device=device, dtype=torch.long),
+        target.teacher_log_normalizers.to(device),
+        lm_head,
+        temperature=config.temperature,
+        vocabulary_chunk_size=config.vocabulary_chunk_size,
+        token_chunk_size=config.token_chunk_size,
+        mass_loss_weight=config.tail_mass_weight,
+        token_weights=token_weights,
+    )
 
 
 def distill_topk(
@@ -667,16 +789,12 @@ def distill_topk(
                         student_hidden = student_hidden.reshape(-1, student_hidden.shape[-1]).index_select(
                             0, selected_tokens
                         )
-                        loss = topk_distillation_loss(
+                        loss = _configured_distillation_loss(
                             student_hidden,
-                            target.top_values.to(device),
-                            target.top_indices.to(device=device, dtype=torch.long),
+                            target,
                             lm_head,
-                            temperature=config.temperature,
-                            token_chunk_size=config.token_chunk_size,
-                            token_weights=(
-                                None if target.token_weights is None else target.token_weights.to(device)
-                            ),
+                            config,
+                            device=device,
                         )
                         optimizer.zero_grad(set_to_none=True)
                         torch.autograd.backward(loss)
@@ -693,16 +811,12 @@ def distill_topk(
                                 0, selected_tokens
                             )
                         with recorder.phase("loss"):
-                            loss = topk_distillation_loss(
+                            loss = _configured_distillation_loss(
                                 student_hidden,
-                                target.top_values.to(device),
-                                target.top_indices.to(device=device, dtype=torch.long),
+                                target,
                                 lm_head,
-                                temperature=config.temperature,
-                                token_chunk_size=config.token_chunk_size,
-                                token_weights=(
-                                    None if target.token_weights is None else target.token_weights.to(device)
-                                ),
+                                config,
+                                device=device,
                             )
                         with recorder.phase("zero_grad"):
                             optimizer.zero_grad(set_to_none=True)
