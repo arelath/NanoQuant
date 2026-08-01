@@ -533,6 +533,9 @@ class FoldableMlpMultiplierTuningConfig:
     multiplier_limit: float = 4.0
     checkpoint_interval_steps: int = 16
     gradient_checkpointing: bool = False
+    initializer_artifact: str | None = None
+    initializer_sha256: str | None = None
+    initializer_multiplier_limit: float = 128.0
 
 
 @dataclass(frozen=True, slots=True)

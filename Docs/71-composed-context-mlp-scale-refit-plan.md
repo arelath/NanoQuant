@@ -600,3 +600,19 @@ conservative global continuation.
 Experiment 035 evidence is documented in
 `Docs/Experiments/035-foldable-mlp-d2-compression.md` and retained under
 `evidence/035`, `outputs/035`, and `Results/035`.
+
+## Experiment 036 production plan
+
+Experiment 036 is the controlled successor to Experiment 035. It retains the
+complete Experiment 035 recipe and changes only the foldable-stage
+initialization. The accepted six-block state is represented as a hash-pinned,
+model-specific log-multiplier seed rather than an absolute component overlay,
+so it can be applied covariantly to a fresh run's own factors without bypassing
+the frozen/global-tuning identity contracts.
+
+The seed is folded before the conservative continuation parameters are
+installed. Consequently, the continuation's identity regularizer is centered
+on the accepted composed-context state, matching the successful Phase C probe,
+instead of pulling the model back toward the unrefitted post-KD state. Full
+acceptance still requires fresh resident validation, held-out NLL/KL, exact
+export, unchanged effective BPW, and the retained quality benchmark.

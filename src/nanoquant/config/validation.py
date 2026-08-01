@@ -751,6 +751,35 @@ def validate(config: RunConfig, phase: ValidationPhase = ValidationPhase.PRE_RES
         "must be positive",
     )
     require(
+        (foldable.initializer_artifact is None) == (foldable.initializer_sha256 is None),
+        "CFG116",
+        "distillation.foldable_mlp_multipliers.initializer_artifact",
+        "must be paired with initializer_sha256",
+    )
+    require(
+        foldable.initializer_artifact is None or bool(foldable.initializer_artifact.strip()),
+        "CFG117",
+        "distillation.foldable_mlp_multipliers.initializer_artifact",
+        "must be non-empty when provided",
+    )
+    require(
+        foldable.initializer_sha256 is None
+        or (
+            len(foldable.initializer_sha256) == 64
+            and all(character in "0123456789abcdef" for character in foldable.initializer_sha256)
+        ),
+        "CFG118",
+        "distillation.foldable_mlp_multipliers.initializer_sha256",
+        "must be a lowercase SHA-256 digest",
+    )
+    require(
+        math.isfinite(foldable.initializer_multiplier_limit)
+        and foldable.initializer_multiplier_limit > 1,
+        "CFG119",
+        "distillation.foldable_mlp_multipliers.initializer_multiplier_limit",
+        "must be finite and greater than one",
+    )
+    require(
         config.evaluation.inline_quality_samples > 0, "CFG034", "evaluation.inline_quality_samples", "must be positive"
     )
     require(

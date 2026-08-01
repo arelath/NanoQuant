@@ -7,6 +7,7 @@ from nanoquant.application.foldable_mlp_multipliers import (
     InstalledMultipliers,
     family_identity_penalty,
     fold_global_mlp_multipliers,
+    seed_global_mlp_multipliers,
 )
 from nanoquant.application.layers import FactorizedReferenceLinear
 
@@ -91,3 +92,35 @@ def test_identity_penalty_weights_families_equally() -> None:
     second = torch.nn.Parameter(torch.tensor([2.0]))
     penalty = family_identity_penalty({"large": (first,), "small": (second,)})
     assert float(penalty.detach()) == 2.5
+
+
+def test_sparse_initializer_seeds_named_axis_and_leaves_other_axis_identity() -> None:
+    module = _linear()
+    wrapper = FoldableMultiplierLinear(
+        module,
+        input_family="down_input",
+        output_family="down_output",
+    )
+    assert wrapper.log_input_multiplier is not None
+    assert wrapper.log_output_multiplier is not None
+    installed = InstalledMultipliers(
+        {(0, "mlp.gate_proj"): wrapper},
+        {
+            "down_input": (wrapper.log_input_multiplier,),
+            "down_output": (wrapper.log_output_multiplier,),
+        },
+    )
+
+    consumed = seed_global_mlp_multipliers(
+        installed,
+        {
+            "model.layers.0.mlp.gate_proj.output_log_multiplier": torch.log(
+                torch.tensor([0.75, 1.5])
+            )
+        },
+        log_limit=torch.log(torch.tensor(4.0)).item(),
+    )
+
+    assert consumed == ("model.layers.0.mlp.gate_proj.output_log_multiplier",)
+    torch.testing.assert_close(wrapper.log_input_multiplier, torch.zeros(3))
+    torch.testing.assert_close(wrapper.log_output_multiplier.exp(), torch.tensor([0.75, 1.5]))

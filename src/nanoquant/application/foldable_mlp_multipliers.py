@@ -210,6 +210,55 @@ def gradient_summary(installed: InstalledMultipliers) -> dict[str, object]:
     return result
 
 
+def seed_global_mlp_multipliers(
+    installed: InstalledMultipliers,
+    tensors: dict[str, torch.Tensor],
+    *,
+    log_limit: float,
+) -> tuple[str, ...]:
+    """Load a sparse, semantic log-multiplier seed; omitted axes stay at identity."""
+
+    prefix = "model.layers."
+    suffixes = {
+        ".input_log_multiplier": "input",
+        ".output_log_multiplier": "output",
+    }
+    consumed: list[str] = []
+    with torch.no_grad():
+        for tensor_name, value in sorted(tensors.items()):
+            if not tensor_name.startswith(prefix):
+                raise ValueError(f"foldable MLP initializer tensor has an invalid name: {tensor_name}")
+            axis = None
+            logical = ""
+            for suffix, candidate_axis in suffixes.items():
+                if tensor_name.endswith(suffix):
+                    axis = candidate_axis
+                    logical = tensor_name.removeprefix(prefix).removesuffix(suffix)
+                    break
+            if axis is None:
+                raise ValueError(f"foldable MLP initializer tensor has an invalid axis: {tensor_name}")
+            block_text, path = logical.split(".", maxsplit=1)
+            try:
+                key = (int(block_text), path)
+            except ValueError as error:
+                raise ValueError(f"foldable MLP initializer block is invalid: {tensor_name}") from error
+            wrapper = installed.wrappers.get(key)
+            if wrapper is None:
+                raise ValueError(f"foldable MLP initializer target is unavailable: {tensor_name}")
+            parameter = (
+                wrapper.log_input_multiplier if axis == "input" else wrapper.log_output_multiplier
+            )
+            if parameter is None:
+                raise ValueError(f"foldable MLP initializer axis is unavailable: {tensor_name}")
+            if value.dtype != torch.float32 or value.shape != parameter.shape:
+                raise ValueError(f"foldable MLP initializer tensor shape or dtype differs: {tensor_name}")
+            if not torch.isfinite(value).all() or bool((value.abs() > log_limit).any()):
+                raise ValueError(f"foldable MLP initializer tensor exceeds the configured bounds: {tensor_name}")
+            parameter.copy_(value.to(device=parameter.device))
+            consumed.append(tensor_name)
+    return tuple(consumed)
+
+
 def _component_values(prefix: str, module: FactorizedReferenceLinear) -> dict[str, torch.Tensor]:
     values = {
         f"{prefix}.scale_pre": module.scale_pre,
@@ -275,4 +324,5 @@ __all__ = [
     "gradient_summary",
     "install_global_mlp_multipliers",
     "multiplier_summary",
+    "seed_global_mlp_multipliers",
 ]

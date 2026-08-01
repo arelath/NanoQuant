@@ -22,6 +22,7 @@ from nanoquant.application.foldable_mlp_multipliers import (
     gradient_summary,
     install_global_mlp_multipliers,
     multiplier_summary,
+    seed_global_mlp_multipliers,
 )
 from nanoquant.config.codec import semantic_hash, to_dict
 from nanoquant.config.schema import FoldableMlpMultiplierTuningConfig, RunConfig
@@ -31,6 +32,10 @@ from nanoquant.infrastructure.commits import latest_complete_identity
 from nanoquant.infrastructure.device_lease import acquire_device_lease
 from nanoquant.infrastructure.distillation_cache import TeacherCacheJournal, load_teacher_epoch
 from nanoquant.infrastructure.factorized_component_overlay import load_factorized_component_overlay
+from nanoquant.infrastructure.foldable_mlp_initializer import (
+    FoldableMlpInitializer,
+    load_foldable_mlp_initializer,
+)
 from nanoquant.infrastructure.frozen_model_loader import load_frozen_run
 from nanoquant.infrastructure.global_tuning import active_global_tuning
 from nanoquant.infrastructure.hf_calibration_dataset import load_pinned_calibration
@@ -141,6 +146,7 @@ def _protocol_hash(
     frozen_identity: dict[str, str],
     global_tuning: ArtifactRef,
     token_hash: str,
+    initializer: FoldableMlpInitializer | None,
 ) -> str:
     return semantic_hash(
         {
@@ -149,7 +155,31 @@ def _protocol_hash(
             "frozen_identity": frozen_identity,
             "global_tuning": global_tuning,
             "token_hash": token_hash,
+            "initializer": (
+                None
+                if initializer is None
+                else {
+                    "tensor_sha256": initializer.tensor_sha256,
+                    "manifest_sha256": hash_file(initializer.root / "manifest.json"),
+                }
+            ),
         }
+    )
+
+
+def _load_initializer(
+    config: RunConfig,
+) -> FoldableMlpInitializer | None:
+    tuning = config.distillation.foldable_mlp_multipliers
+    if tuning.initializer_artifact is None:
+        return None
+    if tuning.initializer_sha256 is None:
+        raise ValueError("foldable MLP initializer SHA-256 is missing")
+    return load_foldable_mlp_initializer(
+        tuning.initializer_artifact,
+        expected_sha256=tuning.initializer_sha256,
+        model_source=config.model.source,
+        model_revision=str(config.model.revision),
     )
 
 
@@ -330,7 +360,14 @@ def _run(config: RunConfig, run_output: Path, snapshot: Path) -> FoldableMlpTuni
     tokens = _load_calibration(run_output)
     frozen_identity = _commit_identity(run_output)
     token_hash = _token_hash(tokens)
-    protocol_hash = _protocol_hash(tuning, frozen_identity, global_tuning, token_hash)
+    initializer = _load_initializer(config)
+    protocol_hash = _protocol_hash(
+        tuning,
+        frozen_identity,
+        global_tuning,
+        token_hash,
+        initializer,
+    )
     active = active_foldable_mlp_tuning(run_output, expected_protocol_hash=protocol_hash)
     if active is not None:
         loaded_overlay = load_factorized_component_overlay(
@@ -356,6 +393,31 @@ def _run(config: RunConfig, run_output: Path, snapshot: Path) -> FoldableMlpTuni
     student = loaded.model
     cast(Any, student).config.use_cache = False
     installed = install_global_mlp_multipliers(student)
+    initialization: dict[str, object] = {"kind": "identity"}
+    if initializer is not None:
+        initializer_log_limit = math.log(tuning.initializer_multiplier_limit)
+        consumed = seed_global_mlp_multipliers(
+            installed,
+            initializer.tensors,
+            log_limit=initializer_log_limit,
+        )
+        seed_summary = multiplier_summary(installed, initializer_log_limit)
+        seeded_tensors, seeded_replaced_bytes = fold_global_mlp_multipliers(
+            student,
+            installed,
+        )
+        initialization = {
+            "kind": "artifact",
+            "artifact": str(initializer.root.resolve()),
+            "tensor_sha256": initializer.tensor_sha256,
+            "manifest_sha256": hash_file(initializer.root / "manifest.json"),
+            "seeded_axis_count": len(consumed),
+            "seeded_axes": list(consumed),
+            "seed_multiplier_summary": seed_summary,
+            "seeded_component_sha256": _tensor_payload_hash(seeded_tensors),
+            "seeded_replaced_payload_bytes": seeded_replaced_bytes,
+        }
+        installed = install_global_mlp_multipliers(student)
     for parameter in student.parameters():
         parameter.requires_grad_(False)
     for parameter in installed.parameters:
@@ -489,6 +551,7 @@ def _run(config: RunConfig, run_output: Path, snapshot: Path) -> FoldableMlpTuni
                 "token_hash": token_hash,
                 "teacher_cache_bytes_loaded": teacher_cache_bytes,
             },
+            "initialization": initialization,
             "training": {
                 "steps_completed": completed,
                 "selected_parameter_count": selected_parameter_count,

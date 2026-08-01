@@ -1,0 +1,344 @@
+{
+  "accepted_component_replay": {
+    "model.layers.0.mlp.down_proj": {
+      "components": {
+        "outlier_values": 0.0,
+        "scale_post": 0.0,
+        "scale_pre": 0.0
+      },
+      "exact": true,
+      "maximum_absolute_error": 0.0
+    },
+    "model.layers.0.mlp.gate_proj": {
+      "components": {
+        "outlier_values": 0.0,
+        "scale_post": 0.0,
+        "scale_pre": 0.0
+      },
+      "exact": true,
+      "maximum_absolute_error": 0.0
+    },
+    "model.layers.0.mlp.up_proj": {
+      "components": {
+        "outlier_values": 0.0,
+        "scale_post": 0.0,
+        "scale_pre": 0.0
+      },
+      "exact": true,
+      "maximum_absolute_error": 0.0
+    },
+    "model.layers.17.mlp.down_proj": {
+      "components": {
+        "outlier_values": 0.0,
+        "scale_post": 0.0,
+        "scale_pre": 0.0
+      },
+      "exact": true,
+      "maximum_absolute_error": 0.0
+    },
+    "model.layers.17.mlp.gate_proj": {
+      "components": {
+        "outlier_values": 0.0,
+        "scale_post": 0.0,
+        "scale_pre": 0.0
+      },
+      "exact": true,
+      "maximum_absolute_error": 0.0
+    },
+    "model.layers.17.mlp.up_proj": {
+      "components": {
+        "outlier_values": 0.0,
+        "scale_post": 0.0,
+        "scale_pre": 0.0
+      },
+      "exact": true,
+      "maximum_absolute_error": 0.0
+    },
+    "model.layers.18.mlp.down_proj": {
+      "components": {
+        "outlier_values": 0.0,
+        "scale_post": 0.0,
+        "scale_pre": 0.0
+      },
+      "exact": true,
+      "maximum_absolute_error": 0.0
+    },
+    "model.layers.18.mlp.gate_proj": {
+      "components": {
+        "outlier_values": 0.0,
+        "scale_post": 0.0,
+        "scale_pre": 0.0
+      },
+      "exact": true,
+      "maximum_absolute_error": 0.0
+    },
+    "model.layers.18.mlp.up_proj": {
+      "components": {
+        "outlier_values": 0.0,
+        "scale_post": 0.0,
+        "scale_pre": 0.0
+      },
+      "exact": true,
+      "maximum_absolute_error": 0.0
+    },
+    "model.layers.23.mlp.down_proj": {
+      "components": {
+        "outlier_values": 0.0,
+        "scale_post": 0.0,
+        "scale_pre": 0.0
+      },
+      "exact": true,
+      "maximum_absolute_error": 0.0
+    },
+    "model.layers.23.mlp.gate_proj": {
+      "components": {
+        "outlier_values": 0.0,
+        "scale_post": 0.0,
+        "scale_pre": 0.0
+      },
+      "exact": true,
+      "maximum_absolute_error": 0.0
+    },
+    "model.layers.23.mlp.up_proj": {
+      "components": {
+        "outlier_values": 0.0,
+        "scale_post": 0.0,
+        "scale_pre": 0.0
+      },
+      "exact": true,
+      "maximum_absolute_error": 0.0
+    },
+    "model.layers.24.mlp.down_proj": {
+      "components": {
+        "outlier_values": 0.0,
+        "scale_post": 0.0,
+        "scale_pre": 0.0
+      },
+      "exact": true,
+      "maximum_absolute_error": 0.0
+    },
+    "model.layers.24.mlp.gate_proj": {
+      "components": {
+        "outlier_values": 0.0,
+        "scale_post": 0.0,
+        "scale_pre": 0.0
+      },
+      "exact": true,
+      "maximum_absolute_error": 0.0
+    },
+    "model.layers.24.mlp.up_proj": {
+      "components": {
+        "outlier_values": 0.0,
+        "scale_post": 0.0,
+        "scale_pre": 0.0
+      },
+      "exact": true,
+      "maximum_absolute_error": 0.0
+    },
+    "model.layers.25.mlp.down_proj": {
+      "components": {
+        "outlier_values": 0.0,
+        "scale_post": 0.0,
+        "scale_pre": 0.0
+      },
+      "exact": true,
+      "maximum_absolute_error": 0.0
+    },
+    "model.layers.25.mlp.gate_proj": {
+      "components": {
+        "outlier_values": 0.0,
+        "scale_post": 0.0,
+        "scale_pre": 0.0
+      },
+      "exact": true,
+      "maximum_absolute_error": 0.0
+    },
+    "model.layers.25.mlp.up_proj": {
+      "components": {
+        "outlier_values": 0.0,
+        "scale_post": 0.0,
+        "scale_pre": 0.0
+      },
+      "exact": true,
+      "maximum_absolute_error": 0.0
+    }
+  },
+  "model": {
+    "revision": "dcc83ea841ab6100d6b47a070329e1ba4cf78752",
+    "source": "google/gemma-3-1b-it"
+  },
+  "multiplier_summary": {
+    "count": 124416,
+    "maximum": 100.00000762939453,
+    "median": 0.9875708818435669,
+    "minimum": 0.015625
+  },
+  "policy": {
+    "0": "output",
+    "17": "joint",
+    "18": "joint",
+    "23": "joint",
+    "24": "joint",
+    "25": "joint"
+  },
+  "schema_version": 1,
+  "semantics": "foldable-mlp-log-multiplier-initializer",
+  "source": {
+    "component_overlay_sha256": "22340b12d8db4d77bb4b574bfe2c82d2dd50e208d06cd71d79a3d5b03c4aa2cb",
+    "dense_overlay_sha256": "51a01a4753bbe61bd7b55cc30a814875e131037f6a665a82668cf354053ffd8d",
+    "fit_iterations": 12,
+    "frozen_identity": {
+      "config_hash": "sha256:3fb8cade21636e9176dff3579c67c506fa0bc8cb9533623ad00f1eadb200b7bc",
+      "model_hash": "sha256:32d5b5d041e98027bc7415107bc79b580f9cce407535b4e30134e8f8aed3b130",
+      "plan_hash": "sha256-80f8858ba06459964680fb2db03d1e1a023ed5b5538cce1c88a7d644dd2b283e"
+    },
+    "global_tuning": {
+      "artifact_id": "sha256-86427bf8fcec089f56d925612642ff658ca925f54d75315703f10879dc5955cb",
+      "artifact_type": "global-tuning-result",
+      "schema_version": 1
+    },
+    "run_output": "D:\\dev\\research\\NanoQuantRewrite\\evidence\\022\\022-d2-kl-compress-and-benchmark-gemma-3-1b-it"
+  },
+  "tensor_count": 23,
+  "tensor_sha256": "718b6d79f37fb1181b64be4faf08141045e302ca7931862836d2a5d5b80fc73c",
+  "tensors": {
+    "model.layers.0.mlp.down_proj.output_log_multiplier": {
+      "dtype": "float32",
+      "shape": [
+        1152
+      ]
+    },
+    "model.layers.0.mlp.gate_proj.output_log_multiplier": {
+      "dtype": "float32",
+      "shape": [
+        6912
+      ]
+    },
+    "model.layers.0.mlp.up_proj.output_log_multiplier": {
+      "dtype": "float32",
+      "shape": [
+        6912
+      ]
+    },
+    "model.layers.17.mlp.down_proj.input_log_multiplier": {
+      "dtype": "float32",
+      "shape": [
+        6912
+      ]
+    },
+    "model.layers.17.mlp.down_proj.output_log_multiplier": {
+      "dtype": "float32",
+      "shape": [
+        1152
+      ]
+    },
+    "model.layers.17.mlp.gate_proj.output_log_multiplier": {
+      "dtype": "float32",
+      "shape": [
+        6912
+      ]
+    },
+    "model.layers.17.mlp.up_proj.output_log_multiplier": {
+      "dtype": "float32",
+      "shape": [
+        6912
+      ]
+    },
+    "model.layers.18.mlp.down_proj.input_log_multiplier": {
+      "dtype": "float32",
+      "shape": [
+        6912
+      ]
+    },
+    "model.layers.18.mlp.down_proj.output_log_multiplier": {
+      "dtype": "float32",
+      "shape": [
+        1152
+      ]
+    },
+    "model.layers.18.mlp.gate_proj.output_log_multiplier": {
+      "dtype": "float32",
+      "shape": [
+        6912
+      ]
+    },
+    "model.layers.18.mlp.up_proj.output_log_multiplier": {
+      "dtype": "float32",
+      "shape": [
+        6912
+      ]
+    },
+    "model.layers.23.mlp.down_proj.input_log_multiplier": {
+      "dtype": "float32",
+      "shape": [
+        6912
+      ]
+    },
+    "model.layers.23.mlp.down_proj.output_log_multiplier": {
+      "dtype": "float32",
+      "shape": [
+        1152
+      ]
+    },
+    "model.layers.23.mlp.gate_proj.output_log_multiplier": {
+      "dtype": "float32",
+      "shape": [
+        6912
+      ]
+    },
+    "model.layers.23.mlp.up_proj.output_log_multiplier": {
+      "dtype": "float32",
+      "shape": [
+        6912
+      ]
+    },
+    "model.layers.24.mlp.down_proj.input_log_multiplier": {
+      "dtype": "float32",
+      "shape": [
+        6912
+      ]
+    },
+    "model.layers.24.mlp.down_proj.output_log_multiplier": {
+      "dtype": "float32",
+      "shape": [
+        1152
+      ]
+    },
+    "model.layers.24.mlp.gate_proj.output_log_multiplier": {
+      "dtype": "float32",
+      "shape": [
+        6912
+      ]
+    },
+    "model.layers.24.mlp.up_proj.output_log_multiplier": {
+      "dtype": "float32",
+      "shape": [
+        6912
+      ]
+    },
+    "model.layers.25.mlp.down_proj.input_log_multiplier": {
+      "dtype": "float32",
+      "shape": [
+        6912
+      ]
+    },
+    "model.layers.25.mlp.down_proj.output_log_multiplier": {
+      "dtype": "float32",
+      "shape": [
+        1152
+      ]
+    },
+    "model.layers.25.mlp.gate_proj.output_log_multiplier": {
+      "dtype": "float32",
+      "shape": [
+        6912
+      ]
+    },
+    "model.layers.25.mlp.up_proj.output_log_multiplier": {
+      "dtype": "float32",
+      "shape": [
+        6912
+      ]
+    }
+  }
+}

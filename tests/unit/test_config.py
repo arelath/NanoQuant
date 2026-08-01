@@ -15,6 +15,7 @@ from nanoquant.config.schema import (
     DatasetConfig,
     DatasetSourceConfig,
     DType,
+    FoldableMlpMultiplierTuningConfig,
     KlSensitivityGranularity,
     LayerRankBudgetConfig,
     ModelConfig,
@@ -336,6 +337,43 @@ def test_resource_interval_validation_rejects_nonfinite_and_warns_on_high_volume
         observability=ObservabilityConfig(record_resource_interval_seconds=0),
     )
     assert validate(disabled) == ()
+
+
+def test_foldable_mlp_initializer_path_and_hash_are_paired_and_pinned() -> None:
+    base = RunConfig(ModelConfig("x"))
+    missing_hash = replace(
+        base,
+        distillation=replace(
+            base.distillation,
+            foldable_mlp_multipliers=FoldableMlpMultiplierTuningConfig(
+                initializer_artifact="initializers/candidate"
+            ),
+        ),
+    )
+    malformed_hash = replace(
+        base,
+        distillation=replace(
+            base.distillation,
+            foldable_mlp_multipliers=FoldableMlpMultiplierTuningConfig(
+                initializer_artifact="initializers/candidate",
+                initializer_sha256="ABC",
+            ),
+        ),
+    )
+
+    assert {issue.code for issue in validate(missing_hash)} == {"CFG116"}
+    assert {issue.code for issue in validate(malformed_hash)} == {"CFG118"}
+
+    invalid_limit = replace(
+        base,
+        distillation=replace(
+            base.distillation,
+            foldable_mlp_multipliers=FoldableMlpMultiplierTuningConfig(
+                initializer_multiplier_limit=1.0
+            ),
+        ),
+    )
+    assert {issue.code for issue in validate(invalid_limit)} == {"CFG119"}
 
 
 def test_legacy_migration_is_total_and_rejects_uninventoried_fields() -> None:
