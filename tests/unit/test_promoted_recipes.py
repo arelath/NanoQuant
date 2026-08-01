@@ -54,6 +54,10 @@ def test_numbered_launchers_own_their_concrete_definitions() -> None:
     launcher_numbers = [int(path.name[:3]) for path in launchers]
     documented_non_launcher_experiments = {
         20: Path("Docs/ImprovementSuggestions/D2-findings.md"),
+        38: Path("Docs/Experiments/038-conditional-mass-floor-correction.md"),
+        39: Path("Docs/Experiments/039-robust-mass-floor-correction.md"),
+        40: Path("Docs/Experiments/040-low-pressure-correction-with-minimal-fold.md"),
+        41: Path("Docs/Experiments/041-experiment040-residual-block25-defect-audit.md"),
     }
 
     assert launcher_numbers == sorted(set(launcher_numbers))
