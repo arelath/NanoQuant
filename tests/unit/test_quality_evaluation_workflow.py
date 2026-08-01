@@ -32,6 +32,12 @@ def test_quality_evaluation_request_rejects_ambiguous_protocols(tmp_path: Path) 
         replace(request, task_names=("piqa", "piqa"))
     with pytest.raises(ValueError, match="unsupported"):
         replace(request, task_names=("gsm8k",))
+    with pytest.raises(ValueError, match="cannot combine"):
+        replace(
+            request,
+            packed_artifact=tmp_path / "packed",
+            component_overlay=tmp_path / "overlay",
+        )
     with pytest.raises(ValueError, match="reasoning dimensions"):
         replace(
             request,
@@ -91,6 +97,7 @@ def test_quality_experiment_resolution_is_pinned_and_repository_relative(
         request=replace(
             _EVALUATION.request,
             packed_artifact=Path("outputs/candidate/packed"),
+            component_overlay=None,
         ),
     )
     resolved = resolve_quality_evaluation_experiment(
@@ -103,6 +110,22 @@ def test_quality_experiment_resolution_is_pinned_and_repository_relative(
         tmp_path / "repo" / "Results/002/002-benchmark-gemma-3-1b-it-quality.md"
     )
     assert resolved.request.packed_artifact == tmp_path / "repo" / "outputs/candidate/packed"
+
+    overlay_experiment = replace(
+        _EVALUATION,
+        request=replace(
+            _EVALUATION.request,
+            component_overlay=Path("evidence/candidate/overlay"),
+        ),
+    )
+    overlay_resolved = resolve_quality_evaluation_experiment(
+        _CONFIG,
+        overlay_experiment,
+        launcher_path=launcher,
+    )
+    assert overlay_resolved.request.component_overlay == (
+        tmp_path / "repo" / "evidence/candidate/overlay"
+    )
 
 
 def test_quality_workflow_records_config_and_launcher_provenance(

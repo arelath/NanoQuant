@@ -6,6 +6,7 @@ import argparse
 import gc
 import json
 import math
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
 
@@ -89,11 +90,15 @@ def _evaluate_arm(
     *,
     device: str,
     token_chunk_size: int,
+    completed: tuple[KlSequenceResult, ...] = (),
+    progress: Callable[[tuple[KlSequenceResult, ...]], None] | None = None,
 ) -> KlBudgetArmResult:
     teacher.eval()
     student.eval()
-    sequences: list[KlSequenceResult] = []
-    for index in range(tokens.shape[0]):
+    if len(completed) > tokens.shape[0]:
+        raise ValueError("factorized component arm checkpoint exceeds the token inventory")
+    sequences = list(completed)
+    for index in range(len(completed), tokens.shape[0]):
         batch = tokens[index : index + 1].to(device)
         teacher_logits = cast(HuggingFaceModel, teacher)(input_ids=batch, use_cache=False).logits
         student_logits = cast(HuggingFaceModel, student)(input_ids=batch, use_cache=False).logits
@@ -105,6 +110,8 @@ def _evaluate_arm(
                 token_chunk_size=token_chunk_size,
             )
         )
+        if progress is not None:
+            progress(tuple(sequences))
         del teacher_logits, student_logits, batch
     return _arm_result(name, tuple(sequences))
 
@@ -129,6 +136,64 @@ def run(args: argparse.Namespace) -> int:
         local_files_only=args.local_files_only,
     )
     tokens = _select_token_window(all_tokens, offset=args.wikitext_offset, samples=args.samples)
+    checkpoint_path = args.output.with_name(args.output.stem + ".checkpoint.json")
+    protocol = {
+        "wikitext_split": args.wikitext_split,
+        "wikitext_offset": args.wikitext_offset,
+        "samples": args.samples,
+        "sequence_length": args.sequence_length,
+        "token_chunk_size": args.token_chunk_size,
+        "dataset_fingerprint": fingerprint,
+        "bos_token_id": bos_token_id,
+        "token_hash": _token_hash(tokens),
+        "arms": [
+            {"name": name, "path": None if path is None else str(path.resolve())}
+            for name, path in args.arm
+        ],
+    }
+    if args.output.is_file():
+        completed_output = json.loads(args.output.read_text(encoding="utf-8"))
+        if (
+            completed_output.get("status") != "completed"
+            or completed_output.get("protocol") != protocol
+        ):
+            raise ValueError("existing factorized component KL output protocol differs")
+        return 0
+    checkpoint: dict[str, Any] = {
+        "schema_version": 1,
+        "status": "in_progress",
+        "protocol": protocol,
+        "sequences": {},
+    }
+    if checkpoint_path.is_file():
+        loaded_checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+        if (
+            loaded_checkpoint.get("schema_version") != 1
+            or loaded_checkpoint.get("protocol") != protocol
+            or not isinstance(loaded_checkpoint.get("sequences"), dict)
+        ):
+            raise ValueError("factorized component KL checkpoint protocol differs")
+        checkpoint = loaded_checkpoint
+
+    def restored(name: str) -> tuple[KlSequenceResult, ...]:
+        payload = cast(dict[str, object], checkpoint["sequences"]).get(name, [])
+        if not isinstance(payload, list):
+            raise ValueError("factorized component KL checkpoint arm is invalid")
+        return tuple(
+            KlSequenceResult(
+                float(item["negative_log_likelihood"]),
+                float(item["kl_nats_per_token"]),
+                int(item["token_count"]),
+            )
+            for item in payload
+        )
+
+    def save_progress(name: str, sequences: tuple[KlSequenceResult, ...]) -> None:
+        cast(dict[str, object], checkpoint["sequences"])[name] = [
+            to_dict(item) for item in sequences
+        ]
+        atomic_write_json(checkpoint_path, checkpoint)
+
     with acquire_device_lease(args.device):
         teacher = load_causal_language_model(
             args.snapshot,
@@ -173,6 +238,13 @@ def run(args: argparse.Namespace) -> int:
                     **json.loads((path / "manifest.json").read_text(encoding="utf-8")),
                 }
             )
+
+            def save_arm_progress(
+                sequences: tuple[KlSequenceResult, ...],
+                arm: str = name,
+            ) -> None:
+                save_progress(arm, sequences)
+
             results[name] = _evaluate_arm(
                 name,
                 teacher,
@@ -180,6 +252,8 @@ def run(args: argparse.Namespace) -> int:
                 tokens,
                 device=args.device,
                 token_chunk_size=args.token_chunk_size,
+                completed=restored(name),
+                progress=save_arm_progress,
             )
             del loaded
             gc.collect()
@@ -193,6 +267,16 @@ def run(args: argparse.Namespace) -> int:
             "nll": _paired_metric_payload(results[before], results[after], "negative_log_likelihood"),
             "kl": _paired_payload(results[before], results[after], seed=0),
         }
+    first = names[0]
+    paired_to_first = {
+        f"{name}_minus_{first}": {
+            "nll": _paired_metric_payload(
+                results[first], results[name], "negative_log_likelihood"
+            ),
+            "kl": _paired_payload(results[first], results[name], seed=0),
+        }
+        for name in names[1:]
+    }
     atomic_write_json(
         args.output,
         {
@@ -204,20 +288,14 @@ def run(args: argparse.Namespace) -> int:
             "frozen_identity": identity,
             "global_tuning": global_tuning,
             "component_overlays": manifests,
-            "protocol": {
-                "wikitext_split": args.wikitext_split,
-                "wikitext_offset": args.wikitext_offset,
-                "samples": args.samples,
-                "sequence_length": args.sequence_length,
-                "token_chunk_size": args.token_chunk_size,
-                "dataset_fingerprint": fingerprint,
-                "bos_token_id": bos_token_id,
-                "token_hash": _token_hash(tokens),
-            },
+            "protocol": protocol,
             "results": {name: to_dict(result) for name, result in results.items()},
             "paired_adjacent_arms": paired,
+            "paired_to_first_arm": paired_to_first,
         },
     )
+    checkpoint["status"] = "completed"
+    atomic_write_json(checkpoint_path, checkpoint)
     return 0
 
 

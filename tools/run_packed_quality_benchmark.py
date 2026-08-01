@@ -29,6 +29,11 @@ def _parser() -> argparse.ArgumentParser:
         type=Path,
         help="optional packed artifact; omit it to evaluate the committed factorized run",
     )
+    parser.add_argument(
+        "--component-overlay",
+        type=Path,
+        help="optional factor-component overlay for an unpacked committed run",
+    )
     parser.add_argument("--run-output", type=Path, required=True)
     parser.add_argument("--snapshot", type=Path, required=True)
     parser.add_argument("--source", required=True)
@@ -72,6 +77,7 @@ def run(args: argparse.Namespace) -> int:
         local_files_only=args.local_files_only,
         maximum_wddm_shared_bytes=args.maximum_wddm_shared_bytes,
         packed_artifact=args.packed_artifact,
+        component_overlay=args.component_overlay,
     )
     result: dict[str, Any] = execute_quality_evaluation(request, progress=_progress)
     atomic_write_json(args.output, result)

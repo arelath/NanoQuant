@@ -89,6 +89,7 @@ class QualityEvaluationRequest:
     local_files_only: bool = False
     maximum_wddm_shared_bytes: int | None = None
     packed_artifact: Path | None = None
+    component_overlay: Path | None = None
     stream_base_model: bool = False
     reasoning_modes: tuple[ReasoningMode, ...] = ()
     reasoning_behavior_slices: tuple[BehaviorSliceConfig, ...] = ()
@@ -112,6 +113,8 @@ class QualityEvaluationRequest:
             raise ValueError("quality evaluation batch sizes and task limit must be positive")
         if self.maximum_wddm_shared_bytes is not None and self.maximum_wddm_shared_bytes < 0:
             raise ValueError("quality evaluation shared-memory limit must be non-negative")
+        if self.packed_artifact is not None and self.component_overlay is not None:
+            raise ValueError("quality evaluation cannot combine packed and component overlays")
         supported = {task.task_name for task in pinned_legacy_multiple_choice_tasks()}
         if not self.task_names or len(set(self.task_names)) != len(self.task_names):
             raise ValueError("quality evaluation task names must be non-empty and unique")
@@ -649,6 +652,7 @@ def execute_quality_evaluation(
                             device=request.device,
                             backend=request.backend,
                             use_global_tuning=request.use_global_tuning,
+                            component_overlay=request.component_overlay,
                         )
                         if request.packed_artifact is None
                         else load_packed_model(
@@ -710,6 +714,9 @@ def execute_quality_evaluation(
             "packed_descriptor_sha256": None
             if request.packed_artifact is None
             else packed_descriptor_sha256,
+            "component_overlay": None
+            if request.component_overlay is None
+            else str(request.component_overlay.resolve()),
         }
     )
     results = {"base": base_result}

@@ -7,6 +7,7 @@ from nanoquant.application.foldable_mlp_multipliers import (
     InstalledMultipliers,
     family_identity_penalty,
     fold_global_mlp_multipliers,
+    rescaled_global_mlp_components,
     seed_global_mlp_multipliers,
 )
 from nanoquant.application.layers import FactorizedReferenceLinear
@@ -74,6 +75,7 @@ def test_foldable_multiplier_preserves_bias_and_folds_all_terms() -> None:
             "down_output": (wrapper.log_output_multiplier,),
         },
     )
+    preview, preview_bytes = rescaled_global_mlp_components(installed)
     tensors, replaced = fold_global_mlp_multipliers(model, installed)
     actual = model.model.layers[0].mlp.gate_proj(value)
     torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-6)
@@ -85,6 +87,10 @@ def test_foldable_multiplier_preserves_bias_and_folds_all_terms() -> None:
         "model.layers.0.mlp.gate_proj.patch_right",
     }
     assert replaced == sum(value.numel() * value.element_size() for value in tensors.values())
+    assert preview_bytes == replaced
+    assert set(preview) == set(tensors)
+    for name in tensors:
+        torch.testing.assert_close(preview[name], tensors[name])
 
 
 def test_identity_penalty_weights_families_equally() -> None:

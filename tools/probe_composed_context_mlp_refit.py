@@ -123,6 +123,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--use-global-tuning", action="store_true")
     parser.add_argument("--local-files-only", action="store_true")
+    parser.add_argument(
+        "--context",
+        choices=CONTEXTS,
+        action="append",
+        help="Restrict fitting to selected contexts; defaults to all contexts.",
+    )
     return parser
 
 
@@ -570,6 +576,9 @@ def run(args: argparse.Namespace) -> int:
     _validate_args(args, adapter.decoder_block_count_from_config(config))
     blocks = tuple(block for block, _choice in args.policy)
     policies = dict(args.policy)
+    contexts = tuple(args.context or CONTEXTS)
+    if not contexts or len(contexts) != len(set(contexts)):
+        raise ValueError("composed-context probe contexts must be non-empty and unique")
     required_samples = max(
         args.fit_offset + args.fit_samples,
         args.validation_offset + args.validation_samples,
@@ -651,7 +660,7 @@ def run(args: argparse.Namespace) -> int:
         fit_metrics: dict[str, object] = {}
         candidates: dict[str, SpliceReconstructionSet] = {}
         state_diagnostics: dict[str, dict[str, dict[str, float]]] = {
-            context: {} for context in CONTEXTS
+            context: {} for context in contexts
         }
         baseline_state_diagnostics = {
             str(block): _block_state_diagnostic(
@@ -663,7 +672,7 @@ def run(args: argparse.Namespace) -> int:
             )
             for block in blocks
         }
-        for context in CONTEXTS:
+        for context in contexts:
             fitted, metrics = _fit_context(
                 context,
                 teacher,
@@ -696,21 +705,29 @@ def run(args: argparse.Namespace) -> int:
                     device=args.device,
                 )
 
-        selected_student_context = {
-            block: min(
-                ("student_function", "student_state"),
-                key=lambda context: float(
-                    state_diagnostics[context][str(block)][
-                        "predicted_block_output_teacher_normalized_rmse"
-                    ]
-                ),
-            )
-            for block in blocks
-        }
+        student_contexts = tuple(
+            context for context in ("student_function", "student_state") if context in contexts
+        )
+        selected_student_context = (
+            {}
+            if not student_contexts
+            else {
+                block: min(
+                    student_contexts,
+                    key=lambda context: float(
+                        state_diagnostics[context][str(block)][
+                            "predicted_block_output_teacher_normalized_rmse"
+                        ]
+                    ),
+                )
+                for block in blocks
+            }
+        )
         evaluated_candidates = {
             key: candidate
             for key, candidate in candidates.items()
-            if key.startswith("teacher_function:")
+            if not selected_student_context
+            or key.startswith("teacher_function:")
             or any(
                 key.startswith(f"{selected_student_context[block]}:block{block}:")
                 for block in blocks
@@ -755,7 +772,7 @@ def run(args: argparse.Namespace) -> int:
         if key != "baseline"
     }
     context_comparisons = {}
-    for block in blocks:
+    for block in selected_student_context if "teacher_function" in contexts else ():
         student_key = (
             f"{selected_student_context[block]}:block{block}:{policies[block]}"
         )
@@ -813,6 +830,7 @@ def run(args: argparse.Namespace) -> int:
                 "fit_token_hash": _token_hash(fit_tokens),
                 "validation_token_hash": _token_hash(validation_tokens),
                 "evaluation_token_hash": _token_hash(evaluation_tokens),
+                "contexts": list(contexts),
             },
             "settings": {
                 "gate_grid_points": args.gate_grid_points,

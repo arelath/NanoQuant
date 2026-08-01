@@ -616,3 +616,23 @@ on the accepted composed-context state, matching the successful Phase C probe,
 instead of pulling the model back toward the unrefitted post-KD state. Full
 acceptance still requires fresh resident validation, held-out NLL/KL, exact
 export, unchanged effective BPW, and the retained quality benchmark.
+
+### Review-probe revision
+
+Experiment 036 was paused at uniform-control block 10 before its candidate
+campaign. The review probes in
+`Docs/73-experiment-035-review-probe-results.md` reject resuming the original
+full-seed policy. On Experiment 035, transplanted block 25 transfers strongly,
+but the full seed is worse than block 25 and winsorization does not fix the
+interaction. A fresh campaign-specific block-25 teacher-context refit is
+significantly better than the transplant, is factor-compatible at zero bytes,
+and reduces retained perplexity from `221.035336` to `148.747976` while moving
+the six-task mean from `0.472500` to `0.479167` with no individual task
+regression.
+
+The defect grows across global KD from `-0.012619` to `-0.435423` correctable
+NLL and from `-0.006930` to `-0.648702` correctable full-vocabulary KL. The
+retained top-k objective moves in the opposite direction: the fresh correction
+worsens its top-k KL by `+0.105220`. The revised production direction is a
+fresh post-KD refit and composition-gating stage, without the current top-k
+continuation, rather than a portable fitted-value seed.

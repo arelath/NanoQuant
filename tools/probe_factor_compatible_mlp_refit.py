@@ -46,6 +46,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--fit-iterations", type=int, default=12)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--use-global-tuning", action="store_true")
+    parser.add_argument(
+        "--skip-evaluation",
+        action="store_true",
+        help="Fit and export components without running redundant dense/factor screens.",
+    )
     return parser
 
 
@@ -269,7 +274,11 @@ def run(args: argparse.Namespace) -> int:
     policy = dict(args.policy)
     if set(policy) != set(manifest["blocks"]):
         raise ValueError("factor-compatible policy must choose every overlay block")
-    if args.wikitext_offset == 0:
+    if args.skip_evaluation:
+        tokens = None
+        dataset_fingerprint = None
+        bos_token_id = None
+    elif args.wikitext_offset == 0:
         tokens, dataset_fingerprint, bos_token_id = _protocol_tokens(
             args.snapshot,
             args.samples,
@@ -296,7 +305,11 @@ def run(args: argparse.Namespace) -> int:
             use_global_tuning=args.use_global_tuning,
         )
         loaded.model.eval()
-        baseline = _evaluate_per_sequence(loaded.model, tokens, args.device)
+        baseline = (
+            None
+            if tokens is None
+            else _evaluate_per_sequence(loaded.model, tokens, args.device)
+        )
         base = getattr(loaded.model, "model", None)
         decoder = getattr(base, "layers", None)
         if not isinstance(decoder, nn.ModuleList):
@@ -324,7 +337,11 @@ def run(args: argparse.Namespace) -> int:
             if args.device.startswith("cuda"):
                 torch.cuda.empty_cache()
 
-        factor_candidate = _evaluate_per_sequence(loaded.model, tokens, args.device)
+        factor_candidate = (
+            None
+            if tokens is None
+            else _evaluate_per_sequence(loaded.model, tokens, args.device)
+        )
         identity = {
             "model_hash": loaded.identity.model_hash,
             "config_hash": loaded.identity.config_hash,
@@ -350,14 +367,16 @@ def run(args: argparse.Namespace) -> int:
                 ),
             )
         )
-        for tensor_name, target in tensors.items():
-            logical = tensor_name.removeprefix("model.layers.").removesuffix(".weight")
-            block_text, path = logical.split(".", maxsplit=1)
-            _install_dense_linear(decoder[int(block_text)], path, target, device=args.device)
-        gc.collect()
-        if args.device.startswith("cuda"):
-            torch.cuda.empty_cache()
-        dense_candidate = _evaluate_per_sequence(loaded.model, tokens, args.device)
+        dense_candidate = None
+        if tokens is not None:
+            for tensor_name, target in tensors.items():
+                logical = tensor_name.removeprefix("model.layers.").removesuffix(".weight")
+                block_text, path = logical.split(".", maxsplit=1)
+                _install_dense_linear(decoder[int(block_text)], path, target, device=args.device)
+            gc.collect()
+            if args.device.startswith("cuda"):
+                torch.cuda.empty_cache()
+            dense_candidate = _evaluate_per_sequence(loaded.model, tokens, args.device)
 
     atomic_write_json(
         args.output,
@@ -379,16 +398,29 @@ def run(args: argparse.Namespace) -> int:
                 "fit_iterations": args.fit_iterations,
                 "dataset_fingerprint": dataset_fingerprint,
                 "bos_token_id": bos_token_id,
-                "token_hash": _token_hash(tokens),
+                "token_hash": None if tokens is None else _token_hash(tokens),
+                "evaluation_skipped": args.skip_evaluation,
             },
             "layers": layers,
             "payload_byte_delta": sum(int(item["payload_byte_delta"]) for item in layers.values()),
             "baseline": baseline,
             "factor_candidate": factor_candidate,
             "dense_candidate": dense_candidate,
-            "paired_factor_minus_baseline_nll": _paired_nll_payload(baseline, factor_candidate),
-            "paired_dense_minus_baseline_nll": _paired_nll_payload(baseline, dense_candidate),
-            "paired_factor_minus_dense_nll": _paired_nll_payload(dense_candidate, factor_candidate),
+            "paired_factor_minus_baseline_nll": (
+                None
+                if baseline is None or factor_candidate is None
+                else _paired_nll_payload(baseline, factor_candidate)
+            ),
+            "paired_dense_minus_baseline_nll": (
+                None
+                if baseline is None or dense_candidate is None
+                else _paired_nll_payload(baseline, dense_candidate)
+            ),
+            "paired_factor_minus_dense_nll": (
+                None
+                if dense_candidate is None or factor_candidate is None
+                else _paired_nll_payload(dense_candidate, factor_candidate)
+            ),
         },
     )
     return 0

@@ -69,6 +69,11 @@ def resolve_quality_evaluation_experiment(
                 if request.packed_artifact is None
                 else _resolve(request.packed_artifact, repository_root)
             ),
+            component_overlay=(
+                None
+                if request.component_overlay is None
+                else _resolve(request.component_overlay, repository_root)
+            ),
         ),
         _resolve(experiment.result_path, repository_root),
         experiment.resolve_model_from_config,

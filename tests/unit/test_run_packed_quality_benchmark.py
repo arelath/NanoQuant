@@ -30,6 +30,7 @@ def test_packed_quality_runner_preserves_complete_default_protocol(
     output = tmp_path / "quality.json"
     args = argparse.Namespace(
         packed_artifact=tmp_path / "packed",
+        component_overlay=None,
         run_output=tmp_path / "run",
         snapshot=tmp_path / "snapshot",
         source="fixture/model",
@@ -57,4 +58,5 @@ def test_packed_quality_runner_preserves_complete_default_protocol(
     assert request.task_limit == 200
     assert request.task_batch_size == 4
     assert request.packed_artifact == args.packed_artifact
+    assert request.component_overlay is None
     assert json.loads(output.read_text(encoding="utf-8")) == {"passed": True}

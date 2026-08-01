@@ -271,6 +271,60 @@ def _component_values(prefix: str, module: FactorizedReferenceLinear) -> dict[st
     return {name: value.detach().cpu().contiguous() for name, value in values.items()}
 
 
+def rescaled_global_mlp_components(
+    installed: InstalledMultipliers,
+    *,
+    blocks: set[int] | None = None,
+) -> tuple[dict[str, torch.Tensor], int]:
+    """Materialize selected folded components without mutating or unwrapping the model."""
+
+    available = {block for block, _path in installed.wrappers}
+    selected = available if blocks is None else blocks
+    if not selected or not selected.issubset(available):
+        raise ValueError("foldable MLP component selection is empty or unavailable")
+    tensors: dict[str, torch.Tensor] = {}
+    replaced_bytes = 0
+    for (block_index, path), wrapper in sorted(installed.wrappers.items()):
+        if block_index not in selected:
+            continue
+        input_multiplier = (
+            None
+            if wrapper.log_input_multiplier is None
+            else wrapper.log_input_multiplier.detach().exp()
+        )
+        output_multiplier = (
+            None
+            if wrapper.log_output_multiplier is None
+            else wrapper.log_output_multiplier.detach().exp()
+        )
+        base = wrapper.base
+        scaled = rescale_factorized_terms(
+            base.scale_pre,
+            base.scale_post,
+            input_multiplier=input_multiplier,
+            output_multiplier=output_multiplier,
+            outlier_indices=base.outlier_indices,
+            outlier_values=base.outlier_values,
+            patch_left=base.patch_left,
+            patch_right=base.patch_right,
+        )
+        prefix = f"model.layers.{block_index}.{path}"
+        values = {
+            f"{prefix}.scale_pre": scaled.scale_pre,
+            f"{prefix}.scale_post": scaled.scale_post,
+        }
+        for name in ("outlier_values", "patch_left", "patch_right"):
+            value = getattr(scaled, name)
+            if isinstance(value, torch.Tensor):
+                values[f"{prefix}.{name}"] = value
+        cpu_values = {
+            name: value.detach().cpu().contiguous() for name, value in values.items()
+        }
+        tensors.update(cpu_values)
+        replaced_bytes += sum(value.numel() * value.element_size() for value in cpu_values.values())
+    return tensors, replaced_bytes
+
+
 def fold_global_mlp_multipliers(
     model: nn.Module,
     installed: InstalledMultipliers,
@@ -324,5 +378,6 @@ __all__ = [
     "gradient_summary",
     "install_global_mlp_multipliers",
     "multiplier_summary",
+    "rescaled_global_mlp_components",
     "seed_global_mlp_multipliers",
 ]

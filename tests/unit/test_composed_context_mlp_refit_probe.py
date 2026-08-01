@@ -126,6 +126,24 @@ def test_context_policy_parser_rejects_duplicate_blocks() -> None:
         probe._parse_policy("0:output,0:joint")
 
 
+def test_context_parser_can_restrict_probe_to_teacher_only() -> None:
+    probe = _probe_module()
+    args = probe._parser().parse_args(
+        [
+            "--run-output",
+            "run",
+            "--snapshot",
+            "snapshot",
+            "--output",
+            "output.json",
+            "--context",
+            "teacher_function",
+        ]
+    )
+
+    assert args.context == ["teacher_function"]
+
+
 def test_paired_metric_payload_uses_requested_sequence_metric() -> None:
     probe = _probe_module()
     baseline_sequences = (

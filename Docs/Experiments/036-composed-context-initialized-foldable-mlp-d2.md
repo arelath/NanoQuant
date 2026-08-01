@@ -2,8 +2,16 @@
 
 ## Status
 
-Implementation and preflight validation in progress. The numbered launcher is
+Paused after uniform-control block 10. The numbered launcher is
 `experiments/036-composed-context-initialized-foldable-mlp-d2-gemma-3-1b-it.py`.
+
+The original full six-block-seed candidate is rejected before its candidate
+campaign. Review probes on retained Experiment 035 show that block 25 transfers
+strongly, but blocks 0 and 18 are harmful and the full seed is worse than block
+25 alone. A fresh block-25 refit on the active campaign is significantly better
+than the transplanted value and reaches retained perplexity `148.747976` at
+zero byte delta. Experiment 036 must not resume unchanged. See
+[73-experiment-035-review-probe-results.md](../73-experiment-035-review-probe-results.md).
 
 ## Purpose
 
@@ -64,3 +72,17 @@ The experiment must:
 
 No result is accepted from the training loss, initializer replay, or WikiText
 perplexity alone.
+
+## Paused-run state and revision decision
+
+The resumable uniform-control run is retained under
+`evidence/036/036-d2-uniform-control-gemma-3-1b-it/`. Its journal contains 66
+records and 11 complete blocks through block 10. No Experiment 036 candidate
+block was started.
+
+The review probes demonstrate that the retained top-k objective actively
+penalizes the correction preferred by full-vocabulary NLL/KL. The original
+64-step continuation is therefore also removed from the revised candidate
+direction. The next candidate must fit and screen teacher-context MLP scales on
+its own post-KD factors, initially block 25 only, then complete the ordinary
+zero-byte folding, export, and quality gates.
