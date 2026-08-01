@@ -189,3 +189,20 @@ Experiment 003's Gemma 3 4B snapshot also exports and publishes the paired visio
 - tensor count: 439;
 - material tensor types: BF16, F16, and F32 (the latter two are converter-required exceptions);
 - SHA-256: `78a2097ec69ed696a6463201fd1333b0f0086836c869bbaf0b4511680b1787b5`.
+
+## Publishing an accepted derived run
+
+An analysis checkpoint can be materialized as an isolated derived run while
+retaining the immutable source resident manifest. Promotion does not rewrite
+that source identity. Instead, the export recipe must explicitly set both
+`publication_experiment_number` and `use_active_global_tuning=True`, and the
+terminal workflow loader must opt into relocated-run loading. Relocated loading
+removes only the material `output` path from the manifest comparison; every
+other resident request field, the journal identity, model identity, plan, and
+transitive artifact graph must still match and pass fresh validation.
+
+This route is only for a terminal derived run whose active global-tuning
+artifact has already been committed through the normal artifact store. It does
+not permit an incomplete run to resume under a different path, infer a Results
+namespace, or silently include tuning absent from the recipe. Experiment 040 is
+the first retained use of this promotion path.

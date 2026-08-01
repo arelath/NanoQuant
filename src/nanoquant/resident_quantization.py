@@ -7092,12 +7092,14 @@ def load_completed_resident_quantization(
     request: ResidentQuantizationRequest,
     *,
     allow_historical_algorithm: bool = False,
+    allow_relocated_run: bool = False,
 ) -> ResidentQuantizationResult:
     """Rehydrate one completed resident result without reopening its run session.
 
     Historical algorithm identities are accepted only for terminal workflow
     consumption. Active/incomplete resume remains bound to the current resident
-    algorithm identity.
+    algorithm identity. Relocated terminal runs require an explicit opt-in and
+    must match every persisted request field except the material output path.
     """
 
     _validate_resident_request(request)
@@ -7106,7 +7108,14 @@ def load_completed_resident_quantization(
     if manifest.status is not RunStatus.COMPLETED:
         raise ValueError(f"resident run is not completed: {manifest.status.value}")
     proposed = _resident_manifest(request, "resident-quantization")
-    if manifest.config_hash != proposed.config_hash:
+    manifest_config = dict(manifest.resolved_config)
+    proposed_config = dict(proposed.resolved_config)
+    relocated_match = False
+    if allow_relocated_run:
+        manifest_config.pop("output", None)
+        proposed_config.pop("output", None)
+        relocated_match = semantic_hash(manifest_config) == semantic_hash(proposed_config)
+    if manifest.config_hash != proposed.config_hash and not relocated_match:
         raise ValueError("completed resident run configuration differs from the current request")
 
     artifacts = LocalArtifactStore(

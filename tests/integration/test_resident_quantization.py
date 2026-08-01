@@ -1,6 +1,7 @@
 import json
 import math
 import os
+import shutil
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
@@ -201,6 +202,22 @@ def test_resident_quantization_commits_complete_transformers_model(
     assert rehydrated.argmax_agreement == result.argmax_agreement
     assert (output / "manifest.json").read_bytes() == manifest_before_rehydrate
     assert (output / "events.jsonl").read_bytes() == events_before_rehydrate
+    relocated_output = tmp_path / "relocated-run"
+    shutil.copytree(output, relocated_output)
+    relocated_request = replace(request, output=relocated_output)
+    with pytest.raises(ValueError, match="configuration differs"):
+        load_completed_resident_quantization(relocated_request)
+    relocated = load_completed_resident_quantization(
+        relocated_request,
+        allow_relocated_run=True,
+    )
+    assert relocated.identity == result.identity
+    assert relocated.blocks == result.blocks
+    with pytest.raises(ValueError, match="configuration differs"):
+        load_completed_resident_quantization(
+            replace(relocated_request, target_bpw=7.9),
+            allow_relocated_run=True,
+        )
     with monkeypatch.context() as historical_context:
         historical_context.setattr(
             resident,

@@ -101,6 +101,7 @@ class ResidentExecutionOptions:
     replace_existing_global_tuning: bool = False
     maximum_wddm_shared_bytes: int | None = None
     replan_memory: bool = False
+    allow_relocated_completed_run: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -644,6 +645,7 @@ def load_completed_resident_workflow(
             memory_plan_reference=memory_plan_reference,
         ),
         allow_historical_algorithm=True,
+        allow_relocated_run=options.allow_relocated_completed_run,
     )
     distillation = None
     if config.distillation.enabled:

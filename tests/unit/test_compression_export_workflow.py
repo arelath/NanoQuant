@@ -51,6 +51,32 @@ def test_compression_export_recipe_resolves_all_material_paths(tmp_path: Path) -
     assert resolved.output_tensor_type == "q8_0"
 
 
+def test_derived_run_export_resolves_explicit_publication_and_tuning(tmp_path: Path) -> None:
+    recipe = replace(
+        _recipe(),
+        gguf_output=Path("Results/040/model.gguf"),
+        publication_experiment_number=40,
+        use_active_global_tuning=True,
+    )
+
+    resolved = resolve_compression_export_recipe(recipe, tmp_path)
+
+    assert resolved.gguf_output == tmp_path / "Results" / "040" / "model.gguf"
+    assert resolved.publication_experiment_number == 40
+    assert resolved.use_active_global_tuning is True
+
+
+@pytest.mark.parametrize("number", [True, 0, 1000])
+def test_compression_export_rejects_invalid_publication_number(number: object) -> None:
+    with pytest.raises(ValueError, match="publication experiment number"):
+        replace(_recipe(), publication_experiment_number=number)  # type: ignore[arg-type]
+
+
+def test_compression_export_rejects_nonboolean_global_tuning_selection() -> None:
+    with pytest.raises(ValueError, match="global-tuning selection"):
+        replace(_recipe(), use_active_global_tuning=1)  # type: ignore[arg-type]
+
+
 def test_complete_compression_export_runs_validated_stages_in_order(
     tmp_path: Path,
     monkeypatch,
@@ -131,6 +157,61 @@ def test_complete_compression_export_runs_validated_stages_in_order(
     assert summary["mmproj"]["sha256"] == "b" * 64
     assert summary["huggingface"] is None
     assert result.huggingface is None
+
+
+def test_derived_run_export_uses_active_tuning_even_when_source_config_disables_it(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    config = replace(
+        _CONFIG,
+        distillation=replace(_CONFIG.distillation, enabled=False),
+    )
+    recipe = replace(
+        _recipe(),
+        gguf_output=Path("Results/040/model.gguf"),
+        publication_experiment_number=40,
+        use_active_global_tuning=True,
+    )
+    resolved = resolve_compression_export_recipe(recipe, tmp_path)
+    calls: list[object] = []
+    monkeypatch.setattr(workflow, "active_global_tuning", lambda *_args: SimpleNamespace())
+    monkeypatch.setattr(
+        workflow,
+        "_runtime_metadata",
+        lambda *_args: RuntimeModelMetadata("source", "revision", "gemma3", "config", "tokenizer"),
+    )
+    monkeypatch.setattr(workflow, "_resolved_model_block_count", lambda *_args: 26)
+    monkeypatch.setattr(
+        workflow,
+        "_ensure_logical_export",
+        lambda *_args, **kwargs: calls.append(kwargs["use_global_tuning"])
+        or {"exact": True},
+    )
+    monkeypatch.setattr(workflow, "_ensure_packed_export", lambda *_args: {"exact": True})
+    monkeypatch.setattr(
+        workflow,
+        "export_llamacpp_gguf",
+        lambda *_args, **_kwargs: GgufExportResult(
+            resolved.gguf_output,
+            resolved.checkpoint_output,
+            resolved.llama_cpp_root / "convert_nanoquant_to_gguf.py",
+            123,
+            "a" * 64,
+            False,
+        ),
+    )
+
+    result = execute_compression_export(
+        config,
+        recipe,
+        repository_root=tmp_path,
+        run_output=tmp_path / "run",
+        snapshot=tmp_path / "snapshot",
+    )
+
+    assert calls == [True]
+    assert result.summary_output.is_file()
 
 
 def test_deferred_huggingface_upload_includes_quality_documents_and_refreshes_summary(
@@ -412,6 +493,25 @@ def test_compression_export_rejects_gguf_outside_numbered_results(tmp_path: Path
     recipe = replace(_recipe(), gguf_output=Path("outputs/003/model.gguf"))
 
     with pytest.raises(ValueError, match="numbered Results directory"):
+        execute_compression_export(
+            _CONFIG,
+            recipe,
+            repository_root=tmp_path,
+            run_output=tmp_path / "run",
+            snapshot=tmp_path / "snapshot",
+        )
+
+
+def test_derived_run_export_requires_explicit_publication_results_directory(
+    tmp_path: Path,
+) -> None:
+    recipe = replace(
+        _recipe(),
+        gguf_output=Path("Results/003/model.gguf"),
+        publication_experiment_number=40,
+    )
+
+    with pytest.raises(ValueError, match=r"Results\\040"):
         execute_compression_export(
             _CONFIG,
             recipe,

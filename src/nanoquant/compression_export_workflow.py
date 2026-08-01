@@ -24,6 +24,7 @@ from nanoquant.infrastructure.gguf_export import (
     normalize_output_tensor_type,
     normalize_token_embedding_type,
 )
+from nanoquant.infrastructure.global_tuning import active_global_tuning
 from nanoquant.infrastructure.huggingface_model_card import (
     HuggingFaceModelCardMetadata,
     huggingface_model_card_output,
@@ -82,6 +83,8 @@ class CompressionExportRecipe:
     token_embedding_type: str = DEFAULT_TOKEN_EMBEDDING_TYPE
     huggingface: HuggingFaceUploadConfig | None = None
     output_tensor_type: str = DEFAULT_OUTPUT_TENSOR_TYPE
+    publication_experiment_number: int | None = None
+    use_active_global_tuning: bool | None = None
 
     def __post_init__(self) -> None:
         if not self.runtime_family:
@@ -93,6 +96,16 @@ class CompressionExportRecipe:
             HuggingFaceUploadConfig,
         ):
             raise ValueError("compression export Hugging Face destination is invalid")
+        if self.publication_experiment_number is not None and (
+            isinstance(self.publication_experiment_number, bool)
+            or not 1 <= self.publication_experiment_number <= 999
+        ):
+            raise ValueError("compression export publication experiment number must be between 1 and 999")
+        if self.use_active_global_tuning is not None and not isinstance(
+            self.use_active_global_tuning,
+            bool,
+        ):
+            raise ValueError("compression export global-tuning selection must be boolean or None")
         object.__setattr__(
             self,
             "token_embedding_type",
@@ -116,6 +129,8 @@ class ResolvedCompressionExportRecipe:
     token_embedding_type: str = DEFAULT_TOKEN_EMBEDDING_TYPE
     huggingface: HuggingFaceUploadConfig | None = None
     output_tensor_type: str = DEFAULT_OUTPUT_TENSOR_TYPE
+    publication_experiment_number: int | None = None
+    use_active_global_tuning: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,11 +168,21 @@ def resolve_compression_export_recipe(
         token_embedding_type=recipe.token_embedding_type,
         huggingface=recipe.huggingface,
         output_tensor_type=recipe.output_tensor_type,
+        publication_experiment_number=recipe.publication_experiment_number,
+        use_active_global_tuning=recipe.use_active_global_tuning,
     )
 
 
-def _results_directory(config: RunConfig, repository_root: Path) -> Path:
-    experiment_number = config.intent.experiment_number
+def _results_directory(
+    config: RunConfig,
+    repository_root: Path,
+    publication_experiment_number: int | None = None,
+) -> Path:
+    experiment_number = (
+        config.intent.experiment_number
+        if publication_experiment_number is None
+        else publication_experiment_number
+    )
     if experiment_number is not None:
         return (repository_root / "Results" / f"{experiment_number:03d}").resolve()
     run_name = config.intent.name.strip()
@@ -170,10 +195,21 @@ def _require_results_gguf_output(
     config: RunConfig,
     repository_root: Path,
     gguf_output: Path,
+    *,
+    publication_experiment_number: int | None = None,
 ) -> None:
-    expected_directory = _results_directory(config, repository_root)
+    expected_directory = _results_directory(
+        config,
+        repository_root,
+        publication_experiment_number,
+    )
     if gguf_output.parent != expected_directory:
-        scope = "numbered Results" if config.intent.experiment_number is not None else "interactive Results"
+        scope = (
+            "numbered Results"
+            if publication_experiment_number is not None
+            or config.intent.experiment_number is not None
+            else "interactive Results"
+        )
         raise ValueError(
             f"compression export GGUF must be written directly to the {scope} directory: "
             f"{expected_directory}"
@@ -464,7 +500,12 @@ def execute_compression_export(
 
     root = Path(repository_root).resolve()
     resolved = resolve_compression_export_recipe(recipe, root)
-    _require_results_gguf_output(config, root, resolved.gguf_output)
+    _require_results_gguf_output(
+        config,
+        root,
+        resolved.gguf_output,
+        publication_experiment_number=resolved.publication_experiment_number,
+    )
     run = Path(run_output).resolve()
     if config.distillation.foldable_mlp_multipliers.enabled:
         active = active_foldable_mlp_tuning(run)
@@ -476,12 +517,19 @@ def execute_compression_export(
     source_snapshot = Path(snapshot).resolve()
     block_count = _resolved_model_block_count(source_snapshot)
     metadata = _runtime_metadata(config, source_snapshot, resolved.runtime_family)
+    use_global_tuning = (
+        config.distillation.enabled
+        if resolved.use_active_global_tuning is None
+        else resolved.use_active_global_tuning
+    )
+    if resolved.use_active_global_tuning is True and active_global_tuning(run) is None:
+        raise ValueError("compression export requested active global tuning but the run has none")
     logical = _ensure_logical_export(
         run,
         resolved,
         metadata,
         block_count,
-        use_global_tuning=config.distillation.enabled,
+        use_global_tuning=use_global_tuning,
         component_overlay=component_overlay,
     )
     packed = _ensure_packed_export(resolved)

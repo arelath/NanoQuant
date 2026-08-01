@@ -323,9 +323,15 @@ def test_completed_workflow_explicitly_loads_historical_algorithm_identity(
     monkeypatch.setattr(workflow, "_resolve_workflow_memory_plan", lambda *_args: (None, None))
     monkeypatch.setattr(workflow, "resident_request_from_config", lambda *_args, **_kwargs: request)
 
-    def load_completed(candidate: object, *, allow_historical_algorithm: bool = False) -> object:
+    def load_completed(
+        candidate: object,
+        *,
+        allow_historical_algorithm: bool = False,
+        allow_relocated_run: bool = False,
+    ) -> object:
         observed["request"] = candidate
         observed["allow_historical_algorithm"] = allow_historical_algorithm
+        observed["allow_relocated_run"] = allow_relocated_run
         return quantization
 
     monkeypatch.setattr(workflow, "load_completed_resident_quantization", load_completed)
@@ -338,6 +344,7 @@ def test_completed_workflow_explicitly_loads_historical_algorithm_identity(
     assert observed == {
         "request": request,
         "allow_historical_algorithm": True,
+        "allow_relocated_run": False,
     }
 
 
