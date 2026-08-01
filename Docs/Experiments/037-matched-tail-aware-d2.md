@@ -59,6 +59,24 @@ PIQA, ARC-Easy, ARC-Challenge, HellaSwag, WinoGrande, and BoolQ.
 Calibration preserves a small PPL advantage over conditional KD, but the
 task mean is lower by `0.01750`. This fails the predeclared no-regression gate.
 
+#### Larger task-inventory diagnostic
+
+The same three active serialized arms were subsequently evaluated on the first
+1,000 examples per task. This was a diagnosis after the predeclared decision,
+not a replacement acceptance gate.
+
+| Arm | WikiText PPL | Six-task mean |
+| --- | ---: | ---: |
+| Conditional top-k | 187.52287 | **0.45317** |
+| Tail-aware 0.5 | **174.08334** | 0.44650 |
+| Tail-aware 0.5 + 1.06 | 186.91545 | 0.44633 |
+
+The conditional advantage shrinks from `0.01750` to `0.00683`, but it does not
+reverse. The fold itself changes the larger task mean by only `-0.00017`.
+Therefore the task deficit comes from the tail-aware training tradeoff, while
+the post-hoc fold is specifically responsible for giving back WikiText and C4
+NLL to meet the selected-mass floor.
+
 ### Pinned C4 gate
 
 The four-arm C4 comparison used the pinned 48x512 slice with token hash
@@ -76,10 +94,11 @@ Uncalibrated tail-aware versus conditional passes both paired gates: NLL
 `[-0.24161, -0.21114]`. The calibrated arm keeps the KL improvement but has
 NLL `+0.02249`, interval `[+0.00300, +0.04188]`, so the matched C4 gate fails.
 
-The combined result is stronger than a single noisy task row: the post-hoc
-scalar needed to meet the mass floor consistently gives back useful NLL and
-task quality. A further scalar sweep on the same validation slice would not
-resolve that structural tradeoff and would turn the gate into a tuning set.
+The combined result is stronger than a single noisy task row: tail-aware
+training improves NLL/KL but retains less task quality, while the post-hoc
+scalar needed to meet the mass floor gives back useful NLL. A further scalar
+sweep on the same validation slice would not resolve both structural
+tradeoffs and would turn the gate into a tuning set.
 
 ## Common state
 
@@ -164,14 +183,18 @@ GGUF, receipts, summary, and quality report remain.
 - `evidence/037/experiment037-tail-aware-uncalibrated-standard-quality.json`
 - `evidence/037/experiment037-tail-aware-folded1p06-standard-quality.json`
 - `evidence/037/experiment037-matched-c4-validation104-48x512.json`
+- `evidence/037/experiment037-conditional-tasklimit1000-quality.json`
+- `evidence/037/experiment037-tail-aware-uncalibrated-tasklimit1000-quality.json`
+- `evidence/037/experiment037-tail-aware-folded1p06-tasklimit1000-quality.json`
 
 ## Next direction
 
 Do not spend another fresh factorization on a different fixed scalar. First,
 use the existing matched state to test a KD constraint or adaptive dual term
-that makes the trained endpoint itself satisfy the broad mass floor. That
-targets the failure directly and avoids the post-hoc temperature correction
-that lost task and C4-NLL quality here. Before selecting another candidate,
-confirm the conditional task advantage on a larger retained task inventory so
-the next objective is designed against a stable signal rather than six
-200-example point estimates.
+that applies mass pressure only when the trained endpoint violates the broad
+floor. Couple it to an explicit trust-region or conditional-shape preservation
+term so the optimizer does not spend the task-friendly behavior measured in
+the conditional control. This targets both diagnosed failures: the raw
+tail-aware endpoint misses the mass floor, and fixed mass pressure loses a
+small but persistent task advantage. Candidate selection must use a separate
+fit/validation split and leave the existing broad and C4 slices untouched.
