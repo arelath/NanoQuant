@@ -2,10 +2,9 @@
 
 ## Status
 
-Fixture validation complete; retained Gemma correction pending. This
-experiment reuses the validated Experiment 037 frozen state and conditional
-checkpoint. It does not rerun factorization and does not resume Experiment
-036.
+Complete; the exact candidate is rejected at the broad mass gate. This
+experiment reused the validated Experiment 037 frozen state and conditional
+checkpoint. It did not rerun factorization and did not resume Experiment 036.
 
 ## Motivation
 
@@ -124,3 +123,43 @@ checkpoint must then, without further tuning:
 Failure on the fit monitor rejects this exact correction protocol cheaply.
 Failure on either untouched final distribution does not authorize coefficient
 or ratio tuning on that distribution.
+
+## Result
+
+The 0.5 and 1.0 coefficients failed the designated 16x512 fit monitor. The
+first-epoch mass values were 0.73106 and 0.72838 respectively, below the
+relative target 0.75870. Coefficient 2.0 produced the first survivor at epoch
+1:
+
+| Fit state | NLL | Full KL | Tail KL | Student top-64 mass |
+| --- | ---: | ---: | ---: | ---: |
+| Conditional initializer | 4.30468 | 1.69310 | 1.63195 | 0.50659 |
+| Weight 2.0, epoch 1 | **4.19592** | **1.34764** | **1.28830** | **0.76165** |
+| Relative target | - | - | - | 0.75870 |
+
+Later checkpoints fell back below the floor, so the predeclared first-survivor
+rule selected the durable epoch-1 checkpoint
+`sha256-56dc4b560ed2c73965a02b5a4bb50945aa05fa6f62763171e2f486e207bbfa24`.
+
+On the untouched validation-offset-104 48x512 slice, the selected checkpoint
+improved conditional NLL from 4.47838 to 4.34548, full KL from 1.66403 to
+1.28348, and tail KL from 1.59103 to 1.21332. Its mass generalized only from
+0.76165 to 0.73890, however, and therefore failed the absolute 0.75 gate.
+The token hash is the retained Experiment 037 value
+`sha256:983ca15101666bef50ef4c1ccd44670a032e865e8f85230f942b08acc01e1b3d`.
+The Hugging Face in-memory dataset fingerprint changed between the two runs,
+but a fresh two-process audit reproduced that exact token hash; the evaluated
+token inventory did not change.
+
+No task, C4, materialization, or export gate was run for this rejected
+checkpoint. A follow-up must be a newly declared protocol with a fit-only
+generalization margin and a new untouched WikiText confirmation slice; it
+cannot retune this candidate against offset 104.
+
+Retained evidence:
+
+- `evidence/038-source-validation.json`
+- `evidence/038/experiment038-mass-floor-ratio0p8-weight0p5-correction/report.json`
+- `evidence/038/experiment038-mass-floor-ratio0p8-weight1p0-correction/report.json`
+- `evidence/038/experiment038-mass-floor-ratio0p8-weight2p0-correction/report.json`
+- `evidence/038/experiment038-weight2-epoch1-validation104-48x512-kl.json`

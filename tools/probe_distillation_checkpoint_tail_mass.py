@@ -31,6 +31,7 @@ from nanoquant.infrastructure.hf_language_model import load_causal_language_mode
 from nanoquant.infrastructure.io_utils import atomic_write_json
 from nanoquant.infrastructure.model_adapters import adapter_for_config
 from nanoquant.infrastructure.tensor_store import LocalTensorStore
+from nanoquant.kl_budget_workflow import _token_hash
 
 
 @dataclass(frozen=True, slots=True)
@@ -290,6 +291,7 @@ def run(args: argparse.Namespace) -> int:
                     "folded-final-rmsnorm" if fold_final_norm else "post-logits"
                 ),
                 "dataset_fingerprint": fingerprint,
+                "token_hash": _token_hash(tokens),
                 "bos_token_id": bos_token_id,
             },
             "checkpoints": checkpoint_receipts,
