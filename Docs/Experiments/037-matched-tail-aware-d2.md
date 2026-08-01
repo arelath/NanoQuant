@@ -3,9 +3,11 @@
 ## Status
 
 Running. Experiment 036 remains paused and is not reused. The common-state
-worker uses two-new-block process slices so Windows releases retired rolling
+worker uses block-bounded process slices so Windows releases retired rolling
 activation file handles between resumes; each slice is validated before the
-next one starts.
+next one starts. The final slice is limited to one new block so the complete
+resident state receives a fresh `--require-complete` audit before export and
+quality evaluation.
 
 ## Question
 

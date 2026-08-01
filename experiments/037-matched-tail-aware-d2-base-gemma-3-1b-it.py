@@ -81,7 +81,9 @@ EXPERIMENT = define_compression_quality_experiment(
     ),
     CONFIG,
     maximum_wddm_shared_gib=0.75,
-    interrupt_after_block_commits=2,
+    # Stop after the final remaining block so the completed resident state can
+    # receive a fresh --require-complete audit before export and evaluation.
+    interrupt_after_block_commits=1,
 )
 
 
