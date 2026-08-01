@@ -169,6 +169,7 @@ def test_complete_frozen_run_can_be_distilled_committed_and_reloaded(
     assert cooldowns == [1.5, 1.5, 3.25]
     assert offloads == ["cpu", "cpu"]
     protocol = to_dict(request.config)
+    protocol.pop("scheduler_total_steps")
     if objective == "top_k":
         protocol.pop("objective")
         protocol.pop("maximum_batches_per_epoch")

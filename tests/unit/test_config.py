@@ -208,6 +208,7 @@ def test_mass_floor_correction_requires_primary_distillation_and_valid_policy() 
         epochs=0,
         learning_rate=math.nan,
         maximum_batches_per_epoch=0,
+        scheduler_total_steps=0,
         minimum_teacher_mass_ratio=1.1,
         mass_loss_weight=0.0,
     )
@@ -223,6 +224,7 @@ def test_mass_floor_correction_requires_primary_distillation_and_valid_policy() 
         "CFG123",
         "CFG124",
         "CFG125",
+        "CFG128",
     }
 
     bad_final_norm = replace(

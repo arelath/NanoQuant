@@ -147,6 +147,7 @@ def test_resident_recipe_maps_warm_started_mass_floor_correction(tmp_path: Path)
         epochs=1,
         learning_rate=1e-5,
         maximum_batches_per_epoch=32,
+        scheduler_total_steps=128,
         minimum_teacher_mass_ratio=0.8,
         mass_loss_weight=2.0,
     )
@@ -170,6 +171,7 @@ def test_resident_recipe_maps_warm_started_mass_floor_correction(tmp_path: Path)
     assert request.config.epochs == 1
     assert request.config.learning_rate == 1e-5
     assert request.config.maximum_batches_per_epoch == 32
+    assert request.config.scheduler_total_steps == 128
     assert request.config.minimum_teacher_mass_ratio == 0.8
     assert request.config.mass_floor_weight == 2.0
     assert request.initializer_global_tuning == initializer

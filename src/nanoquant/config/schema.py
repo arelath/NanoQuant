@@ -547,6 +547,7 @@ class MassFloorCorrectionConfig:
     epochs: int = 1
     learning_rate: float = 1e-5
     maximum_batches_per_epoch: int = 32
+    scheduler_total_steps: int = 128
     minimum_teacher_mass_ratio: float = 0.8
     mass_loss_weight: float = 2.0
 

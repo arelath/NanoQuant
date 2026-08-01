@@ -588,6 +588,7 @@ def mass_floor_correction_request_from_config(
             token_chunk_size=primary.config.token_chunk_size,
             maximum_tokens_per_batch=primary.config.maximum_tokens_per_batch,
             maximum_batches_per_epoch=correction.maximum_batches_per_epoch,
+            scheduler_total_steps=correction.scheduler_total_steps,
             minimum_teacher_mass_ratio=correction.minimum_teacher_mass_ratio,
             mass_floor_weight=correction.mass_loss_weight,
             gradient_checkpointing=primary.config.gradient_checkpointing,

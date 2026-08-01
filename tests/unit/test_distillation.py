@@ -1,4 +1,5 @@
 from copy import deepcopy
+from dataclasses import replace
 
 import pytest
 import torch
@@ -42,6 +43,7 @@ def test_distillation_config_uses_legacy_zero_weight_decay() -> None:
     assert TopKDistillationConfig().objective == "top_k"
     assert TopKDistillationConfig().weight_decay == 0.0
     assert TopKDistillationConfig().maximum_batches_per_epoch is None
+    assert TopKDistillationConfig().scheduler_total_steps is None
     assert TopKDistillationConfig().tail_mass_weight == 1.0
     assert TopKDistillationConfig().minimum_teacher_mass_ratio == 0.8
     assert TopKDistillationConfig().mass_floor_weight == 1.0
@@ -60,6 +62,8 @@ def test_distillation_config_validates_mass_floor_policy() -> None:
         TopKDistillationConfig(minimum_teacher_mass_ratio=0.0)
     with pytest.raises(ValueError, match="mass floor weight"):
         TopKDistillationConfig(mass_floor_weight=float("nan"))
+    with pytest.raises(ValueError, match="scheduler total steps"):
+        TopKDistillationConfig(scheduler_total_steps=0)
 
 
 def test_teacher_cache_plan_matches_legacy_python_and_device_rng() -> None:
@@ -678,6 +682,88 @@ def test_topk_distillation_resume_restores_adam_and_scheduler_exactly(
     assert resumed_metrics.epoch_losses == pytest.approx(control_metrics.epoch_losses, abs=1e-8)
     assert resumed_metrics.steps_completed == control_metrics.steps_completed
     assert torch.equal(resumed.projection.weight, control.projection.weight)
+
+
+def test_short_correction_can_retain_a_longer_cosine_schedule_horizon() -> None:
+    torch.manual_seed(31)
+    teacher = ToyLanguageModel()
+    initial_student = deepcopy(teacher)
+    with torch.no_grad():
+        initial_student.projection.weight.add_(0.2)
+    tokens = torch.randint(1, 17, (6, 5), generator=torch.Generator().manual_seed(32))
+    long_config = TopKDistillationConfig(
+        objective="top_k_mass_floor",
+        epochs=4,
+        batch_size=2,
+        learning_rate=0.025,
+        top_k=6,
+        vocabulary_chunk_size=5,
+        token_chunk_size=3,
+        maximum_tokens_per_batch=7,
+        maximum_batches_per_epoch=2,
+        gradient_checkpointing=False,
+        seed=33,
+    )
+    long_cache = cache_topk_teacher_targets(
+        teacher,
+        tokens,
+        teacher.lm_head,
+        _hidden,
+        long_config,
+        device="cpu",
+        pad_token_id=None,
+    )
+    checkpoints: list[DistillationResumeState] = []
+
+    def stop_after_first_epoch(state: DistillationResumeState) -> None:
+        checkpoints.append(state)
+        raise InterruptedError("first epoch retained")
+
+    with pytest.raises(InterruptedError, match="first epoch retained"):
+        distill_topk(
+            deepcopy(initial_student),
+            tokens,
+            initial_student.lm_head,
+            _hidden,
+            long_cache,
+            long_config,
+            lambda name, _parameter: name == "projection.weight",
+            device="cpu",
+            checkpoint_sink=stop_after_first_epoch,
+        )
+
+    short_config = replace(
+        long_config,
+        epochs=1,
+        scheduler_total_steps=sum(len(epoch) for epoch in long_cache.epochs),
+    )
+    short_cache = cache_topk_teacher_targets(
+        teacher,
+        tokens,
+        teacher.lm_head,
+        _hidden,
+        short_config,
+        device="cpu",
+        pad_token_id=None,
+    )
+    short_student = deepcopy(initial_student)
+    short_metrics = distill_topk(
+        short_student,
+        tokens,
+        short_student.lm_head,
+        _hidden,
+        short_cache,
+        short_config,
+        lambda name, _parameter: name == "projection.weight",
+        device="cpu",
+    )
+
+    retained = checkpoints[-1]
+    assert short_metrics.epoch_losses == retained.epoch_losses
+    assert torch.equal(
+        short_student.projection.weight,
+        dict(retained.parameter_values)["projection.weight"],
+    )
 
 
 def test_distillation_micro_profile_preserves_cache_training_and_parameters() -> None:

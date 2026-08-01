@@ -353,7 +353,7 @@ def _offload_student(student: nn.Module, device: str) -> None:
     student.cpu()
     gc.collect()
     if device.startswith("cuda"):
-        torch.cuda.synchronize(device)
+        torch.cuda.synchronize(torch.device(device))
         torch.cuda.empty_cache()
 
 
@@ -404,8 +404,11 @@ def _run_global_topk_distillation(
             protocol.pop("mass_floor_weight")
         else:
             protocol.pop("tail_mass_weight")
+    if protocol.get("scheduler_total_steps") is None:
+        protocol.pop("scheduler_total_steps")
     teacher_protocol = dict(protocol)
     teacher_protocol.pop("optimizer_version")
+    teacher_protocol.pop("scheduler_total_steps", None)
     # Teacher-cache schema v1 included weight decay even though it cannot
     # affect teacher targets. Normalize it to the original protocol value so
     # the legacy-zero-decay correction can reuse the already committed cache.
@@ -495,7 +498,7 @@ def _run_global_topk_distillation(
         selected, auxiliary_names = _selected_parameters(loaded.model, trainable)
 
     if request.device.startswith("cuda"):
-        torch.cuda.reset_peak_memory_stats(request.device)
+        torch.cuda.reset_peak_memory_stats(torch.device(request.device))
     cache_journal = load_teacher_cache_journal(
         request.run_output,
         cache_identity,

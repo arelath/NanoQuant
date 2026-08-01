@@ -39,6 +39,7 @@ class TopKDistillationConfig:
     token_chunk_size: int = 128
     maximum_tokens_per_batch: int | None = 512
     maximum_batches_per_epoch: int | None = None
+    scheduler_total_steps: int | None = None
     tail_mass_weight: float = 1.0
     minimum_teacher_mass_ratio: float = 0.8
     mass_floor_weight: float = 1.0
@@ -61,6 +62,8 @@ class TopKDistillationConfig:
             raise ValueError("distillation maximum tokens per batch must be positive when provided")
         if self.maximum_batches_per_epoch is not None and self.maximum_batches_per_epoch <= 0:
             raise ValueError("distillation maximum batches per epoch must be positive when provided")
+        if self.scheduler_total_steps is not None and self.scheduler_total_steps <= 0:
+            raise ValueError("distillation scheduler total steps must be positive when provided")
         if not math.isfinite(self.tail_mass_weight) or self.tail_mass_weight <= 0:
             raise ValueError("distillation tail mass weight must be finite and positive")
         if (
@@ -851,6 +854,11 @@ def distill_topk(
         weight_decay=config.weight_decay,
     )
     total_steps = sum(len(epoch) for epoch in teacher_cache.epochs)
+    scheduler_total_steps = (
+        total_steps if config.scheduler_total_steps is None else config.scheduler_total_steps
+    )
+    if scheduler_total_steps < total_steps:
+        raise ValueError("distillation scheduler total steps cannot be shorter than training")
     starting_steps = 0 if resume is None else resume.steps_completed
     if starting_steps < 0 or starting_steps > total_steps:
         raise ValueError("distillation resume step is out of range")
@@ -864,13 +872,13 @@ def distill_topk(
         )
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
-        T_max=max(1, total_steps),
+        T_max=max(1, scheduler_total_steps),
     )
     restore_cosine_annealing_state(
         optimizer,
         scheduler,
         starting_steps,
-        total_steps,
+        scheduler_total_steps,
         config.learning_rate,
     )
     cpu_tokens = token_ids.detach().cpu()

@@ -747,6 +747,19 @@ def validate(config: RunConfig, phase: ValidationPhase = ValidationPhase.PRE_RES
         "must be positive",
     )
     require(
+        correction.scheduler_total_steps > 0,
+        "CFG128",
+        "distillation.mass_floor_correction.scheduler_total_steps",
+        "must be positive",
+    )
+    require(
+        correction.scheduler_total_steps
+        >= correction.epochs * correction.maximum_batches_per_epoch,
+        "CFG129",
+        "distillation.mass_floor_correction.scheduler_total_steps",
+        "must cover every configured correction training step",
+    )
+    require(
         math.isfinite(correction.minimum_teacher_mass_ratio)
         and 0 < correction.minimum_teacher_mass_ratio <= 1,
         "CFG124",

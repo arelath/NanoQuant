@@ -28,10 +28,21 @@ def test_process_memory_snapshot_can_measure_an_explicit_process() -> None:
 
 
 def test_peak_device_memory_uses_reserved_allocator_high_water(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(torch.cuda, "max_memory_allocated", lambda _device: 6_000)
-    monkeypatch.setattr(torch.cuda, "max_memory_reserved", lambda _device: 9_000)
+    observed: list[torch.device] = []
+
+    def allocated(device: torch.device) -> int:
+        observed.append(device)
+        return 6_000
+
+    def reserved(device: torch.device) -> int:
+        observed.append(device)
+        return 9_000
+
+    monkeypatch.setattr(torch.cuda, "max_memory_allocated", allocated)
+    monkeypatch.setattr(torch.cuda, "max_memory_reserved", reserved)
 
     assert peak_device_memory_bytes("cuda:0") == 9_000
+    assert observed == [torch.device("cuda:0"), torch.device("cuda:0")]
     monkeypatch.setattr(torch.cuda, "max_memory_reserved", lambda _device: 4_000)
     assert peak_device_memory_bytes("cuda:0") == 6_000
     assert peak_device_memory_bytes("cpu") == 0
