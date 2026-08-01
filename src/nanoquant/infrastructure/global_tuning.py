@@ -15,6 +15,26 @@ from .artifacts import LocalArtifactStore
 from .io_utils import safe_replace
 
 
+def _write_pointer(path: Path, reference: ArtifactRef, *, temporary_prefix: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(prefix=temporary_prefix, suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump(to_dict(reference), stream, sort_keys=True, indent=2)
+            stream.flush()
+            os.fsync(stream.fileno())
+        safe_replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def _stage_pointer_path(run_output: str | Path, state_namespace: str) -> Path:
+    if not state_namespace or Path(state_namespace).name != state_namespace or state_namespace in {".", ".."}:
+        raise ValueError("global-tuning state namespace must be a safe filename stem")
+    return Path(run_output) / f"{state_namespace}-result.json"
+
+
 @dataclass(frozen=True, slots=True)
 class CommittedGlobalTuning:
     reference: ArtifactRef
@@ -48,18 +68,24 @@ def load_global_tuning(reference: ArtifactRef, artifacts: LocalArtifactStore) ->
 
 
 def activate_global_tuning(run_output: str | Path, reference: ArtifactRef) -> None:
-    output = Path(run_output)
-    output.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary = tempfile.mkstemp(prefix="global-tuning-", suffix=".tmp", dir=output)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-            json.dump(to_dict(reference), stream, sort_keys=True, indent=2)
-            stream.flush()
-            os.fsync(stream.fileno())
-        safe_replace(temporary, output / "global-tuning.json")
-    finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
+    _write_pointer(
+        Path(run_output) / "global-tuning.json",
+        reference,
+        temporary_prefix="global-tuning-",
+    )
+
+
+def activate_global_tuning_stage(
+    run_output: str | Path,
+    reference: ArtifactRef,
+    *,
+    state_namespace: str,
+) -> None:
+    _write_pointer(
+        _stage_pointer_path(run_output, state_namespace),
+        reference,
+        temporary_prefix="global-tuning-stage-",
+    )
 
 
 def active_global_tuning(run_output: str | Path) -> ArtifactRef | None:
@@ -68,3 +94,15 @@ def active_global_tuning(run_output: str | Path) -> ArtifactRef | None:
         return None
     payload = json.loads(path.read_text(encoding="utf-8"))
     return from_dict(ArtifactRef, payload, path="global_tuning_reference")
+
+
+def active_global_tuning_stage(
+    run_output: str | Path,
+    *,
+    state_namespace: str,
+) -> ArtifactRef | None:
+    path = _stage_pointer_path(run_output, state_namespace)
+    if not path.exists():
+        return None
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    return from_dict(ArtifactRef, payload, path="global_tuning_stage_reference")

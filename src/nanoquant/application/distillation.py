@@ -40,6 +40,8 @@ class TopKDistillationConfig:
     maximum_tokens_per_batch: int | None = 512
     maximum_batches_per_epoch: int | None = None
     tail_mass_weight: float = 1.0
+    minimum_teacher_mass_ratio: float = 0.8
+    mass_floor_weight: float = 1.0
     gradient_checkpointing: bool = True
     weight_decay: float = 0.0
     seed: int = 0
@@ -47,7 +49,7 @@ class TopKDistillationConfig:
     sampling_version: str = "legacy-python-device-rng-v1"
 
     def __post_init__(self) -> None:
-        if self.objective not in {"top_k", "top_k_tail"}:
+        if self.objective not in {"top_k", "top_k_tail", "top_k_mass_floor"}:
             raise ValueError("unsupported distillation objective")
         if self.epochs <= 0 or self.batch_size <= 0:
             raise ValueError("distillation epochs and batch size must be positive")
@@ -61,6 +63,13 @@ class TopKDistillationConfig:
             raise ValueError("distillation maximum batches per epoch must be positive when provided")
         if not math.isfinite(self.tail_mass_weight) or self.tail_mass_weight <= 0:
             raise ValueError("distillation tail mass weight must be finite and positive")
+        if (
+            not math.isfinite(self.minimum_teacher_mass_ratio)
+            or not 0 < self.minimum_teacher_mass_ratio <= 1
+        ):
+            raise ValueError("distillation minimum teacher mass ratio must be in (0, 1]")
+        if not math.isfinite(self.mass_floor_weight) or self.mass_floor_weight <= 0:
+            raise ValueError("distillation mass floor weight must be finite and positive")
         if self.weight_decay < 0:
             raise ValueError("distillation weight decay cannot be negative")
         if self.optimizer_version != "legacy-optimi-adamw-v1":
@@ -625,7 +634,7 @@ def cache_topk_teacher_epoch(
                 teacher_hidden = hidden_states(teacher, batch)
                 teacher_hidden = teacher_hidden.reshape(-1, teacher_hidden.shape[-1])
                 teacher_hidden = teacher_hidden.index_select(0, selected.to(teacher_hidden.device))
-                if config.objective == "top_k_tail":
+                if config.objective in {"top_k_tail", "top_k_mass_floor"}:
                     values, vocabulary_indices, teacher_log_normalizers = (
                         teacher_topk_logits_with_normalizers(
                             teacher_hidden,
@@ -664,7 +673,7 @@ def cache_topk_teacher_epoch(
                     teacher_hidden = teacher_hidden.reshape(-1, teacher_hidden.shape[-1])
                     teacher_hidden = teacher_hidden.index_select(0, selected.to(teacher_hidden.device))
                 with recorder.phase("topk"):
-                    if config.objective == "top_k_tail":
+                    if config.objective in {"top_k_tail", "top_k_mass_floor"}:
                         values, vocabulary_indices, teacher_log_normalizers = (
                             teacher_topk_logits_with_normalizers(
                                 teacher_hidden,
@@ -766,8 +775,21 @@ def _configured_distillation_loss(
             token_weights=token_weights,
         )
     if target.teacher_log_normalizers is None:
-        raise ValueError("top-k tail distillation requires teacher log normalizers")
-    return topk_tail_distillation_loss(
+        raise ValueError(f"{config.objective} distillation requires teacher log normalizers")
+    if config.objective == "top_k_tail":
+        return topk_tail_distillation_loss(
+            student_hidden,
+            target.top_values.to(device),
+            target.top_indices.to(device=device, dtype=torch.long),
+            target.teacher_log_normalizers.to(device),
+            lm_head,
+            temperature=config.temperature,
+            vocabulary_chunk_size=config.vocabulary_chunk_size,
+            token_chunk_size=config.token_chunk_size,
+            mass_loss_weight=config.tail_mass_weight,
+            token_weights=token_weights,
+        )
+    return topk_mass_floor_distillation_loss(
         student_hidden,
         target.top_values.to(device),
         target.top_indices.to(device=device, dtype=torch.long),
@@ -776,7 +798,8 @@ def _configured_distillation_loss(
         temperature=config.temperature,
         vocabulary_chunk_size=config.vocabulary_chunk_size,
         token_chunk_size=config.token_chunk_size,
-        mass_loss_weight=config.tail_mass_weight,
+        minimum_teacher_mass_ratio=config.minimum_teacher_mass_ratio,
+        mass_loss_weight=config.mass_floor_weight,
         token_weights=token_weights,
     )
 

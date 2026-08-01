@@ -3,17 +3,20 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
-import json
 import math
 from dataclasses import replace
 from pathlib import Path
 
 import _paths  # noqa: F401
 from materialize_topk_tail_checkpoint import _hardlink_tree
-from probe_distillation_checkpoint_tail_mass import _apply_gemma_final_norm_scale
 
 from nanoquant.config.codec import to_dict
+from nanoquant.final_norm_calibration import (
+    CALIBRATION_VERSION,
+    FINAL_NORM_NAME,
+    apply_gemma_final_norm_scale,
+    calibrated_protocol_hash,
+)
 from nanoquant.infrastructure.artifacts import LocalArtifactStore
 from nanoquant.infrastructure.global_tuning import (
     activate_global_tuning,
@@ -24,9 +27,6 @@ from nanoquant.infrastructure.global_tuning import (
 from nanoquant.infrastructure.io_utils import atomic_workspace, atomic_write_json
 from nanoquant.infrastructure.tensor_store import LocalTensorStore
 
-CALIBRATION_VERSION = "gemma-final-rmsnorm-effective-weight-scale-v1"
-FINAL_NORM_NAME = "model.norm.weight"
-
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -34,22 +34,6 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--derived-run-output", type=Path, required=True)
     parser.add_argument("--scale", type=float, required=True)
     return parser
-
-
-def calibrated_protocol_hash(base_protocol_hash: str, scale: float) -> str:
-    payload = json.dumps(
-        {
-            "base_protocol_hash": base_protocol_hash,
-            "calibration": {
-                "name": FINAL_NORM_NAME,
-                "scale": scale,
-                "version": CALIBRATION_VERSION,
-            },
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode()
-    return "sha256:" + hashlib.sha256(payload).hexdigest()
 
 
 def run(args: argparse.Namespace) -> int:
@@ -69,7 +53,7 @@ def run(args: argparse.Namespace) -> int:
         raise ValueError("global tuning result has no Gemma final RMSNorm parameter")
     with LocalTensorStore(source_artifacts).read(auxiliary[FINAL_NORM_NAME]) as value:
         calibrated = value.clone()
-        _apply_gemma_final_norm_scale(calibrated, value, args.scale)
+        apply_gemma_final_norm_scale(calibrated, value, args.scale)
     protocol_hash = calibrated_protocol_hash(committed.result.protocol_hash, args.scale)
 
     with atomic_workspace(destination) as temporary:

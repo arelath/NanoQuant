@@ -721,6 +721,57 @@ def validate(config: RunConfig, phase: ValidationPhase = ValidationPhase.PRE_RES
         "must be finite and positive",
     )
     require(config.distillation.weight_decay >= 0, "CFG033", "distillation.weight_decay", "must not be negative")
+    correction = config.distillation.mass_floor_correction
+    require(
+        not correction.enabled or config.distillation.enabled,
+        "CFG120",
+        "distillation.mass_floor_correction.enabled",
+        "requires global distillation",
+    )
+    require(
+        correction.epochs > 0,
+        "CFG121",
+        "distillation.mass_floor_correction.epochs",
+        "must be positive",
+    )
+    require(
+        math.isfinite(correction.learning_rate) and correction.learning_rate > 0,
+        "CFG122",
+        "distillation.mass_floor_correction.learning_rate",
+        "must be finite and positive",
+    )
+    require(
+        correction.maximum_batches_per_epoch > 0,
+        "CFG123",
+        "distillation.mass_floor_correction.maximum_batches_per_epoch",
+        "must be positive",
+    )
+    require(
+        math.isfinite(correction.minimum_teacher_mass_ratio)
+        and 0 < correction.minimum_teacher_mass_ratio <= 1,
+        "CFG124",
+        "distillation.mass_floor_correction.minimum_teacher_mass_ratio",
+        "must be finite and in (0, 1]",
+    )
+    require(
+        math.isfinite(correction.mass_loss_weight) and correction.mass_loss_weight > 0,
+        "CFG125",
+        "distillation.mass_floor_correction.mass_loss_weight",
+        "must be finite and positive",
+    )
+    final_norm = config.distillation.final_norm_calibration
+    require(
+        not final_norm.enabled or config.distillation.enabled,
+        "CFG126",
+        "distillation.final_norm_calibration.enabled",
+        "requires global distillation",
+    )
+    require(
+        math.isfinite(final_norm.scale) and final_norm.scale > 0,
+        "CFG127",
+        "distillation.final_norm_calibration.scale",
+        "must be finite and positive",
+    )
     foldable = config.distillation.foldable_mlp_multipliers
     require(
         not foldable.enabled or config.distillation.enabled,

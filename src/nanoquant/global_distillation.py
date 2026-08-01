@@ -5,6 +5,7 @@ from __future__ import annotations
 import gc
 import hashlib
 import json
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -64,7 +65,13 @@ from nanoquant.infrastructure.distillation_checkpoint import (
 )
 from nanoquant.infrastructure.distillation_progress import DistillationProgressLogger
 from nanoquant.infrastructure.frozen_model_loader import LoadedFrozenModel, load_frozen_run
-from nanoquant.infrastructure.global_tuning import activate_global_tuning, commit_global_tuning
+from nanoquant.infrastructure.global_tuning import (
+    activate_global_tuning,
+    activate_global_tuning_stage,
+    active_global_tuning_stage,
+    commit_global_tuning,
+    load_global_tuning,
+)
 from nanoquant.infrastructure.hf_language_model import load_causal_language_model
 from nanoquant.infrastructure.memory_cleanup import release_memory
 from nanoquant.infrastructure.profiling import profiled_run
@@ -94,6 +101,8 @@ class GlobalDistillationRequest:
     maximum_wddm_shared_bytes: int | None = None
     distillation_target_mask: torch.Tensor | None = None
     distillation_weights: torch.Tensor | None = None
+    initializer_global_tuning: ArtifactRef | None = None
+    state_namespace: str = "global-distillation"
 
 
 @dataclass(frozen=True, slots=True)
@@ -360,6 +369,8 @@ def _run_global_topk_distillation(
         raise ValueError("distillation initial cooldown must be finite and non-negative")
     if not 0.0 <= request.epoch_cooldown_seconds < float("inf"):
         raise ValueError("distillation epoch cooldown must be finite and non-negative")
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", request.state_namespace) is None:
+        raise ValueError("distillation state namespace must be a safe non-empty filename stem")
     if request.initial_cooldown_seconds:
         progress.status(
             f"waiting {request.initial_cooldown_seconds:g}s before loading models to let memory settle"
@@ -384,9 +395,15 @@ def _run_global_topk_distillation(
         # This coefficient is semantically inactive for the conditional-only
         # objective, independent of the configured numeric value.
         protocol.pop("tail_mass_weight")
+        protocol.pop("minimum_teacher_mass_ratio")
+        protocol.pop("mass_floor_weight")
     else:
         protocol["teacher_normalizer_version"] = TAIL_NORMALIZER_VERSION
-    protocol_hash = semantic_hash(protocol)
+        if protocol.get("objective") == "top_k_tail":
+            protocol.pop("minimum_teacher_mass_ratio")
+            protocol.pop("mass_floor_weight")
+        else:
+            protocol.pop("tail_mass_weight")
     teacher_protocol = dict(protocol)
     teacher_protocol.pop("optimizer_version")
     # Teacher-cache schema v1 included weight decay even though it cannot
@@ -394,6 +411,9 @@ def _run_global_topk_distillation(
     # the legacy-zero-decay correction can reuse the already committed cache.
     teacher_protocol["weight_decay"] = 0.01
     teacher_protocol_hash = semantic_hash(teacher_protocol)
+    if request.initializer_global_tuning is not None:
+        protocol["initializer_global_tuning"] = to_dict(request.initializer_global_tuning)
+    protocol_hash = semantic_hash(protocol)
     token_hash = "sha256:" + hashlib.sha256(token_bytes).hexdigest()
     target_hash = None
     if request.distillation_target_mask is not None:
@@ -414,6 +434,10 @@ def _run_global_topk_distillation(
     micro_recorder = recorder if request.profiling.level is ProfilingLevel.MICRO else NULL_RECORDER
     artifacts = LocalArtifactStore(request.run_output / "artifacts", recorder=micro_recorder)
     tensors = LocalTensorStore(artifacts)
+    completed_stage_reference = active_global_tuning_stage(
+        request.run_output,
+        state_namespace=request.state_namespace,
+    )
     progress.status(
         f"starting global top-k distillation: samples={tokens.shape[0]}, "
         f"sequence_length={tokens.shape[1]}, epochs={request.config.epochs}"
@@ -428,13 +452,46 @@ def _run_global_topk_distillation(
             device="cpu",
             verify_hashes=request.verify_hashes,
             backend="factorized",
-            use_global_tuning=not request.replace_existing_global_tuning,
+            use_global_tuning=(
+                request.initializer_global_tuning is not None
+                or not request.replace_existing_global_tuning
+            ),
             recorder=recorder,
         )
-    if loaded.global_tuning is not None:
+    source_blocks = tuple(block.teacher_outputs.artifact for block in loaded.blocks)
+    if completed_stage_reference is not None:
+        completed_stage = load_global_tuning(completed_stage_reference, artifacts)
+        if (
+            completed_stage.result.source_blocks != source_blocks
+            or completed_stage.result.protocol_hash != protocol_hash
+            or completed_stage.result.token_hash != data_hash
+        ):
+            raise ValueError("completed distillation stage does not match the requested run/protocol")
+        activate_global_tuning(request.run_output, completed_stage.reference)
+        result = completed_stage.result
+        return GlobalDistillationRunResult(
+            completed_stage.reference,
+            result,
+            DistillationMetrics(
+                result.epoch_losses,
+                result.steps_completed,
+                result.selected_parameter_count,
+                result.teacher_cache_bytes,
+            ),
+        )
+    initializer = None
+    if request.initializer_global_tuning is not None:
+        if loaded.global_tuning != request.initializer_global_tuning:
+            raise ValueError("active global tuning does not match the requested initializer")
+        initializer = load_global_tuning(request.initializer_global_tuning, artifacts)
+    elif loaded.global_tuning is not None:
         raise ValueError("run already has an active global tuning result")
     with recorder.phase("thaw"):
-        trainable = _thaw_frozen_layers(loaded, tensors)
+        trainable = _thaw_frozen_layers(
+            loaded,
+            tensors,
+            frozen_states=None if initializer is None else initializer.result.tuned_blocks,
+        )
         selected, auxiliary_names = _selected_parameters(loaded.model, trainable)
 
     if request.device.startswith("cuda"):
@@ -444,6 +501,7 @@ def _run_global_topk_distillation(
         cache_identity,
         request.config.epochs,
         replace_mismatched=request.replace_existing_global_tuning,
+        state_namespace=request.state_namespace,
     )
     completed_cache_epochs = sum(reference is not None for reference in cache_journal.epochs)
     progress.status(
@@ -496,6 +554,7 @@ def _run_global_topk_distillation(
                     cache_journal,
                     epoch_index,
                     committed_epoch.reference,
+                    state_namespace=request.state_namespace,
                 )
     teacher.cpu()
     del teacher_head, teacher
@@ -528,12 +587,18 @@ def _run_global_topk_distillation(
             pad_token_id=request.pad_token_id,
         )
     checkpoint_identity = DistillationCheckpointIdentity(
-        tuple(block.teacher_outputs.artifact for block in loaded.blocks),
+        source_blocks,
         protocol_hash,
         data_hash,
         target_hash,
+        request.initializer_global_tuning,
     )
-    active_checkpoint = active_distillation_checkpoint(request.run_output, checkpoint_identity, artifacts)
+    active_checkpoint = active_distillation_checkpoint(
+        request.run_output,
+        checkpoint_identity,
+        artifacts,
+        state_namespace=request.state_namespace,
+    )
 
     epoch_commits = 0
 
@@ -545,7 +610,11 @@ def _run_global_topk_distillation(
         )
         with recorder.phase("checkpoint_commit", epoch=state.completed_epochs):
             committed_checkpoint = commit_distillation_checkpoint(state, checkpoint_identity, artifacts)
-            activate_distillation_checkpoint(request.run_output, committed_checkpoint.reference)
+            activate_distillation_checkpoint(
+                request.run_output,
+                committed_checkpoint.reference,
+                state_namespace=request.state_namespace,
+            )
         progress.status(
             f"training checkpoint saved for epoch "
             f"{state.completed_epochs}/{request.config.epochs}"
@@ -614,7 +683,7 @@ def _run_global_topk_distillation(
         )
     result = GlobalTuningResult(
         2,
-        tuple(block.teacher_outputs.artifact for block in loaded.blocks),
+        source_blocks,
         tuned_blocks,
         tuple((name, auxiliary_refs[name]) for name in auxiliary_names),
         protocol_hash,
@@ -631,6 +700,11 @@ def _run_global_topk_distillation(
     )
     with recorder.phase("commit"):
         committed = commit_global_tuning(result, artifacts)
+        activate_global_tuning_stage(
+            request.run_output,
+            committed.reference,
+            state_namespace=request.state_namespace,
+        )
         activate_global_tuning(request.run_output, committed.reference)
     progress.status("global top-k distillation complete")
     return GlobalDistillationRunResult(committed.reference, result, metrics)

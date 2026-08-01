@@ -43,7 +43,23 @@ def test_distillation_config_uses_legacy_zero_weight_decay() -> None:
     assert TopKDistillationConfig().weight_decay == 0.0
     assert TopKDistillationConfig().maximum_batches_per_epoch is None
     assert TopKDistillationConfig().tail_mass_weight == 1.0
+    assert TopKDistillationConfig().minimum_teacher_mass_ratio == 0.8
+    assert TopKDistillationConfig().mass_floor_weight == 1.0
     assert TopKDistillationConfig().sampling_version == "legacy-python-device-rng-v1"
+
+
+def test_distillation_config_validates_mass_floor_policy() -> None:
+    config = TopKDistillationConfig(
+        objective="top_k_mass_floor",
+        minimum_teacher_mass_ratio=0.75,
+        mass_floor_weight=2.0,
+    )
+    assert config.objective == "top_k_mass_floor"
+
+    with pytest.raises(ValueError, match="teacher mass ratio"):
+        TopKDistillationConfig(minimum_teacher_mass_ratio=0.0)
+    with pytest.raises(ValueError, match="mass floor weight"):
+        TopKDistillationConfig(mass_floor_weight=float("nan"))
 
 
 def test_teacher_cache_plan_matches_legacy_python_and_device_rng() -> None:
@@ -583,7 +599,7 @@ def test_cached_topk_distillation_is_bounded_deterministic_and_improves_student(
     )
 
 
-@pytest.mark.parametrize("objective", ["top_k", "top_k_tail"])
+@pytest.mark.parametrize("objective", ["top_k", "top_k_tail", "top_k_mass_floor"])
 def test_topk_distillation_resume_restores_adam_and_scheduler_exactly(
     objective: str,
 ) -> None:

@@ -1,4 +1,5 @@
 import json
+import shutil
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
@@ -13,6 +14,7 @@ from nanoquant.application.distillation import TopKDistillationConfig
 from nanoquant.application.layers import TrainableFactorizedLinear
 from nanoquant.config.codec import semantic_hash, to_dict
 from nanoquant.config.schema import ADMMConfig, SharedInputGroupConfig
+from nanoquant.final_norm_calibration import calibrate_global_tuning_final_norm
 from nanoquant.global_distillation import GlobalDistillationRequest, run_global_topk_distillation
 from nanoquant.infrastructure.artifacts import LocalArtifactStore
 from nanoquant.infrastructure.distillation_checkpoint import (
@@ -68,7 +70,7 @@ def test_global_distillation_selects_budgeted_side_tensors_but_not_binary_latent
     assert set(auxiliary) == {"norm.weight", "norm.bias"}
 
 
-@pytest.mark.parametrize("objective", ["top_k", "top_k_tail"])
+@pytest.mark.parametrize("objective", ["top_k", "top_k_tail", "top_k_mass_floor"])
 def test_complete_frozen_run_can_be_distilled_committed_and_reloaded(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -153,6 +155,8 @@ def test_complete_frozen_run_can_be_distilled_committed_and_reloaded(
             gradient_checkpointing=False,
             weight_decay=0.0,
             tail_mass_weight=0.5,
+            minimum_teacher_mass_ratio=0.8,
+            mass_floor_weight=2.0,
         ),
         device="cpu",
         initial_cooldown_seconds=1.5,
@@ -169,10 +173,17 @@ def test_complete_frozen_run_can_be_distilled_committed_and_reloaded(
         protocol.pop("objective")
         protocol.pop("maximum_batches_per_epoch")
         protocol.pop("tail_mass_weight")
+        protocol.pop("minimum_teacher_mass_ratio")
+        protocol.pop("mass_floor_weight")
     else:
         protocol["teacher_normalizer_version"] = (
             global_distillation_module.TAIL_NORMALIZER_VERSION
         )
+        if objective == "top_k_tail":
+            protocol.pop("minimum_teacher_mass_ratio")
+            protocol.pop("mass_floor_weight")
+        else:
+            protocol.pop("tail_mass_weight")
     assert distilled.result.protocol_hash == semantic_hash(protocol)
     profiles = [json.loads(path.read_text(encoding="utf-8")) for path in sorted(output.glob("profile*.json"))]
     distillation_profiles = [profile for profile in profiles if profile["run_id"] == "global-distillation"]
@@ -211,7 +222,7 @@ def test_complete_frozen_run_can_be_distilled_committed_and_reloaded(
         ).read_text(encoding="utf-8")
     )
     assert first_epoch_manifest["schema_version"] == (
-        3 if objective == "top_k_tail" else 1
+        3 if objective in {"top_k_tail", "top_k_mass_floor"} else 1
     )
     persisted = load_global_tuning(distilled.reference, LocalArtifactStore(output / "artifacts"))
     assert persisted.result == distilled.result
@@ -286,3 +297,80 @@ def test_complete_frozen_run_can_be_distilled_committed_and_reloaded(
     with torch.no_grad():
         pre_distillation_logits = cast(Any, pre_distillation.model)(input_ids=tokens, use_cache=False).logits
     assert torch.equal(pre_distillation_logits, before_logits)
+
+    if objective == "top_k":
+        control_output = tmp_path / "control-run"
+        shutil.copytree(output, control_output)
+        primary_cache_pointer = (output / "global-distillation-cache.json").read_bytes()
+        primary_training_pointer = (output / "global-distillation-training.json").read_bytes()
+        correction_request = GlobalDistillationRequest(
+            output,
+            snapshot,
+            "fixture/gemma3",
+            "pinned-test-revision",
+            tokens,
+            TopKDistillationConfig(
+                objective="top_k_mass_floor",
+                epochs=2,
+                batch_size=2,
+                learning_rate=0.005,
+                top_k=8,
+                vocabulary_chunk_size=7,
+                token_chunk_size=4,
+                maximum_tokens_per_batch=8,
+                maximum_batches_per_epoch=1,
+                gradient_checkpointing=False,
+                weight_decay=0.0,
+                minimum_teacher_mass_ratio=0.8,
+                mass_floor_weight=2.0,
+            ),
+            device="cpu",
+            initializer_global_tuning=distilled.reference,
+            state_namespace="global-distillation-mass-floor",
+        )
+        control = run_global_topk_distillation(
+            replace(correction_request, run_output=control_output)
+        )
+        with pytest.raises(InterruptedError, match="after 1 distillation epoch checkpoint"):
+            run_global_topk_distillation(
+                replace(correction_request, interrupt_after_epoch_commits=1)
+            )
+        assert active_global_tuning(output) == distilled.reference
+        assert (output / "global-distillation-cache.json").read_bytes() == primary_cache_pointer
+        assert (output / "global-distillation-training.json").read_bytes() == primary_training_pointer
+        assert (output / "global-distillation-mass-floor-cache.json").exists()
+        assert (output / "global-distillation-mass-floor-training.json").exists()
+
+        resumed = run_global_topk_distillation(correction_request)
+        assert active_global_tuning(output) == resumed.reference
+        assert resumed.result.protocol_hash == control.result.protocol_hash
+        assert resumed.result.tuned_blocks == control.result.tuned_blocks
+        assert resumed.result.auxiliary_parameters == control.result.auxiliary_parameters
+        assert resumed.result.epoch_losses == control.result.epoch_losses
+        assert resumed.result.steps_completed == control.result.steps_completed
+        assert resumed.result.block_metrics == control.result.block_metrics
+        reused = run_global_topk_distillation(correction_request)
+        assert reused.reference == resumed.reference
+        assert reused.result == resumed.result
+        assert active_global_tuning(output) == resumed.reference
+        assert (output / "global-distillation-result.json").exists()
+        assert (output / "global-distillation-mass-floor-result.json").exists()
+
+        source_auxiliary = dict(resumed.result.auxiliary_parameters)
+        calibrated = calibrate_global_tuning_final_norm(output, resumed.reference, 1.015)
+        calibrated_auxiliary = dict(calibrated.result.auxiliary_parameters)
+        tensor_store = LocalTensorStore(LocalArtifactStore(output / "artifacts"))
+        with tensor_store.read(source_auxiliary["model.norm.weight"]) as source_norm:
+            with tensor_store.read(calibrated_auxiliary["model.norm.weight"]) as calibrated_norm:
+                assert torch.allclose(
+                    1 + calibrated_norm.float(),
+                    (1 + source_norm.float()) * 1.015,
+                    atol=2e-3,
+                    rtol=0,
+                )
+        assert calibrate_global_tuning_final_norm(
+            output,
+            resumed.reference,
+            1.015,
+        ).reference == calibrated.reference
+        assert active_global_tuning(output) == calibrated.reference

@@ -35,6 +35,7 @@ from nanoquant.resident_workflow import (
     distillation_request_from_config,
     execute_resident_workflow,
     load_completed_resident_workflow,
+    mass_floor_correction_request_from_config,
     resident_request_from_config,
     resolve_resident_experiment_inputs,
 )
@@ -136,6 +137,44 @@ def test_resident_recipe_maps_tail_kd_protocol(tmp_path: Path) -> None:
     assert request.config.objective == "top_k_tail"
     assert request.config.maximum_batches_per_epoch == 32
     assert request.config.tail_mass_weight == 0.5
+
+
+def test_resident_recipe_maps_warm_started_mass_floor_correction(tmp_path: Path) -> None:
+    base = _resident_config()
+    correction = replace(
+        base.distillation.mass_floor_correction,
+        enabled=True,
+        epochs=1,
+        learning_rate=1e-5,
+        maximum_batches_per_epoch=32,
+        minimum_teacher_mass_ratio=0.8,
+        mass_loss_weight=2.0,
+    )
+    configured = replace(
+        base,
+        distillation=replace(base.distillation, mass_floor_correction=correction),
+    )
+    initializer = ArtifactRef("global-tuning-result", "sha256-" + "a" * 64, 1)
+    options = ResidentExecutionOptions(
+        interrupt_after_mass_floor_correction_epoch_commits=1
+    )
+
+    request = mass_floor_correction_request_from_config(
+        configured,
+        _inputs(tmp_path),
+        initializer,
+        options,
+    )
+
+    assert request.config.objective == "top_k_mass_floor"
+    assert request.config.epochs == 1
+    assert request.config.learning_rate == 1e-5
+    assert request.config.maximum_batches_per_epoch == 32
+    assert request.config.minimum_teacher_mass_ratio == 0.8
+    assert request.config.mass_floor_weight == 2.0
+    assert request.initializer_global_tuning == initializer
+    assert request.state_namespace == "global-distillation-mass-floor"
+    assert request.interrupt_after_epoch_commits == 1
 
 
 def test_resident_recipe_maps_dense_objective_to_covariance_refinement(tmp_path: Path) -> None:
@@ -299,6 +338,80 @@ def test_combined_workflow_runs_quantization_before_distillation(
     assert cast(Any, result.quantization) is quantization_result
     assert cast(Any, result.distillation) is distillation_result
     assert transitions == [{"artifact_id": "sha256-distillation"}]
+
+
+def test_combined_workflow_runs_mass_floor_correction_after_primary_distillation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base = _resident_config()
+    config = replace(
+        base,
+        distillation=replace(
+            base.distillation,
+            mass_floor_correction=replace(
+                base.distillation.mass_floor_correction,
+                enabled=True,
+            ),
+            final_norm_calibration=replace(
+                base.distillation.final_norm_calibration,
+                enabled=True,
+                scale=1.015,
+            ),
+        ),
+    )
+    inputs = _inputs(tmp_path)
+    calls: list[tuple[str, ArtifactRef | None]] = []
+    primary_reference = ArtifactRef("global-tuning-result", "sha256-" + "a" * 64, 1)
+    correction_reference = ArtifactRef("global-tuning-result", "sha256-" + "b" * 64, 1)
+    calibrated_reference = ArtifactRef("global-tuning-result", "sha256-" + "c" * 64, 1)
+    primary = type("Result", (), {"reference": primary_reference})()
+    correction = type("Result", (), {"reference": correction_reference})()
+
+    monkeypatch.setattr(workflow, "run_resident_quantization", lambda _request: object())
+
+    def distill(request: Any) -> Any:
+        calls.append((request.state_namespace, request.initializer_global_tuning))
+        return primary if len(calls) == 1 else correction
+
+    monkeypatch.setattr(workflow, "run_global_topk_distillation", distill)
+    calibrations: list[tuple[Path, ArtifactRef, float]] = []
+    calibrated_result = type(
+        "CalibratedResult",
+        (),
+        {
+            "epoch_losses": (1.0,),
+            "steps_completed": 1,
+            "selected_parameter_count": 1,
+            "teacher_cache_bytes": 1,
+        },
+    )()
+
+    def calibrate(run_output: Path, source: ArtifactRef, scale: float) -> Any:
+        calibrations.append((run_output, source, scale))
+        return type(
+            "CommittedCalibration",
+            (),
+            {"reference": calibrated_reference, "result": calibrated_result},
+        )()
+
+    monkeypatch.setattr(workflow, "calibrate_global_tuning_final_norm", calibrate)
+    transitions = []
+    monkeypatch.setattr(
+        workflow,
+        "_transition_workflow_manifest",
+        lambda *_args, **kwargs: transitions.append(kwargs),
+    )
+
+    result = execute_resident_workflow(config, inputs)
+
+    assert calls == [
+        ("global-distillation", None),
+        ("global-distillation-mass-floor", primary_reference),
+    ]
+    assert calibrations == [(inputs.output, correction_reference, 1.015)]
+    assert result.distillation is not None
+    assert result.distillation.reference == calibrated_reference
+    assert transitions == [{"artifact_id": calibrated_reference.artifact_id}]
 
 
 def test_completed_workflow_explicitly_loads_historical_algorithm_identity(

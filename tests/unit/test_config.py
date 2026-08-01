@@ -200,6 +200,45 @@ def test_validation_phases_have_stable_codes() -> None:
     assert {issue.code for issue in validate(invalid)} == {"CFG015", "CFG016"}
 
 
+def test_mass_floor_correction_requires_primary_distillation_and_valid_policy() -> None:
+    base = RunConfig(ModelConfig("x"))
+    correction = replace(
+        base.distillation.mass_floor_correction,
+        enabled=True,
+        epochs=0,
+        learning_rate=math.nan,
+        maximum_batches_per_epoch=0,
+        minimum_teacher_mass_ratio=1.1,
+        mass_loss_weight=0.0,
+    )
+    invalid = replace(
+        base,
+        distillation=replace(base.distillation, mass_floor_correction=correction),
+    )
+
+    assert {issue.code for issue in validate(invalid)} == {
+        "CFG120",
+        "CFG121",
+        "CFG122",
+        "CFG123",
+        "CFG124",
+        "CFG125",
+    }
+
+    bad_final_norm = replace(
+        base,
+        distillation=replace(
+            base.distillation,
+            final_norm_calibration=replace(
+                base.distillation.final_norm_calibration,
+                enabled=True,
+                scale=math.nan,
+            ),
+        ),
+    )
+    assert {issue.code for issue in validate(bad_final_norm)} == {"CFG126", "CFG127"}
+
+
 def test_activation_gpu_cache_reserve_must_be_finite_and_non_negative() -> None:
     base = RunConfig(ModelConfig("x"))
 

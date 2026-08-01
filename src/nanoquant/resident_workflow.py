@@ -36,6 +36,7 @@ from nanoquant.config.validation import ValidationPhase, raise_for_issues, valid
 from nanoquant.domain.models import ArtifactRef
 from nanoquant.domain.resources import ResolvedMemoryPlan
 from nanoquant.domain.runs import RunManifest, RunStatus
+from nanoquant.final_norm_calibration import calibrate_global_tuning_final_norm
 from nanoquant.global_distillation import (
     GlobalDistillationRequest,
     GlobalDistillationRunResult,
@@ -96,6 +97,7 @@ class ResidentExecutionOptions:
     interrupt_after_block_commits: int | None = None
     interrupt_after_factorized_tuning_epoch_commits: int | None = None
     interrupt_after_distillation_epoch_commits: int | None = None
+    interrupt_after_mass_floor_correction_epoch_commits: int | None = None
     restore_completed_blocks: bool = True
     defer_layer_loss_snapshots: bool = False
     replace_existing_global_tuning: bool = False
@@ -557,6 +559,63 @@ def distillation_request_from_config(
     )
 
 
+def mass_floor_correction_request_from_config(
+    config: RunConfig,
+    inputs: ResolvedResidentInputs,
+    initializer: ArtifactRef,
+    options: ResidentExecutionOptions = _DEFAULT_EXECUTION_OPTIONS,
+) -> GlobalDistillationRequest:
+    """Map the optional Experiment-040-style correction continuation."""
+
+    primary = distillation_request_from_config(config, inputs, options)
+    correction = config.distillation.mass_floor_correction
+    if not correction.enabled:
+        raise ValueError("mass-floor correction is disabled in the canonical run config")
+    return GlobalDistillationRequest(
+        run_output=primary.run_output,
+        snapshot=primary.snapshot,
+        source=primary.source,
+        revision=primary.revision,
+        token_ids=primary.token_ids,
+        config=TopKDistillationConfig(
+            objective="top_k_mass_floor",
+            epochs=correction.epochs,
+            batch_size=primary.config.batch_size,
+            learning_rate=correction.learning_rate,
+            temperature=primary.config.temperature,
+            top_k=primary.config.top_k,
+            vocabulary_chunk_size=primary.config.vocabulary_chunk_size,
+            token_chunk_size=primary.config.token_chunk_size,
+            maximum_tokens_per_batch=primary.config.maximum_tokens_per_batch,
+            maximum_batches_per_epoch=correction.maximum_batches_per_epoch,
+            minimum_teacher_mass_ratio=correction.minimum_teacher_mass_ratio,
+            mass_floor_weight=correction.mass_loss_weight,
+            gradient_checkpointing=primary.config.gradient_checkpointing,
+            weight_decay=primary.config.weight_decay,
+            seed=primary.config.seed,
+            optimizer_version=primary.config.optimizer_version,
+            sampling_version=primary.config.sampling_version,
+        ),
+        device=primary.device,
+        pad_token_id=primary.pad_token_id,
+        verify_hashes=primary.verify_hashes,
+        interrupt_after_epoch_commits=(
+            options.interrupt_after_mass_floor_correction_epoch_commits
+        ),
+        initial_cooldown_seconds=primary.initial_cooldown_seconds,
+        epoch_cooldown_seconds=primary.epoch_cooldown_seconds,
+        profiling=primary.profiling,
+        block_snapshot_samples=primary.block_snapshot_samples,
+        block_snapshot_tokens=primary.block_snapshot_tokens,
+        block_snapshot_denominator_floor=primary.block_snapshot_denominator_floor,
+        maximum_wddm_shared_bytes=primary.maximum_wddm_shared_bytes,
+        distillation_target_mask=primary.distillation_target_mask,
+        distillation_weights=primary.distillation_weights,
+        initializer_global_tuning=initializer,
+        state_namespace="global-distillation-mass-floor",
+    )
+
+
 def execute_resident_workflow(
     config: RunConfig,
     inputs: ResolvedResidentInputs,
@@ -598,7 +657,36 @@ def execute_resident_workflow(
     distillation = None
     if config.distillation.enabled:
         try:
-            distillation = run_global_topk_distillation(distillation_request_from_config(config, inputs, options))
+            primary_distillation = run_global_topk_distillation(
+                distillation_request_from_config(config, inputs, options)
+            )
+            distillation = primary_distillation
+            if config.distillation.mass_floor_correction.enabled:
+                distillation = run_global_topk_distillation(
+                    mass_floor_correction_request_from_config(
+                        config,
+                        inputs,
+                        primary_distillation.reference,
+                        options,
+                    )
+                )
+            if config.distillation.final_norm_calibration.enabled:
+                calibrated = calibrate_global_tuning_final_norm(
+                    inputs.output,
+                    distillation.reference,
+                    config.distillation.final_norm_calibration.scale,
+                )
+                calibrated_result = calibrated.result
+                distillation = GlobalDistillationRunResult(
+                    calibrated.reference,
+                    calibrated_result,
+                    DistillationMetrics(
+                        calibrated_result.epoch_losses,
+                        calibrated_result.steps_completed,
+                        calibrated_result.selected_parameter_count,
+                        calibrated_result.teacher_cache_bytes,
+                    ),
+                )
         except (KeyboardInterrupt, InterruptedError) as exc:
             _transition_workflow_manifest(
                 inputs,
@@ -790,6 +878,7 @@ __all__ = [
     "ResidentExecutionOptions",
     "ResidentWorkflowResult",
     "distillation_request_from_config",
+    "mass_floor_correction_request_from_config",
     "execute_resident_workflow",
     "load_completed_resident_workflow",
     "resident_request_from_config",

@@ -69,3 +69,40 @@ def test_distillation_checkpoint_roundtrips_and_activates_atomically(tmp_path: P
             DistillationCheckpointIdentity(identity.source_blocks, "different", identity.token_hash),
             artifacts,
         )
+
+    initializer = ArtifactRef("global-tuning-result", "sha256-" + "b" * 64, 1)
+    isolated_identity = DistillationCheckpointIdentity(
+        identity.source_blocks,
+        identity.protocol_hash,
+        identity.token_hash,
+        initializer_global_tuning=initializer,
+    )
+    isolated = commit_distillation_checkpoint(_state(), isolated_identity, artifacts)
+    activate_distillation_checkpoint(
+        tmp_path,
+        isolated.reference,
+        state_namespace="global-distillation-correction",
+    )
+    isolated_loaded = active_distillation_checkpoint(
+        tmp_path,
+        isolated_identity,
+        artifacts,
+        state_namespace="global-distillation-correction",
+    )
+    assert isolated_loaded is not None
+    assert isolated_loaded.reference == isolated.reference
+    assert isolated_loaded.identity == isolated_identity
+    assert torch.equal(
+        dict(isolated_loaded.state.parameter_values)["scale"],
+        dict(isolated.state.parameter_values)["scale"],
+    )
+    primary_loaded = active_distillation_checkpoint(tmp_path, identity, artifacts)
+    assert primary_loaded is not None
+    assert primary_loaded.reference == loaded.reference
+    with pytest.raises(ValueError, match="safe filename stem"):
+        active_distillation_checkpoint(
+            tmp_path,
+            isolated_identity,
+            artifacts,
+            state_namespace="../escape",
+        )

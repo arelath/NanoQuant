@@ -41,6 +41,12 @@ class CommittedTeacherEpoch:
     bytes: int
 
 
+def _state_path(run_output: str | Path, state_namespace: str) -> Path:
+    if not state_namespace or Path(state_namespace).name != state_namespace or state_namespace in {".", ".."}:
+        raise ValueError("teacher-cache state namespace must be a safe filename stem")
+    return Path(run_output) / f"{state_namespace}-cache.json"
+
+
 def commit_teacher_epoch(
     epoch_index: int,
     batches: tuple[TopKTeacherBatch, ...],
@@ -159,8 +165,9 @@ def load_teacher_cache_journal(
     epoch_count: int,
     *,
     replace_mismatched: bool = False,
+    state_namespace: str = "global-distillation",
 ) -> TeacherCacheJournal:
-    path = Path(run_output) / "global-distillation-cache.json"
+    path = _state_path(run_output, state_namespace)
     if not path.exists():
         return TeacherCacheJournal(1, identity, (None,) * epoch_count)
     journal = from_dict(
@@ -180,6 +187,8 @@ def record_teacher_epoch(
     journal: TeacherCacheJournal,
     epoch_index: int,
     reference: ArtifactRef,
+    *,
+    state_namespace: str = "global-distillation",
 ) -> TeacherCacheJournal:
     if epoch_index < 0 or epoch_index >= len(journal.epochs):
         raise ValueError("teacher-cache journal epoch index is out of range")
@@ -196,7 +205,7 @@ def record_teacher_epoch(
             json.dump(to_dict(updated), stream, sort_keys=True, indent=2)
             stream.flush()
             os.fsync(stream.fileno())
-        safe_replace(temporary, output / "global-distillation-cache.json")
+        safe_replace(temporary, _state_path(output, state_namespace))
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)

@@ -540,6 +540,26 @@ class FoldableMlpMultiplierTuningConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class MassFloorCorrectionConfig:
+    """One-sided selected-mass correction warm-started from primary model KD."""
+
+    enabled: bool = False
+    epochs: int = 1
+    learning_rate: float = 1e-5
+    maximum_batches_per_epoch: int = 32
+    minimum_teacher_mass_ratio: float = 0.8
+    mass_loss_weight: float = 2.0
+
+
+@dataclass(frozen=True, slots=True)
+class FinalNormCalibrationConfig:
+    """Model-specific zero-byte logit-scale fold applied after global KD."""
+
+    enabled: bool = False
+    scale: float = 1.015
+
+
+@dataclass(frozen=True, slots=True)
 class DistillationConfig:
     enabled: bool = False
     loss: DistillationLoss = DistillationLoss.TOP_K
@@ -558,6 +578,12 @@ class DistillationConfig:
     optimizer_version: str = "legacy-optimi-adamw-v1"
     sampling_version: str = "legacy-python-device-rng-v1"
     teacher_targets_artifact: str | None = None
+    mass_floor_correction: MassFloorCorrectionConfig = field(
+        default_factory=MassFloorCorrectionConfig
+    )
+    final_norm_calibration: FinalNormCalibrationConfig = field(
+        default_factory=FinalNormCalibrationConfig
+    )
     foldable_mlp_multipliers: FoldableMlpMultiplierTuningConfig = field(
         default_factory=FoldableMlpMultiplierTuningConfig
     )

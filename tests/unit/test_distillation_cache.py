@@ -57,6 +57,30 @@ def test_teacher_cache_epochs_commit_resume_and_materialize(tmp_path: Path) -> N
     assert replacement.identity == replacement_identity
     assert replacement.epochs == (None, None, None)
 
+    isolated = load_teacher_cache_journal(
+        tmp_path,
+        identity,
+        1,
+        state_namespace="global-distillation-correction",
+    )
+    isolated = record_teacher_epoch(
+        tmp_path,
+        isolated,
+        0,
+        first.reference,
+        state_namespace="global-distillation-correction",
+    )
+    assert load_teacher_cache_journal(
+        tmp_path,
+        identity,
+        1,
+        state_namespace="global-distillation-correction",
+    ) == isolated
+    assert (tmp_path / "global-distillation-cache.json").exists()
+    assert (tmp_path / "global-distillation-correction-cache.json").exists()
+    with pytest.raises(ValueError, match="safe filename stem"):
+        load_teacher_cache_journal(tmp_path, identity, 1, state_namespace="../escape")
+
 
 def test_tail_teacher_cache_round_trips_log_normalizers_in_schema_three(
     tmp_path: Path,

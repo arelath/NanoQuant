@@ -28,6 +28,7 @@ class DistillationCheckpointIdentity:
     protocol_hash: str
     token_hash: str
     target_hash: str | None = None
+    initializer_global_tuning: ArtifactRef | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,6 +36,12 @@ class CommittedDistillationCheckpoint:
     reference: ArtifactRef
     identity: DistillationCheckpointIdentity
     state: DistillationResumeState
+
+
+def _state_path(run_output: str | Path, state_namespace: str) -> Path:
+    if not state_namespace or Path(state_namespace).name != state_namespace or state_namespace in {".", ".."}:
+        raise ValueError("distillation checkpoint state namespace must be a safe filename stem")
+    return Path(run_output) / f"{state_namespace}-training.json"
 
 
 def commit_distillation_checkpoint(
@@ -130,7 +137,12 @@ def load_distillation_checkpoint(
     return CommittedDistillationCheckpoint(reference, identity, state)
 
 
-def activate_distillation_checkpoint(run_output: str | Path, reference: ArtifactRef) -> None:
+def activate_distillation_checkpoint(
+    run_output: str | Path,
+    reference: ArtifactRef,
+    *,
+    state_namespace: str = "global-distillation",
+) -> None:
     output = Path(run_output)
     output.mkdir(parents=True, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(prefix="distillation-checkpoint-", suffix=".tmp", dir=output)
@@ -139,7 +151,7 @@ def activate_distillation_checkpoint(run_output: str | Path, reference: Artifact
             json.dump(to_dict(reference), stream, sort_keys=True, indent=2)
             stream.flush()
             os.fsync(stream.fileno())
-        safe_replace(temporary, output / "global-distillation-training.json")
+        safe_replace(temporary, _state_path(output, state_namespace))
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
@@ -149,8 +161,10 @@ def active_distillation_checkpoint(
     run_output: str | Path,
     identity: DistillationCheckpointIdentity,
     artifacts: LocalArtifactStore,
+    *,
+    state_namespace: str = "global-distillation",
 ) -> CommittedDistillationCheckpoint | None:
-    path = Path(run_output) / "global-distillation-training.json"
+    path = _state_path(run_output, state_namespace)
     if not path.exists():
         return None
     reference = from_dict(
