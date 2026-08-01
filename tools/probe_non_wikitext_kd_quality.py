@@ -12,7 +12,7 @@ from typing import Any, cast
 
 import _paths  # noqa: F401
 import torch
-from datasets import load_dataset  # type: ignore[import-untyped]
+from datasets import Dataset, load_dataset  # type: ignore[import-untyped]
 from probe_composed_context_mlp_refit import _paired_metric_payload
 from probe_corrected_codebook_splice import _paired_payload
 from probe_factorized_component_overlays_kl import _dtype
@@ -25,7 +25,8 @@ from nanoquant.application.kl_budget import (
     KlSequenceResult,
     causal_kl_nll_per_sequence_from_logits,
 )
-from nanoquant.config.codec import to_dict
+from nanoquant.config.codec import from_dict, to_dict
+from nanoquant.domain.models import ArtifactRef
 from nanoquant.infrastructure.device_lease import acquire_device_lease
 from nanoquant.infrastructure.frozen_model_loader import load_frozen_run
 from nanoquant.infrastructure.hf_language_model import load_causal_language_model
@@ -40,20 +41,29 @@ C4_VALIDATION_FILE = "en/c4-validation.00000-of-00008.json.gz"
 C4_VALIDATION_FILE_SHA256 = "bc35d7c1b1d14b90cd3a394cccbcbe191935edd04bf42ee965379c6e2987a5f0"
 
 
-def _parse_arm(value: str) -> tuple[str, str, Path]:
+def _parse_arm(value: str) -> tuple[str, str, Path, Path | None]:
     name, separator, specification = value.partition("=")
-    mode, mode_separator, path = specification.partition(";")
+    parts = specification.split(";")
+    mode = parts[0] if parts else ""
     if (
         not separator
         or not name.strip()
-        or mode not in {"prekd", "postkd"}
-        or not mode_separator
-        or not path.strip()
+        or mode not in {"prekd", "postkd", "tuning"}
+        or (mode in {"prekd", "postkd"} and len(parts) != 2)
+        or (mode == "tuning" and len(parts) != 3)
+        or not parts[1].strip()
+        or (mode == "tuning" and not parts[2].strip())
     ):
         raise argparse.ArgumentTypeError(
-            "arm must use name=prekd;run-output or name=postkd;run-output"
+            "arm must use name=prekd;run-output, name=postkd;run-output, or "
+            "name=tuning;run-output;artifact-reference-json"
         )
-    return name.strip(), mode, Path(path.strip())
+    return (
+        name.strip(),
+        mode,
+        Path(parts[1].strip()),
+        None if mode != "tuning" else Path(parts[2].strip()),
+    )
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -113,12 +123,22 @@ def _load_c4_tokens(
     sequence_length: int,
     local_files_only: bool,
 ) -> tuple[torch.Tensor, str, int | None]:
-    dataset = load_dataset(
-        C4_DATASET,
-        data_files={"validation": data_file},
-        split="validation",
-        revision=revision,
-    )
+    local_data_file = Path(data_file)
+    if local_data_file.is_file() and local_data_file.suffix == ".arrow":
+        dataset = Dataset.from_file(str(local_data_file.resolve()))
+    elif local_data_file.is_file():
+        dataset = load_dataset(
+            "json",
+            data_files={"validation": str(local_data_file.resolve())},
+            split="validation",
+        )
+    else:
+        dataset = load_dataset(
+            C4_DATASET,
+            data_files={"validation": data_file},
+            split="validation",
+            revision=revision,
+        )
     if documents <= 0 or len(dataset) < documents:
         raise ValueError("C4 document inventory is shorter than the pinned protocol")
     tokenizer = AutoTokenizer.from_pretrained(
@@ -204,7 +224,7 @@ def _comparison(
 
 def run(args: argparse.Namespace) -> int:
     arms = tuple(args.arm)
-    names = tuple(name for name, _mode, _path in arms)
+    names = tuple(name for name, _mode, _path, _pointer in arms)
     if (
         len(arms) < 2
         or len(set(names)) != len(names)
@@ -247,8 +267,13 @@ def run(args: argparse.Namespace) -> int:
         "token_hash": _token_hash(tokens),
         "model_revision": args.model_revision,
         "arms": [
-            {"name": name, "mode": mode, "run_output": str(path.resolve())}
-            for name, mode, path in arms
+            {
+                "name": name,
+                "mode": mode,
+                "run_output": str(path.resolve()),
+                "global_tuning_pointer": None if pointer is None else str(pointer.resolve()),
+            }
+            for name, mode, path, pointer in arms
         ],
         "primary_baseline": args.primary_baseline,
         "primary_candidate": args.primary_candidate,
@@ -307,7 +332,14 @@ def run(args: argparse.Namespace) -> int:
             local_files_only=args.local_files_only,
         ).to(args.device)
         cast(Any, teacher).config.use_cache = False
-        for name, mode, run_output in arms:
+        for name, mode, run_output, tuning_pointer in arms:
+            global_tuning_override = None
+            if tuning_pointer is not None:
+                global_tuning_override = from_dict(
+                    ArtifactRef,
+                    json.loads(tuning_pointer.read_text(encoding="utf-8")),
+                    path=f"arm[{name}].global_tuning",
+                )
             loaded = load_frozen_run(
                 run_output,
                 args.snapshot,
@@ -316,7 +348,8 @@ def run(args: argparse.Namespace) -> int:
                 device=args.device,
                 verify_hashes=False,
                 backend="factorized",
-                use_global_tuning=mode == "postkd",
+                use_global_tuning=mode != "prekd",
+                global_tuning_override=global_tuning_override,
             )
             observed_identity: dict[str, object] = {
                 "model_hash": loaded.identity.model_hash,
@@ -331,6 +364,9 @@ def run(args: argparse.Namespace) -> int:
                 "run_output": str(run_output.resolve()),
                 "global_tuning": (
                     None if loaded.global_tuning is None else to_dict(loaded.global_tuning)
+                ),
+                "global_tuning_pointer": (
+                    None if tuning_pointer is None else str(tuning_pointer.resolve())
                 ),
             }
 

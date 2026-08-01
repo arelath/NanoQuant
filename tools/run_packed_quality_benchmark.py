@@ -50,6 +50,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--maximum-wddm-shared-bytes", type=int)
     parser.add_argument("--local-files-only", action="store_true")
     parser.add_argument("--no-global-tuning", action="store_true")
+    parser.add_argument(
+        "--base-quality",
+        type=Path,
+        help="reuse the BF16 base result from a protocol-matched quality report",
+    )
     return parser
 
 
@@ -79,7 +84,30 @@ def run(args: argparse.Namespace) -> int:
         packed_artifact=args.packed_artifact,
         component_overlay=args.component_overlay,
     )
-    result: dict[str, Any] = execute_quality_evaluation(request, progress=_progress)
+    base_result = None
+    if args.base_quality is not None:
+        payload = json.loads(args.base_quality.read_text(encoding="utf-8"))
+        if (
+            payload.get("model", {}).get("source") != args.source
+            or payload.get("model", {}).get("revision") != args.revision
+            or payload.get("protocol", {}).get("wikitext_samples") != args.wikitext_samples
+            or payload.get("protocol", {}).get("wikitext_sequence_length")
+            != args.wikitext_sequence_length
+            or payload.get("protocol", {}).get("task_names")
+            != list(request.task_names)
+            or payload.get("protocol", {}).get("task_limit") != args.task_limit
+        ):
+            raise ValueError("reused base quality report does not match the requested protocol")
+        base_result = payload.get("results", {}).get("base")
+        if not isinstance(base_result, dict):
+            raise ValueError("reused base quality report has no base result")
+    result: dict[str, Any] = execute_quality_evaluation(
+        request,
+        progress=_progress,
+        **({} if base_result is None else {"base_result": base_result}),
+    )
+    if args.base_quality is not None:
+        result["base_result_source"] = str(args.base_quality.resolve())
     atomic_write_json(args.output, result)
     return 0
 

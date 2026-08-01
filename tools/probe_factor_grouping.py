@@ -16,7 +16,7 @@ import time
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import torch
 from safetensors import safe_open
@@ -400,7 +400,7 @@ def _load_output(path: Path, protocol: ProbeProtocol) -> dict[str, Any]:
         raise ValueError("existing output uses a different probe protocol")
     if not isinstance(payload.get("groups"), dict) or not isinstance(payload.get("topologies"), dict):
         raise ValueError("existing output is missing probe result maps")
-    return payload
+    return cast(dict[str, Any], payload)
 
 
 def _write_output(path: Path, payload: dict[str, Any]) -> None:

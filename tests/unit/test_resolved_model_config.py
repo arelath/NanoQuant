@@ -56,6 +56,29 @@ def test_pinned_hub_revision_does_not_require_a_model_info_lookup(
     assert resolved.values["num_hidden_layers"] == 16
 
 
+def test_pinned_hub_config_loads_from_resolved_hash_named_blob(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    revision = "b" * 40
+    blob = tmp_path / "blobs" / "06ab0678bc32d4f1474f31b35914512b1f9edaf7"
+    blob.parent.mkdir()
+    blob.write_text(
+        json.dumps({"model_type": "gemma3_text", "num_hidden_layers": 26}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        resolved_config,
+        "hf_hub_download",
+        lambda **_kwargs: str(blob),
+    )
+
+    resolved = resolve_model_config("owner/blob-backed-model", revision)
+
+    assert resolved.values["num_hidden_layers"] == 26
+    assert resolved.path == blob
+
+
 def test_snapshot_model_config_rejects_a_non_object_root(tmp_path: Path) -> None:
     (tmp_path / "config.json").write_text("[]\n", encoding="utf-8")
 

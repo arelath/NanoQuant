@@ -192,6 +192,66 @@ def test_base_only_quality_does_not_load_a_pytorch_candidate(
     assert result["comparison"] is None
 
 
+def test_quality_evaluation_can_reuse_a_prevalidated_base_result(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    request = quality_evaluation.QualityEvaluationRequest(
+        tmp_path / "snapshot",
+        "fixture/model",
+        "revision",
+        tmp_path / "run",
+        device="cpu",
+        wikitext_samples=1,
+        wikitext_sequence_length=2,
+        task_names=("piqa",),
+    )
+    prepared = quality_evaluation.PreparedQualityInputs(
+        torch.tensor(((1, 2),), dtype=torch.long),
+        "fixture-fingerprint",
+        1,
+        0,
+        "sha256:" + "a" * 64,
+        (),
+    )
+    reused = {
+        "label": "base",
+        "wikitext": {"perplexity": 2.0},
+        "tasks": [],
+        "elapsed_seconds": 1.0,
+        "peak_device_bytes": 0,
+        "peak_host_bytes": 0,
+    }
+    progress = []
+    monkeypatch.setattr(
+        quality_evaluation,
+        "acquire_device_lease",
+        lambda _device: nullcontext(),
+    )
+    monkeypatch.setattr(
+        quality_evaluation.AutoConfig,
+        "from_pretrained",
+        lambda *_args, **_kwargs: SimpleNamespace(model_type="qwen"),
+    )
+    monkeypatch.setattr(
+        quality_evaluation,
+        "load_causal_language_model",
+        lambda *_args, **_kwargs: pytest.fail("reused base must not be loaded"),
+    )
+
+    result = quality_evaluation.execute_quality_evaluation(
+        request,
+        prepared=prepared,
+        progress=lambda event, _payload: progress.append(event),
+        evaluate_candidate=False,
+        base_result=reused,
+    )
+
+    assert result["results"]["base"] == reused
+    assert result["protocol"]["base_execution"] == "reused"
+    assert "model_evaluation_reused" in progress
+
+
 def test_reasoning_comparison_rejects_hidden_thinking_regression() -> None:
     base = {
         "wikitext": {"perplexity": 10.0},

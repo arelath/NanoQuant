@@ -47,6 +47,7 @@ def test_packed_quality_runner_preserves_complete_default_protocol(
         maximum_wddm_shared_bytes=805_306_368,
         local_files_only=True,
         no_global_tuning=False,
+        base_quality=None,
     )
 
     assert tool.run(args) == 0
@@ -60,3 +61,64 @@ def test_packed_quality_runner_preserves_complete_default_protocol(
     assert request.packed_artifact == args.packed_artifact
     assert request.component_overlay is None
     assert json.loads(output.read_text(encoding="utf-8")) == {"passed": True}
+
+
+def test_packed_quality_runner_reuses_only_a_protocol_matched_base(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    tool = _tool_module()
+    captured = {}
+    base_result = {
+        "wikitext": {"perplexity": 12.0},
+        "tasks": {name: {"primary_metric_value": 0.5} for name in tool.DEFAULT_TASKS},
+    }
+    base_quality = tmp_path / "base-quality.json"
+    base_quality.write_text(
+        json.dumps(
+            {
+                "model": {"source": "fixture/model", "revision": "revision"},
+                "protocol": {
+                    "wikitext_samples": 64,
+                    "wikitext_sequence_length": 128,
+                    "task_names": list(tool.DEFAULT_TASKS),
+                    "task_limit": 200,
+                },
+                "results": {"base": base_result},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def execute(request, *, progress, base_result):  # type: ignore[no-untyped-def]
+        captured["base_result"] = base_result
+        return {"passed": True}
+
+    monkeypatch.setattr(tool, "execute_quality_evaluation", execute)
+    output = tmp_path / "quality.json"
+    args = argparse.Namespace(
+        packed_artifact=tmp_path / "packed",
+        component_overlay=None,
+        run_output=tmp_path / "run",
+        snapshot=tmp_path / "snapshot",
+        source="fixture/model",
+        revision="revision",
+        output=output,
+        device="cuda:0",
+        backend="factorized",
+        wikitext_samples=64,
+        wikitext_sequence_length=128,
+        wikitext_batch_size=8,
+        task=[],
+        task_limit=200,
+        task_batch_size=4,
+        maximum_wddm_shared_bytes=805_306_368,
+        local_files_only=True,
+        no_global_tuning=False,
+        base_quality=base_quality,
+    )
+
+    assert tool.run(args) == 0
+    assert captured["base_result"] == base_result
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert payload["base_result_source"] == str(base_quality.resolve())

@@ -22,10 +22,7 @@ class ResolvedModelConfig:
     path: Path
 
 
-def load_snapshot_model_config(snapshot: str | Path) -> dict[str, Any]:
-    """Load and validate the configuration stored in a resolved snapshot."""
-
-    path = Path(snapshot).resolve() / "config.json"
+def _load_model_config_file(path: Path) -> dict[str, Any]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -33,6 +30,13 @@ def load_snapshot_model_config(snapshot: str | Path) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError(f"resolved model config root must be an object: {path}")
     return cast(dict[str, Any], payload)
+
+
+def load_snapshot_model_config(snapshot: str | Path) -> dict[str, Any]:
+    """Load and validate the configuration stored in a resolved snapshot."""
+
+    path = Path(snapshot).resolve() / "config.json"
+    return _load_model_config_file(path)
 
 
 @cache
@@ -59,7 +63,10 @@ def resolve_model_config(source: str, revision: str | None) -> ResolvedModelConf
             revision=resolved_revision,
         )
     ).resolve()
-    values = load_snapshot_model_config(path.parent)
+    # Hugging Face snapshots normally expose ``config.json`` as a symlink into
+    # the cache's content-addressed ``blobs`` directory. Resolving that symlink
+    # produces a hash-named file, so its parent is not itself a snapshot.
+    values = _load_model_config_file(path)
     return ResolvedModelConfig(values, resolved_revision, path)
 
 

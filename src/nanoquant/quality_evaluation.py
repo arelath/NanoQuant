@@ -583,6 +583,7 @@ def execute_quality_evaluation(
     prepared: PreparedQualityInputs | None = None,
     progress: QualityProgressCallback | None = None,
     evaluate_candidate: bool = True,
+    base_result: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Evaluate the base model and, when requested, the frozen candidate."""
 
@@ -602,38 +603,45 @@ def execute_quality_evaluation(
             model_config = AutoConfig.from_pretrained(request.snapshot, local_files_only=False)
             model_type = str(getattr(model_config, "model_type", "")).lower()
             attention_implementation = "eager" if model_type.startswith("gemma") else "sdpa"
-            base_load_started = time.perf_counter()
-            _emit_progress(progress, "model_load_started", model="base")
-            source_model = load_causal_language_model(
-                request.snapshot,
-                torch_dtype=_checkpoint_dtype(request.snapshot),
-                attention_implementation=attention_implementation,
-            ).to("cpu" if request.stream_base_model else request.device)
-            base = (
-                BlockStreamedCausalLM(
-                    source_model,
-                    adapter_for_config(cast(dict[str, object], model_config.to_dict())),
-                    request.device,
+            base_execution = "reused"
+            if base_result is None:
+                base_execution = "block_streamed" if request.stream_base_model else "resident"
+                base_load_started = time.perf_counter()
+                _emit_progress(progress, "model_load_started", model="base")
+                source_model = load_causal_language_model(
+                    request.snapshot,
+                    torch_dtype=_checkpoint_dtype(request.snapshot),
+                    attention_implementation=attention_implementation,
+                ).to("cpu" if request.stream_base_model else request.device)
+                base = (
+                    BlockStreamedCausalLM(
+                        source_model,
+                        adapter_for_config(cast(dict[str, object], model_config.to_dict())),
+                        request.device,
+                    )
+                    if request.stream_base_model
+                    else source_model
                 )
-                if request.stream_base_model
-                else source_model
-            )
-            if monitor is not None:
-                monitor.check()
-            base_load_seconds = time.perf_counter() - base_load_started
-            _emit_progress(
-                progress,
-                "model_load_completed",
-                model="base",
-                elapsed_seconds=base_load_seconds,
-            )
-            try:
-                base_result = _evaluate_model("base", base, request, inputs, monitor, progress)
-                base_result["model_load_seconds"] = base_load_seconds
-                base_result["execution"] = "block_streamed" if request.stream_base_model else "resident"
-            finally:
-                del base, source_model
-                _release_device_memory()
+                if monitor is not None:
+                    monitor.check()
+                base_load_seconds = time.perf_counter() - base_load_started
+                _emit_progress(
+                    progress,
+                    "model_load_completed",
+                    model="base",
+                    elapsed_seconds=base_load_seconds,
+                )
+                try:
+                    base_result = _evaluate_model("base", base, request, inputs, monitor, progress)
+                    base_result["model_load_seconds"] = base_load_seconds
+                    base_result["execution"] = base_execution
+                finally:
+                    del base, source_model
+                    _release_device_memory()
+            else:
+                if "wikitext" not in base_result or "tasks" not in base_result:
+                    raise ValueError("reused quality base result is incomplete")
+                _emit_progress(progress, "model_evaluation_reused", model="base")
             frozen_result: dict[str, Any] | None = None
             frozen_identity: dict[str, Any] | None = None
             global_tuning: dict[str, Any] | None = None
@@ -766,7 +774,7 @@ def execute_quality_evaluation(
             "task_limit": request.task_limit,
             "task_batch_size": request.task_batch_size,
             "tokenizer_hash": inputs.tokenizer_hash,
-            "base_execution": "block_streamed" if request.stream_base_model else "resident",
+            "base_execution": base_execution,
             **(
                 {}
                 if not request.reasoning_modes
