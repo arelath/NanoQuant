@@ -39,6 +39,11 @@ def test_reasoning_sequence_length_override_must_be_valid() -> None:
         replace(_EXPERIMENT, reasoning_sequence_length_override=1)
 
 
+def test_block_bounded_execution_limit_must_be_positive() -> None:
+    with pytest.raises(ValueError, match="at least one block"):
+        replace(_EXPERIMENT, interrupt_after_block_commits=0)
+
+
 def test_compression_quality_runs_quality_before_huggingface_upload_and_publication(
     tmp_path: Path,
     monkeypatch,
@@ -112,9 +117,11 @@ def test_compression_quality_runs_quality_before_huggingface_upload_and_publicat
         llamacpp_quality=True,
         llama_cpp_root=tmp_path / "llama.cpp",
         reasoning_sequence_length_override=1024,
+        interrupt_after_block_commits=4,
     )
     def complete(*_args, **kwargs):  # type: ignore[no-untyped-def]
         assert "defer_huggingface" not in kwargs
+        assert kwargs["options"].interrupt_after_block_commits == 4
         calls.append("complete")
         return CompleteCompressionResult(resident, export)
 

@@ -30,6 +30,7 @@ def test_experiment037_is_a_pre_kd_common_state_using_the_035_profile() -> None:
         "output.run_root",
     }
     assert candidate.workflow.maximum_wddm_shared_gib == 0.75
+    assert candidate.workflow.interrupt_after_block_commits == 2
     assert candidate.workflow.export.gguf_output == Path(
         "Results/037/gemma-3-1b-it-nanoquant.gguf"
     )

@@ -2,7 +2,10 @@
 
 ## Status
 
-Prepared for execution. Experiment 036 remains paused and is not reused.
+Running. Experiment 036 remains paused and is not reused. The common-state
+worker uses two-new-block process slices so Windows releases retired rolling
+activation file handles between resumes; each slice is validated before the
+next one starts.
 
 ## Question
 

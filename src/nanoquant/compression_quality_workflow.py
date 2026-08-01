@@ -79,6 +79,7 @@ class CompressionQualityExperiment:
     local_files_only: bool = False
     maximum_wddm_shared_gib: float | None = None
     restore_completed_blocks: bool = True
+    interrupt_after_block_commits: int | None = None
     quality_backend: str | None = BackendType.FACTORIZED.value
     large_model_guards: bool = False
     llamacpp_quality: bool = False
@@ -95,6 +96,8 @@ class CompressionQualityExperiment:
             not math.isfinite(self.maximum_wddm_shared_gib) or self.maximum_wddm_shared_gib < 0
         ):
             raise ValueError("maximum WDDM shared memory must be finite and non-negative")
+        if self.interrupt_after_block_commits is not None and self.interrupt_after_block_commits <= 0:
+            raise ValueError("block-bounded execution must commit at least one block")
         if self.quality_backend not in {
             None,
             BackendType.FACTORIZED.value,
@@ -186,6 +189,7 @@ def execute_compression_quality_experiment(
         options=ResidentExecutionOptions(
             restore_completed_blocks=experiment.restore_completed_blocks,
             maximum_wddm_shared_bytes=maximum_shared_bytes,
+            interrupt_after_block_commits=experiment.interrupt_after_block_commits,
         ),
     )
     workflow = complete.workflow

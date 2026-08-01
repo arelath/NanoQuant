@@ -81,6 +81,7 @@ EXPERIMENT = define_compression_quality_experiment(
     ),
     CONFIG,
     maximum_wddm_shared_gib=0.75,
+    interrupt_after_block_commits=2,
 )
 
 
