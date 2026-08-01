@@ -49,6 +49,12 @@ def test_global_distillation_launcher_uses_canonical_recipe(monkeypatch, tmp_pat
             str(tmp_path / "run"),
             "--snapshot",
             str(tmp_path / "snapshot"),
+            "--objective",
+            "top_k_tail",
+            "--maximum-batches-per-epoch",
+            "32",
+            "--tail-mass-weight",
+            "0.5",
         ],
     )
 
@@ -58,4 +64,7 @@ def test_global_distillation_launcher_uses_canonical_recipe(monkeypatch, tmp_pat
     request = captured[0]
     assert request.config.epochs == 8
     assert request.config.top_k == 64
+    assert request.config.objective == "top_k_tail"
+    assert request.config.maximum_batches_per_epoch == 32
+    assert request.config.tail_mass_weight == 0.5
     assert request.config.optimizer_version == "legacy-optimi-adamw-v1"

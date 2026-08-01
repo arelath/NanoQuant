@@ -11,7 +11,7 @@ import _paths  # noqa: F401
 from recipes import BASE_COMPRESSION_TEMPLATE
 from transformers.models.auto.tokenization_auto import AutoTokenizer
 
-from nanoquant.config.schema import ProfilingConfig, ProfilingLevel
+from nanoquant.config.schema import DistillationLoss, ProfilingConfig, ProfilingLevel
 from nanoquant.global_distillation import run_global_topk_distillation
 from nanoquant.infrastructure.hf_calibration_dataset import load_or_prepare_calibration
 from nanoquant.resident_workflow import (
@@ -30,6 +30,13 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--learning-rate", type=float, default=1e-5)
     parser.add_argument("--top-k", type=int, default=64)
+    parser.add_argument(
+        "--objective",
+        choices=(DistillationLoss.TOP_K.value, DistillationLoss.TOP_K_TAIL.value),
+        default=DistillationLoss.TOP_K.value,
+    )
+    parser.add_argument("--maximum-batches-per-epoch", type=int)
+    parser.add_argument("--tail-mass-weight", type=float, default=1.0)
     parser.add_argument("--maximum-tokens-per-batch", type=int, default=512)
     parser.add_argument("--vocabulary-chunk-size", type=int, default=8192)
     parser.add_argument("--token-chunk-size", type=int, default=128)
@@ -85,6 +92,7 @@ def main() -> None:
         distillation=replace(
             base.distillation,
             enabled=True,
+            loss=DistillationLoss(args.objective),
             epochs=args.epochs,
             batch_size=args.batch_size,
             learning_rate=args.learning_rate,
@@ -93,6 +101,8 @@ def main() -> None:
             vocabulary_chunk_size=args.vocabulary_chunk_size,
             token_chunk_size=args.token_chunk_size,
             maximum_tokens_per_batch=args.maximum_tokens_per_batch,
+            maximum_batches_per_epoch=args.maximum_batches_per_epoch,
+            tail_mass_weight=args.tail_mass_weight,
             gradient_checkpointing=True,
             weight_decay=0.0,
         ),
