@@ -375,3 +375,24 @@ def test_complete_frozen_run_can_be_distilled_committed_and_reloaded(
             1.015,
         ).reference == calibrated.reference
         assert active_global_tuning(output) == calibrated.reference
+
+        primary_override = load_frozen_run(
+            output,
+            snapshot,
+            source_name="fixture/gemma3",
+            revision="pinned-test-revision",
+            device="cpu",
+            global_tuning_override=distilled.reference,
+        )
+        assert primary_override.global_tuning == distilled.reference
+        assert primary_override.global_tuning != active_global_tuning(output)
+        with pytest.raises(ValueError, match="requires global tuning"):
+            load_frozen_run(
+                output,
+                snapshot,
+                source_name="fixture/gemma3",
+                revision="pinned-test-revision",
+                device="cpu",
+                use_global_tuning=False,
+                global_tuning_override=distilled.reference,
+            )

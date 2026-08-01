@@ -17,7 +17,8 @@ from probe_mlp_overlays_kl import _split_tokens
 from probe_mlp_policy_frozen_transfer import MODEL_SOURCE, PINNED_MODEL_REVISION
 from transformers.modeling_utils import PreTrainedModel
 
-from nanoquant.config.codec import to_dict
+from nanoquant.config.codec import from_dict, to_dict
+from nanoquant.domain.models import ArtifactRef
 from nanoquant.infrastructure.device_lease import acquire_device_lease
 from nanoquant.infrastructure.frozen_model_loader import load_frozen_run
 from nanoquant.infrastructure.hf_language_model import load_causal_language_model
@@ -56,11 +57,13 @@ def _parse_arm(value: str) -> tuple[str, str, Path | None]:
     if (
         not separator
         or not name.strip()
-        or state not in {"prekd", "postkd"}
-        or (overlay_separator and (state != "postkd" or not overlay.strip()))
+        or state not in {"prekd", "postkd", "tuning"}
+        or (state == "tuning" and (not overlay_separator or not overlay.strip()))
+        or (overlay_separator and (state == "prekd" or not overlay.strip()))
     ):
         raise argparse.ArgumentTypeError(
-            "arm must use name=prekd, name=postkd, or name=postkd:component-overlay"
+            "arm must use name=prekd, name=postkd, name=postkd:component-overlay, "
+            "or name=tuning:artifact-reference-json"
         )
     return name.strip(), state, None if not overlay_separator else Path(overlay)
 
@@ -206,6 +209,16 @@ def run(args: argparse.Namespace) -> int:
             local_files_only=args.local_files_only,
         ).to(args.device)
         for name, state, overlay in args.arm:
+            global_tuning_override = None
+            component_overlay = overlay
+            if state == "tuning":
+                assert overlay is not None
+                global_tuning_override = from_dict(
+                    ArtifactRef,
+                    json.loads(overlay.read_text(encoding="utf-8")),
+                    path=f"arm[{name}].global_tuning",
+                )
+                component_overlay = None
             loaded = load_frozen_run(
                 args.run_output,
                 args.snapshot,
@@ -214,8 +227,9 @@ def run(args: argparse.Namespace) -> int:
                 device=args.device,
                 verify_hashes=False,
                 backend="factorized",
-                use_global_tuning=state == "postkd",
-                component_overlay=overlay,
+                use_global_tuning=state != "prekd",
+                global_tuning_override=global_tuning_override,
+                component_overlay=component_overlay,
             )
             observed_identity = {
                 "model_hash": loaded.identity.model_hash,
@@ -228,7 +242,12 @@ def run(args: argparse.Namespace) -> int:
             manifests[name] = {
                 "state": state,
                 "global_tuning": None if loaded.global_tuning is None else to_dict(loaded.global_tuning),
-                "component_overlay": None if overlay is None else str(overlay.resolve()),
+                "global_tuning_pointer": (
+                    str(overlay.resolve()) if state == "tuning" and overlay is not None else None
+                ),
+                "component_overlay": (
+                    None if component_overlay is None else str(component_overlay.resolve())
+                ),
             }
             results[name] = _evaluate(
                 cast(PreTrainedModel, teacher),

@@ -34,5 +34,12 @@ def test_tail_mass_arm_parser_supports_pre_post_and_overlay() -> None:
         "postkd",
         Path("evidence/fixed"),
     )
+    assert _parse_arm("conditional=tuning:evidence/primary.json") == (
+        "conditional",
+        "tuning",
+        Path("evidence/primary.json"),
+    )
     with pytest.raises(Exception, match="arm must use"):
         _parse_arm("broken=prekd:overlay")
+    with pytest.raises(Exception, match="arm must use"):
+        _parse_arm("broken=tuning")
