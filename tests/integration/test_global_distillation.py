@@ -168,6 +168,10 @@ def test_complete_frozen_run_can_be_distilled_committed_and_reloaded(
         protocol.pop("objective")
         protocol.pop("maximum_batches_per_epoch")
         protocol.pop("tail_mass_weight")
+    else:
+        protocol["teacher_normalizer_version"] = (
+            global_distillation_module.TAIL_NORMALIZER_VERSION
+        )
     assert distilled.result.protocol_hash == semantic_hash(protocol)
     profiles = [json.loads(path.read_text(encoding="utf-8")) for path in sorted(output.glob("profile*.json"))]
     distillation_profiles = [profile for profile in profiles if profile["run_id"] == "global-distillation"]

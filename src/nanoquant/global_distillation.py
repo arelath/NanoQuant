@@ -18,6 +18,7 @@ from nanoquant.application.block_snapshots import (
     select_block_snapshot_tokens,
 )
 from nanoquant.application.distillation import (
+    TAIL_NORMALIZER_VERSION,
     DistillationMetrics,
     DistillationResumeState,
     TopKDistillationConfig,
@@ -374,6 +375,8 @@ def _run_global_topk_distillation(
         # This coefficient is semantically inactive for the conditional-only
         # objective, independent of the configured numeric value.
         protocol.pop("tail_mass_weight")
+    else:
+        protocol["teacher_normalizer_version"] = TAIL_NORMALIZER_VERSION
     protocol_hash = semantic_hash(protocol)
     teacher_protocol = dict(protocol)
     teacher_protocol.pop("optimizer_version")

@@ -108,6 +108,7 @@ def test_chunked_teacher_topk_matches_dense_logits() -> None:
         head,
         top_k=6,
         vocabulary_chunk_size=4,
+        token_chunk_size=3,
         temperature=0.7,
     )
     assert torch.equal(summary_values, values)

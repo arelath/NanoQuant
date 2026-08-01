@@ -24,6 +24,8 @@ HiddenStatesFunction = Callable[[nn.Module, torch.Tensor], torch.Tensor]
 ParameterSelector = Callable[[str, nn.Parameter], bool]
 DistillationProgressSink = Callable[[str, Mapping[str, object]], None]
 
+TAIL_NORMALIZER_VERSION = "legacy-topk-plus-token-chunked-logsumexp-v1"
+
 
 @dataclass(frozen=True, slots=True)
 class TopKDistillationConfig:
@@ -151,14 +153,14 @@ def select_kd_token_indices(
 
 
 @torch.no_grad()
-def teacher_topk_logits_with_normalizers(
+def teacher_topk_logits(
     hidden_states: torch.Tensor,
     lm_head: nn.Module,
     *,
     top_k: int,
     vocabulary_chunk_size: int,
     temperature: float,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     weight = getattr(lm_head, "weight", None)
     if not isinstance(weight, torch.Tensor) or weight.ndim != 2:
         raise TypeError("distillation LM head must expose a rank-two weight")
@@ -168,19 +170,12 @@ def teacher_topk_logits_with_normalizers(
     requested_k = min(top_k, weight.shape[0])
     best_values: torch.Tensor | None = None
     best_indices: torch.Tensor | None = None
-    log_normalizers: torch.Tensor | None = None
     for start in range(0, weight.shape[0], vocabulary_chunk_size):
         end = min(start + vocabulary_chunk_size, weight.shape[0])
         chunk_bias = None if bias is None else bias[start:end]
         logits = torch.nn.functional.linear(hidden_states, weight[start:end], chunk_bias)
         if temperature != 1.0:
             logits = logits / temperature
-        chunk_log_normalizers = torch.logsumexp(logits.float(), dim=-1)
-        log_normalizers = (
-            chunk_log_normalizers
-            if log_normalizers is None
-            else torch.logaddexp(log_normalizers, chunk_log_normalizers)
-        )
         chunk_k = min(requested_k, logits.shape[-1])
         values, indices = torch.topk(logits, chunk_k, dim=-1)
         indices = indices + start
@@ -191,28 +186,41 @@ def teacher_topk_logits_with_normalizers(
         merged_indices = torch.cat((best_indices, indices), dim=-1)
         best_values, order = torch.topk(merged_values, requested_k, dim=-1)
         best_indices = merged_indices.gather(-1, order)
-    if best_values is None or best_indices is None or log_normalizers is None:
+    if best_values is None or best_indices is None:
         raise ValueError("distillation LM head has an empty vocabulary")
-    return best_values, best_indices, log_normalizers
+    return best_values, best_indices
 
 
 @torch.no_grad()
-def teacher_topk_logits(
+def teacher_topk_logits_with_normalizers(
     hidden_states: torch.Tensor,
     lm_head: nn.Module,
     *,
     top_k: int,
     vocabulary_chunk_size: int,
+    token_chunk_size: int,
     temperature: float,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    values, indices, _log_normalizers = teacher_topk_logits_with_normalizers(
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    # Preserve the legacy top-k GEMM geometry so the selected targets remain
+    # byte-for-byte compatible with retained conditional caches. Compute the
+    # full-vocabulary normalizer separately using the explicitly bounded token
+    # geometry exercised by the analysis candidate; BF16 GEMM results depend
+    # measurably on this batch dimension.
+    values, indices = teacher_topk_logits(
         hidden_states,
         lm_head,
         top_k=top_k,
         vocabulary_chunk_size=vocabulary_chunk_size,
         temperature=temperature,
     )
-    return values, indices
+    log_normalizers = vocabulary_logsumexp(
+        hidden_states,
+        lm_head,
+        vocabulary_chunk_size=vocabulary_chunk_size,
+        token_chunk_size=token_chunk_size,
+        temperature=temperature,
+    )
+    return values, indices, log_normalizers
 
 
 def selected_lm_head_logits(
@@ -533,6 +541,7 @@ def cache_topk_teacher_epoch(
                             lm_head,
                             top_k=config.top_k,
                             vocabulary_chunk_size=config.vocabulary_chunk_size,
+                            token_chunk_size=config.token_chunk_size,
                             temperature=config.temperature,
                         )
                     )
@@ -571,6 +580,7 @@ def cache_topk_teacher_epoch(
                                 lm_head,
                                 top_k=config.top_k,
                                 vocabulary_chunk_size=config.vocabulary_chunk_size,
+                                token_chunk_size=config.token_chunk_size,
                                 temperature=config.temperature,
                             )
                         )
