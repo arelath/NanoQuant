@@ -9,6 +9,14 @@ checks. Its uniform-control run has 11 durable blocks through block 10; the
 candidate campaign has not started and must not resume under the original
 six-block-seed policy.
 
+Subsequent audit in
+[74-block25-anomaly-and-topk-tail-mass-audit.md](74-block25-anomaly-and-topk-tail-mass-audit.md)
+changes the interpretation and priority. The block-25 result is a valid
+full-model recovery result, but it is not a block-local reconstruction repair.
+It compensates a probability-mass error created by conditional top-64 KD. The
+next experiment should repair that objective on the retained pre-KD state
+before this refit is promoted as a production stage.
+
 ## Conclusions
 
 1. The block-25 defect is systematic across Experiments 022 and 035.

@@ -86,3 +86,14 @@ penalizes the correction preferred by full-vocabulary NLL/KL. The original
 direction. The next candidate must fit and screen teacher-context MLP scales on
 its own post-KD factors, initially block 25 only, then complete the ordinary
 zero-byte folding, export, and quality gates.
+
+The deeper audit in
+[74-block25-anomaly-and-topk-tail-mass-audit.md](../74-block25-anomaly-and-topk-tail-mass-audit.md)
+supersedes that immediate next step. Conditional top-64 KD collapses the
+student probability mass on the teacher's selected entries from 0.8977 pre-KD
+to 0.5133 post-KD while improving only the renormalized conditional objective.
+Block 25 is the highest-leverage compensator for that model-wide error, not an
+independent block-local repair. Experiment 036 remains paused while a
+top-64-plus-tail objective is tested on the retained Experiment 035 pre-KD
+state. Only the remaining block-25 marginal after that repair can justify a
+revised production candidate.
