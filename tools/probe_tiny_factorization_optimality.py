@@ -44,6 +44,7 @@ class TinyOptimalityProtocol:
     scale_passes: int
     exact_scale_starts: int
     exact_scale_passes: int
+    exact_batch_size: int
     population: int
     elite: int
     offspring_per_elite: int
@@ -75,22 +76,34 @@ def _sign_from_bits(values: torch.Tensor, bit_count: int) -> torch.Tensor:
     return (((values[:, None] >> shifts) & 1).float() * 2.0) - 1.0
 
 
-def gauge_reduced_sign_pairs(size: int, *, device: torch.device | str = "cpu") -> tuple[torch.Tensor, torch.Tensor]:
-    """Enumerate sign pairs after fixing the exact row/column/component gauges.
+def gauge_reduced_sign_pair_count(size: int) -> int:
+    if size <= 0 or size > 5:
+        raise ValueError("gauge-reduced counting supports sizes one through five")
+    return 1 << ((size - 1) * (2 * size - 1))
+
+
+def gauge_reduced_sign_pair_range(
+    size: int,
+    start: int,
+    end: int,
+    *,
+    device: torch.device | str = "cpu",
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Materialize a contiguous range of gauge-distinct sign pairs.
 
     `left` has an all-positive first row and first column. `right` has an
     all-positive first row. Signed pre/mid/post scales retain every represented
     matrix despite those gauge choices.
     """
 
-    if size <= 0 or size > 4:
-        raise ValueError("gauge-reduced enumeration supports sizes one through four")
+    total = gauge_reduced_sign_pair_count(size)
+    if not 0 <= start <= end <= total:
+        raise ValueError("gauge-reduced sign range is invalid")
     left_bits = (size - 1) ** 2
     right_bits = size * (size - 1)
-    left_count = 1 << left_bits
     right_count = 1 << right_bits
-    combinations = left_count * right_count
-    indices = torch.arange(combinations, dtype=torch.int64, device=device)
+    combinations = end - start
+    indices = torch.arange(start, end, dtype=torch.int64, device=device)
     left_indices = torch.div(indices, right_count, rounding_mode="floor")
     right_indices = indices.remainder(right_count)
     left = torch.ones((combinations, size, size), dtype=torch.float32, device=device)
@@ -100,6 +113,17 @@ def gauge_reduced_sign_pairs(size: int, *, device: torch.device | str = "cpu") -
     if right_bits:
         right[:, 1:, :] = _sign_from_bits(right_indices, right_bits).reshape(combinations, size - 1, size)
     return left, right
+
+
+def gauge_reduced_sign_pairs(size: int, *, device: torch.device | str = "cpu") -> tuple[torch.Tensor, torch.Tensor]:
+    """Enumerate every sign pair after fixing exact scale/sign gauges."""
+
+    return gauge_reduced_sign_pair_range(
+        size,
+        0,
+        gauge_reduced_sign_pair_count(size),
+        device=device,
+    )
 
 
 def _weighted_errors(
@@ -190,7 +214,7 @@ def fit_scale_population(
         system = left_gram * right_gram
         system = 0.5 * (system + system.mT)
         diagonal = system.diagonal(dim1=-2, dim2=-1)
-        ridge = (diagonal.abs().mean(dim=1) * 1e-7).clamp_min(epsilon)
+        ridge = (diagonal.abs().mean(dim=1) * 1e-6).clamp_min(max(epsilon, 1e-6))
         diagonal.add_(ridge[:, None])
         rhs = torch.einsum(
             "bir,ij,brj,i,j->br",
@@ -200,7 +224,18 @@ def fit_scale_population(
             output_weight,
             input_weight,
         )
-        mid = torch.linalg.solve(system, rhs[:, :, None]).squeeze(2)
+        solution, info = torch.linalg.solve_ex(system, rhs[:, :, None])
+        failed = info != 0
+        if bool(failed.any()):
+            fallback_system = system[failed].clone()
+            fallback_system.diagonal(dim1=-2, dim2=-1).add_((ridge[failed] * 1_000).clamp_min(1e-3)[:, None])
+            fallback, fallback_info = torch.linalg.solve_ex(
+                fallback_system,
+                rhs[failed, :, None],
+            )
+            fallback[fallback_info != 0] = 0
+            solution[failed] = fallback
+        mid = solution.squeeze(2)
         mid = torch.nan_to_num(mid)
 
         prediction = _population_reconstruct(left, right, pre, mid, post)
@@ -260,19 +295,31 @@ def exhaustive_sign_oracle(
     passes: int,
     seed: int,
     device: str,
+    batch_size: int,
 ) -> tuple[PopulationFit, int]:
-    left, right = gauge_reduced_sign_pairs(target.shape[0], device=device)
-    fitted = fit_scale_population(
-        target,
-        left,
-        right,
-        input_importance,
-        output_importance,
-        starts=starts,
-        passes=passes,
-        seed=seed,
-    )
-    return _best_population(fitted, 1), left.shape[0]
+    if batch_size <= 0:
+        raise ValueError("exhaustive sign batch size must be positive")
+    sign_configurations = gauge_reduced_sign_pair_count(target.shape[0])
+    best: PopulationFit | None = None
+    for start in range(0, sign_configurations, batch_size):
+        end = min(start + batch_size, sign_configurations)
+        left, right = gauge_reduced_sign_pair_range(target.shape[0], start, end, device=device)
+        fitted = fit_scale_population(
+            target,
+            left,
+            right,
+            input_importance,
+            output_importance,
+            starts=starts,
+            passes=passes,
+            seed=_logical_seed(seed, f"batch|{start}|{end}"),
+        )
+        candidate = _best_population(fitted, 1)
+        if best is None or float(candidate.errors[0]) < float(best.errors[0]):
+            best = candidate
+    if best is None:
+        raise RuntimeError("exhaustive sign enumeration produced no candidates")
+    return best, sign_configurations
 
 
 def _production_candidates(
@@ -617,12 +664,14 @@ def _score_case(
             passes=protocol.exact_scale_passes,
             seed=_logical_seed(protocol.seed, f"{name}|exhaustive"),
             device=protocol.device,
+            batch_size=protocol.exact_batch_size,
         )
         search = {
             "kind": "gauge-reduced-exhaustive-signs-multistart-als",
             "sign_configurations": sign_configurations,
             "continuous_starts_per_configuration": protocol.exact_scale_starts,
             "scale_passes": protocol.exact_scale_passes,
+            "batch_size": protocol.exact_batch_size,
         }
     else:
         oracle, search = heuristic_oracle(
@@ -722,7 +771,7 @@ def _real_cases(
 
 def run(args: argparse.Namespace) -> int:
     protocol = TinyOptimalityProtocol(
-        3,
+        5,
         args.model_revision,
         args.exact_size,
         args.heuristic_size,
@@ -739,6 +788,7 @@ def run(args: argparse.Namespace) -> int:
         args.scale_passes,
         args.exact_scale_starts,
         args.exact_scale_passes,
+        args.exact_batch_size,
         args.population,
         args.elite,
         args.offspring_per_elite,
@@ -819,6 +869,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--scale-passes", type=int, default=16)
     parser.add_argument("--exact-scale-starts", type=int, default=16)
     parser.add_argument("--exact-scale-passes", type=int, default=64)
+    parser.add_argument("--exact-batch-size", type=int, default=65536)
     parser.add_argument("--population", type=int, default=4096)
     parser.add_argument("--elite", type=int, default=32)
     parser.add_argument("--offspring-per-elite", type=int, default=16)

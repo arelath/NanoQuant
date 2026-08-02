@@ -53,6 +53,7 @@ task-evaluation protocol, and Experiments 028 and 030 added Qwen-specific deploy
 | [034](034-gemma-3-1b-post-refit-qkv-covariance.md) | Completed | Gemma 3 1B IT | Selected post-refit QKV refinement passed resume/export validation but regressed pre-KD perplexity by 4.59% and final perplexity by 5.50%, so it was rejected. |
 | [049](049-cyclic-scale-rank.md) | Rejected at screen | Gemma 3 1B IT | Cyclic pre/post scale banks added tiny fixed-rank capacity but regressed all nine equal-bit comparisons by 4.07–14.76%. |
 | [050](050-tiny-factorization-optimality.md) | Completed diagnostic | Gemma 3 1B IT + synthetic | Exhaustive 3x3 search found large same-format optimizer gaps; exhaustive 10-bit row/column moves improved one of three real 10x10 crops by 3.12%. |
+| [051](051-four-by-four-exhaustive-sign-coverage.md) | Completed diagnostic | Gemma 3 1B IT + synthetic | Complete 4x4 coverage with 16 scale starts and 256 passes finished in 7:46 for one target and 12:41 for two; 5x5 is beyond the 20-minute bound. |
 
 The original launchers were under `experiments/`. Retained measurements remain under `Results/` and `evidence/`;
 architecture and decision records remain elsewhere in `Docs/`.
