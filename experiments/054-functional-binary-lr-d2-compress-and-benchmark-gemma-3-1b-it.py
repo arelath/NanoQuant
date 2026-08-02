@@ -1,4 +1,4 @@
-"""Experiment 054: replay Experiment 024 with a promoted binary tuning rate."""
+"""Experiment 054: replay Experiment 024 with a conservative binary tuning rate."""
 
 from dataclasses import replace
 
@@ -80,7 +80,7 @@ CONFIG = replace(
             FACTORIZED_TUNING,
             learning_rates=replace(
                 FACTORIZED_TUNING.learning_rates,
-                binary=1e-4,
+                binary=3e-5,
             ),
         ),
     ),
@@ -99,13 +99,13 @@ _DEFINED_EXPERIMENT = define_compression_quality_experiment(
         name="functional-binary-lr-d2-compress-and-benchmark-gemma-3-1b-it",
         purpose=(
             "Replay Experiment 024 at identical representation cost while allowing functional "
-            "factorized tuning to move binary signs with a separately validated 1e-4 rate, then "
+            "factorized tuning to move binary signs with a production-horizon 3e-5 rate, then "
             "complete export and the long quality benchmark."
         ),
         hypothesis=(
-            "The block-0 gate's disjoint block-output, teacher-KL, and next-token-NLL gains from "
-            "a 1e-4 binary learning rate generalize across the complete compressed model without "
-            "changing ranks or effective BPW."
+            "A conservative 3e-5 binary learning rate retains the block-0 gate improvement while "
+            "remaining finite across the production 256-row optimizer horizon and improving the "
+            "complete model without increasing effective BPW."
         ),
         baseline=BaselineRef.experiment(BASELINE),
         tags=(
@@ -114,7 +114,7 @@ _DEFINED_EXPERIMENT = define_compression_quality_experiment(
             "quality",
             "experiment-024-replay",
             "functional-binary-tuning",
-            "binary-lr-1e-4",
+            "binary-lr-3e-5",
             "same-bpw",
             "held-out-kl-gated",
             "global-distillation",

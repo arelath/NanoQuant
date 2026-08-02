@@ -59,11 +59,37 @@ language model on 16 held-out 512-token sequences beginning at row 192.
 The paired 95% bootstrap interval for the KL delta is
 `[-0.018644, -0.004004]`, wholly below zero. The more aggressive `3e-4` arm
 reduced block loss further, but its 16-sequence KL interval crossed zero and its
-NLL regressed. It is rejected; `1e-4` is the promoted rate.
+NLL regressed. It is rejected.
 
 Evidence:
 `evidence/054/block0-gate-binary-lr-confirm-1e4-kl16.json` and
 `evidence/054/block0-gate-binary-lr-confirm-kl16.json`.
+
+## Production-horizon canary
+
+The first complete-run attempt correctly failed rather than silently publishing
+an unstable model. The small replay fitted 64 rows (8 optimizer steps per epoch),
+whereas the production recipe fits 256 rows (32 steps per epoch). Applying
+`1e-4` unchanged therefore made a substantially larger optimization excursion:
+
+| Run | Gate rank | Left-sign changes | Fraction changed |
+|---|---:|---:|---:|
+| Experiment 024 uniform control, `1e-5` | 960 | 14,421 | 0.217% |
+| Experiment 054 failed control, `1e-4` | 960 | 153,181 | 2.309% |
+
+The candidate's block-0 factorized gate loss improved from Experiment 024's
+0.501360 to 0.198145, but its propagated activations caused non-finite block-1
+targets. The resident run stopped with a `FloatingPointError` after preserving a
+hash-valid block-0 commit. This rejects `1e-4` at the production horizon and also
+shows why a finite end-to-end canary is mandatory after a small functional probe.
+
+The retry uses the already-screened `3e-5` arm. It improved the original 64/64
+held-out block loss from 0.450137 to 0.394186, while limiting the per-step rate to
+30% of the failed setting. It is a production candidate, not yet a final result.
+
+Failed-run evidence:
+`evidence/054/054-d2-uniform-control-gemma-3-1b-it`, inactive resident identity
+`sha256:20154357dd0019eac6ec20c5c6cf67a9eeb26b3d434b51beed2faea2497b3b40`.
 
 ## Complete-run protocol
 
@@ -71,12 +97,15 @@ The numbered compression run is an Experiment 024 replay with exactly one
 intended algorithmic change:
 
 ```text
-block_tuning.factorized.learning_rates.binary: 1e-5 -> 1e-4
+block_tuning.factorized.learning_rates.binary: 1e-5 -> 3e-5
 ```
 
-Scale, outlier, and bias rates remain `1e-5`; ranks, BPW accounting, outlier
-policy, shared QKV with the 2x V objective, allocation, post-block refit, and
-global distillation remain those of Experiment 024.
+Scale, outlier, and bias rates remain `1e-5`; BPW accounting, outlier policy,
+shared QKV with the 2x V objective, allocation recipe, post-block refit, and
+global distillation remain those of Experiment 024. The same-run measured
+profile may redistribute exact ranks as a downstream effect; target BPW and all
+rank-budget policies remain fixed and the observed rank inventory will be
+reported rather than assumed equal.
 
 Promotion requires all of the following:
 
@@ -87,4 +116,3 @@ Promotion requires all of the following:
 4. The standard retained WikiText-2 quality benchmark and task benchmark.
 5. Comparison against Experiment 024 on quality, BPW, time, memory, and artifact
    bytes. A tiny or partial run cannot complete this experiment.
-
