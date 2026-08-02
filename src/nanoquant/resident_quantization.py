@@ -216,7 +216,7 @@ from nanoquant.infrastructure.tuning_checkpoint import (
 from nanoquant.ports.event_sink import EventSink, LayerCommittedPayload, emit_layer_committed
 from nanoquant.ports.model_adapter import ModelAdapter
 
-RESIDENT_ALGORITHM_VERSION = 52
+RESIDENT_ALGORITHM_VERSION = 53
 COVARIANCE_REFINEMENT_MAX_INPUT_FEATURES = 2048
 _THROUGHPUT_PROBE_REPETITIONS = 5
 _THROUGHPUT_PROBE_WARMUP_WORKLOADS = 3
@@ -2599,11 +2599,9 @@ class _RankProbeEvidence:
     member_sensitivity_energies: tuple[float, ...]
     member_weight_norms_squared: tuple[float, ...]
     logical_seed: int
-    wall_seconds: float
-    peak_workspace_bytes: int
 
     def __post_init__(self) -> None:
-        if self.schema_version != 3:
+        if self.schema_version != 4:
             raise ValueError("unsupported reconstruction rank-probe evidence schema")
         if not self.response_points or tuple(point.rank for point in self.response_points) != tuple(
             sorted({point.rank for point in self.response_points})
@@ -3166,9 +3164,14 @@ def _run_reconstruction_rank_probes(
                 unit.rank,
                 ordered_response_points,
             )
-            peak = int(torch.cuda.max_memory_allocated(request.device)) if request.device.startswith("cuda") else 0
+            wall_seconds = time.perf_counter() - started
+            peak_workspace_bytes = (
+                int(torch.cuda.max_memory_allocated(request.device))
+                if request.device.startswith("cuda")
+                else 0
+            )
             evidence = _RankProbeEvidence(
-                3,
+                4,
                 probe_plan,
                 unit_id,
                 member_layers[0].block.index,
@@ -3192,8 +3195,6 @@ def _run_reconstruction_rank_probes(
                 tuple(member_energies),
                 tuple(member_norms),
                 seed,
-                time.perf_counter() - started,
-                peak,
             )
         reference = _commit_rank_probe_result(request, evidence, artifacts)
         persisted[unit_id] = (reference, evidence)
@@ -3206,8 +3207,8 @@ def _run_reconstruction_rank_probes(
             artifact_id=reference.artifact_id,
             rank=unit.rank,
             relative_frobenius_error=evidence.relative_frobenius_error,
-            wall_seconds=evidence.wall_seconds,
-            peak_workspace_bytes=evidence.peak_workspace_bytes,
+            wall_seconds=wall_seconds,
+            peak_workspace_bytes=peak_workspace_bytes,
         )
         del factorized
         if request.device.startswith("cuda"):

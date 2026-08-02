@@ -216,8 +216,21 @@ only summary statistics or plan totals is not sufficient.
 
 The tiny CPU integration gate proves independent equality and byte-identical
 resume reuse. A retained real-run self-check validates a 136-artifact graph.
-The two independent pinned-Gemma executions are still pending, so this does not
-yet clear the campaign blocker.
+The first two independent pinned-Gemma executions completed and correctly
+failed the exact gate. Calibration and objective artifacts matched exactly, and
+the two plan payloads differed only in their reconstruction-profile artifact
+reference. All 130 rank-probe result artifacts differed solely because
+`wall_seconds` was embedded in their content-addressed payloads; ranks, errors,
+curves, allocation decisions, and every other plan field were identical. This
+was an artifact-identity defect rather than numerical rank instability, but it
+still violated the predeclared exact-hash gate.
+
+Rank-probe schema 4 therefore keeps timing and peak workspace in observable
+events while excluding both nondeterministic telemetry fields from immutable
+semantic evidence. The resident algorithm version is 53, preventing reuse of
+schema-3 commits. The failed receipt remains retained under
+`evidence/048/pinned-gemma-preprocessing-replay`; a clean version-53 two-process
+replay remains required to clear the blocker.
 
 ## Experiment 043 correction
 

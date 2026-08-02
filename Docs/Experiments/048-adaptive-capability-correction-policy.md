@@ -198,10 +198,20 @@ fresh factorization recipe underlying this campaign:
 ```powershell
 .\.venv\Scripts\python.exe tools\replay_gemma_preprocessing_reproducibility.py `
   --launcher experiments\044-tail-aware-256-d2-compress-and-benchmark-gemma-3-1b-it.py `
-  --output-root evidence\048\pinned-gemma-preprocessing-replay
+  --output-root evidence\048\pinned-gemma-preprocessing-replay-v2
 ```
 
 The orchestrator launches `run-a` and `run-b` in distinct Python processes and
 writes `preprocessing-reproducibility.json` only after complete transitive hash
 validation. No evaluation slice is reserved or opened by this operation. Until
 that real receipt passes, Experiment 048 remains paused.
+
+The initial real replay at `evidence/048/pinned-gemma-preprocessing-replay`
+failed as intended. Calibration input, calibration statistics, objectives, and
+the semantic configuration were exact. The plans differed only by their
+reconstruction-profile reference, and all 130 profile members differed only in
+recorded wall time. Telemetry had been included in content-addressed semantic
+evidence. Rank-probe schema 4 removes wall time and peak workspace from the
+artifact payload while retaining both in events; resident algorithm version 53
+prevents adoption of the old evidence. The failed receipt is retained, and the
+version-53 replay uses the new `-v2` output rather than overwriting it.

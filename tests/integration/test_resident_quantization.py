@@ -725,6 +725,11 @@ def test_reconstruction_rank_probe_covers_every_physical_unit_before_fitting(tmp
     probe_payload = json.loads(
         (artifacts.path_for(first_result) / "rank-probe-result.json").read_text()
     )
+    assert "wall_seconds" not in probe_payload
+    assert "peak_workspace_bytes" not in probe_payload
+    completed_probe = next(event for event in events if event["name"] == "rank_probe.unit_completed")
+    assert completed_probe["fields"]["wall_seconds"] > 0
+    assert completed_probe["fields"]["peak_workspace_bytes"] == 0
     assert len(probe_payload["response_points"]) == 2
     assert probe_payload["response_curve"]["unit_pattern"] in {
         "mlp.gate_proj",
