@@ -262,6 +262,7 @@ def _prepare_automatic_kl_inputs(
             inputs,
             ResidentExecutionOptions(
                 restore_completed_blocks=experiment.workflow.restore_completed_blocks,
+                interrupt_after_block_commits=experiment.workflow.interrupt_after_block_commits,
                 maximum_wddm_shared_bytes=(
                     None if maximum_shared is None else int(maximum_shared * 2**30)
                 ),

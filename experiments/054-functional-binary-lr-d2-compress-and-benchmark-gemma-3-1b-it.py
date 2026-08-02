@@ -131,6 +131,11 @@ EXPERIMENT = replace(
         _DEFINED_EXPERIMENT.workflow,
         task_limit=1000,
         local_files_only=True,
+        # Post-block refit can leave the CUDA process numerically contaminated
+        # after its non-finite rollback even though the committed block is
+        # valid. A clean process per durable block avoids carrying that
+        # transient state into the next block.
+        interrupt_after_block_commits=1,
     ),
 )
 

@@ -102,6 +102,22 @@ improves its normalized loss by 27.4%, commits all MLP, shared-QKV, and O owners
 and propagates finite activations into block 1. This promotes `3e-5` past the
 multi-block canary; complete-model quality remains the final gate.
 
+The uninterrupted process later encountered a non-finite block-2 teacher
+objective immediately after block 1. A fresh audit validated all 48 reachable
+artifacts across the first two blocks (2.94 GB), and the committed block-1
+activation pair contained no non-finite values. Reloading that exact activation
+artifact in a clean process produced a finite block-2 target power of 284.977 and
+continued tuning normally. The failure is therefore process-local carry-over,
+not corruption of the durable boundary or evidence that `3e-5` itself is
+non-finite at block 2.
+
+Experiment 054 now executes in clean, one-block process slices. Every slice
+rehydrates the validated frozen prefix and canonical activation generation,
+commits one additional block, and exits intentionally. The campaign retains
+numbered stdout/stderr logs and resumes at the next unused slice after an
+interruption. This contains the transient in-memory state while preserving the
+same numerical recipe, rank budget, and committed model state.
+
 Failed-run evidence:
 `evidence/054/054-d2-uniform-control-gemma-3-1b-it--archive-20154357dd00`,
 inactive resident identity

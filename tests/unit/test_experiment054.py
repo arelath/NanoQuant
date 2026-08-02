@@ -7,6 +7,7 @@ def test_experiment054_changes_only_identity_output_and_binary_rate_from_024() -
 
     rates = candidate.config.block_tuning.factorized.learning_rates
     assert candidate.identity.baseline.label == baseline.identity.canonical_name
+    assert candidate.workflow.interrupt_after_block_commits == 1
     assert rates.binary == 3e-5
     assert rates.scale == 1e-5
     assert rates.outlier is None
