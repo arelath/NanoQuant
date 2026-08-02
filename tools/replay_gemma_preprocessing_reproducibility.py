@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib
 import json
 import runpy
 import subprocess
@@ -22,7 +23,9 @@ from nanoquant.resident_workflow import (
     execute_resident_workflow,
     resolve_resident_experiment_inputs,
 )
-from tools.compare_preprocessing_runs import compare_runs
+
+_COMPARE_MODULE = "tools.compare_preprocessing_runs" if __package__ else "compare_preprocessing_runs"
+compare_runs = cast(Any, importlib.import_module(_COMPARE_MODULE)).compare_runs
 
 
 def _parser() -> argparse.ArgumentParser:

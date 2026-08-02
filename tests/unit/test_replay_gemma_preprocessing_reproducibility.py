@@ -1,9 +1,22 @@
 from __future__ import annotations
 
+import subprocess
 import sys
 from pathlib import Path
 
 import tools.replay_gemma_preprocessing_reproducibility as replay
+
+
+def test_replay_script_entry_point_loads() -> None:
+    completed = subprocess.run(
+        [sys.executable, str(Path(replay.__file__).resolve()), "--help"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "--single-run-output" not in completed.stdout
 
 
 def test_replay_launches_each_run_in_a_fresh_python_process(
