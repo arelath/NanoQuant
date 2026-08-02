@@ -114,7 +114,9 @@ receipt match the durable correction checkpoint.
 
 Strict resident validation audited 713 artifacts and all 26 blocks. Rank sum
 remains 111,744 and effective BPW remains `1.024417665448784`. The correction
-adds no tensors, represented factor bytes, or inference operations.
+changes no selected-tensor count, represented factor bits, rank, or inference
+operations. The exact reload and representation comparison is retained at
+`evidence/047/experiment047-materialization-verification.json`.
 
 ## Deployment benchmarks
 
@@ -125,8 +127,10 @@ conditions:
 - Experiment 042: `171.870897` (candidate is 3.15% lower and comfortably
   inside the 2% non-inferiority ceiling of `175.308315`).
 
-The non-binding task-200 mean is `0.4600`, between Experiment 044's `0.4592`
-and Experiment 042's `0.4617`.
+Using each task's declared primary metric, the non-binding task-200 mean is
+`0.455000` versus Experiment 044's `0.454167`. The paired delta is
+`+0.000833`, 95% interval `[-0.011667, +0.012500]`; neither improvement nor
+regression is established.
 
 At 1,000 examples per task, the candidate scores are:
 
@@ -146,10 +150,19 @@ The benchmark loader applied the durable checkpoint directly. The exact
 the derived global-tuning artifact; no fold or other transformation was
 applied.
 
+The successful canonical worker began after the C4 gate but overlapped the end
+of the representation-only materialization step, instead of waiting for that
+step to finish. Materialization cannot alter or select the frozen checkpoint,
+and it subsequently proved exact loaded state with unchanged representation.
+No treatment or threshold changed in response. This remains a procedural
+ordering deviation and is recorded rather than hidden.
+
 Evidence:
 
 - `evidence/047/experiment047-correction3-strict-validation.json`;
+- `evidence/047/experiment047-materialization-verification.json`;
 - `evidence/047/experiment047-correction3-canonical-quality.json`;
+- `evidence/047/experiment047-correction3-vs-044-task200-paired.json`;
 - `evidence/047/experiment047-correction3-tasklimit1000-quality.json`;
 - `evidence/047/experiment047-correction3-vs-experiment044-tasklimit1000-paired.json`;
 - `evidence/047/experiment047-correction3-vs-experiment042-tasklimit1000-paired.json`.
