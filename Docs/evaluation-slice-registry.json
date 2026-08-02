@@ -189,7 +189,7 @@
       "token_start": 151552,
       "token_end": 176128,
       "token_hash": "sha256:98ab9ec7c492025b6ae03d8706a96c80262d4504b726bd9df03b58a734629402",
-      "status": "reserved",
+      "status": "retired",
       "consumer": "experiment-047-fixed-epoch3-capability-confirmation",
       "evidence": "evidence/047/experiment047-c4-validation296-48x512.json"
     }

@@ -2,10 +2,9 @@
 
 ## Status
 
-Predeclared and awaiting a committed source identity. No Experiment 047 model
-evaluation may begin until this document and the slice reservation are
-committed. The exact checkpoint-arm evaluator was already committed in
-`29bc4b5` and may not change during this experiment.
+Primary C4 confirmation passed. Artifact materialization and the conditional
+deployment benchmarks remain pending. The exact checkpoint-arm evaluator was
+committed in `29bc4b5` and did not change during the gate.
 
 ## Question
 
@@ -80,3 +79,25 @@ general compression recipe.
 
 Failure rejects the fixed epoch-3 hypothesis. It does not reject one-sided
 correction in general.
+
+## Primary-gate result
+
+The committed source identity was `28c5543`. The evaluator observed the exact
+256-step baseline, 96-step candidate, common frozen identity, 48 aligned
+sequences, and reserved token hash. The result was:
+
+| Arm | C4 NLL | Full KL |
+| --- | ---: | ---: |
+| Experiment 044 tail-aware baseline | 4.912287 | 1.006619 |
+| Correction epoch 3 | **4.872377** | **0.984313** |
+
+Candidate-minus-baseline paired intervals both pass:
+
+- NLL: `-0.039910`, 95% interval `[-0.047543, -0.032233]`;
+- full KL: `-0.022307`, 95% interval `[-0.027980, -0.016931]`.
+
+An overlapping continuation briefly started the later canonical benchmark
+before this gate. It was stopped before producing an output artifact and was
+not used to select, alter, or judge the candidate. The C4 worker then ran alone
+under the CUDA lease. The reserved slice is permanently retired with evidence
+at `evidence/047/experiment047-c4-validation296-48x512.json`.
