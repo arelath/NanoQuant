@@ -1,0 +1,99 @@
+{
+  "schema_version": 1,
+  "policy": "A token interval used for fitting, selection, monitoring, or gating is permanently retired. New gates must be reserved before evaluation and must not overlap any reserved or retired interval in the same dataset split.",
+  "slices": [
+    {
+      "id": "wikitext-validation-retired-000-079",
+      "dataset": "Salesforce/wikitext:wikitext-2-raw-v1",
+      "split": "validation",
+      "offset": 0,
+      "samples": 80,
+      "sequence_length": 512,
+      "token_start": 0,
+      "token_end": 40880,
+      "token_hash": "multiple-historical-slices",
+      "status": "retired",
+      "consumer": "experiments-021-through-035"
+    },
+    {
+      "id": "wikitext-validation-retired-080-295",
+      "dataset": "Salesforce/wikitext:wikitext-2-raw-v1",
+      "split": "validation",
+      "offset": 80,
+      "samples": 216,
+      "sequence_length": 512,
+      "token_start": 40880,
+      "token_end": 151256,
+      "token_hash": "multiple-historical-slices",
+      "status": "retired",
+      "consumer": "experiments-035-through-042"
+    },
+    {
+      "id": "wikitext-validation-retired-300-347",
+      "dataset": "Salesforce/wikitext:wikitext-2-raw-v1",
+      "split": "validation",
+      "offset": 300,
+      "samples": 48,
+      "sequence_length": 512,
+      "token_start": 153300,
+      "token_end": 177828,
+      "token_hash": "sha256:9ee31088130e314637ed3607ddf7903890438c0aa7e62b1cd261b971479a4aef",
+      "status": "retired",
+      "consumer": "experiments-040-042-and-043-exploratory"
+    },
+    {
+      "id": "experiment043-final-wikitext-validation348-48x512",
+      "dataset": "Salesforce/wikitext:wikitext-2-raw-v1",
+      "split": "validation",
+      "offset": 348,
+      "samples": 48,
+      "sequence_length": 512,
+      "token_start": 177828,
+      "token_end": 202356,
+      "token_hash": "sha256:a1ae1fe5d43b570e7472c6a12b891e162628083c10d292a730f5360bcd79a0e6",
+      "status": "retired",
+      "consumer": "experiment-043-final-gate",
+      "evidence": "evidence/043/experiment043-final-validation348-48x512-kd-quality.json"
+    },
+    {
+      "id": "wikitext-test-retired-conservative-000-547",
+      "dataset": "Salesforce/wikitext:wikitext-2-raw-v1",
+      "split": "test",
+      "offset": 0,
+      "samples": 548,
+      "sequence_length": 512,
+      "token_start": 0,
+      "token_end": 280028,
+      "token_hash": "multiple-historical-slices",
+      "status": "retired",
+      "consumer": "standard-quality-and-experiments-001-through-041"
+    },
+    {
+      "id": "c4-validation-retired-000-151",
+      "dataset": "allenai/c4",
+      "split": "validation",
+      "offset": 0,
+      "samples": 152,
+      "sequence_length": 512,
+      "token_start": 0,
+      "token_end": 77824,
+      "token_hash": "multiple-historical-slices",
+      "status": "retired",
+      "consumer": "experiments-035-through-042"
+    },
+    {
+      "id": "experiment043-c4-validation152-48x512",
+      "dataset": "allenai/c4",
+      "split": "validation",
+      "offset": 152,
+      "samples": 48,
+      "sequence_length": 512,
+      "token_start": 77824,
+      "token_end": 102400,
+      "token_hash": "sha256:49d347cadb5df2d9b5aa5b16dd106f8932534c3696e2614032591703da8cd1eb",
+      "status": "retired",
+      "consumer": "experiment-043-c4-gate",
+      "evidence": "evidence/043/experiment043-c4-validation152-48x512.json"
+    }
+  ]
+}

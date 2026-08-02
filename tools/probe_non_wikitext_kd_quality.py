@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import gc
+import hashlib
 import json
 import math
 from collections.abc import Callable, Sequence
@@ -27,8 +28,10 @@ from nanoquant.application.kl_budget import (
 )
 from nanoquant.config.codec import from_dict, to_dict
 from nanoquant.domain.models import ArtifactRef
+from nanoquant.infrastructure.artifacts import LocalArtifactStore
 from nanoquant.infrastructure.device_lease import acquire_device_lease
 from nanoquant.infrastructure.frozen_model_loader import load_frozen_run
+from nanoquant.infrastructure.global_tuning import load_global_tuning
 from nanoquant.infrastructure.hf_language_model import load_causal_language_model
 from nanoquant.infrastructure.hf_model_protocol import HuggingFaceModel
 from nanoquant.infrastructure.io_utils import atomic_write_json
@@ -66,6 +69,17 @@ def _parse_arm(value: str) -> tuple[str, str, Path, Path | None]:
     )
 
 
+def _parse_expected_steps(value: str) -> tuple[str, int]:
+    name, separator, steps = value.partition("=")
+    try:
+        parsed = int(steps)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("expected steps must use arm=nonnegative-integer") from exc
+    if not separator or not name.strip() or parsed < 0:
+        raise argparse.ArgumentTypeError("expected steps must use arm=nonnegative-integer")
+    return name.strip(), parsed
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--snapshot", type=Path, required=True)
@@ -73,6 +87,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--arm", type=_parse_arm, action="append", required=True)
     parser.add_argument("--primary-baseline", required=True)
     parser.add_argument("--primary-candidate", required=True)
+    parser.add_argument("--expected-steps", type=_parse_expected_steps, action="append", required=True)
+    parser.add_argument("--slice-registry", type=Path, required=True)
+    parser.add_argument("--slice-id", required=True)
     parser.add_argument("--model-revision", default=PINNED_MODEL_REVISION)
     parser.add_argument("--c4-revision", default=C4_REVISION)
     parser.add_argument("--c4-file", default=C4_VALIDATION_FILE)
@@ -222,9 +239,58 @@ def _comparison(
     }
 
 
+def _c4_slice_reservation(
+    path: Path,
+    slice_id: str,
+    *,
+    offset: int,
+    samples: int,
+    sequence_length: int,
+    token_hash: str,
+) -> tuple[dict[str, object], str]:
+    encoded = path.read_bytes()
+    registry = json.loads(encoded)
+    entries = registry.get("slices")
+    if registry.get("schema_version") != 1 or not isinstance(entries, list):
+        raise ValueError("evaluation slice registry is invalid")
+    selected = [item for item in entries if item.get("id") == slice_id]
+    if len(selected) != 1:
+        raise ValueError("C4 evaluation slice reservation is missing or ambiguous")
+    reservation = selected[0]
+    expected = {
+        "dataset": C4_DATASET,
+        "split": "validation",
+        "offset": offset,
+        "samples": samples,
+        "sequence_length": sequence_length,
+        "token_start": offset * sequence_length,
+        "token_end": (offset + samples) * sequence_length,
+        "token_hash": token_hash,
+        "status": "reserved",
+    }
+    if any(reservation.get(key) != value for key, value in expected.items()):
+        raise ValueError("C4 evaluation slice reservation differs from the requested protocol")
+    start = int(expected["token_start"])
+    end = int(expected["token_end"])
+    for item in entries:
+        if (
+            item is reservation
+            or item.get("dataset") != C4_DATASET
+            or item.get("split") != "validation"
+            or item.get("status") not in {"reserved", "retired"}
+        ):
+            continue
+        other_start = int(item["token_start"])
+        other_end = int(item["token_end"])
+        if max(start, other_start) < min(end, other_end):
+            raise ValueError(f"C4 evaluation slice overlaps reserved/retired slice {item['id']}")
+    return cast(dict[str, object], reservation), "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
 def run(args: argparse.Namespace) -> int:
     arms = tuple(args.arm)
     names = tuple(name for name, _mode, _path, _pointer in arms)
+    expected_steps = dict(args.expected_steps)
     if (
         len(arms) < 2
         or len(set(names)) != len(names)
@@ -234,6 +300,8 @@ def run(args: argparse.Namespace) -> int:
         or min(args.c4_documents, args.samples, args.sequence_length - 1, args.token_chunk_size)
         <= 0
         or args.offset < 0
+        or set(expected_steps) != set(names)
+        or len(expected_steps) != len(args.expected_steps)
     ):
         raise ValueError("non-WikiText KD protocol is invalid")
     tokens, fingerprint, bos_token_id = _load_c4_tokens(
@@ -245,6 +313,15 @@ def run(args: argparse.Namespace) -> int:
         samples=args.samples,
         sequence_length=args.sequence_length,
         local_files_only=args.local_files_only,
+    )
+    token_hash = _token_hash(tokens)
+    reservation, registry_hash = _c4_slice_reservation(
+        args.slice_registry,
+        args.slice_id,
+        offset=args.offset,
+        samples=args.samples,
+        sequence_length=args.sequence_length,
+        token_hash=token_hash,
     )
     protocol = {
         "dataset": C4_DATASET,
@@ -264,7 +341,7 @@ def run(args: argparse.Namespace) -> int:
         "samples": args.samples,
         "sequence_length": args.sequence_length,
         "token_chunk_size": args.token_chunk_size,
-        "token_hash": _token_hash(tokens),
+        "token_hash": token_hash,
         "model_revision": args.model_revision,
         "arms": [
             {
@@ -272,11 +349,15 @@ def run(args: argparse.Namespace) -> int:
                 "mode": mode,
                 "run_output": str(path.resolve()),
                 "global_tuning_pointer": None if pointer is None else str(pointer.resolve()),
+                "expected_steps": expected_steps[name],
             }
             for name, mode, path, pointer in arms
         ],
         "primary_baseline": args.primary_baseline,
         "primary_candidate": args.primary_candidate,
+        "slice_registry": str(args.slice_registry.resolve()),
+        "slice_registry_sha256": registry_hash,
+        "slice_reservation": reservation,
     }
     checkpoint_path = args.output.with_name(args.output.stem + ".checkpoint.json")
     if args.output.is_file():
@@ -359,6 +440,21 @@ def run(args: argparse.Namespace) -> int:
             if frozen_identity is not None and observed_identity != frozen_identity:
                 raise ValueError("non-WikiText arms have different frozen identities")
             frozen_identity = observed_identity
+            if loaded.global_tuning is None and mode != "prekd":
+                raise ValueError(f"non-WikiText arm {name} has no global tuning")
+            observed_steps = (
+                0
+                if loaded.global_tuning is None and mode == "prekd"
+                else load_global_tuning(
+                    cast(ArtifactRef, loaded.global_tuning),
+                    LocalArtifactStore(run_output / "artifacts"),
+                ).result.steps_completed
+            )
+            if observed_steps != expected_steps[name]:
+                raise ValueError(
+                    f"non-WikiText arm {name} has {observed_steps} steps; "
+                    f"expected {expected_steps[name]}"
+                )
             manifests[name] = {
                 "mode": mode,
                 "run_output": str(run_output.resolve()),
@@ -368,6 +464,7 @@ def run(args: argparse.Namespace) -> int:
                 "global_tuning_pointer": (
                     None if tuning_pointer is None else str(tuning_pointer.resolve())
                 ),
+                "steps_completed": observed_steps,
             }
 
             def save_arm_progress(

@@ -1,10 +1,13 @@
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 import torch
 from pytest import MonkeyPatch
 
 from tools.probe_non_wikitext_kd_quality import (
+    _c4_slice_reservation,
     _contiguous_token_windows,
     _load_c4_tokens,
     _parse_arm,
@@ -66,11 +69,67 @@ def test_primary_comparison_is_explicit_in_the_cli_protocol() -> None:
             "baseline",
             "--primary-candidate",
             "candidate",
+            "--expected-steps",
+            "baseline=256",
+            "--expected-steps",
+            "candidate=256",
+            "--slice-registry",
+            "registry.json",
+            "--slice-id",
+            "candidate-slice",
         ]
     )
 
     assert args.primary_baseline == "baseline"
     assert args.primary_candidate == "candidate"
+
+
+def test_c4_slice_reservation_rejects_retired_overlap(tmp_path: Path) -> None:
+    registry = tmp_path / "registry.json"
+    registry.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "slices": [
+                    {
+                        "id": "old",
+                        "dataset": "allenai/c4",
+                        "split": "validation",
+                        "offset": 0,
+                        "samples": 48,
+                        "sequence_length": 512,
+                        "token_start": 0,
+                        "token_end": 24576,
+                        "token_hash": "old",
+                        "status": "retired",
+                    },
+                    {
+                        "id": "new",
+                        "dataset": "allenai/c4",
+                        "split": "validation",
+                        "offset": 24,
+                        "samples": 48,
+                        "sequence_length": 512,
+                        "token_start": 12288,
+                        "token_end": 36864,
+                        "token_hash": "new",
+                        "status": "reserved",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="overlaps"):
+        _c4_slice_reservation(
+            registry,
+            "new",
+            offset=24,
+            samples=48,
+            sequence_length=512,
+            token_hash="new",
+        )
 
 
 def test_local_c4_shard_uses_packaged_json_loader(
