@@ -73,7 +73,7 @@ def select_checkpoint(
         }
         for name in names
     }
-    baseline_pairs: dict[str, dict[str, object]] = {}
+    baseline_pairs: dict[str, object] = {}
     eligible: list[str] = []
     for arm in ordered_arms:
         comparisons = {

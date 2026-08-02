@@ -2,8 +2,17 @@
 
 ## Status
 
-Predeclared. The development slice is reserved but no checkpoint has been
-evaluated on it.
+Completed with no surviving earlier checkpoint. The frozen rule selected epoch
+5 as the earliest three-metric plateau member, but its NLL is significantly
+worse than epoch 8, so epoch 8 is retained and no derived model is materialized.
+
+This result is analysis-only for an additional procedural reason. An
+overlapping continuation opened the reserved slice after this document, the
+selection rule, and the reservation had been written to the shared workspace,
+but before their source commit completed. That misses the intended
+commit-before-evaluation condition. Because the frozen outcome rejects a
+replacement and changes no model, it may conservatively rule out the earlier
+checkpoint hypothesis; it cannot support promotion of a candidate.
 
 ## Question
 
@@ -68,16 +77,57 @@ No correction, final-norm fold, block-25 refit, or coefficient change may be
 introduced during this experiment. If checkpoint selection cannot close the
 gap, those become separate, freshly calibrated composition experiments.
 
+## Result
+
+All arms matched their declared step counts and immutable Experiment 044
+identity. The development means were:
+
+| Arm | Steps | NLL | Full KL | Top-k + tail KL | PPL |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| pre-KD | 0 | 5.134158 | 1.708103 | 1.609366 | 169.72 |
+| epoch 1 | 32 | 4.824066 | 1.609028 | 1.518957 | 124.47 |
+| epoch 2 | 64 | 4.758649 | 1.547678 | 1.462323 | 116.59 |
+| epoch 3 | 96 | 4.718302 | 1.521553 | 1.437353 | 111.98 |
+| epoch 4 | 128 | 4.686435 | 1.494005 | 1.410709 | 108.47 |
+| epoch 5 | 160 | 4.670901 | 1.485623 | 1.402212 | 106.79 |
+| epoch 6 | 192 | 4.665452 | 1.481484 | 1.398062 | 106.21 |
+| epoch 7 | 224 | 4.665298 | 1.481242 | 1.397864 | 106.20 |
+| epoch 8 | 256 | 4.664809 | 1.480959 | 1.397553 | 106.15 |
+
+Every trained checkpoint improved NLL and full KL over pre-KD with paired 95%
+upper bounds below zero. Epochs 5-8 were within 0.02 nats of all three minima,
+so the predeclared plateau rule selected the earliest, epoch 5.
+
+Epoch 5 does not satisfy the replacement rule. Relative to epoch 8 it is worse
+on all three metrics:
+
+- NLL `+0.006092`, paired 95% interval `[+0.004185, +0.007857]`;
+- full KL `+0.004664`, interval `[+0.003373, +0.005907]`;
+- top-k-plus-tail KL `+0.004659`, interval `[+0.003388, +0.005879]`.
+
+The durable selection receipt therefore says `retain epoch8`. Earlier
+checkpoint selection cannot explain or close Experiment 044's deployment
+quality gap, so the follow-up materialization, C4, and task gates are not
+opened.
+
+Evidence:
+
+- `evidence/045/experiment045-wikitext-validation444-24x512-checkpoint-curve.json`;
+- `evidence/045/experiment045-wikitext-validation444-24x512-checkpoint-curve.checkpoint.json`;
+- `evidence/045/experiment045-checkpoint-selection.json`.
+
 ## Frozen execution
 
 `tools/probe_wikitext_kd_quality.py` evaluates the pre-KD control and all eight
 immutable checkpoints in one invocation. Its report must include paired
 intervals for every arm against both pre-KD and epoch 8; rerunning different
 pairings after opening the slice is forbidden. The output is
-`evidence/045/experiment045-wikitext-validation444-24x512-checkpoint-sweep.json`.
+`evidence/045/experiment045-wikitext-validation444-24x512-checkpoint-curve.json`.
 
 `tools/select_wikitext_kd_checkpoint.py` applies the rule above without loading
 a model or changing an artifact. Its output is
-`evidence/045/experiment045-wikitext-validation444-24x512-selection.json` and
-binds the sweep by SHA-256. Both tools and their tests are committed before the
-reserved development slice is opened.
+`evidence/045/experiment045-checkpoint-selection.json` and binds the sweep by
+SHA-256. The intended protocol required both tools and their tests to be
+committed before the reserved development slice was opened. As recorded in the
+status above, the overlapping execution violated that ordering requirement, so
+the result is restricted to conservative hypothesis rejection.
