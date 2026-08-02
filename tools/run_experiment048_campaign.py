@@ -31,7 +31,6 @@ ROOT = Path(__file__).resolve().parent.parent
 LAUNCHER = ROOT / "experiments/048-adaptive-capability-correction-d2-gemma-3-1b-it.py"
 REGISTRY = ROOT / "Docs/evaluation-slice-registry.json"
 CORRECTION_NAMESPACE = "global-distillation-mass-floor"
-C4_VALIDATION_FILE = "en/c4-validation.00000-of-00008.json.gz"
 DEFAULT_REFERENCES = (
     (
         "accepted040",
@@ -97,7 +96,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--confirmation-slice-id")
     parser.add_argument("--selection-offset", type=int, default=344)
     parser.add_argument("--confirmation-offset", type=int, default=392)
-    parser.add_argument("--c4-file", default=C4_VALIDATION_FILE)
+    parser.add_argument("--c4-file", type=Path)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--local-files-only", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
@@ -435,8 +434,11 @@ def _confirmation_command(
 
 
 def _run(args: argparse.Namespace) -> int:
-    if args.snapshot is None or not args.selection_slice_id or not args.confirmation_slice_id:
-        raise ValueError("campaign requires snapshot and both immutable slice identities")
+    if args.snapshot is None or args.c4_file is None or not args.selection_slice_id or not args.confirmation_slice_id:
+        raise ValueError("campaign requires snapshot, local C4 data, and both immutable slice identities")
+    args.c4_file = args.c4_file.resolve()
+    if not args.c4_file.is_file():
+        raise ValueError("campaign C4 data file is missing")
     paths = _campaign_paths(args.output_root)
     if args.dry_run:
         print(
@@ -486,6 +488,8 @@ def _run(args: argparse.Namespace) -> int:
         args.selection_slice_id,
         "--confirmation-slice-id",
         args.confirmation_slice_id,
+        "--c4-file",
+        args.c4_file,
         *_reference_arguments(),
         "--output",
         paths.receipt,

@@ -41,6 +41,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--slice-registry", type=Path, required=True)
     parser.add_argument("--selection-slice-id", required=True)
     parser.add_argument("--confirmation-slice-id", required=True)
+    parser.add_argument("--c4-file", type=Path, required=True)
     parser.add_argument(
         "--retained-reference",
         type=_retained_reference_argument,
@@ -231,6 +232,9 @@ def run(args: argparse.Namespace) -> int:
     launcher = args.launcher.resolve()
     validation_path = args.strict_validation.resolve()
     registry_path = args.slice_registry.resolve()
+    c4_file = args.c4_file.resolve()
+    if not c4_file.is_file():
+        raise ValueError("Experiment 048 C4 data file is missing")
     manifest_path = run_output / "manifest.json"
     manifest = from_dict(
         RunManifest,
@@ -324,6 +328,7 @@ def run(args: argparse.Namespace) -> int:
             "manifest": manifest_path,
             "strict_validation": validation_path,
             "slice_registry": registry_path,
+            "c4_data": c4_file,
             "selector": repository_root / "tools" / "select_c4_capability_correction_checkpoint.py",
             "c4_evaluator": repository_root / "tools" / "probe_non_wikitext_kd_quality.py",
             "temperature_fitter": repository_root / "tools" / "fit_non_wikitext_temperature.py",
@@ -367,6 +372,15 @@ def run(args: argparse.Namespace) -> int:
             "registry_audit": registry_audit,
             "registry_snapshot": registry_payload,
             "registry_snapshot_hash": semantic_hash(registry_payload),
+        },
+        "c4_protocol": {
+            "dataset": "allenai/c4",
+            "split": "validation",
+            "data_file": str(c4_file),
+            "data_file_sha256": _sha256(c4_file),
+            "documents": 1_100,
+            "samples_per_slice": 48,
+            "sequence_length": 512,
         },
         "bound_files": bound_files,
     }

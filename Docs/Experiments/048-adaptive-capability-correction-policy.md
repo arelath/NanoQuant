@@ -387,3 +387,15 @@ the orchestrator materializes and fully benchmarks the same-run primary
 fallback. Neither path changes a coefficient, tolerance, checkpoint rule, or
 slice. The orchestrator remains unlaunched: the two fresh token hashes and
 reservations are still deliberately absent.
+
+The local C4 Arrow file is now a required campaign input rather than an
+unbound loader default. Its absolute path and SHA-256 are frozen in the
+campaign receipt and the same path is propagated to reservation, selection,
+temperature fitting, and confirmation. `tools/reserve_experiment048_c4_slices.py`
+tokenizes both proposed ranges through the evaluator's exact tokenizer/window
+function, writes an immutable pre-mutation intent containing the original
+registry snapshot and both token hashes, and then appends both reservations
+under the same exclusive ledger lock used for retirement. It is resumable
+across an interruption and rejects overlap, identity reuse, or any registry
+change outside that intent. The implementation passes the full repository
+gate; it has not yet been invoked on the fresh ranges.
