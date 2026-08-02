@@ -85,10 +85,26 @@ shows why a finite end-to-end canary is mandatory after a small functional probe
 
 The retry uses the already-screened `3e-5` arm. It improved the original 64/64
 held-out block loss from 0.450137 to 0.394186, while limiting the per-step rate to
-30% of the failed setting. It is a production candidate, not yet a final result.
+30% of the failed setting.
+
+The production-horizon retry passed the boundary that rejected `1e-4`:
+
+| Metric | Experiment 024 control | Experiment 054 `3e-5` control |
+|---|---:|---:|
+| Block-0 gate left-sign changes | 14,421 (0.217%) | 54,749 (0.825%) |
+| Block-0 gate factorized loss | 0.501360 | 0.307358 |
+| Block-0 final normalized loss | 0.008605 | 0.006247 |
+| Block-1 entry | finite | finite |
+
+The 54,749 production sign changes closely reproduce the roughly 53k excursion
+selected by the 64-row probe instead of the failed run's 153k excursion. Block 0
+improves its normalized loss by 27.4%, commits all MLP, shared-QKV, and O owners,
+and propagates finite activations into block 1. This promotes `3e-5` past the
+multi-block canary; complete-model quality remains the final gate.
 
 Failed-run evidence:
-`evidence/054/054-d2-uniform-control-gemma-3-1b-it`, inactive resident identity
+`evidence/054/054-d2-uniform-control-gemma-3-1b-it--archive-20154357dd00`,
+inactive resident identity
 `sha256:20154357dd0019eac6ec20c5c6cf67a9eeb26b3d434b51beed2faea2497b3b40`.
 
 ## Complete-run protocol
