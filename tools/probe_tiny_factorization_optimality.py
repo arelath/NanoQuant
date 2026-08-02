@@ -76,17 +76,26 @@ def _sign_from_bits(values: torch.Tensor, bit_count: int) -> torch.Tensor:
     return (((values[:, None] >> shifts) & 1).float() * 2.0) - 1.0
 
 
-def gauge_reduced_sign_pair_count(size: int) -> int:
-    if size <= 0 or size > 5:
-        raise ValueError("gauge-reduced counting supports sizes one through five")
-    return 1 << ((size - 1) * (2 * size - 1))
+def gauge_reduced_sign_pair_count(
+    rows: int,
+    columns: int | None = None,
+    rank: int | None = None,
+) -> int:
+    columns = rows if columns is None else columns
+    rank = min(rows, columns) if rank is None else rank
+    exponent = (rank - 1) * (rows + columns - 1)
+    if rows <= 0 or columns <= 0 or rank <= 0 or rank > min(rows, columns) or exponent > 62:
+        raise ValueError("gauge-reduced sign geometry exceeds the int64 enumerator")
+    return 1 << exponent
 
 
 def gauge_reduced_sign_pair_range(
-    size: int,
+    rows: int,
     start: int,
     end: int,
     *,
+    columns: int | None = None,
+    rank: int | None = None,
     device: torch.device | str = "cpu",
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Materialize a contiguous range of gauge-distinct sign pairs.
@@ -96,32 +105,46 @@ def gauge_reduced_sign_pair_range(
     matrix despite those gauge choices.
     """
 
-    total = gauge_reduced_sign_pair_count(size)
+    columns = rows if columns is None else columns
+    rank = min(rows, columns) if rank is None else rank
+    total = gauge_reduced_sign_pair_count(rows, columns, rank)
     if not 0 <= start <= end <= total:
         raise ValueError("gauge-reduced sign range is invalid")
-    left_bits = (size - 1) ** 2
-    right_bits = size * (size - 1)
+    left_bits = (rows - 1) * (rank - 1)
+    right_bits = columns * (rank - 1)
     right_count = 1 << right_bits
     combinations = end - start
     indices = torch.arange(start, end, dtype=torch.int64, device=device)
     left_indices = torch.div(indices, right_count, rounding_mode="floor")
     right_indices = indices.remainder(right_count)
-    left = torch.ones((combinations, size, size), dtype=torch.float32, device=device)
-    right = torch.ones_like(left)
+    left = torch.ones((combinations, rows, rank), dtype=torch.float32, device=device)
+    right = torch.ones((combinations, rank, columns), dtype=torch.float32, device=device)
     if left_bits:
-        left[:, 1:, 1:] = _sign_from_bits(left_indices, left_bits).reshape(combinations, size - 1, size - 1)
+        left[:, 1:, 1:] = _sign_from_bits(left_indices, left_bits).reshape(
+            combinations, rows - 1, rank - 1
+        )
     if right_bits:
-        right[:, 1:, :] = _sign_from_bits(right_indices, right_bits).reshape(combinations, size - 1, size)
+        right[:, 1:, :] = _sign_from_bits(right_indices, right_bits).reshape(
+            combinations, rank - 1, columns
+        )
     return left, right
 
 
-def gauge_reduced_sign_pairs(size: int, *, device: torch.device | str = "cpu") -> tuple[torch.Tensor, torch.Tensor]:
+def gauge_reduced_sign_pairs(
+    rows: int,
+    *,
+    columns: int | None = None,
+    rank: int | None = None,
+    device: torch.device | str = "cpu",
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Enumerate every sign pair after fixing exact scale/sign gauges."""
 
     return gauge_reduced_sign_pair_range(
-        size,
+        rows,
         0,
-        gauge_reduced_sign_pair_count(size),
+        gauge_reduced_sign_pair_count(rows, columns, rank),
+        columns=columns,
+        rank=rank,
         device=device,
     )
 
@@ -164,9 +187,15 @@ def fit_scale_population(
 ) -> PopulationFit:
     """Run batched multistart ALS for fixed binary sign candidates."""
 
-    if left.ndim != 3 or right.ndim != 3 or left.shape != right.shape:
-        raise ValueError("population factors must be equal-sized batches of square matrices")
-    if starts <= 0 or passes < 0 or left.shape[1:] != target.shape:
+    if left.ndim != 3 or right.ndim != 3 or left.shape[0] != right.shape[0]:
+        raise ValueError("population factors must have equal batch dimensions")
+    if (
+        starts <= 0
+        or passes < 0
+        or left.shape[1] != target.shape[0]
+        or right.shape[2] != target.shape[1]
+        or left.shape[2] != right.shape[1]
+    ):
         raise ValueError("population scale-fit geometry or settings are invalid")
     device = left.device
     dtype = torch.float64 if device.type == "cpu" else torch.float32
@@ -175,31 +204,32 @@ def fit_scale_population(
     output_weight = output_importance.to(device=device, dtype=dtype).reshape(-1).clamp_min(epsilon)
     left = torch.sign(left.to(dtype=dtype)).repeat_interleave(starts, dim=0)
     right = torch.sign(right.to(dtype=dtype)).repeat_interleave(starts, dim=0)
-    count, size, _ = left.shape
+    count, rows, rank = left.shape
+    columns = right.shape[2]
     generator = torch.Generator(device=device).manual_seed(seed)
-    pre = torch.ones((count, size), dtype=dtype, device=device)
-    post = torch.ones_like(pre)
+    pre = torch.ones((count, columns), dtype=dtype, device=device)
+    post = torch.ones((count, rows), dtype=dtype, device=device)
     if starts > 1:
         start_index = torch.arange(count, device=device).remainder(starts)
         randomized = start_index != 0
         random_count = int(randomized.sum())
         pre[randomized] = (
             torch.where(
-                torch.rand((random_count, size), generator=generator, device=device) >= 0.5,
+                torch.rand((random_count, columns), generator=generator, device=device) >= 0.5,
                 1.0,
                 -1.0,
             )
-            * torch.exp(0.5 * torch.randn((random_count, size), generator=generator, device=device))
+            * torch.exp(0.5 * torch.randn((random_count, columns), generator=generator, device=device))
         ).to(dtype)
         post[randomized] = (
             torch.where(
-                torch.rand((random_count, size), generator=generator, device=device) >= 0.5,
+                torch.rand((random_count, rows), generator=generator, device=device) >= 0.5,
                 1.0,
                 -1.0,
             )
-            * torch.exp(0.5 * torch.randn((random_count, size), generator=generator, device=device))
+            * torch.exp(0.5 * torch.randn((random_count, rows), generator=generator, device=device))
         ).to(dtype)
-    mid = torch.ones_like(pre)
+    mid = torch.ones((count, rank), dtype=dtype, device=device)
     best_pre = pre.clone()
     best_mid = mid.clone()
     best_post = post.clone()
@@ -296,14 +326,23 @@ def exhaustive_sign_oracle(
     seed: int,
     device: str,
     batch_size: int,
+    rank: int | None = None,
 ) -> tuple[PopulationFit, int]:
     if batch_size <= 0:
         raise ValueError("exhaustive sign batch size must be positive")
-    sign_configurations = gauge_reduced_sign_pair_count(target.shape[0])
+    rank = min(target.shape) if rank is None else rank
+    sign_configurations = gauge_reduced_sign_pair_count(target.shape[0], target.shape[1], rank)
     best: PopulationFit | None = None
     for start in range(0, sign_configurations, batch_size):
         end = min(start + batch_size, sign_configurations)
-        left, right = gauge_reduced_sign_pair_range(target.shape[0], start, end, device=device)
+        left, right = gauge_reduced_sign_pair_range(
+            target.shape[0],
+            start,
+            end,
+            columns=target.shape[1],
+            rank=rank,
+            device=device,
+        )
         fitted = fit_scale_population(
             target,
             left,
@@ -709,7 +748,7 @@ def _score_case(
 def _synthetic_cases(
     size: int, count: int, seed: int
 ) -> list[tuple[str, torch.Tensor, torch.Tensor, torch.Tensor, float | None]]:
-    result = []
+    result: list[tuple[str, torch.Tensor, torch.Tensor, torch.Tensor, float | None]] = []
     for index in range(count):
         generator = torch.Generator().manual_seed(_logical_seed(seed, f"synthetic|{size}|{index}"))
         gaussian = torch.randn((size, size), generator=generator)

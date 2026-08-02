@@ -211,6 +211,34 @@ def test_admm_rejects_invalid_schedule_and_dimensions() -> None:
     assert all(0 <= function(0.3) <= 1 for function in SCHEDULES.values())
 
 
+def test_exact_svid_projection_is_available_without_changing_the_default() -> None:
+    weight = torch.tensor([[0.3, -0.8, 1.1], [0.9, 0.2, -0.4], [-0.7, 0.5, 0.6]])
+    arguments = (weight, torch.ones(3), torch.ones(3), 3)
+    default = factorize_admm(
+        *arguments,
+        torch.Generator().manual_seed(31),
+        outer_iterations=4,
+        inner_iterations=3,
+    )
+    explicit_power = factorize_admm(
+        *arguments,
+        torch.Generator().manual_seed(31),
+        outer_iterations=4,
+        inner_iterations=3,
+        projection_method="power",
+    )
+    exact = factorize_admm(
+        *arguments,
+        torch.Generator().manual_seed(31),
+        outer_iterations=4,
+        inner_iterations=3,
+        projection_method="exact_svd",
+    )
+
+    torch.testing.assert_close(default.reconstruction, explicit_power.reconstruction, rtol=0, atol=0)
+    assert torch.isfinite(exact.reconstruction).all()
+
+
 def test_admm_preserves_legacy_factor_dtype_and_signed_svid_scales() -> None:
     weight = torch.tensor(
         [[1.0, -2.0, 0.5], [-1.0, 0.25, 2.0], [0.5, 1.0, -1.0]],

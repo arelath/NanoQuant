@@ -72,6 +72,7 @@ class AdmmParameters:
     early_stop_tolerance: float | None = None
     epsilon: float = 1e-12
     transpose_wide: bool = False
+    projection_method: str = "power"
 
     def __post_init__(self) -> None:
         if self.outer_iterations < 0 or self.inner_iterations <= 0:
@@ -82,6 +83,8 @@ class AdmmParameters:
             raise ValueError("ADMM regularization and epsilon are invalid")
         if self.penalty_schedule not in SCHEDULES:
             raise ValueError(f"unknown penalty schedule: {self.penalty_schedule}")
+        if self.projection_method not in {"power", "exact_svd"}:
+            raise ValueError(f"unknown SVID projection method: {self.projection_method}")
 
 
 def _sign(value: torch.Tensor) -> torch.Tensor:
@@ -107,17 +110,35 @@ def _power_iteration(
 
 
 def _rank_one_sign_projection(
-    value: torch.Tensor, iterations: int, generator: torch.Generator, epsilon: float
+    value: torch.Tensor,
+    iterations: int,
+    generator: torch.Generator,
+    epsilon: float,
+    method: str,
 ) -> torch.Tensor:
-    left, right, signs = _svid_components(value, iterations, generator, epsilon)
+    left, right, signs = _svid_components(value, iterations, generator, epsilon, method)
     return torch.outer(left, right) * signs
 
 
 def _svid_components(
-    value: torch.Tensor, iterations: int, generator: torch.Generator, epsilon: float
+    value: torch.Tensor,
+    iterations: int,
+    generator: torch.Generator,
+    epsilon: float,
+    method: str = "power",
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     signs = _sign(value)
-    left, singular, right = _power_iteration(value.abs(), iterations, generator, epsilon)
+    if method == "power":
+        left, singular, right = _power_iteration(value.abs(), iterations, generator, epsilon)
+    elif method == "exact_svd":
+        left_vectors, singular_values, right_vectors = torch.linalg.svd(
+            value.abs().float(), full_matrices=False
+        )
+        left = left_vectors[:, 0].to(value.dtype)
+        singular = singular_values[0].to(value.dtype).clamp_min(epsilon)
+        right = right_vectors[0].to(value.dtype)
+    else:
+        raise ValueError(f"unknown SVID projection method: {method}")
     return left * singular, right, signs
 
 
@@ -162,6 +183,7 @@ def factorize_admm(
     epsilon: float = 1e-12,
     recorder: PhaseRecorder = NULL_RECORDER,
     transpose_wide: bool = False,
+    projection_method: str = "power",
 ) -> ADMMResult:
     if weight.ndim != 2 or rank <= 0 or rank > min(weight.shape):
         raise ValueError("weight must be a matrix and rank within its dimensions")
@@ -173,6 +195,8 @@ def factorize_admm(
         schedule = SCHEDULES[penalty_schedule]
     except KeyError as exc:
         raise ValueError(f"unknown penalty schedule: {penalty_schedule}") from exc
+    if projection_method not in {"power", "exact_svd"}:
+        raise ValueError(f"unknown SVID projection method: {projection_method}")
     # Legacy NanoQuant solves wide matrices in transposed orientation. Besides
     # reducing the larger solve dimension, this fixes which random values seed
     # the left and right factors; preserving it is required for factor parity.
@@ -192,6 +216,7 @@ def factorize_admm(
             epsilon=epsilon,
             recorder=recorder,
             transpose_wide=False,
+            projection_method=projection_method,
         )
         return ADMMResult(
             transposed.right_latent.mT.contiguous(),
@@ -217,8 +242,12 @@ def factorize_admm(
         left = torch.randn((weight.shape[0], rank), dtype=dtype, device=weight.device, generator=generator)
         right = torch.randn((rank, weight.shape[1]), dtype=dtype, device=weight.device, generator=generator)
     with recorder.phase("initial_projection"):
-        left_projected = _rank_one_sign_projection(left, inner_iterations, generator, epsilon)
-        right_projected = _rank_one_sign_projection(right, inner_iterations, generator, epsilon)
+        left_projected = _rank_one_sign_projection(
+            left, inner_iterations, generator, epsilon, projection_method
+        )
+        right_projected = _rank_one_sign_projection(
+            right, inner_iterations, generator, epsilon, projection_method
+        )
         left_dual = left - left_projected
         right_dual = right - right_projected
     trace: list[ADMMTracePoint] = []
@@ -253,8 +282,12 @@ def factorize_admm(
             )
             previous_left = left_projected
             previous_right = right_projected
-            left_projected = _rank_one_sign_projection(left + left_dual, inner_iterations, generator, epsilon)
-            right_projected = _rank_one_sign_projection(right + right_dual, inner_iterations, generator, epsilon)
+            left_projected = _rank_one_sign_projection(
+                left + left_dual, inner_iterations, generator, epsilon, projection_method
+            )
+            right_projected = _rank_one_sign_projection(
+                right + right_dual, inner_iterations, generator, epsilon, projection_method
+            )
             left_dual.add_(left - left_projected)
             right_dual.add_(right - right_projected)
             completed = iteration + 1
@@ -297,10 +330,10 @@ def factorize_admm(
                 previous_right = right_projected
                 with recorder.phase("projection"):
                     left_projected = _rank_one_sign_projection(
-                        left + left_dual, inner_iterations, generator, epsilon
+                        left + left_dual, inner_iterations, generator, epsilon, projection_method
                     )
                     right_projected = _rank_one_sign_projection(
-                        right + right_dual, inner_iterations, generator, epsilon
+                        right + right_dual, inner_iterations, generator, epsilon, projection_method
                     )
                 with recorder.phase("dual_update"):
                     left_dual.add_(left - left_projected)
@@ -338,10 +371,10 @@ def factorize_admm(
         left_export = left_export * scale_factor
     with recorder.phase("export_svid"):
         right_u, scale_pre, right_binary = _svid_components(
-            right_export.float(), inner_iterations, generator, epsilon
+            right_export.float(), inner_iterations, generator, epsilon, projection_method
         )
         left_u, scale_post, left_sign = _svid_components(
-            left_export.mT.float(), inner_iterations, generator, epsilon
+            left_export.mT.float(), inner_iterations, generator, epsilon, projection_method
         )
         left_binary = left_sign.mT.to(dtype).clone(memory_format=torch.contiguous_format)
         right_binary = right_binary.to(dtype).contiguous()
@@ -396,4 +429,5 @@ def factorize_admm_with_parameters(
         epsilon=parameters.epsilon,
         recorder=recorder,
         transpose_wide=parameters.transpose_wide,
+        projection_method=parameters.projection_method,
     )

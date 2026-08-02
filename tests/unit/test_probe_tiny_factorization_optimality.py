@@ -34,6 +34,19 @@ def test_gauge_reduced_ranges_partition_full_enumeration() -> None:
     torch.testing.assert_close(torch.cat((first_right, second_right)), full_right)
 
 
+def test_low_rank_gauge_reduction_scales_with_rank_instead_of_matrix_size() -> None:
+    left, right = gauge_reduced_sign_pair_range(5, 0, 13, columns=5, rank=3)
+
+    assert gauge_reduced_sign_pair_count(5, 5, 3) == 262_144
+    assert gauge_reduced_sign_pair_count(6, 6, 3) == 4_194_304
+    assert gauge_reduced_sign_pair_count(10, 10, 2) == 524_288
+    assert left.shape == (13, 5, 3)
+    assert right.shape == (13, 3, 5)
+    assert torch.equal(left[:, 0, :], torch.ones(13, 3))
+    assert torch.equal(left[:, :, 0], torch.ones(13, 5))
+    assert torch.equal(right[:, 0, :], torch.ones(13, 5))
+
+
 def test_exhaustive_oracle_batching_preserves_complete_one_start_result() -> None:
     target = torch.tensor([[0.2, -0.7, 1.1], [0.9, 0.3, -0.4], [-0.5, 0.8, 0.6]])
     arguments = (target, torch.ones(3), torch.ones(3))
@@ -72,6 +85,27 @@ def test_population_scale_fit_recovers_representable_target_when_given_true_sign
         right[None],
         torch.ones(3),
         torch.ones(3),
+        starts=8,
+        passes=64,
+        seed=4,
+    )
+
+    assert float(fitted.errors.min()) < 1e-10
+
+
+def test_population_scale_fit_supports_rectangular_low_rank_factors() -> None:
+    left = torch.tensor([[1.0, -1.0], [-1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]])
+    right = torch.tensor([[1.0, 1.0, -1.0], [-1.0, 1.0, -1.0]])
+    target = (left * torch.tensor([0.8, 1.3, 0.9, 1.1])[:, None]) @ (
+        right * torch.tensor([1.2, 0.7])[:, None] * torch.tensor([0.7, 1.2, 0.9])[None, :]
+    )
+
+    fitted = fit_scale_population(
+        target,
+        left[None],
+        right[None],
+        torch.ones(3),
+        torch.ones(4),
         starts=8,
         passes=64,
         seed=4,
