@@ -2,12 +2,14 @@
 
 ## Status
 
-Paused at immutable slice declaration. Allocation reproducibility, exact
+Paused after immutable slice reservation. Allocation reproducibility, exact
 initializer-regime binding, calibration/capability separation, selected-
 checkpoint reload equality, and the campaign-receipt implementation now pass
-their preflight gates. No fresh slice is reserved and no model evaluation is
-authorized. The numbered launcher deliberately fails if invoked directly
-until the adaptive orchestrator and the exact slice reservations are complete.
+their preflight gates. Two fresh slices are reserved, but neither has been
+opened and no model evaluation has run. The numbered launcher deliberately
+fails if invoked directly; the adaptive orchestrator is the only authorized
+entry point because it enforces selection, fallback, confirmation, and final
+quality ordering.
 
 ## Motivation
 
@@ -385,8 +387,22 @@ primary fallback without opening confirmation. A selected correction that
 fails untouched C4 confirmation is retained as failed evidence, after which
 the orchestrator materializes and fully benchmarks the same-run primary
 fallback. Neither path changes a coefficient, tolerance, checkpoint rule, or
-slice. The orchestrator remains unlaunched: the two fresh token hashes and
-reservations are still deliberately absent.
+slice. The orchestrator remains unlaunched. Its two fresh C4 ranges are now
+reserved but have not been opened or evaluated:
+
+- selection: offset 344, 48x512, token hash
+  `sha256:2ca230bf679af1c2147744c1141a3eaf04f61616666c46c09b3ec687c55a70fd`;
+- confirmation: offset 392, 48x512, token hash
+  `sha256:6c62bd172303e33b6a6a0847dbaaf587df25852fa9f0bc56269bfd7d3f5e6f1d`.
+
+The reservation intent is
+`evidence/048/experiment048-c4-reservation-intent.json`, protocol hash
+`sha256:ca19d3e885ad50753f58e1a1f77da867fda13af68b64a92d8bd314e084dcaedc`.
+It binds C4 Arrow SHA-256
+`b815c9d0f42d47d67710ccd6c56efe0876633ce265acda03b5fd96424b0c2556`,
+dataset fingerprint `e2b0d3b96d5472e5`, BOS token 2, and the complete
+pre-mutation registry snapshot. The ledger now validates with 14 retired and
+two reserved slices.
 
 The local C4 Arrow file is now a required campaign input rather than an
 unbound loader default. Its absolute path and SHA-256 are frozen in the
@@ -398,4 +414,5 @@ registry snapshot and both token hashes, and then appends both reservations
 under the same exclusive ledger lock used for retirement. It is resumable
 across an interruption and rejects overlap, identity reuse, or any registry
 change outside that intent. The implementation passes the full repository
-gate; it has not yet been invoked on the fresh ranges.
+gate. It has now been invoked exactly once to create the reservations above;
+no model was loaded and neither reservation has transitioned to `retired`.

@@ -237,3 +237,4 @@ __marimo__/
 MegaContext.txt
 MegaContext-files.txt
 /.tmp*
+*.lifecycle.lock
