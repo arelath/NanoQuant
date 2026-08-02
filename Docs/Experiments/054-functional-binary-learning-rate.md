@@ -111,12 +111,25 @@ continued tuning normally. The failure is therefore process-local carry-over,
 not corruption of the durable boundary or evidence that `3e-5` itself is
 non-finite at block 2.
 
-Experiment 054 now executes in clean, one-block process slices. Every slice
-rehydrates the validated frozen prefix and canonical activation generation,
-commits one additional block, and exits intentionally. The campaign retains
-numbered stdout/stderr logs and resumes at the next unused slice after an
-interruption. This contains the transient in-memory state while preserving the
-same numerical recipe, rank budget, and committed model state.
+As a diagnostic containment, Experiment 054 executed in clean, one-block
+process slices. Every slice rehydrated the validated frozen prefix and canonical
+activation generation, committed one additional block, and exited
+intentionally. This isolated transient in-memory state while preserving the same
+numerical recipe, rank budget, and committed model state.
+
+That containment isolated the actual rollback bug: best-state restoration
+copied every selected parameter back exactly, but the failed AdamW step left
+gradients, moments, denominators, and BF16 Kahan compensation attached to the
+process. Those allocations could contain NaNs and poison the next block after
+CUDA reused the scratch storage. Rollback now zeroes optimizer scratch before
+release and detaches all tuning gradients.
+
+A same-process two-block canary then proved the fix. Block 13 produced the
+expected non-finite post-refit epoch, restored its byte-identical entry state,
+and committed. Without a process reload, block 14 entered with finite target
+power 174,782.797, completed normally, rolled back its own non-finite refit, and
+committed. Clean-process slicing is no longer enabled; the remainder of the run
+is the repeated-rollback production test.
 
 Failed-run evidence:
 `evidence/054/054-d2-uniform-control-gemma-3-1b-it--archive-20154357dd00`,

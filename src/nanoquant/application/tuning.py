@@ -328,6 +328,29 @@ def _require_finite_selected_parameters(
         )
 
 
+@torch.no_grad()
+def _sanitize_nonfinite_optimizer_step(
+    optimizer: ParityAdamW,
+    selected: list[tuple[str, nn.Parameter]],
+) -> None:
+    """Remove non-finite failed-step state before CUDA storage is recycled.
+
+    Restoring the best parameter values is not a complete rollback when the
+    optimizer has already written NaNs into gradients, moments, denominators,
+    or Kahan compensation.  Zero those allocations before detaching gradients
+    so a later block cannot observe poisoned process-local scratch storage.
+    """
+
+    for _name, parameter in selected:
+        gradient = parameter.grad
+        if gradient is not None:
+            gradient.zero_()
+            parameter.grad = None
+        for value in optimizer.state.get(parameter, {}).values():
+            if isinstance(value, torch.Tensor):
+                value.zero_()
+
+
 def tune(
     model: nn.Module,
     request: TuningRequest,
@@ -589,6 +612,7 @@ def tune(
                     # The best state always includes the finite entry state. Stop
                     # immediately rather than spending later epochs from parameters
                     # that an overflowing optimizer step may already have poisoned.
+                    _sanitize_nonfinite_optimizer_step(optimizer, selected)
                     stopped_early = True
                     break
                 previous_epoch_loss = epoch_losses[-2] if len(epoch_losses) > 2 else None
@@ -673,6 +697,7 @@ def tune(
         if stager is not None:
             stager.close()
         for parameter in model.parameters():
+            parameter.grad = None
             parameter.requires_grad_(original_requires_grad[id(parameter)])
     elements = request.targets.numel()
     del optimizer, scheduler, best_state

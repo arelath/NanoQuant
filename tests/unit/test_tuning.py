@@ -7,6 +7,7 @@ from torch import nn
 
 import nanoquant.application.tuning as tuning_module
 from nanoquant.application.layers import TrainableFactorizedLinear, TrainableSharedInputFactorGroup
+from nanoquant.application.parity_adamw import ParityAdamW
 from nanoquant.application.tuning import (
     FactorizedTuningLearningRates,
     TuningRequest,
@@ -513,6 +514,14 @@ def test_post_block_refit_updates_scales_without_latent_changes() -> None:
 def test_post_block_refit_rolls_back_immediately_after_nonfinite_epoch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    optimizers: list[ParityAdamW] = []
+
+    class CapturingParityAdamW(ParityAdamW):
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            super().__init__(*args, **kwargs)
+            optimizers.append(self)
+
+    monkeypatch.setattr(tuning_module, "ParityAdamW", CapturingParityAdamW)
     model = Hybrid()
     inputs = torch.randn(8, 3, generator=torch.Generator().manual_seed(401))
     targets = torch.randn(8, 2, generator=torch.Generator().manual_seed(402))
@@ -542,6 +551,12 @@ def test_post_block_refit_rolls_back_immediately_after_nonfinite_epoch(
     assert observed[1][0] == 1 and torch.isnan(torch.tensor(observed[1][1]))
     for name, value in model.named_parameters():
         assert torch.equal(value, before[name])
+        assert value.grad is None
+    assert len(optimizers) == 1
+    for state in optimizers[0].state.values():
+        for value in state.values():
+            if isinstance(value, torch.Tensor):
+                assert torch.count_nonzero(value) == 0
 
 
 def test_tuning_rejects_nonfinite_initial_loss(monkeypatch: pytest.MonkeyPatch) -> None:
