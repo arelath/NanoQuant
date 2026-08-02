@@ -2,9 +2,10 @@
 
 ## Status
 
-Primary C4 confirmation passed. Artifact materialization and the conditional
-deployment benchmarks remain pending. The exact checkpoint-arm evaluator was
-committed in `29bc4b5` and did not change during the gate.
+Completed. All four gates passed for the fixed Experiment 044 trajectory. The
+epoch-3 correction is a validated retained candidate, but it is not a
+transferable production recipe. The exact checkpoint-arm evaluator was
+committed in `29bc4b5` and did not change during the primary gate.
 
 ## Question
 
@@ -101,3 +102,67 @@ before this gate. It was stopped before producing an output artifact and was
 not used to select, alter, or judge the candidate. The C4 worker then ran alone
 under the CUDA lease. The reserved slice is permanently retired with evidence
 at `evidence/047/experiment047-c4-validation296-48x512.json`.
+
+## Materialization result
+
+Epoch 3 materialized as global-tuning artifact
+`sha256-9eae64909f2533e35655ecbcfa341eb68415684f36b0ba7673ba8d109c52c0e5`
+under `evidence/047/experiment047-correction3-derived-run`. A hash-verifying
+reload found all 677 selected tensors, zero missing tensors, zero mismatches,
+and maximum absolute difference 0. The protocol hash, token hash, and 96-step
+receipt match the durable correction checkpoint.
+
+Strict resident validation audited 713 artifacts and all 26 blocks. Rank sum
+remains 111,744 and effective BPW remains `1.024417665448784`. The correction
+adds no tensors, represented factor bytes, or inference operations.
+
+## Deployment benchmarks
+
+The canonical 64x128 WikiText result is PPL `166.451651`, passing both binding
+conditions:
+
+- Experiment 044: `180.364133` (candidate is 7.71% lower);
+- Experiment 042: `171.870897` (candidate is 3.15% lower and comfortably
+  inside the 2% non-inferiority ceiling of `175.308315`).
+
+The non-binding task-200 mean is `0.4600`, between Experiment 044's `0.4592`
+and Experiment 042's `0.4617`.
+
+At 1,000 examples per task, the candidate scores are:
+
+| PIQA | ARC-E | ARC-C | HellaSwag | WinoGrande | BoolQ | Mean |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0.588 | 0.378 | 0.216 | 0.400 | 0.503 | 0.624 | **0.4515** |
+
+Paired task-stratified comparisons establish no regression:
+
+- versus Experiment 044: delta `+0.002167`, 95% interval
+  `[-0.002667, +0.007000]`;
+- versus Experiment 042: delta `-0.007000`, 95% interval
+  `[-0.017667, +0.003667]`.
+
+The benchmark loader applied the durable checkpoint directly. The exact
+677-tensor reload audit above proves that it is behaviorally the same state as
+the derived global-tuning artifact; no fold or other transformation was
+applied.
+
+Evidence:
+
+- `evidence/047/experiment047-correction3-strict-validation.json`;
+- `evidence/047/experiment047-correction3-canonical-quality.json`;
+- `evidence/047/experiment047-correction3-tasklimit1000-quality.json`;
+- `evidence/047/experiment047-correction3-vs-experiment044-tasklimit1000-paired.json`;
+- `evidence/047/experiment047-correction3-vs-experiment042-tasklimit1000-paired.json`.
+
+## Decision
+
+The fixed epoch-3 checkpoint repairs the retained Experiment 044 candidate
+enough to beat both Experiments 044 and 042 on factorized WikiText PPL without
+an established task regression. This is evidence that a capability-oriented
+post-KD correction can complement tail-aware primary KD.
+
+It does not justify transplanting 96 steps, weight 2.0, or ratio 0.8 into a
+fresh run. The next work is to define an adaptive stopping policy whose monitor
+and uncertainty are committed before training, then test that policy in one
+fresh complete compression campaign with normal packed reload, GGUF export,
+C4, WikiText, and task gates.
