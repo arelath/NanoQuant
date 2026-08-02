@@ -3,7 +3,12 @@ from __future__ import annotations
 import pytest
 import torch
 
-from nanoquant.domain.binary_factor_search import refine_binary_factors_separable
+from nanoquant.domain.binary_factor_search import (
+    _one_bit_pass,
+    _scores,
+    _variable_depth_pass,
+    refine_binary_factors_separable,
+)
 from nanoquant.domain.scale_fit import reconstruct
 
 
@@ -132,6 +137,93 @@ def test_component_replacement_is_monotonic_and_bounded() -> None:
 
     assert result.after_error <= result.before_error
     assert result.component_updates <= 4 * 2 * 2
+
+
+def test_shared_codebook_transfers_a_better_pattern_between_rows() -> None:
+    right = torch.tensor([[1.0, 1.0], [1.0, -1.0]])
+    true_left = torch.tensor([[1.0, 1.0], [1.0, 1.0], [1.0, -1.0]])
+    initial_left = torch.tensor([[1.0, 1.0], [1.0, -1.0], [1.0, -1.0]])
+    target = true_left @ right
+
+    result = refine_binary_factors_separable(
+        target,
+        initial_left,
+        right,
+        torch.ones(2),
+        torch.ones(2),
+        torch.ones(3),
+        torch.ones(2),
+        torch.ones(3),
+        outer_passes=2,
+        scale_passes=4,
+        continuous_candidates=False,
+        one_bit_passes=0,
+        codebook_passes=2,
+        codebook_size=8,
+        pair_passes=0,
+        block_bits=0,
+        component_passes=0,
+    )
+
+    assert result.codebook_updates > 0
+    assert result.after_error < result.before_error * 0.01
+
+
+def test_variable_depth_chain_crosses_a_two_bit_barrier() -> None:
+    generator = torch.Generator().manual_seed(0)
+    design = torch.randn((6, 6), generator=generator)
+    gram = design @ design.mT
+    cross = torch.randn((1, 6), generator=generator) * 2
+    vectors = torch.randint(0, 2, (1, 6), generator=generator).float().mul_(2).sub_(1)
+    scores, alpha, beta, _ = _scores(vectors, cross, gram, 1e-8)
+    scales = alpha / beta
+    for _ in range(20):
+        vectors, scales, scores, updates = _one_bit_pass(
+            vectors, cross, gram, scales, scores, 1e-8, 1e-10
+        )
+        if updates == 0:
+            break
+    local_score = float(scores[0])
+    one_bit_local = vectors.clone()
+
+    refined, _scales, refined_scores, updates = _variable_depth_pass(
+        vectors,
+        cross,
+        gram,
+        scales,
+        scores,
+        6,
+        1e-8,
+        1e-10,
+    )
+
+    assert updates == 1
+    assert float(refined_scores[0]) > local_score
+    assert int((refined != one_bit_local).sum()) == 2
+
+
+def test_one_bit_pass_honors_the_highest_gain_update_cap() -> None:
+    vectors = torch.ones((2, 2))
+    cross = torch.tensor([[2.0, -1.0], [1.0, -0.2]])
+    gram = torch.eye(2)
+    scores, alpha, beta, _ = _scores(vectors, cross, gram, 1e-8)
+    scales = alpha / beta
+
+    refined, _scales, refined_scores, updates = _one_bit_pass(
+        vectors,
+        cross,
+        gram,
+        scales,
+        scores,
+        1e-8,
+        1e-10,
+        maximum_updates=1,
+    )
+
+    assert updates == 1
+    assert int((refined[0] != vectors[0]).sum()) == 1
+    assert torch.equal(refined[1], vectors[1])
+    assert float(refined_scores.sum()) > float(scores.sum())
 
 
 def test_joint_window_exhausts_the_gauge_reduced_three_by_three_signs() -> None:

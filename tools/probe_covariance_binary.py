@@ -1,14 +1,16 @@
-"""Probe covariance-aware refinement of the existing binary-factor format.
+"""Probe held-out refinements of the existing binary-factor format.
 
 The production format reconstructs a weight as
 
     diag(post) @ left_binary @ diag(mid) @ right_binary @ diag(pre)
 
 This analysis-only probe keeps that representation, rank, and factor bits
-unchanged.  It starts from the ordinary diagonal-objective ADMM result, then
-alternates exact dense-covariance scale solves with bounded sign-coordinate
-descent.  The retained format therefore needs no whitening matrix or runtime
-transform.
+unchanged.  Both modes start from the ordinary diagonal-objective ADMM result.
+The covariance mode alternates exact dense-covariance scale solves with bounded
+sign-coordinate descent.  The direct-binary mode runs selected final-product
+sign neighborhoods and evaluates them through the same held-out covariance,
+block-output, and language-model splice gates.  Neither mode needs a whitening
+matrix or runtime transform.
 
 The full pinned-model orchestration is intentionally added only after the
 small-matrix objective and sign-delta identities pass focused tests.
@@ -63,6 +65,7 @@ from probe_input_hadamard import (
 from safetensors import safe_open
 
 from nanoquant.config.codec import to_dict
+from nanoquant.domain.binary_factor_search import refine_binary_factors_separable
 from nanoquant.domain.factorization import AdmmParameters, factorize_admm_with_parameters
 from nanoquant.domain.metrics import dense_hessian_squared_error
 from nanoquant.domain.models import BitCost, BlockId, LayerId
@@ -83,6 +86,15 @@ from nanoquant.quality_evaluation import _wikitext_tokens
 
 MODEL_SOURCE = "google/gemma-3-1b-it"
 CANDIDATE_KEY = "covariance-refined"
+DIRECT_CANDIDATE_KEY = "direct-binary"
+GROUP_LABELS = frozenset({"qkv", "o", "gate", "up", "down"})
+
+
+def _parse_group_labels(value: str) -> tuple[str, ...]:
+    result = tuple(item.strip() for item in value.split(",") if item.strip())
+    if not result or len(result) != len(set(result)) or any(item not in GROUP_LABELS for item in result):
+        raise argparse.ArgumentTypeError("direct groups must be unique known group labels")
+    return result
 
 
 @dataclass(frozen=True, slots=True)
@@ -611,6 +623,15 @@ def _group_pair(
     left_flip_steps: int,
     right_flip_batches: int,
     right_flip_batch_size: int,
+    refinement_mode: str,
+    direct_refine: bool,
+    direct_outer_passes: int,
+    direct_scale_passes: int,
+    direct_one_bit_passes: int,
+    direct_one_bit_fraction: float,
+    direct_max_one_bit_vectors: int,
+    direct_codebook_passes: int,
+    direct_codebook_size: int,
 ) -> tuple[
     tuple[dict[str, Any], tuple[tuple[MemberSpec, torch.Tensor, float], ...]],
     tuple[dict[str, Any], tuple[tuple[MemberSpec, torch.Tensor, float], ...]],
@@ -703,9 +724,70 @@ def _group_pair(
         None if held_out_covariance is None else held_out_covariance.to(protocol.device),
         baseline_metadata,
     )
-    if regularized is None:
+    if refinement_mode == "direct-binary" and direct_refine:
+        if protocol.device.startswith("cuda"):
+            torch.cuda.reset_peak_memory_stats(protocol.device)
+            torch.cuda.synchronize(protocol.device)
+        candidate_started = time.perf_counter()
+        direct = refine_binary_factors_separable(
+            target,
+            factorized.left_binary,
+            factorized.right_binary,
+            fitted.scale_pre,
+            fitted.scale_mid,
+            fitted.scale_post,
+            diagonal,
+            output_importance,
+            outer_passes=direct_outer_passes,
+            scale_passes=direct_scale_passes,
+            continuous_candidates=False,
+            one_bit_passes=direct_one_bit_passes,
+            one_bit_fraction=direct_one_bit_fraction,
+            max_one_bit_vectors=direct_max_one_bit_vectors,
+            codebook_passes=direct_codebook_passes,
+            codebook_size=direct_codebook_size,
+            pair_passes=0,
+            block_bits=0,
+            component_passes=0,
+            joint_passes=0,
+        )
+        if protocol.device.startswith("cuda"):
+            torch.cuda.synchronize(protocol.device)
+        direct_metadata = {
+            "before_error": direct.before_error,
+            "after_error": direct.after_error,
+            "accepted_outer_passes": direct.accepted_outer_passes,
+            "one_bit_updates": direct.one_bit_updates,
+            "codebook_updates": direct.codebook_updates,
+            "wall_seconds": time.perf_counter() - candidate_started,
+            "peak_device_bytes": (
+                int(torch.cuda.max_memory_allocated(protocol.device))
+                if protocol.device.startswith("cuda")
+                else 0
+            ),
+        }
+        candidate = _base_result_payload(
+            handle,
+            group,
+            protocol,
+            profiles,
+            target,
+            direct.reconstruction,
+            output_importance,
+            diagonal,
+            None if fit_covariance is None else fit_covariance.to(protocol.device),
+            None if held_out_covariance is None else held_out_covariance.to(protocol.device),
+            direct_metadata,
+        )
+        del target, raw_input, output_importance, diagonal, factorized, fitted, direct
+        if protocol.device.startswith("cuda"):
+            torch.cuda.empty_cache()
+        return baseline, candidate
+
+    if refinement_mode == "direct-binary" or regularized is None:
         del target, raw_input, output_importance, diagonal, factorized, fitted
         return baseline, baseline
+    assert fit_covariance is not None
 
     if protocol.device.startswith("cuda"):
         torch.cuda.reset_peak_memory_stats(protocol.device)
@@ -879,6 +961,19 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--covariance-diagonal-blend", type=float, default=0.0)
     parser.add_argument("--covariance-promotion-threshold", type=float, default=0.10)
     parser.add_argument("--minimum-relative-kl-gain", type=float, default=0.05)
+    parser.add_argument(
+        "--refinement-mode",
+        choices=("covariance", "direct-binary"),
+        default="covariance",
+    )
+    parser.add_argument("--direct-groups", type=_parse_group_labels, default=("qkv",))
+    parser.add_argument("--direct-outer-passes", type=int, default=2)
+    parser.add_argument("--direct-scale-passes", type=int, default=4)
+    parser.add_argument("--direct-one-bit-passes", type=int, default=8)
+    parser.add_argument("--direct-one-bit-fraction", type=float, default=1.0)
+    parser.add_argument("--direct-max-one-bit-vectors", type=int, default=2**31 - 1)
+    parser.add_argument("--direct-codebook-passes", type=int, default=2)
+    parser.add_argument("--direct-codebook-size", type=int, default=512)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--local-files-only", action="store_true")
@@ -903,6 +998,16 @@ def run(args: argparse.Namespace) -> int:
         or args.right_flip_batch_size <= 0
     ):
         raise ValueError("covariance-binary refinement settings are invalid")
+    if (
+        args.direct_outer_passes < 0
+        or args.direct_scale_passes < 0
+        or args.direct_one_bit_passes < 0
+        or not 0.0 <= args.direct_one_bit_fraction <= 1.0
+        or args.direct_max_one_bit_vectors < 0
+        or args.direct_codebook_passes < 0
+        or args.direct_codebook_size < 0
+    ):
+        raise ValueError("direct binary refinement settings are invalid")
     if (
         args.damp_fraction < 0
         or not 0 <= args.covariance_diagonal_blend <= 1
@@ -955,6 +1060,7 @@ def run(args: argparse.Namespace) -> int:
         0.0,
     )
     profiles = load_calibration_profiles(args.calibration_state, 0.0)
+    candidate_key = CANDIDATE_KEY if args.refinement_mode == "covariance" else DIRECT_CANDIDATE_KEY
     with acquire_device_lease(args.device):
         teacher = load_causal_language_model(
             args.snapshot,
@@ -1003,25 +1109,34 @@ def run(args: argparse.Namespace) -> int:
                         left_flip_steps=args.left_flip_steps,
                         right_flip_batches=args.right_flip_batches,
                         right_flip_batch_size=args.right_flip_batch_size,
+                        refinement_mode=args.refinement_mode,
+                        direct_refine=group.label in args.direct_groups,
+                        direct_outer_passes=args.direct_outer_passes,
+                        direct_scale_passes=args.direct_scale_passes,
+                        direct_one_bit_passes=args.direct_one_bit_passes,
+                        direct_one_bit_fraction=args.direct_one_bit_fraction,
+                        direct_max_one_bit_vectors=args.direct_max_one_bit_vectors,
+                        direct_codebook_passes=args.direct_codebook_passes,
+                        direct_codebook_size=args.direct_codebook_size,
                     )
                     baseline_groups[key], baseline_members[key] = baseline
                     candidate_groups[key], candidate_members[key] = candidate
         reconstruction_sets = {
             BASELINE_KEY: _reconstruction_set(baseline_groups, baseline_members),
-            CANDIDATE_KEY: _reconstruction_set(candidate_groups, candidate_members),
+            candidate_key: _reconstruction_set(candidate_groups, candidate_members),
         }
         reconstruction_metrics = {
             BASELINE_KEY: {
                 "aggregate": _aggregate_groups(baseline_groups),
                 "groups": baseline_groups,
             },
-            CANDIDATE_KEY: {
+            candidate_key: {
                 "aggregate": _aggregate_groups(candidate_groups),
                 "groups": candidate_groups,
             },
         }
         baseline_bits = int(reconstruction_metrics[BASELINE_KEY]["aggregate"]["actual_bits"])
-        candidate_bits = int(reconstruction_metrics[CANDIDATE_KEY]["aggregate"]["actual_bits"])
+        candidate_bits = int(reconstruction_metrics[candidate_key]["aggregate"]["actual_bits"])
         if candidate_bits != baseline_bits:
             raise ValueError("covariance refinement changed the physical factor bit budget")
         baseline_ranks = {key: int(value["rank"]) for key, value in baseline_groups.items()}
@@ -1044,7 +1159,7 @@ def run(args: argparse.Namespace) -> int:
         block_outputs = {}
         teacher_batches: tuple[torch.Tensor, ...] | None = None
         baseline_nll = math.nan
-        for key in (BASELINE_KEY, CANDIDATE_KEY):
+        for key in (BASELINE_KEY, candidate_key):
             evaluator = DenseKlSpliceEvaluator(
                 teacher,
                 reconstruction_sets[key],
@@ -1076,7 +1191,7 @@ def run(args: argparse.Namespace) -> int:
     comparisons = {
         arm: _paired_summary(
             kl_results[BASELINE_KEY][arm],
-            kl_results[CANDIDATE_KEY][arm],
+            kl_results[candidate_key][arm],
         )
         for arm in arms
     }
@@ -1084,7 +1199,7 @@ def run(args: argparse.Namespace) -> int:
         reconstruction_metrics[BASELINE_KEY]["aggregate"]["held_out_covariance_error"]
     )
     held_candidate = float(
-        reconstruction_metrics[CANDIDATE_KEY]["aggregate"]["held_out_covariance_error"]
+        reconstruction_metrics[candidate_key]["aggregate"]["held_out_covariance_error"]
     )
     held_reduction = (held_baseline - held_candidate) / max(held_baseline, 1e-30)
     full_comparison = comparisons["full"]
@@ -1099,14 +1214,22 @@ def run(args: argparse.Namespace) -> int:
     payload = {
         "schema_version": 1,
         "status": "completed",
-        "role": "analysis-only covariance-aware binary refinement; not a compression artifact",
+        "role": "analysis-only binary-factor refinement splice gate; not a compression artifact",
         "model_source": MODEL_SOURCE,
         "model_revision": args.model_revision,
         "blocks": list(args.blocks),
         "block_output_blocks": list(block_output_blocks),
         "functional_arms": list(arms),
-        "refined_groups": sorted(TRANSFORMED_GROUPS),
-        "held_identical_group": "down",
+        "refined_groups": (
+            sorted(TRANSFORMED_GROUPS)
+            if args.refinement_mode == "covariance"
+            else sorted(args.direct_groups)
+        ),
+        "held_identical_groups": (
+            ["down"]
+            if args.refinement_mode == "covariance"
+            else sorted(GROUP_LABELS.difference(args.direct_groups))
+        ),
         "representation": "diag(post) @ B_left @ diag(mid) @ B_right @ diag(pre)",
         "protocol": {
             **to_dict(protocol),
@@ -1127,6 +1250,15 @@ def run(args: argparse.Namespace) -> int:
             "right_flip_batch_size": args.right_flip_batch_size,
             "covariance_promotion_threshold": args.covariance_promotion_threshold,
             "minimum_relative_kl_gain": args.minimum_relative_kl_gain,
+            "refinement_mode": args.refinement_mode,
+            "direct_groups": list(args.direct_groups),
+            "direct_outer_passes": args.direct_outer_passes,
+            "direct_scale_passes": args.direct_scale_passes,
+            "direct_one_bit_passes": args.direct_one_bit_passes,
+            "direct_one_bit_fraction": args.direct_one_bit_fraction,
+            "direct_max_one_bit_vectors": args.direct_max_one_bit_vectors,
+            "direct_codebook_passes": args.direct_codebook_passes,
+            "direct_codebook_size": args.direct_codebook_size,
         },
         "teacher_baseline_nll": baseline_nll,
         "reconstruction": reconstruction_metrics,
@@ -1140,6 +1272,7 @@ def run(args: argparse.Namespace) -> int:
             "held_out_covariance_relative_error_reduction": held_reduction,
             "functional_promotion": functional_promotion,
             "promotes_covariance_binary_refinement": promotes,
+            "promotes_selected_refinement": promotes,
         },
     }
     atomic_write_json(args.output, payload)

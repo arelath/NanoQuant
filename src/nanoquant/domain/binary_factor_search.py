@@ -24,6 +24,8 @@ class BinaryFactorSearchResult:
     accepted_outer_passes: int
     continuous_updates: int
     one_bit_updates: int
+    codebook_updates: int
+    variable_depth_updates: int
     pair_updates: int
     block_updates: int
     block_patterns_evaluated: int
@@ -36,6 +38,8 @@ class BinaryFactorSearchResult:
 class _VectorSearchStats:
     continuous_updates: int = 0
     one_bit_updates: int = 0
+    codebook_updates: int = 0
+    variable_depth_updates: int = 0
     pair_updates: int = 0
     block_updates: int = 0
     block_patterns_evaluated: int = 0
@@ -108,6 +112,9 @@ def _one_bit_pass(
     scores: torch.Tensor,
     epsilon: float,
     tolerance: float,
+    *,
+    vector_weights: torch.Tensor | None = None,
+    maximum_updates: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
     _, alpha, beta, gram_product = _scores(vectors, cross, gram, epsilon)
     candidate_alpha = alpha[:, None] - 2.0 * vectors * cross
@@ -118,6 +125,17 @@ def _one_bit_pass(
     ).clamp_min(epsilon)
     candidate_scores = candidate_alpha.square() / candidate_beta
     best_scores, indices = candidate_scores.max(dim=1)
+    if maximum_updates is not None and maximum_updates < vectors.shape[0]:
+        weights = (
+            torch.ones_like(best_scores)
+            if vector_weights is None
+            else vector_weights.to(device=vectors.device, dtype=best_scores.dtype)
+        )
+        gains = (best_scores - scores) * weights
+        selected = gains.topk(maximum_updates).indices
+        active = torch.zeros(vectors.shape[0], dtype=torch.bool, device=vectors.device)
+        active[selected] = True
+        best_scores = torch.where(active, best_scores, scores)
     rows = torch.arange(vectors.shape[0], device=vectors.device)
     candidates = vectors.clone()
     candidates[rows, indices] *= -1
@@ -206,6 +224,111 @@ def _pair_pass(
     )
 
 
+def _codebook_pass(
+    vectors: torch.Tensor,
+    cross: torch.Tensor,
+    gram: torch.Tensor,
+    scales: torch.Tensor,
+    scores: torch.Tensor,
+    maximum_patterns: int,
+    epsilon: float,
+    tolerance: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
+    """Transfer exact scale-profiled sign candidates between shared-Q rows."""
+
+    if maximum_patterns == 0 or vectors.shape[0] < 2:
+        return vectors, scales, scores, 0
+    patterns, counts = torch.unique(vectors, dim=0, return_counts=True)
+    if patterns.shape[0] > maximum_patterns:
+        frequent_count = min(maximum_patterns // 2, patterns.shape[0])
+        frequent = counts.topk(frequent_count).indices
+        remaining = maximum_patterns - frequent_count
+        stride = max(1, patterns.shape[0] // max(remaining, 1))
+        diverse = torch.arange(0, patterns.shape[0], stride, device=vectors.device)[:remaining]
+        selected = torch.unique(torch.cat((frequent, diverse)))
+        if selected.numel() < maximum_patterns:
+            mask = torch.ones(patterns.shape[0], dtype=torch.bool, device=vectors.device)
+            mask[selected] = False
+            supplement = torch.arange(patterns.shape[0], device=vectors.device)[mask][
+                : maximum_patterns - selected.numel()
+            ]
+            selected = torch.cat((selected, supplement))
+        patterns = patterns.index_select(0, selected[:maximum_patterns])
+    denominator = ((patterns @ gram) * patterns).sum(dim=1).clamp_min(epsilon)
+    numerator = cross @ patterns.mT
+    candidate_scores = numerator.square() / denominator[None, :]
+    best_scores, choices = candidate_scores.max(dim=1)
+    rows = torch.arange(vectors.shape[0], device=vectors.device)
+    candidates = patterns.index_select(0, choices)
+    return _accept_vectors(
+        vectors,
+        scales,
+        scores,
+        candidates,
+        best_scores,
+        numerator[rows, choices],
+        denominator.index_select(0, choices),
+        tolerance,
+    )
+
+
+def _variable_depth_pass(
+    vectors: torch.Tensor,
+    cross: torch.Tensor,
+    gram: torch.Tensor,
+    scales: torch.Tensor,
+    scores: torch.Tensor,
+    chain_length: int,
+    epsilon: float,
+    tolerance: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
+    """Build uphill-capable locked-bit chains and commit the best prefix."""
+
+    chain_length = min(chain_length, vectors.shape[1])
+    if chain_length == 0:
+        return vectors, scales, scores, 0
+    state = vectors.clone()
+    _, alpha, beta, gram_product = _scores(state, cross, gram, epsilon)
+    locked = torch.zeros_like(state, dtype=torch.bool)
+    best_vectors = vectors.clone()
+    best_scores = scores.clone()
+    best_alpha = alpha.clone()
+    best_beta = beta.clone()
+    rows = torch.arange(vectors.shape[0], device=vectors.device)
+    diagonal = gram.diagonal()[None, :]
+    for _ in range(chain_length):
+        candidate_alpha = alpha[:, None] - 2.0 * state * cross
+        candidate_beta = (
+            beta[:, None] - 4.0 * state * gram_product + 4.0 * diagonal
+        ).clamp_min(epsilon)
+        candidate_scores = candidate_alpha.square() / candidate_beta
+        candidate_scores.masked_fill_(locked, -torch.inf)
+        choices = candidate_scores.argmax(dim=1)
+        old_signs = state[rows, choices].clone()
+        alpha = candidate_alpha[rows, choices]
+        beta = candidate_beta[rows, choices]
+        state[rows, choices] *= -1
+        locked[rows, choices] = True
+        gram_product -= 2.0 * old_signs[:, None] * gram.index_select(0, choices)
+        current_scores = alpha.square() / beta
+        improved = current_scores > best_scores
+        if bool(improved.any()):
+            best_vectors[improved] = state[improved]
+            best_scores[improved] = current_scores[improved]
+            best_alpha[improved] = alpha[improved]
+            best_beta[improved] = beta[improved]
+    return _accept_vectors(
+        vectors,
+        scales,
+        scores,
+        best_vectors,
+        best_scores,
+        best_alpha,
+        best_beta,
+        tolerance,
+    )
+
+
 def _patterns(bit_count: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
     values = torch.arange(1 << bit_count, dtype=torch.int64, device=device)
     shifts = torch.arange(bit_count, dtype=torch.int64, device=device)
@@ -269,6 +392,11 @@ def _refine_vectors(
     *,
     continuous: bool,
     one_bit_passes: int,
+    one_bit_vectors: int,
+    codebook_passes: int,
+    codebook_size: int,
+    variable_depth_passes: int,
+    variable_depth_length: int,
     pair_passes: int,
     pair_pool_size: int,
     block_bits: int,
@@ -295,9 +423,45 @@ def _refine_vectors(
         stats.continuous_updates += count
     for _ in range(one_bit_passes):
         vectors, scales, scores, count = _one_bit_pass(
-            vectors, cross, gram, scales, scores, epsilon, tolerance
+            vectors,
+            cross,
+            gram,
+            scales,
+            scores,
+            epsilon,
+            tolerance,
+            vector_weights=vector_weights,
+            maximum_updates=one_bit_vectors,
         )
         stats.one_bit_updates += count
+        if count == 0:
+            break
+    for _ in range(codebook_passes):
+        vectors, scales, scores, count = _codebook_pass(
+            vectors,
+            cross,
+            gram,
+            scales,
+            scores,
+            codebook_size,
+            epsilon,
+            tolerance,
+        )
+        stats.codebook_updates += count
+        if count == 0:
+            break
+    for _ in range(variable_depth_passes):
+        vectors, scales, scores, count = _variable_depth_pass(
+            vectors,
+            cross,
+            gram,
+            scales,
+            scores,
+            variable_depth_length,
+            epsilon,
+            tolerance,
+        )
+        stats.variable_depth_updates += count
         if count == 0:
             break
     for _ in range(pair_passes):
@@ -696,6 +860,12 @@ def refine_binary_factors_separable(
     scale_passes: int = 4,
     continuous_candidates: bool = True,
     one_bit_passes: int = 8,
+    one_bit_fraction: float = 1.0,
+    max_one_bit_vectors: int = 2**31 - 1,
+    codebook_passes: int = 0,
+    codebook_size: int = 512,
+    variable_depth_passes: int = 0,
+    variable_depth_length: int = 32,
     pair_passes: int = 2,
     pair_pool_size: int = 32,
     block_bits: int = 10,
@@ -737,6 +907,12 @@ def refine_binary_factors_separable(
         outer_passes < 0
         or scale_passes < 0
         or one_bit_passes < 0
+        or not 0.0 <= one_bit_fraction <= 1.0
+        or max_one_bit_vectors < 0
+        or codebook_passes < 0
+        or codebook_size < 0
+        or variable_depth_passes < 0
+        or variable_depth_length < 0
         or pair_passes < 0
         or pair_pool_size < 0
         or block_bits < 0
@@ -792,6 +968,7 @@ def refine_binary_factors_separable(
         left_gram = (scaled_right * input_weight[None, :]) @ scaled_right.mT
         left_cross = (target32 * input_weight[None, :]) @ scaled_right.mT
         hard_left = min(max_hard_vectors, math.ceil(left.shape[0] * hard_fraction))
+        one_bit_left = min(max_one_bit_vectors, math.ceil(left.shape[0] * one_bit_fraction))
         left, post, left_stats = _refine_vectors(
             left,
             left_cross,
@@ -800,6 +977,11 @@ def refine_binary_factors_separable(
             output_weight,
             continuous=continuous_candidates,
             one_bit_passes=one_bit_passes,
+            one_bit_vectors=one_bit_left,
+            codebook_passes=codebook_passes,
+            codebook_size=codebook_size,
+            variable_depth_passes=variable_depth_passes,
+            variable_depth_length=variable_depth_length,
             pair_passes=pair_passes,
             pair_pool_size=pair_pool_size,
             block_bits=block_bits,
@@ -813,6 +995,7 @@ def refine_binary_factors_separable(
         right_gram = scaled_left.mT @ (scaled_left * output_weight[:, None])
         right_cross = (scaled_left.mT @ (target32 * output_weight[:, None])).mT
         hard_right = min(max_hard_vectors, math.ceil(right.shape[1] * hard_fraction))
+        one_bit_right = min(max_one_bit_vectors, math.ceil(right.shape[1] * one_bit_fraction))
         right_vectors, pre, right_stats = _refine_vectors(
             right.mT.contiguous(),
             right_cross,
@@ -821,6 +1004,11 @@ def refine_binary_factors_separable(
             input_weight,
             continuous=continuous_candidates,
             one_bit_passes=one_bit_passes,
+            one_bit_vectors=one_bit_right,
+            codebook_passes=codebook_passes,
+            codebook_size=codebook_size,
+            variable_depth_passes=variable_depth_passes,
+            variable_depth_length=variable_depth_length,
             pair_passes=pair_passes,
             pair_pool_size=pair_pool_size,
             block_bits=block_bits,
@@ -894,6 +1082,8 @@ def refine_binary_factors_separable(
         for stats in (left_stats, right_stats):
             totals.continuous_updates += stats.continuous_updates
             totals.one_bit_updates += stats.one_bit_updates
+            totals.codebook_updates += stats.codebook_updates
+            totals.variable_depth_updates += stats.variable_depth_updates
             totals.pair_updates += stats.pair_updates
             totals.block_updates += stats.block_updates
             totals.block_patterns_evaluated += stats.block_patterns_evaluated
@@ -913,6 +1103,8 @@ def refine_binary_factors_separable(
         accepted_outer_passes,
         totals.continuous_updates,
         totals.one_bit_updates,
+        totals.codebook_updates,
+        totals.variable_depth_updates,
         totals.pair_updates,
         totals.block_updates,
         totals.block_patterns_evaluated,

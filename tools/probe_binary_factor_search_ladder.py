@@ -37,6 +37,12 @@ class LadderProtocol:
     scale_passes: int
     search_outer_passes: int
     one_bit_passes: int
+    one_bit_fraction: float
+    max_one_bit_vectors: int
+    codebook_passes: int
+    codebook_size: int
+    variable_depth_passes: int
+    variable_depth_length: int
     pair_passes: int
     block_passes: int
     block_bits: int
@@ -127,6 +133,8 @@ def _search_stage(
             "accepted_outer_passes": result.accepted_outer_passes,
             "continuous_updates": result.continuous_updates,
             "one_bit_updates": result.one_bit_updates,
+            "codebook_updates": result.codebook_updates,
+            "variable_depth_updates": result.variable_depth_updates,
             "pair_updates": result.pair_updates,
             "block_updates": result.block_updates,
             "block_patterns_evaluated": result.block_patterns_evaluated,
@@ -252,6 +260,45 @@ def _score_case(
         protocol,
         continuous_candidates=False,
         one_bit_passes=protocol.one_bit_passes,
+        one_bit_fraction=protocol.one_bit_fraction,
+        max_one_bit_vectors=protocol.max_one_bit_vectors,
+        pair_passes=0,
+        block_bits=0,
+        block_passes=0,
+        component_passes=0,
+        joint_passes=0,
+    )
+    stages.append(stage)
+    stage, state = _search_stage(
+        "codebook",
+        target,
+        input_importance,
+        output_importance,
+        state,
+        protocol,
+        continuous_candidates=False,
+        one_bit_passes=0,
+        codebook_passes=protocol.codebook_passes,
+        codebook_size=protocol.codebook_size,
+        pair_passes=0,
+        block_bits=0,
+        block_passes=0,
+        component_passes=0,
+        joint_passes=0,
+    )
+    stages.append(stage)
+    stage, state = _search_stage(
+        "variable_depth",
+        target,
+        input_importance,
+        output_importance,
+        state,
+        protocol,
+        continuous_candidates=False,
+        one_bit_passes=0,
+        codebook_passes=0,
+        variable_depth_passes=protocol.variable_depth_passes,
+        variable_depth_length=protocol.variable_depth_length,
         pair_passes=0,
         block_bits=0,
         block_passes=0,
@@ -447,6 +494,16 @@ def run(args: argparse.Namespace) -> int:
     rank = args.size if args.rank is None else args.rank
     if rank <= 0 or rank > args.size:
         raise ValueError("rank must be between one and matrix size")
+    if (
+        args.one_bit_passes < 0
+        or not 0.0 <= args.one_bit_fraction <= 1.0
+        or args.max_one_bit_vectors < 0
+        or args.codebook_passes < 0
+        or args.codebook_size < 0
+        or args.variable_depth_passes < 0
+        or args.variable_depth_length < 0
+    ):
+        raise ValueError("binary search ladder settings are invalid")
     protocol = LadderProtocol(
         1,
         args.size,
@@ -457,6 +514,12 @@ def run(args: argparse.Namespace) -> int:
         args.scale_passes,
         args.search_outer_passes,
         args.one_bit_passes,
+        args.one_bit_fraction,
+        args.max_one_bit_vectors,
+        args.codebook_passes,
+        args.codebook_size,
+        args.variable_depth_passes,
+        args.variable_depth_length,
         args.pair_passes,
         args.block_passes,
         args.block_bits,
@@ -525,6 +588,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--scale-passes", type=int, default=32)
     parser.add_argument("--search-outer-passes", type=int, default=8)
     parser.add_argument("--one-bit-passes", type=int, default=16)
+    parser.add_argument("--one-bit-fraction", type=float, default=1.0)
+    parser.add_argument("--max-one-bit-vectors", type=int, default=2**31 - 1)
+    parser.add_argument("--codebook-passes", type=int, default=2)
+    parser.add_argument("--codebook-size", type=int, default=512)
+    parser.add_argument("--variable-depth-passes", type=int, default=2)
+    parser.add_argument("--variable-depth-length", type=int, default=32)
     parser.add_argument("--pair-passes", type=int, default=4)
     parser.add_argument("--block-passes", type=int, default=4)
     parser.add_argument("--block-bits", type=int, default=10)

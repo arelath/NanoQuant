@@ -233,3 +233,34 @@ def test_covariance_probe_parser_retains_diagonal_blend() -> None:
 
     assert args.covariance_diagonal_blend == 0.5
     assert args.covariance_reserved_samples == 20
+
+
+def test_covariance_probe_parser_accepts_direct_binary_mode() -> None:
+    args = _parser().parse_args(
+        [
+            "--model",
+            "model.safetensors",
+            "--snapshot",
+            "snapshot",
+            "--calibration-state",
+            "calibration",
+            "--output",
+            "result.json",
+            "--refinement-mode",
+            "direct-binary",
+            "--direct-groups",
+            "qkv,o",
+            "--direct-codebook-size",
+            "128",
+            "--direct-one-bit-fraction",
+            "0.05",
+            "--direct-max-one-bit-vectors",
+            "16",
+        ]
+    )
+
+    assert args.refinement_mode == "direct-binary"
+    assert args.direct_groups == ("qkv", "o")
+    assert args.direct_codebook_size == 128
+    assert args.direct_one_bit_fraction == 0.05
+    assert args.direct_max_one_bit_vectors == 16
