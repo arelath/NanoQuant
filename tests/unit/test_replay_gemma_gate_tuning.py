@@ -6,10 +6,38 @@ from safetensors.torch import save_file
 from tools.replay_gemma_gate_tuning import (
     _comparison,
     _legacy_initial,
+    _parser,
     _refit_state,
     _rewrite_initial,
     _rewrite_pre_scale_fit,
 )
+
+
+def test_parser_supports_disjoint_calibration_windows() -> None:
+    args = _parser().parse_args(
+        [
+            "--snapshot",
+            "snapshot",
+            "--rewrite-factor",
+            "factor.safetensors",
+            "--rewrite-scales",
+            "scales.safetensors",
+            "--rewrite-frozen",
+            "frozen.safetensors",
+            "--output",
+            "result.json",
+            "--sample-offset",
+            "128",
+            "--kl-offset",
+            "192",
+            "--kl-samples",
+            "4",
+        ]
+    )
+
+    assert args.sample_offset == 128
+    assert args.kl_offset == 192
+    assert args.kl_samples == 4
 
 
 def test_initial_state_loaders_map_legacy_and_rewrite_names(tmp_path: Path) -> None:

@@ -2,11 +2,14 @@
 
 ## Status
 
-Paused after immutable slice reservation. Allocation reproducibility, exact
+Paused at a fail-closed resident numerical boundary after immutable slice
+reservation. Allocation reproducibility, exact
 initializer-regime binding, calibration/capability separation, selected-
 checkpoint reload equality, and the campaign-receipt implementation now pass
-their preflight gates. Two fresh slices are reserved, but neither has been
-opened and no model evaluation has run. The numbered launcher deliberately
+their preflight gates. The first single-worker launch durably committed blocks
+0 through 2, then failed while beginning block 3. Two fresh slices are
+reserved, but neither has been
+opened and no model evaluation has run on them. The numbered launcher deliberately
 fails if invoked directly; the adaptive orchestrator is the only authorized
 entry point because it enforces selection, fallback, confirmation, and final
 quality ordering.
@@ -337,8 +340,9 @@ The numbered workflow now fixes the six-task guardrail at 1,000 examples. Its
 complete-compression options can explicitly load a relocated, exactly audited
 selected-checkpoint run, allowing the final logical, packed, GGUF, and quality
 path to consume the materialized winner instead of silently exporting the
-last correction epoch. These safeguards still do not authorize a fresh data
-reservation or CUDA launch; orchestration and a complete dry run remain.
+last correction epoch. These safeguards are now active in the committed
+orchestrator; the immutable reservations and complete dry run described below
+clear the former orchestration blocker.
 
 The materialization boundary also accepts the canonical resident endpoint as
 its metadata authority; it no longer assumes a standalone analysis probe left
@@ -414,5 +418,121 @@ registry snapshot and both token hashes, and then appends both reservations
 under the same exclusive ledger lock used for retirement. It is resumable
 across an interruption and rejects overlap, identity reuse, or any registry
 change outside that intent. The implementation passes the full repository
-gate. It has now been invoked exactly once to create the reservations above;
-no model was loaded and neither reservation has transitioned to `retired`.
+gate. It was invoked exactly once to create the reservations above; that
+reservation operation loaded no model and neither reservation has transitioned
+to `retired`.
+
+The final pre-launch validation ran with sandbox-local device-lease and
+Hugging Face dataset caches: 1,244 tests passed and 49 explicitly configured
+tests were deselected; repository Ruff and the standard 208-file mypy target
+also pass. Model-card rendering now performs a deterministic local metadata
+round-trip instead of contacting Hugging Face's remote YAML validator, so the
+export tests and real offline export path share the same reproducible
+behavior. That gate authorized the first single-worker CUDA launch; data remain
+unopened until the completed resident run and campaign receipt authorize the
+selection-slice transition.
+
+## First resident launch: numerical stop and recovery gate
+
+The first campaign launch reused the exact validated preprocessing identity and
+durably committed blocks 0, 1, and 2 before the original failure. Every
+post-block refit reported a
+non-finite epoch loss, but the refitter's existing best-state restoration made
+the post-refit and propagated block outputs finite. Block 3 then produced a
+non-finite non-factorized training trajectory and residual outlier selection
+failed on a singular solve. The worker stopped before strict validation,
+campaign-receipt construction, or either C4 slice opening. The authoritative
+failure evidence is retained in `evidence/048/campaign/resident.stdout.log`,
+`resident.stderr.log`, and `launcher.stderr.log`; the journal is durable through
+block 2 at sequence 18.
+
+Follow-up inspection rejects the initial hypothesis that block 2 committed a
+NaN activation. Its retained teacher and compressed activation tensors each
+contain zero non-finite elements. A fresh dense block-3 sweep over all 256
+retained teacher and compressed inputs also contains zero non-finite outputs.
+The failure therefore is not evidence of persistent activation corruption. A
+bounded resume subsequently completed block 3 with finite teacher power,
+entry loss, tuning losses, and final loss, then stopped at its injected
+one-block boundary. A second bounded probe completed block 4 and demonstrated
+the new immediate refit rollback in the real Gemma path.
+
+The recovery gate hardens two behaviors before that resume:
+
+- tuning stops on its first non-finite epoch and restores the last finite best
+  state immediately, rather than spending later epochs from poisoned optimizer
+  parameters;
+- every named block-loss boundary rejects NaN or infinity before it can enter a
+  block commit.
+
+CPU regressions prove immediate refit rollback, initial non-finite rejection,
+and fail-closed block-loss recording. The focused tuning/loss and resident
+integration suite passes with 34 tests and three configured deselections;
+focused Ruff and mypy checks also pass. The correction is committed as
+`2aa4298`.
+
+The bounded resumes do not rehabilitate the original campaign identity. Its
+block-0 result persisted a non-finite `block_entry_pre_quantization` loss, which
+violates the new boundary contract even though that block's final activation
+was finite. The entire run and its campaign logs are therefore preserved under
+the suffix `--failed-nonfinite-run_20260802T104826559984_1e8a8833`, with
+`failure-audit.json` recording the invalidating artifact and both bounded
+observations. Nothing was deleted. A fresh run must start from block 0 under
+the original canonical Experiment 048 paths; it may reuse validated
+preprocessing, but it may not adopt any block from the archived identity. The
+slice registry still validates with both Experiment 048 C4 reservations
+unopened. The next authorized action is the full repository gate followed by
+that fresh single-worker launch.
+
+## Fresh canonical run and bounded continuation
+
+The fresh canonical run completed the full repository gate before launch:
+1,251 tests passed and 49 configured tests were deselected; repository Ruff
+and the standard `src/nanoquant experiments/recipes` mypy target also passed.
+It reused the validated calibration, objective, probe, and allocation artifacts
+under the same semantic identity, but recomputed every block from block 0.
+
+The first long-lived worker committed blocks 0 through 3 with finite boundary
+metrics. It then stopped before block-4 layer work when a newly computed block
+loss was non-finite. Independent dense replay of the retained activations was
+finite, and fresh bounded workers completed the same boundaries. This repeated
+the earlier finding: the non-finite observations were process-local and were
+not present in the persisted activation generations.
+
+The campaign now executes at most one newly committed block per resident child
+process. Each child uses normal identity-checked resume discovery and returns a
+distinct injected-boundary status only after the block commit is durable. The
+controller restarts only for that status and propagates ordinary worker
+failures. This isolates long-lived CUDA state without changing the numerical
+recipe or allowing a second device owner.
+
+The first post-resume durable prefix was blocks 0 through 8. Block 8 is artifact
+`sha256-6abbb45bc18b27a88a1cf85711c7a9ad73694d615b690aa84c740a00dcdce695`
+at journal sequence 54, with finite entry loss `753.5584106445312`, target
+weighted mean square `30329.205078125`, and final loss `256.0640563964844`.
+The fresh partial audit validates 334 transitive artifacts and 5,237,160,348
+bytes through block 8, with one journal identity, no inactive records, and an
+effective partial BPW of `1.2076211696`. Its receipt is
+`evidence/048/campaign/resumed-block8-validation.json`.
+
+Bounded continuation subsequently committed blocks 9 through 12. The current
+partial audit validates the contiguous block-0-through-12 prefix: 78 active
+journal records, one identity, no inactive records, 422 transitive artifacts,
+6,264,945,805 artifact bytes, and effective partial BPW `1.1436384553`. The
+receipt is `evidence/048/campaign/resumed-block12-validation.json`.
+
+Further bounded workers committed blocks 13 through 16. The current audit
+validates the contiguous block-0-through-16 prefix: 102 active journal records,
+one identity, no inactive records, 510 transitive artifacts, 7,233,374,335
+artifact bytes, and effective partial BPW `1.0967303923`. The receipt is
+`evidence/048/campaign/resumed-block16-validation.json`. Blocks 15 and 16 have
+finite final losses that are modestly above their finite entry losses; this is
+preserved for model-quality diagnosis and does not waive the required final
+quality benchmark.
+
+Three abrupt worker exits correlated exactly with Windows `nvlddmkm` system
+event 153 for the CUDA device. They were NVIDIA driver resets, not Python
+exceptions. A cooled, uncontended retry completed block 8 without a new driver
+event. Subsequent launches must therefore keep the process/GPU/lease gate,
+avoid overlap with other CUDA experiments, and allow a thermal idle interval
+between bounded workers when needed. Neither reserved Experiment 048 C4 slice
+has been opened, and no campaign decision or quality conclusion exists yet.

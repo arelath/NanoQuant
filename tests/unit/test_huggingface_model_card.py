@@ -5,10 +5,29 @@ from pathlib import Path
 from huggingface_hub import ModelCard
 
 from nanoquant.infrastructure.huggingface_model_card import (
+    HuggingFaceModelCardMetadata,
     load_huggingface_model_card_metadata,
+    render_huggingface_model_card,
     write_huggingface_model_card,
 )
 from tools.render_huggingface_model_card import main
+
+
+def test_model_card_rendering_is_deterministic_and_offline(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setattr(
+        ModelCard,
+        "validate",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("rendering must not call the remote YAML validator")
+        ),
+    )
+
+    rendered = render_huggingface_model_card(
+        HuggingFaceModelCardMetadata("owner/base", "revision"),
+        model_name="quantized",
+    )
+
+    assert ModelCard(rendered).data.get("base_model") == "owner/base"
 
 
 def test_model_card_inherits_source_metadata_and_retains_report_body(tmp_path: Path) -> None:

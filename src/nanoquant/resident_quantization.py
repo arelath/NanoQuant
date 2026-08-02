@@ -64,6 +64,7 @@ from nanoquant.application.stages import StageContext, execute_stage
 from nanoquant.application.telemetry import TelemetryContext
 from nanoquant.application.tuning import (
     EpochLossMode,
+    FactorizedTuningLearningRates,
     TuningRequest,
     TuningResumeState,
     post_block_refit,
@@ -216,7 +217,7 @@ from nanoquant.infrastructure.tuning_checkpoint import (
 from nanoquant.ports.event_sink import EventSink, LayerCommittedPayload, emit_layer_committed
 from nanoquant.ports.model_adapter import ModelAdapter
 
-RESIDENT_ALGORITHM_VERSION = 53
+RESIDENT_ALGORITHM_VERSION = 54
 COVARIANCE_REFINEMENT_MAX_INPUT_FEATURES = 2048
 _THROUGHPUT_PROBE_REPETITIONS = 5
 _THROUGHPUT_PROBE_WARMUP_WORKLOADS = 3
@@ -372,6 +373,9 @@ class ResidentQuantizationRequest:
     factorized_tuning_epochs: int = 0
     factorized_tuning_batch_size: int = 8
     factorized_tuning_learning_rate: float = 1e-5
+    factorized_tuning_binary_learning_rate: float | None = None
+    factorized_tuning_outlier_learning_rate: float | None = None
+    factorized_tuning_bias_learning_rate: float | None = None
     factorized_tuning_epoch_cooldown_seconds: float = 0.0
     initial_cooldown_seconds: float = 0.0
     nonfactorized_tuning_epochs: int = 0
@@ -1619,6 +1623,24 @@ def _tuning_seed(request: ResidentQuantizationRequest, stage: str, block: int, l
     return logical_seed(request.seed, stage, block, layer, 0)
 
 
+def _factorized_tuning_learning_rates(
+    request: ResidentQuantizationRequest,
+) -> FactorizedTuningLearningRates:
+    scale = request.factorized_tuning_learning_rate
+    return FactorizedTuningLearningRates(
+        scale
+        if request.factorized_tuning_binary_learning_rate is None
+        else request.factorized_tuning_binary_learning_rate,
+        scale,
+        scale
+        if request.factorized_tuning_outlier_learning_rate is None
+        else request.factorized_tuning_outlier_learning_rate,
+        scale
+        if request.factorized_tuning_bias_learning_rate is None
+        else request.factorized_tuning_bias_learning_rate,
+    )
+
+
 def _rehydrate_trainable_layer(
     state: FrozenNanoQuantState,
     tensors: LocalTensorStore,
@@ -2272,6 +2294,9 @@ def _resident_config_hash(request: ResidentQuantizationRequest) -> str:
         "factorized_tuning_epochs": request.factorized_tuning_epochs,
         "factorized_tuning_batch_size": request.factorized_tuning_batch_size,
         "factorized_tuning_learning_rate": request.factorized_tuning_learning_rate,
+        "factorized_tuning_binary_learning_rate": request.factorized_tuning_binary_learning_rate,
+        "factorized_tuning_outlier_learning_rate": request.factorized_tuning_outlier_learning_rate,
+        "factorized_tuning_bias_learning_rate": request.factorized_tuning_bias_learning_rate,
         "nonfactorized_tuning_epochs": request.nonfactorized_tuning_epochs,
         "nonfactorized_tuning_epochs_by_layer": request.nonfactorized_tuning_epochs_by_layer,
         "nonfactorized_tuning_batch_size": request.nonfactorized_tuning_batch_size,
@@ -4058,6 +4083,17 @@ def _validate_resident_request(request: ResidentQuantizationRequest) -> None:
         raise ValueError("resident quantization post-block refit epochs cannot be negative")
     if request.factorized_tuning_epochs > 0 and request.factorized_tuning_batch_size <= 0:
         raise ValueError("resident quantization factorized tuning batch size must be positive")
+    factorized_learning_rates = _factorized_tuning_learning_rates(request)
+    if request.factorized_tuning_epochs > 0 and any(
+        not math.isfinite(value) or value <= 0
+        for value in (
+            factorized_learning_rates.binary,
+            factorized_learning_rates.scale,
+            factorized_learning_rates.outlier,
+            factorized_learning_rates.bias,
+        )
+    ):
+        raise ValueError("resident quantization factorized tuning learning rates must be positive and finite")
     if (
         request.nonfactorized_tuning_epochs > 0 or any(request.nonfactorized_tuning_epochs_by_layer)
     ) and request.nonfactorized_tuning_batch_size <= 0:
@@ -5654,6 +5690,7 @@ def _execute_resident_quantization_pipeline(
                             ),
                             tuning_forward,
                             tuning_recorder,
+                            learning_rates=_factorized_tuning_learning_rates(request),
                         )
                 with _profile_layer_phase(recorder, block_index, group_plan.name, "freeze"):
                     frozen_group = SharedInputGroupFreezer().freeze(
@@ -6148,6 +6185,7 @@ def _execute_resident_quantization_pipeline(
                                 ),
                                 tuning_forward,
                                 tuning_recorder,
+                                learning_rates=_factorized_tuning_learning_rates(request),
                                 resume=None if active_checkpoint is None else active_checkpoint.state,
                                 checkpoint_sink=checkpoint_sink,
                             )

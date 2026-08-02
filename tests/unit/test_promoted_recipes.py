@@ -62,6 +62,11 @@ def test_numbered_launchers_own_their_concrete_definitions() -> None:
         45: Path("Docs/Experiments/045-fresh-tail-aware-checkpoint-selection.md"),
         46: Path("Docs/Experiments/046-tail-aware-capability-correction.md"),
         47: Path("Docs/Experiments/047-fixed-epoch3-capability-confirmation.md"),
+        49: Path("Docs/Experiments/049-cyclic-scale-rank.md"),
+        50: Path("Docs/Experiments/050-tiny-factorization-optimality.md"),
+        51: Path("Docs/Experiments/051-four-by-four-exhaustive-sign-coverage.md"),
+        52: Path("Docs/Experiments/052-bounded-direct-binary-factor-search.md"),
+        53: Path("Docs/Experiments/053-direct-binary-search-held-out-gate.md"),
     }
 
     assert launcher_numbers == sorted(set(launcher_numbers))

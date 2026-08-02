@@ -9,6 +9,7 @@ global-distillation requests used by tools, numbered runfiles, and Python caller
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -217,9 +218,17 @@ def _validate_supported_recipe(config: RunConfig) -> None:
     )
     factor_lrs = factorized.learning_rates
     _require(
-        factor_lrs.binary == factor_lrs.scale == factor_lrs.bias and factor_lrs.outlier in {None, factor_lrs.scale},
+        all(
+            math.isfinite(value) and value > 0
+            for value in (
+                factor_lrs.binary,
+                factor_lrs.scale,
+                factor_lrs.scale if factor_lrs.outlier is None else factor_lrs.outlier,
+                factor_lrs.bias,
+            )
+        ),
         "block_tuning.factorized.learning_rates",
-        "the resident parity optimizer currently uses one learning rate",
+        "all effective learning rates must be positive and finite",
     )
     refit = config.block_tuning.post_block_refit
     refit_lr = factor_lrs.scale if refit.scale_learning_rate is None else refit.scale_learning_rate
@@ -420,6 +429,13 @@ def resident_request_from_config(
         factorized_tuning_epochs=factorized.loop.epochs if factorized.loop.enabled else 0,
         factorized_tuning_batch_size=factorized.loop.batch_size,
         factorized_tuning_learning_rate=factorized_lr,
+        factorized_tuning_binary_learning_rate=factorized.learning_rates.binary,
+        factorized_tuning_outlier_learning_rate=(
+            factorized_lr
+            if factorized.learning_rates.outlier is None
+            else factorized.learning_rates.outlier
+        ),
+        factorized_tuning_bias_learning_rate=factorized.learning_rates.bias,
         factorized_tuning_epoch_cooldown_seconds=options.factorized_tuning_epoch_cooldown_seconds,
         initial_cooldown_seconds=options.initial_cooldown_seconds,
         nonfactorized_tuning_epochs=nonfactorized_epochs if nonfactorized.loop.enabled else 0,

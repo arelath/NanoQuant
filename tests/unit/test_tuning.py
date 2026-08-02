@@ -8,6 +8,7 @@ from torch import nn
 import nanoquant.application.tuning as tuning_module
 from nanoquant.application.layers import TrainableFactorizedLinear, TrainableSharedInputFactorGroup
 from nanoquant.application.tuning import (
+    FactorizedTuningLearningRates,
     TuningRequest,
     _PinnedBatchStager,
     _release_cuda_cache_under_pressure,
@@ -204,6 +205,41 @@ def test_factorized_tuning_changes_only_selected_module_and_restores_best() -> N
     assert torch.equal(model.base.weight, base_before)
 
 
+def test_factorized_binary_learning_rate_can_cross_a_tiny_sign_margin() -> None:
+    class TinyFactor(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.quant = TrainableFactorizedLinear(
+                torch.tensor([[1.0], [0.001]]),
+                torch.ones((1, 2)),
+                torch.ones(2),
+                torch.ones(1),
+                torch.ones(2),
+            )
+
+        def forward(self, value: torch.Tensor) -> torch.Tensor:
+            return self.quant(value)
+
+    inputs = torch.eye(2).repeat(4, 1)
+    targets = torch.tensor([[1.0, -1.0], [1.0, -1.0]]).repeat(4, 1)
+    control = TinyFactor()
+    candidate = deepcopy(control)
+    request = TuningRequest(inputs, targets, 1, 8, 1e-5, seed=80)
+
+    control_metrics = tune_factorized(control, "quant", request, _forward)
+    candidate_metrics = tune_factorized(
+        candidate,
+        "quant",
+        request,
+        _forward,
+        learning_rates=FactorizedTuningLearningRates(0.01, 1e-5, 1e-5, 1e-5),
+    )
+
+    assert bool(control.quant.left_latent[1, 0] > 0)
+    assert bool(candidate.quant.left_latent[1, 0] < 0)
+    assert candidate_metrics.final.loss < control_metrics.final.loss
+
+
 def test_factorized_tuning_can_keep_final_epoch_state(monkeypatch: pytest.MonkeyPatch) -> None:
     model = Hybrid()
     inputs = torch.randn(8, 3, generator=torch.Generator().manual_seed(70))
@@ -348,6 +384,56 @@ def test_factorized_tuning_epoch_resume_is_bitwise_equivalent() -> None:
         "quant",
         request,
         _forward,
+        resume=checkpoints[-1],
+    )
+
+    assert resumed_metrics == control_metrics
+    for control_parameter, resumed_parameter in zip(
+        control.parameters(), restarted.parameters(), strict=True
+    ):
+        assert torch.equal(resumed_parameter, control_parameter)
+
+
+def test_grouped_learning_rate_factorized_resume_is_bitwise_equivalent() -> None:
+    initial = Hybrid()
+    control = deepcopy(initial)
+    interrupted = deepcopy(initial)
+    inputs = torch.randn(12, 3, generator=torch.Generator().manual_seed(81))
+    targets = torch.randn(12, 2, generator=torch.Generator().manual_seed(82))
+    request = TuningRequest(inputs, targets, 4, 4, 0.002, seed=83, microbatch_size=2)
+    learning_rates = FactorizedTuningLearningRates(0.01, 0.002, 0.004, 0.003)
+    checkpoints = []
+
+    control_metrics = tune_factorized(
+        control,
+        "quant",
+        request,
+        _forward,
+        learning_rates=learning_rates,
+    )
+
+    def checkpoint_sink(state):  # type: ignore[no-untyped-def]
+        checkpoints.append(state)
+        if state.completed_epochs == 2:
+            raise InterruptedError("injected grouped-rate interruption")
+
+    with pytest.raises(InterruptedError, match="grouped-rate interruption"):
+        tune_factorized(
+            interrupted,
+            "quant",
+            request,
+            _forward,
+            learning_rates=learning_rates,
+            checkpoint_sink=checkpoint_sink,
+        )
+
+    restarted = deepcopy(initial)
+    resumed_metrics = tune_factorized(
+        restarted,
+        "quant",
+        request,
+        _forward,
+        learning_rates=learning_rates,
         resume=checkpoints[-1],
     )
 

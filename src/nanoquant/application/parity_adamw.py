@@ -230,7 +230,7 @@ def restore_cosine_annealing_state(
     scheduler: torch.optim.lr_scheduler.CosineAnnealingLR,
     completed_steps: int,
     total_steps: int,
-    initial_learning_rate: float,
+    initial_learning_rate: float | tuple[float, ...],
     *,
     eta_min: float = 0.0,
 ) -> None:
@@ -238,13 +238,21 @@ def restore_cosine_annealing_state(
 
     if completed_steps == 0:
         return
-    current_lr = eta_min + (initial_learning_rate - eta_min) * (
-        1 + math.cos(math.pi * completed_steps / max(1, total_steps))
-    ) / 2
-    for group in optimizer.param_groups:
+    initial_learning_rates = (
+        (initial_learning_rate,) * len(optimizer.param_groups)
+        if isinstance(initial_learning_rate, float)
+        else initial_learning_rate
+    )
+    if len(initial_learning_rates) != len(optimizer.param_groups):
+        raise ValueError("optimizer learning-rate groups differ from scheduler restore state")
+    cosine = (1 + math.cos(math.pi * completed_steps / max(1, total_steps))) / 2
+    current_learning_rates = tuple(
+        eta_min + (value - eta_min) * cosine for value in initial_learning_rates
+    )
+    for group, current_lr in zip(optimizer.param_groups, current_learning_rates, strict=True):
         group["lr"] = current_lr
     scheduler_state = scheduler.state_dict()
     scheduler_state["last_epoch"] = completed_steps
     scheduler_state["_step_count"] = completed_steps + 1
-    scheduler_state["_last_lr"] = [current_lr] * len(optimizer.param_groups)
+    scheduler_state["_last_lr"] = list(current_learning_rates)
     scheduler.load_state_dict(scheduler_state)

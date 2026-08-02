@@ -1,9 +1,11 @@
-"""Replay block-0 gate tuning from retained legacy and rewrite initial states."""
+"""Replay one Gemma projection's tuning from retained legacy and rewrite states."""
 
 from __future__ import annotations
 
 import argparse
+import gc
 import json
+import math
 import time
 from pathlib import Path
 from typing import Any, cast
@@ -13,12 +15,24 @@ from safetensors import safe_open
 from torch import nn
 from transformers import AutoModelForCausalLM
 
+from nanoquant.application.kl_budget import KlBudgetArmResult, paired_bootstrap_kl_delta
 from nanoquant.application.layers import BlockEditor, TrainableFactorizedLinear
 from nanoquant.application.prefix_capture import capture_prefix_invocations
-from nanoquant.application.tuning import TuningRequest, tune_factorized
+from nanoquant.application.tuning import (
+    FactorizedTuningLearningRates,
+    TuningRequest,
+    tune_factorized,
+)
+from nanoquant.config.codec import to_dict
+from nanoquant.domain.models import BlockId, LayerId
 from nanoquant.domain.scale_fit import MaterializedScaleFitResult, fit_scales
 from nanoquant.infrastructure.device_lease import wait_for_device_lease
 from nanoquant.infrastructure.hf_calibration_dataset import load_or_prepare_calibration
+from nanoquant.infrastructure.kl_splice import (
+    DenseKlSpliceEvaluator,
+    SpliceReconstruction,
+    SpliceReconstructionSet,
+)
 from nanoquant.infrastructure.model_adapters import adapter_for_config
 from nanoquant.infrastructure.safetensors_source import SafetensorsModelSource
 from nanoquant.resident_quantization import (
@@ -30,7 +44,7 @@ from nanoquant.resident_quantization import (
 )
 
 MODEL_REVISION = "dcc83ea841ab6100d6b47a070329e1ba4cf78752"
-GATE_PATH = "mlp.gate_proj"
+DEFAULT_LAYER_PATH = "mlp.gate_proj"
 
 
 def _read_tensors(path: Path, keys: tuple[str, ...]) -> dict[str, torch.Tensor]:
@@ -189,19 +203,65 @@ def _comparison(left: dict[str, torch.Tensor], right: dict[str, torch.Tensor]) -
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--snapshot", type=Path, required=True)
-    parser.add_argument("--fisher", type=Path, required=True)
-    parser.add_argument("--legacy-initial", type=Path, required=True)
+    parser.add_argument("--block-index", type=int, default=0)
+    parser.add_argument("--layer-path", default=DEFAULT_LAYER_PATH)
+    parser.add_argument("--fisher", type=Path)
+    parser.add_argument(
+        "--resident-calibration",
+        type=Path,
+        help="resident calibration tensor artifact containing the selected projection importance",
+    )
+    parser.add_argument(
+        "--calibration-directory",
+        type=Path,
+        help="reuse calibration-input.json and its artifact store from this run directory",
+    )
+    parser.add_argument("--legacy-initial", type=Path)
     parser.add_argument("--rewrite-factor", type=Path, required=True)
     parser.add_argument("--rewrite-scales", type=Path, required=True)
     parser.add_argument("--rewrite-frozen", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--epochs", default="8,32")
     parser.add_argument(
+        "--binary-learning-rates",
+        default="1e-5",
+        help="comma-separated binary rates; scale, outlier, and bias remain at 1e-5",
+    )
+    parser.add_argument(
+        "--initializations",
+        default="legacy,rewrite",
+        help="comma-separated subset of legacy,rewrite",
+    )
+    parser.add_argument(
         "--ls-scale-fit-passes",
         default="0,1,2,4,8",
         help="comma-separated alternating-pass counts for the pre-tuning LS sweep",
     )
     parser.add_argument("--samples", type=int, default=256)
+    parser.add_argument(
+        "--sample-offset",
+        type=int,
+        default=0,
+        help="start at this calibration row so confirmation runs can use a disjoint sample window",
+    )
+    parser.add_argument(
+        "--fit-samples",
+        type=int,
+        help="fit on this prefix and reserve the remaining requested samples for held-out block loss",
+    )
+    parser.add_argument(
+        "--kl-samples",
+        type=int,
+        default=0,
+        help="evaluate each tuned gate as a dense full-model splice on this many calibration rows",
+    )
+    parser.add_argument(
+        "--kl-offset",
+        type=int,
+        default=0,
+        help="absolute calibration-row offset for the optional language-model splice gate",
+    )
+    parser.add_argument("--kl-sequence-length", type=int, default=512)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--microbatch-size", type=int, default=8)
     parser.add_argument("--block-forward-batch-size", type=int, default=4)
@@ -217,20 +277,59 @@ def _parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = _parser().parse_args()
+    if (args.fisher is None) == (args.resident_calibration is None):
+        raise ValueError("provide exactly one of --fisher or --resident-calibration")
+    if args.block_index < 0:
+        raise ValueError("block index must be non-negative")
+    layer_path = str(args.layer_path).strip()
+    if not layer_path or layer_path == "self_attn.attn_qkv":
+        raise ValueError("layer path must name one independent projection")
     epochs = tuple(int(value.strip()) for value in args.epochs.split(",") if value.strip())
     if not epochs or any(value <= 0 for value in epochs):
         raise ValueError("epochs must contain positive integers")
+    binary_learning_rates = tuple(
+        float(value.strip()) for value in args.binary_learning_rates.split(",") if value.strip()
+    )
+    if not binary_learning_rates or any(not math.isfinite(value) or value <= 0 for value in binary_learning_rates):
+        raise ValueError("binary-learning-rates must contain positive finite values")
+    initializations = tuple(value.strip() for value in args.initializations.split(",") if value.strip())
+    if not initializations or len(initializations) != len(set(initializations)) or any(
+        value not in {"legacy", "rewrite"} for value in initializations
+    ):
+        raise ValueError("initializations must be a unique subset of legacy,rewrite")
     ls_scale_fit_passes = tuple(
         int(value.strip()) for value in args.ls_scale_fit_passes.split(",") if value.strip()
     )
     if not ls_scale_fit_passes or any(value < 0 for value in ls_scale_fit_passes):
         raise ValueError("ls-scale-fit-passes must contain non-negative integers")
-    legacy = _legacy_initial(args.legacy_initial)
+    if "legacy" in initializations and args.legacy_initial is None:
+        raise ValueError("legacy initialization requires --legacy-initial")
+    legacy = None if args.legacy_initial is None else _legacy_initial(args.legacy_initial)
     rewrite = _rewrite_initial(args.rewrite_factor, args.rewrite_scales, args.rewrite_frozen)
     rewrite_pre_scale_fit = _rewrite_pre_scale_fit(args.rewrite_factor, args.rewrite_frozen)
-    calibration = load_or_prepare_calibration(args.snapshot, args.output.parent)
-    if args.samples <= 0 or args.samples > calibration.input_ids.shape[0]:
+    calibration = load_or_prepare_calibration(
+        args.snapshot,
+        args.output.parent if args.calibration_directory is None else args.calibration_directory,
+    )
+    if args.sample_offset < 0:
+        raise ValueError("sample offset must be non-negative")
+    sample_stop = args.sample_offset + args.samples
+    if args.samples <= 0 or sample_stop > calibration.input_ids.shape[0]:
         raise ValueError("sample count is outside the pinned calibration tensor")
+    fit_samples = args.samples if args.fit_samples is None else args.fit_samples
+    if fit_samples <= 0 or fit_samples > args.samples:
+        raise ValueError("fit sample count is outside the requested sample range")
+    if args.kl_samples < 0 or args.kl_offset < 0 or args.kl_sequence_length <= 1:
+        raise ValueError("KL splice protocol values are invalid")
+    kl_stop = args.kl_offset + args.kl_samples
+    if kl_stop > calibration.input_ids.shape[0]:
+        raise ValueError("KL sample count is outside the pinned calibration tensor")
+    fit_start = args.sample_offset
+    fit_stop = fit_start + fit_samples
+    if args.kl_samples and max(fit_start, args.kl_offset) < min(fit_stop, kl_stop):
+        raise ValueError("KL splice rows must not overlap the tuning-fit rows")
+    if args.kl_samples and args.kl_sequence_length > calibration.input_ids.shape[1]:
+        raise ValueError("KL sequence length exceeds the pinned calibration tensor")
 
     source = SafetensorsModelSource(
         args.snapshot,
@@ -241,23 +340,57 @@ def main() -> None:
     checkpoint = source.inventory()
     adapter = adapter_for_config(checkpoint.config)
     inventory = adapter.model_inventory(source)
-    with safe_open(args.fisher, framework="pt", device="cpu") as handle:
-        input_importance = handle.get_tensor("i.model.layers.0.mlp.gate_proj")
-        gate_output_importance = handle.get_tensor("o.model.layers.0.mlp.gate_proj")
-        block_output_importance = handle.get_tensor("o.model.layers.0.mlp.down_proj")
+    if args.block_index >= len(inventory.blocks):
+        raise ValueError("block index is outside the model inventory")
+    importance_path = args.fisher if args.resident_calibration is None else args.resident_calibration
+    if importance_path is None:
+        raise AssertionError("importance source validation did not resolve a path")
+    with safe_open(importance_path, framework="pt", device="cpu") as handle:
+        if args.resident_calibration is None:
+            input_importance = handle.get_tensor(
+                f"i.model.layers.{args.block_index}.{layer_path}"
+            )
+            layer_output_importance = handle.get_tensor(
+                f"o.model.layers.{args.block_index}.{layer_path}"
+            )
+            block_output_importance = handle.get_tensor(
+                f"o.model.layers.{args.block_index}.mlp.down_proj"
+            )
+        else:
+            input_importance = handle.get_tensor(
+                f"block_{args.block_index}.{layer_path}.input_importance"
+            )
+            layer_output_importance = handle.get_tensor(
+                f"block_{args.block_index}.{layer_path}.output_importance"
+            )
+            block_output_importance = handle.get_tensor(
+                f"block_{args.block_index}.mlp.down_proj.output_importance"
+            )
 
     payload: dict[str, object] = {
         "schema_version": 1,
         "model_revision": MODEL_REVISION,
+        "block_index": args.block_index,
+        "layer_path": layer_path,
+        "sample_offset": args.sample_offset,
         "samples": args.samples,
+        "fit_samples": fit_samples,
+        "held_out_samples": args.samples - fit_samples,
+        "kl_samples": args.kl_samples,
         "epochs": list(epochs),
+        "binary_learning_rates": list(binary_learning_rates),
+        "initializations": list(initializations),
         "epoch_loss_mode": "legacy_training",
         "ls_scale_fit_passes": list(ls_scale_fit_passes),
         "protocol": {
             "snapshot": str(args.snapshot.resolve()),
             "calibration_artifact": calibration.reference.artifact_id,
-            "fisher": str(args.fisher.resolve()),
-            "legacy_initial": str(args.legacy_initial.resolve()),
+            "importance": str(importance_path.resolve()),
+            "importance_kind": "legacy_fisher" if args.resident_calibration is None else "resident_calibration",
+            "calibration_directory": (
+                None if args.calibration_directory is None else str(args.calibration_directory.resolve())
+            ),
+            "legacy_initial": None if args.legacy_initial is None else str(args.legacy_initial.resolve()),
             "rewrite_factor": str(args.rewrite_factor.resolve()),
             "rewrite_scales": str(args.rewrite_scales.resolve()),
             "rewrite_frozen": str(args.rewrite_frozen.resolve()),
@@ -265,18 +398,28 @@ def main() -> None:
             "batch_size": args.batch_size,
             "microbatch_size": args.microbatch_size,
             "block_forward_batch_size": args.block_forward_batch_size,
+            "sample_offset": args.sample_offset,
+            "fit_samples": fit_samples,
+            "kl_offset": args.kl_offset,
+            "kl_samples": args.kl_samples,
+            "kl_sequence_length": args.kl_sequence_length,
         },
         "environment": {
             "torch": str(torch.__version__),
             "cuda": torch.version.cuda,
             "gpu": torch.cuda.get_device_name(args.device) if args.device.startswith("cuda") else None,
         },
-        "initial_state_comparison": _comparison(legacy, rewrite),
+        "initial_state_comparison": (
+            None
+            if legacy is None or set(initializations) != {"legacy", "rewrite"}
+            else _comparison(legacy, rewrite)
+        ),
         "runs": [],
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with wait_for_device_lease(args.device, args.wait_for_device_seconds), _legacy_cuda_numerics():
-        tokens = calibration.input_ids[: args.samples].to(args.device)
+        kl_reconstructions: list[torch.Tensor] = []
+        tokens = calibration.input_ids[args.sample_offset : sample_stop].to(args.device)
         model = cast(
             nn.Module,
             AutoModelForCausalLM.from_pretrained(
@@ -291,13 +434,35 @@ def main() -> None:
         if not isinstance(layers, nn.ModuleList):
             raise TypeError("model does not expose decoder layers")
         text_model = getattr(model, "model", model)
+        source_block = layers[args.block_index]
         capture = capture_prefix_invocations(
-            layers[0],
+            source_block,
             (lambda: cast(Any, text_model)(input_ids=tokens[:1], use_cache=False),),
         )[0]
         metadata = capture.keyword
-        inputs = _run_prefix_batched(adapter, model, tokens, args.block_forward_batch_size, "cpu").detach()
-        source_block = layers[0]
+        if args.block_index == 0:
+            inputs = _run_prefix_batched(
+                adapter, model, tokens, args.block_forward_batch_size, "cpu"
+            ).detach()
+        else:
+            captured_inputs: list[torch.Tensor] = []
+            with torch.no_grad():
+                for start in range(0, tokens.shape[0], args.block_forward_batch_size):
+                    end = min(start + args.block_forward_batch_size, tokens.shape[0])
+                    invocation = capture_prefix_invocations(
+                        source_block,
+                        (
+                            lambda start=start, end=end: cast(Any, text_model)(
+                                input_ids=tokens[start:end], use_cache=False
+                            ),
+                        ),
+                    )[0]
+                    if not invocation.positional or not isinstance(
+                        invocation.positional[0], torch.Tensor
+                    ):
+                        raise TypeError("captured block invocation has no tensor input")
+                    captured_inputs.append(invocation.positional[0].to("cpu"))
+            inputs = torch.cat(captured_inputs, dim=0).detach()
         targets = _run_block_batched(
             adapter,
             source_block,
@@ -306,20 +471,21 @@ def main() -> None:
             args.block_forward_batch_size,
             "cpu",
         ).detach()
-        with source.read_tensor("model.layers.0.mlp.gate_proj.weight", args.device) as source_weight:
+        source_weight_key = f"model.layers.{args.block_index}.{layer_path}.weight"
+        with source.read_tensor(source_weight_key, args.device) as source_weight:
             pre_fit_module = _module(rewrite_pre_scale_fit, args.device, inputs.dtype)
             post_fit_module = _module(rewrite, args.device, inputs.dtype)
             pre_fit_metrics = _weighted_weight_metrics(
                 source_weight,
                 pre_fit_module,
                 input_importance.to(args.device),
-                gate_output_importance.to(args.device),
+                layer_output_importance.to(args.device),
             )
             post_fit_metrics = _weighted_weight_metrics(
                 source_weight,
                 post_fit_module,
                 input_importance.to(args.device),
-                gate_output_importance.to(args.device),
+                layer_output_importance.to(args.device),
             )
             payload["rewrite_ls_scale_fit"] = {
                 "before": pre_fit_metrics,
@@ -336,13 +502,15 @@ def main() -> None:
                     rewrite_pre_scale_fit,
                     source_weight,
                     input_importance.to(args.device),
-                    gate_output_importance.to(args.device),
+                    layer_output_importance.to(args.device),
                     pass_count,
                 )
-                block = adapter.load_block(source, inventory.blocks[0].block, args.device)
+                block = adapter.load_block(
+                    source, inventory.blocks[args.block_index].block, args.device
+                )
                 block.eval()
                 refitted_module = _module(refitted_state, args.device, inputs.dtype)
-                BlockEditor().install_trainable_layer(block, GATE_PATH, refitted_module)
+                BlockEditor().install_trainable_layer(block, layer_path, refitted_module)
                 row: dict[str, object] = {
                     "alternating_passes": pass_count,
                     "accepted": fitted.accepted,
@@ -353,7 +521,7 @@ def main() -> None:
                         source_weight,
                         refitted_module,
                         input_importance.to(args.device),
-                        gate_output_importance.to(args.device),
+                        layer_output_importance.to(args.device),
                     ),
                     "block_loss": _block_loss(
                         adapter,
@@ -371,81 +539,190 @@ def main() -> None:
                 del block, refitted_module, refitted_state
             payload["ls_scale_fit_sweep"] = ls_scale_fit_sweep
             args.output.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-            for name, state in (("legacy", legacy), ("rewrite", rewrite)):
+            states = {"rewrite": rewrite}
+            if legacy is not None:
+                states["legacy"] = legacy
+            for name in initializations:
+                state = states[name]
                 for epoch_count in epochs:
-                    if args.device.startswith("cuda"):
-                        torch.cuda.reset_peak_memory_stats(args.device)
-                    block = adapter.load_block(source, inventory.blocks[0].block, args.device)
-                    block.eval()
-                    trainable = _module(state, args.device, inputs.dtype)
-                    BlockEditor().install_trainable_layer(block, GATE_PATH, trainable)
-                    before_weight = _weighted_weight_metrics(
-                        source_weight,
-                        trainable,
-                        input_importance.to(args.device),
-                        gate_output_importance.to(args.device),
-                    )
-                    before_block = _block_loss(
-                        adapter,
-                        block,
-                        inputs,
-                        targets,
-                        block_output_importance,
-                        metadata,
-                        args.block_forward_batch_size,
-                    )
-                    started = time.perf_counter()
-                    trajectory: list[dict[str, float | int]] = []
-                    metrics = tune_factorized(
-                        block,
-                        GATE_PATH,
-                        TuningRequest(
-                            inputs,
-                            targets,
-                            epoch_count,
-                            args.batch_size,
-                            1e-5,
-                            output_importance=block_output_importance,
-                            seed=0,
-                            microbatch_size=args.microbatch_size,
-                            restore_best_state=False,
-                            epoch_loss_mode="legacy_training",
-                            epoch_observer=lambda epoch, loss, trajectory=trajectory: trajectory.append(
-                                {"epoch": epoch, "loss": loss}
+                    for binary_learning_rate in binary_learning_rates:
+                        if args.device.startswith("cuda"):
+                            torch.cuda.reset_peak_memory_stats(args.device)
+                        block = adapter.load_block(
+                            source, inventory.blocks[args.block_index].block, args.device
+                        )
+                        block.eval()
+                        trainable = _module(state, args.device, inputs.dtype)
+                        initial_left = torch.where(trainable.left_latent.detach() >= 0, 1, -1)
+                        initial_right = torch.where(trainable.right_latent.detach() >= 0, 1, -1)
+                        BlockEditor().install_trainable_layer(block, layer_path, trainable)
+                        before_weight = _weighted_weight_metrics(
+                            source_weight,
+                            trainable,
+                            input_importance.to(args.device),
+                            layer_output_importance.to(args.device),
+                        )
+                        before_block = _block_loss(
+                            adapter,
+                            block,
+                            inputs[:fit_samples],
+                            targets[:fit_samples],
+                            block_output_importance,
+                            metadata,
+                            args.block_forward_batch_size,
+                        )
+                        before_held_out = (
+                            None
+                            if fit_samples == args.samples
+                            else _block_loss(
+                                adapter,
+                                block,
+                                inputs[fit_samples:],
+                                targets[fit_samples:],
+                                block_output_importance,
+                                metadata,
+                                args.block_forward_batch_size,
+                            )
+                        )
+                        started = time.perf_counter()
+                        trajectory: list[dict[str, float | int]] = []
+
+                        def observe_epoch(
+                            epoch: int,
+                            loss: float,
+                            observed: list[dict[str, float | int]] = trajectory,
+                        ) -> None:
+                            observed.append({"epoch": epoch, "loss": loss})
+
+                        metrics = tune_factorized(
+                            block,
+                            layer_path,
+                            TuningRequest(
+                                inputs[:fit_samples],
+                                targets[:fit_samples],
+                                epoch_count,
+                                args.batch_size,
+                                1e-5,
+                                output_importance=block_output_importance,
+                                seed=0,
+                                microbatch_size=args.microbatch_size,
+                                restore_best_state=False,
+                                epoch_loss_mode="legacy_training",
+                                epoch_observer=observe_epoch,
                             ),
-                        ),
-                        lambda module, value: adapter.run_block(module, value, **metadata),
-                    )
-                    after_weight = _weighted_weight_metrics(
-                        source_weight,
-                        trainable,
-                        input_importance.to(args.device),
-                        gate_output_importance.to(args.device),
-                    )
-                    row = {
-                        "initialization": name,
-                        "epochs": epoch_count,
-                        "before_block_loss": before_block,
-                        "tuning_before_loss": (
-                            None if metrics.before is None else metrics.before.loss
-                        ),
-                        "best_loss": metrics.best.loss,
-                        "final_loss": metrics.final.loss,
-                        "best_epoch": metrics.best_epoch,
-                        "trajectory": trajectory,
-                        "initial_weight": before_weight,
-                        "final_weight": after_weight,
-                        "wall_seconds": time.perf_counter() - started,
-                        "peak_cuda_allocated_bytes": int(torch.cuda.max_memory_allocated(args.device)),
-                        "peak_cuda_reserved_bytes": int(torch.cuda.max_memory_reserved(args.device)),
-                        "final_cuda_allocated_bytes": int(torch.cuda.memory_allocated(args.device)),
-                        "final_cuda_reserved_bytes": int(torch.cuda.memory_reserved(args.device)),
-                    }
-                    cast(list[object], payload["runs"]).append(row)
-                    args.output.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-                    print(json.dumps(row, indent=2, sort_keys=True))
-                    del block, trainable
-                    torch.cuda.empty_cache()
+                            lambda module, value: adapter.run_block(module, value, **metadata),
+                            learning_rates=FactorizedTuningLearningRates(
+                                binary_learning_rate,
+                                1e-5,
+                                1e-5,
+                                1e-5,
+                            ),
+                        )
+                        after_weight = _weighted_weight_metrics(
+                            source_weight,
+                            trainable,
+                            input_importance.to(args.device),
+                            layer_output_importance.to(args.device),
+                        )
+                        after_held_out = (
+                            None
+                            if fit_samples == args.samples
+                            else _block_loss(
+                                adapter,
+                                block,
+                                inputs[fit_samples:],
+                                targets[fit_samples:],
+                                block_output_importance,
+                                metadata,
+                                args.block_forward_batch_size,
+                            )
+                        )
+                        final_left = torch.where(trainable.left_latent.detach() >= 0, 1, -1)
+                        final_right = torch.where(trainable.right_latent.detach() >= 0, 1, -1)
+                        row = {
+                            "initialization": name,
+                            "epochs": epoch_count,
+                            "binary_learning_rate": binary_learning_rate,
+                            "before_block_loss": before_block,
+                            "before_held_out_block_loss": before_held_out,
+                            "tuning_before_loss": (
+                                None if metrics.before is None else metrics.before.loss
+                            ),
+                            "best_loss": metrics.best.loss,
+                            "final_loss": metrics.final.loss,
+                            "after_held_out_block_loss": after_held_out,
+                            "best_epoch": metrics.best_epoch,
+                            "trajectory": trajectory,
+                            "left_sign_changes": int((final_left != initial_left).sum()),
+                            "right_sign_changes": int((final_right != initial_right).sum()),
+                            "initial_weight": before_weight,
+                            "final_weight": after_weight,
+                            "wall_seconds": time.perf_counter() - started,
+                            "peak_cuda_allocated_bytes": int(torch.cuda.max_memory_allocated(args.device)),
+                            "peak_cuda_reserved_bytes": int(torch.cuda.max_memory_reserved(args.device)),
+                            "final_cuda_allocated_bytes": int(torch.cuda.memory_allocated(args.device)),
+                            "final_cuda_reserved_bytes": int(torch.cuda.memory_reserved(args.device)),
+                        }
+                        cast(list[object], payload["runs"]).append(row)
+                        if args.kl_samples:
+                            kl_reconstructions.append(
+                                trainable.dense_weight().detach().to(device="cpu").contiguous()
+                            )
+                        args.output.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+                        print(json.dumps(row, indent=2, sort_keys=True))
+                        del block, trainable
+                        torch.cuda.empty_cache()
+        if args.kl_samples:
+            kl_tokens = calibration.input_ids[
+                args.kl_offset : kl_stop, : args.kl_sequence_length
+            ].contiguous()
+            layer = LayerId(BlockId(args.block_index), layer_path)
+            splice_key = f"{args.block_index}:{layer_path}"
+            teacher_state: tuple[float, tuple[torch.Tensor, ...]] | None = None
+            kl_results: list[KlBudgetArmResult] = []
+            runs = cast(list[dict[str, object]], payload["runs"])
+            if len(kl_reconstructions) != len(runs):
+                raise AssertionError("KL reconstruction inventory differs from tuning runs")
+            for row, reconstruction in zip(runs, kl_reconstructions, strict=True):
+                normalized_error = float(
+                    cast(Any, cast(dict[str, object], row["final_weight"])["weighted_normalized_error"])
+                )
+                reconstruction_set = SpliceReconstructionSet(
+                    (SpliceReconstruction(layer, reconstruction, None, normalized_error**2),),
+                    ((splice_key, (layer,)),),
+                    ((splice_key, normalized_error**2),),
+                )
+                evaluator = DenseKlSpliceEvaluator(
+                    model,
+                    reconstruction_set,
+                    kl_tokens,
+                    device=args.device,
+                    batch_size=1,
+                    token_chunk_size=128,
+                    teacher_cache_mode="cpu",
+                )
+                if teacher_state is None:
+                    teacher_state = evaluator.teacher_cache_state()
+                else:
+                    evaluator.install_teacher_cache(*teacher_state)
+                kl_result = evaluator("full")
+                kl_results.append(kl_result)
+                row["language_model_splice"] = to_dict(kl_result)
+                args.output.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+                del evaluator, reconstruction_set
+                gc.collect()
+                torch.cuda.empty_cache()
+            baseline = kl_results[0]
+            payload["language_model_splice_comparisons_to_first"] = [
+                {
+                    "run_index": index,
+                    "negative_log_likelihood_delta": (
+                        result.negative_log_likelihood - baseline.negative_log_likelihood
+                    ),
+                    "kl": to_dict(paired_bootstrap_kl_delta(baseline, result, seed=0)),
+                }
+                for index, result in enumerate(kl_results[1:], start=1)
+            ]
         model.to("cpu")
     args.output.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 

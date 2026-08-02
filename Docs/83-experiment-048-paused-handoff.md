@@ -88,3 +88,13 @@ Before resuming:
 
 The experiment is paused, not rejected or accepted. No quality conclusion can
 be drawn from this partial run.
+
+## Resume event
+
+The user subsequently directed the experiment to continue. The pause sentinel
+was explicitly removed after rechecking process ownership, the device lease,
+the journal, and the saved validation receipt. A bounded resident worker then
+completed block 8 at journal sequence 54. This document remains the historical
+handoff for the block-0-through-7 pause point; the live status and later
+evidence are recorded in
+`Docs/Experiments/048-adaptive-capability-correction-policy.md`.

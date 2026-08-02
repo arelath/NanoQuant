@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from argparse import Namespace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -14,6 +15,7 @@ from tools.run_experiment048_campaign import (
     _selected,
     _selection_evaluation_command,
     _static_plan,
+    _worker,
 )
 
 
@@ -41,6 +43,59 @@ def test_campaign_plan_keeps_selection_and_confirmation_in_distinct_stages(
         "if corrected: open final slice and run raw/fitted absolute C4 confirmation"
     )
     assert plan[-1].endswith("1000-example six-task quality")
+
+
+def test_resident_controller_restarts_after_each_committed_block(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "tools.run_experiment048_campaign.PAUSE_SENTINEL",
+        tmp_path / "not-paused",
+    )
+    return_codes = iter((75, 75, 0))
+    commands: list[tuple[list[str], Path, bool]] = []
+
+    def run(command, *, cwd, check):  # type: ignore[no-untyped-def]
+        commands.append((command, cwd, check))
+        return SimpleNamespace(returncode=next(return_codes))
+
+    monkeypatch.setattr("tools.run_experiment048_campaign.subprocess.run", run)
+    snapshot = tmp_path / "snapshot"
+
+    assert _worker(Namespace(snapshot=snapshot, worker="resident")) == 0
+    assert len(commands) == 3
+    assert all(command[0][2:4] == ["--worker", "resident-block"] for command in commands)
+    assert all(command[0][-2:] == ["--snapshot", str(snapshot.resolve())] for command in commands)
+    assert all(command[1:] == (Path(__file__).resolve().parents[2], False) for command in commands)
+
+
+def test_resident_controller_propagates_block_worker_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "tools.run_experiment048_campaign.PAUSE_SENTINEL",
+        tmp_path / "not-paused",
+    )
+    monkeypatch.setattr(
+        "tools.run_experiment048_campaign.subprocess.run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=19),
+    )
+
+    assert _worker(Namespace(snapshot=tmp_path / "snapshot", worker="resident")) == 19
+
+
+def test_worker_stops_before_loading_experiment_when_pause_sentinel_exists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sentinel = tmp_path / "PAUSED"
+    sentinel.write_text("paused for another experiment\n", encoding="utf-8")
+    monkeypatch.setattr("tools.run_experiment048_campaign.PAUSE_SENTINEL", sentinel)
+    monkeypatch.setattr(
+        "tools.run_experiment048_campaign._load_definition",
+        lambda: pytest.fail("paused worker must not load the experiment"),
+    )
+
+    assert _worker(Namespace(snapshot=tmp_path / "snapshot", worker="resident-block")) == 76
 
 
 def test_selection_command_binds_primary_and_all_correction_checkpoints(

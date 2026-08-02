@@ -24,6 +24,7 @@ from nanoquant.domain.profiling import NULL_RECORDER, PhaseRecorder
 
 ForwardFunction = Callable[[nn.Module, torch.Tensor], torch.Tensor]
 ParameterSelector = Callable[[str, nn.Parameter], bool]
+ParameterLearningRate = Callable[[str, nn.Parameter], float]
 EpochLossMode: TypeAlias = Literal["full_evaluation", "legacy_training"]
 
 _CUDA_CACHE_PRESSURE_FRACTION = 0.8
@@ -45,6 +46,14 @@ class TuningRequest:
     epoch_observer: Callable[[int, float], None] | None = None
     restore_best_state: bool = True
     epoch_loss_mode: EpochLossMode = "full_evaluation"
+
+
+@dataclass(frozen=True, slots=True)
+class FactorizedTuningLearningRates:
+    binary: float
+    scale: float
+    outlier: float
+    bias: float
 
 
 TuningOptimizerState: TypeAlias = ParityAdamWState
@@ -326,6 +335,7 @@ def tune(
     selector: ParameterSelector,
     recorder: PhaseRecorder = NULL_RECORDER,
     *,
+    learning_rate_for_parameter: ParameterLearningRate | None = None,
     resume: TuningResumeState | None = None,
     checkpoint_sink: TuningCheckpointSink | None = None,
 ) -> TuningMetrics:
@@ -343,6 +353,16 @@ def tune(
     selected = [(name, parameter) for name, parameter in model.named_parameters() if selector(name, parameter)]
     if not selected:
         raise ValueError("tuning selector chose no parameters")
+    grouped_parameters: dict[float, list[nn.Parameter]] = {}
+    for name, parameter in selected:
+        learning_rate = (
+            request.learning_rate
+            if learning_rate_for_parameter is None
+            else learning_rate_for_parameter(name, parameter)
+        )
+        if not math.isfinite(learning_rate) or learning_rate <= 0:
+            raise ValueError(f"invalid tuning learning rate for parameter: {name}")
+        grouped_parameters.setdefault(learning_rate, []).append(parameter)
     _require_finite_selected_parameters(selected, "initial state")
     original_requires_grad = {id(parameter): parameter.requires_grad for parameter in model.parameters()}
     for parameter in model.parameters():
@@ -438,9 +458,12 @@ def tune(
         for epoch, observed_loss in enumerate(epoch_losses):
             if observed_loss is not None:
                 request.epoch_observer(epoch, observed_loss)
-    optimizer = ParityAdamW(
-        [parameter for _, parameter in selected], lr=request.learning_rate, weight_decay=request.weight_decay
-    )
+    optimizer_groups = [
+        {"params": parameters, "lr": learning_rate}
+        for learning_rate, parameters in grouped_parameters.items()
+    ]
+    optimizer = ParityAdamW(optimizer_groups, lr=request.learning_rate, weight_decay=request.weight_decay)
+    initial_learning_rates = tuple(float(group["lr"]) for group in optimizer.param_groups)
     steps_per_epoch = (request.inputs.shape[0] + request.batch_size - 1) // request.batch_size
     total_steps = max(1, request.epochs * steps_per_epoch)
     starting_steps = 0 if resume is None else resume.steps_completed
@@ -456,7 +479,7 @@ def tune(
         scheduler,
         starting_steps,
         total_steps,
-        request.learning_rate,
+        initial_learning_rates,
         eta_min=request.learning_rate * 1e-4,
     )
     generator = torch.Generator(device="cpu").manual_seed(request.seed)
@@ -698,16 +721,32 @@ def tune_factorized(
     forward: ForwardFunction,
     recorder: PhaseRecorder = NULL_RECORDER,
     *,
+    learning_rates: FactorizedTuningLearningRates | None = None,
     resume: TuningResumeState | None = None,
     checkpoint_sink: TuningCheckpointSink | None = None,
 ) -> TuningMetrics:
     prefix = module_path + "."
+
+    def parameter_learning_rate(name: str, _parameter: nn.Parameter) -> float:
+        if learning_rates is None:
+            return request.learning_rate
+        if name.endswith((".left_latent", ".right_latent")):
+            return learning_rates.binary
+        if name.endswith((".scale_pre", ".scale_mid", ".scale_post", ".patch_left", ".patch_right")):
+            return learning_rates.scale
+        if name.endswith(".outlier_values"):
+            return learning_rates.outlier
+        if name.endswith(".bias"):
+            return learning_rates.bias
+        return request.learning_rate
+
     return tune(
         model,
         request,
         forward,
         lambda name, _parameter: name.startswith(prefix),
         recorder,
+        learning_rate_for_parameter=parameter_learning_rate,
         resume=resume,
         checkpoint_sink=checkpoint_sink,
     )

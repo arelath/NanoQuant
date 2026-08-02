@@ -1,0 +1,1500 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="" xml:lang="">
+<head>
+  <meta charset="utf-8" />
+  <meta name="generator" content="pandoc" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <meta name="author" content="[PLACEHOLDER: Author names] [PLACEHOLDER: Affiliations] [PLACEHOLDER: Corresponding author email]" />
+  <title>Beyond Matrix Reconstruction</title>
+  <style>
+    /* Default styles provided by pandoc.
+    ** See https://pandoc.org/MANUAL.html#variables-for-html for config info.
+    */
+    html {
+      color: #1a1a1a;
+      background-color: #fdfdfd;
+    }
+    body {
+      margin: 0 auto;
+      max-width: 36em;
+      padding-left: 50px;
+      padding-right: 50px;
+      padding-top: 50px;
+      padding-bottom: 50px;
+      hyphens: auto;
+      overflow-wrap: break-word;
+      text-rendering: optimizeLegibility;
+      font-kerning: normal;
+    }
+    @media (max-width: 600px) {
+      body {
+        font-size: 0.9em;
+        padding: 12px;
+      }
+      h1 {
+        font-size: 1.8em;
+      }
+    }
+    @media print {
+      html {
+        background-color: white;
+      }
+      body {
+        background-color: transparent;
+        color: black;
+        font-size: 12pt;
+      }
+      p, h2, h3 {
+        orphans: 3;
+        widows: 3;
+      }
+      h2, h3, h4 {
+        page-break-after: avoid;
+      }
+    }
+    p {
+      margin: 1em 0;
+    }
+    a {
+      color: #1a1a1a;
+    }
+    a:visited {
+      color: #1a1a1a;
+    }
+    img {
+      max-width: 100%;
+    }
+    svg {
+      height: auto;
+      max-width: 100%;
+    }
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.4em;
+    }
+    h5, h6 {
+      font-size: 1em;
+      font-style: italic;
+    }
+    h6 {
+      font-weight: normal;
+    }
+    ol, ul {
+      padding-left: 1.7em;
+      margin-top: 1em;
+    }
+    li > ol, li > ul {
+      margin-top: 0;
+    }
+    blockquote {
+      margin: 1em 0 1em 1.7em;
+      padding-left: 1em;
+      border-left: 2px solid #e6e6e6;
+      color: #606060;
+    }
+    div.abstract {
+      margin: 2em 2em 2em 2em;
+      text-align: left;
+      font-size: 85%;
+    }
+    div.abstract-title {
+      font-weight: bold;
+      text-align: center;
+      padding: 0;
+      margin-bottom: 0.5em;
+    }
+    code {
+      font-family: Menlo, Monaco, Consolas, 'Lucida Console', monospace;
+      font-size: 85%;
+      margin: 0;
+      hyphens: manual;
+    }
+    pre {
+      margin: 1em 0;
+      overflow: auto;
+    }
+    pre code {
+      padding: 0;
+      overflow: visible;
+      overflow-wrap: normal;
+    }
+    .sourceCode {
+     background-color: transparent;
+     overflow: visible;
+    }
+    hr {
+      border: none;
+      border-top: 1px solid #1a1a1a;
+      height: 1px;
+      margin: 1em 0;
+    }
+    table {
+      margin: 1em 0;
+      border-collapse: collapse;
+      width: 100%;
+      overflow-x: auto;
+      display: block;
+      font-variant-numeric: lining-nums tabular-nums;
+    }
+    table caption {
+      margin-bottom: 0.75em;
+    }
+    tbody {
+      margin-top: 0.5em;
+      border-top: 1px solid #1a1a1a;
+      border-bottom: 1px solid #1a1a1a;
+    }
+    th {
+      border-top: 1px solid #1a1a1a;
+      padding: 0.25em 0.5em 0.25em 0.5em;
+    }
+    td {
+      padding: 0.125em 0.5em 0.25em 0.5em;
+    }
+    header {
+      margin-bottom: 4em;
+      text-align: center;
+    }
+    #TOC li {
+      list-style: none;
+    }
+    #TOC ul {
+      padding-left: 1.3em;
+    }
+    #TOC > ul {
+      padding-left: 0;
+    }
+    #TOC a:not(:hover) {
+      text-decoration: none;
+    }
+    code{white-space: pre-wrap;}
+    span.smallcaps{font-variant: small-caps;}
+    div.columns{display: flex; gap: min(4vw, 1.5em);}
+    div.column{flex: auto; overflow-x: auto;}
+    div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+    /* The extra [class] is a hack that increases specificity enough to
+       override a similar rule in reveal.js */
+    ul.task-list[class]{list-style: none;}
+    ul.task-list li input[type="checkbox"] {
+      font-size: inherit;
+      width: 0.8em;
+      margin: 0 0.8em 0.2em -1.6em;
+      vertical-align: middle;
+    }
+    /* CSS for citations */
+    div.csl-bib-body { }
+    div.csl-entry {
+      clear: both;
+    }
+    .hanging-indent div.csl-entry {
+      margin-left:2em;
+      text-indent:-2em;
+    }
+    div.csl-left-margin {
+      min-width:2em;
+      float:left;
+    }
+    div.csl-right-inline {
+      margin-left:2em;
+      padding-left:1em;
+    }
+    div.csl-indent {
+      margin-left: 2em;
+    }  </style>
+  <script defer=""
+  src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml-full.js"
+  type="text/javascript"></script>
+</head>
+<body>
+<header id="title-block-header">
+<h1 class="title">Beyond Matrix Reconstruction</h1>
+<p class="author"><span
+style="color: red!70!black"><strong>[PLACEHOLDER: Author
+names]</strong></span><br />
+<span style="color: red!70!black"><strong>[PLACEHOLDER:
+Affiliations]</strong></span><br />
+<span
+style="color: red!70!black"><strong><code>[PLACEHOLDER: Corresponding author email]</code></strong></span></p>
+<div class="abstract">
+<div class="abstract-title">Abstract</div>
+<p>Low-rank binary factorization makes post-training compression below
+one bit per weight possible, but at this precision matrix-local
+reconstruction error is a weak proxy for language-model behavior. We
+introduce <span class="smallcaps">FunctionalNanoQuant</span>, a set of
+storage-neutral and exact-budget extensions to <span
+class="smallcaps">NanoQuant</span>. First, an exact-unit functional
+profiler measures the predictive divergence caused by each physical
+factorization unit, while a rank-response model allocates aligned rank
+quanta by predicted functional error reduction per physical bit. Second,
+operator-coupled scale refitting optimizes the gated MLP as a composed
+function rather than as three independent matrices, and covariantly
+folds every learned multiplier into the existing factor scales and
+correction terms. Third, a top-<span
+class="math inline">\(k\)</span>-plus-tail distillation objective
+removes the confidence invariance of conditional top-<span
+class="math inline">\(k\)</span> distillation while retaining a bounded
+teacher cache. We additionally study shared-input factorization,
+covariance-aware binary refinement, and a mixed free/codebook factor
+representation.</p>
+<p>On Gemma 3 1B, functional rank allocation reduces WikiText-2
+perplexity from 274.9 to 228.6 at essentially unchanged effective bits
+per weight (BPW). Foldable MLP refitting further reduces
+protocol-matched perplexity by 5.39% with identical packed bytes and
+BPW. On a matched frozen factorization, tail-aware distillation reduces
+WikiText-2 perplexity from 197.4 to 184.2 and improves held-out C4
+negative log-likelihood and full-vocabulary teacher KL without an
+established six-task regression. <span
+style="color: red!70!black"><strong>[PLACEHOLDER: Add results for at
+least two additional model families and the final combined
+method.]</strong></span> These results show that sub-1-bit recovery
+benefits from optimizing the functional error actually exposed by the
+model, provided that the resulting corrections remain faithful to the
+deployed representation.</p>
+</div>
+</header>
+<h1 id="introduction">Introduction</h1>
+<p>Post-training quantization (PTQ) normally reduces the precision of a
+dense weight tensor in place. This approach becomes structurally awkward
+below one bit per source parameter. <span
+class="smallcaps">NanoQuant</span> instead represents a dense matrix by
+two low-rank binary factors and a small set of floating-point scales,
+initializes the factors with a latent-binary ADMM procedure, refines
+them inside a block-reconstruction loop, and finally tunes model-level
+scales by knowledge distillation <span class="citation"
+data-cites="nanoquant2026">(Chong et al. 2026)</span>. The
+representation establishes a strong sub-1-bit size–quality frontier
+without the data budget of low-rank binary quantization-aware
+training <span class="citation"
+data-cites="littlebit2025 onebit2024">(Lee et al. 2025; <span
+class="nocase">Xu et al.</span> 2024)</span>.</p>
+<p>Our starting observation is that a successful representation does not
+make its local reconstruction objective an adequate global decision
+rule. In the project’s controlled experiments, lower unweighted matrix
+error often corresponds to worse teacher KL or perplexity; individually
+favorable changes frequently fail when composed across depth. At
+approximately one BPW, there is too little redundant capacity to ignore
+this mismatch.</p>
+<p>We therefore ask a narrower question than inventing another binary
+factorizer: <em>how should a fixed low-rank binary representation spend
+and recover its capacity when end-model behavior, exact physical bits,
+and runtime fidelity are all first-class constraints?</em></p>
+<p><span class="smallcaps">FunctionalNanoQuant</span> answers with three
+mechanisms:</p>
+<ol>
+<li><p><strong>Functional error budgeting.</strong> We splice one
+physical factorization unit at a time into a dense teacher, measure
+causal full-vocabulary KL, probe the unit’s reconstruction response at
+several ranks, and allocate exact aligned rank quanta by diminishing
+predicted gain per bit.</p></li>
+<li><p><strong>Foldable composed-operator recovery.</strong> We fit
+positive channel multipliers at the gate/up product and downstream
+projection of a gated MLP, optionally continue them against model-level
+loss, and fold them into already stored scales and side terms. The
+serialized model adds no tensor shapes, bytes, or inference
+operation.</p></li>
+<li><p><strong>Tail-aware bounded distillation.</strong> We cache the
+teacher’s top-<span class="math inline">\(k\)</span> logits and one
+full-vocabulary log-normalizer per selected token. The resulting <span
+class="math inline">\(k+1\)</span>-category objective retains the
+teacher’s aggregate tail mass and removes a confidence-null direction in
+conditional top-<span class="math inline">\(k\)</span> KD.</p></li>
+</ol>
+<p>The paper also records algorithms that reveal the limits of local
+proxies: shared-input and reciprocal factor grouping, dense-covariance
+sign refinement, sparse-corrected sign codebooks, and a mixed free/coded
+basis. Some are useful representations or diagnostics but do not yet
+satisfy full-model transfer. Reporting those negative and partial
+results prevents a locally attractive ablation from being mistaken for a
+deployable method.</p>
+<p>Our contributions are:</p>
+<ul>
+<li><p>an exact-bit, KL-calibrated rank allocator driven by current-run
+physical-unit measurements and piecewise rank-response curves;</p></li>
+<li><p>an operator-coupled scale-recovery family whose learned
+parameters are exactly foldable into low-rank binary model
+components;</p></li>
+<li><p>a bounded-memory top-<span
+class="math inline">\(k\)</span>-plus-tail model-reconstruction
+objective and a diagnosis of conditional top-<span
+class="math inline">\(k\)</span> confidence collapse;</p></li>
+<li><p>a mixed free/coded sign-word factor representation that trades
+coding cost for additional rank at the same physical bit budget;
+and</p></li>
+<li><p>a reproducible evaluation methodology spanning immutable
+calibration, paired held-out comparisons, exact BPW, packed execution,
+resume, and GGUF export.</p></li>
+</ul>
+<figure data-latex-placement="t">
+
+</figure>
+<h1 id="background-and-problem-formulation">Background and Problem
+Formulation</h1>
+<h2 id="low-rank-binary-ptq">Low-rank binary PTQ</h2>
+<p>For a dense linear weight <span
+class="math inline">\(W\in\mathbb{R}^{m\times n}\)</span>, we use the
+deployed factor form <span class="math display">\[\widehat W =
+  \operatorname{diag}(s_{\mathrm{post}})
+  B_L
+  \operatorname{diag}(s_{\mathrm{mid}})
+  B_R
+  \operatorname{diag}(s_{\mathrm{pre}}).
+  \tag{1}\]</span> where <span
+class="math inline">\(B_L\in\{-1,+1\}^{m\times r}\)</span> and <span
+class="math inline">\(B_R\in\{-1,+1\}^{r\times n}\)</span>. Optional
+salient columns, biases, or low-rank side corrections are accounted
+separately and must be transformed covariantly whenever a boundary scale
+changes. This form generalizes the two channel-scale formulation in
+<span class="smallcaps">NanoQuant</span> while retaining packed binary
+execution.</p>
+<p>The binary factor cost is rank dependent. Let <span
+class="math inline">\(C_i(r)\)</span> be the exact physical cost of unit
+<span class="math inline">\(i\)</span> at rank <span
+class="math inline">\(r\)</span>, including aligned sign words,
+rank-shaped scales, and fixed side data. Given target budget <span
+class="math inline">\(C_{\max}\)</span>, the planner must satisfy <span
+class="math display">\[\sum_i C_i(r_i) \le C_{\max}
+  \tag{2}\]</span> without treating alignment residue or metadata as
+free.</p>
+<h2 id="why-local-reconstruction-is-insufficient">Why local
+reconstruction is insufficient</h2>
+<p>Let <span class="math inline">\(M\)</span> be the dense teacher and
+<span class="math inline">\(\widehat M_S\)</span> a model in which only
+units in <span class="math inline">\(S\)</span> are replaced by their
+compressed reconstructions. For token inventory <span
+class="math inline">\(\mathcal D\)</span>, define the splice divergence
+<span class="math display">\[K(S)=\frac{1}{|\mathcal
+T|}\sum_{t\in\mathcal T}
+D_{\mathrm{KL}}\!\left(p_M(\cdot\mid x_{&lt;t})\,\|\,
+p_{\widehat M_S}(\cdot\mid x_{&lt;t})\right).
+\tag{3}\]</span> The exact-unit profile uses <span
+class="math inline">\(K(\{i\})\)</span>. This is more expensive than
+Frobenius error, but for billion-parameter models a complete 130-unit
+profile is still small relative to factorization and tuning. More
+importantly, it measures the quantity the allocator is intended to
+protect.</p>
+<h1 id="functional-error-budgeting">Functional Error Budgeting</h1>
+<h2 id="immutable-exact-unit-profiling">Immutable exact-unit
+profiling</h2>
+<p>The profiler begins from a complete baseline factorization. It loads
+the dense teacher once, caches or streams teacher log-probabilities, and
+evaluates a factorized splice for each <em>physical</em> unit. A shared
+QKV group is one arm, not three logical arms. Every profile is bound to
+the model revision, calibration state, factorization recipe, source
+tensor hashes, token hashes, and packed-unit topology. Per-sequence NLL
+and KL are retained for paired bootstrap intervals.</p>
+<p>For each unit <span class="math inline">\(i\)</span>, the profile
+records baseline rank <span class="math inline">\(r_{i,0}\)</span>,
+exact cost, functional anchor <span class="math inline">\(K_i\)</span>,
+and calibration-weighted squared reconstruction error <span
+class="math inline">\(D_{i,0}\)</span>. Earlier variants used <span
+class="math inline">\(K_i/D_{i,0}\)</span> as a sensitivity proxy; the
+accepted exact-unit policy uses <span class="math inline">\(K_i\)</span>
+directly and reserves reconstruction error for predicting the effect of
+a rank change.</p>
+<h2 id="measured-rank-response-curves">Measured rank-response
+curves</h2>
+<p>Each unit is probed at aligned lower, baseline, and upper ranks using
+the current run’s objective and factorization settings. Over the
+calibrated rank interval, relative reconstruction error is modeled as
+piecewise exponential. If <span class="math inline">\(B_i(r)\)</span> is
+the integrated per-rank slope from <span
+class="math inline">\(r_{i,0}\)</span> to <span
+class="math inline">\(r\)</span>, then <span
+class="math display">\[D_i(r)=D_{i,0}\exp[-2B_i(r)].
+\tag{4}\]</span> For a segment with slope <span
+class="math inline">\(\beta_{ij}\)</span>, <span
+class="math inline">\(B_i(r)\)</span> accumulates <span
+class="math inline">\(\beta_{ij}\)</span> times the signed rank distance
+traversed in that segment. The factor two converts the empirical
+relative-error response to squared error.</p>
+<p>Noisy probe intervals that fail to establish improvement are assigned
+zero marginal gain. Response curves are invalidated if topology, source
+weights, calibration, ADMM settings, or baseline rank changes.</p>
+<h2 id="exact-bit-allocation">Exact-bit allocation</h2>
+<p>At current rank <span class="math inline">\(r\)</span>, one aligned
+quantum <span class="math inline">\(\Delta\)</span> receives priority
+<span class="math display">\[\pi_i(r,\Delta)=
+\frac{a_i\left[D_i(r)-D_i(r+\Delta)\right]}
+{C_i(r+\Delta)-C_i(r)},
+\qquad
+a_i=\exp\!\left(\gamma(\log K_i-\overline{\log K})\right).
+\tag{5}\]</span> where <span class="math inline">\(\overline{\log
+K}\)</span> is a baseline-cost-weighted geometric mean and <span
+class="math inline">\(\gamma\in[0,1]\)</span> tempers sensitivity. The
+KL-calibrated configuration uses <span
+class="math inline">\(\gamma=1\)</span>. Starting from legal floors, the
+deterministic planner repeatedly awards the affordable quantum with
+maximum <span class="math inline">\(\pi_i\)</span>, recomputing
+diminishing gain after each award. Architecture-critical units may have
+explicit floors; all units respect calibrated response bounds and
+physical rank caps.</p>
+<div class="center">
+
+</div>
+<h2 id="reconstruction-aware-precursor">Reconstruction-aware
+precursor</h2>
+<p>The reconstruction-only precursor uses Eq. (4) with activation/Fisher
+sensitivity rather than exact-unit KL. It reduced aggregate matrix error
+in probes but could starve architecture-critical transforms. A complete
+Gemma 3 270M run reached perplexity 2018.5, substantially worse than the
+accepted baseline. This negative result motivated exact functional
+anchors and protected floors rather than invalidating measured rank
+response itself.</p>
+<h1 id="topology-and-objective-variants">Topology and Objective
+Variants</h1>
+<h2 id="shared-input-stacking">Shared-input stacking</h2>
+<p>For projections <span class="math inline">\(W_1,\ldots,W_g\)</span>
+consuming the same input <span class="math inline">\(x\)</span>, row
+stacking forms <span class="math display">\[W_G=\begin{bmatrix}W_1\\
+\vdots\\ W_g\end{bmatrix}
+\approx B_{L,G}\operatorname{diag}(s_G)B_{R,G}.
+\tag{6}\]</span> so all members share the right/input binary basis. The
+combined rank is funded by the exact sum of the separate member budgets.
+Output importance is concatenated in member order; input importance is
+shared. Outliers and commits belong to the physical group, while logical
+outputs are row slices.</p>
+<p>QKV stacking reduced fixed-budget reconstruction error in preliminary
+studies, but a complete Gemma 3 270M run regressed both perplexity and
+task accuracy. We therefore treat shared-input topology as a planner
+option, not a universal architecture rule. Reciprocal groupings such as
+<span class="math inline">\([Q;V]\)</span> with <span
+class="math inline">\([K;O^\top]\)</span> also improved matrix
+objectives but failed held-out attention-function gates.</p>
+<h2 id="fisher-weighting-and-covariance-aware-refinement">Fisher
+weighting and covariance-aware refinement</h2>
+<p>For reconstruction error <span class="math inline">\(E=W-\widehat
+W\)</span>, the covariance-aware objective is <span
+class="math display">\[\mathcal J(E)=
+\operatorname{tr}\!\left(D_{\mathrm{out}}E\Sigma_{\mathrm{in}}E^\top\right).
+\tag{7}\]</span> where <span
+class="math inline">\(D_{\mathrm{out}}\)</span> is diagonal output
+importance and <span class="math inline">\(\Sigma_{\mathrm{in}}\)</span>
+is a dense input covariance. Starting from ordinary ADMM factors, the
+bounded refinement alternates:</p>
+<ol>
+<li><p>closed-form pre/mid/post scale fits under Eq. (7);</p></li>
+<li><p>exact left-sign coordinate flips, independent by output
+row;</p></li>
+<li><p>right-sign batches whose complete coupled quadratic delta is
+negative;</p></li>
+<li><p>final scale fits with rollback if the objective does not
+improve.</p></li>
+</ol>
+<p>The representation, rank, and persisted bit count do not change. On
+selected blocks, the 32-step variant reduced held-out covariance error
+energy by 30.94% and joint-splice KL by 10.47%. However, a later
+complete production transfer regressed both pre- and post-KD perplexity
+because the covariance source and placement rule did not transfer. We
+report covariance refinement as a useful bounded solver and negative
+general-selection result, not as part of the final default method.</p>
+<h1 id="sec:mixed">Mixed Free/Coded Binary Factors</h1>
+<p>Ordinary binary factors store each sign independently. A
+codebook-constrained factor instead represents each 32-bit sign word by
+a short codeword index. At equal storage this funds a larger rank, but
+coding both factors restricts both the basis patterns and their
+per-output mixtures. We leave <span class="math inline">\(B_L\)</span>
+fully free and use a heterogeneous basis for rows of <span
+class="math inline">\(B_R\)</span>: <span
+class="math display">\[B_R=\begin{bmatrix}B_R^{\mathrm{free}}\\
+\operatorname{decode}(z_1,c_1)\\ \vdots\\
+\operatorname{decode}(z_q,c_q)
+\end{bmatrix},
+\qquad
+\operatorname{decode}(z,c)=\mathcal C[z]\oplus \operatorname{mask}(c).
+\tag{8}\]</span> Here <span class="math inline">\(\mathcal C\)</span> is
+a <span class="math inline">\(2^{10}\)</span>-entry table of 32-bit sign
+words. Each coded word stores a 10-bit table index and a 9-bit
+identifier for an unordered pair of corrected bit positions, for a
+19-bit record. Component permutation lets the free rows form a prefix,
+so only one free-row count is required.</p>
+<p>The accepted down-projection candidate raises rank from 970 to 1344,
+retains 256 fully free right-factor rows, and codes the remaining 1088
+rows. It uses 7,966,224 bits versus 7,966,624 for the baseline. Across
+blocks 0, 12, and 24, held-out joint splice KL fell by 8.52%; a later
+selective five-block policy passed three factorization seeds. The
+compact payload is expanded once to the canonical packed sign words at
+load time, leaving the timed linear kernel unchanged.</p>
+<div class="center">
+
+</div>
+<p>This representation is fully documented because it is algorithmically
+new, but <span style="color: red!70!black"><strong>[PLACEHOLDER:
+complete a fresh end-to-end compression, packed-quality, and cross-model
+transfer campaign before claiming it as part of the promoted
+method.]</strong></span></p>
+<h1 id="operator-coupled-scale-recovery-and-folding">Operator-Coupled
+Scale Recovery and Folding</h1>
+<h2 id="gated-mlp-objective">Gated-MLP objective</h2>
+<p>For gate and up projections, the dense teacher intermediate is <span
+class="math display">\[h^\star=\operatorname{SiLU}(g^\star)\odot
+u^\star.
+\tag{9}\]</span> Independent matrix reconstruction cannot exploit
+cancellation or compensate the nonlinear gate. We fit positive channel
+multipliers <span class="math inline">\(a,b\)</span> by minimizing <span
+class="math display">\[\min_{a,b&gt;0}\left\|
+\operatorname{SiLU}(\widehat g\odot a)\odot(\widehat u\odot b)-h^\star
+\right\|_F^2.
+\tag{10}\]</span> within bounded multiplicative limits. The downstream
+input multiplier <span class="math inline">\(c\)</span> is then fit
+against the teacher MLP output: <span
+class="math display">\[\min_{c&gt;0}\left\|y^\star-\widehat
+W_{\mathrm{down}}
+       (\widehat h\odot c)\right\|_F^2.
+\tag{11}\]</span> Output-channel fits have closed-form least-squares
+solutions with identity fallback per channel. Down-input fitting uses
+diagonal-preconditioned descent and backtracking, accepting only strict
+objective decreases.</p>
+<p>Local selection did not compose reliably. The accepted policy
+therefore uses fresh language-functional windows to select a small
+post-KD block mapping and then confirms the complete mapping on
+untouched data. On the retained Gemma candidate, five selected blocks
+reduced protocol-matched perplexity from 228.55 to 216.24 (5.39%) while
+improving five of six limited tasks.</p>
+<h2 id="global-foldable-continuation">Global foldable continuation</h2>
+<p>The global variant installs log-multipliers on every MLP factorized
+linear: gate output, up output, down input, and down output. If <span
+class="math inline">\(\theta\)</span> denotes all log-multipliers,
+training minimizes a held-out reconstruction or distillation loss plus a
+family-balanced identity penalty <span class="math display">\[\mathcal
+L(\theta)=\mathcal L_{\mathrm{model}}(\theta)
++\lambda_{\mathrm{id}}\frac{1}{F}\sum_{f=1}^F
+\frac{1}{|\theta_f|}\|\theta_f\|_2^2.
+\tag{12}\]</span> with <span class="math inline">\(\exp(\theta)\)</span>
+bounded around one. Optimization uses the exact forward that will result
+after folding, including salient outliers and optional patch terms.</p>
+<p>For Eq. (1), an input multiplier is absorbed into <span
+class="math inline">\(s_{\mathrm{pre}}\)</span> and an output multiplier
+into <span class="math inline">\(s_{\mathrm{post}}\)</span>. Outlier
+values and low-rank patch terms are rescaled on the corresponding
+boundary so the complete linear function is preserved. After
+optimization, the wrapper modules are removed and the rescaled
+components replace the same number of bytes. Deployment-faithful replay
+requires zero maximum absolute difference between the unfolded
+optimization forward and folded model.</p>
+<div class="center">
+
+</div>
+<p>This paper assumes the composed-context initializer and global
+foldable continuation pass their final transfer gates. <span
+style="color: red!70!black"><strong>[PLACEHOLDER: Insert the final
+fresh-campaign effect size, paired interval, cross-model results, and
+end-to-end runtime after those runs complete.]</strong></span></p>
+<h2 id="final-normalizer-confidence-fold">Final-normalizer confidence
+fold</h2>
+<p>For Gemma RMSNorm, the effective final-normalizer weight is <span
+class="math inline">\(1+w\)</span>. A scalar <span
+class="math inline">\(\alpha\)</span> can therefore be folded exactly as
+<span class="math display">\[w&#39; = \alpha(1+w)-1.
+\tag{13}\]</span> This changes no shape, byte count, or inference
+operation. We use it only as explicit calibration, not as evidence of
+model capability. A fixed <span
+class="math inline">\(\alpha=1.015\)</span> passed one retained campaign
+but failed to transfer to a fresh factorization; the general policy must
+derive <span class="math inline">\(\alpha\)</span> on calibration-only
+data with a predeclared margin or omit the fold when the primary
+objective is already calibrated.</p>
+<h1 id="tail-aware-bounded-model-reconstruction">Tail-Aware Bounded
+Model Reconstruction</h1>
+<h2 id="confidence-invariance-of-conditional-top-k-kd">Confidence
+invariance of conditional top-<span class="math inline">\(k\)</span>
+KD</h2>
+<p>Conditional top-<span class="math inline">\(k\)</span> distillation
+normalizes teacher and student logits only within the teacher-selected
+set <span class="math inline">\(S_k\)</span>. Adding a constant to all
+selected student logits relative to the unobserved vocabulary tail
+leaves this loss unchanged. In our long-horizon runs, this null
+direction caused selected probability mass to collapse even while
+conditional loss improved.</p>
+<p>For teacher probabilities <span class="math inline">\(p_i\)</span>,
+student probabilities <span class="math inline">\(q_i\)</span>, selected
+masses <span class="math inline">\(M_p=\sum_{i\in S_k}p_i\)</span> and
+<span class="math inline">\(M_q=\sum_{i\in S_k}q_i\)</span>, define
+<span class="math display">\[\begin{aligned}
+\mathcal L_{\mathrm{shape}}
+   &amp;= -\sum_{i\in S_k}p_i\log\frac{q_i}{M_q},\\
+\mathcal L_{\mathrm{mass}}
+   &amp;= -M_p\log M_q -(1-M_p)\log(1-M_q),\\
+\mathcal L_{\mathrm{tail}}
+   &amp;= \mathcal L_{\mathrm{shape}}+\lambda_{\mathrm{tail}}
+      \mathcal L_{\mathrm{mass}}.
+\end{aligned}
+\tag{14}\]</span> When <span
+class="math inline">\(\lambda_{\mathrm{tail}}=1\)</span>, Eq. (14) is
+exactly the cross entropy over the teacher’s <span
+class="math inline">\(k\)</span> selected categories plus one aggregated
+tail category. Other positive values trade conditional shape against
+calibration.</p>
+<p>The teacher cache stores selected indices, selected logits, and one
+full-vocabulary log-normalizer per selected token. Vocabulary and token
+chunking bound memory without approximating the target. On the matched
+Gemma factorization, eight epochs capped at 32 batches (256 optimizer
+steps) and <span
+class="math inline">\(\lambda_{\mathrm{tail}}=0.5\)</span> outperformed
+both 2048-step conditional KD and 256-step conditional KD on fresh
+WikiText and C4 NLL/KL.</p>
+<h2 id="one-sided-mass-floor-correction">One-sided mass-floor
+correction</h2>
+<p>We also evaluated a short warm-start correction that preserves
+conditional shape while applying pressure only below a target selected
+mass. With <span class="math inline">\(\rho\in(0,1]\)</span> and batch
+means <span class="math inline">\(\bar M_p,\bar M_q\)</span>, <span
+class="math display">\[\mathcal L_{\mathrm{floor}}=
+\mathcal L_{\mathrm{conditional}}+\mu\,
+\operatorname{ReLU}\!\left[
+\operatorname{logit}(\rho\bar M_p)-\operatorname{logit}(\bar M_q)
+\right].
+\tag{15}\]</span> The correction exactly vanishes once the batch
+constraint is met. A low- pressure 32-step correction plus a small
+final-norm fold improved retained WikiText and C4 results at unchanged
+BPW, but the fixed recipe missed its mass floor on a fresh
+factorization. It is therefore an ablation and fallback, not the
+preferred primary objective. The preferred method attacks confidence
+drift inside the primary tail-aware objective and uses selected mass as
+a calibration diagnostic rather than a capability gate.</p>
+<div class="center">
+
+</div>
+<h1 id="systems-realization">Systems Realization</h1>
+<p>Each scientific state is content addressed and bound to semantic
+inputs: model revision, calibration tokens and statistics, topology,
+objective, rank plan, factorizer version, and tuning protocol. Block and
+layer commits are immutable. Rolling activation generations bound disk
+use while completed factor results remain durable. Epoch checkpoints
+make factorized and global tuning resume-equivalent across process
+boundaries.</p>
+<p>The deployment path validates logical factors, packs sign words,
+creates a hash-bound converter checkpoint, exports GGUF, and evaluates
+both a PyTorch reference and the modified llama.cpp path. Exact BPW
+includes binary factors, scales, outliers, corrections, alignment, and
+declared metadata. No algorithm is called storage neutral merely because
+its primary tensor shapes are unchanged.</p>
+<p>The mixed-basis overlay is deliberately separate from the canonical
+packed layout. Selected compact factors predecode once at model load to
+the ordinary packed words; unselected layers fall back lazily to the
+base artifact. This keeps the hot kernel unchanged and makes
+representation experiments reversible.</p>
+<h1 id="experimental-methodology">Experimental Methodology</h1>
+<h2 id="models-data-and-baselines">Models, data, and baselines</h2>
+<p>The primary retained workload is <code>google/gemma-3-1b-it</code>
+revision <code>dcc83ea8...</code>. Calibration uses 256
+tokenizer-resolved sequences of length 2048. Language modeling is
+measured on fixed WikiText-2 windows and independent pinned C4 windows.
+Task guardrails cover PIQA, ARC-Easy, ARC-Challenge, HellaSwag,
+WinoGrande, and BoolQ. Candidate selection and final gates use
+non-overlapping, hash-registered slices.</p>
+<p><span style="color: red!70!black"><strong>[PLACEHOLDER: Add final
+experiments on at least Llama 3.2 1B/3B and Qwen3 0.6B/4B or larger,
+including immutable model revisions and token
+hashes.]</strong></span></p>
+<p>Baselines should include the contemporary <span
+class="smallcaps">NanoQuant</span> implementation, its uniform or
+canonical rank plan, the project’s D2 baseline, and relevant
+binary/sub-1-bit PTQ and QAT methods at reported effective storage <span
+class="citation"
+data-cites="nanoquant2026 littlebit2025 dbf2026 billm2024 hbllm2026">(Chong
+et al. 2026; Lee et al. 2025; Boza and Macko 2026; <span
+class="nocase">Huang et al.</span> 2024; <span class="nocase">Chen et
+al.</span> 2026)</span>. Where external methods cannot be rerun under
+identical infrastructure, we separate reported paper results from
+protocol-matched local comparisons.</p>
+<h2 id="metrics-and-statistical-gates">Metrics and statistical
+gates</h2>
+<p>We report causal NLL, perplexity, full-vocabulary teacher KL,
+top-<span class="math inline">\(k\)</span>-plus-tail KL, selected mass
+with uncertainty, downstream task accuracy, exact logical and packed
+BPW, artifact bytes, wall time, peak device/host memory, and runtime
+throughput. Paired token or sequence bootstrap intervals are used for
+language metrics; task comparisons use task-stratified paired intervals.
+A slice used for selection is permanently retired from confirmation.</p>
+<h2 id="required-final-factorial-design">Required final factorial
+design</h2>
+<p>Every final model family should evaluate the following arms from
+matched calibration and, where possible, a common factorization:</p>
+<ol>
+<li><p>contemporary <span class="smallcaps">NanoQuant</span>;</p></li>
+<li><p><span class="math inline">\(+\)</span> KL-calibrated rank
+allocation;</p></li>
+<li><p><span class="math inline">\(+\)</span> foldable composed-operator
+recovery;</p></li>
+<li><p><span class="math inline">\(+\)</span> tail-aware bounded
+KD;</p></li>
+<li><p>complete <span
+class="smallcaps">FunctionalNanoQuant</span>;</p></li>
+<li><p>optional <span class="math inline">\(+\)</span> mixed free/coded
+representation.</p></li>
+</ol>
+<p>At least <span style="color: red!70!black"><strong>[PLACEHOLDER:
+three]</strong></span> factorization/calibration seeds are required for
+the final combined result. Hyperparameters selected on Gemma remain
+explicit and are not silently reused as universal defaults.</p>
+<h1 id="results">Results</h1>
+<h2 id="functional-rank-allocation">Functional rank allocation</h2>
+<div id="tab:d2">
+<table>
+<caption>KL-calibrated exact-unit allocation at approximately 1.025 BPW.
+Baselines are the matched preceding rank-allocation
+experiments.</caption>
+<thead>
+<tr>
+<th style="text-align: left;">Model</th>
+<th style="text-align: right;">Baseline PPL</th>
+<th style="text-align: right;">D2 PPL</th>
+<th style="text-align: right;">Baseline task</th>
+<th style="text-align: right;">D2 task</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: left;">Gemma 3 270M</td>
+<td style="text-align: right;">1369.485</td>
+<td style="text-align: right;">1141.160</td>
+<td style="text-align: right;">0.4200</td>
+<td style="text-align: right;">0.3983</td>
+</tr>
+<tr>
+<td style="text-align: left;">Gemma 3 1B</td>
+<td style="text-align: right;">274.912</td>
+<td style="text-align: right;">228.551</td>
+<td style="text-align: right;">0.4617</td>
+<td style="text-align: right;">0.4692</td>
+</tr>
+<tr>
+<td style="text-align: left;"><span
+style="color: red!70!black"><strong>[PLACEHOLDER: Llama
+model]</strong></span></td>
+<td style="text-align: right;">–</td>
+<td style="text-align: right;">–</td>
+<td style="text-align: right;">–</td>
+<td style="text-align: right;">–</td>
+</tr>
+<tr>
+<td style="text-align: left;"><span
+style="color: red!70!black"><strong>[PLACEHOLDER: Qwen
+model]</strong></span></td>
+<td style="text-align: right;">–</td>
+<td style="text-align: right;">–</td>
+<td style="text-align: right;">–</td>
+<td style="text-align: right;">–</td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>D2 gives the clearest improvement on Gemma 3 1B: a 16.9% perplexity
+reduction and a small task improvement at effectively identical BPW. On
+270M it improves perplexity but trades away task accuracy, showing why
+the final method cannot be selected from one language-model
+aggregate.</p>
+<h2 id="foldable-mlp-recovery">Foldable MLP recovery</h2>
+<div id="tab:fold">
+<table>
+<caption>Post-KD selected MLP scale placement on the retained Gemma 3 1B
+factorization. Packed bytes and effective BPW are identical.</caption>
+<thead>
+<tr>
+<th style="text-align: left;">State</th>
+<th style="text-align: right;">WikiText-2 PPL</th>
+<th style="text-align: right;">Six-task mean</th>
+<th style="text-align: right;">Relative PPL</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: left;">BF16 teacher</td>
+<td style="text-align: right;">96.460</td>
+<td style="text-align: right;">0.6233</td>
+<td style="text-align: right;">–</td>
+</tr>
+<tr>
+<td style="text-align: left;">D2 compressed</td>
+<td style="text-align: right;">228.551</td>
+<td style="text-align: right;">0.4692</td>
+<td style="text-align: right;">baseline</td>
+</tr>
+<tr>
+<td style="text-align: left;">Foldable five-block mapping</td>
+<td style="text-align: right;">216.242</td>
+<td style="text-align: right;">0.4800</td>
+<td style="text-align: right;"><span
+class="math inline">\(-5.386\%\)</span></td>
+</tr>
+<tr>
+<td style="text-align: left;"><span
+style="color: red!70!black"><strong>[PLACEHOLDER: Global
+composed-context fold]</strong></span></td>
+<td style="text-align: right;">–</td>
+<td style="text-align: right;">–</td>
+<td style="text-align: right;">–</td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>The current accepted local mapping demonstrates that functional
+improvement can be obtained by changing only already-stored scale
+values. <span style="color: red!70!black"><strong>[PLACEHOLDER: The
+final paper must replace or supplement this selected mapping with the
+assumed- accepted fresh global foldable campaign and its matched
+intervals.]</strong></span></p>
+<h2 id="tail-aware-reconstruction">Tail-aware reconstruction</h2>
+<div id="tab:tail">
+<table>
+<caption>Matched KD ablation on one fresh Gemma 3 1B
+factorization.</caption>
+<thead>
+<tr>
+<th style="text-align: left;">Objective</th>
+<th style="text-align: right;">Steps</th>
+<th style="text-align: right;">WikiText NLL</th>
+<th style="text-align: right;">Full KL</th>
+<th style="text-align: right;">Selected mass</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: left;">Conditional top-64</td>
+<td style="text-align: right;">2048</td>
+<td style="text-align: right;">4.5250</td>
+<td style="text-align: right;">1.7702</td>
+<td style="text-align: right;">0.3979</td>
+</tr>
+<tr>
+<td style="text-align: left;">Conditional top-64</td>
+<td style="text-align: right;">256</td>
+<td style="text-align: right;">4.3697</td>
+<td style="text-align: right;">1.5540</td>
+<td style="text-align: right;">0.4926</td>
+</tr>
+<tr>
+<td style="text-align: left;">Top-64 <span
+class="math inline">\(+\)</span> tail (<span
+class="math inline">\(\lambda=0.5\)</span>)</td>
+<td style="text-align: right;">256</td>
+<td style="text-align: right;"><strong>4.2236</strong></td>
+<td style="text-align: right;"><strong>1.2614</strong></td>
+<td style="text-align: right;"><strong>0.7156</strong></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>Relative to conditional-256, the tail objective improves NLL by
+0.1461 nats and full KL by 0.2926, with both paired 95% intervals wholly
+beneficial. On a fresh C4 slice it improves NLL by 0.0670 and full KL by
+0.2181. The six-task 1000-example mean changes from 0.45267 to 0.45100,
+with interval spanning zero. The standard WikiText perplexity improves
+from 197.40 to 184.22.</p>
+<p><span style="color: red!70!black"><strong>[PLACEHOLDER: Insert
+Experiment 044 fresh complete-run results, including packed and
+llama.cpp quality, before presenting tail-aware KD as production
+complete.]</strong></span></p>
+<h2 id="representation-and-solver-studies">Representation and solver
+studies</h2>
+<div id="tab:variants">
+<table style="width:85%;">
+<caption>Representative equal-bit or storage-neutral algorithm studies.
+A positive screen does not imply successful complete-model
+transfer.</caption>
+<colgroup>
+<col style="width: 28%" />
+<col style="width: 25%" />
+<col style="width: 31%" />
+</colgroup>
+<thead>
+<tr>
+<th style="text-align: left;">Variant</th>
+<th style="text-align: left;">Best local/functional result</th>
+<th style="text-align: left;">Final disposition</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: left;">Stacked shared-input QKV</td>
+<td style="text-align: left;">8–9% reconstruction headroom in planning
+probes</td>
+<td style="text-align: left;">Standalone 270M quality regressed;
+optional topology</td>
+</tr>
+<tr>
+<td style="text-align: left;">Reciprocal attention partitions</td>
+<td style="text-align: left;">QV/KO matrix RMSE <span
+class="math inline">\(-1.04\%\)</span></td>
+<td style="text-align: left;">Held-out attention KL <span
+class="math inline">\(+27.29\%\)</span>; rejected</td>
+</tr>
+<tr>
+<td style="text-align: left;">Covariance binary refinement</td>
+<td style="text-align: left;">Held-out covariance energy <span
+class="math inline">\(-30.94\%\)</span>; splice KL <span
+class="math inline">\(-10.47\%\)</span></td>
+<td style="text-align: left;">Complete placement regressed PPL;
+research-only</td>
+</tr>
+<tr>
+<td style="text-align: left;">Mixed free/coded <span
+class="math inline">\(V\)</span></td>
+<td style="text-align: left;">Three-block splice KL <span
+class="math inline">\(-8.52\%\)</span>; stable selective policy</td>
+<td style="text-align: left;">Accepted representation; full-model
+campaign pending</td>
+</tr>
+<tr>
+<td style="text-align: left;">Coupled gate/up + down scale refit</td>
+<td style="text-align: left;">Selected post-KD PPL <span
+class="math inline">\(-5.39\%\)</span></td>
+<td style="text-align: left;">Accepted under folding assumption</td>
+</tr>
+<tr>
+<td style="text-align: left;">Low-pressure mass-floor correction</td>
+<td style="text-align: left;">Retained packed PPL 172.71 vs. conditional
+187.52</td>
+<td style="text-align: left;">Fixed fold failed fresh mass transfer;
+ablation</td>
+</tr>
+</tbody>
+</table>
+</div>
+<h2 id="end-to-end-comparison">End-to-end comparison</h2>
+<div id="tab:final">
+<table>
+<caption>Required final end-to-end comparison. All values must be
+measured under protocol-matched effective storage and
+evaluation.</caption>
+<thead>
+<tr>
+<th style="text-align: left;">Method</th>
+<th style="text-align: right;">BPW</th>
+<th style="text-align: right;">PPL</th>
+<th style="text-align: right;">Task mean</th>
+<th style="text-align: right;">Compress h</th>
+<th style="text-align: right;">Peak GB</th>
+<th style="text-align: right;">tok/s</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: left;">BF16</td>
+<td style="text-align: right;">16</td>
+<td style="text-align: right;"><span
+style="color: red!70!black"><strong>[PLACEHOLDER:
+–]</strong></span></td>
+<td style="text-align: right;"><span
+style="color: red!70!black"><strong>[PLACEHOLDER:
+–]</strong></span></td>
+<td style="text-align: right;">–</td>
+<td style="text-align: right;"><span
+style="color: red!70!black"><strong>[PLACEHOLDER:
+–]</strong></span></td>
+<td style="text-align: right;"><span
+style="color: red!70!black"><strong>[PLACEHOLDER:
+–]</strong></span></td>
+</tr>
+<tr>
+<td style="text-align: left;">Contemporary <span
+class="smallcaps">NanoQuant</span></td>
+<td style="text-align: right;"><span
+style="color: red!70!black"><strong>[PLACEHOLDER:
+–]</strong></span></td>
+<td style="text-align: right;"><span
+style="color: red!70!black"><strong>[PLACEHOLDER:
+–]</strong></span></td>
+<td style="text-align: right;"><span
+style="color: red!70!black"><strong>[PLACEHOLDER:
+–]</strong></span></td>
+<td style="text-align: right;"><span
+style="color: red!70!black"><strong>[PLACEHOLDER:
+–]</strong></span></td>
+<td style="text-align: right;"><span
+style="color: red!70!black"><strong>[PLACEHOLDER:
+–]</strong></span></td>
+<td style="text-align: right;"><span
+style="color: red!70!black"><strong>[PLACEHOLDER:
+–]</strong></span></td>
+</tr>
+<tr>
+<td style="text-align: left;"><span
+class="smallcaps">FunctionalNanoQuant</span></td>
+<td style="text-align: right;"><span
+style="color: red!70!black"><strong>[PLACEHOLDER:
+–]</strong></span></td>
+<td style="text-align: right;"><span
+style="color: red!70!black"><strong>[PLACEHOLDER:
+–]</strong></span></td>
+<td style="text-align: right;"><span
+style="color: red!70!black"><strong>[PLACEHOLDER:
+–]</strong></span></td>
+<td style="text-align: right;"><span
+style="color: red!70!black"><strong>[PLACEHOLDER:
+–]</strong></span></td>
+<td style="text-align: right;"><span
+style="color: red!70!black"><strong>[PLACEHOLDER:
+–]</strong></span></td>
+<td style="text-align: right;"><span
+style="color: red!70!black"><strong>[PLACEHOLDER:
+–]</strong></span></td>
+</tr>
+<tr>
+<td style="text-align: left;"><span
+class="smallcaps">FunctionalNanoQuant</span>+ mixed basis</td>
+<td style="text-align: right;"><span
+style="color: red!70!black"><strong>[PLACEHOLDER:
+–]</strong></span></td>
+<td style="text-align: right;"><span
+style="color: red!70!black"><strong>[PLACEHOLDER:
+–]</strong></span></td>
+<td style="text-align: right;"><span
+style="color: red!70!black"><strong>[PLACEHOLDER:
+–]</strong></span></td>
+<td style="text-align: right;"><span
+style="color: red!70!black"><strong>[PLACEHOLDER:
+–]</strong></span></td>
+<td style="text-align: right;"><span
+style="color: red!70!black"><strong>[PLACEHOLDER:
+–]</strong></span></td>
+<td style="text-align: right;"><span
+style="color: red!70!black"><strong>[PLACEHOLDER:
+–]</strong></span></td>
+</tr>
+</tbody>
+</table>
+</div>
+<figure data-latex-placement="t">
+
+</figure>
+<h1 id="related-work">Related Work</h1>
+<h4 id="binary-and-sub-1-bit-llms.">Binary and sub-1-bit LLMs.</h4>
+<p>OneBit, LittleBit, DBF, BiLLM, and related methods explore binary
+weights, low-rank binary factors, QAT, and binary PTQ <span
+class="citation"
+data-cites="onebit2024 littlebit2025 dbf2026 billm2024">(<span
+class="nocase">Xu et al.</span> 2024; Lee et al. 2025; Boza and Macko
+2026; <span class="nocase">Huang et al.</span> 2024)</span>. <span
+class="smallcaps">NanoQuant</span> combines low-rank binary factors with
+Hessian-aware ADMM initialization, block reconstruction, model-level
+scale tuning, and binary CUDA kernels <span class="citation"
+data-cites="nanoquant2026">(Chong et al. 2026)</span>. Our work retains
+its factorization primitive and focuses on functional allocation,
+foldable recovery, and bounded tail-aware calibration.</p>
+<h4
+id="quantization-aware-reconstruction-and-allocation.">Quantization-aware
+reconstruction and allocation.</h4>
+<p>GPTQ, AWQ, OmniQuant, and low-rank error-reconstruction methods use
+curvature, activation statistics, learned clipping/scaling, or additive
+low-rank terms to preserve quantized models <span class="citation"
+data-cites="gptq2022 awq2023 omniquant2023 lqer2024">(Frantar et al.
+2023; Lin et al. 2023; Shao et al. 2024; Zhang et al. 2024)</span>. Our
+allocator differs by measuring the end-model KL contribution of each
+current physical factorization unit, joining it to current-run
+rank-response probes, and optimizing exact rank-dependent physical
+cost.</p>
+<h4 id="scale-reparameterization.">Scale reparameterization.</h4>
+<p>SmoothQuant migrates quantization difficulty through an equivalent
+channel transformation, while RepQuant decouples expressive
+quantization-time scales from hardware-friendly inference scales <span
+class="citation" data-cites="smoothquant2023 repquant2024">(Xiao et al.
+2023; Li et al. 2024)</span>. Our folding algebra belongs to this broad
+family. The new element is the composed gated-MLP and model-functional
+optimization of existing low-rank binary boundary scales, with covariant
+treatment of salient and patch terms and byte-identical
+serialization.</p>
+<h4 id="sparse-logit-distillation.">Sparse logit distillation.</h4>
+<p>Sparse teacher caches reduce the cost of logit KD, but naive
+top-<span class="math inline">\(k\)</span> targets are biased and hide
+the vocabulary tail <span class="citation"
+data-cites="sparsekd2025">(Anshumann et al. 2025)</span>.
+Random-sampling estimators preserve the full gradient in expectation,
+while other methods emphasize selected logit ranking or scaling <span
+class="citation" data-cites="topkd2025">(Wang and Zhou 2025)</span>. Our
+objective is not an unbiased estimator of full-vocabulary KL. It is an
+exact coarse-grained <span class="math inline">\(k+1\)</span>-category
+cross entropy with an adjustable conditional/mass tradeoff, chosen
+because model reconstruction updates few stored scale parameters under a
+strict memory budget.</p>
+<h1 id="limitations-and-responsible-interpretation">Limitations and
+Responsible Interpretation</h1>
+<p>The strongest current evidence is concentrated on Gemma 3 1B.
+Gemma-specific rank sensitivities, selected blocks, tail coefficient,
+and final-normalizer fold must not be advertised as universal. The
+project has an operational Llama 3.2 1B result, but not yet
+protocol-matched transfer of the complete new method; larger Llama and
+Qwen campaigns remain incomplete or planned.</p>
+<p>Functional profiling consumes teacher inference and can overfit its
+token inventory if slice lifecycle is not enforced. Greedy rank
+allocation assumes the measured marginal response is sufficiently
+separable; cross-unit interactions remain only indirectly represented by
+the splice baseline and final gates. Tail-aware distillation trades an
+exact full-vocabulary target for a coarse tail bucket and is not
+suitable when tail shape itself is the task signal.</p>
+<p>Several locally successful algorithms failed complete transfer. We
+therefore distinguish <em>matrix</em>, <em>operator</em>,
+<em>splice</em>, <em>frozen-model</em>, and <em>production/export</em>
+evidence. Placeholders in this draft are claims that must remain absent
+from the abstract and conclusion until their gates are complete.</p>
+<h1 id="conclusion">Conclusion</h1>
+<p>Sub-1-bit post-training compression leaves little room for a poor
+proxy. We show that a low-rank binary model can spend its exact bit
+budget using measured functional sensitivity, recover coupled operator
+behavior through parameters that fold into its existing representation,
+and preserve confidence with a bounded top-<span
+class="math inline">\(k\)</span>-plus-tail target. On the retained Gemma
+workloads, each accepted component improves a matched baseline without
+increasing effective storage. <span
+style="color: red!70!black"><strong>[PLACEHOLDER: After completing the
+final cross-model factorial campaign, summarize the combined Pareto
+improvement and runtime here.]</strong></span></p>
+<h1 id="complete-algorithm-catalog">Complete Algorithm Catalog</h1>
+<p>Table <a href="#tab:catalog" data-reference-type="ref"
+data-reference="tab:catalog">6</a> records all major new algorithm
+families investigated in the project, including negative results.
+“Promoted” refers to the scope of retained evidence, not a universal
+default.</p>
+<div id="tab:catalog">
+<table style="width:88%;">
+<caption>Algorithm catalog and evidence status.</caption>
+<colgroup>
+<col style="width: 24%" />
+<col style="width: 42%" />
+<col style="width: 22%" />
+</colgroup>
+<thead>
+<tr>
+<th style="text-align: left;">Algorithm</th>
+<th style="text-align: left;">Main idea</th>
+<th style="text-align: left;">Status</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: left;">Reconstruction-aware allocation</td>
+<td style="text-align: left;">Piecewise exponential rank response; error
+reduction per exact bit</td>
+<td style="text-align: left;">Reconstruction gate positive; end quality
+rejected</td>
+</tr>
+<tr>
+<td style="text-align: left;">KL-calibrated D2 allocation</td>
+<td style="text-align: left;">Exact physical-unit splice KL anchors
+current-run rank response</td>
+<td style="text-align: left;">Promoted on Gemma 270M/1B</td>
+</tr>
+<tr>
+<td style="text-align: left;">Interaction-corrected D2</td>
+<td style="text-align: left;">Normalize marginal KL anchors for observed
+unit interactions and trust region</td>
+<td style="text-align: left;">Shifted PPL/task tradeoff; not
+adopted</td>
+</tr>
+<tr>
+<td style="text-align: left;">Stacked shared-input factors</td>
+<td style="text-align: left;">Row-concatenate projections and share the
+input-side binary basis</td>
+<td style="text-align: left;">Standalone quality rejected</td>
+</tr>
+<tr>
+<td style="text-align: left;">Attention partition search</td>
+<td style="text-align: left;">Exhaustive partitions of Q/K/V/<span
+class="math inline">\(O^\top\)</span> under equal bits</td>
+<td style="text-align: left;">Matrix winner failed function gate</td>
+</tr>
+<tr>
+<td style="text-align: left;">Fisher shrinkage/power screen</td>
+<td style="text-align: left;">Tune output-importance regularization and
+exponent under held-out KL</td>
+<td style="text-align: left;">Raw Fisher promoted for one workload;
+transfer mixed</td>
+</tr>
+<tr>
+<td style="text-align: left;">Member-weighted group objective</td>
+<td style="text-align: left;">Reweight logical members inside one shared
+physical factorization objective</td>
+<td style="text-align: left;">Preliminary value gain confounded;
+combined recipe not adopted</td>
+</tr>
+<tr>
+<td style="text-align: left;">Dense-covariance sign refinement</td>
+<td style="text-align: left;">Exact coordinate/batch sign flips under a
+quadratic activation metric</td>
+<td style="text-align: left;">Screen positive; production placement
+rejected</td>
+</tr>
+<tr>
+<td style="text-align: left;">Input Hadamard preprocessing</td>
+<td style="text-align: left;">Structured input rotation intended to
+expose covariance headroom</td>
+<td style="text-align: left;">Decisively rejected</td>
+</tr>
+<tr>
+<td style="text-align: left;">Closed-form output bias</td>
+<td style="text-align: left;">Store the calibration mean residual <span
+class="math inline">\(\mathbb E[x](W-\widehat W)^\top\)</span> as an
+additive bias</td>
+<td style="text-align: left;">Equal-budget functional screen
+rejected</td>
+</tr>
+<tr>
+<td style="text-align: left;">Sparse residual correction</td>
+<td style="text-align: left;">Fund selected residual elements/columns by
+reducing factor rank</td>
+<td style="text-align: left;">Sparse beats columns locally; equal-budget
+model not promoted</td>
+</tr>
+<tr>
+<td style="text-align: left;">Low-rank residual patch</td>
+<td style="text-align: left;">Fit a small activation-aware
+floating-point residual factor and charge its exact bits</td>
+<td style="text-align: left;">Strong local ceiling; equal-budget model
+regressed</td>
+</tr>
+<tr>
+<td style="text-align: left;">Sign-word codebook</td>
+<td style="text-align: left;">Store factor words as codebook indices to
+fund greater rank</td>
+<td style="text-align: left;">Uniform coding insufficient</td>
+</tr>
+<tr>
+<td style="text-align: left;">Progressive sign fixing</td>
+<td style="text-align: left;">Freeze high-confidence signs while
+optimizing remaining words</td>
+<td style="text-align: left;">Equal-bit screen rejected</td>
+</tr>
+<tr>
+<td style="text-align: left;">Sparse-corrected sign code</td>
+<td style="text-align: left;">Codebook word plus encoded bit
+corrections</td>
+<td style="text-align: left;">Functional point estimates positive;
+incomplete</td>
+</tr>
+<tr>
+<td style="text-align: left;">Mixed free/coded basis</td>
+<td style="text-align: left;">Free coefficient factor; free basis
+anchors plus corrected coded breadth</td>
+<td style="text-align: left;">Selective down-projection accepted</td>
+</tr>
+<tr>
+<td style="text-align: left;">Dominant-factor transfer</td>
+<td style="text-align: left;">Apply one-sided mixed coding to gate/up
+and attention orientations</td>
+<td style="text-align: left;">Gate/up local opportunity; attention
+rejected</td>
+</tr>
+<tr>
+<td style="text-align: left;">Coupled gate/up refit</td>
+<td style="text-align: left;">Fit existing output scales after
+SiLU/product composition</td>
+<td style="text-align: left;">Promoted</td>
+</tr>
+<tr>
+<td style="text-align: left;">Student-activation down refit</td>
+<td style="text-align: left;">Fit down input scale against the composed
+student MLP activation</td>
+<td style="text-align: left;">Promoted</td>
+</tr>
+<tr>
+<td style="text-align: left;">Composition-scope scale policy</td>
+<td style="text-align: left;">Select multiple block scale mappings on
+disjoint language-functional data</td>
+<td style="text-align: left;">Promoted with transfer constraints</td>
+</tr>
+<tr>
+<td style="text-align: left;">Global foldable multipliers</td>
+<td style="text-align: left;">Tune log multipliers through exact
+deployable factor forwards, then fold</td>
+<td style="text-align: left;">Assumed accepted for this draft</td>
+</tr>
+<tr>
+<td style="text-align: left;">Conditional top-<span
+class="math inline">\(k\)</span> KD</td>
+<td style="text-align: left;">Original sparse model-level scale
+reconstruction</td>
+<td style="text-align: left;">Baseline; confidence collapse at long
+horizon</td>
+</tr>
+<tr>
+<td style="text-align: left;">Top-<span class="math inline">\(k\)</span>
+plus tail KD</td>
+<td style="text-align: left;">Add aggregate vocabulary-tail mass
+category</td>
+<td style="text-align: left;">Promoted analysis; fresh production run
+pending</td>
+</tr>
+<tr>
+<td style="text-align: left;">One-sided mass-floor correction</td>
+<td style="text-align: left;">Conditional KD plus logit-space inequality
+penalty</td>
+<td style="text-align: left;">Retained success; fixed policy failed
+fresh transfer</td>
+</tr>
+<tr>
+<td style="text-align: left;">Final RMSNorm calibration</td>
+<td style="text-align: left;">Fold one scalar into Gemma effective norm
+weight</td>
+<td style="text-align: left;">Calibration tool, not capability
+claim</td>
+</tr>
+<tr>
+<td style="text-align: left;">Mixed overlay/predecode</td>
+<td style="text-align: left;">Store compact 19-bit records and expand
+once to canonical packed words</td>
+<td style="text-align: left;">Runtime contract implemented; full
+campaign pending</td>
+</tr>
+</tbody>
+</table>
+</div>
+<h1 id="negative-result-details">Negative-Result Details</h1>
+<h4 id="topology-is-not-selected-by-matrix-error.">Topology is not
+selected by matrix error.</h4>
+<p>The fixed QV/KO attention partition improved the corrected-Fisher
+matrix objective by approximately 1.04% across two seeds but increased
+held-out full-attention teacher KL by 27.29%. Per-block matrix-oracle
+selection is therefore not a valid topology policy without an
+operator-functional selector.</p>
+<h4 id="covariance-is-not-a-transferable-placement-score.">Covariance is
+not a transferable placement score.</h4>
+<p>Dense-covariance refinement reduced its optimization objective at
+every selected production placement, yet the fresh model regressed from
+273.52 to 286.08 pre-KD perplexity and from 228.55 to 241.12 post-KD.
+The offline and resident covariance sources differed, and local
+covariance reduction did not predict composition across blocks.</p>
+<h4
+id="biases-and-residual-patches-must-pay-their-rank-opportunity-cost.">Biases
+and residual patches must pay their rank opportunity cost.</h4>
+<p>For calibration input mean <span class="math inline">\(\bar
+x\)</span>, the closed-form output correction <span
+class="math inline">\(b=\bar x(W-\widehat W)^\top\)</span> removes the
+mean activation residual without changing the binary factors. Likewise,
+a low-rank patch <span class="math inline">\(P_LP_R\)</span> or sparse
+residual entries can remove a large fraction of local activation error.
+However, their exact stored indices, values, and factors displace binary
+rank under an equal-bit budget. The all-unit bias arm increased an <span
+class="math inline">\(o_{\mathrm{proj}}\)</span> splice KL by 21.66%,
+and a locally strong rank-4 residual patch increased the equal-budget
+model KL by 14.25%. Sparse entries were consistently more efficient than
+complete residual columns, but did not recover enough of the rank-loss
+penalty for promotion. These remain supported sidecar mechanisms, not
+default quality improvements.</p>
+<h4 id="group-member-weighting-can-be-real-but-non-additive.">Group
+member weighting can be real but non-additive.</h4>
+<p>Reweighting value-projection rows inside a stacked QKV objective
+produced a large preliminary splice improvement, but the first sweep
+regenerated nonidentical Fisher inputs. A corrected combined “best
+methods” experiment that included stacked QKV and a doubled value
+objective did not beat the simpler exact-unit D2 recipe. Member
+weighting is therefore a controlled objective parameter requiring
+identical calibration artifacts, not an accepted universal
+multiplier.</p>
+<h4 id="untuned-overlays-do-not-replace-resident-tuning.">Untuned
+overlays do not replace resident tuning.</h4>
+<p>A complete MLP hybrid improved 29.68% relative to its equal-budget
+untuned sign-word family, but direct installation into the retained
+frozen model raised perplexity from 273.87 to 1904.75. The relative
+representation result remains valid; the absolute transfer failed
+because the overlay bypassed block-local factor tuning, non-factorized
+tuning, outliers, and post-block refit.</p>
+<h4 id="a-fixed-confidence-fold-does-not-transfer.">A fixed confidence
+fold does not transfer.</h4>
+<p>The retained low-pressure correction plus <span
+class="math inline">\(\alpha=1.015\)</span> final-norm fold passed all
+local gates, but on a fresh factorization selected mass was 0.7305,
+below the predeclared 0.75 floor. This motivated the primary tail-aware
+objective and the treatment of scalar confidence as calibration rather
+than capability.</p>
+<h1 id="reproducibility-checklist">Reproducibility Checklist</h1>
+<p>The final artifact should provide:</p>
+<ul>
+<li><p>immutable model revisions, tokenizer identities, dataset commits,
+and token hashes;</p></li>
+<li><p>all configuration and algorithm-version hashes;</p></li>
+<li><p>exact rank inventories and logical, packed, and physical
+BPW;</p></li>
+<li><p>per-sequence evaluation values and paired bootstrap
+seeds;</p></li>
+<li><p>complete resident journals and transitive artifact
+validation;</p></li>
+<li><p>factorized, packed, llama.cpp checkpoint, and GGUF
+receipts;</p></li>
+<li><p>compression wall time and stage-level timing;</p></li>
+<li><p>peak allocated/reserved GPU bytes, host working set, and artifact
+bytes;</p></li>
+<li><p>runtime fallback counts, prefill/decode protocol, and throughput
+distributions; and</p></li>
+<li><p>all rejected arms needed to reproduce selection
+decisions.</p></li>
+</ul>
+<div id="refs" class="references csl-bib-body hanging-indent"
+role="list">
+<div id="ref-sparsekd2025" class="csl-entry" role="listitem">
+Anshumann, Mohd Abbas Zaidi, Akhil Kedia, et al. 2025. <span>“Sparse
+Logit Sampling: Accelerating Knowledge Distillation in LLMs.”</span>
+<em>Proceedings of the 63rd Annual Meeting of the Association for
+Computational Linguistics</em>, 18085–108. <a
+href="https://doi.org/10.18653/v1/2025.acl-long.885">https://doi.org/10.18653/v1/2025.acl-long.885</a>.
+</div>
+<div id="ref-dbf2026" class="csl-entry" role="listitem">
+Boza, Viliam, and Dominik Macko. 2026. <span>“DBF: Low-Rank Binary
+Factorization for Large Language Models.”</span> <em>arXiv
+Preprint</em>.
+</div>
+<div id="ref-hbllm2026" class="csl-entry" role="listitem">
+<span class="nocase">Chen, Unknown et al.</span> 2026. <span>“HB-LLM:
+Binary Post-Training Quantization for Large Language Models.”</span>
+<em>arXiv Preprint</em>.
+</div>
+<div id="ref-nanoquant2026" class="csl-entry" role="listitem">
+Chong, Hyochan, Dongkyu Kim, Changdong Kim, and Minseop Choi. 2026.
+<span>“NanoQuant: Efficient Sub-1-Bit Quantization of Large Language
+Models.”</span> <em>arXiv Preprint arXiv:2602.06694</em>.
+</div>
+<div id="ref-gptq2022" class="csl-entry" role="listitem">
+Frantar, Elias, Saleh Ashkboos, Torsten Hoefler, and Dan Alistarh. 2023.
+<span>“GPTQ: Accurate Post-Training Quantization for Generative
+Pre-Trained Transformers.”</span> <em>International Conference on
+Learning Representations</em>.
+</div>
+<div id="ref-billm2024" class="csl-entry" role="listitem">
+<span class="nocase">Huang, Wei et al.</span> 2024. <span>“BiLLM:
+Pushing the Limit of Post-Training Quantization for LLMs.”</span>
+<em>International Conference on Machine Learning</em>.
+</div>
+<div id="ref-littlebit2025" class="csl-entry" role="listitem">
+Lee, Banseok, Dongkyu Kim, Youngcheon You, and Youngmin Kim. 2025.
+<span>“LittleBit: Ultra Low-Bit Quantization via Latent
+Factorization.”</span> <em>Advances in Neural Information Processing
+Systems</em>.
+</div>
+<div id="ref-repquant2024" class="csl-entry" role="listitem">
+Li, Zhikai, Xuewen Liu, Jing Zhang, and Qingyi Gu. 2024.
+<span>“RepQuant: Towards Accurate Post-Training Quantization of Large
+Transformer Models via Scale Reparameterization.”</span> <em>arXiv
+Preprint arXiv:2402.05628</em>.
+</div>
+<div id="ref-awq2023" class="csl-entry" role="listitem">
+Lin, Ji, Jiaming Tang, Haotian Tang, et al. 2023. <span>“AWQ:
+Activation-Aware Weight Quantization for LLM Compression and
+Acceleration.”</span> <em>arXiv Preprint arXiv:2306.00978</em>.
+</div>
+<div id="ref-omniquant2023" class="csl-entry" role="listitem">
+Shao, Wenqi, Mengzhao Chen, Zhaoyang Zhang, et al. 2024.
+<span>“OmniQuant: Omnidirectionally Calibrated Quantization for Large
+Language Models.”</span> <em>International Conference on Learning
+Representations</em>.
+</div>
+<div id="ref-topkd2025" class="csl-entry" role="listitem">
+Wang, Qi, and Jinjia Zhou. 2025. <span>“TopKD: Top-Scaled Knowledge
+Distillation.”</span> <em>arXiv Preprint arXiv:2508.04539</em>.
+</div>
+<div id="ref-smoothquant2023" class="csl-entry" role="listitem">
+Xiao, Guangxuan, Ji Lin, Mickael Seznec, Hao Wu, Julien Demouth, and
+Song Han. 2023. <span>“SmoothQuant: Accurate and Efficient Post-Training
+Quantization for Large Language Models.”</span> <em>International
+Conference on Machine Learning</em>.
+</div>
+<div id="ref-onebit2024" class="csl-entry" role="listitem">
+<span class="nocase">Xu, Yuzhuang et al.</span> 2024. <span>“OneBit:
+Towards Extremely Low-Bit Large Language Models.”</span> <em>Advances in
+Neural Information Processing Systems</em>.
+</div>
+<div id="ref-lqer2024" class="csl-entry" role="listitem">
+Zhang, Cheng, Jianyi Cheng, George A. Constantinides, and Yiren Zhao.
+2024. <span>“LQER: Low-Rank Quantization Error Reconstruction for
+LLMs.”</span> <em>arXiv Preprint arXiv:2402.02446</em>.
+</div>
+</div>
+</body>
+</html>

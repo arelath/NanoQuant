@@ -31,6 +31,10 @@ ROOT = Path(__file__).resolve().parent.parent
 LAUNCHER = ROOT / "experiments/048-adaptive-capability-correction-d2-gemma-3-1b-it.py"
 REGISTRY = ROOT / "Docs/evaluation-slice-registry.json"
 CORRECTION_NAMESPACE = "global-distillation-mass-floor"
+RESIDENT_BLOCK_INTERRUPTED = 75
+CAMPAIGN_PAUSED = 76
+RESIDENT_BLOCK_WORKER_LIMIT = 28
+PAUSE_SENTINEL = ROOT / "evidence/048/PAUSED"
 DEFAULT_REFERENCES = (
     (
         "accepted040",
@@ -100,7 +104,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--local-files-only", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--worker", choices=("resident", "complete"), help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--worker",
+        choices=("resident", "resident-block", "complete"),
+        help=argparse.SUPPRESS,
+    )
     parser.add_argument("--derived-run", type=Path, help=argparse.SUPPRESS)
     return parser
 
@@ -116,18 +124,50 @@ def _load_definition() -> ExperimentDefinition[CompressionQualityExperiment]:
 
 
 def _worker(args: argparse.Namespace) -> int:
+    if PAUSE_SENTINEL.is_file():
+        print(
+            f"Experiment 048 is paused by {PAUSE_SENTINEL}; "
+            "remove the sentinel explicitly before resuming",
+            flush=True,
+        )
+        return CAMPAIGN_PAUSED
     if args.snapshot is None:
         raise ValueError("campaign worker requires --snapshot")
-    definition = _load_definition()
     if args.worker == "resident":
+        command = [
+            sys.executable,
+            str(Path(__file__).resolve()),
+            "--worker",
+            "resident-block",
+            "--snapshot",
+            str(args.snapshot.resolve()),
+        ]
+        for _attempt in range(RESIDENT_BLOCK_WORKER_LIMIT):
+            result = subprocess.run(command, cwd=ROOT, check=False)
+            if result.returncode == RESIDENT_BLOCK_INTERRUPTED:
+                continue
+            return result.returncode
+        raise RuntimeError("Experiment 048 exceeded its resident block-worker limit")
+    definition = _load_definition()
+    if args.worker == "resident-block":
         inputs = resolve_resident_experiment_inputs(definition.config, launcher_path=LAUNCHER)
         if inputs.snapshot != args.snapshot.resolve():
             raise ValueError("resolved Experiment 048 snapshot differs from --snapshot")
-        execute_resident_workflow(
-            definition.config,
-            inputs,
-            ResidentExecutionOptions(maximum_wddm_shared_bytes=int(0.75 * 2**30)),
-        )
+        try:
+            execute_resident_workflow(
+                definition.config,
+                inputs,
+                ResidentExecutionOptions(
+                    maximum_wddm_shared_bytes=int(0.75 * 2**30),
+                    interrupt_after_block_commits=1,
+                ),
+            )
+        except InterruptedError as exc:
+            expected = "injected interruption after 1 new block commits"
+            if str(exc) != expected:
+                raise
+            print(f"Experiment 048 resident block boundary committed: {exc}", flush=True)
+            return RESIDENT_BLOCK_INTERRUPTED
         return 0
     if args.worker == "complete":
         if args.derived_run is None:

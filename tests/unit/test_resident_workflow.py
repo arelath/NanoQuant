@@ -17,6 +17,7 @@ from nanoquant.config.schema import (
     CalibrationMethod,
     DistillationLoss,
     ExecutorKind,
+    FactorizedLearningRates,
     ObjectiveKind,
     PostRefitCovarianceRefinementConfig,
     RunConfig,
@@ -74,6 +75,10 @@ def test_resident_recipe_maps_every_hidden_parity_semantic(tmp_path: Path) -> No
     assert request.nonfactorized_tuning_epochs == 0
     assert request.nonfactorized_tuning_epochs_by_layer == (8, 4, 3, 2, 2, 2, 2)
     assert request.factorized_tuning_epochs == 8
+    assert request.factorized_tuning_binary_learning_rate == 1e-5
+    assert request.factorized_tuning_learning_rate == 1e-5
+    assert request.factorized_tuning_outlier_learning_rate == 1e-5
+    assert request.factorized_tuning_bias_learning_rate == 1e-5
     assert request.post_block_refit_epochs == 2
     assert request.tuning_microbatch_size == 8
     assert request.legacy_tuning_seed_reset
@@ -118,6 +123,30 @@ def test_resident_mapping_rejects_unimplemented_semantics(tmp_path: Path) -> Non
 
     with pytest.raises(ValueError, match="only top_k and top_k_tail are implemented"):
         resident_request_from_config(unsupported, _inputs(tmp_path))
+
+
+def test_resident_recipe_maps_distinct_factorized_learning_rates(tmp_path: Path) -> None:
+    base = _resident_config()
+    factorized = replace(
+        base.block_tuning.factorized,
+        learning_rates=FactorizedLearningRates(
+            binary=3e-5,
+            scale=1e-5,
+            outlier=2e-5,
+            bias=4e-5,
+        ),
+    )
+    config = replace(
+        base,
+        block_tuning=replace(base.block_tuning, factorized=factorized),
+    )
+
+    request = resident_request_from_config(config, _inputs(tmp_path))
+
+    assert request.factorized_tuning_binary_learning_rate == 3e-5
+    assert request.factorized_tuning_learning_rate == 1e-5
+    assert request.factorized_tuning_outlier_learning_rate == 2e-5
+    assert request.factorized_tuning_bias_learning_rate == 4e-5
 
 
 def test_resident_recipe_maps_tail_kd_protocol(tmp_path: Path) -> None:

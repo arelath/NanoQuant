@@ -1,0 +1,915 @@
+\documentclass[10pt]{article}
+
+\usepackage[margin=0.82in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage{xspace}
+
+\hypersetup{colorlinks=true,allcolors=blue!55!black}
+\setlist{nosep,leftmargin=*}
+\newcommand{\method}{\textsc{FunctionalNanoQuant}\xspace}
+\newcommand{\nq}{\textsc{NanoQuant}\xspace}
+\newcommand{\placeholder}[1]{\textcolor{red!70!black}{\textbf{[PLACEHOLDER: #1]}}}
+\newcommand{\figureplaceholder}[2]{%
+  \begin{figure}[t]
+    \centering
+    \fbox{\parbox[c][#1][c]{0.92\linewidth}{\centering\placeholder{#2}}}
+  \end{figure}}
+
+\title{Beyond Matrix Reconstruction: Functional Error Budgeting and\\
+Foldable Recovery for Sub-1-Bit Language Models}
+\author{\placeholder{Author names}\\
+\placeholder{Affiliations}\\
+\texttt{\placeholder{Corresponding author email}}}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Low-rank binary factorization makes post-training compression below one bit per
+weight possible, but at this precision matrix-local reconstruction error is a
+weak proxy for language-model behavior. We introduce \method, a set of
+storage-neutral and exact-budget extensions to \nq. First, an exact-unit
+functional profiler measures the predictive divergence caused by each physical
+factorization unit, while a rank-response model allocates aligned rank quanta by
+predicted functional error reduction per physical bit. Second, operator-coupled
+scale refitting optimizes the gated MLP as a composed function rather than as
+three independent matrices, and covariantly folds every learned multiplier into
+the existing factor scales and correction terms. Third, a top-$k$-plus-tail
+distillation objective removes the confidence invariance of conditional top-$k$
+distillation while retaining a bounded teacher cache. We additionally study
+shared-input factorization, covariance-aware binary refinement, and a mixed
+free/codebook factor representation.
+
+On Gemma~3 1B, functional rank allocation reduces WikiText-2 perplexity from
+274.9 to 228.6 at essentially unchanged effective bits per weight (BPW).
+Foldable MLP refitting further reduces protocol-matched perplexity by 5.39\%
+with identical packed bytes and BPW. On a matched frozen factorization,
+tail-aware distillation reduces WikiText-2 perplexity from 197.4 to 184.2 and
+improves held-out C4 negative log-likelihood and full-vocabulary teacher KL
+without an established six-task regression. \placeholder{Add results for at
+least two additional model families and the final combined method.} These
+results show that sub-1-bit recovery benefits from optimizing the functional
+error actually exposed by the model, provided that the resulting corrections
+remain faithful to the deployed representation.
+\end{abstract}
+
+\section{Introduction}
+
+Post-training quantization (PTQ) normally reduces the precision of a dense
+weight tensor in place. This approach becomes structurally awkward below one
+bit per source parameter. \nq instead represents a dense matrix by two
+low-rank binary factors and a small set of floating-point scales, initializes
+the factors with a latent-binary ADMM procedure, refines them inside a
+block-reconstruction loop, and finally tunes model-level scales by knowledge
+distillation~\cite{nanoquant2026}. The representation establishes a strong
+sub-1-bit size--quality frontier without the data budget of low-rank binary
+quantization-aware training~\cite{littlebit2025,onebit2024}.
+
+Our starting observation is that a successful representation does not make
+its local reconstruction objective an adequate global decision rule. In the
+project's controlled experiments, lower unweighted matrix error often
+corresponds to worse teacher KL or perplexity; individually favorable changes
+frequently fail when composed across depth. At approximately one BPW, there is
+too little redundant capacity to ignore this mismatch.
+
+We therefore ask a narrower question than inventing another binary
+factorizer: \emph{how should a fixed low-rank binary representation spend and
+recover its capacity when end-model behavior, exact physical bits, and runtime
+fidelity are all first-class constraints?}
+
+\method answers with three mechanisms:
+
+\begin{enumerate}
+  \item \textbf{Functional error budgeting.} We splice one physical
+  factorization unit at a time into a dense teacher, measure causal
+  full-vocabulary KL, probe the unit's reconstruction response at several
+  ranks, and allocate exact aligned rank quanta by diminishing predicted gain
+  per bit.
+  \item \textbf{Foldable composed-operator recovery.} We fit positive
+  channel multipliers at the gate/up product and downstream projection of a
+  gated MLP, optionally continue them against model-level loss, and fold them
+  into already stored scales and side terms. The serialized model adds no
+  tensor shapes, bytes, or inference operation.
+  \item \textbf{Tail-aware bounded distillation.} We cache the teacher's
+  top-$k$ logits and one full-vocabulary log-normalizer per selected token.
+  The resulting $k+1$-category objective retains the teacher's aggregate tail
+  mass and removes a confidence-null direction in conditional top-$k$ KD.
+\end{enumerate}
+
+The paper also records algorithms that reveal the limits of local proxies:
+shared-input and reciprocal factor grouping, dense-covariance sign refinement,
+sparse-corrected sign codebooks, and a mixed free/coded basis. Some are useful
+representations or diagnostics but do not yet satisfy full-model transfer.
+Reporting those negative and partial results prevents a locally attractive
+ablation from being mistaken for a deployable method.
+
+Our contributions are:
+
+\begin{itemize}
+  \item an exact-bit, KL-calibrated rank allocator driven by current-run
+  physical-unit measurements and piecewise rank-response curves;
+  \item an operator-coupled scale-recovery family whose learned parameters
+  are exactly foldable into low-rank binary model components;
+  \item a bounded-memory top-$k$-plus-tail model-reconstruction objective and
+  a diagnosis of conditional top-$k$ confidence collapse;
+  \item a mixed free/coded sign-word factor representation that trades coding
+  cost for additional rank at the same physical bit budget; and
+  \item a reproducible evaluation methodology spanning immutable calibration,
+  paired held-out comparisons, exact BPW, packed execution, resume, and GGUF
+  export.
+\end{itemize}
+
+\figureplaceholder{1.55in}{Overview figure: dense model $\rightarrow$ functional
+unit profiling $\rightarrow$ exact-bit allocation $\rightarrow$ NanoQuant
+factorization $\rightarrow$ coupled foldable recovery $\rightarrow$ tail-aware
+KD $\rightarrow$ packed/GGUF runtime.}
+
+\section{Background and Problem Formulation}
+
+\subsection{Low-rank binary PTQ}
+
+For a dense linear weight $W\in\mathbb{R}^{m\times n}$, we use the deployed
+factor form
+\[
+  \widehat W =
+  \operatorname{diag}(s_{\mathrm{post}})
+  B_L
+  \operatorname{diag}(s_{\mathrm{mid}})
+  B_R
+  \operatorname{diag}(s_{\mathrm{pre}}).
+  \tag{1}
+\]
+where $B_L\in\{-1,+1\}^{m\times r}$ and
+$B_R\in\{-1,+1\}^{r\times n}$. Optional salient columns, biases, or low-rank
+side corrections are accounted separately and must be transformed
+covariantly whenever a boundary scale changes. This form generalizes the two
+channel-scale formulation in \nq while retaining packed binary execution.
+
+The binary factor cost is rank dependent. Let $C_i(r)$ be the exact physical
+cost of unit $i$ at rank $r$, including aligned sign words, rank-shaped scales,
+and fixed side data. Given target budget $C_{\max}$, the planner must satisfy
+\[
+  \sum_i C_i(r_i) \le C_{\max}
+  \tag{2}
+\]
+without treating alignment residue or metadata as free.
+
+\subsection{Why local reconstruction is insufficient}
+
+Let $M$ be the dense teacher and $\widehat M_S$ a model in which only units in
+$S$ are replaced by their compressed reconstructions. For token inventory
+$\mathcal D$, define the splice divergence
+\[
+ K(S)=\frac{1}{|\mathcal T|}\sum_{t\in\mathcal T}
+ D_{\mathrm{KL}}\!\left(p_M(\cdot\mid x_{<t})\,\|\,
+ p_{\widehat M_S}(\cdot\mid x_{<t})\right).
+ \tag{3}
+\]
+The exact-unit profile uses $K(\{i\})$. This is more expensive than Frobenius
+error, but for billion-parameter models a complete 130-unit profile is still
+small relative to factorization and tuning. More importantly, it measures the
+quantity the allocator is intended to protect.
+
+\section{Functional Error Budgeting}
+
+\subsection{Immutable exact-unit profiling}
+
+The profiler begins from a complete baseline factorization. It loads the dense
+teacher once, caches or streams teacher log-probabilities, and evaluates a
+factorized splice for each \emph{physical} unit. A shared QKV group is one arm,
+not three logical arms. Every profile is bound to the model revision,
+calibration state, factorization recipe, source tensor hashes, token hashes,
+and packed-unit topology. Per-sequence NLL and KL are retained for paired
+bootstrap intervals.
+
+For each unit $i$, the profile records baseline rank $r_{i,0}$, exact cost,
+functional anchor $K_i$, and calibration-weighted squared reconstruction
+error $D_{i,0}$. Earlier variants used $K_i/D_{i,0}$ as a sensitivity proxy;
+the accepted exact-unit policy uses $K_i$ directly and reserves
+reconstruction error for predicting the effect of a rank change.
+
+\subsection{Measured rank-response curves}
+
+Each unit is probed at aligned lower, baseline, and upper ranks using the
+current run's objective and factorization settings. Over the calibrated rank
+interval, relative reconstruction error is modeled as piecewise exponential.
+If $B_i(r)$ is the integrated per-rank slope from $r_{i,0}$ to $r$, then
+\[
+ D_i(r)=D_{i,0}\exp[-2B_i(r)].
+ \tag{4}
+\]
+For a segment with slope $\beta_{ij}$,
+$B_i(r)$ accumulates $\beta_{ij}$ times the signed rank distance traversed in
+that segment. The factor two converts the empirical relative-error response to
+squared error.
+
+Noisy probe intervals that fail to establish improvement are assigned zero
+marginal gain. Response curves are invalidated if topology, source weights,
+calibration, ADMM settings, or baseline rank changes.
+
+\subsection{Exact-bit allocation}
+
+At current rank $r$, one aligned quantum $\Delta$ receives priority
+\[
+ \pi_i(r,\Delta)=
+ \frac{a_i\left[D_i(r)-D_i(r+\Delta)\right]}
+ {C_i(r+\Delta)-C_i(r)},
+ \qquad
+ a_i=\exp\!\left(\gamma(\log K_i-\overline{\log K})\right).
+ \tag{5}
+\]
+where $\overline{\log K}$ is a baseline-cost-weighted geometric mean and
+$\gamma\in[0,1]$ tempers sensitivity. The KL-calibrated configuration uses
+$\gamma=1$. Starting from legal floors, the deterministic planner repeatedly
+awards the affordable quantum with maximum $\pi_i$, recomputing diminishing
+gain after each award. Architecture-critical units may have explicit floors;
+all units respect calibrated response bounds and physical rank caps.
+
+\begin{center}
+\fbox{\begin{minipage}{0.93\linewidth}
+\textbf{Algorithm 1: KL-calibrated exact-bit rank allocation}
+\begin{enumerate}
+  \item Build a uniform or canonical baseline plan and complete its factorization.
+  \item Measure exact-unit splice KL $K_i$ on a held-out functional profile.
+  \item Probe each current physical unit at lower, baseline, and upper ranks.
+  \item Fit monotone piecewise response curves and construct legal floors/caps.
+  \item Initialize all ranks at their floors and charge exact fixed plus rank costs.
+  \item Repeatedly award the feasible aligned quantum with maximum predicted
+  KL-weighted error reduction per bit (Eq.~(5)).
+  \item Persist the immutable plan before any production factorization begins.
+\end{enumerate}
+\end{minipage}}
+\end{center}
+
+\subsection{Reconstruction-aware precursor}
+
+The reconstruction-only precursor uses Eq.~(4) with
+activation/Fisher sensitivity rather than exact-unit KL. It reduced aggregate
+matrix error in probes but could starve architecture-critical transforms. A
+complete Gemma~3 270M run reached perplexity 2018.5, substantially worse than
+the accepted baseline. This negative result motivated exact functional anchors
+and protected floors rather than invalidating measured rank response itself.
+
+\section{Topology and Objective Variants}
+
+\subsection{Shared-input stacking}
+
+For projections $W_1,\ldots,W_g$ consuming the same input $x$, row stacking
+forms
+\[
+ W_G=\begin{bmatrix}W_1\\ \vdots\\ W_g\end{bmatrix}
+ \approx B_{L,G}\operatorname{diag}(s_G)B_{R,G}.
+ \tag{6}
+\]
+so all members share the right/input binary basis. The combined rank is funded
+by the exact sum of the separate member budgets. Output importance is
+concatenated in member order; input importance is shared. Outliers and commits
+belong to the physical group, while logical outputs are row slices.
+
+QKV stacking reduced fixed-budget reconstruction error in preliminary studies,
+but a complete Gemma~3 270M run regressed both perplexity and task accuracy.
+We therefore treat shared-input topology as a planner option, not a universal
+architecture rule. Reciprocal groupings such as $[Q;V]$ with $[K;O^\top]$
+also improved matrix objectives but failed held-out attention-function gates.
+
+\subsection{Fisher weighting and covariance-aware refinement}
+
+For reconstruction error $E=W-\widehat W$, the covariance-aware objective is
+\[
+ \mathcal J(E)=
+ \operatorname{tr}\!\left(D_{\mathrm{out}}E\Sigma_{\mathrm{in}}E^\top\right).
+ \tag{7}
+\]
+where $D_{\mathrm{out}}$ is diagonal output importance and
+$\Sigma_{\mathrm{in}}$ is a dense input covariance. Starting from ordinary
+ADMM factors, the bounded refinement alternates:
+
+\begin{enumerate}
+  \item closed-form pre/mid/post scale fits under Eq.~(7);
+  \item exact left-sign coordinate flips, independent by output row;
+  \item right-sign batches whose complete coupled quadratic delta is negative;
+  \item final scale fits with rollback if the objective does not improve.
+\end{enumerate}
+
+The representation, rank, and persisted bit count do not change. On selected
+blocks, the 32-step variant reduced held-out covariance error energy by 30.94\%
+and joint-splice KL by 10.47\%. However, a later complete production transfer
+regressed both pre- and post-KD perplexity because the covariance source and
+placement rule did not transfer. We report covariance refinement as a useful
+bounded solver and negative general-selection result, not as part of the final
+default method.
+
+\section{Mixed Free/Coded Binary Factors}
+\label{sec:mixed}
+
+Ordinary binary factors store each sign independently. A codebook-constrained
+factor instead represents each 32-bit sign word by a short codeword index. At
+equal storage this funds a larger rank, but coding both factors restricts both
+the basis patterns and their per-output mixtures. We leave $B_L$ fully free
+and use a heterogeneous basis for rows of $B_R$:
+\[
+ B_R=\begin{bmatrix}B_R^{\mathrm{free}}\\
+ \operatorname{decode}(z_1,c_1)\\ \vdots\\
+ \operatorname{decode}(z_q,c_q)
+ \end{bmatrix},
+ \qquad
+ \operatorname{decode}(z,c)=\mathcal C[z]\oplus \operatorname{mask}(c).
+ \tag{8}
+\]
+Here $\mathcal C$ is a $2^{10}$-entry table of 32-bit sign words. Each coded
+word stores a 10-bit table index and a 9-bit identifier for an unordered pair
+of corrected bit positions, for a 19-bit record. Component permutation lets
+the free rows form a prefix, so only one free-row count is required.
+
+The accepted down-projection candidate raises rank from 970 to 1344, retains
+256 fully free right-factor rows, and codes the remaining 1088 rows. It uses
+7,966,224 bits versus 7,966,624 for the baseline. Across blocks 0, 12, and 24,
+held-out joint splice KL fell by 8.52\%; a later selective five-block policy
+passed three factorization seeds. The compact payload is expanded once to the
+canonical packed sign words at load time, leaving the timed linear kernel
+unchanged.
+
+\begin{center}
+\fbox{\begin{minipage}{0.93\linewidth}
+\textbf{Algorithm 2: Mixed free/coded factor fitting}
+\begin{enumerate}
+  \item Choose candidate rank and the largest free-prefix allocation that
+  fits the exact baseline bit budget.
+  \item Keep the left factor and the right free prefix as independent signs.
+  \item For every coded 32-bit word, search nearby table entries jointly with
+  an encoded two-bit correction mask.
+  \item Alternate continuous ADMM updates with projection of constrained and
+  free rows; periodically update then freeze the codebook.
+  \item Permute components so free rows are contiguous and serialize exact
+  19-bit records.
+  \item At model preparation, expand selected layers once to canonical packed
+  words and execute the existing kernel.
+\end{enumerate}
+\end{minipage}}
+\end{center}
+
+This representation is fully documented because it is algorithmically new,
+but \placeholder{complete a fresh end-to-end compression, packed-quality, and
+cross-model transfer campaign before claiming it as part of the promoted
+method.}
+
+\section{Operator-Coupled Scale Recovery and Folding}
+
+\subsection{Gated-MLP objective}
+
+For gate and up projections, the dense teacher intermediate is
+\[
+ h^\star=\operatorname{SiLU}(g^\star)\odot u^\star.
+ \tag{9}
+\]
+Independent matrix reconstruction cannot exploit cancellation or compensate
+the nonlinear gate. We fit positive channel multipliers $a,b$ by minimizing
+\[
+ \min_{a,b>0}\left\|
+ \operatorname{SiLU}(\widehat g\odot a)\odot(\widehat u\odot b)-h^\star
+ \right\|_F^2.
+ \tag{10}
+\]
+within bounded multiplicative limits. The downstream input multiplier $c$ is
+then fit against the teacher MLP output:
+\[
+ \min_{c>0}\left\|y^\star-\widehat W_{\mathrm{down}}
+       (\widehat h\odot c)\right\|_F^2.
+ \tag{11}
+\]
+Output-channel fits have closed-form least-squares solutions with identity
+fallback per channel. Down-input fitting uses diagonal-preconditioned descent
+and backtracking, accepting only strict objective decreases.
+
+Local selection did not compose reliably. The accepted policy therefore uses
+fresh language-functional windows to select a small post-KD block mapping and
+then confirms the complete mapping on untouched data. On the retained Gemma
+candidate, five selected blocks reduced protocol-matched perplexity from
+228.55 to 216.24 (5.39\%) while improving five of six limited tasks.
+
+\subsection{Global foldable continuation}
+
+The global variant installs log-multipliers on every MLP factorized linear:
+gate output, up output, down input, and down output. If $\theta$ denotes all
+log-multipliers, training minimizes a held-out reconstruction or distillation
+loss plus a family-balanced identity penalty
+\[
+ \mathcal L(\theta)=\mathcal L_{\mathrm{model}}(\theta)
+ +\lambda_{\mathrm{id}}\frac{1}{F}\sum_{f=1}^F
+ \frac{1}{|\theta_f|}\|\theta_f\|_2^2.
+ \tag{12}
+\]
+with $\exp(\theta)$ bounded around one. Optimization uses the exact forward
+that will result after folding, including salient outliers and optional patch
+terms.
+
+For Eq.~(1), an input multiplier is absorbed into
+$s_{\mathrm{pre}}$ and an output multiplier into $s_{\mathrm{post}}$.
+Outlier values and low-rank patch terms are rescaled on the corresponding
+boundary so the complete linear function is preserved. After optimization,
+the wrapper modules are removed and the rescaled components replace the same
+number of bytes. Deployment-faithful replay requires zero maximum absolute
+difference between the unfolded optimization forward and folded model.
+
+\begin{center}
+\fbox{\begin{minipage}{0.93\linewidth}
+\textbf{Algorithm 3: Foldable composed-context recovery}
+\begin{enumerate}
+  \item Load a complete packed-binary model and freeze all signs and ranks.
+  \item Initialize bounded log-multipliers at identity or from a hash-bound
+  composed-context seed.
+  \item Optimize coupled gate/up and down boundary multipliers on held-out
+  model-functional loss with identity regularization.
+  \item Checkpoint multiplier and optimizer state without changing model
+  representation.
+  \item Covariantly multiply the existing pre/post scales and every affected
+  side term; remove multiplier wrappers.
+  \item Require exact folded replay, identical represented bytes, logical and
+  packed reload, and untouched functional confirmation.
+\end{enumerate}
+\end{minipage}}
+\end{center}
+
+This paper assumes the composed-context initializer and global foldable
+continuation pass their final transfer gates. \placeholder{Insert the final
+fresh-campaign effect size, paired interval, cross-model results, and end-to-end
+runtime after those runs complete.}
+
+\subsection{Final-normalizer confidence fold}
+
+For Gemma RMSNorm, the effective final-normalizer weight is $1+w$. A scalar
+$\alpha$ can therefore be folded exactly as
+\[
+ w' = \alpha(1+w)-1.
+ \tag{13}
+\]
+This changes no shape, byte count, or inference operation. We use it only as
+explicit calibration, not as evidence of model capability. A fixed
+$\alpha=1.015$ passed one retained campaign but failed to transfer to a fresh
+factorization; the general policy must derive $\alpha$ on calibration-only
+data with a predeclared margin or omit the fold when the primary objective is
+already calibrated.
+
+\section{Tail-Aware Bounded Model Reconstruction}
+
+\subsection{Confidence invariance of conditional top-$k$ KD}
+
+Conditional top-$k$ distillation normalizes teacher and student logits only
+within the teacher-selected set $S_k$. Adding a constant to all selected
+student logits relative to the unobserved vocabulary tail leaves this loss
+unchanged. In our long-horizon runs, this null direction caused selected
+probability mass to collapse even while conditional loss improved.
+
+For teacher probabilities $p_i$, student probabilities $q_i$, selected masses
+$M_p=\sum_{i\in S_k}p_i$ and $M_q=\sum_{i\in S_k}q_i$, define
+\[
+\begin{aligned}
+ \mathcal L_{\mathrm{shape}}
+   &= -\sum_{i\in S_k}p_i\log\frac{q_i}{M_q},\\
+ \mathcal L_{\mathrm{mass}}
+   &= -M_p\log M_q -(1-M_p)\log(1-M_q),\\
+ \mathcal L_{\mathrm{tail}}
+   &= \mathcal L_{\mathrm{shape}}+\lambda_{\mathrm{tail}}
+      \mathcal L_{\mathrm{mass}}.
+\end{aligned}
+\tag{14}
+\]
+When $\lambda_{\mathrm{tail}}=1$, Eq.~(14) is exactly the cross
+entropy over the teacher's $k$ selected categories plus one aggregated tail
+category. Other positive values trade conditional shape against calibration.
+
+The teacher cache stores selected indices, selected logits, and one
+full-vocabulary log-normalizer per selected token. Vocabulary and token
+chunking bound memory without approximating the target. On the matched Gemma
+factorization, eight epochs capped at 32 batches (256 optimizer steps) and
+$\lambda_{\mathrm{tail}}=0.5$ outperformed both 2048-step conditional KD and
+256-step conditional KD on fresh WikiText and C4 NLL/KL.
+
+\subsection{One-sided mass-floor correction}
+
+We also evaluated a short warm-start correction that preserves conditional
+shape while applying pressure only below a target selected mass. With
+$\rho\in(0,1]$ and batch means $\bar M_p,\bar M_q$,
+\[
+ \mathcal L_{\mathrm{floor}}=
+ \mathcal L_{\mathrm{conditional}}+\mu\,
+ \operatorname{ReLU}\!\left[
+ \operatorname{logit}(\rho\bar M_p)-\operatorname{logit}(\bar M_q)
+ \right].
+ \tag{15}
+\]
+The correction exactly vanishes once the batch constraint is met. A low-
+pressure 32-step correction plus a small final-norm fold improved retained
+WikiText and C4 results at unchanged BPW, but the fixed recipe missed its mass
+floor on a fresh factorization. It is therefore an ablation and fallback, not
+the preferred primary objective. The preferred method attacks confidence drift
+inside the primary tail-aware objective and uses selected mass as a calibration
+diagnostic rather than a capability gate.
+
+\begin{center}
+\fbox{\begin{minipage}{0.93\linewidth}
+\textbf{Algorithm 4: Tail-aware global reconstruction}
+\begin{enumerate}
+  \item Cache teacher top-$k$ indices and logits plus chunked full-vocabulary
+  log-normalizers for selected tokens.
+  \item Freeze binary factors and select only stored scales, outlier values,
+  biases, and normalization parameters for optimization.
+  \item Optimize Eq.~(14) for a bounded, explicitly recorded
+  number of batches and steps.
+  \item Select a checkpoint on held-out NLL/full-KL subject to a calibration
+  diagnostic; do not select on training loss.
+  \item Materialize an immutable tuned state and verify factorized, packed,
+  and exported execution.
+\end{enumerate}
+\end{minipage}}
+\end{center}
+
+\section{Systems Realization}
+
+Each scientific state is content addressed and bound to semantic inputs:
+model revision, calibration tokens and statistics, topology, objective,
+rank plan, factorizer version, and tuning protocol. Block and layer commits
+are immutable. Rolling activation generations bound disk use while completed
+factor results remain durable. Epoch checkpoints make factorized and global
+tuning resume-equivalent across process boundaries.
+
+The deployment path validates logical factors, packs sign words, creates a
+hash-bound converter checkpoint, exports GGUF, and evaluates both a PyTorch
+reference and the modified llama.cpp path. Exact BPW includes binary factors,
+scales, outliers, corrections, alignment, and declared metadata. No algorithm
+is called storage neutral merely because its primary tensor shapes are
+unchanged.
+
+The mixed-basis overlay is deliberately separate from the canonical packed
+layout. Selected compact factors predecode once at model load to the ordinary
+packed words; unselected layers fall back lazily to the base artifact. This
+keeps the hot kernel unchanged and makes representation experiments reversible.
+
+\section{Experimental Methodology}
+
+\subsection{Models, data, and baselines}
+
+The primary retained workload is \texttt{google/gemma-3-1b-it} revision
+\texttt{dcc83ea8...}. Calibration uses 256 tokenizer-resolved sequences of
+length 2048. Language modeling is measured on fixed WikiText-2 windows and
+independent pinned C4 windows. Task guardrails cover PIQA, ARC-Easy,
+ARC-Challenge, HellaSwag, WinoGrande, and BoolQ. Candidate selection and final
+gates use non-overlapping, hash-registered slices.
+
+\placeholder{Add final experiments on at least Llama 3.2 1B/3B and Qwen3
+0.6B/4B or larger, including immutable model revisions and token hashes.}
+
+Baselines should include the contemporary \nq implementation, its uniform or
+canonical rank plan, the project's D2 baseline, and relevant binary/sub-1-bit
+PTQ and QAT methods at reported effective storage
+\cite{nanoquant2026,littlebit2025,dbf2026,billm2024,hbllm2026}. Where external
+methods cannot be rerun under identical infrastructure, we separate reported
+paper results from protocol-matched local comparisons.
+
+\subsection{Metrics and statistical gates}
+
+We report causal NLL, perplexity, full-vocabulary teacher KL, top-$k$-plus-tail
+KL, selected mass with uncertainty, downstream task accuracy, exact logical
+and packed BPW, artifact bytes, wall time, peak device/host memory, and runtime
+throughput. Paired token or sequence bootstrap intervals are used for
+language metrics; task comparisons use task-stratified paired intervals. A
+slice used for selection is permanently retired from confirmation.
+
+\subsection{Required final factorial design}
+
+Every final model family should evaluate the following arms from matched
+calibration and, where possible, a common factorization:
+\begin{enumerate}
+  \item contemporary \nq;
+  \item $+$ KL-calibrated rank allocation;
+  \item $+$ foldable composed-operator recovery;
+  \item $+$ tail-aware bounded KD;
+  \item complete \method;
+  \item optional $+$ mixed free/coded representation.
+\end{enumerate}
+At least \placeholder{three} factorization/calibration seeds are required for
+the final combined result. Hyperparameters selected on Gemma remain explicit
+and are not silently reused as universal defaults.
+
+\section{Results}
+
+\subsection{Functional rank allocation}
+
+\begin{table}[t]
+\centering
+\caption{KL-calibrated exact-unit allocation at approximately 1.025 BPW.
+Baselines are the matched preceding rank-allocation experiments.}
+\label{tab:d2}
+\begin{tabular}{lrrrr}
+\toprule
+Model & Baseline PPL & D2 PPL & Baseline task & D2 task \\
+\midrule
+Gemma 3 270M & 1369.485 & 1141.160 & 0.4200 & 0.3983 \\
+Gemma 3 1B   & 274.912  & 228.551  & 0.4617 & 0.4692 \\
+\placeholder{Llama model} & -- & -- & -- & -- \\
+\placeholder{Qwen model}  & -- & -- & -- & -- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+D2 gives the clearest improvement on Gemma~3 1B: a 16.9\% perplexity reduction
+and a small task improvement at effectively identical BPW. On 270M it improves
+perplexity but trades away task accuracy, showing why the final method cannot
+be selected from one language-model aggregate.
+
+\subsection{Foldable MLP recovery}
+
+\begin{table}[t]
+\centering
+\caption{Post-KD selected MLP scale placement on the retained Gemma~3 1B
+factorization. Packed bytes and effective BPW are identical.}
+\label{tab:fold}
+\begin{tabular}{lrrr}
+\toprule
+State & WikiText-2 PPL & Six-task mean & Relative PPL \\
+\midrule
+BF16 teacher & 96.460 & 0.6233 & -- \\
+D2 compressed & 228.551 & 0.4692 & baseline \\
+Foldable five-block mapping & 216.242 & 0.4800 & $-5.386\%$ \\
+\placeholder{Global composed-context fold} & -- & -- & -- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The current accepted local mapping demonstrates that functional improvement
+can be obtained by changing only already-stored scale values. \placeholder{The
+final paper must replace or supplement this selected mapping with the assumed-
+accepted fresh global foldable campaign and its matched intervals.}
+
+\subsection{Tail-aware reconstruction}
+
+\begin{table}[t]
+\centering
+\caption{Matched KD ablation on one fresh Gemma~3 1B factorization.}
+\label{tab:tail}
+\begin{tabular}{lrrrr}
+\toprule
+Objective & Steps & WikiText NLL & Full KL & Selected mass \\
+\midrule
+Conditional top-64 & 2048 & 4.5250 & 1.7702 & 0.3979 \\
+Conditional top-64 & 256  & 4.3697 & 1.5540 & 0.4926 \\
+Top-64 $+$ tail ($\lambda=0.5$) & 256 & \textbf{4.2236} & \textbf{1.2614} & \textbf{0.7156} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Relative to conditional-256, the tail objective improves NLL by 0.1461 nats
+and full KL by 0.2926, with both paired 95\% intervals wholly beneficial. On a
+fresh C4 slice it improves NLL by 0.0670 and full KL by 0.2181. The six-task
+1000-example mean changes from 0.45267 to 0.45100, with interval spanning zero.
+The standard WikiText perplexity improves from 197.40 to 184.22.
+
+\placeholder{Insert Experiment 044 fresh complete-run results, including
+packed and llama.cpp quality, before presenting tail-aware KD as production
+complete.}
+
+\subsection{Representation and solver studies}
+
+\begin{table}[t]
+\centering
+\caption{Representative equal-bit or storage-neutral algorithm studies. A
+positive screen does not imply successful complete-model transfer.}
+\label{tab:variants}
+\small
+\begin{tabular}{p{0.29\linewidth}p{0.25\linewidth}p{0.31\linewidth}}
+\toprule
+Variant & Best local/functional result & Final disposition \\
+\midrule
+Stacked shared-input QKV & 8--9\% reconstruction headroom in planning probes & Standalone 270M quality regressed; optional topology \\
+Reciprocal attention partitions & QV/KO matrix RMSE $-1.04\%$ & Held-out attention KL $+27.29\%$; rejected \\
+Covariance binary refinement & Held-out covariance energy $-30.94\%$; splice KL $-10.47\%$ & Complete placement regressed PPL; research-only \\
+Mixed free/coded $V$ & Three-block splice KL $-8.52\%$; stable selective policy & Accepted representation; full-model campaign pending \\
+Coupled gate/up + down scale refit & Selected post-KD PPL $-5.39\%$ & Accepted under folding assumption \\
+Low-pressure mass-floor correction & Retained packed PPL 172.71 vs. conditional 187.52 & Fixed fold failed fresh mass transfer; ablation \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{End-to-end comparison}
+
+\begin{table}[t]
+\centering
+\caption{Required final end-to-end comparison. All values must be measured
+under protocol-matched effective storage and evaluation.}
+\label{tab:final}
+\small
+\begin{tabular}{lrrrrrr}
+\toprule
+Method & BPW & PPL & Task mean & Compress h & Peak GB & tok/s \\
+\midrule
+BF16 & 16 & \placeholder{--} & \placeholder{--} & -- & \placeholder{--} & \placeholder{--} \\
+Contemporary \nq & \placeholder{--} & \placeholder{--} & \placeholder{--} & \placeholder{--} & \placeholder{--} & \placeholder{--} \\
+\method & \placeholder{--} & \placeholder{--} & \placeholder{--} & \placeholder{--} & \placeholder{--} & \placeholder{--} \\
+\method + mixed basis & \placeholder{--} & \placeholder{--} & \placeholder{--} & \placeholder{--} & \placeholder{--} & \placeholder{--} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\figureplaceholder{1.5in}{Pareto plot: effective BPW versus perplexity/task
+quality across NanoQuant, FunctionalNanoQuant ablations, and external
+sub-1-bit baselines for all evaluated model families.}
+
+\section{Related Work}
+
+\paragraph{Binary and sub-1-bit LLMs.}
+OneBit, LittleBit, DBF, BiLLM, and related methods explore binary weights,
+low-rank binary factors, QAT, and binary PTQ
+\cite{onebit2024,littlebit2025,dbf2026,billm2024}. \nq combines low-rank
+binary factors with Hessian-aware ADMM initialization, block reconstruction,
+model-level scale tuning, and binary CUDA kernels~\cite{nanoquant2026}. Our
+work retains its factorization primitive and focuses on functional allocation,
+foldable recovery, and bounded tail-aware calibration.
+
+\paragraph{Quantization-aware reconstruction and allocation.}
+GPTQ, AWQ, OmniQuant, and low-rank error-reconstruction methods use curvature,
+activation statistics, learned clipping/scaling, or additive low-rank terms
+to preserve quantized models~\cite{gptq2022,awq2023,omniquant2023,lqer2024}.
+Our allocator differs by measuring the end-model KL contribution of each
+current physical factorization unit, joining it to current-run rank-response
+probes, and optimizing exact rank-dependent physical cost.
+
+\paragraph{Scale reparameterization.}
+SmoothQuant migrates quantization difficulty through an equivalent channel
+transformation, while RepQuant decouples expressive quantization-time scales
+from hardware-friendly inference scales~\cite{smoothquant2023,repquant2024}.
+Our folding algebra belongs to this broad family. The new element is the
+composed gated-MLP and model-functional optimization of existing low-rank
+binary boundary scales, with covariant treatment of salient and patch terms
+and byte-identical serialization.
+
+\paragraph{Sparse logit distillation.}
+Sparse teacher caches reduce the cost of logit KD, but naive top-$k$ targets
+are biased and hide the vocabulary tail~\cite{sparsekd2025}. Random-sampling
+estimators preserve the full gradient in expectation, while other methods
+emphasize selected logit ranking or scaling~\cite{topkd2025}. Our objective is
+not an unbiased estimator of full-vocabulary KL. It is an exact coarse-grained
+$k+1$-category cross entropy with an adjustable conditional/mass tradeoff,
+chosen because model reconstruction updates few stored scale parameters under
+a strict memory budget.
+
+\section{Limitations and Responsible Interpretation}
+
+The strongest current evidence is concentrated on Gemma~3 1B. Gemma-specific
+rank sensitivities, selected blocks, tail coefficient, and final-normalizer
+fold must not be advertised as universal. The project has an operational
+Llama~3.2 1B result, but not yet protocol-matched transfer of the complete new
+method; larger Llama and Qwen campaigns remain incomplete or planned.
+
+Functional profiling consumes teacher inference and can overfit its token
+inventory if slice lifecycle is not enforced. Greedy rank allocation assumes
+the measured marginal response is sufficiently separable; cross-unit
+interactions remain only indirectly represented by the splice baseline and
+final gates. Tail-aware distillation trades an exact full-vocabulary target
+for a coarse tail bucket and is not suitable when tail shape itself is the
+task signal.
+
+Several locally successful algorithms failed complete transfer. We therefore
+distinguish \emph{matrix}, \emph{operator}, \emph{splice}, \emph{frozen-model},
+and \emph{production/export} evidence. Placeholders in this draft are claims
+that must remain absent from the abstract and conclusion until their gates are
+complete.
+
+\section{Conclusion}
+
+Sub-1-bit post-training compression leaves little room for a poor proxy. We
+show that a low-rank binary model can spend its exact bit budget using measured
+functional sensitivity, recover coupled operator behavior through parameters
+that fold into its existing representation, and preserve confidence with a
+bounded top-$k$-plus-tail target. On the retained Gemma workloads, each
+accepted component improves a matched baseline without increasing effective
+storage. \placeholder{After completing the final cross-model factorial
+campaign, summarize the combined Pareto improvement and runtime here.}
+
+\appendix
+
+\section{Complete Algorithm Catalog}
+
+Table~\ref{tab:catalog} records all major new algorithm families investigated
+in the project, including negative results. ``Promoted'' refers to the scope
+of retained evidence, not a universal default.
+
+\begin{table}[h]
+\centering
+\caption{Algorithm catalog and evidence status.}
+\label{tab:catalog}
+\scriptsize
+\begin{tabular}{p{0.24\linewidth}p{0.42\linewidth}p{0.22\linewidth}}
+\toprule
+Algorithm & Main idea & Status \\
+\midrule
+Reconstruction-aware allocation & Piecewise exponential rank response; error reduction per exact bit & Reconstruction gate positive; end quality rejected \\
+KL-calibrated D2 allocation & Exact physical-unit splice KL anchors current-run rank response & Promoted on Gemma 270M/1B \\
+Interaction-corrected D2 & Normalize marginal KL anchors for observed unit interactions and trust region & Shifted PPL/task tradeoff; not adopted \\
+Stacked shared-input factors & Row-concatenate projections and share the input-side binary basis & Standalone quality rejected \\
+Attention partition search & Exhaustive partitions of Q/K/V/$O^\top$ under equal bits & Matrix winner failed function gate \\
+Fisher shrinkage/power screen & Tune output-importance regularization and exponent under held-out KL & Raw Fisher promoted for one workload; transfer mixed \\
+Member-weighted group objective & Reweight logical members inside one shared physical factorization objective & Preliminary value gain confounded; combined recipe not adopted \\
+Dense-covariance sign refinement & Exact coordinate/batch sign flips under a quadratic activation metric & Screen positive; production placement rejected \\
+Input Hadamard preprocessing & Structured input rotation intended to expose covariance headroom & Decisively rejected \\
+Closed-form output bias & Store the calibration mean residual $\mathbb E[x](W-\widehat W)^\top$ as an additive bias & Equal-budget functional screen rejected \\
+Sparse residual correction & Fund selected residual elements/columns by reducing factor rank & Sparse beats columns locally; equal-budget model not promoted \\
+Low-rank residual patch & Fit a small activation-aware floating-point residual factor and charge its exact bits & Strong local ceiling; equal-budget model regressed \\
+Sign-word codebook & Store factor words as codebook indices to fund greater rank & Uniform coding insufficient \\
+Progressive sign fixing & Freeze high-confidence signs while optimizing remaining words & Equal-bit screen rejected \\
+Sparse-corrected sign code & Codebook word plus encoded bit corrections & Functional point estimates positive; incomplete \\
+Mixed free/coded basis & Free coefficient factor; free basis anchors plus corrected coded breadth & Selective down-projection accepted \\
+Dominant-factor transfer & Apply one-sided mixed coding to gate/up and attention orientations & Gate/up local opportunity; attention rejected \\
+Coupled gate/up refit & Fit existing output scales after SiLU/product composition & Promoted \\
+Student-activation down refit & Fit down input scale against the composed student MLP activation & Promoted \\
+Composition-scope scale policy & Select multiple block scale mappings on disjoint language-functional data & Promoted with transfer constraints \\
+Global foldable multipliers & Tune log multipliers through exact deployable factor forwards, then fold & Assumed accepted for this draft \\
+Conditional top-$k$ KD & Original sparse model-level scale reconstruction & Baseline; confidence collapse at long horizon \\
+Top-$k$ plus tail KD & Add aggregate vocabulary-tail mass category & Promoted analysis; fresh production run pending \\
+One-sided mass-floor correction & Conditional KD plus logit-space inequality penalty & Retained success; fixed policy failed fresh transfer \\
+Final RMSNorm calibration & Fold one scalar into Gemma effective norm weight & Calibration tool, not capability claim \\
+Mixed overlay/predecode & Store compact 19-bit records and expand once to canonical packed words & Runtime contract implemented; full campaign pending \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Negative-Result Details}
+
+\paragraph{Topology is not selected by matrix error.}
+The fixed QV/KO attention partition improved the corrected-Fisher matrix
+objective by approximately 1.04\% across two seeds but increased held-out
+full-attention teacher KL by 27.29\%. Per-block matrix-oracle selection is
+therefore not a valid topology policy without an operator-functional selector.
+
+\paragraph{Covariance is not a transferable placement score.}
+Dense-covariance refinement reduced its optimization objective at every
+selected production placement, yet the fresh model regressed from 273.52 to
+286.08 pre-KD perplexity and from 228.55 to 241.12 post-KD. The offline and
+resident covariance sources differed, and local covariance reduction did not
+predict composition across blocks.
+
+\paragraph{Biases and residual patches must pay their rank opportunity cost.}
+For calibration input mean $\bar x$, the closed-form output correction
+$b=\bar x(W-\widehat W)^\top$ removes the mean activation residual without
+changing the binary factors. Likewise, a low-rank patch $P_LP_R$ or sparse
+residual entries can remove a large fraction of local activation error.
+However, their exact stored indices, values, and factors displace binary rank
+under an equal-bit budget. The all-unit bias arm increased an $o_{\mathrm{proj}}$
+splice KL by 21.66\%, and a locally strong rank-4 residual patch increased the
+equal-budget model KL by 14.25\%. Sparse entries were consistently more
+efficient than complete residual columns, but did not recover enough of the
+rank-loss penalty for promotion. These remain supported sidecar mechanisms,
+not default quality improvements.
+
+\paragraph{Group member weighting can be real but non-additive.}
+Reweighting value-projection rows inside a stacked QKV objective produced a
+large preliminary splice improvement, but the first sweep regenerated
+nonidentical Fisher inputs. A corrected combined ``best methods'' experiment
+that included stacked QKV and a doubled value objective did not beat the
+simpler exact-unit D2 recipe. Member weighting is therefore a controlled
+objective parameter requiring identical calibration artifacts, not an accepted
+universal multiplier.
+
+\paragraph{Untuned overlays do not replace resident tuning.}
+A complete MLP hybrid improved 29.68\% relative to its equal-budget untuned
+sign-word family, but direct installation into the retained frozen model
+raised perplexity from 273.87 to 1904.75. The relative representation result
+remains valid; the absolute transfer failed because the overlay bypassed
+block-local factor tuning, non-factorized tuning, outliers, and post-block
+refit.
+
+\paragraph{A fixed confidence fold does not transfer.}
+The retained low-pressure correction plus $\alpha=1.015$ final-norm fold
+passed all local gates, but on a fresh factorization selected mass was 0.7305,
+below the predeclared 0.75 floor. This motivated the primary tail-aware
+objective and the treatment of scalar confidence as calibration rather than
+capability.
+
+\section{Reproducibility Checklist}
+
+The final artifact should provide:
+\begin{itemize}
+  \item immutable model revisions, tokenizer identities, dataset commits, and
+  token hashes;
+  \item all configuration and algorithm-version hashes;
+  \item exact rank inventories and logical, packed, and physical BPW;
+  \item per-sequence evaluation values and paired bootstrap seeds;
+  \item complete resident journals and transitive artifact validation;
+  \item factorized, packed, llama.cpp checkpoint, and GGUF receipts;
+  \item compression wall time and stage-level timing;
+  \item peak allocated/reserved GPU bytes, host working set, and artifact bytes;
+  \item runtime fallback counts, prefill/decode protocol, and throughput
+  distributions; and
+  \item all rejected arms needed to reproduce selection decisions.
+\end{itemize}
+
+\bibliographystyle{plain}
+\bibliography{references}
+
+\end{document}

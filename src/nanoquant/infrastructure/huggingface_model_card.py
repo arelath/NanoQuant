@@ -120,7 +120,8 @@ def render_huggingface_model_card(
     yaml_metadata = card_data.to_yaml(line_break="\n")
     rendered = f"---\n{yaml_metadata}\n---\n\n{markdown_body}\n"
     card = ModelCard(rendered)
-    card.validate(repo_type="model")
+    if card.data.to_dict() != card_data.to_dict():  # type: ignore[no-untyped-call]
+        raise ValueError("rendered Hugging Face model-card metadata did not round trip")
     return str(card).rstrip() + "\n"
 
 
