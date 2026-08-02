@@ -117,19 +117,37 @@ activation generation, committed one additional block, and exited
 intentionally. This isolated transient in-memory state while preserving the same
 numerical recipe, rank budget, and committed model state.
 
-That containment isolated the actual rollback bug: best-state restoration
-copied every selected parameter back exactly, but the failed AdamW step left
-gradients, moments, denominators, and BF16 Kahan compensation attached to the
-process. Those allocations could contain NaNs and poison the next block after
-CUDA reused the scratch storage. Rollback now zeroes optimizer scratch before
-release and detaches all tuning gradients.
+The first rollback repair proved that best-state restoration itself was exact:
+every selected parameter was byte-identical before refit and after rollback.
+It also cleared gradients and AdamW scratch before releasing the failed refit.
+A same-process canary crossed the block-13 rollback, entered block 14 with
+finite target power 174,782.797, and committed both blocks. A longer replay
+nevertheless failed after a later rollback, so end-of-epoch cleanup was
+necessary but not sufficient.
 
-A same-process two-block canary then proved the fix. Block 13 produced the
-expected non-finite post-refit epoch, restored its byte-identical entry state,
-and committed. Without a process reload, block 14 entered with finite target
-power 174,782.797, completed normally, rolled back its own non-finite refit, and
-committed. Clean-process slicing is no longer enabled; the remainder of the run
-is the repeated-rollback production test.
+The remaining bug was the rollback boundary. The tuner did not inspect
+non-finite state until full epoch evaluation, after it had already run later
+backward and optimizer steps from a poisoned step. Rollback is now
+transactional at each logical optimizer step: it rejects a non-finite scalar
+loss before backward, rejects non-finite accumulated gradients before AdamW,
+and checks both selected parameters and AdamW moments, squared moments,
+denominators, and Kahan compensation immediately after the update. The first
+bad step is sanitized, training stops, and the finite entry/best parameter
+snapshot is restored. A regression separately poisons only optimizer state,
+while leaving parameters finite, to cover the hole that parameter-only checks
+missed.
+
+The legacy implementation was also audited before considering a loss-rescaling
+workaround. Legacy intentionally backpropagates the summed weighted error
+divided by calibration rows, so the rewrite retains that normalization rather
+than hiding the rollback defect with a different objective scale.
+
+The production replay in
+`evidence/054/rollback-root-cause-diagnostic.stdout.log` then crossed the
+non-finite post-refit rollbacks in blocks 18, 19, 20, and 21 in one process and
+entered block 22 with finite teacher power. This is the repeated-rollback test
+that the old end-of-epoch behavior failed. Clean-process slicing is no longer
+enabled.
 
 Failed-run evidence:
 `evidence/054/054-d2-uniform-control-gemma-3-1b-it--archive-20154357dd00`,

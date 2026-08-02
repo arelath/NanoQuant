@@ -328,6 +328,29 @@ def _require_finite_selected_parameters(
         )
 
 
+def _selected_parameters_are_finite(selected: list[tuple[str, nn.Parameter]]) -> bool:
+    return all(bool(torch.isfinite(parameter).all()) for _name, parameter in selected)
+
+
+def _selected_gradients_are_finite(selected: list[tuple[str, nn.Parameter]]) -> bool:
+    return all(
+        parameter.grad is None or bool(torch.isfinite(parameter.grad).all())
+        for _name, parameter in selected
+    )
+
+
+def _optimizer_state_is_finite(
+    optimizer: ParityAdamW,
+    selected: list[tuple[str, nn.Parameter]],
+) -> bool:
+    return all(
+        bool(torch.isfinite(value).all())
+        for _name, parameter in selected
+        for value in optimizer.state.get(parameter, {}).values()
+        if isinstance(value, torch.Tensor)
+    )
+
+
 @torch.no_grad()
 def _sanitize_nonfinite_optimizer_step(
     optimizer: ParityAdamW,
@@ -536,6 +559,7 @@ def tune(
                     else stager.batches(tuple(item.indexes for item in microbatches))
                 )
                 device_batch_iterator = iter(device_batches)
+                nonfinite_step = False
                 for item in microbatches:
                     if recorder is NULL_RECORDER:
                         staged_batch = next(device_batch_iterator)
@@ -562,16 +586,21 @@ def tune(
                         prediction = forward(model, input_batch)
                         loss_sum = _loss_sum(prediction, target_batch, importance)
                         loss = loss_sum / max(1, item.batch_elements)
-                        torch.autograd.backward(loss)
                     else:
                         with recorder.phase("forward"):
                             prediction = forward(model, input_batch)
                         with recorder.phase("loss"):
                             loss_sum = _loss_sum(prediction, target_batch, importance)
                             loss = loss_sum / max(1, item.batch_elements)
+                    loss_is_finite = not request.restore_best_state or bool(torch.isfinite(loss).all())
+                    if loss_is_finite and recorder is NULL_RECORDER:
+                        torch.autograd.backward(loss)
+                    elif loss_is_finite:
                         with recorder.phase("backward"):
                             torch.autograd.backward(loss)
-                    if epoch_loss_sum is not None:
+                    else:
+                        nonfinite_step = True
+                    if epoch_loss_sum is not None and loss_is_finite:
                         epoch_loss_sum.add_(loss_sum.detach())
                     # Do not retain the final microbatch's autograd graph through
                     # optimizer/evaluation/factorization phase boundaries.
@@ -579,17 +608,34 @@ def tune(
                     if stager is not None and staged_batch.slot is not None:
                         stager.mark_consumed(staged_batch.slot)
                     del staged_batch
+                    if nonfinite_step:
+                        _sanitize_nonfinite_optimizer_step(optimizer, selected)
+                        break
                     if item.finishes_step:
+                        if request.restore_best_state and not _selected_gradients_are_finite(selected):
+                            _sanitize_nonfinite_optimizer_step(optimizer, selected)
+                            nonfinite_step = True
+                            break
                         if recorder is NULL_RECORDER:
                             optimizer.step()
-                            scheduler.step()
                         else:
                             with recorder.phase("optimizer_step"):
                                 optimizer.step()
-                                scheduler.step()
                                 recorder.add("tuning.steps", 1)
+                        if request.restore_best_state and (
+                            not _selected_parameters_are_finite(selected)
+                            or not _optimizer_state_is_finite(optimizer, selected)
+                        ):
+                            _sanitize_nonfinite_optimizer_step(optimizer, selected)
+                            nonfinite_step = True
+                            break
+                        scheduler.step()
                 epochs_completed = epoch + 1
-                if epoch_loss_sum is not None:
+                if nonfinite_step:
+                    current = float("nan")
+                    if epoch_loss_sum is not None:
+                        del epoch_loss_sum
+                elif epoch_loss_sum is not None:
                     if recorder is NULL_RECORDER:
                         current = float(epoch_loss_sum / request.targets.numel())
                     else:

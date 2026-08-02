@@ -559,6 +559,91 @@ def test_post_block_refit_rolls_back_immediately_after_nonfinite_epoch(
                 assert torch.count_nonzero(value) == 0
 
 
+def test_post_block_refit_rolls_back_at_first_nonfinite_optimizer_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    step_count = 0
+
+    class PoisoningParityAdamW(ParityAdamW):
+        def step(self, closure: None = None) -> None:
+            nonlocal step_count
+            assert closure is None
+            super().step()
+            step_count += 1
+            parameter = self.param_groups[0]["params"][0]
+            assert isinstance(parameter, torch.Tensor)
+            with torch.no_grad():
+                parameter.fill_(float("nan"))
+
+    monkeypatch.setattr(tuning_module, "ParityAdamW", PoisoningParityAdamW)
+    model = Hybrid()
+    inputs = torch.randn(8, 3, generator=torch.Generator().manual_seed(405))
+    targets = torch.randn(8, 2, generator=torch.Generator().manual_seed(406))
+    before = {name: value.detach().clone() for name, value in model.named_parameters()}
+
+    metrics = post_block_refit(
+        model,
+        TuningRequest(inputs, targets, 3, 2, 0.02),
+        _forward,
+    )
+
+    assert step_count == 1
+    assert metrics.epochs_completed == 1
+    assert metrics.stopped_early is True
+    assert metrics.best.loss == metrics.final.loss
+    for name, value in model.named_parameters():
+        assert torch.equal(value, before[name])
+        assert value.grad is None
+
+
+def test_post_block_refit_rolls_back_at_first_nonfinite_optimizer_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    step_count = 0
+
+    class StatePoisoningParityAdamW(ParityAdamW):
+        def step(self, closure: None = None) -> None:
+            nonlocal step_count
+            assert closure is None
+            super().step()
+            step_count += 1
+            parameter = self.param_groups[0]["params"][0]
+            assert isinstance(parameter, torch.Tensor)
+            state = self.state[parameter]
+            exponential_average_squared = state["exp_avg_sq"]
+            assert isinstance(exponential_average_squared, torch.Tensor)
+            exponential_average_squared.fill_(float("inf"))
+
+    monkeypatch.setattr(tuning_module, "ParityAdamW", StatePoisoningParityAdamW)
+    model = Hybrid()
+    inputs = torch.randn(8, 3, generator=torch.Generator().manual_seed(407))
+    targets = torch.randn(8, 2, generator=torch.Generator().manual_seed(408))
+    before = {name: value.detach().clone() for name, value in model.named_parameters()}
+
+    metrics = post_block_refit(
+        model,
+        TuningRequest(inputs, targets, 3, 2, 0.02),
+        _forward,
+    )
+
+    assert step_count == 1
+    assert metrics.epochs_completed == 1
+    assert metrics.stopped_early is True
+    assert metrics.best.loss == metrics.final.loss
+    for name, value in model.named_parameters():
+        assert torch.equal(value, before[name])
+        assert value.grad is None
+
+    monkeypatch.setattr(tuning_module, "ParityAdamW", ParityAdamW)
+    replay = post_block_refit(
+        model,
+        TuningRequest(inputs, targets, 1, 2, 0.001),
+        _forward,
+    )
+    assert replay.stopped_early is False
+    assert torch.isfinite(torch.tensor(replay.final.loss))
+
+
 def test_tuning_rejects_nonfinite_initial_loss(monkeypatch: pytest.MonkeyPatch) -> None:
     model = Hybrid()
     inputs = torch.randn(4, 3, generator=torch.Generator().manual_seed(403))
