@@ -122,6 +122,20 @@
       "status": "retired",
       "consumer": "experiment-044-fresh-factorization-transfer-gate",
       "evidence": "evidence/044/experiment044-c4-validation200-48x512-prekd-vs-postkd.json"
+    },
+    {
+      "id": "experiment045-wikitext-validation444-24x512",
+      "dataset": "Salesforce/wikitext:wikitext-2-raw-v1",
+      "split": "validation",
+      "offset": 444,
+      "samples": 24,
+      "sequence_length": 512,
+      "token_start": 226884,
+      "token_end": 239148,
+      "token_hash": "sha256:6b35ae6c5ef767ddec6cb400f82f975d90809e4320f9de92b2b3d8d8f902eadd",
+      "status": "retired",
+      "consumer": "experiment-045-fresh-tail-aware-checkpoint-selection",
+      "evidence": "evidence/045/experiment045-wikitext-validation444-24x512-checkpoint-curve.json"
     }
   ]
 }

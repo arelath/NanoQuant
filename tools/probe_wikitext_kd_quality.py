@@ -619,6 +619,20 @@ def run(args: argparse.Namespace) -> int:
         for before, after in zip(names, names[1:], strict=False)
     }
     primary = comparison(args.primary_baseline, args.primary_candidate)
+    against_primary_baseline = {
+        f"{name}_minus_{args.primary_baseline}": comparison(
+            args.primary_baseline, name
+        )
+        for name in names
+        if name != args.primary_baseline
+    }
+    against_primary_candidate = {
+        f"{name}_minus_{args.primary_candidate}": comparison(
+            args.primary_candidate, name
+        )
+        for name in names
+        if name != args.primary_candidate
+    }
     arm_results = {}
     for name, sequences in arm_sequences.items():
         intervals = {
@@ -654,6 +668,8 @@ def run(args: argparse.Namespace) -> int:
             "arms": manifests,
             "results": arm_results,
             "paired_adjacent_arms": adjacent,
+            "paired_against_primary_baseline": against_primary_baseline,
+            "paired_against_primary_candidate": against_primary_candidate,
             "primary_comparison": {
                 "candidate_minus_baseline": (
                     f"{args.primary_candidate}_minus_{args.primary_baseline}"
