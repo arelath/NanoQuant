@@ -27,6 +27,14 @@ def test_parity_launcher_keeps_explicit_memory_fallback_microbatch() -> None:
     assert args.tuning_microbatch_size == 1
 
 
+def test_parity_launcher_exposes_preprocessing_only_stop() -> None:
+    args = _parser().parse_args(
+        ["--output", "run", "--snapshot", "snapshot", "--stop-after-preprocessing"]
+    )
+
+    assert args.stop_after_preprocessing
+
+
 def test_parity_launcher_builds_request_through_canonical_recipe(monkeypatch, tmp_path: Path) -> None:
     captured = []
     monkeypatch.setattr(

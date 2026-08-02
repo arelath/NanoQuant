@@ -198,6 +198,27 @@ The allocation-statistics numerical path is corrected, but its pinned-Gemma
 repeatability gate and the raw-versus-temperature-fitted comparison report are
 not complete. Both remain explicit blockers for the next fresh full campaign.
 
+### Durable independent preprocessing replay
+
+The resident workflow now has a non-semantic preprocessing boundary. When
+requested, it durably commits calibration statistics, objective specifications,
+the reconstruction-rank profile, and the final allocation plan, emits an
+explicit interruption event, releases resident resources, and stops before the
+first compression commit. Restarting the same run reuses that exact state.
+
+`tools/replay_gemma_preprocessing_reproducibility.py` executes the two replay
+arms in separate Python processes. `tools/compare_preprocessing_runs.py` then
+performs a fresh hash validation of each root and every transitively referenced
+artifact. The gate requires exact equality of the resident semantic-config
+hash, preprocessing-state hash, calibration artifact, objective artifact,
+allocation-plan artifact, and the complete reachable artifact graph. Matching
+only summary statistics or plan totals is not sufficient.
+
+The tiny CPU integration gate proves independent equality and byte-identical
+resume reuse. A retained real-run self-check validates a 136-artifact graph.
+The two independent pinned-Gemma executions are still pending, so this does not
+yet clear the campaign blocker.
+
 ## Experiment 043 correction
 
 The original Experiment 043 draft named validation offset 300 as untouched,

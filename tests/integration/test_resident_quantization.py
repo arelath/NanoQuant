@@ -42,6 +42,7 @@ from nanoquant.resident_quantization import (
 )
 from nanoquant.resident_replay import capture_and_replay_resident_layer
 from nanoquant.runtime import RuntimeModelMetadata, convert_logical_to_packed
+from tools.compare_preprocessing_runs import compare_runs
 
 
 def test_resident_covariance_refinement_is_explicit_and_persisted(tmp_path: Path) -> None:
@@ -579,6 +580,64 @@ def test_resident_quantization_factorizes_qkv_as_one_shared_input_group(tmp_path
         ).logits
     assert torch.isfinite(packed_dense_logits).all()
     assert torch.allclose(packed_dense_logits, packed_logits, atol=1e-5, rtol=1e-5)
+
+
+def test_preprocessing_only_runs_are_exact_and_resume_without_recomputation(tmp_path: Path) -> None:
+    snapshot = tmp_path / "snapshot"
+    config = Gemma3TextConfig(
+        vocab_size=24,
+        hidden_size=8,
+        intermediate_size=16,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=4,
+    )
+    Gemma3ForCausalLM(config).save_pretrained(snapshot, safe_serialization=True)
+    base = ResidentQuantizationRequest(
+        snapshot,
+        tmp_path / "run-a",
+        "fixture/gemma3",
+        "pinned-test-revision",
+        ((1, 2, 3, 4),),
+        device="cpu",
+        target_bpw=8.0,
+        rank_multiple=1,
+        allocation_strategy=AllocationStrategy.UNIFORM,
+        admm=ADMMConfig(outer_iterations=1, inner_iterations=1),
+        profiling=ProfilingConfig(level=ProfilingLevel.OFF),
+        interrupt_after_preprocessing=True,
+    )
+    second = replace(base, output=tmp_path / "run-b")
+
+    for request in (base, second):
+        with pytest.raises(InterruptedError, match="after durable preprocessing commit"):
+            run_resident_quantization(request)
+        manifest = json.loads((request.output / "manifest.json").read_text())
+        assert manifest["status"] == "interrupted"
+        event_names = [
+            json.loads(line)["name"]
+            for line in (request.output / "events.jsonl").read_text().splitlines()
+        ]
+        assert "preprocessing.selected" in event_names
+        assert "preprocessing.interrupted" in event_names
+        assert "compression.progress_initialized" not in event_names
+
+    comparison = compare_runs(base.output, second.output)
+    assert comparison["passed"]
+    assert all(comparison["comparisons"].values())
+
+    state_path = base.output / "state" / "preprocessing.json"
+    state_before_resume = state_path.read_bytes()
+    resumed = run_resident_quantization(replace(base, interrupt_after_preprocessing=False))
+
+    assert len(resumed.blocks) == 1
+    assert state_path.read_bytes() == state_before_resume
+    resumed_events = [
+        json.loads(line) for line in (base.output / "events.jsonl").read_text().splitlines()
+    ]
+    selected = [event for event in resumed_events if event["name"] == "preprocessing.selected"]
+    assert selected[-1]["fields"]["reused"] is True
 
 
 def test_reconstruction_rank_probe_covers_every_physical_unit_before_fitting(tmp_path: Path) -> None:

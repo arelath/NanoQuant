@@ -182,3 +182,26 @@ preflight alone authorizes a fresh campaign:
 The next action is therefore not slice reservation. It is the deterministic
 calibration-statistics/plan replay and the calibration-versus-capability report
 implementation required by Document 81.
+
+## Preprocessing replay mechanism
+
+The replay mechanism is now implemented and fixture-tested. A resident run can
+stop immediately after durable preprocessing without changing its semantic
+configuration identity. Two independent fixture runs are required to
+match the preprocessing-state hash, calibration, objectives, allocation plan,
+and every transitively referenced artifact before resume. The resumed fixture
+reuses the same state byte-for-byte and reaches compression normally.
+
+The pinned replay command is bound to the Experiment 044 launcher, which is the
+fresh factorization recipe underlying this campaign:
+
+```powershell
+.\.venv\Scripts\python.exe tools\replay_gemma_preprocessing_reproducibility.py `
+  --launcher experiments\044-tail-aware-256-d2-compress-and-benchmark-gemma-3-1b-it.py `
+  --output-root evidence\048\pinned-gemma-preprocessing-replay
+```
+
+The orchestrator launches `run-a` and `run-b` in distinct Python processes and
+writes `preprocessing-reproducibility.json` only after complete transitive hash
+validation. No evaluation slice is reserved or opened by this operation. Until
+that real receipt passes, Experiment 048 remains paused.

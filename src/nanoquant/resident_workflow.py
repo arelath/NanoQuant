@@ -93,6 +93,7 @@ class ResidentExecutionOptions:
     post_block_refit_epoch_cooldown_seconds: float = 0.0
     distillation_epoch_cooldown_seconds: float = 0.0
     interrupt_after_layer_commits: int | None = None
+    interrupt_after_preprocessing: bool = False
     preprocessing_reuse_run: Path | None = None
     rank_probe_reuse_run: Path | None = None
     interrupt_after_block_commits: int | None = None
@@ -441,6 +442,7 @@ def resident_request_from_config(
         activation_gpu_reserve_bytes=int(config.runtime.activations.gpu_reserve_gib * 2**30),
         seed=config.reproducibility.seed,
         interrupt_after_layer_commits=options.interrupt_after_layer_commits,
+        interrupt_after_preprocessing=options.interrupt_after_preprocessing,
         preprocessing_reuse_run=options.preprocessing_reuse_run,
         rank_probe_reuse_run=options.rank_probe_reuse_run,
         interrupt_after_block_commits=options.interrupt_after_block_commits,
@@ -821,7 +823,12 @@ def _reject_incompatible_run_before_preparation(output: Path, expected_config_ha
     )
 
 
-def resolve_resident_experiment_inputs(config: RunConfig, *, launcher_path: str | Path) -> ResolvedResidentInputs:
+def resolve_resident_experiment_inputs(
+    config: RunConfig,
+    *,
+    launcher_path: str | Path,
+    output_override: str | Path | None = None,
+) -> ResolvedResidentInputs:
     """Resolve a zero-argument runfile's model and run-local calibration tokens."""
 
     _validate_supported_recipe(config)
@@ -836,7 +843,11 @@ def resolve_resident_experiment_inputs(config: RunConfig, *, launcher_path: str 
     registry_root = Path(config.output.run_root)
     if not registry_root.is_absolute():
         registry_root = repository_root / registry_root
-    output = registry_root / config.intent.name
+    output = (
+        registry_root / config.intent.name
+        if output_override is None
+        else Path(output_override).resolve()
+    )
     preparation_hash = config_hash(config)
     _reject_incompatible_run_before_preparation(output, preparation_hash)
     calibration = (

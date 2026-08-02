@@ -316,12 +316,14 @@ def test_sweep_reuse_paths_map_as_nonsemantic_execution_controls(tmp_path: Path)
     inputs = _inputs(tmp_path)
     baseline = resident_request_from_config(_resident_config(), inputs)
     options = ResidentExecutionOptions(
+        interrupt_after_preprocessing=True,
         preprocessing_reuse_run=tmp_path / "calibration-donor",
         rank_probe_reuse_run=tmp_path / "probe-donor",
     )
 
     request = resident_request_from_config(_resident_config(), inputs, options)
 
+    assert request.interrupt_after_preprocessing
     assert request.preprocessing_reuse_run == options.preprocessing_reuse_run
     assert request.rank_probe_reuse_run == options.rank_probe_reuse_run
     assert resident._resident_manifest_config(request, "resident-quantization") == resident._resident_manifest_config(
@@ -542,6 +544,15 @@ def test_zero_argument_resolution_generates_run_local_calibration(
         "seed": 0,
         "preparation_id": workflow.config_hash(config),
     }
+
+    override = repository / "evidence" / "reproducibility" / "run-a"
+    overridden = resolve_resident_experiment_inputs(
+        config,
+        launcher_path=launcher,
+        output_override=override,
+    )
+    assert overridden.output == override.resolve()
+    assert observed["path"] == override.resolve()
 
 
 def test_zero_argument_resolution_rejects_incompatible_run_before_calibration(

@@ -394,6 +394,7 @@ class ResidentQuantizationRequest:
     verify_hashes: bool = True
     interrupt_after_layer_commits: int | None = None
     interrupt_after_rank_probe_commits: int | None = None
+    interrupt_after_preprocessing: bool = False
     preprocessing_reuse_run: Path | None = None
     rank_probe_reuse_run: Path | None = None
     interrupt_after_block_commits: int | None = None
@@ -2330,6 +2331,7 @@ def _resident_manifest_config(request: ResidentQuantizationRequest, component: s
     payload.pop("launcher_path")
     payload.pop("memory_plan")
     payload.pop("memory_plan_reference")
+    payload.pop("interrupt_after_preprocessing")
     payload.pop("preprocessing_reuse_run")
     payload.pop("rank_probe_reuse_run")
     payload["token_ids"] = _manifest_tensor_identity(request.token_ids)
@@ -5227,6 +5229,17 @@ def _execute_resident_quantization_pipeline(
                 blocks=len(plan.blocks),
                 planned_bits=plan.planned_cost.total,
             )
+    if request.interrupt_after_preprocessing:
+        events.emit(
+            "resident-quantization",
+            "warning",
+            "preprocessing.interrupted",
+            calibration_artifact=calibration.reference.artifact_id,
+            objectives_artifact=objectives.reference.artifact_id,
+            plan_artifact=persisted_plan.reference.artifact_id,
+        )
+        executor.release()
+        raise InterruptedError("requested interruption after durable preprocessing commit")
     state_manager = QuantizationStateManager(
         request,
         events,

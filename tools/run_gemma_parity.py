@@ -57,6 +57,11 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--activation-retention", choices=("rolling", "all"), default="rolling")
+    parser.add_argument(
+        "--stop-after-preprocessing",
+        action="store_true",
+        help="stop after calibration, objectives, and the allocation plan are durably committed",
+    )
     parser.add_argument("--interrupt-after-layer-commits", type=int)
     parser.add_argument("--interrupt-after-block-commits", type=int)
     parser.add_argument("--interrupt-after-factorized-tuning-epoch-commits", type=int)
@@ -223,6 +228,7 @@ def main() -> None:
         initial_cooldown_seconds=args.initial_cooldown_seconds,
         nonfactorized_tuning_epoch_cooldown_seconds=args.nonfactorized_tuning_epoch_cooldown_seconds,
         post_block_refit_epoch_cooldown_seconds=args.post_block_refit_epoch_cooldown_seconds,
+        interrupt_after_preprocessing=args.stop_after_preprocessing,
         interrupt_after_layer_commits=args.interrupt_after_layer_commits,
         interrupt_after_block_commits=args.interrupt_after_block_commits,
         interrupt_after_factorized_tuning_epoch_commits=args.interrupt_after_factorized_tuning_epoch_commits,
