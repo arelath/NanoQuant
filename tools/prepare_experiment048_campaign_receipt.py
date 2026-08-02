@@ -24,9 +24,7 @@ from nanoquant.resident_workflow import primary_distillation_config_from_run_con
 
 EXPERIMENT_NUMBER = 48
 MODEL_REVISION = "dcc83ea841ab6100d6b47a070329e1ba4cf78752"
-PRIMARY_PROTOCOL_HASH = (
-    "sha256:0ed7993a02eb980403ebeb97ff2d2cbf738242e64e6a7d07ad9f2900ef611936"
-)
+PRIMARY_PROTOCOL_HASH = "sha256:0ed7993a02eb980403ebeb97ff2d2cbf738242e64e6a7d07ad9f2900ef611936"
 PRIMARY_STEPS = 256
 CORRECTION_NAMESPACE = "global-distillation-mass-floor"
 CORRECTION_STEPS = {1: 32, 2: 64, 3: 96, 4: 128}
@@ -43,6 +41,13 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--slice-registry", type=Path, required=True)
     parser.add_argument("--selection-slice-id", required=True)
     parser.add_argument("--confirmation-slice-id", required=True)
+    parser.add_argument(
+        "--retained-reference",
+        type=_retained_reference_argument,
+        action="append",
+        required=True,
+        help="fixed absolute reference as name=completed-run-output;expected-steps",
+    )
     parser.add_argument("--output", type=Path, required=True)
     return parser
 
@@ -51,12 +56,55 @@ def _sha256(path: Path) -> str:
     return "sha256:" + hash_file(path)
 
 
+def _retained_reference_argument(value: str) -> tuple[str, Path, int]:
+    name, separator, remainder = value.partition("=")
+    path, step_separator, raw_steps = remainder.rpartition(";")
+    try:
+        steps = int(raw_steps)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("retained reference must use name=run-output;positive-steps") from exc
+    if not separator or not step_separator or not name.strip() or not path.strip() or steps <= 0:
+        raise argparse.ArgumentTypeError("retained reference must use name=run-output;positive-steps")
+    return name.strip(), Path(path.strip()), steps
+
+
+def _retained_reference_receipts(
+    references: tuple[tuple[str, Path, int], ...],
+) -> tuple[dict[str, object], ...]:
+    names = tuple(name for name, _path, _steps in references)
+    if not references or len(names) != len(set(names)) or "prekd" in names or "uncorrected" in names:
+        raise ValueError("Experiment 048 retained references are invalid")
+    receipts = []
+    for name, raw_path, expected_steps in references:
+        path = raw_path.resolve()
+        manifest_path = path / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        reference = active_global_tuning(path)
+        artifacts = LocalArtifactStore(path / "artifacts", use_persistent_validation_cache=False)
+        if manifest.get("status") != "completed" or reference is None:
+            raise ValueError(f"Experiment 048 retained reference {name} is incomplete")
+        result = load_global_tuning(reference, artifacts).result
+        if result.steps_completed != expected_steps:
+            raise ValueError(f"Experiment 048 retained reference {name} step count differs")
+        receipts.append(
+            {
+                "name": name,
+                "run_output": str(path),
+                "expected_steps": expected_steps,
+                "manifest_sha256": _sha256(manifest_path),
+                "global_tuning": to_dict(reference),
+                "manifest_authorized_global_tuning": reference.artifact_id in manifest.get("artifacts", []),
+                "protocol_hash": result.protocol_hash,
+                "source_blocks": [to_dict(item) for item in result.source_blocks],
+            }
+        )
+    return tuple(receipts)
+
+
 def _validate_experiment048_config(config: RunConfig) -> str:
     distillation = config.distillation
     correction = distillation.mass_floor_correction
-    primary_hash = distillation_protocol_hash(
-        primary_distillation_config_from_run_config(config)
-    )
+    primary_hash = distillation_protocol_hash(primary_distillation_config_from_run_config(config))
     if (
         config.intent.experiment_number != EXPERIMENT_NUMBER
         or str(config.model.revision) != MODEL_REVISION
@@ -139,9 +187,7 @@ def _checkpoint_receipts(
             or candidate.identity.initializer_global_tuning != primary
             or candidate.identity.source_blocks != source_blocks
         ):
-            raise ValueError(
-                f"Experiment 048 correction checkpoint epoch {epoch} differs"
-            )
+            raise ValueError(f"Experiment 048 correction checkpoint epoch {epoch} differs")
         receipts.append(
             {
                 "epoch": epoch,
@@ -196,10 +242,7 @@ def run(args: argparse.Namespace) -> int:
         raise ValueError("Experiment 048 resident workflow is not complete")
     config = from_dict(RunConfig, canonical, path="experiment048.config")
     primary_hash = _validate_experiment048_config(config)
-    if (
-        manifest.launcher.content_hash != _sha256(launcher)
-        or manifest.launcher.experiment_number != EXPERIMENT_NUMBER
-    ):
+    if manifest.launcher.content_hash != _sha256(launcher) or manifest.launcher.experiment_number != EXPERIMENT_NUMBER:
         raise ValueError("Experiment 048 launcher or config identity differs")
 
     validation = json.loads(validation_path.read_text(encoding="utf-8"))
@@ -237,8 +280,7 @@ def run(args: argparse.Namespace) -> int:
         or primary_result.steps_completed != PRIMARY_STEPS
         or correction_result.steps_completed != CORRECTION_STEPS[4]
         or correction_result.source_blocks != primary_result.source_blocks
-        or correction_result.selected_parameter_count
-        != primary_result.selected_parameter_count
+        or correction_result.selected_parameter_count != primary_result.selected_parameter_count
     ):
         raise ValueError("Experiment 048 primary or correction endpoint differs")
     primary_checkpoints = discover_checkpoints(
@@ -263,6 +305,7 @@ def run(args: argparse.Namespace) -> int:
         source_blocks=primary_result.source_blocks,
         correction_protocol_hash=correction_result.protocol_hash,
     )
+    retained_references = _retained_reference_receipts(tuple(args.retained_reference))
 
     registry_payload = json.loads(registry_path.read_text(encoding="utf-8"))
     selection, confirmation, registry_audit = _reserved_c4_slices(
@@ -281,17 +324,11 @@ def run(args: argparse.Namespace) -> int:
             "manifest": manifest_path,
             "strict_validation": validation_path,
             "slice_registry": registry_path,
-            "selector": repository_root
-            / "tools"
-            / "select_c4_capability_correction_checkpoint.py",
+            "selector": repository_root / "tools" / "select_c4_capability_correction_checkpoint.py",
             "c4_evaluator": repository_root / "tools" / "probe_non_wikitext_kd_quality.py",
             "temperature_fitter": repository_root / "tools" / "fit_non_wikitext_temperature.py",
-            "checkpoint_materializer": repository_root
-            / "tools"
-            / "materialize_topk_tail_checkpoint.py",
-            "temperature_protocol": repository_root
-            / "Docs"
-            / "82-temperature-calibration-reporting-protocol.md",
+            "checkpoint_materializer": repository_root / "tools" / "materialize_topk_tail_checkpoint.py",
+            "temperature_protocol": repository_root / "Docs" / "82-temperature-calibration-reporting-protocol.md",
         }.items()
     }
     protocol: dict[str, object] = {
@@ -315,13 +352,14 @@ def run(args: argparse.Namespace) -> int:
         "selector": {
             "rule": RULE,
             "baseline": {"name": "uncorrected", "steps": PRIMARY_STEPS},
-            "arms": [
-                {"name": f"correction{epoch}", "steps": steps}
-                for epoch, steps in CORRECTION_STEPS.items()
-            ],
+            "arms": [{"name": f"correction{epoch}", "steps": steps} for epoch, steps in CORRECTION_STEPS.items()],
             "tolerance": SELECTOR_TOLERANCE,
             "bootstrap_resamples": BOOTSTRAP_RESAMPLES,
             "bootstrap_seed": BOOTSTRAP_SEED,
+        },
+        "absolute_references": {
+            "same_run": ("prekd", "uncorrected"),
+            "retained": retained_references,
         },
         "slices": {
             "selection": selection,
@@ -341,9 +379,7 @@ def run(args: argparse.Namespace) -> int:
     if args.output.exists():
         existing = json.loads(args.output.read_text(encoding="utf-8"))
         if existing != receipt:
-            raise FileExistsError(
-                f"refusing to replace a different Experiment 048 receipt: {args.output}"
-            )
+            raise FileExistsError(f"refusing to replace a different Experiment 048 receipt: {args.output}")
         return 0
     atomic_write_json(args.output, receipt)
     print(json.dumps(receipt, indent=2))

@@ -168,6 +168,27 @@ def test_rejects_step_and_protocol_mismatches() -> None:
         )
 
 
+def test_accepts_explicit_tuning_pointer_for_same_run_baseline() -> None:
+    quality, checkpoint = _payloads(
+        {"base": (256, 5.0, 2.0), "epoch1": (32, 4.9, 1.9)}
+    )
+    quality["protocol"]["arms"][0]["mode"] = "tuning"  # type: ignore[index]
+    quality["arms"]["base"]["mode"] = "tuning"  # type: ignore[index]
+    checkpoint["protocol"]["arms"][0]["mode"] = "tuning"  # type: ignore[index]
+
+    result = select_c4_capability_checkpoint(
+        quality,
+        checkpoint,
+        baseline=("base", 256),
+        ordered_arms=(("epoch1", 32),),
+        tolerance=0.01,
+        resamples=100,
+        seed=0,
+    )
+
+    assert result["selected_arm"] == "epoch1"
+
+
 def test_rejects_extra_arm_inventory() -> None:
     quality, checkpoint = _payloads(
         {"base": (256, 5.0, 2.0), "epoch1": (32, 4.9, 1.9)}

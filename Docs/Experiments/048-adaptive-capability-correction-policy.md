@@ -345,3 +345,45 @@ exactly 256 steps as the uncorrected fallback, alongside correction epochs
 1-4. Therefore both selector outcomes are materializable: a winning correction
 uses its exact correction checkpoint, while a no-survivor decision deploys the
 same-run primary endpoint rather than the active 128-step correction endpoint.
+
+## Adaptive campaign orchestrator
+
+`tools/run_experiment048_campaign.py` now implements the complete resumable
+stage graph. Its dry-run plan fixes the order before data are opened:
+
+1. fresh resident factorization, exact 256-step primary, and the complete
+   32/64/96/128-step correction curve;
+2. strict resident validation and immutable campaign receipt;
+3. irreversible selection-slice retirement, one same-run five-arm C4 curve,
+   and the frozen selector;
+4. exact selected-checkpoint (or primary fallback) materialization and strict
+   validation;
+5. for a selected correction only, identity-bound baseline/candidate
+   temperature fits on the retired selection slice, followed by irreversible
+   confirmation-slice retirement and raw/fitted final C4 reporting;
+6. mandatory `execute_complete_compression`, logical/packed/GGUF artifacts,
+   WikiText quality, and the 1,000-example six-task guardrail on the deployed
+   derived run.
+
+The campaign receipt also freezes the two absolute historical references:
+accepted Experiment 040 at 32 correction steps and tail-aware Experiment 044
+at 256 primary steps. It records each manifest hash, active tuning artifact,
+protocol hash, source-block inventory, and whether the historical manifest
+explicitly authorized that tuning artifact. The latter is false for the old
+Experiment 040 derived-manifest schema and is reported rather than hidden;
+the reference is read-only and its artifact is freshly validated.
+
+The baseline arm in selection is loaded through the explicit primary tuning
+pointer, not the active correction pointer. The selector permits `tuning`
+mode only for that baseline; all correction arms must remain exact checkpoint
+loads. Final selected-arm evaluation likewise uses the checkpoint identity
+that the decision and temperature-fit receipts bind. Exact materialization
+then proves that the deployment artifact has the same tensors.
+
+Failure paths are predeclared. A no-survivor selector result deploys the bound
+primary fallback without opening confirmation. A selected correction that
+fails untouched C4 confirmation is retained as failed evidence, after which
+the orchestrator materializes and fully benchmarks the same-run primary
+fallback. Neither path changes a coefficient, tolerance, checkpoint rule, or
+slice. The orchestrator remains unlaunched: the two fresh token hashes and
+reservations are still deliberately absent.

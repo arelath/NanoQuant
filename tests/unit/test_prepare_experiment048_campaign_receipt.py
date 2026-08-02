@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -11,6 +12,7 @@ from tools.prepare_experiment048_campaign_receipt import (
     _checkpoint_receipts,
     _primary_checkpoint_receipt,
     _reserved_c4_slices,
+    _retained_reference_argument,
     _validate_experiment048_config,
 )
 from tools.probe_distillation_checkpoint_tail_mass import CheckpointCandidate
@@ -30,6 +32,14 @@ def _slice(identity: str, offset: int, consumer: str) -> dict[str, object]:
         "status": "reserved",
         "consumer": consumer,
     }
+
+
+def test_retained_reference_parser_preserves_windows_drive_paths() -> None:
+    assert _retained_reference_argument(r"accepted040=D:\evidence\040;32") == (
+        "accepted040",
+        Path(r"D:\evidence\040"),
+        32,
+    )
 
 
 def test_campaign_config_accepts_only_the_frozen_experiment048_regime() -> None:

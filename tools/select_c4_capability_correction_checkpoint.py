@@ -108,11 +108,17 @@ def _validate_arm_inventory(
         observed = observed_arms[name]
         is_baseline = name == baseline[0]
         checkpoint_identity = observed.get("checkpoint")
+        observed_mode = observed.get("mode")
+        protocol_mode = protocol_arm.get("mode")
         if (
             int(protocol_arm.get("expected_steps", -1)) != steps
             or int(observed.get("steps_completed", -1)) != steps
-            or protocol_arm.get("mode") != ("postkd" if is_baseline else "checkpoint")
-            or observed.get("mode") != ("postkd" if is_baseline else "checkpoint")
+            or protocol_mode != observed_mode
+            or (
+                is_baseline
+                and protocol_mode not in {"postkd", "tuning"}
+            )
+            or (not is_baseline and protocol_mode != "checkpoint")
             or (
                 not is_baseline
                 and (
