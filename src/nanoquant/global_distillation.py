@@ -75,6 +75,7 @@ from nanoquant.infrastructure.global_tuning import (
 from nanoquant.infrastructure.hf_language_model import load_causal_language_model
 from nanoquant.infrastructure.memory_cleanup import release_memory
 from nanoquant.infrastructure.profiling import profiled_run
+from nanoquant.infrastructure.reproducibility import deterministic_torch_execution
 from nanoquant.infrastructure.resource_usage import peak_device_memory_bytes, peak_process_memory_bytes
 from nanoquant.infrastructure.tensor_store import LocalTensorStore
 
@@ -102,6 +103,8 @@ class GlobalDistillationRequest:
     distillation_target_mask: torch.Tensor | None = None
     distillation_weights: torch.Tensor | None = None
     initializer_global_tuning: ArtifactRef | None = None
+    expected_initializer_protocol_hash: str | None = None
+    expected_initializer_steps: int | None = None
     state_namespace: str = "global-distillation"
 
 
@@ -357,6 +360,37 @@ def _offload_student(student: nn.Module, device: str) -> None:
         torch.cuda.empty_cache()
 
 
+def _distillation_protocol(config: TopKDistillationConfig) -> dict[str, object]:
+    protocol = to_dict(config)
+    if not isinstance(protocol, dict):
+        raise TypeError("distillation config did not encode as an object")
+    if protocol.get("objective") == "top_k":
+        protocol.pop("objective")
+        if protocol.get("maximum_batches_per_epoch") is None:
+            protocol.pop("maximum_batches_per_epoch")
+        # These coefficients are semantically inactive for conditional-only
+        # KD, independent of their configured numeric values.
+        protocol.pop("tail_mass_weight")
+        protocol.pop("minimum_teacher_mass_ratio")
+        protocol.pop("mass_floor_weight")
+    else:
+        protocol["teacher_normalizer_version"] = TAIL_NORMALIZER_VERSION
+        if protocol.get("objective") == "top_k_tail":
+            protocol.pop("minimum_teacher_mass_ratio")
+            protocol.pop("mass_floor_weight")
+        else:
+            protocol.pop("tail_mass_weight")
+    if protocol.get("scheduler_total_steps") is None:
+        protocol.pop("scheduler_total_steps")
+    return cast(dict[str, object], protocol)
+
+
+def distillation_protocol_hash(config: TopKDistillationConfig) -> str:
+    """Return the semantic protocol identity for a non-warm-started KD run."""
+
+    return semantic_hash(_distillation_protocol(config))
+
+
 def _run_global_topk_distillation(
     request: GlobalDistillationRequest,
     recorder: PhaseRecorder,
@@ -385,27 +419,16 @@ def _run_global_topk_distillation(
         denominator_floor=request.block_snapshot_denominator_floor,
     )
     token_bytes = tokens.contiguous().view(torch.uint8).numpy().tobytes()
-    protocol = to_dict(request.config)
-    if not isinstance(protocol, dict):
-        raise TypeError("distillation config did not encode as an object")
-    if protocol.get("objective") == "top_k":
-        protocol.pop("objective")
-        if protocol.get("maximum_batches_per_epoch") is None:
-            protocol.pop("maximum_batches_per_epoch")
-        # This coefficient is semantically inactive for the conditional-only
-        # objective, independent of the configured numeric value.
-        protocol.pop("tail_mass_weight")
-        protocol.pop("minimum_teacher_mass_ratio")
-        protocol.pop("mass_floor_weight")
-    else:
-        protocol["teacher_normalizer_version"] = TAIL_NORMALIZER_VERSION
-        if protocol.get("objective") == "top_k_tail":
-            protocol.pop("minimum_teacher_mass_ratio")
-            protocol.pop("mass_floor_weight")
-        else:
-            protocol.pop("tail_mass_weight")
-    if protocol.get("scheduler_total_steps") is None:
-        protocol.pop("scheduler_total_steps")
+    expectation_values = (
+        request.expected_initializer_protocol_hash,
+        request.expected_initializer_steps,
+    )
+    if request.initializer_global_tuning is None:
+        if any(value is not None for value in expectation_values):
+            raise ValueError("initializer expectations require a global-tuning initializer")
+    elif any(value is None for value in expectation_values):
+        raise ValueError("warm-started distillation requires exact initializer expectations")
+    protocol = _distillation_protocol(request.config)
     teacher_protocol = dict(protocol)
     teacher_protocol.pop("optimizer_version")
     teacher_protocol.pop("scheduler_total_steps", None)
@@ -416,6 +439,10 @@ def _run_global_topk_distillation(
     teacher_protocol_hash = semantic_hash(teacher_protocol)
     if request.initializer_global_tuning is not None:
         protocol["initializer_global_tuning"] = to_dict(request.initializer_global_tuning)
+        protocol["initializer_expectation"] = {
+            "protocol_hash": request.expected_initializer_protocol_hash,
+            "steps_completed": request.expected_initializer_steps,
+        }
     protocol_hash = semantic_hash(protocol)
     token_hash = "sha256:" + hashlib.sha256(token_bytes).hexdigest()
     target_hash = None
@@ -487,6 +514,14 @@ def _run_global_topk_distillation(
         if loaded.global_tuning != request.initializer_global_tuning:
             raise ValueError("active global tuning does not match the requested initializer")
         initializer = load_global_tuning(request.initializer_global_tuning, artifacts)
+        if (
+            initializer.result.protocol_hash
+            != request.expected_initializer_protocol_hash
+            or initializer.result.steps_completed != request.expected_initializer_steps
+        ):
+            raise ValueError(
+                "global-tuning initializer differs from the correction's frozen regime"
+            )
     elif loaded.global_tuning is not None:
         raise ValueError("run already has an active global tuning result")
     with recorder.phase("thaw"):
@@ -715,14 +750,15 @@ def _run_global_topk_distillation(
 
 def run_global_topk_distillation(request: GlobalDistillationRequest) -> GlobalDistillationRunResult:
     def execute() -> GlobalDistillationRunResult:
-        with profiled_run(
-            request.profiling,
-            request.run_output,
-            None,
-            run_id="global-distillation",
-        ) as recorder:
-            with recorder.phase("run"):
-                return _run_global_topk_distillation(request, recorder)
+        with deterministic_torch_execution(request.config.seed, request.device):
+            with profiled_run(
+                request.profiling,
+                request.run_output,
+                None,
+                run_id="global-distillation",
+            ) as recorder:
+                with recorder.phase("run"):
+                    return _run_global_topk_distillation(request, recorder)
 
     if request.device.startswith("cuda"):
         with acquire_device_lease(request.device):

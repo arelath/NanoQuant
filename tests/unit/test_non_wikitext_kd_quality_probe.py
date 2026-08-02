@@ -6,7 +6,9 @@ import pytest
 import torch
 from pytest import MonkeyPatch
 
+from nanoquant.application.kl_budget import KlSequenceResult
 from tools.probe_non_wikitext_kd_quality import (
+    _arm_result,
     _c4_slice_reservation,
     _contiguous_token_windows,
     _load_c4_tokens,
@@ -22,6 +24,18 @@ class _Tokenizer:
         assert text == "first second"
         assert kwargs == {"return_tensors": "pt", "add_special_tokens": True}
         return SimpleNamespace(input_ids=torch.arange(18).unsqueeze(0))
+
+
+def test_c4_arm_reports_temperature_invariant_top1_agreement() -> None:
+    result = _arm_result(
+        "candidate",
+        (
+            KlSequenceResult(4.0, 1.0, 3, 2 / 3),
+            KlSequenceResult(5.0, 2.0, 1, 0.0),
+        ),
+    )
+
+    assert result.teacher_top1_agreement == pytest.approx(0.5)
 
 
 def test_arm_parser_keeps_windows_drive_colons_inside_the_run_path() -> None:

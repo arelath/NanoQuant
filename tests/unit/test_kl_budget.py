@@ -96,6 +96,12 @@ def test_per_sequence_kl_reduces_to_the_batch_result() -> None:
         aggregate[0]
     )
     assert sum(item.kl_nats_per_token * item.token_count for item in sequences) / count == pytest.approx(aggregate[1])
+    expected_agreement = (
+        teacher[:, :-1].argmax(dim=-1) == student[:, :-1].argmax(dim=-1)
+    ).float().mean()
+    assert sum(
+        float(item.teacher_top1_agreement) * item.token_count for item in sequences
+    ) / count == pytest.approx(float(expected_agreement))
 
 
 def test_kl_budget_workflow_resumes_and_checkpoints_each_missing_arm() -> None:

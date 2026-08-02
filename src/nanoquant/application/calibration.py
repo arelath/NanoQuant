@@ -21,7 +21,7 @@ from nanoquant.domain.calibration_math import (
 from nanoquant.domain.profiling import NULL_RECORDER, PhaseRecorder
 from nanoquant.ports.activation_store import ActivationStore
 
-CAUSAL_CALIBRATION_ALGORITHM_VERSION = 4
+CAUSAL_CALIBRATION_ALGORITHM_VERSION = 5
 
 TensorUpdate = Callable[[str, torch.Tensor], None]
 
@@ -287,24 +287,13 @@ def calibrate_causal_model(
                     hidden = text_output[0]
                 if not isinstance(hidden, torch.Tensor):
                     raise TypeError("causal calibration text model did not return hidden states")
-            lm_head_weight = getattr(lm_head, "weight", None)
-            if (
-                hidden.is_cuda
-                and isinstance(lm_head_weight, torch.Tensor)
-                and lm_head_weight.is_cuda
-            ):
-                with recorder.phase("loss"):
-                    loss = memory_efficient_causal_language_model_loss(
-                        hidden,
-                        lm_head_weight,
-                        batch.to(hidden.device),
-                    )
-                with recorder.phase("backward"):
-                    torch.autograd.backward(loss)
-                return
             hidden_gradient = torch.zeros_like(hidden)
             target_count = batch.shape[0] * (batch.shape[1] - 1)
-            token_chunk = 128
+            # Use only operations covered by PyTorch deterministic-algorithm
+            # enforcement. The custom Triton CCE path is faster, but its
+            # backward reductions did not provide the cross-run guarantee
+            # required for calibration statistics and allocation plans.
+            token_chunk = 32 if hidden.is_cuda else 128
             with recorder.phase("loss"):
                 for start in range(0, batch.shape[1] - 1, token_chunk):
                     end = min(start + token_chunk, batch.shape[1] - 1)

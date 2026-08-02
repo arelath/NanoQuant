@@ -40,6 +40,7 @@ from nanoquant.final_norm_calibration import calibrate_global_tuning_final_norm
 from nanoquant.global_distillation import (
     GlobalDistillationRequest,
     GlobalDistillationRunResult,
+    distillation_protocol_hash,
     run_global_topk_distillation,
 )
 from nanoquant.infrastructure.artifacts import LocalArtifactStore
@@ -571,6 +572,11 @@ def mass_floor_correction_request_from_config(
     correction = config.distillation.mass_floor_correction
     if not correction.enabled:
         raise ValueError("mass-floor correction is disabled in the canonical run config")
+    primary_protocol_hash = distillation_protocol_hash(primary.config)
+    if primary_protocol_hash != correction.expected_initializer_protocol_hash:
+        raise ValueError(
+            "primary distillation differs from the correction's frozen initializer regime"
+        )
     return GlobalDistillationRequest(
         run_output=primary.run_output,
         snapshot=primary.snapshot,
@@ -613,6 +619,10 @@ def mass_floor_correction_request_from_config(
         distillation_target_mask=primary.distillation_target_mask,
         distillation_weights=primary.distillation_weights,
         initializer_global_tuning=initializer,
+        expected_initializer_protocol_hash=(
+            correction.expected_initializer_protocol_hash
+        ),
+        expected_initializer_steps=correction.expected_initializer_steps,
         state_namespace="global-distillation-mass-floor",
     )
 
@@ -658,8 +668,19 @@ def execute_resident_workflow(
     distillation = None
     if config.distillation.enabled:
         try:
+            primary_request = distillation_request_from_config(config, inputs, options)
+            if config.distillation.mass_floor_correction.enabled:
+                correction = config.distillation.mass_floor_correction
+                if (
+                    distillation_protocol_hash(primary_request.config)
+                    != correction.expected_initializer_protocol_hash
+                ):
+                    raise ValueError(
+                        "primary distillation differs from the correction's frozen "
+                        "initializer regime"
+                    )
             primary_distillation = run_global_topk_distillation(
-                distillation_request_from_config(config, inputs, options)
+                primary_request
             )
             distillation = primary_distillation
             if config.distillation.mass_floor_correction.enabled:

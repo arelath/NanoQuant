@@ -16,7 +16,7 @@ from nanoquant.domain.linear_math import chunk_slices
 from nanoquant.domain.models import ArtifactRef, ArtifactTypes
 from nanoquant.ports.artifact_store import ArtifactStore
 
-KL_BUDGET_EVALUATOR_VERSION = 3
+KL_BUDGET_EVALUATOR_VERSION = 4
 KL_BUDGET_PROFILE_SCHEMA_VERSION = 2
 
 
@@ -53,6 +53,7 @@ class KlSequenceResult:
     negative_log_likelihood: float
     kl_nats_per_token: float
     token_count: int
+    teacher_top1_agreement: float | None = None
 
     def __post_init__(self) -> None:
         if self.token_count <= 0:
@@ -61,6 +62,11 @@ class KlSequenceResult:
             raise ValueError("KL sequence metrics must be finite")
         if self.kl_nats_per_token < 0:
             raise ValueError("KL sequence KL must not be negative")
+        if self.teacher_top1_agreement is not None and (
+            not math.isfinite(self.teacher_top1_agreement)
+            or not 0 <= self.teacher_top1_agreement <= 1
+        ):
+            raise ValueError("KL sequence top-1 agreement must be finite and in [0, 1]")
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +77,7 @@ class KlBudgetArmResult:
     token_count: int
     weighted_normalized_squared_error: float | None = None
     sequences: tuple[KlSequenceResult, ...] = ()
+    teacher_top1_agreement: float | None = None
 
     def __post_init__(self) -> None:
         if not self.arm or self.token_count <= 0:
@@ -92,6 +99,38 @@ class KlBudgetArmResult:
             raise ValueError("KL budget arm NLL differs from its sequence results")
         if not math.isclose(sequence_kl / self.token_count, self.kl_nats_per_token, rel_tol=1e-9, abs_tol=1e-9):
             raise ValueError("KL budget arm KL differs from its sequence results")
+        sequence_agreements = tuple(
+            item.teacher_top1_agreement for item in self.sequences
+        )
+        available_agreements = tuple(
+            value for value in sequence_agreements if value is not None
+        )
+        if self.teacher_top1_agreement is not None and len(
+            available_agreements
+        ) != len(sequence_agreements):
+            raise ValueError("KL budget arm top-1 agreement inventory is incomplete")
+        elif self.teacher_top1_agreement is not None:
+            agreement = math.fsum(
+                value * item.token_count
+                for value, item in zip(
+                    available_agreements,
+                    self.sequences,
+                    strict=True,
+                )
+            ) / self.token_count
+            if (
+                not math.isfinite(self.teacher_top1_agreement)
+                or not 0 <= self.teacher_top1_agreement <= 1
+                or not math.isclose(
+                    agreement,
+                    self.teacher_top1_agreement,
+                    rel_tol=1e-9,
+                    abs_tol=1e-9,
+                )
+            ):
+                raise ValueError(
+                    "KL budget arm top-1 agreement differs from its sequence results"
+                )
 
 
 @dataclass(frozen=True, slots=True)
@@ -253,7 +292,17 @@ def causal_kl_nll_per_sequence_from_logits(
             token_chunk_size=token_chunk_size,
             teacher_is_log_probs=teacher_is_log_probs,
         )
-        results.append(KlSequenceResult(nll, kl, count))
+        teacher_values = teacher_logits[index : index + 1, :-1]
+        student_values = student_logits[index : index + 1, :-1]
+        valid = torch.ones_like(token_ids[index : index + 1, 1:], dtype=torch.bool)
+        if mask is not None:
+            valid = mask[:, 1:].bool() & mask[:, :-1].bool()
+        agreement = (
+            teacher_values.argmax(dim=-1).eq(student_values.argmax(dim=-1))[valid]
+            .float()
+            .mean()
+        )
+        results.append(KlSequenceResult(nll, kl, count, float(agreement)))
     return tuple(results)
 
 

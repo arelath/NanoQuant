@@ -141,9 +141,14 @@ def test_resident_recipe_maps_tail_kd_protocol(tmp_path: Path) -> None:
 
 def test_resident_recipe_maps_warm_started_mass_floor_correction(tmp_path: Path) -> None:
     base = _resident_config()
+    expected_protocol_hash = workflow.distillation_protocol_hash(
+        distillation_request_from_config(base, _inputs(tmp_path)).config
+    )
     correction = replace(
         base.distillation.mass_floor_correction,
         enabled=True,
+        expected_initializer_protocol_hash=expected_protocol_hash,
+        expected_initializer_steps=256,
         epochs=1,
         learning_rate=1e-5,
         maximum_batches_per_epoch=32,
@@ -175,8 +180,28 @@ def test_resident_recipe_maps_warm_started_mass_floor_correction(tmp_path: Path)
     assert request.config.minimum_teacher_mass_ratio == 0.8
     assert request.config.mass_floor_weight == 2.0
     assert request.initializer_global_tuning == initializer
+    assert request.expected_initializer_protocol_hash == expected_protocol_hash
+    assert request.expected_initializer_steps == 256
     assert request.state_namespace == "global-distillation-mass-floor"
     assert request.interrupt_after_epoch_commits == 1
+
+    mismatched = replace(
+        configured,
+        distillation=replace(
+            configured.distillation,
+            mass_floor_correction=replace(
+                correction,
+                expected_initializer_protocol_hash="sha256:" + "0" * 64,
+            ),
+        ),
+    )
+    with pytest.raises(ValueError, match="frozen initializer regime"):
+        mass_floor_correction_request_from_config(
+            mismatched,
+            _inputs(tmp_path),
+            initializer,
+            options,
+        )
 
 
 def test_resident_recipe_maps_dense_objective_to_covariance_refinement(tmp_path: Path) -> None:
@@ -346,6 +371,10 @@ def test_combined_workflow_runs_mass_floor_correction_after_primary_distillation
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     base = _resident_config()
+    inputs = _inputs(tmp_path)
+    expected_protocol_hash = workflow.distillation_protocol_hash(
+        distillation_request_from_config(base, inputs).config
+    )
     config = replace(
         base,
         distillation=replace(
@@ -353,6 +382,8 @@ def test_combined_workflow_runs_mass_floor_correction_after_primary_distillation
             mass_floor_correction=replace(
                 base.distillation.mass_floor_correction,
                 enabled=True,
+                expected_initializer_protocol_hash=expected_protocol_hash,
+                expected_initializer_steps=256,
             ),
             final_norm_calibration=replace(
                 base.distillation.final_norm_calibration,
@@ -361,7 +392,6 @@ def test_combined_workflow_runs_mass_floor_correction_after_primary_distillation
             ),
         ),
     )
-    inputs = _inputs(tmp_path)
     calls: list[tuple[str, ArtifactRef | None]] = []
     primary_reference = ArtifactRef("global-tuning-result", "sha256-" + "a" * 64, 1)
     correction_reference = ArtifactRef("global-tuning-result", "sha256-" + "b" * 64, 1)

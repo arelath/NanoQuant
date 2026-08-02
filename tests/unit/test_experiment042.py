@@ -13,6 +13,10 @@ def test_experiment042_is_the_fresh_canonical_experiment040_policy() -> None:
     assert not candidate.config.distillation.foldable_mlp_multipliers.enabled
     correction = candidate.config.distillation.mass_floor_correction
     assert correction.enabled
+    assert correction.expected_initializer_protocol_hash == (
+        "sha256:486d928da18d78c4a584ff9ad9d55d7b5922bfff0e524edf3b7a506cf0595aab"
+    )
+    assert correction.expected_initializer_steps == 2048
     assert correction.epochs == 1
     assert correction.learning_rate == 1e-5
     assert correction.maximum_batches_per_epoch == 32
@@ -26,6 +30,8 @@ def test_experiment042_is_the_fresh_canonical_experiment040_policy() -> None:
         "distillation.enabled",
         "distillation.final_norm_calibration.enabled",
         "distillation.mass_floor_correction.enabled",
+        "distillation.mass_floor_correction.expected_initializer_protocol_hash",
+        "distillation.mass_floor_correction.expected_initializer_steps",
         "intent.baseline_run",
         "intent.experiment_number",
         "intent.hypothesis",

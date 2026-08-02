@@ -54,6 +54,10 @@ CONFIG = replace(
         mass_floor_correction=replace(
             BASE_CONFIG.distillation.mass_floor_correction,
             enabled=True,
+            expected_initializer_protocol_hash=(
+                "sha256:486d928da18d78c4a584ff9ad9d55d7b5922bfff0e524edf3b7a506cf0595aab"
+            ),
+            expected_initializer_steps=2048,
             epochs=1,
             learning_rate=1e-5,
             maximum_batches_per_epoch=32,

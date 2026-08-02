@@ -56,6 +56,7 @@ from nanoquant.infrastructure.global_tuning import active_global_tuning, load_gl
 from nanoquant.infrastructure.hf_language_model import load_causal_language_model
 from nanoquant.infrastructure.io_utils import atomic_workspace, atomic_write_json, hash_file
 from nanoquant.infrastructure.model_adapters import adapter_for_config
+from nanoquant.infrastructure.reproducibility import deterministic_torch_execution
 from nanoquant.infrastructure.safetensors_io import SAFETENSORS
 from nanoquant.infrastructure.tensor_store import LocalTensorStore
 from nanoquant.kl_budget_workflow import _token_hash
@@ -330,6 +331,7 @@ def _report_protocol(
         "source_resident_config_hash": source_manifest["config_hash"],
         "model_revision": args.model_revision,
         "distillation_config": to_dict(config),
+        "numerical_execution": "pytorch-deterministic-v1",
         "maximum_batches_per_epoch": args.maximum_batches_per_epoch,
         "calibration_token_hash": _token_hash(calibration_tokens),
         "teacher_cache_manifest_sha256": hash_file(
@@ -408,7 +410,10 @@ def run(args: argparse.Namespace) -> int:
     report["monitor_dataset_fingerprint"] = monitor_fingerprint
     report["monitor_bos_token_id"] = monitor_bos
     started = time.perf_counter()
-    with acquire_device_lease(args.device):
+    with acquire_device_lease(args.device), deterministic_torch_execution(
+        config.seed,
+        args.device,
+    ):
         normalizers = (
             _load_or_create_teacher_normalizers(
                 args.output_directory,

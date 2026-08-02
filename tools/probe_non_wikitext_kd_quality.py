@@ -192,6 +192,17 @@ def _arm_result(name: str, sequences: tuple[KlSequenceResult, ...]) -> KlBudgetA
     if not sequences:
         raise ValueError("non-WikiText arm produced no sequence metrics")
     tokens = math.fsum(item.token_count for item in sequences)
+    agreements = tuple(item.teacher_top1_agreement for item in sequences)
+    available_agreements = tuple(value for value in agreements if value is not None)
+    top1_agreement = (
+        math.fsum(
+            value * item.token_count
+            for value, item in zip(available_agreements, sequences, strict=True)
+        )
+        / tokens
+        if len(available_agreements) == len(agreements)
+        else None
+    )
     return KlBudgetArmResult(
         name,
         math.fsum(item.negative_log_likelihood * item.token_count for item in sequences)
@@ -199,6 +210,7 @@ def _arm_result(name: str, sequences: tuple[KlSequenceResult, ...]) -> KlBudgetA
         math.fsum(item.kl_nats_per_token * item.token_count for item in sequences) / tokens,
         int(tokens),
         sequences=sequences,
+        teacher_top1_agreement=top1_agreement,
     )
 
 
@@ -244,9 +256,21 @@ def _comparison(
 ) -> dict[str, object]:
     nll = _paired_metric_payload(baseline, candidate, "negative_log_likelihood")
     kl = _paired_payload(baseline, candidate, seed=0)
+    top1 = (
+        _paired_metric_payload(
+            baseline,
+            candidate,
+            "teacher_top1_agreement",
+            higher_is_better=True,
+        )
+        if baseline.teacher_top1_agreement is not None
+        and candidate.teacher_top1_agreement is not None
+        else None
+    )
     return {
         "nll": nll,
         "kl": kl,
+        "teacher_top1_agreement": top1,
         "passes": bool(nll["improved_with_confidence"])
         and float(kl["upper_delta"]) <= 0.0,
     }

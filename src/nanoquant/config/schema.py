@@ -544,6 +544,8 @@ class MassFloorCorrectionConfig:
     """One-sided selected-mass correction warm-started from primary model KD."""
 
     enabled: bool = False
+    expected_initializer_protocol_hash: str | None = None
+    expected_initializer_steps: int | None = None
     epochs: int = 1
     learning_rate: float = 1e-5
     maximum_batches_per_epoch: int = 32

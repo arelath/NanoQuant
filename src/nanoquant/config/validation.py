@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass
 from enum import Enum
 
@@ -727,6 +728,30 @@ def validate(config: RunConfig, phase: ValidationPhase = ValidationPhase.PRE_RES
         "CFG120",
         "distillation.mass_floor_correction.enabled",
         "requires global distillation",
+    )
+    require(
+        not correction.enabled
+        or (
+            isinstance(correction.expected_initializer_protocol_hash, str)
+            and re.fullmatch(
+                r"sha256:[0-9a-f]{64}",
+                correction.expected_initializer_protocol_hash,
+            )
+            is not None
+        ),
+        "CFG130",
+        "distillation.mass_floor_correction.expected_initializer_protocol_hash",
+        "must bind an exact sha256 protocol when correction is enabled",
+    )
+    require(
+        not correction.enabled
+        or (
+            correction.expected_initializer_steps is not None
+            and correction.expected_initializer_steps > 0
+        ),
+        "CFG131",
+        "distillation.mass_floor_correction.expected_initializer_steps",
+        "must bind a positive completed-step count when correction is enabled",
     )
     require(
         correction.epochs > 0,

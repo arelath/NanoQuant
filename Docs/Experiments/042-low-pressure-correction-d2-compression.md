@@ -198,3 +198,29 @@ Retained evidence:
 - `evidence/042/experiment042-block25-teacher-context-fit380-val384-screen460-24x512.json`;
 - `Results/042/042-low-pressure-correction-d2-compress-and-benchmark-gemma-3-1b-it-summary.json`;
 - `Results/042/gemma-3-1b-it-nanoquant.export-summary.json`.
+
+## Post-completion methodology correction
+
+The independent review in
+[Document 80](../80-experiment-042-independent-transfer-review.md) supersedes
+the original transfer interpretation above. The implementation and artifacts
+remain valid, but the correction policy was developed after a 256-step primary
+KD initializer and deployed here after 2,048 steps. The large
+candidate-minus-conditional improvement therefore measures recovery from a
+more damaged baseline as well as correction benefit; it is not clean evidence
+that the fixed correction policy transferred.
+
+The `0.75` selected-mass rejection is also reclassified as a calibration
+failure, not a demonstrated capability failure. A single final-norm scale acts
+as a global temperature on this Gemma configuration, so selected mass cannot
+serve as a compression-quality gate without a separately derived deployment
+requirement. The 200-example task result is descriptive only. The 1,000-example
+same-run comparison does not establish a regression, but five of six task
+directions are unfavorable and it must not be described as evidence of task
+improvement.
+
+Experiment 042 is still a completed, rejected historical campaign. Its main
+lesson is now the regime-transfer failure and the need for the enforceable
+guardrails in
+[Document 81](../81-experiment-methodology-guardrails.md), not acceptance of a
+fixed correction/fold recipe.

@@ -327,8 +327,18 @@ def test_complete_frozen_run_can_be_distilled_committed_and_reloaded(
             ),
             device="cpu",
             initializer_global_tuning=distilled.reference,
+            expected_initializer_protocol_hash=distilled.result.protocol_hash,
+            expected_initializer_steps=distilled.result.steps_completed,
             state_namespace="global-distillation-mass-floor",
         )
+        with pytest.raises(ValueError, match="frozen regime"):
+            run_global_topk_distillation(
+                replace(
+                    correction_request,
+                    expected_initializer_steps=distilled.result.steps_completed + 1,
+                    state_namespace="global-distillation-invalid-regime",
+                )
+            )
         control = run_global_topk_distillation(
             replace(correction_request, run_output=control_output)
         )

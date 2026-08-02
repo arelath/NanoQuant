@@ -168,3 +168,46 @@ def test_paired_metric_payload_uses_requested_sequence_metric() -> None:
     assert result["lower_delta"] == -0.5
     assert result["upper_delta"] == -0.5
     assert result["improved_with_confidence"] is True
+
+
+def test_paired_metric_payload_supports_higher_is_better_metrics() -> None:
+    probe = _probe_module()
+    baseline_sequences = (
+        KlSequenceResult(2.0, 0.5, 4, 0.5),
+        KlSequenceResult(4.0, 0.7, 4, 0.5),
+    )
+    candidate_sequences = (
+        KlSequenceResult(1.5, 0.8, 4, 0.75),
+        KlSequenceResult(3.5, 1.0, 4, 0.75),
+    )
+    baseline = KlBudgetArmResult(
+        "full",
+        3.0,
+        0.6,
+        8,
+        None,
+        baseline_sequences,
+        teacher_top1_agreement=0.5,
+    )
+    candidate = KlBudgetArmResult(
+        "full",
+        2.5,
+        0.9,
+        8,
+        None,
+        candidate_sequences,
+        teacher_top1_agreement=0.75,
+    )
+
+    result = probe._paired_metric_payload(
+        baseline,
+        candidate,
+        "teacher_top1_agreement",
+        resamples=100,
+        higher_is_better=True,
+    )
+
+    assert result["point_delta"] == 0.25
+    assert result["lower_delta"] == 0.25
+    assert result["upper_delta"] == 0.25
+    assert result["improved_with_confidence"] is True

@@ -491,6 +491,16 @@ epoch, so later capped epochs match prefixes of the uncapped target plan. The
 loss, coefficient, cap, and cached-target schema are semantic resume identity
 inputs.
 
+A warm-started mass-floor correction additionally declares the exact primary
+distillation regime it was developed for through
+`expected_initializer_protocol_hash` and `expected_initializer_steps`. Both
+are required when correction is enabled. Canonical execution compares the
+declared hash with the configured primary protocol before primary KD begins and
+then compares both fields with the persisted initializer before correction.
+Changing a primary objective, horizon, batch cap, optimizer, or sampling policy
+therefore fails closed instead of silently transferring a correction across
+regimes.
+
 ## 9. Runtime, storage, and resume
 
 ```python

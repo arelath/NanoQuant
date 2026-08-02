@@ -313,6 +313,7 @@ def _paired_metric_payload(
     *,
     seed: int = 0,
     resamples: int = 10_000,
+    higher_is_better: bool = False,
 ) -> dict[str, object]:
     before = baseline.sequences
     after = candidate.sequences
@@ -340,14 +341,19 @@ def _paired_metric_payload(
     point = float(getattr(candidate, attribute)) - float(getattr(baseline, attribute))
     lower = deltas[int(0.025 * resamples)]
     upper = deltas[int(0.975 * resamples) - 1]
+    baseline_value = float(getattr(baseline, attribute))
     return {
         "point_delta": point,
-        "relative_delta": point / float(getattr(baseline, attribute)),
+        "relative_delta": None if baseline_value == 0.0 else point / baseline_value,
         "lower_delta": lower,
         "upper_delta": upper,
         "confidence": 0.95,
         "resamples": resamples,
-        "improved_with_confidence": point < 0 and upper < 0,
+        "improved_with_confidence": (
+            point > 0 and lower > 0
+            if higher_is_better
+            else point < 0 and upper < 0
+        ),
     }
 
 

@@ -205,6 +205,8 @@ def test_mass_floor_correction_requires_primary_distillation_and_valid_policy() 
     correction = replace(
         base.distillation.mass_floor_correction,
         enabled=True,
+        expected_initializer_protocol_hash="invalid",
+        expected_initializer_steps=0,
         epochs=0,
         learning_rate=math.nan,
         maximum_batches_per_epoch=0,
@@ -225,6 +227,24 @@ def test_mass_floor_correction_requires_primary_distillation_and_valid_policy() 
         "CFG124",
         "CFG125",
         "CFG128",
+        "CFG130",
+        "CFG131",
+    }
+
+    missing_regime = replace(
+        base,
+        distillation=replace(
+            base.distillation,
+            enabled=True,
+            mass_floor_correction=replace(
+                base.distillation.mass_floor_correction,
+                enabled=True,
+            ),
+        ),
+    )
+    assert {issue.code for issue in validate(missing_regime)} == {
+        "CFG130",
+        "CFG131",
     }
 
     bad_final_norm = replace(

@@ -190,6 +190,7 @@ from nanoquant.infrastructure.live_reconstruction import update_live_weight_erro
 from nanoquant.infrastructure.model_adapters import TransformersModelAdapter, adapter_for_config
 from nanoquant.infrastructure.profiling import profiled_run
 from nanoquant.infrastructure.progress_journal import JournalRecord, ProgressJournal
+from nanoquant.infrastructure.reproducibility import deterministic_torch_execution
 from nanoquant.infrastructure.resident_executor import Cancellation, ResidentExecutor
 from nanoquant.infrastructure.resource_planning import (
     load_memory_plan_revision,
@@ -215,7 +216,7 @@ from nanoquant.infrastructure.tuning_checkpoint import (
 from nanoquant.ports.event_sink import EventSink, LayerCommittedPayload, emit_layer_committed
 from nanoquant.ports.model_adapter import ModelAdapter
 
-RESIDENT_ALGORITHM_VERSION = 51
+RESIDENT_ALGORITHM_VERSION = 52
 COVARIANCE_REFINEMENT_MAX_INPUT_FEATURES = 2048
 _THROUGHPUT_PROBE_REPETITIONS = 5
 _THROUGHPUT_PROBE_WARMUP_WORKLOADS = 3
@@ -7073,19 +7074,29 @@ def run_resident_factorization_slice(request: ResidentQuantizationRequest) -> Re
     if request.low_rank_patch.enabled:
         raise ValueError("resident factorization slices cannot fit activation-space low-rank patches")
     if request.device.startswith("cuda"):
-        with acquire_device_lease(request.device), _legacy_cuda_numerics():
+        with (
+            acquire_device_lease(request.device),
+            deterministic_torch_execution(request.seed, request.device),
+            _legacy_cuda_numerics(),
+        ):
             return _run_resident_factorization_slice(request)
-    return _run_resident_factorization_slice(request)
+    with deterministic_torch_execution(request.seed, request.device):
+        return _run_resident_factorization_slice(request)
 
 
 def run_resident_quantization(request: ResidentQuantizationRequest) -> ResidentQuantizationResult:
     """Run with an exclusive cross-process lease for CUDA resident state."""
     if request.device.startswith("cuda"):
-        with acquire_device_lease(request.device), _legacy_cuda_numerics():
+        with (
+            acquire_device_lease(request.device),
+            deterministic_torch_execution(request.seed, request.device),
+            _legacy_cuda_numerics(),
+        ):
             if request.initial_cooldown_seconds:
                 time.sleep(request.initial_cooldown_seconds)
             return _run_resident_quantization(request)
-    return _run_resident_quantization(request)
+    with deterministic_torch_execution(request.seed, request.device):
+        return _run_resident_quantization(request)
 
 
 def load_completed_resident_quantization(
