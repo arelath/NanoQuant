@@ -2,9 +2,14 @@
 
 ## Status
 
-Design only. No slice is reserved and no model evaluation is authorized. The
-selector, tests, complete command line, slice hashes, and gate rule must be
-committed before this experiment can become predeclared.
+Paused after implementation preflight. The selector and its retired-evidence
+replay are implemented and tested, but no fresh slice is reserved and no model
+evaluation is authorized. The independent Experiment 042 review identified
+additional methodology gates in
+[Document 81](../81-experiment-methodology-guardrails.md). Allocation
+reproducibility, exact initializer-regime binding, calibration/capability
+separation, and the revised reporting protocol must be complete before this
+experiment can become predeclared.
 
 ## Motivation
 
@@ -116,3 +121,64 @@ one fresh complete `execute_complete_compression` campaign with:
 A fresh-run failure keeps the uncorrected tail-aware baseline and rejects this
 policy. It does not trigger another coefficient, tolerance, epoch, or slice
 search within the same campaign.
+
+## Implementation preflight result
+
+`tools/select_c4_capability_correction_checkpoint.py`, frozen in commit
+`e7558f2`, implements the two-metric rule. Its input contract binds the complete ordered arm inventory,
+baseline and checkpoint step counts, checkpoint identities, common protocol,
+aligned sequence inventories, input-file SHA-256 hashes, tolerance, bootstrap
+count, and seed. It emits the selected immutable arm identity and falls back
+to the uncorrected baseline when there is no eligible joint plateau.
+
+Focused tests cover invalid arm syntax, exact step identities, protocol and
+inventory mismatch, aggregate-versus-sequence disagreement, no-survivor
+fallback, disjoint eligible minima, earliest joint-plateau selection, and both
+input hashes. Eight tests pass; focused Ruff and the repository-standard mypy
+target also pass.
+
+The authorized mechanical replay on the retired Experiment 046 C4 curve used
+the exact future policy values: tolerance `0.01`, 10,000 paired resamples, seed
+0, baseline 256 steps, and correction checkpoints at 32, 64, 96, and 128
+steps. It produced:
+
+- eligible: correction epochs 2, 3, and 4;
+- joint plateau: correction epochs 3 and 4;
+- decision: correction epoch 3, the earliest joint-plateau arm;
+- selected immutable checkpoint:
+  `sha256-d885f823e0651314d78f1c4c7b98edd66470344bb1957f5e27aa959ac0624a8d`.
+
+The decision receipt is
+`evidence/048/experiment048-retired046-selector-replay-v2.json`. It was created
+only after the selector implementation was committed. This result is
+implementation evidence only. The data were already opened, the resulting
+epoch-3 hypothesis is already known, and the replay consumes no new slice. The
+receipt binds quality SHA-256
+`e7f9c6813164449ec127a3a90ca41ce2a34ae9feee7164bc86705fd435d92f14`
+and sequence-checkpoint SHA-256
+`5bb9f5327b48c631eaab324034aa14d8ca2a271a2c0ce3b2fd5908ec50112263`.
+
+## Superseding constraints from the Experiment 042 review
+
+The following constraints supersede any earlier implication that selector
+preflight alone authorizes a fresh campaign:
+
+- the 256-step `top_k_tail` primary protocol must be bound by its exact
+  protocol hash and completed-step count before correction can run;
+- the corrected deterministic calibration path must reproduce identical
+  calibration-statistics and plan hashes on a pinned-Gemma replay, or the
+  fresh-factorization comparison remains confounded;
+- selected mass is reported as calibration, not used as a capability gate;
+- C4 reports teacher-top-1 agreement alongside NLL and full KL, but it does not
+  retroactively enter the frozen checkpoint rule;
+- raw and temperature-fitted results must be separated in the final report;
+- task evaluation is a 1,000-example guardrail, never a 200-example selection
+  signal;
+- the permanent slice-registry validator must pass before reservation and
+  launch;
+- absolute results against pre-KD, uncorrected tail-aware, and fixed retained
+  references accompany every marginal comparison.
+
+The next action is therefore not slice reservation. It is the deterministic
+calibration-statistics/plan replay and the calibration-versus-capability report
+implementation required by Document 81.
