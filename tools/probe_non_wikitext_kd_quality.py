@@ -52,7 +52,7 @@ C4_VALIDATION_FILE = "en/c4-validation.00000-of-00008.json.gz"
 C4_VALIDATION_FILE_SHA256 = "bc35d7c1b1d14b90cd3a394cccbcbe191935edd04bf42ee965379c6e2987a5f0"
 
 
-def _parse_arm(value: str) -> tuple[str, str, Path, Path | None, int | None]:
+def _parse_arm(value: str) -> tuple[str, str, Path, Path | None, int | None, str]:
     name, separator, specification = value.partition("=")
     parts = specification.split(";")
     mode = parts[0] if parts else ""
@@ -62,7 +62,7 @@ def _parse_arm(value: str) -> tuple[str, str, Path, Path | None, int | None]:
         or mode not in {"prekd", "postkd", "tuning", "checkpoint"}
         or (mode in {"prekd", "postkd"} and len(parts) != 2)
         or (mode == "tuning" and len(parts) != 3)
-        or (mode == "checkpoint" and len(parts) != 4)
+        or (mode == "checkpoint" and len(parts) not in {4, 5})
         or not parts[1].strip()
         or (mode == "tuning" and not parts[2].strip())
         or (mode == "checkpoint" and not parts[2].strip())
@@ -70,7 +70,7 @@ def _parse_arm(value: str) -> tuple[str, str, Path, Path | None, int | None]:
         raise argparse.ArgumentTypeError(
             "arm must use name=prekd;run-output, name=postkd;run-output, or "
             "name=tuning;run-output;artifact-reference-json, or "
-            "name=checkpoint;run-output;checkpoint-output;epoch"
+            "name=checkpoint;run-output;checkpoint-output;epoch[;state-namespace]"
         )
     epoch = None
     if mode == "checkpoint":
@@ -80,12 +80,20 @@ def _parse_arm(value: str) -> tuple[str, str, Path, Path | None, int | None]:
             raise argparse.ArgumentTypeError("checkpoint epoch must be an integer") from exc
         if epoch <= 0:
             raise argparse.ArgumentTypeError("checkpoint epoch must be positive")
+    state_namespace = (
+        parts[4].strip()
+        if mode == "checkpoint" and len(parts) == 5
+        else "global-distillation"
+    )
+    if not state_namespace or Path(state_namespace).name != state_namespace:
+        raise argparse.ArgumentTypeError("checkpoint state namespace must be a safe filename stem")
     return (
         name.strip(),
         mode,
         Path(parts[1].strip()),
         None if mode not in {"tuning", "checkpoint"} else Path(parts[2].strip()),
         epoch,
+        state_namespace,
     )
 
 
@@ -558,7 +566,9 @@ def _c4_slice_reservation(
 
 def run(args: argparse.Namespace) -> int:
     arms = tuple(args.arm)
-    names = tuple(name for name, _mode, _path, _pointer, _epoch in arms)
+    names = tuple(
+        name for name, _mode, _path, _pointer, _epoch, _namespace in arms
+    )
     expected_steps = dict(args.expected_steps)
     temperature_receipt_items = tuple(args.temperature_fit_receipt)
     if (
@@ -639,12 +649,13 @@ def run(args: argparse.Namespace) -> int:
                     {
                         "checkpoint_output": str(cast(Path, pointer).resolve()),
                         "epoch": epoch,
+                        "checkpoint_state_namespace": namespace,
                     }
                     if mode == "checkpoint"
                     else {}
                 ),
             }
-            for name, mode, path, pointer, epoch in arms
+            for name, mode, path, pointer, epoch, namespace in arms
         ],
         "primary_baseline": args.primary_baseline,
         "primary_candidate": args.primary_candidate,
@@ -751,7 +762,7 @@ def run(args: argparse.Namespace) -> int:
             local_files_only=args.local_files_only,
         ).to(args.device)
         cast(Any, teacher).config.use_cache = False
-        for name, mode, run_output, tuning_pointer, epoch in arms:
+        for name, mode, run_output, tuning_pointer, epoch, namespace in arms:
             global_tuning_override = None
             if mode == "tuning" and tuning_pointer is not None:
                 global_tuning_override = from_dict(
@@ -778,6 +789,7 @@ def run(args: argparse.Namespace) -> int:
                     run_output,
                     tuning_pointer,
                     epoch,
+                    namespace,
                 )
                 loaded.model.to(args.device)
             observed_identity: dict[str, object] = {
@@ -814,6 +826,9 @@ def run(args: argparse.Namespace) -> int:
                     str(tuning_pointer.resolve()) if mode == "tuning" else None
                 ),
                 "checkpoint": checkpoint_receipt,
+                "checkpoint_state_namespace": (
+                    namespace if mode == "checkpoint" else None
+                ),
                 "steps_completed": observed_steps,
             }
 

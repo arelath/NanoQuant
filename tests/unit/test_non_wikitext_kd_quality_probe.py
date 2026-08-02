@@ -118,6 +118,7 @@ def test_arm_parser_keeps_windows_drive_colons_inside_the_run_path() -> None:
         Path(r"D:\evidence\candidate"),
         None,
         None,
+        "global-distillation",
     )
     assert _parse_arm(
         r"conditional=tuning;D:\evidence\candidate;D:\evidence\primary.json"
@@ -127,6 +128,7 @@ def test_arm_parser_keeps_windows_drive_colons_inside_the_run_path() -> None:
         Path(r"D:\evidence\candidate"),
         Path(r"D:\evidence\primary.json"),
         None,
+        "global-distillation",
     )
 
 
@@ -137,7 +139,12 @@ def test_checkpoint_arm_parser_keeps_windows_paths_and_epoch() -> None:
         Path(r"D:\frozen"),
         Path(r"D:\checkpoints"),
         4,
+        "global-distillation",
     )
+
+    assert _parse_arm(
+        r"candidate=checkpoint;D:\frozen;D:\checkpoints;3;global-distillation-mass-floor"
+    )[-1] == "global-distillation-mass-floor"
 
 
 def test_temperature_receipts_bind_primary_arms_and_share_calibration_slice(

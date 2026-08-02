@@ -79,10 +79,22 @@ def _parser() -> argparse.ArgumentParser:
 def discover_checkpoints(
     run_output: Path,
     epochs: set[int],
+    *,
+    state_namespace: str = "global-distillation",
 ) -> tuple[CheckpointCandidate, ...]:
+    if (
+        not state_namespace
+        or Path(state_namespace).name != state_namespace
+        or state_namespace in {".", ".."}
+    ):
+        raise ValueError("checkpoint state namespace must be a safe filename stem")
     active = from_dict(
         ArtifactRef,
-        json.loads((run_output / "global-distillation-training.json").read_text(encoding="utf-8")),
+        json.loads(
+            (run_output / f"{state_namespace}-training.json").read_text(
+                encoding="utf-8"
+            )
+        ),
         path="active_distillation_checkpoint",
     )
     artifacts = LocalArtifactStore(run_output / "artifacts")

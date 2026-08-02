@@ -29,6 +29,28 @@ def test_parser_accepts_an_explicit_checkpoint_epoch() -> None:
     )
 
     assert args.epoch == 1
+    assert args.state_namespace == "global-distillation"
+
+
+def test_parser_accepts_canonical_correction_namespace() -> None:
+    args = _parser().parse_args(
+        [
+            "--run-output",
+            "run",
+            "--snapshot",
+            "snapshot",
+            "--checkpoint-output",
+            "checkpoint",
+            "--derived-run-output",
+            "derived",
+            "--epoch",
+            "3",
+            "--state-namespace",
+            "global-distillation-mass-floor",
+        ]
+    )
+
+    assert args.state_namespace == "global-distillation-mass-floor"
 
 
 def test_hardlink_tree_reproduces_nested_inventory_without_copying(tmp_path) -> None:  # type: ignore[no-untyped-def]

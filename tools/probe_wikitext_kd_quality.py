@@ -47,7 +47,7 @@ class SequenceMetrics:
     token_count: int
 
 
-def _parse_arm(value: str) -> tuple[str, str, Path, Path | None, int | None]:
+def _parse_arm(value: str) -> tuple[str, str, Path, Path | None, int | None, str]:
     name, separator, specification = value.partition("=")
     parts = specification.split(";")
     if not separator or not name.strip() or not specification.strip():
@@ -61,20 +61,41 @@ def _parse_arm(value: str) -> tuple[str, str, Path, Path | None, int | None]:
             raise argparse.ArgumentTypeError(
                 "tuning arm must use name=tuning;run-output;artifact-reference-json"
             )
-        return name.strip(), "tuning", Path(parts[1].strip()), Path(parts[2].strip()), None
+        return (
+            name.strip(),
+            "tuning",
+            Path(parts[1].strip()),
+            Path(parts[2].strip()),
+            None,
+            "global-distillation",
+        )
     if parts[0] in {"prekd", "postkd"}:
         if len(parts) != 2 or not parts[1].strip():
             raise argparse.ArgumentTypeError(
                 "materialized arm must use name=prekd;run-output or "
                 "name=postkd;run-output"
             )
-        return name.strip(), parts[0], Path(parts[1].strip()), None, None
+        return (
+            name.strip(),
+            parts[0],
+            Path(parts[1].strip()),
+            None,
+            None,
+            "global-distillation",
+        )
     if parts[0] != "checkpoint":
-        return name.strip(), "postkd", Path(specification.strip()), None, None
-    if len(parts) != 4 or not parts[1].strip() or not parts[2].strip():
+        return (
+            name.strip(),
+            "postkd",
+            Path(specification.strip()),
+            None,
+            None,
+            "global-distillation",
+        )
+    if len(parts) not in {4, 5} or not parts[1].strip() or not parts[2].strip():
         raise argparse.ArgumentTypeError(
             "checkpoint arm must use "
-            "name=checkpoint;frozen-run-output;checkpoint-output;epoch"
+            "name=checkpoint;frozen-run-output;checkpoint-output;epoch[;state-namespace]"
         )
     try:
         epoch = int(parts[3])
@@ -82,12 +103,16 @@ def _parse_arm(value: str) -> tuple[str, str, Path, Path | None, int | None]:
         raise argparse.ArgumentTypeError("checkpoint arm epoch must be an integer") from exc
     if epoch <= 0:
         raise argparse.ArgumentTypeError("checkpoint arm epoch must be positive")
+    state_namespace = parts[4].strip() if len(parts) == 5 else "global-distillation"
+    if not state_namespace or Path(state_namespace).name != state_namespace:
+        raise argparse.ArgumentTypeError("checkpoint state namespace must be a safe filename stem")
     return (
         name.strip(),
         "checkpoint",
         Path(parts[1].strip()),
         Path(parts[2].strip()),
         epoch,
+        state_namespace,
     )
 
 
@@ -109,6 +134,7 @@ def _apply_checkpoint(
     frozen_run_output: Path,
     checkpoint_output: Path,
     epoch: int,
+    state_namespace: str = "global-distillation",
 ) -> dict[str, object]:
     frozen_artifacts = LocalArtifactStore(frozen_run_output / "artifacts")
     trainable = _thaw_frozen_layers(loaded, LocalTensorStore(frozen_artifacts))
@@ -118,7 +144,11 @@ def _apply_checkpoint(
         for name, parameter in loaded.model.named_parameters()
         if id(parameter) in selected_ids
     }
-    candidate = discover_checkpoints(checkpoint_output, {epoch})[0]
+    candidate = discover_checkpoints(
+        checkpoint_output,
+        {epoch},
+        state_namespace=state_namespace,
+    )[0]
     checkpoint = load_distillation_checkpoint(
         candidate.reference,
         candidate.identity,
@@ -135,6 +165,7 @@ def _apply_checkpoint(
         "steps": candidate.steps,
         "reference": asdict(candidate.reference),
         "checkpoint_output": str(checkpoint_output.resolve()),
+        "state_namespace": state_namespace,
     }
 
 
@@ -371,7 +402,9 @@ def _restore(payload: object) -> tuple[SequenceMetrics, ...]:
 
 def run(args: argparse.Namespace) -> int:
     arms = tuple(args.arm)
-    names = tuple(name for name, _mode, _path, _checkpoint, _epoch in arms)
+    names = tuple(
+        name for name, _mode, _path, _checkpoint, _epoch, _namespace in arms
+    )
     expected_steps = dict(args.expected_steps)
     if (
         len(arms) < 2
@@ -434,9 +467,10 @@ def run(args: argparse.Namespace) -> int:
                     None if checkpoint is None else str(checkpoint.resolve())
                 ),
                 "epoch": epoch,
+                "checkpoint_state_namespace": namespace,
                 "expected_steps": expected_steps[name],
             }
-            for name, mode, path, checkpoint, epoch in arms
+            for name, mode, path, checkpoint, epoch, namespace in arms
         ],
         "primary_baseline": args.primary_baseline,
         "primary_candidate": args.primary_candidate,
@@ -480,7 +514,7 @@ def run(args: argparse.Namespace) -> int:
         ).to(args.device)
         cast(Any, teacher).config.use_cache = False
         teacher.eval()
-        for name, mode, run_output, checkpoint_output, epoch in arms:
+        for name, mode, run_output, checkpoint_output, epoch, namespace in arms:
             global_tuning_override = None
             if mode == "tuning":
                 assert checkpoint_output is not None
@@ -508,6 +542,7 @@ def run(args: argparse.Namespace) -> int:
                     run_output,
                     checkpoint_output,
                     epoch,
+                    namespace,
                 )
                 loaded.model.to(args.device)
             if checkpoint_receipt is not None:
@@ -539,6 +574,9 @@ def run(args: argparse.Namespace) -> int:
                 "run_output": str(run_output.resolve()),
                 "global_tuning": asdict(loaded.global_tuning) if loaded.global_tuning else None,
                 "checkpoint": checkpoint_receipt,
+                "checkpoint_state_namespace": (
+                    namespace if mode == "checkpoint" else None
+                ),
                 "global_tuning_pointer": (
                     str(checkpoint_output.resolve()) if mode == "tuning" else None
                 ),

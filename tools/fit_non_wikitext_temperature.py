@@ -55,7 +55,7 @@ CONVERGENCE_TOLERANCE = 1e-4
 HESSIAN_FLOOR = 1e-12
 SOLVER_SEED = 0
 
-Arm = tuple[str, str, Path, Path | None, int | None]
+Arm = tuple[str, str, Path, Path | None, int | None, str]
 
 
 def _arm(value: str) -> Arm:
@@ -182,7 +182,7 @@ def _load_arm(
     expected_steps: int,
     device: str,
 ) -> tuple[Any, dict[str, object], dict[str, object]]:
-    name, mode, run_output, tuning_pointer, epoch = arm
+    name, mode, run_output, tuning_pointer, epoch, state_namespace = arm
     global_tuning_override = None
     if mode == "tuning" and tuning_pointer is not None:
         global_tuning_override = from_dict(
@@ -209,6 +209,7 @@ def _load_arm(
             run_output,
             tuning_pointer,
             epoch,
+            state_namespace,
         )
         loaded.model.to(device)
     if checkpoint_receipt is not None:
@@ -232,6 +233,9 @@ def _load_arm(
             str(cast(Path, tuning_pointer).resolve()) if mode == "tuning" else None
         ),
         "checkpoint": checkpoint_receipt,
+        "checkpoint_state_namespace": (
+            state_namespace if mode == "checkpoint" else None
+        ),
         "steps_completed": observed_steps,
     }
     frozen_identity = {
@@ -283,7 +287,7 @@ def run(args: argparse.Namespace) -> int:
         )
     ):
         raise ValueError("temperature-fit protocol is invalid")
-    name, _mode, _run_output, _pointer, _epoch = cast(Arm, args.arm)
+    name, _mode, _run_output, _pointer, _epoch, _namespace = cast(Arm, args.arm)
     decision, expected_arm_identity, selection_quality_protocol = _selection_arm_identity(
         args.selection_decision,
         role=args.role,

@@ -59,6 +59,9 @@ def test_numbered_launchers_own_their_concrete_definitions() -> None:
         40: Path("Docs/Experiments/040-low-pressure-correction-with-minimal-fold.md"),
         41: Path("Docs/Experiments/041-experiment040-residual-block25-defect-audit.md"),
         43: Path("Docs/Experiments/043-matched-kd-horizon-objective-ablation.md"),
+        45: Path("Docs/Experiments/045-fresh-tail-aware-checkpoint-selection.md"),
+        46: Path("Docs/Experiments/046-tail-aware-capability-correction.md"),
+        47: Path("Docs/Experiments/047-fixed-epoch3-capability-confirmation.md"),
     }
 
     assert launcher_numbers == sorted(set(launcher_numbers))

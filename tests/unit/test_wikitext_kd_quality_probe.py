@@ -22,6 +22,7 @@ def test_checkpoint_arm_parser_keeps_windows_paths() -> None:
         Path(r"D:\frozen"),
         Path(r"D:\checkpoints"),
         8,
+        "global-distillation",
     )
 
 
@@ -32,6 +33,7 @@ def test_materialized_arm_parser_remains_compatible() -> None:
         Path(r"D:\materialized"),
         None,
         None,
+        "global-distillation",
     )
 
 
@@ -42,6 +44,7 @@ def test_pre_kd_arm_parser_supports_same_factorization_control() -> None:
         Path(r"D:\materialized"),
         None,
         None,
+        "global-distillation",
     )
 
 
@@ -52,6 +55,20 @@ def test_tuning_arm_parser_keeps_immutable_pointer() -> None:
         Path(r"D:\frozen"),
         Path(r"D:\conditional.json"),
         None,
+        "global-distillation",
+    )
+
+
+def test_checkpoint_arm_parser_accepts_canonical_correction_namespace() -> None:
+    assert _parse_arm(
+        r"tail=checkpoint;D:\frozen;D:\checkpoints;3;global-distillation-mass-floor"
+    ) == (
+        "tail",
+        "checkpoint",
+        Path(r"D:\frozen"),
+        Path(r"D:\checkpoints"),
+        3,
+        "global-distillation-mass-floor",
     )
 
 

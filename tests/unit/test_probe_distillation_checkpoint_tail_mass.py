@@ -56,6 +56,31 @@ def test_discover_checkpoints_filters_to_active_protocol(tmp_path: Path) -> None
     assert [candidate.reference.artifact_id for candidate in candidates] == [epoch_one, active]
 
 
+def test_discover_checkpoints_supports_canonical_correction_namespace(
+    tmp_path: Path,
+) -> None:
+    active = "sha256-" + "d" * 64
+    _write_checkpoint(tmp_path, active, epoch=4, protocol="sha256:correction")
+    (tmp_path / "global-distillation-mass-floor-training.json").write_text(
+        json.dumps(
+            {
+                "artifact_id": active,
+                "artifact_type": "distillation-checkpoint",
+                "schema_version": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    candidates = discover_checkpoints(
+        tmp_path,
+        {4},
+        state_namespace="global-distillation-mass-floor",
+    )
+
+    assert candidates[0].reference.artifact_id == active
+
+
 def test_scaled_result_name_preserves_legacy_single_scale_name() -> None:
     assert _scaled_result_name("epoch_8", 1.0, multiple=False) == "epoch_8"
     assert _scaled_result_name("epoch_8", 1.075, multiple=True) == "epoch_8@scale=1.075"

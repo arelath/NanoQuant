@@ -2,14 +2,12 @@
 
 ## Status
 
-Paused after implementation preflight. The selector and its retired-evidence
-replay are implemented and tested, but no fresh slice is reserved and no model
-evaluation is authorized. The independent Experiment 042 review identified
-additional methodology gates in
-[Document 81](../81-experiment-methodology-guardrails.md). Allocation
-reproducibility, exact initializer-regime binding, calibration/capability
-separation, and the revised reporting protocol must be complete before this
-experiment can become predeclared.
+Paused at immutable slice declaration. Allocation reproducibility, exact
+initializer-regime binding, calibration/capability separation, selected-
+checkpoint reload equality, and the campaign-receipt implementation now pass
+their preflight gates. No fresh slice is reserved and no model evaluation is
+authorized. The numbered launcher deliberately fails if invoked directly
+until the adaptive orchestrator and the exact slice reservations are complete.
 
 ## Motivation
 
@@ -261,6 +259,54 @@ exact equality for 677 parameters and 2,069,760 elements; both inventories hash
 to `sha256:f362da60f4aa087eceeb95c0339a089dfbf4fe7885f4d86be1ede51de47c6fea`.
 Fresh resident validation independently passes all 26 blocks, 130 owners, and
 713 transitive artifacts. This replay opens no data and is implementation
-evidence only. The materializer requirement is now cleared; the fresh campaign
-receipt implementation and immutable arm/slice declaration remain before
-reservation.
+evidence only. The materializer requirement is now cleared; the adaptive
+orchestrator and immutable arm/slice declaration remain before reservation.
+
+## Frozen fresh-campaign declaration
+
+The configuration-only launcher is
+`experiments/048-adaptive-capability-correction-d2-gemma-3-1b-it.py`. It binds
+one fresh factorization to the exact Experiment 044 primary regime:
+
+- `top_k_tail`, tail weight 0.5;
+- eight epochs capped at 32 batches, exactly 256 expected steps;
+- primary protocol hash
+  `sha256:0ed7993a02eb980403ebeb97ff2d2cbf738242e64e6a7d07ad9f2900ef611936`;
+- one correction trajectory with weight 2.0, mass ratio 0.8, learning rate
+  `1e-5`, four 32-step epochs, and a fixed 128-step scheduler horizon;
+- no fixed final-norm fold and no foldable-MLP continuation.
+
+The only configuration differences from Experiment 044 are enabling the
+correction, binding its initializer protocol/step identity, extending it to
+four complete epochs, and the numbered experiment metadata/output paths. The
+launcher cannot accidentally execute the ordinary epoch-4 export path: its
+entry point remains fail-closed until the adaptive campaign orchestrator is
+available.
+
+Canonical correction checkpoints use the
+`global-distillation-mass-floor` state namespace. Checkpoint discovery,
+WikiText/C4 evaluation, temperature fitting, and selected-checkpoint
+materialization now carry that namespace explicitly; an Experiment 042 real
+artifact check resolves its canonical epoch-1 checkpoint at exactly 32 steps.
+
+`tools/prepare_experiment048_campaign_receipt.py` is the pre-selection
+fail-closed receipt builder. After a fresh resident run, but before the C4
+selection slice is opened, it requires:
+
+- a completed Experiment 048 manifest whose launcher bytes and canonical
+  configuration match the declaration above;
+- fresh strict validation with all 26 blocks and 130 owners;
+- the exact 256-step primary artifact and active 128-step correction endpoint;
+- all four correction checkpoints at 32, 64, 96, and 128 steps, sharing one
+  protocol, source-block identity, and the exact primary initializer;
+- two disjoint 48x512 C4 reservations with permanently distinct selection and
+  final-confirmation roles;
+- the frozen selector rule, tolerance 0.01, 10,000 resamples, seed 0, and hashes
+  of every evaluator, fitter, materializer, registry, launcher, and protocol
+  document that will consume the run.
+
+The receipt is immutable and may only reach
+`ready_for_selection_evaluation` when every binding agrees. The remaining
+preflight work is the adaptive orchestrator plus choosing, hashing, and
+reserving the two declared C4 intervals. No data were opened by this
+declaration work.

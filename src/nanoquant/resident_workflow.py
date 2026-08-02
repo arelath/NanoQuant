@@ -520,7 +520,6 @@ def distillation_request_from_config(
         raise ValueError("distillation is disabled in the canonical run config")
     if len(inputs.token_ids) != config.calibration.sample_count:
         raise ValueError("resolved distillation sample count does not match config")
-    distillation = config.distillation
     return GlobalDistillationRequest(
         run_output=inputs.output,
         snapshot=inputs.snapshot,
@@ -529,24 +528,7 @@ def distillation_request_from_config(
         token_ids=inputs.token_ids,
         distillation_target_mask=inputs.distillation_target_mask,
         distillation_weights=inputs.distillation_weights,
-        config=TopKDistillationConfig(
-            objective=distillation.loss.value,
-            epochs=distillation.epochs,
-            batch_size=distillation.batch_size,
-            learning_rate=distillation.learning_rate,
-            temperature=distillation.temperature,
-            top_k=distillation.top_k,
-            vocabulary_chunk_size=distillation.vocabulary_chunk_size,
-            token_chunk_size=distillation.token_chunk_size,
-            maximum_tokens_per_batch=distillation.maximum_tokens_per_batch,
-            maximum_batches_per_epoch=distillation.maximum_batches_per_epoch,
-            tail_mass_weight=distillation.tail_mass_weight,
-            gradient_checkpointing=distillation.gradient_checkpointing,
-            weight_decay=distillation.weight_decay,
-            seed=config.reproducibility.seed,
-            optimizer_version=distillation.optimizer_version,
-            sampling_version=distillation.sampling_version,
-        ),
+        config=primary_distillation_config_from_run_config(config),
         device=config.runtime.compute_device,
         pad_token_id=inputs.pad_token_id,
         verify_hashes=config.runtime.source_streaming.verify_tensor_hashes,
@@ -559,6 +541,35 @@ def distillation_request_from_config(
         block_snapshot_tokens=config.observability.block_snapshot_tokens,
         block_snapshot_denominator_floor=config.observability.loss_denominator_floor,
         maximum_wddm_shared_bytes=options.maximum_wddm_shared_bytes,
+    )
+
+
+def primary_distillation_config_from_run_config(
+    config: RunConfig,
+) -> TopKDistillationConfig:
+    """Return the semantic primary KD protocol without resolving run inputs."""
+
+    _validate_supported_recipe(config)
+    if not config.distillation.enabled:
+        raise ValueError("distillation is disabled in the canonical run config")
+    distillation = config.distillation
+    return TopKDistillationConfig(
+        objective=distillation.loss.value,
+        epochs=distillation.epochs,
+        batch_size=distillation.batch_size,
+        learning_rate=distillation.learning_rate,
+        temperature=distillation.temperature,
+        top_k=distillation.top_k,
+        vocabulary_chunk_size=distillation.vocabulary_chunk_size,
+        token_chunk_size=distillation.token_chunk_size,
+        maximum_tokens_per_batch=distillation.maximum_tokens_per_batch,
+        maximum_batches_per_epoch=distillation.maximum_batches_per_epoch,
+        tail_mass_weight=distillation.tail_mass_weight,
+        gradient_checkpointing=distillation.gradient_checkpointing,
+        weight_decay=distillation.weight_decay,
+        seed=config.reproducibility.seed,
+        optimizer_version=distillation.optimizer_version,
+        sampling_version=distillation.sampling_version,
     )
 
 
@@ -912,6 +923,7 @@ __all__ = [
     "ResidentWorkflowResult",
     "distillation_request_from_config",
     "mass_floor_correction_request_from_config",
+    "primary_distillation_config_from_run_config",
     "execute_resident_workflow",
     "load_completed_resident_workflow",
     "resident_request_from_config",

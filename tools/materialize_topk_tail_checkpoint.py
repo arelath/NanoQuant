@@ -54,6 +54,7 @@ def _parser() -> argparse.ArgumentParser:
         type=int,
         help="Materialize a specific durable epoch instead of the active checkpoint.",
     )
+    parser.add_argument("--state-namespace", default="global-distillation")
     parser.add_argument("--derived-run-output", type=Path, required=True)
     parser.add_argument("--model-source", default=MODEL_SOURCE)
     parser.add_argument("--model-revision", default=PINNED_MODEL_REVISION)
@@ -80,11 +81,23 @@ def _hardlink_tree(source: Path, destination: Path) -> int:
 def _load_checkpoint(
     checkpoint_output: Path,
     epoch: int | None = None,
+    *,
+    state_namespace: str = "global-distillation",
 ) -> CommittedDistillationCheckpoint:
+    if (
+        not state_namespace
+        or Path(state_namespace).name != state_namespace
+        or state_namespace in {".", ".."}
+    ):
+        raise ValueError("checkpoint state namespace must be a safe filename stem")
     if epoch is not None:
         if epoch <= 0:
             raise ValueError("materialized checkpoint epoch must be positive")
-        candidate = discover_checkpoints(checkpoint_output, {epoch})[0]
+        candidate = discover_checkpoints(
+            checkpoint_output,
+            {epoch},
+            state_namespace=state_namespace,
+        )[0]
         return load_distillation_checkpoint(
             candidate.reference,
             candidate.identity,
@@ -93,7 +106,7 @@ def _load_checkpoint(
     pointer = from_dict(
         ArtifactRef,
         json.loads(
-            (checkpoint_output / "global-distillation-training.json").read_text(
+            (checkpoint_output / f"{state_namespace}-training.json").read_text(
                 encoding="utf-8"
             )
         ),
@@ -193,7 +206,11 @@ def run(args: argparse.Namespace) -> int:
     )
     if checkpoint_report.get("status") != "completed":
         raise ValueError("top-k tail checkpoint experiment is not complete")
-    checkpoint = _load_checkpoint(args.checkpoint_output, args.epoch)
+    checkpoint = _load_checkpoint(
+        args.checkpoint_output,
+        args.epoch,
+        state_namespace=args.state_namespace,
+    )
     source_manifest = from_dict(
         RunManifest,
         json.loads((source / "manifest.json").read_text(encoding="utf-8")),
@@ -298,6 +315,8 @@ def run(args: argparse.Namespace) -> int:
                 str(args.checkpoint_output.resolve()),
                 "--epoch",
                 str(args.epoch) if args.epoch is not None else "active",
+                "--state-namespace",
+                args.state_namespace,
                 "--derived-run-output",
                 str(destination),
             ),
@@ -309,6 +328,7 @@ def run(args: argparse.Namespace) -> int:
                 "schema_version": 2,
                 "source_run_output": str(source),
                 "checkpoint_output": str(args.checkpoint_output.resolve()),
+                "checkpoint_state_namespace": args.state_namespace,
                 "checkpoint": to_dict(checkpoint.reference),
                 "checkpoint_identity": to_dict(checkpoint.identity),
                 "global_tuning": to_dict(committed.reference),
