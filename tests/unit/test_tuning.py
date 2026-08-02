@@ -424,6 +424,52 @@ def test_post_block_refit_updates_scales_without_latent_changes() -> None:
     assert torch.equal(model.quant.right_latent, latent_before[1])
 
 
+def test_post_block_refit_rolls_back_immediately_after_nonfinite_epoch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = Hybrid()
+    inputs = torch.randn(8, 3, generator=torch.Generator().manual_seed(401))
+    targets = torch.randn(8, 2, generator=torch.Generator().manual_seed(402))
+    before = {name: value.detach().clone() for name, value in model.named_parameters()}
+    evaluations = iter((1.0, float("nan"), 1.0))
+    observed: list[tuple[int, float]] = []
+
+    monkeypatch.setattr(tuning_module, "_evaluate_loss", lambda *_args, **_kwargs: next(evaluations))
+    metrics = post_block_refit(
+        model,
+        TuningRequest(
+            inputs,
+            targets,
+            3,
+            4,
+            0.02,
+            epoch_observer=lambda epoch, loss: observed.append((epoch, loss)),
+        ),
+        _forward,
+    )
+
+    assert metrics.epochs_completed == 1
+    assert metrics.stopped_early is True
+    assert metrics.best.loss == metrics.final.loss == 1.0
+    assert len(observed) == 2
+    assert observed[0] == (0, 1.0)
+    assert observed[1][0] == 1 and torch.isnan(torch.tensor(observed[1][1]))
+    for name, value in model.named_parameters():
+        assert torch.equal(value, before[name])
+
+
+def test_tuning_rejects_nonfinite_initial_loss(monkeypatch: pytest.MonkeyPatch) -> None:
+    model = Hybrid()
+    inputs = torch.randn(4, 3, generator=torch.Generator().manual_seed(403))
+    targets = torch.randn(4, 2, generator=torch.Generator().manual_seed(404))
+    requires_grad = {name: value.requires_grad for name, value in model.named_parameters()}
+    monkeypatch.setattr(tuning_module, "_evaluate_loss", lambda *_args, **_kwargs: float("nan"))
+
+    with pytest.raises(FloatingPointError, match="initial evaluation"):
+        post_block_refit(model, TuningRequest(inputs, targets, 1, 2, 0.02), _forward)
+    assert {name: value.requires_grad for name, value in model.named_parameters()} == requires_grad
+
+
 def test_post_block_refit_keeps_coupled_shared_input_scales_fixed() -> None:
     class SharedHybrid(nn.Module):
         def __init__(self) -> None:

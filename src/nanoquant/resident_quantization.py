@@ -6323,7 +6323,7 @@ def _execute_resident_quantization_pipeline(
                 learning_rate=request.post_block_refit_learning_rate,
             ):
                 with _profile_block_phase(recorder, block_index, "refit"):
-                    post_block_refit(
+                    refit_metrics = post_block_refit(
                         working_block,
                         TuningRequest(
                             compressed_inputs,
@@ -6345,6 +6345,18 @@ def _execute_resident_quantization_pipeline(
                         tuning_forward,
                         tuning_recorder,
                     )
+            if refit_metrics.stopped_early and refit_metrics.epochs_completed < request.post_block_refit_epochs:
+                events.emit(
+                    "resident-quantization",
+                    "warning",
+                    "post_block_refit.nonfinite_rollback",
+                    block=block_index,
+                    epochs_completed=refit_metrics.epochs_completed,
+                    requested_epochs=request.post_block_refit_epochs,
+                    before_loss=(None if refit_metrics.before is None else refit_metrics.before.loss),
+                    best_loss=refit_metrics.best.loss,
+                    final_loss=refit_metrics.final.loss,
+                )
             for group_result in group_results:
                 _run_post_refit_covariance_refinement(
                     request,

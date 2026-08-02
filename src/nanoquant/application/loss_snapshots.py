@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 from nanoquant.domain.models import (
@@ -67,25 +68,31 @@ class BlockLossRecorder:
     final_frozen_pre_kd: float | None = None
     target_weighted_mean_square: float | None = None
 
+    @staticmethod
+    def _finite(value: float, name: str) -> float:
+        if not math.isfinite(value):
+            raise FloatingPointError(f"block loss snapshot {name} is non-finite")
+        return value
+
     def record_target_weighted_mean_square(self, value: float) -> None:
-        self.target_weighted_mean_square = value
+        self.target_weighted_mean_square = self._finite(value, "target_weighted_mean_square")
 
     def record_source_reference(self, value: float) -> None:
-        self.source_reference = value
+        self.source_reference = self._finite(value, "source_reference")
 
     def record_block_entry(self, value: float) -> None:
-        self.block_entry = value
+        self.block_entry = self._finite(value, "block_entry")
 
     def record_after_layer(self, layer: LayerId, value: float) -> None:
         if any(existing == layer for existing, _ in self.after_layers):
             raise ValueError(f"layer loss already recorded: {layer}")
-        self.after_layers.append((layer, value))
+        self.after_layers.append((layer, self._finite(value, f"after_layer:{layer.path}")))
 
     def record_post_block_refit(self, value: float) -> None:
-        self.after_post_block_refit = value
+        self.after_post_block_refit = self._finite(value, "after_post_block_refit")
 
     def record_final_frozen_pre_kd(self, value: float) -> None:
-        self.final_frozen_pre_kd = value
+        self.final_frozen_pre_kd = self._finite(value, "final_frozen_pre_kd")
 
     def finalize(self) -> BlockLossMetrics:
         if self.source_reference is None or self.block_entry is None or self.final_frozen_pre_kd is None:

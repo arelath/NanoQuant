@@ -309,6 +309,16 @@ def _loss(model: nn.Module, request: TuningRequest, forward: ForwardFunction) ->
     return _loss_sum(prediction, request.targets, request.output_importance) / request.targets.numel()
 
 
+def _require_finite_selected_parameters(
+    selected: list[tuple[str, nn.Parameter]], operation: str
+) -> None:
+    nonfinite = [name for name, parameter in selected if not bool(torch.isfinite(parameter).all())]
+    if nonfinite:
+        raise FloatingPointError(
+            f"tuning {operation} contains non-finite selected parameters: {', '.join(nonfinite)}"
+        )
+
+
 def tune(
     model: nn.Module,
     request: TuningRequest,
@@ -333,6 +343,7 @@ def tune(
     selected = [(name, parameter) for name, parameter in model.named_parameters() if selector(name, parameter)]
     if not selected:
         raise ValueError("tuning selector chose no parameters")
+    _require_finite_selected_parameters(selected, "initial state")
     original_requires_grad = {id(parameter): parameter.requires_grad for parameter in model.parameters()}
     for parameter in model.parameters():
         parameter.requires_grad_(False)
@@ -372,12 +383,15 @@ def tune(
                 if name in best_parameter_values and best_parameter_values[name].shape != parameter.shape:
                     raise ValueError(f"tuning resume best parameter shape differs: {name}")
                 parameter.copy_(value.to(device=parameter.device, dtype=parameter.dtype))
+        _require_finite_selected_parameters(selected, "resumed state")
         before_value = resume.epoch_losses[0]
         observed_losses: list[tuple[int, float]] = [
             (index, value) for index, value in enumerate(resume.epoch_losses) if value is not None
         ]
         if not observed_losses:
             raise ValueError("tuning resume contains no observed loss")
+        if any(not math.isfinite(value) for _index, value in observed_losses):
+            raise ValueError("tuning resume contains a non-finite observed loss")
         best_loss_index, best_value = min(observed_losses, key=lambda item: item[1])
         expected_best_epoch = best_loss_index - 1
         if resume.best_epoch != expected_best_epoch:
@@ -405,6 +419,10 @@ def tune(
             else:
                 with recorder.phase("initial_evaluation"):
                     before_value = _evaluate_loss(model, request, forward, recorder)
+            if not math.isfinite(before_value):
+                for parameter in model.parameters():
+                    parameter.requires_grad_(original_requires_grad[id(parameter)])
+                raise FloatingPointError("tuning initial evaluation produced a non-finite loss")
             best_value = before_value
             best_epoch = -1
             if request.restore_best_state and recorder is NULL_RECORDER:
@@ -540,6 +558,16 @@ def tune(
                 if request.epoch_observer is not None:
                     request.epoch_observer(epoch + 1, current)
                 epoch_losses.append(current)
+                if not math.isfinite(current):
+                    if not request.restore_best_state or best_state is None:
+                        raise FloatingPointError(
+                            f"tuning epoch {epoch + 1} produced a non-finite loss without rollback state"
+                        )
+                    # The best state always includes the finite entry state. Stop
+                    # immediately rather than spending later epochs from parameters
+                    # that an overflowing optimizer step may already have poisoned.
+                    stopped_early = True
+                    break
                 previous_epoch_loss = epoch_losses[-2] if len(epoch_losses) > 2 else None
                 if current < best_value:
                     comparison_loss = (
@@ -615,6 +643,9 @@ def tune(
         else:
             with recorder.phase("final_evaluation"):
                 final_value = _evaluate_loss(model, request, forward, recorder)
+        _require_finite_selected_parameters(selected, "final state")
+        if not math.isfinite(final_value):
+            raise FloatingPointError("tuning final evaluation produced a non-finite loss")
     finally:
         if stager is not None:
             stager.close()
