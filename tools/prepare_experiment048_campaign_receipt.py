@@ -153,6 +153,33 @@ def _checkpoint_receipts(
     return tuple(receipts)
 
 
+def _primary_checkpoint_receipt(
+    candidates: tuple[CheckpointCandidate, ...],
+    *,
+    primary: ArtifactRef,
+    source_blocks: tuple[ArtifactRef, ...],
+    protocol_hash: str,
+) -> dict[str, object]:
+    if len(candidates) != 1:
+        raise ValueError("Experiment 048 primary fallback checkpoint differs")
+    candidate = candidates[0]
+    if (
+        candidate.epoch != 8
+        or candidate.steps != PRIMARY_STEPS
+        or candidate.identity.protocol_hash != protocol_hash
+        or candidate.identity.source_blocks != source_blocks
+        or candidate.identity.initializer_global_tuning is not None
+    ):
+        raise ValueError("Experiment 048 primary fallback checkpoint differs")
+    return {
+        "epoch": candidate.epoch,
+        "steps": candidate.steps,
+        "reference": to_dict(candidate.reference),
+        "identity": to_dict(candidate.identity),
+        "endpoint_reference": to_dict(primary),
+    }
+
+
 def run(args: argparse.Namespace) -> int:
     run_output = args.run_output.resolve()
     launcher = args.launcher.resolve()
@@ -214,6 +241,17 @@ def run(args: argparse.Namespace) -> int:
         != primary_result.selected_parameter_count
     ):
         raise ValueError("Experiment 048 primary or correction endpoint differs")
+    primary_checkpoints = discover_checkpoints(
+        run_output,
+        {8},
+        state_namespace="global-distillation",
+    )
+    primary_fallback = _primary_checkpoint_receipt(
+        primary_checkpoints,
+        primary=primary,
+        source_blocks=primary_result.source_blocks,
+        protocol_hash=primary_result.protocol_hash,
+    )
     candidates = discover_checkpoints(
         run_output,
         set(CORRECTION_STEPS),
@@ -266,6 +304,7 @@ def run(args: argparse.Namespace) -> int:
             "reference": to_dict(primary),
             "protocol_hash": primary_result.protocol_hash,
             "steps": primary_result.steps_completed,
+            "fallback_checkpoint": primary_fallback,
         },
         "correction": {
             "active_reference": to_dict(correction),

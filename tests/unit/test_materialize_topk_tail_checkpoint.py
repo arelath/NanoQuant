@@ -1,15 +1,52 @@
+import json
 import os
+from types import SimpleNamespace
 
 import pytest
 import torch
 
+from nanoquant.config.codec import to_dict
+from nanoquant.domain.models import ArtifactRef
 from nanoquant.domain.runs import LauncherProvenance, RunManifest, RunStatus
 from tools.materialize_topk_tail_checkpoint import (
+    _checkpoint_result_metadata,
     _derived_manifest,
     _exact_reload_audit,
     _hardlink_tree,
     _parser,
 )
+
+
+def test_materializer_uses_resident_endpoint_metadata_without_probe_report(
+    tmp_path, monkeypatch
+) -> None:  # type: ignore[no-untyped-def]
+    source = (ArtifactRef("activation-generation", "sha256-" + "a" * 64, 1),)
+    pointer = ArtifactRef("global-tuning-result", "sha256-" + "b" * 64, 1)
+    (tmp_path / "global-distillation-result.json").write_text(
+        json.dumps(to_dict(pointer)),
+        encoding="utf-8",
+    )
+    checkpoint = SimpleNamespace(
+        identity=SimpleNamespace(protocol_hash="sha256:protocol", source_blocks=source),
+        state=SimpleNamespace(steps_completed=224),
+    )
+    endpoint = SimpleNamespace(
+        protocol_hash="sha256:protocol",
+        source_blocks=source,
+        steps_completed=256,
+        teacher_cache_bytes=123,
+        wall_seconds=4.5,
+    )
+    monkeypatch.setattr(
+        "tools.materialize_topk_tail_checkpoint.load_global_tuning",
+        lambda *_args, **_kwargs: SimpleNamespace(result=endpoint),
+    )
+
+    assert _checkpoint_result_metadata(
+        tmp_path,
+        checkpoint,
+        state_namespace="global-distillation",
+    ) == (123, 4.5, "resident-global-tuning")
 
 
 def test_parser_accepts_an_explicit_checkpoint_epoch() -> None:

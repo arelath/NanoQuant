@@ -196,19 +196,58 @@ def _derived_manifest(
     return transition(running, RunStatus.COMPLETED, artifacts=artifacts)
 
 
+def _checkpoint_result_metadata(
+    checkpoint_output: Path,
+    checkpoint: CommittedDistillationCheckpoint,
+    *,
+    state_namespace: str,
+) -> tuple[int, float, str]:
+    """Load resident endpoint metadata, retaining the older probe-report fallback."""
+
+    result_pointer = checkpoint_output / f"{state_namespace}-result.json"
+    if result_pointer.is_file():
+        reference = from_dict(
+            ArtifactRef,
+            json.loads(result_pointer.read_text(encoding="utf-8")),
+            path="topk_tail_checkpoint.endpoint",
+        )
+        endpoint = load_global_tuning(
+            reference,
+            LocalArtifactStore(checkpoint_output / "artifacts"),
+        ).result
+        if (
+            endpoint.protocol_hash != checkpoint.identity.protocol_hash
+            or endpoint.source_blocks != checkpoint.identity.source_blocks
+            or endpoint.steps_completed < checkpoint.state.steps_completed
+        ):
+            raise ValueError("resident endpoint metadata differs from the selected checkpoint")
+        return endpoint.teacher_cache_bytes, endpoint.wall_seconds, "resident-global-tuning"
+    report_path = checkpoint_output / "report.json"
+    if not report_path.is_file():
+        raise ValueError("selected checkpoint has no resident endpoint or analysis report metadata")
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    if report.get("status") != "completed":
+        raise ValueError("top-k tail checkpoint experiment is not complete")
+    return (
+        int(report.get("teacher_cache_bytes", 0)),
+        float(report.get("wall_seconds", 0.0)),
+        "analysis-report",
+    )
+
+
 def run(args: argparse.Namespace) -> int:
     source = args.run_output.resolve()
     destination = args.derived_run_output.resolve()
     if destination.exists():
         raise ValueError(f"derived run output already exists: {destination}")
-    checkpoint_report = json.loads(
-        (args.checkpoint_output / "report.json").read_text(encoding="utf-8")
-    )
-    if checkpoint_report.get("status") != "completed":
-        raise ValueError("top-k tail checkpoint experiment is not complete")
     checkpoint = _load_checkpoint(
         args.checkpoint_output,
         args.epoch,
+        state_namespace=args.state_namespace,
+    )
+    teacher_cache_bytes, source_wall_seconds, metadata_source = _checkpoint_result_metadata(
+        args.checkpoint_output,
+        checkpoint,
         state_namespace=args.state_namespace,
     )
     source_manifest = from_dict(
@@ -269,8 +308,8 @@ def run(args: argparse.Namespace) -> int:
             checkpoint.state.epoch_losses,
             checkpoint.state.steps_completed,
             len(selected_parameters),
-            int(checkpoint_report.get("teacher_cache_bytes", 0)),
-            float(checkpoint_report.get("wall_seconds", 0.0)),
+            teacher_cache_bytes,
+            source_wall_seconds,
             0,
             peak_process_memory_bytes(),
         )
@@ -331,6 +370,7 @@ def run(args: argparse.Namespace) -> int:
                 "checkpoint_state_namespace": args.state_namespace,
                 "checkpoint": to_dict(checkpoint.reference),
                 "checkpoint_identity": to_dict(checkpoint.identity),
+                "checkpoint_metadata_source": metadata_source,
                 "global_tuning": to_dict(committed.reference),
                 "derived_run_id": derived_manifest.run_id,
                 "parent_run_id": derived_manifest.parent_run_id,

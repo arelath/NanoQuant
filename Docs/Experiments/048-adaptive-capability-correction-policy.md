@@ -337,3 +337,11 @@ selected-checkpoint run, allowing the final logical, packed, GGUF, and quality
 path to consume the materialized winner instead of silently exporting the
 last correction epoch. These safeguards still do not authorize a fresh data
 reservation or CUDA launch; orchestration and a complete dry run remain.
+
+The materialization boundary also accepts the canonical resident endpoint as
+its metadata authority; it no longer assumes a standalone analysis probe left
+`report.json`. The campaign receipt binds the primary epoch-8 checkpoint at
+exactly 256 steps as the uncorrected fallback, alongside correction epochs
+1-4. Therefore both selector outcomes are materializable: a winning correction
+uses its exact correction checkpoint, while a no-survivor decision deploys the
+same-run primary endpoint rather than the active 128-step correction endpoint.

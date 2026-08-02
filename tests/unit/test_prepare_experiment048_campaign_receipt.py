@@ -9,6 +9,7 @@ from nanoquant.infrastructure.distillation_checkpoint import DistillationCheckpo
 from tests.support.experiments import load_experiment
 from tools.prepare_experiment048_campaign_receipt import (
     _checkpoint_receipts,
+    _primary_checkpoint_receipt,
     _reserved_c4_slices,
     _validate_experiment048_config,
 )
@@ -111,4 +112,34 @@ def test_campaign_checkpoint_inventory_binds_primary_and_all_four_steps() -> Non
             primary=primary,
             source_blocks=source,
             correction_protocol_hash="sha256:correction",
+        )
+
+
+def test_campaign_binds_primary_epoch8_as_the_uncorrected_fallback() -> None:
+    primary = ArtifactRef("global-tuning-result", "sha256-" + "a" * 64, 1)
+    source = (ArtifactRef("activation-generation", "sha256-" + "b" * 64, 1),)
+    checkpoint = CheckpointCandidate(
+        8,
+        256,
+        ArtifactRef("distillation-checkpoint", "sha256-" + "c" * 64, 1),
+        DistillationCheckpointIdentity(source, "sha256:primary", "sha256:tokens"),
+    )
+
+    receipt = _primary_checkpoint_receipt(
+        (checkpoint,),
+        primary=primary,
+        source_blocks=source,
+        protocol_hash="sha256:primary",
+    )
+
+    assert receipt["epoch"] == 8
+    assert receipt["steps"] == 256
+    assert receipt["endpoint_reference"]["artifact_id"] == primary.artifact_id
+    changed = replace(checkpoint, steps=255)
+    with pytest.raises(ValueError, match="fallback checkpoint"):
+        _primary_checkpoint_receipt(
+            (changed,),
+            primary=primary,
+            source_blocks=source,
+            protocol_hash="sha256:primary",
         )
