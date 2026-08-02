@@ -35,6 +35,16 @@ def test_materialized_arm_parser_remains_compatible() -> None:
     )
 
 
+def test_pre_kd_arm_parser_supports_same_factorization_control() -> None:
+    assert _parse_arm(r"baseline=prekd;D:\materialized") == (
+        "baseline",
+        "prekd",
+        Path(r"D:\materialized"),
+        None,
+        None,
+    )
+
+
 def test_tuning_arm_parser_keeps_immutable_pointer() -> None:
     assert _parse_arm(r"long=tuning;D:\frozen;D:\conditional.json") == (
         "long",

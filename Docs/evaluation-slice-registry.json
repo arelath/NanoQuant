@@ -94,6 +94,34 @@
       "status": "retired",
       "consumer": "experiment-043-c4-gate",
       "evidence": "evidence/043/experiment043-c4-validation152-48x512.json"
+    },
+    {
+      "id": "experiment044-wikitext-validation396-48x512",
+      "dataset": "Salesforce/wikitext:wikitext-2-raw-v1",
+      "split": "validation",
+      "offset": 396,
+      "samples": 48,
+      "sequence_length": 512,
+      "token_start": 202356,
+      "token_end": 226884,
+      "token_hash": "sha256:8121a0e488a85602dd808ea2be915272ad5025f87f4d1621e1e2e5b5a39ddbb0",
+      "status": "retired",
+      "consumer": "experiment-044-fresh-factorization-transfer-gate",
+      "evidence": "evidence/044/experiment044-wikitext-validation396-48x512-prekd-vs-postkd.json"
+    },
+    {
+      "id": "experiment044-c4-validation200-48x512",
+      "dataset": "allenai/c4",
+      "split": "validation",
+      "offset": 200,
+      "samples": 48,
+      "sequence_length": 512,
+      "token_start": 102400,
+      "token_end": 126976,
+      "token_hash": "sha256:d8b3fb059626683523f1ab05676f4c14dd809cb322c22476cf075c45bf2d5615",
+      "status": "retired",
+      "consumer": "experiment-044-fresh-factorization-transfer-gate",
+      "evidence": "evidence/044/experiment044-c4-validation200-48x512-prekd-vs-postkd.json"
     }
   ]
 }

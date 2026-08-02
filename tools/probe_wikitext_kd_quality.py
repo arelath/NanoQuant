@@ -62,6 +62,13 @@ def _parse_arm(value: str) -> tuple[str, str, Path, Path | None, int | None]:
                 "tuning arm must use name=tuning;run-output;artifact-reference-json"
             )
         return name.strip(), "tuning", Path(parts[1].strip()), Path(parts[2].strip()), None
+    if parts[0] in {"prekd", "postkd"}:
+        if len(parts) != 2 or not parts[1].strip():
+            raise argparse.ArgumentTypeError(
+                "materialized arm must use name=prekd;run-output or "
+                "name=postkd;run-output"
+            )
+        return name.strip(), parts[0], Path(parts[1].strip()), None, None
     if parts[0] != "checkpoint":
         return name.strip(), "postkd", Path(specification.strip()), None, None
     if len(parts) != 4 or not parts[1].strip() or not parts[2].strip():
@@ -89,9 +96,11 @@ def _parse_expected_steps(value: str) -> tuple[str, int]:
     try:
         parsed = int(steps)
     except ValueError as exc:
-        raise argparse.ArgumentTypeError("expected steps must use arm=positive-integer") from exc
-    if not separator or not name.strip() or parsed <= 0:
-        raise argparse.ArgumentTypeError("expected steps must use arm=positive-integer")
+        raise argparse.ArgumentTypeError(
+            "expected steps must use arm=nonnegative-integer"
+        ) from exc
+    if not separator or not name.strip() or parsed < 0:
+        raise argparse.ArgumentTypeError("expected steps must use arm=nonnegative-integer")
     return name.strip(), parsed
 
 
@@ -489,7 +498,7 @@ def run(args: argparse.Namespace) -> int:
                 device=load_device,
                 verify_hashes=False,
                 backend="factorized",
-                use_global_tuning=mode != "checkpoint",
+                use_global_tuning=mode not in {"checkpoint", "prekd"},
                 global_tuning_override=global_tuning_override,
             )
             checkpoint_receipt = None
@@ -504,12 +513,15 @@ def run(args: argparse.Namespace) -> int:
             if checkpoint_receipt is not None:
                 observed_steps = int(checkpoint_receipt["steps"])
             else:
-                if loaded.global_tuning is None:
+                if loaded.global_tuning is None and mode == "prekd":
+                    observed_steps = 0
+                elif loaded.global_tuning is None:
                     raise ValueError(f"WikiText KD arm {name} has no global tuning")
-                observed_steps = load_global_tuning(
-                    loaded.global_tuning,
-                    LocalArtifactStore(run_output / "artifacts"),
-                ).result.steps_completed
+                else:
+                    observed_steps = load_global_tuning(
+                        loaded.global_tuning,
+                        LocalArtifactStore(run_output / "artifacts"),
+                    ).result.steps_completed
             if observed_steps != expected_steps[name]:
                 raise ValueError(
                     f"WikiText KD arm {name} has {observed_steps} steps; "
