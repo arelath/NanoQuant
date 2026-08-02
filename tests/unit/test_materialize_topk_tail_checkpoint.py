@@ -1,6 +1,15 @@
 import os
 
-from tools.materialize_topk_tail_checkpoint import _hardlink_tree, _parser
+import pytest
+import torch
+
+from nanoquant.domain.runs import LauncherProvenance, RunManifest, RunStatus
+from tools.materialize_topk_tail_checkpoint import (
+    _derived_manifest,
+    _exact_reload_audit,
+    _hardlink_tree,
+    _parser,
+)
 
 
 def test_parser_accepts_an_explicit_checkpoint_epoch() -> None:
@@ -37,3 +46,72 @@ def test_hardlink_tree_reproduces_nested_inventory_without_copying(tmp_path) -> 
     assert os.stat(source / "nested" / "tensor.bin").st_ino == os.stat(
         destination / "nested" / "tensor.bin"
     ).st_ino
+
+
+def test_exact_reload_audit_binds_every_parameter() -> None:
+    expected = {
+        "model.layers.0.scale": torch.tensor([1.0, 2.0], dtype=torch.bfloat16),
+        "model.norm.weight": torch.tensor([0.5], dtype=torch.float32),
+    }
+    actual = {name: value.clone() for name, value in expected.items()}
+
+    audit = _exact_reload_audit(expected, actual)
+
+    assert audit["passed"] is True
+    assert audit["parameter_count"] == 2
+    assert audit["element_count"] == 3
+    assert audit["checkpoint_inventory_hash"] == audit["reloaded_inventory_hash"]
+    assert [item["name"] for item in audit["parameters"]] == [
+        "model.layers.0.scale",
+        "model.norm.weight",
+    ]
+
+
+@pytest.mark.parametrize(
+    "actual",
+    (
+        {"model.layers.0.scale": torch.tensor([1.0])},
+        {"model.layers.0.scale": torch.tensor([1.0, 3.0])},
+        {"model.layers.0.scale": torch.tensor([1.0, 2.0], dtype=torch.float64)},
+    ),
+)
+def test_exact_reload_audit_fails_closed_on_inventory_or_value_change(
+    actual: dict[str, torch.Tensor],
+) -> None:
+    expected = {"model.layers.0.scale": torch.tensor([1.0, 2.0])}
+
+    with pytest.raises(ValueError, match="differs from its checkpoint"):
+        _exact_reload_audit(expected, actual)
+
+
+def test_derived_manifest_has_new_lineage_and_authorizes_selected_tuning() -> None:
+    source = RunManifest(
+        1,
+        "source-run",
+        RunStatus.COMPLETED,
+        "created",
+        "updated",
+        "sha256:config",
+        {"output": "source"},
+        LauncherProvenance("numbered_runfile", 48, "experiments/048.py", "sha256:x", "rev", ()),
+        {"machine": "fixture"},
+        artifacts=("sha256-source", "sha256-old-tuning"),
+    )
+
+    derived = _derived_manifest(
+        source,
+        global_tuning_artifact_id="sha256-selected-tuning",
+        arguments=("--epoch", "3"),
+    )
+
+    assert derived.status is RunStatus.COMPLETED
+    assert derived.run_id != source.run_id
+    assert derived.parent_run_id == source.run_id
+    assert derived.forked_from_stage == "distillation-checkpoint-materialization"
+    assert derived.config_hash == source.config_hash
+    assert derived.resolved_config == source.resolved_config
+    assert derived.artifacts == (
+        "sha256-source",
+        "sha256-old-tuning",
+        "sha256-selected-tuning",
+    )

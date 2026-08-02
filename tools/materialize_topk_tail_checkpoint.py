@@ -14,8 +14,9 @@ import torch
 from probe_distillation_checkpoint_tail_mass import discover_checkpoints
 from probe_mlp_policy_frozen_transfer import MODEL_SOURCE, PINNED_MODEL_REVISION
 
-from nanoquant.config.codec import from_dict, to_dict
+from nanoquant.config.codec import from_dict, semantic_hash, to_dict
 from nanoquant.domain.models import ArtifactRef, GlobalTuningResult
+from nanoquant.domain.runs import RunManifest, RunStatus
 from nanoquant.global_distillation import (
     _freeze_tuned_blocks,
     _selected_parameters,
@@ -28,10 +29,19 @@ from nanoquant.infrastructure.distillation_checkpoint import (
     load_distillation_checkpoint,
 )
 from nanoquant.infrastructure.frozen_model_loader import load_frozen_run
-from nanoquant.infrastructure.global_tuning import activate_global_tuning, commit_global_tuning
+from nanoquant.infrastructure.global_tuning import (
+    activate_global_tuning,
+    commit_global_tuning,
+    load_global_tuning,
+)
 from nanoquant.infrastructure.io_utils import atomic_workspace, atomic_write_json
 from nanoquant.infrastructure.resource_usage import peak_process_memory_bytes
-from nanoquant.infrastructure.tensor_store import LocalTensorStore
+from nanoquant.infrastructure.runs import (
+    initial_manifest_from_resolved,
+    launcher_provenance,
+    transition,
+)
+from nanoquant.infrastructure.tensor_store import LocalTensorStore, _tensor_hash
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -103,6 +113,76 @@ def _load_checkpoint(
     return load_distillation_checkpoint(pointer, identity, artifacts)
 
 
+def _tensor_inventory(values: dict[str, torch.Tensor]) -> tuple[dict[str, object], ...]:
+    return tuple(
+        {
+            "name": name,
+            "shape": list(value.shape),
+            "dtype": str(value.dtype).removeprefix("torch."),
+            "content_hash": _tensor_hash(value),
+        }
+        for name, value in sorted(values.items())
+    )
+
+
+def _exact_reload_audit(
+    checkpoint_values: dict[str, torch.Tensor],
+    reloaded_values: dict[str, torch.Tensor],
+) -> dict[str, object]:
+    expected = _tensor_inventory(checkpoint_values)
+    actual = _tensor_inventory(reloaded_values)
+    expected_by_name = {str(item["name"]): item for item in expected}
+    actual_by_name = {str(item["name"]): item for item in actual}
+    missing = sorted(set(expected_by_name) - set(actual_by_name))
+    unexpected = sorted(set(actual_by_name) - set(expected_by_name))
+    mismatched = sorted(
+        name
+        for name in set(expected_by_name) & set(actual_by_name)
+        if expected_by_name[name] != actual_by_name[name]
+        or not torch.equal(checkpoint_values[name].cpu(), reloaded_values[name].cpu())
+    )
+    passed = not missing and not unexpected and not mismatched
+    audit = {
+        "passed": passed,
+        "comparison": "exact-name-shape-dtype-and-value-equality",
+        "parameter_count": len(expected),
+        "element_count": sum(value.numel() for value in checkpoint_values.values()),
+        "checkpoint_inventory_hash": semantic_hash(expected),
+        "reloaded_inventory_hash": semantic_hash(actual),
+        "parameters": expected,
+        "missing_parameters": missing,
+        "unexpected_parameters": unexpected,
+        "mismatched_parameters": mismatched,
+    }
+    if not passed:
+        raise ValueError(
+            "materialized global tuning differs from its checkpoint: "
+            f"missing={missing}, unexpected={unexpected}, mismatched={mismatched}"
+        )
+    return audit
+
+
+def _derived_manifest(
+    source: RunManifest,
+    *,
+    global_tuning_artifact_id: str,
+    arguments: tuple[str, ...],
+) -> RunManifest:
+    created = initial_manifest_from_resolved(
+        source.config_hash,
+        source.resolved_config,
+        launcher_provenance(Path(__file__), None, arguments),
+        source.environment,
+        parent_run_id=source.run_id,
+        forked_from_stage="distillation-checkpoint-materialization",
+    )
+    running = transition(created, RunStatus.RUNNING)
+    artifacts = tuple(
+        dict.fromkeys((*source.artifacts, global_tuning_artifact_id))
+    )
+    return transition(running, RunStatus.COMPLETED, artifacts=artifacts)
+
+
 def run(args: argparse.Namespace) -> int:
     source = args.run_output.resolve()
     destination = args.derived_run_output.resolve()
@@ -114,6 +194,11 @@ def run(args: argparse.Namespace) -> int:
     if checkpoint_report.get("status") != "completed":
         raise ValueError("top-k tail checkpoint experiment is not complete")
     checkpoint = _load_checkpoint(args.checkpoint_output, args.epoch)
+    source_manifest = from_dict(
+        RunManifest,
+        json.loads((source / "manifest.json").read_text(encoding="utf-8")),
+        path="source_manifest",
+    )
     started = time.perf_counter()
     source_artifacts = LocalArtifactStore(source / "artifacts")
     loaded = load_frozen_run(
@@ -174,19 +259,68 @@ def run(args: argparse.Namespace) -> int:
         )
         committed = commit_global_tuning(result, destination_artifacts)
         activate_global_tuning(temporary, committed.reference)
+        reloaded_tuning = load_global_tuning(
+            committed.reference,
+            destination_artifacts,
+        ).result
+        reloaded = load_frozen_run(
+            temporary,
+            args.snapshot,
+            source_name=args.model_source,
+            revision=args.model_revision,
+            device="cpu",
+            verify_hashes=True,
+            backend="factorized",
+            use_global_tuning=True,
+        )
+        reloaded_trainable = _thaw_frozen_layers(
+            reloaded,
+            destination_tensors,
+            frozen_states=reloaded_tuning.tuned_blocks,
+        )
+        reloaded_selected_ids, _reloaded_auxiliary = _selected_parameters(
+            reloaded.model,
+            reloaded_trainable,
+        )
+        reloaded_values = {
+            name: parameter.detach().cpu().clone()
+            for name, parameter in reloaded.model.named_parameters()
+            if id(parameter) in reloaded_selected_ids
+        }
+        reload_audit = _exact_reload_audit(checkpoint_values, reloaded_values)
+        derived_manifest = _derived_manifest(
+            source_manifest,
+            global_tuning_artifact_id=committed.reference.artifact_id,
+            arguments=(
+                "--run-output",
+                str(source),
+                "--checkpoint-output",
+                str(args.checkpoint_output.resolve()),
+                "--epoch",
+                str(args.epoch) if args.epoch is not None else "active",
+                "--derived-run-output",
+                str(destination),
+            ),
+        )
+        atomic_write_json(temporary / "manifest.json", to_dict(derived_manifest))
         atomic_write_json(
             temporary / "topk-tail-materialization.json",
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "source_run_output": str(source),
                 "checkpoint_output": str(args.checkpoint_output.resolve()),
                 "checkpoint": to_dict(checkpoint.reference),
+                "checkpoint_identity": to_dict(checkpoint.identity),
                 "global_tuning": to_dict(committed.reference),
+                "derived_run_id": derived_manifest.run_id,
+                "parent_run_id": derived_manifest.parent_run_id,
                 "steps_completed": checkpoint.state.steps_completed,
                 "linked_source_files": linked_files,
+                "exact_reload_audit": reload_audit,
                 "materialization_wall_seconds": time.perf_counter() - started,
             },
         )
+        del reloaded, reloaded_trainable, reloaded_values
     del loaded, trainable
     gc.collect()
     return 0

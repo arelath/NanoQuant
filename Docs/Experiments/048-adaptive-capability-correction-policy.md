@@ -235,3 +235,32 @@ NLL/KL as the promotion gate, and reports calibrated NLL/KL and top-k-mass
 diagnostics separately. It rejects a receipt whose arm, checkpoint, frozen
 model, selector evidence, or token role differs. No fresh Experiment 048 slice
 has yet been reserved or opened.
+
+## Selected-checkpoint materialization preflight
+
+The selected-checkpoint materializer now treats reload equality as a binding
+gate rather than assuming that freezing a checkpoint produces the same model.
+It reloads the newly committed normal global-tuning artifact through the
+factorized model loader and requires exact name, shape, dtype, and value
+equality for every selected parameter. Its schema-2 receipt records the full
+per-parameter content-hash inventory and equal checkpoint/reload inventory
+hashes. Any missing, unexpected, or changed tensor aborts the atomic derived
+run.
+
+The derived run also receives a distinct run identity, records the source run
+as its parent, names `distillation-checkpoint-materialization` as its fork
+boundary, and adds the selected global-tuning artifact to the completed
+manifest. This makes the selected pointer eligible for the normal completed
+workflow and export loaders instead of leaving a source manifest that only
+authorized the superseded active checkpoint.
+
+An analysis-only replay of the already-known Experiment 046 epoch-3 checkpoint
+is retained at
+`evidence/048/experiment048-retired046-epoch3-materialization-v3`. It proves
+exact equality for 677 parameters and 2,069,760 elements; both inventories hash
+to `sha256:f362da60f4aa087eceeb95c0339a089dfbf4fe7885f4d86be1ede51de47c6fea`.
+Fresh resident validation independently passes all 26 blocks, 130 owners, and
+713 transitive artifacts. This replay opens no data and is implementation
+evidence only. The materializer requirement is now cleared; the fresh campaign
+receipt implementation and immutable arm/slice declaration remain before
+reservation.
