@@ -50,6 +50,7 @@ def test_experiment048_freezes_one_exact_deployment_regime() -> None:
     }
     assert candidate.workflow.maximum_wddm_shared_gib == 0.75
     assert candidate.workflow.llamacpp_quality
+    assert candidate.workflow.task_limit == 1000
     assert candidate.workflow.export.gguf_output == Path(
         "Results/048/gemma-3-1b-it-nanoquant.gguf"
     )

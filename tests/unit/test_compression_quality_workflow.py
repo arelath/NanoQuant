@@ -118,10 +118,12 @@ def test_compression_quality_runs_quality_before_huggingface_upload_and_publicat
         llama_cpp_root=tmp_path / "llama.cpp",
         reasoning_sequence_length_override=1024,
         interrupt_after_block_commits=4,
+        allow_relocated_completed_run=True,
     )
     def complete(*_args, **kwargs):  # type: ignore[no-untyped-def]
         assert "defer_huggingface" not in kwargs
         assert kwargs["options"].interrupt_after_block_commits == 4
+        assert kwargs["options"].allow_relocated_completed_run
         calls.append("complete")
         return CompleteCompressionResult(resident, export)
 

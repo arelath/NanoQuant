@@ -122,6 +122,15 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--arm", type=_parse_arm, action="append", required=True)
     parser.add_argument("--primary-baseline", required=True)
     parser.add_argument("--primary-candidate", required=True)
+    parser.add_argument(
+        "--reference-arm",
+        action="append",
+        default=[],
+        help=(
+            "arm whose frozen factorization may differ from the primary same-run pair; "
+            "reported only as an absolute reference and never used for promotion"
+        ),
+    )
     parser.add_argument("--expected-steps", type=_parse_expected_steps, action="append", required=True)
     parser.add_argument("--slice-registry", type=Path, required=True)
     parser.add_argument("--slice-id", required=True)
@@ -520,7 +529,7 @@ def _c4_slice_reservation(
     samples: int,
     sequence_length: int,
     token_hash: str,
-    allowed_statuses: tuple[str, ...] = ("reserved",),
+    allowed_statuses: tuple[str, ...] = ("retired",),
 ) -> tuple[dict[str, object], str]:
     encoded = path.read_bytes()
     registry = json.loads(encoded)
@@ -564,12 +573,27 @@ def _c4_slice_reservation(
     return cast(dict[str, object], reservation), "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
+def _primary_frozen_identity(
+    name: str,
+    observed: dict[str, object],
+    *,
+    reference_arms: frozenset[str],
+    current: dict[str, object] | None,
+) -> dict[str, object] | None:
+    if name in reference_arms:
+        return current
+    if current is not None and observed != current:
+        raise ValueError("non-WikiText primary arms have different frozen identities")
+    return observed
+
+
 def run(args: argparse.Namespace) -> int:
     arms = tuple(args.arm)
     names = tuple(
         name for name, _mode, _path, _pointer, _epoch, _namespace in arms
     )
     expected_steps = dict(args.expected_steps)
+    reference_arms = frozenset(args.reference_arm)
     temperature_receipt_items = tuple(args.temperature_fit_receipt)
     if (
         len(arms) < 2
@@ -577,6 +601,10 @@ def run(args: argparse.Namespace) -> int:
         or args.primary_baseline not in names
         or args.primary_candidate not in names
         or args.primary_baseline == args.primary_candidate
+        or not reference_arms.issubset(names)
+        or len(reference_arms) != len(args.reference_arm)
+        or args.primary_baseline in reference_arms
+        or args.primary_candidate in reference_arms
         or min(args.c4_documents, args.samples, args.sequence_length - 1, args.token_chunk_size)
         <= 0
         or args.offset < 0
@@ -659,6 +687,7 @@ def run(args: argparse.Namespace) -> int:
         ],
         "primary_baseline": args.primary_baseline,
         "primary_candidate": args.primary_candidate,
+        "reference_arms": tuple(args.reference_arm),
         "slice_registry": str(args.slice_registry.resolve()),
         "slice_registry_sha256": registry_hash,
         "slice_reservation": reservation,
@@ -754,6 +783,7 @@ def run(args: argparse.Namespace) -> int:
     temperature_sequences: dict[str, tuple[TemperatureSequenceMetrics, ...]] = {}
     manifests: dict[str, dict[str, object]] = {}
     frozen_identity: dict[str, object] | None = None
+    frozen_identities: dict[str, dict[str, object]] = {}
     with acquire_device_lease(args.device):
         teacher = load_causal_language_model(
             args.snapshot,
@@ -797,9 +827,13 @@ def run(args: argparse.Namespace) -> int:
                 "config_hash": loaded.identity.config_hash,
                 "plan_hash": loaded.identity.plan_hash,
             }
-            if frozen_identity is not None and observed_identity != frozen_identity:
-                raise ValueError("non-WikiText arms have different frozen identities")
-            frozen_identity = observed_identity
+            frozen_identity = _primary_frozen_identity(
+                name,
+                observed_identity,
+                reference_arms=reference_arms,
+                current=frozen_identity,
+            )
+            frozen_identities[name] = observed_identity
             if loaded.global_tuning is None and mode not in {"prekd", "checkpoint"}:
                 raise ValueError(f"non-WikiText arm {name} has no global tuning")
             if checkpoint_receipt is not None:
@@ -902,6 +936,13 @@ def run(args: argparse.Namespace) -> int:
         results[args.primary_baseline],
         results[args.primary_candidate],
     )
+    absolute_candidate_comparisons = {
+        reference: {
+            "candidate_minus_reference": f"{args.primary_candidate}_minus_{reference}",
+            **_comparison(results[reference], results[args.primary_candidate]),
+        }
+        for reference in (args.primary_baseline, *args.reference_arm)
+    }
     temperature_report = None
     if temperature_fits:
         baseline_temperature = temperature_sequences[args.primary_baseline]
@@ -998,6 +1039,7 @@ def run(args: argparse.Namespace) -> int:
             "role": "analysis-only pinned non-WikiText KD quality gate",
             "protocol": protocol,
             "frozen_identity": frozen_identity,
+            "frozen_identities": frozen_identities,
             "arms": manifests,
             "results": {name: to_dict(result) for name, result in results.items()},
             "paired_adjacent_arms": adjacent,
@@ -1007,6 +1049,7 @@ def run(args: argparse.Namespace) -> int:
                 ),
                 **primary,
             },
+            "absolute_candidate_comparisons": absolute_candidate_comparisons,
             **(
                 {}
                 if temperature_report is None

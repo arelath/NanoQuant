@@ -288,6 +288,8 @@ def run(args: argparse.Namespace) -> int:
             "selection": selection,
             "confirmation": confirmation,
             "registry_audit": registry_audit,
+            "registry_snapshot": registry_payload,
+            "registry_snapshot_hash": semantic_hash(registry_payload),
         },
         "bound_files": bound_files,
     }

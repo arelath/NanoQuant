@@ -86,6 +86,7 @@ class CompressionQualityExperiment:
     llama_cpp_root: Path | None = None
     llamacpp_quality_parallel: int = 4
     reasoning_sequence_length_override: int | None = None
+    allow_relocated_completed_run: bool = False
 
     def __post_init__(self) -> None:
         if self.wikitext_samples <= 0 or self.wikitext_sequence_length < 2:
@@ -190,6 +191,7 @@ def execute_compression_quality_experiment(
             restore_completed_blocks=experiment.restore_completed_blocks,
             maximum_wddm_shared_bytes=maximum_shared_bytes,
             interrupt_after_block_commits=experiment.interrupt_after_block_commits,
+            allow_relocated_completed_run=experiment.allow_relocated_completed_run,
         ),
     )
     workflow = complete.workflow

@@ -310,3 +310,30 @@ The receipt is immutable and may only reach
 preflight work is the adaptive orchestrator plus choosing, hashing, and
 reserving the two declared C4 intervals. No data were opened by this
 declaration work.
+
+## Fresh-data and deployment safeguards
+
+Fresh slices now have an irreversible, receipt-authorized opening step.
+`tools/open_experiment048_c4_slice.py` holds an exclusive registry lock,
+verifies the complete registry snapshot and campaign protocol, and atomically
+changes exactly one authorized slice from `reserved` to `retired` before any
+model evaluation. The transition records the campaign receipt and protocol
+hashes, is idempotent for the same authority, and rejects unrelated registry
+changes. The C4 evaluator accepts `retired` slices by default and no longer
+evaluates a merely reserved slice. Thus an interruption after the first model
+forward cannot return opened data to the unused pool.
+
+Final reporting also distinguishes causal arms from historical references.
+The uncorrected baseline and selected checkpoint must have the same model,
+configuration, and allocation-plan hashes. Explicitly declared pre-KD or
+retained reference arms may have different factorization identities, but they
+are excluded from the primary promotion pair and are emitted only as absolute
+candidate-versus-reference comparisons. This keeps the marginal correction
+claim same-run while satisfying the requirement to show absolute context.
+
+The numbered workflow now fixes the six-task guardrail at 1,000 examples. Its
+complete-compression options can explicitly load a relocated, exactly audited
+selected-checkpoint run, allowing the final logical, packed, GGUF, and quality
+path to consume the materialized winner instead of silently exporting the
+last correction epoch. These safeguards still do not authorize a fresh data
+reservation or CUDA launch; orchestration and a complete dry run remain.

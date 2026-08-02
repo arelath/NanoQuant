@@ -27,6 +27,7 @@ from tools.probe_non_wikitext_kd_quality import (
     _parse_arm,
     _parse_temperature_receipt,
     _parser,
+    _primary_frozen_identity,
     _sequence_from_checkpoint,
     _temperature_bootstrap,
 )
@@ -296,10 +297,16 @@ def test_primary_comparison_is_explicit_in_the_cli_protocol() -> None:
             "baseline",
             "--primary-candidate",
             "candidate",
+            "--reference-arm",
+            "retained",
+            "--arm",
+            "retained=postkd;retained-run",
             "--expected-steps",
             "baseline=256",
             "--expected-steps",
             "candidate=256",
+            "--expected-steps",
+            "retained=256",
             "--slice-registry",
             "registry.json",
             "--slice-id",
@@ -313,10 +320,42 @@ def test_primary_comparison_is_explicit_in_the_cli_protocol() -> None:
 
     assert args.primary_baseline == "baseline"
     assert args.primary_candidate == "candidate"
+    assert args.reference_arm == ["retained"]
     assert args.temperature_fit_receipt == [
         ("baseline", Path("baseline-fit.json")),
         ("candidate", Path("candidate-fit.json")),
     ]
+
+
+def test_reference_arm_may_differ_but_primary_pair_must_share_identity() -> None:
+    identity = {"model_hash": "m", "config_hash": "c", "plan_hash": "p"}
+    retained = {"model_hash": "other", "config_hash": "c2", "plan_hash": "p2"}
+
+    current = _primary_frozen_identity(
+        "baseline",
+        identity,
+        reference_arms=frozenset({"retained"}),
+        current=None,
+    )
+    assert _primary_frozen_identity(
+        "retained",
+        retained,
+        reference_arms=frozenset({"retained"}),
+        current=current,
+    ) == identity
+    assert _primary_frozen_identity(
+        "candidate",
+        identity,
+        reference_arms=frozenset({"retained"}),
+        current=current,
+    ) == identity
+    with pytest.raises(ValueError, match="primary arms"):
+        _primary_frozen_identity(
+            "candidate",
+            retained,
+            reference_arms=frozenset({"retained"}),
+            current=current,
+        )
 
 
 def test_c4_slice_reservation_rejects_retired_overlap(tmp_path: Path) -> None:
@@ -364,6 +403,7 @@ def test_c4_slice_reservation_rejects_retired_overlap(tmp_path: Path) -> None:
             samples=48,
             sequence_length=512,
             token_hash="new",
+            allowed_statuses=("reserved",),
         )
 
 

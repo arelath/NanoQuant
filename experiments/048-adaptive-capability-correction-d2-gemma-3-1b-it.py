@@ -115,6 +115,7 @@ EXPERIMENT = define_compression_quality_experiment(
     CONFIG,
     maximum_wddm_shared_gib=0.75,
     llamacpp_quality=True,
+    task_limit=1000,
 )
 
 

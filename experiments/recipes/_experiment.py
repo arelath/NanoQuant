@@ -342,6 +342,8 @@ def define_compression_quality_experiment(
     llamacpp_quality: bool = False,
     llamacpp_quality_parallel: int = 4,
     reasoning_sequence_length_override: int | None = None,
+    task_limit: int = 200,
+    allow_relocated_completed_run: bool = False,
 ) -> ExperimentDefinition[CompressionQualityExperiment]:
     layout = ExperimentLayout(identity)
     config = _materialize_config(template, identity, layout)
@@ -360,6 +362,8 @@ def define_compression_quality_experiment(
         llama_cpp_root=_LLAMA_CPP_ROOT if llamacpp_quality else None,
         llamacpp_quality_parallel=llamacpp_quality_parallel,
         reasoning_sequence_length_override=reasoning_sequence_length_override,
+        task_limit=task_limit,
+        allow_relocated_completed_run=allow_relocated_completed_run,
     )
     return ExperimentDefinition(identity, config, workflow, layout)
 
