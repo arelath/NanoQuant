@@ -149,3 +149,34 @@ def test_rollover_compares_expected_hash_with_embedded_canonical_run_config(
             tmp_path / "Results" / "030",
             expected_config_hash=expected_hash,
         )
+
+
+def test_rollover_requires_explicit_acceptance_and_preserves_failed_run(tmp_path: Path) -> None:
+    run = tmp_path / "evidence" / "054" / "054-fixture"
+    outputs = tmp_path / "outputs" / "054"
+    results = tmp_path / "Results" / "054"
+    run.mkdir(parents=True)
+    old_hash = "sha256:" + "a" * 64
+    new_hash = "sha256:" + "b" * 64
+    (run / "manifest.json").write_text(
+        json.dumps({"status": "failed", "config_hash": old_hash}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="explicit acceptance"):
+        plan_rollover(run, outputs, results, expected_config_hash=new_hash)
+
+    plan = plan_rollover(
+        run,
+        outputs,
+        results,
+        expected_config_hash=new_hash,
+        allow_failed=True,
+    )
+    fresh = execute_rollover(plan)
+
+    assert plan.stored_status == "failed"
+    assert plan.run_archive.joinpath("manifest.json").is_file()
+    assert not fresh.joinpath("manifest.json").exists()
+    rollover = json.loads((fresh / "state" / "config-rollover.json").read_text(encoding="utf-8"))
+    assert rollover["stored_status"] == "failed"

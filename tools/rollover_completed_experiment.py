@@ -1,9 +1,10 @@
-"""Archive an incompatible completed experiment and start a fresh canonical run.
+"""Archive an incompatible completed or explicitly accepted failed experiment.
 
 This is intentionally a dry-run tool by default. If a newly prepared
 calibration receipt matching the requested configuration coexists with the old
 resident manifest, its validated artifact closure is retained. Otherwise the
-fresh run starts without calibration.
+fresh run starts without calibration. Failed runs require ``--allow-failed`` so
+an operator cannot archive failure evidence accidentally.
 """
 
 from __future__ import annotations
@@ -32,6 +33,7 @@ class RolloverPlan:
     results_archive: Path
     stored_config_hash: str
     expected_config_hash: str
+    stored_status: str
     calibration_artifact_id: str | None
     calibration_artifact_count: int
     calibration_logical_bytes: int
@@ -95,6 +97,7 @@ def plan_rollover(
     results_root: str | Path,
     *,
     expected_config_hash: str,
+    allow_failed: bool = False,
 ) -> RolloverPlan:
     run = Path(run_output).resolve()
     outputs = Path(outputs_root).resolve()
@@ -108,8 +111,11 @@ def plan_rollover(
 
     manifest = _read_object(run / "manifest.json", "resident manifest")
     stored_hash = _preparation_config_hash(manifest)
-    if manifest.get("status") != "completed":
-        raise ValueError("rollover requires a completed resident manifest")
+    stored_status = str(manifest.get("status") or "")
+    if stored_status != "completed" and not (allow_failed and stored_status == "failed"):
+        raise ValueError(
+            "rollover requires a completed resident manifest or explicit acceptance of a failed run"
+        )
     if not stored_hash.startswith("sha256:") or len(stored_hash) != 71:
         raise ValueError("resident manifest has an invalid config hash")
     if stored_hash == expected_config_hash:
@@ -150,6 +156,7 @@ def plan_rollover(
         results_archive,
         stored_hash,
         expected_config_hash,
+        stored_status,
         calibration_artifact,
         len(closure),
         logical_bytes,
@@ -167,6 +174,7 @@ def execute_rollover(plan: RolloverPlan) -> Path:
         plan.outputs_root,
         plan.results_root,
         expected_config_hash=plan.expected_config_hash,
+        allow_failed=plan.stored_status == "failed",
     )
     if current != plan:
         raise ValueError("rollover inputs changed after planning")
@@ -214,6 +222,7 @@ def execute_rollover(plan: RolloverPlan) -> Path:
                 "schema_version": 1,
                 "stored_config_hash": plan.stored_config_hash,
                 "expected_config_hash": plan.expected_config_hash,
+                "stored_status": plan.stored_status,
                 "archived_run": str(plan.run_archive),
                 "archived_outputs": str(plan.outputs_archive),
                 "archived_results": str(plan.results_archive),
@@ -254,6 +263,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--outputs-root", type=Path, required=True)
     parser.add_argument("--results-root", type=Path, required=True)
     parser.add_argument("--expected-config-hash", required=True)
+    parser.add_argument(
+        "--allow-failed",
+        action="store_true",
+        help="archive a failed resident run while preserving it as the rollover source",
+    )
     parser.add_argument("--apply", action="store_true", help="apply the rollover; default is dry-run")
     return parser
 
@@ -265,6 +279,7 @@ def main() -> int:
         args.outputs_root,
         args.results_root,
         expected_config_hash=args.expected_config_hash,
+        allow_failed=args.allow_failed,
     )
     print(
         json.dumps(
