@@ -18,6 +18,7 @@ from probe_composed_context_mlp_refit import _paired_metric_payload
 from probe_corrected_codebook_splice import _paired_payload
 from probe_factorized_component_overlays_kl import _dtype
 from probe_mlp_policy_frozen_transfer import MODEL_SOURCE, PINNED_MODEL_REVISION
+from probe_wikitext_kd_quality import _apply_checkpoint
 from torch import nn
 from transformers.models.auto.tokenization_auto import AutoTokenizer
 
@@ -44,28 +45,40 @@ C4_VALIDATION_FILE = "en/c4-validation.00000-of-00008.json.gz"
 C4_VALIDATION_FILE_SHA256 = "bc35d7c1b1d14b90cd3a394cccbcbe191935edd04bf42ee965379c6e2987a5f0"
 
 
-def _parse_arm(value: str) -> tuple[str, str, Path, Path | None]:
+def _parse_arm(value: str) -> tuple[str, str, Path, Path | None, int | None]:
     name, separator, specification = value.partition("=")
     parts = specification.split(";")
     mode = parts[0] if parts else ""
     if (
         not separator
         or not name.strip()
-        or mode not in {"prekd", "postkd", "tuning"}
+        or mode not in {"prekd", "postkd", "tuning", "checkpoint"}
         or (mode in {"prekd", "postkd"} and len(parts) != 2)
         or (mode == "tuning" and len(parts) != 3)
+        or (mode == "checkpoint" and len(parts) != 4)
         or not parts[1].strip()
         or (mode == "tuning" and not parts[2].strip())
+        or (mode == "checkpoint" and not parts[2].strip())
     ):
         raise argparse.ArgumentTypeError(
             "arm must use name=prekd;run-output, name=postkd;run-output, or "
-            "name=tuning;run-output;artifact-reference-json"
+            "name=tuning;run-output;artifact-reference-json, or "
+            "name=checkpoint;run-output;checkpoint-output;epoch"
         )
+    epoch = None
+    if mode == "checkpoint":
+        try:
+            epoch = int(parts[3])
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError("checkpoint epoch must be an integer") from exc
+        if epoch <= 0:
+            raise argparse.ArgumentTypeError("checkpoint epoch must be positive")
     return (
         name.strip(),
         mode,
         Path(parts[1].strip()),
-        None if mode != "tuning" else Path(parts[2].strip()),
+        None if mode not in {"tuning", "checkpoint"} else Path(parts[2].strip()),
+        epoch,
     )
 
 
@@ -289,7 +302,7 @@ def _c4_slice_reservation(
 
 def run(args: argparse.Namespace) -> int:
     arms = tuple(args.arm)
-    names = tuple(name for name, _mode, _path, _pointer in arms)
+    names = tuple(name for name, _mode, _path, _pointer, _epoch in arms)
     expected_steps = dict(args.expected_steps)
     if (
         len(arms) < 2
@@ -348,10 +361,20 @@ def run(args: argparse.Namespace) -> int:
                 "name": name,
                 "mode": mode,
                 "run_output": str(path.resolve()),
-                "global_tuning_pointer": None if pointer is None else str(pointer.resolve()),
+                "global_tuning_pointer": (
+                    str(pointer.resolve()) if mode == "tuning" else None
+                ),
                 "expected_steps": expected_steps[name],
+                **(
+                    {
+                        "checkpoint_output": str(cast(Path, pointer).resolve()),
+                        "epoch": epoch,
+                    }
+                    if mode == "checkpoint"
+                    else {}
+                ),
             }
-            for name, mode, path, pointer in arms
+            for name, mode, path, pointer, epoch in arms
         ],
         "primary_baseline": args.primary_baseline,
         "primary_candidate": args.primary_candidate,
@@ -413,25 +436,35 @@ def run(args: argparse.Namespace) -> int:
             local_files_only=args.local_files_only,
         ).to(args.device)
         cast(Any, teacher).config.use_cache = False
-        for name, mode, run_output, tuning_pointer in arms:
+        for name, mode, run_output, tuning_pointer, epoch in arms:
             global_tuning_override = None
-            if tuning_pointer is not None:
+            if mode == "tuning" and tuning_pointer is not None:
                 global_tuning_override = from_dict(
                     ArtifactRef,
                     json.loads(tuning_pointer.read_text(encoding="utf-8")),
                     path=f"arm[{name}].global_tuning",
                 )
+            load_device = "cpu" if mode == "checkpoint" else args.device
             loaded = load_frozen_run(
                 run_output,
                 args.snapshot,
                 source_name=MODEL_SOURCE,
                 revision=args.model_revision,
-                device=args.device,
+                device=load_device,
                 verify_hashes=False,
                 backend="factorized",
-                use_global_tuning=mode != "prekd",
+                use_global_tuning=mode not in {"prekd", "checkpoint"},
                 global_tuning_override=global_tuning_override,
             )
+            checkpoint_receipt = None
+            if mode == "checkpoint" and tuning_pointer is not None and epoch is not None:
+                checkpoint_receipt = _apply_checkpoint(
+                    loaded,
+                    run_output,
+                    tuning_pointer,
+                    epoch,
+                )
+                loaded.model.to(args.device)
             observed_identity: dict[str, object] = {
                 "model_hash": loaded.identity.model_hash,
                 "config_hash": loaded.identity.config_hash,
@@ -440,16 +473,17 @@ def run(args: argparse.Namespace) -> int:
             if frozen_identity is not None and observed_identity != frozen_identity:
                 raise ValueError("non-WikiText arms have different frozen identities")
             frozen_identity = observed_identity
-            if loaded.global_tuning is None and mode != "prekd":
+            if loaded.global_tuning is None and mode not in {"prekd", "checkpoint"}:
                 raise ValueError(f"non-WikiText arm {name} has no global tuning")
-            observed_steps = (
-                0
-                if loaded.global_tuning is None and mode == "prekd"
-                else load_global_tuning(
+            if checkpoint_receipt is not None:
+                observed_steps = int(checkpoint_receipt["steps"])
+            elif loaded.global_tuning is None and mode == "prekd":
+                observed_steps = 0
+            else:
+                observed_steps = load_global_tuning(
                     cast(ArtifactRef, loaded.global_tuning),
                     LocalArtifactStore(run_output / "artifacts"),
                 ).result.steps_completed
-            )
             if observed_steps != expected_steps[name]:
                 raise ValueError(
                     f"non-WikiText arm {name} has {observed_steps} steps; "
@@ -462,8 +496,9 @@ def run(args: argparse.Namespace) -> int:
                     None if loaded.global_tuning is None else to_dict(loaded.global_tuning)
                 ),
                 "global_tuning_pointer": (
-                    None if tuning_pointer is None else str(tuning_pointer.resolve())
+                    str(tuning_pointer.resolve()) if mode == "tuning" else None
                 ),
+                "checkpoint": checkpoint_receipt,
                 "steps_completed": observed_steps,
             }
 

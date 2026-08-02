@@ -30,6 +30,7 @@ def test_arm_parser_keeps_windows_drive_colons_inside_the_run_path() -> None:
         "postkd",
         Path(r"D:\evidence\candidate"),
         None,
+        None,
     )
     assert _parse_arm(
         r"conditional=tuning;D:\evidence\candidate;D:\evidence\primary.json"
@@ -38,6 +39,17 @@ def test_arm_parser_keeps_windows_drive_colons_inside_the_run_path() -> None:
         "tuning",
         Path(r"D:\evidence\candidate"),
         Path(r"D:\evidence\primary.json"),
+        None,
+    )
+
+
+def test_checkpoint_arm_parser_keeps_windows_paths_and_epoch() -> None:
+    assert _parse_arm(r"candidate=checkpoint;D:\frozen;D:\checkpoints;4") == (
+        "candidate",
+        "checkpoint",
+        Path(r"D:\frozen"),
+        Path(r"D:\checkpoints"),
+        4,
     )
 
 
