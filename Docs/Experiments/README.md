@@ -51,6 +51,7 @@ task-evaluation protocol, and Experiments 028 and 030 added Qwen-specific deploy
 | [032](032-gemma-3-1b-raw-fisher-d2.md) | Completed | Gemma 3 1B IT | Raw Fisher won the static KL screen but regressed retained perplexity by 7.22%, so it was rejected. |
 | [033](033-gemma-3-1b-covariance-refined-d2.md) | Completed | Gemma 3 1B IT | Pre-tuning covariance refinement improved its local objective but regressed retained perplexity by 19.26%, so it was rejected. |
 | [034](034-gemma-3-1b-post-refit-qkv-covariance.md) | Completed | Gemma 3 1B IT | Selected post-refit QKV refinement passed resume/export validation but regressed pre-KD perplexity by 4.59% and final perplexity by 5.50%, so it was rejected. |
+| [049](049-cyclic-scale-rank.md) | Rejected at screen | Gemma 3 1B IT | Cyclic pre/post scale banks added tiny fixed-rank capacity but regressed all nine equal-bit comparisons by 4.07–14.76%. |
 
 The original launchers were under `experiments/`. Retained measurements remain under `Results/` and `evidence/`;
 architecture and decision records remain elsewhere in `Docs/`.
