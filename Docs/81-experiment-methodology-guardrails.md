@@ -103,8 +103,26 @@ The canonical workflow compares the declared hash with the configured primary
 KD protocol before primary training begins. Global distillation independently
 compares both values with the persisted initializer before correction. Missing,
 malformed, or mismatched values fail closed, and both expectations are part of
-the correction protocol identity. This directly blocks the 256-versus-2,048
-transfer error.
+the correction protocol identity. This blocks accidental warm-start from the
+wrong deployment artifact, but it does **not** by itself prove that the policy
+was developed in that regime.
+
+`tools/prepare_policy_initializer_transfer_receipt.py` closes that separate
+methodology gap. It reads the completed development initializer's actual global-
+tuning result, requires its protocol hash and observed steps to equal the
+deployment launcher's primary protocol and explicit configured horizon, and
+requires the correction declaration to bind those same values. It also rejects
+an uncapped transferred primary, a cross-trajectory fixed final-norm value, or
+reused selection/confirmation identities. The receipt explicitly limits its
+claim to regime identity; held-out same-run selection and untouched confirmation
+remain necessary policy evidence. This is the guard that detects the original
+256-versus-2,048 development-to-deployment error.
+
+For Experiment 048 this validator is not advisory. The immutable pre-selection
+campaign receipt loads the manifest-authorized Experiment 044 primary endpoint,
+runs the transfer check against the fresh Experiment 048 configuration, and
+binds both the development evidence and validator bytes into its protocol hash.
+Selection data cannot be opened unless that receipt succeeds.
 
 ### Deterministic numerical execution
 
@@ -129,8 +147,9 @@ plan comparison remains required before the next fresh campaign.
 `tools/validate_evaluation_slice_registry.py` audits the whole registry before
 reservation or launch. It rejects duplicate identities, a `released` status,
 malformed token-interval arithmetic, and every overlap among reserved and
-retired intervals. The current ledger passes with 14 retired slices and no
-reserved slices.
+retired intervals. The current ledger passes with 14 retired slices and two
+Experiment 048 slices reserved under permanently distinct selection and
+confirmation roles.
 
 ### Evidence-consistent adaptive selection
 

@@ -8,6 +8,11 @@ from pathlib import Path
 from typing import cast
 
 import _paths  # noqa: F401
+from prepare_policy_initializer_transfer_receipt import (
+    PolicyInitializerRegime,
+    load_development_initializer,
+    validate_policy_initializer_transfer,
+)
 from probe_distillation_checkpoint_tail_mass import CheckpointCandidate, discover_checkpoints
 from select_c4_capability_correction_checkpoint import RULE
 from validate_evaluation_slice_registry import validate_registry
@@ -31,6 +36,10 @@ CORRECTION_STEPS = {1: 32, 2: 64, 3: 96, 4: 128}
 SELECTOR_TOLERANCE = 0.01
 BOOTSTRAP_RESAMPLES = 10_000
 BOOTSTRAP_SEED = 0
+DEVELOPMENT_INITIALIZER = (
+    Path(__file__).resolve().parent.parent
+    / "evidence/044/044-tail-aware-256-d2-compress-and-benchmark-gemma-3-1b-it"
+)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -318,6 +327,18 @@ def run(args: argparse.Namespace) -> int:
         confirmation_id=args.confirmation_slice_id,
     )
     repository_root = Path(__file__).resolve().parent.parent
+    development_result, development_binding = load_development_initializer(
+        DEVELOPMENT_INITIALIZER
+    )
+    policy_transfer = validate_policy_initializer_transfer(
+        PolicyInitializerRegime(
+            development_result.protocol_hash,
+            development_result.steps_completed,
+        ),
+        config,
+        selection_slice_id=args.selection_slice_id,
+        confirmation_slice_id=args.confirmation_slice_id,
+    )
     bound_files = {
         name: {
             "path": str(path.resolve()),
@@ -333,6 +354,9 @@ def run(args: argparse.Namespace) -> int:
             "c4_evaluator": repository_root / "tools" / "probe_non_wikitext_kd_quality.py",
             "temperature_fitter": repository_root / "tools" / "fit_non_wikitext_temperature.py",
             "checkpoint_materializer": repository_root / "tools" / "materialize_topk_tail_checkpoint.py",
+            "policy_transfer_validator": (
+                repository_root / "tools" / "prepare_policy_initializer_transfer_receipt.py"
+            ),
             "temperature_protocol": repository_root / "Docs" / "82-temperature-calibration-reporting-protocol.md",
         }.items()
     }
@@ -353,6 +377,14 @@ def run(args: argparse.Namespace) -> int:
             "protocol_hash": correction_result.protocol_hash,
             "state_namespace": CORRECTION_NAMESPACE,
             "checkpoints": checkpoints,
+        },
+        "policy_initializer_transfer": {
+            "claim_scope": (
+                "Regime identity only; same-run held-out selection and untouched "
+                "confirmation provide policy evidence."
+            ),
+            "development_evidence": development_binding,
+            "validation": policy_transfer,
         },
         "selector": {
             "rule": RULE,
