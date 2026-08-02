@@ -194,9 +194,10 @@ priority because selected mass is no longer a capability gate and the always-on
 tail-aware primary objective attacks the diagnosed drift directly. Revisit them
 only if a concrete deployment requirement makes mass calibration load-bearing.
 
-The allocation-statistics numerical path is corrected, but its pinned-Gemma
-repeatability gate and the raw-versus-temperature-fitted comparison report are
-not complete. Both remain explicit blockers for the next fresh full campaign.
+The allocation-statistics numerical path, pinned-Gemma repeatability gate, and
+raw-versus-temperature-fitted reporting mechanism are now complete. A fresh
+campaign remains blocked until its exact arms and non-overlapping slices are
+declared immutably; no prior slice may be reopened for that purpose.
 
 ### Durable independent preprocessing replay
 
@@ -229,8 +230,26 @@ Rank-probe schema 4 therefore keeps timing and peak workspace in observable
 events while excluding both nondeterministic telemetry fields from immutable
 semantic evidence. The resident algorithm version is 53, preventing reuse of
 schema-3 commits. The failed receipt remains retained under
-`evidence/048/pinned-gemma-preprocessing-replay`; a clean version-53 two-process
-replay remains required to clear the blocker.
+`evidence/048/pinned-gemma-preprocessing-replay`.
+
+The clean version-53 replay at
+`evidence/048/pinned-gemma-preprocessing-replay-v2` passes. Its two independent
+Python processes have identical preprocessing-state hash
+`sha256:fe81b786e27cc9d3994f913d8fe1f9e7420421572cf1f815e786c14752626190`,
+calibration artifact `sha256-97a4d686...34de9`, objective artifact
+`sha256-75cc889932...f73eb`, 130-unit reconstruction profile
+`sha256-53a60bbf8...dab2`, and allocation plan
+`sha256-625ebfa08...7385`. Fresh validation in both the orchestrator receipt and
+a separately invoked comparison covers the same 136-artifact transitive graph.
+This clears the pinned-Gemma allocation-repeatability blocker. The
+raw-versus-temperature-fitted reporting path is now implemented under
+`Docs/82-temperature-calibration-reporting-protocol.md`: fits are resumable,
+bound to the immutable selector decision and exact retired selection slice,
+and consumed only through per-arm receipts by the untouched final C4 report.
+The existing raw C4 result remains the primary gate. The repository-wide gate
+passes with 1,216 tests, 49 expected deselections, clean Ruff, and clean mypy.
+The remaining launch preflight is the fresh campaign's immutable slice/arm
+declaration.
 
 ## Experiment 043 correction
 

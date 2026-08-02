@@ -7,13 +7,28 @@ import torch
 from pytest import MonkeyPatch
 
 from nanoquant.application.kl_budget import KlSequenceResult
+from nanoquant.application.temperature_calibration import (
+    TemperatureNllStatistics,
+    TemperatureSequenceMetrics,
+    fit_logit_temperature,
+)
+from nanoquant.infrastructure.temperature_fit_checkpoint import (
+    complete_temperature_fit_receipt,
+)
 from tools.probe_non_wikitext_kd_quality import (
     _arm_result,
     _c4_slice_reservation,
     _contiguous_token_windows,
+    _evaluate_temperature_arm,
+    _kl_result_from_temperature,
     _load_c4_tokens,
+    _load_temperature_receipts,
+    _paired_temperature_metric,
     _parse_arm,
+    _parse_temperature_receipt,
     _parser,
+    _sequence_from_checkpoint,
+    _temperature_bootstrap,
 )
 
 
@@ -26,6 +41,16 @@ class _Tokenizer:
         return SimpleNamespace(input_ids=torch.arange(18).unsqueeze(0))
 
 
+class _LogitModel(torch.nn.Module):
+    def __init__(self, logits: torch.Tensor) -> None:
+        super().__init__()
+        self.register_buffer("values", logits)
+
+    def forward(self, *, input_ids: torch.Tensor, use_cache: bool) -> SimpleNamespace:
+        assert not use_cache
+        return SimpleNamespace(logits=self.values.expand(input_ids.shape[0], -1, -1))
+
+
 def test_c4_arm_reports_temperature_invariant_top1_agreement() -> None:
     result = _arm_result(
         "candidate",
@@ -36,6 +61,54 @@ def test_c4_arm_reports_temperature_invariant_top1_agreement() -> None:
     )
 
     assert result.teacher_top1_agreement == pytest.approx(0.5)
+
+
+def test_c4_checkpoint_resume_preserves_top1_agreement() -> None:
+    restored = _sequence_from_checkpoint(
+        {
+            "negative_log_likelihood": 4.0,
+            "kl_nats_per_token": 1.0,
+            "token_count": 3,
+            "teacher_top1_agreement": 2 / 3,
+        }
+    )
+
+    assert restored.teacher_top1_agreement == pytest.approx(2 / 3)
+
+
+def test_c4_checkpoint_resume_accepts_pre_top1_checkpoint() -> None:
+    restored = _sequence_from_checkpoint(
+        {
+            "negative_log_likelihood": 4.0,
+            "kl_nats_per_token": 1.0,
+            "token_count": 3,
+        }
+    )
+
+    assert restored.teacher_top1_agreement is None
+
+
+def test_c4_temperature_pass_keeps_raw_metrics_and_top1_ordering() -> None:
+    tokens = torch.tensor([[0, 1, 0]])
+    teacher = _LogitModel(torch.tensor([[[0.0, 1.0], [1.0, 0.0], [0.0, 0.0]]]))
+    student = _LogitModel(torch.tensor([[[0.0, 0.5], [0.5, 0.0], [0.0, 0.0]]]))
+
+    sequences = _evaluate_temperature_arm(
+        "candidate",
+        teacher,
+        student,
+        tokens,
+        logit_scale=1.5,
+        top_k=1,
+        device="cpu",
+        token_chunk_size=2,
+    )
+    raw = _kl_result_from_temperature("candidate", sequences, fitted=False)
+    fitted = _kl_result_from_temperature("candidate", sequences, fitted=True)
+
+    assert fitted.negative_log_likelihood < raw.negative_log_likelihood
+    assert fitted.kl_nats_per_token < raw.kl_nats_per_token
+    assert fitted.teacher_top1_agreement == raw.teacher_top1_agreement == 1.0
 
 
 def test_arm_parser_keeps_windows_drive_colons_inside_the_run_path() -> None:
@@ -65,6 +138,127 @@ def test_checkpoint_arm_parser_keeps_windows_paths_and_epoch() -> None:
         Path(r"D:\checkpoints"),
         4,
     )
+
+
+def test_temperature_receipts_bind_primary_arms_and_share_calibration_slice(
+    tmp_path: Path,
+) -> None:
+    result = fit_logit_temperature(
+        lambda scale: TemperatureNllStatistics(8, 3.0, scale - 1.2, 1.0)
+    )
+    entries = []
+    for name, role in (("baseline", "baseline"), ("candidate", "selected")):
+        output = tmp_path / f"{name}.json"
+        protocol = {
+            "solver": {
+                "version": 1,
+                "initial_logit_scale": 1.0,
+                "minimum_logit_scale": 0.5,
+                "maximum_logit_scale": 1.5,
+                "maximum_update_passes": 4,
+                "convergence_tolerance": 1e-4,
+                "hessian_floor": 1e-12,
+            },
+            "selection": {
+                "decision": "decision.json",
+                "decision_sha256": "sha256:decision",
+                "selected_arm": "candidate",
+                "role": role,
+            },
+            "dataset": {"name": "allenai/c4"},
+            "slice": {"token_hash": "sha256:calibration"},
+            "model": {"revision": "revision", "frozen_identity": {"model_hash": "m"}},
+            "arm": {"name": name, "steps_completed": 96},
+        }
+        complete_temperature_fit_receipt(
+            output,
+            tmp_path / f"{name}.checkpoint.json",
+            protocol,
+            result,
+        )
+        entries.append((name, output))
+
+    protocols, results, summaries = _load_temperature_receipts(
+        tuple(entries),
+        baseline="baseline",
+        candidate="candidate",
+        current_token_hash="sha256:held-out",
+    )
+
+    assert set(protocols) == set(results) == set(summaries) == {"baseline", "candidate"}
+    assert summaries["candidate"]["logit_scale"] == pytest.approx(1.2)
+    assert _parse_temperature_receipt("candidate=fit.json") == (
+        "candidate",
+        Path("fit.json"),
+    )
+
+
+def test_temperature_report_bootstraps_mass_and_paired_effects() -> None:
+    baseline = (
+        TemperatureSequenceMetrics(4.0, 1.0, 3.8, 0.8, 0.5, 0.9, 0.7, 0.75, 3),
+        TemperatureSequenceMetrics(5.0, 2.0, 4.8, 1.8, 1.0, 0.9, 0.8, 0.85, 1),
+    )
+    candidate = (
+        TemperatureSequenceMetrics(3.5, 0.8, 3.4, 0.7, 0.5, 0.9, 0.75, 0.8, 3),
+        TemperatureSequenceMetrics(4.5, 1.8, 4.4, 1.7, 1.0, 0.9, 0.85, 0.9, 1),
+    )
+
+    absolute = _temperature_bootstrap(
+        baseline,
+        "raw_student_teacher_topk_mass",
+        resamples=100,
+    )
+    paired = _paired_temperature_metric(
+        baseline,
+        candidate,
+        "raw_student_teacher_topk_mass",
+        resamples=100,
+        higher_is_better=True,
+    )
+
+    assert absolute["mean"] == pytest.approx(0.725)
+    assert paired["point_delta"] == pytest.approx(0.05)
+    assert paired["improved_with_confidence"] is True
+
+
+def test_temperature_receipts_reject_reuse_of_final_slice(tmp_path: Path) -> None:
+    result = fit_logit_temperature(
+        lambda scale: TemperatureNllStatistics(8, 3.0, scale - 1.2, 1.0)
+    )
+    entries = []
+    for name, role in (("baseline", "baseline"), ("candidate", "selected")):
+        output = tmp_path / f"{name}.json"
+        protocol = {
+            "solver": {
+                "version": 1,
+                "initial_logit_scale": 1.0,
+                "minimum_logit_scale": 0.5,
+                "maximum_logit_scale": 1.5,
+                "maximum_update_passes": 4,
+                "convergence_tolerance": 1e-4,
+                "hessian_floor": 1e-12,
+            },
+            "selection": {"selected_arm": "candidate", "role": role},
+            "dataset": {},
+            "slice": {"token_hash": "sha256:same"},
+            "model": {},
+            "arm": {"name": name},
+        }
+        complete_temperature_fit_receipt(
+            output,
+            tmp_path / f"{name}.checkpoint.json",
+            protocol,
+            result,
+        )
+        entries.append((name, output))
+
+    with pytest.raises(ValueError, match="data role"):
+        _load_temperature_receipts(
+            tuple(entries),
+            baseline="baseline",
+            candidate="candidate",
+            current_token_hash="sha256:same",
+        )
 
 
 def test_contiguous_c4_windows_apply_offset_after_tokenization() -> None:
@@ -103,11 +297,19 @@ def test_primary_comparison_is_explicit_in_the_cli_protocol() -> None:
             "registry.json",
             "--slice-id",
             "candidate-slice",
+            "--temperature-fit-receipt",
+            "baseline=baseline-fit.json",
+            "--temperature-fit-receipt",
+            "candidate=candidate-fit.json",
         ]
     )
 
     assert args.primary_baseline == "baseline"
     assert args.primary_candidate == "candidate"
+    assert args.temperature_fit_receipt == [
+        ("baseline", Path("baseline-fit.json")),
+        ("candidate", Path("candidate-fit.json")),
+    ]
 
 
 def test_c4_slice_reservation_rejects_retired_overlap(tmp_path: Path) -> None:

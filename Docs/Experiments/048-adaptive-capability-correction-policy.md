@@ -215,3 +215,23 @@ evidence. Rank-probe schema 4 removes wall time and peak workspace from the
 artifact payload while retaining both in events; resident algorithm version 53
 prevents adoption of the old evidence. The failed receipt is retained, and the
 version-53 replay uses the new `-v2` output rather than overwriting it.
+
+The version-53 replay passes. Run A and run B independently produce exact
+identity for the calibration input, Fisher statistics, objectives, all 130
+rank-probe results, reconstruction profile, final allocation plan, resident
+semantic configuration, preprocessing-state file, and the complete reachable
+136-artifact graph. The authoritative receipt is
+`evidence/048/pinned-gemma-preprocessing-replay-v2/preprocessing-reproducibility.json`;
+`independent-preprocessing-comparison.json` records a second fresh validation.
+No evaluation slice was opened. Allocation reproducibility is no longer an
+Experiment 048 blocker.
+
+The calibration-versus-capability reporting mechanism is also implemented.
+After a fresh selector decision, `tools/fit_non_wikitext_temperature.py` fits
+each primary arm independently on that exact retired selection slice and emits
+an identity-bound resumable receipt. The final C4 evaluator accepts only the
+baseline and selected-arm receipts from one shared fit protocol, preserves raw
+NLL/KL as the promotion gate, and reports calibrated NLL/KL and top-k-mass
+diagnostics separately. It rejects a receipt whose arm, checkpoint, frozen
+model, selector evidence, or token role differs. No fresh Experiment 048 slice
+has yet been reserved or opened.

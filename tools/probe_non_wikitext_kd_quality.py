@@ -7,6 +7,7 @@ import gc
 import hashlib
 import json
 import math
+import random
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any, cast
@@ -27,7 +28,12 @@ from nanoquant.application.kl_budget import (
     KlSequenceResult,
     causal_kl_nll_per_sequence_from_logits,
 )
-from nanoquant.config.codec import from_dict, to_dict
+from nanoquant.application.temperature_calibration import (
+    TemperatureFitResult,
+    TemperatureSequenceMetrics,
+    causal_raw_fitted_temperature_metrics,
+)
+from nanoquant.config.codec import from_dict, semantic_hash, to_dict
 from nanoquant.domain.models import ArtifactRef
 from nanoquant.infrastructure.artifacts import LocalArtifactStore
 from nanoquant.infrastructure.device_lease import acquire_device_lease
@@ -35,8 +41,9 @@ from nanoquant.infrastructure.frozen_model_loader import load_frozen_run
 from nanoquant.infrastructure.global_tuning import load_global_tuning
 from nanoquant.infrastructure.hf_language_model import load_causal_language_model
 from nanoquant.infrastructure.hf_model_protocol import HuggingFaceModel
-from nanoquant.infrastructure.io_utils import atomic_write_json
+from nanoquant.infrastructure.io_utils import atomic_write_json, hash_file
 from nanoquant.infrastructure.model_adapters import adapter_for_config
+from nanoquant.infrastructure.temperature_fit_checkpoint import load_temperature_fit_receipt
 from nanoquant.kl_budget_workflow import _token_hash
 
 C4_DATASET = "allenai/c4"
@@ -93,6 +100,13 @@ def _parse_expected_steps(value: str) -> tuple[str, int]:
     return name.strip(), parsed
 
 
+def _parse_temperature_receipt(value: str) -> tuple[str, Path]:
+    name, separator, path = value.partition("=")
+    if not separator or not name.strip() or not path.strip():
+        raise argparse.ArgumentTypeError("temperature fit receipt must use arm=path")
+    return name.strip(), Path(path.strip())
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--snapshot", type=Path, required=True)
@@ -113,6 +127,14 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--token-chunk-size", type=int, default=128)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--local-files-only", action="store_true")
+    parser.add_argument(
+        "--temperature-fit-receipt",
+        type=_parse_temperature_receipt,
+        action="append",
+        default=[],
+        help="opt-in final reporting with one frozen arm=receipt fit for each primary arm",
+    )
+    parser.add_argument("--temperature-top-k", type=int, default=64)
     return parser
 
 
@@ -214,6 +236,20 @@ def _arm_result(name: str, sequences: tuple[KlSequenceResult, ...]) -> KlBudgetA
     )
 
 
+def _sequence_from_checkpoint(item: dict[str, object]) -> KlSequenceResult:
+    agreement = item.get("teacher_top1_agreement")
+    return KlSequenceResult(
+        float(cast(Any, item["negative_log_likelihood"])),
+        float(cast(Any, item["kl_nats_per_token"])),
+        int(cast(Any, item["token_count"])),
+        None if agreement is None else float(cast(Any, agreement)),
+    )
+
+
+def _temperature_sequence_from_checkpoint(item: dict[str, object]) -> TemperatureSequenceMetrics:
+    return from_dict(TemperatureSequenceMetrics, item, path="temperature_sequence")
+
+
 @torch.no_grad()
 def _evaluate_arm(
     name: str,
@@ -250,6 +286,198 @@ def _evaluate_arm(
     return _arm_result(name, tuple(sequences))
 
 
+@torch.no_grad()
+def _evaluate_temperature_arm(
+    name: str,
+    teacher: nn.Module,
+    student: nn.Module,
+    tokens: torch.Tensor,
+    *,
+    logit_scale: float,
+    top_k: int,
+    device: str,
+    token_chunk_size: int,
+    completed: tuple[TemperatureSequenceMetrics, ...] = (),
+    progress: Callable[[tuple[TemperatureSequenceMetrics, ...]], None] | None = None,
+) -> tuple[TemperatureSequenceMetrics, ...]:
+    if len(completed) > tokens.shape[0]:
+        raise ValueError("temperature-report checkpoint exceeds the token inventory")
+    teacher.eval()
+    student.eval()
+    sequences = list(completed)
+    for index in range(len(completed), tokens.shape[0]):
+        batch = tokens[index : index + 1].to(device)
+        teacher_logits = cast(HuggingFaceModel, teacher)(input_ids=batch, use_cache=False).logits
+        student_logits = cast(HuggingFaceModel, student)(input_ids=batch, use_cache=False).logits
+        sequences.extend(
+            causal_raw_fitted_temperature_metrics(
+                teacher_logits,
+                student_logits,
+                batch,
+                logit_scale=logit_scale,
+                top_k=top_k,
+                token_chunk_size=token_chunk_size,
+            )
+        )
+        if progress is not None:
+            progress(tuple(sequences))
+        print(f"{name} raw/fitted: {index + 1}/{tokens.shape[0]} sequences", flush=True)
+        del batch, teacher_logits, student_logits
+    return tuple(sequences)
+
+
+def _temperature_mean(
+    sequences: tuple[TemperatureSequenceMetrics, ...],
+    attribute: str,
+) -> float:
+    if not sequences:
+        raise ValueError("temperature report has no sequence metrics")
+    tokens = math.fsum(item.token_count for item in sequences)
+    return math.fsum(
+        float(getattr(item, attribute)) * item.token_count for item in sequences
+    ) / tokens
+
+
+def _kl_result_from_temperature(
+    name: str,
+    sequences: tuple[TemperatureSequenceMetrics, ...],
+    *,
+    fitted: bool,
+) -> KlBudgetArmResult:
+    converted = tuple(
+        KlSequenceResult(
+            (
+                item.fitted_negative_log_likelihood
+                if fitted
+                else item.raw_negative_log_likelihood
+            ),
+            item.fitted_kl_nats_per_token if fitted else item.raw_kl_nats_per_token,
+            item.token_count,
+            item.teacher_top1_agreement,
+        )
+        for item in sequences
+    )
+    return _arm_result(name, converted)
+
+
+def _temperature_bootstrap(
+    sequences: tuple[TemperatureSequenceMetrics, ...],
+    attribute: str,
+    *,
+    resamples: int = 10_000,
+    seed: int = 0,
+) -> dict[str, object]:
+    generator = random.Random(seed)
+    sampled = []
+    for _sample in range(resamples):
+        selected = tuple(sequences[generator.randrange(len(sequences))] for _ in sequences)
+        sampled.append(_temperature_mean(selected, attribute))
+    sampled.sort()
+    return {
+        "mean": _temperature_mean(sequences, attribute),
+        "lower": sampled[int(0.025 * resamples)],
+        "upper": sampled[int(0.975 * resamples) - 1],
+        "confidence": 0.95,
+        "resamples": resamples,
+    }
+
+
+def _paired_temperature_metric(
+    baseline: tuple[TemperatureSequenceMetrics, ...],
+    candidate: tuple[TemperatureSequenceMetrics, ...],
+    attribute: str,
+    *,
+    resamples: int = 10_000,
+    seed: int = 0,
+    higher_is_better: bool = False,
+) -> dict[str, object]:
+    if not baseline or len(baseline) != len(candidate) or tuple(
+        item.token_count for item in baseline
+    ) != tuple(item.token_count for item in candidate):
+        raise ValueError("paired temperature report requires aligned sequences")
+    generator = random.Random(seed)
+    deltas = []
+    for _sample in range(resamples):
+        indices = [generator.randrange(len(baseline)) for _ in baseline]
+        before = tuple(baseline[index] for index in indices)
+        after = tuple(candidate[index] for index in indices)
+        deltas.append(
+            _temperature_mean(after, attribute) - _temperature_mean(before, attribute)
+        )
+    deltas.sort()
+    before_mean = _temperature_mean(baseline, attribute)
+    point = _temperature_mean(candidate, attribute) - before_mean
+    lower = deltas[int(0.025 * resamples)]
+    upper = deltas[int(0.975 * resamples) - 1]
+    return {
+        "point_delta": point,
+        "relative_delta": None if before_mean == 0 else point / before_mean,
+        "lower_delta": lower,
+        "upper_delta": upper,
+        "confidence": 0.95,
+        "resamples": resamples,
+        "improved_with_confidence": (
+            point > 0 and lower > 0 if higher_is_better else point < 0 and upper < 0
+        ),
+    }
+
+
+def _load_temperature_receipts(
+    entries: tuple[tuple[str, Path], ...],
+    *,
+    baseline: str,
+    candidate: str,
+    current_token_hash: str,
+) -> tuple[
+    dict[str, dict[str, object]],
+    dict[str, TemperatureFitResult],
+    dict[str, dict[str, object]],
+]:
+    if len(entries) != 2 or {name for name, _path in entries} != {baseline, candidate}:
+        raise ValueError("temperature reporting requires exactly the primary baseline and candidate fits")
+    protocols: dict[str, dict[str, object]] = {}
+    results: dict[str, TemperatureFitResult] = {}
+    summaries: dict[str, dict[str, object]] = {}
+    for name, path in entries:
+        protocol, result = load_temperature_fit_receipt(path)
+        arm = protocol.get("arm")
+        selection = protocol.get("selection")
+        fit_slice = protocol.get("slice")
+        if (
+            not isinstance(arm, dict)
+            or arm.get("name") != name
+            or not isinstance(selection, dict)
+            or not isinstance(fit_slice, dict)
+            or fit_slice.get("token_hash") == current_token_hash
+        ):
+            raise ValueError("temperature fit receipt identity or data role is invalid")
+        expected_role = "baseline" if name == baseline else "selected"
+        if selection.get("role") != expected_role or selection.get("selected_arm") != candidate:
+            raise ValueError("temperature fit receipt role differs from the final comparison")
+        protocols[name] = protocol
+        results[name] = result
+        summaries[name] = {
+            "path": str(path.resolve()),
+            "sha256": "sha256:" + hash_file(path),
+            "protocol_hash": semantic_hash(protocol),
+            "logit_scale": result.final_logit_scale,
+            "equivalent_temperature": result.equivalent_temperature,
+        }
+    shared_keys = ("solver", "dataset", "slice", "model")
+    baseline_selection = cast(dict[str, object], protocols[baseline]["selection"])
+    candidate_selection = cast(dict[str, object], protocols[candidate]["selection"])
+    if (
+        any(
+            protocols[baseline].get(key) != protocols[candidate].get(key)
+            for key in shared_keys
+        )
+        or {key: value for key, value in baseline_selection.items() if key != "role"}
+        != {key: value for key, value in candidate_selection.items() if key != "role"}
+    ):
+        raise ValueError("temperature fit receipts do not share one fitting protocol and slice")
+    return protocols, results, summaries
+
+
 def _comparison(
     baseline: KlBudgetArmResult,
     candidate: KlBudgetArmResult,
@@ -284,6 +512,7 @@ def _c4_slice_reservation(
     samples: int,
     sequence_length: int,
     token_hash: str,
+    allowed_statuses: tuple[str, ...] = ("reserved",),
 ) -> tuple[dict[str, object], str]:
     encoded = path.read_bytes()
     registry = json.loads(encoded)
@@ -294,6 +523,8 @@ def _c4_slice_reservation(
     if len(selected) != 1:
         raise ValueError("C4 evaluation slice reservation is missing or ambiguous")
     reservation = selected[0]
+    if not allowed_statuses or any(status not in {"reserved", "retired"} for status in allowed_statuses):
+        raise ValueError("C4 evaluation slice allowed statuses are invalid")
     expected = {
         "dataset": C4_DATASET,
         "split": "validation",
@@ -303,12 +534,13 @@ def _c4_slice_reservation(
         "token_start": offset * sequence_length,
         "token_end": (offset + samples) * sequence_length,
         "token_hash": token_hash,
-        "status": "reserved",
     }
-    if any(reservation.get(key) != value for key, value in expected.items()):
+    if any(reservation.get(key) != value for key, value in expected.items()) or reservation.get(
+        "status"
+    ) not in allowed_statuses:
         raise ValueError("C4 evaluation slice reservation differs from the requested protocol")
-    start = int(expected["token_start"])
-    end = int(expected["token_end"])
+    start = offset * sequence_length
+    end = (offset + samples) * sequence_length
     for item in entries:
         if (
             item is reservation
@@ -328,6 +560,7 @@ def run(args: argparse.Namespace) -> int:
     arms = tuple(args.arm)
     names = tuple(name for name, _mode, _path, _pointer, _epoch in arms)
     expected_steps = dict(args.expected_steps)
+    temperature_receipt_items = tuple(args.temperature_fit_receipt)
     if (
         len(arms) < 2
         or len(set(names)) != len(names)
@@ -339,6 +572,7 @@ def run(args: argparse.Namespace) -> int:
         or args.offset < 0
         or set(expected_steps) != set(names)
         or len(expected_steps) != len(args.expected_steps)
+        or args.temperature_top_k <= 0
     ):
         raise ValueError("non-WikiText KD protocol is invalid")
     tokens, fingerprint, bos_token_id = _load_c4_tokens(
@@ -352,6 +586,18 @@ def run(args: argparse.Namespace) -> int:
         local_files_only=args.local_files_only,
     )
     token_hash = _token_hash(tokens)
+    temperature_protocols: dict[str, dict[str, object]] = {}
+    temperature_fits: dict[str, TemperatureFitResult] = {}
+    temperature_receipts: dict[str, dict[str, object]] = {}
+    if temperature_receipt_items:
+        temperature_protocols, temperature_fits, temperature_receipts = (
+            _load_temperature_receipts(
+                temperature_receipt_items,
+                baseline=args.primary_baseline,
+                candidate=args.primary_candidate,
+                current_token_hash=token_hash,
+            )
+        )
     reservation, registry_hash = _c4_slice_reservation(
         args.slice_registry,
         args.slice_id,
@@ -406,6 +652,14 @@ def run(args: argparse.Namespace) -> int:
         "slice_registry_sha256": registry_hash,
         "slice_reservation": reservation,
     }
+    if temperature_fits:
+        protocol["temperature_reporting"] = {
+            "mode": "apply_identity_bound_per_arm_logit_scales",
+            "protocol_document": "Docs/82-temperature-calibration-reporting-protocol.md",
+            "fit_receipts": temperature_receipts,
+            "top_k": args.temperature_top_k,
+            "raw_metrics_remain_primary": True,
+        }
     checkpoint_path = args.output.with_name(args.output.stem + ".checkpoint.json")
     if args.output.is_file():
         completed = json.loads(args.output.read_text(encoding="utf-8"))
@@ -418,12 +672,21 @@ def run(args: argparse.Namespace) -> int:
         "protocol": protocol,
         "sequences": {},
     }
+    if temperature_fits:
+        checkpoint["temperature_sequences"] = {}
     if checkpoint_path.is_file():
         restored_checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
         if (
             restored_checkpoint.get("schema_version") != 1
             or restored_checkpoint.get("protocol") != protocol
             or not isinstance(restored_checkpoint.get("sequences"), dict)
+            or (
+                temperature_fits
+                and not isinstance(
+                    restored_checkpoint.get("temperature_sequences"),
+                    dict,
+                )
+            )
         ):
             raise ValueError("non-WikiText checkpoint protocol differs")
         checkpoint = restored_checkpoint
@@ -432,14 +695,29 @@ def run(args: argparse.Namespace) -> int:
         payload = cast(dict[str, object], checkpoint["sequences"]).get(name, [])
         if not isinstance(payload, list):
             raise ValueError("non-WikiText checkpoint arm is invalid")
-        return tuple(
-            KlSequenceResult(
-                float(item["negative_log_likelihood"]),
-                float(item["kl_nats_per_token"]),
-                int(item["token_count"]),
-            )
-            for item in payload
+        return tuple(_sequence_from_checkpoint(item) for item in payload)
+
+    def restored_temperature(name: str) -> tuple[TemperatureSequenceMetrics, ...]:
+        payload = cast(dict[str, object], checkpoint["temperature_sequences"]).get(name, [])
+        if not isinstance(payload, list):
+            raise ValueError("non-WikiText temperature checkpoint arm is invalid")
+        sequences = tuple(_temperature_sequence_from_checkpoint(item) for item in payload)
+        raw_payload = cast(dict[str, object], checkpoint["sequences"]).get(name, [])
+        expected_raw = (
+            []
+            if not sequences
+            else [
+                to_dict(item)
+                for item in _kl_result_from_temperature(
+                    name,
+                    sequences,
+                    fitted=False,
+                ).sequences
+            ]
         )
+        if raw_payload not in ([], expected_raw):
+            raise ValueError("raw and temperature checkpoint sequences differ")
+        return sequences
 
     def save_progress(name: str, sequences: tuple[KlSequenceResult, ...]) -> None:
         cast(dict[str, object], checkpoint["sequences"])[name] = [
@@ -447,9 +725,22 @@ def run(args: argparse.Namespace) -> int:
         ]
         atomic_write_json(checkpoint_path, checkpoint)
 
+    def save_temperature_progress(
+        name: str, sequences: tuple[TemperatureSequenceMetrics, ...]
+    ) -> None:
+        cast(dict[str, object], checkpoint["temperature_sequences"])[name] = [
+            to_dict(item) for item in sequences
+        ]
+        cast(dict[str, object], checkpoint["sequences"])[name] = [
+            to_dict(item)
+            for item in _kl_result_from_temperature(name, sequences, fitted=False).sequences
+        ]
+        atomic_write_json(checkpoint_path, checkpoint)
+
     config = json.loads((args.snapshot / "config.json").read_text(encoding="utf-8"))
     adapter = adapter_for_config(config)
     results: dict[str, KlBudgetArmResult] = {}
+    temperature_sequences: dict[str, tuple[TemperatureSequenceMetrics, ...]] = {}
     manifests: dict[str, dict[str, object]] = {}
     frozen_identity: dict[str, object] | None = None
     with acquire_device_lease(args.device):
@@ -500,7 +791,7 @@ def run(args: argparse.Namespace) -> int:
             if loaded.global_tuning is None and mode not in {"prekd", "checkpoint"}:
                 raise ValueError(f"non-WikiText arm {name} has no global tuning")
             if checkpoint_receipt is not None:
-                observed_steps = int(checkpoint_receipt["steps"])
+                observed_steps = int(cast(Any, checkpoint_receipt["steps"]))
             elif loaded.global_tuning is None and mode == "prekd":
                 observed_steps = 0
             else:
@@ -526,22 +817,62 @@ def run(args: argparse.Namespace) -> int:
                 "steps_completed": observed_steps,
             }
 
-            def save_arm_progress(
-                sequences: tuple[KlSequenceResult, ...],
-                arm: str = name,
-            ) -> None:
-                save_progress(arm, sequences)
+            if name in temperature_fits:
+                fit_protocol = temperature_protocols[name]
+                if fit_protocol.get("arm") != {"name": name, **manifests[name]}:
+                    raise ValueError(
+                        f"temperature-fit receipt for {name} differs from the loaded arm"
+                    )
+                fit_model = fit_protocol.get("model")
+                if (
+                    not isinstance(fit_model, dict)
+                    or fit_model.get("revision") != args.model_revision
+                    or fit_model.get("frozen_identity") != observed_identity
+                ):
+                    raise ValueError(
+                        f"temperature-fit receipt for {name} differs from the loaded model"
+                    )
 
-            results[name] = _evaluate_arm(
-                name,
-                teacher,
-                loaded.model,
-                tokens,
-                device=args.device,
-                token_chunk_size=args.token_chunk_size,
-                completed=restored(name),
-                progress=save_arm_progress,
-            )
+                def save_arm_temperature_progress(
+                    sequences: tuple[TemperatureSequenceMetrics, ...],
+                    arm: str = name,
+                ) -> None:
+                    save_temperature_progress(arm, sequences)
+
+                temperature_sequences[name] = _evaluate_temperature_arm(
+                    name,
+                    teacher,
+                    loaded.model,
+                    tokens,
+                    logit_scale=temperature_fits[name].final_logit_scale,
+                    top_k=args.temperature_top_k,
+                    device=args.device,
+                    token_chunk_size=args.token_chunk_size,
+                    completed=restored_temperature(name),
+                    progress=save_arm_temperature_progress,
+                )
+                results[name] = _kl_result_from_temperature(
+                    name,
+                    temperature_sequences[name],
+                    fitted=False,
+                )
+            else:
+                def save_arm_progress(
+                    sequences: tuple[KlSequenceResult, ...],
+                    arm: str = name,
+                ) -> None:
+                    save_progress(arm, sequences)
+
+                results[name] = _evaluate_arm(
+                    name,
+                    teacher,
+                    loaded.model,
+                    tokens,
+                    device=args.device,
+                    token_chunk_size=args.token_chunk_size,
+                    completed=restored(name),
+                    progress=save_arm_progress,
+                )
             del loaded
             gc.collect()
             if args.device.startswith("cuda"):
@@ -556,6 +887,94 @@ def run(args: argparse.Namespace) -> int:
         results[args.primary_baseline],
         results[args.primary_candidate],
     )
+    temperature_report = None
+    if temperature_fits:
+        baseline_temperature = temperature_sequences[args.primary_baseline]
+        candidate_temperature = temperature_sequences[args.primary_candidate]
+        result_attributes = (
+            "raw_negative_log_likelihood",
+            "raw_kl_nats_per_token",
+            "fitted_negative_log_likelihood",
+            "fitted_kl_nats_per_token",
+            "teacher_top1_agreement",
+            "teacher_topk_mass",
+            "raw_student_teacher_topk_mass",
+            "fitted_student_teacher_topk_mass",
+        )
+        paired_attributes = tuple(
+            attribute
+            for attribute in result_attributes
+            if attribute != "teacher_topk_mass"
+        )
+        paired_temperature = {
+            attribute: _paired_temperature_metric(
+                baseline_temperature,
+                candidate_temperature,
+                attribute,
+                higher_is_better=attribute
+                in {
+                    "teacher_top1_agreement",
+                    "raw_student_teacher_topk_mass",
+                    "fitted_student_teacher_topk_mass",
+                },
+            )
+            for attribute in paired_attributes
+        }
+        raw_nll_delta = cast(
+            float,
+            paired_temperature["raw_negative_log_likelihood"]["point_delta"],
+        )
+        fitted_nll_delta = cast(
+            float,
+            paired_temperature["fitted_negative_log_likelihood"]["point_delta"],
+        )
+        raw_kl_delta = cast(
+            float,
+            paired_temperature["raw_kl_nats_per_token"]["point_delta"],
+        )
+        fitted_kl_delta = cast(
+            float,
+            paired_temperature["fitted_kl_nats_per_token"]["point_delta"],
+        )
+        temperature_report = {
+            "role": "calibration diagnostic; cannot override the raw primary gate",
+            "raw_primary_gate_passes": primary["passes"],
+            "fitted_metrics_are_gating": False,
+            "fit_receipts": temperature_receipts,
+            "results": {
+                name: {
+                    attribute: _temperature_bootstrap(sequences, attribute)
+                    for attribute in result_attributes
+                }
+                for name, sequences in temperature_sequences.items()
+            },
+            "primary_paired_comparison": {
+                "candidate_minus_baseline": (
+                    f"{args.primary_candidate}_minus_{args.primary_baseline}"
+                ),
+                **paired_temperature,
+                "calibration_removed_from_raw_marginal": {
+                    "negative_log_likelihood": {
+                        "raw_point_delta": raw_nll_delta,
+                        "fitted_point_delta": fitted_nll_delta,
+                        "removed_fraction": (
+                            None
+                            if raw_nll_delta == 0
+                            else (raw_nll_delta - fitted_nll_delta) / raw_nll_delta
+                        ),
+                    },
+                    "kl_nats_per_token": {
+                        "raw_point_delta": raw_kl_delta,
+                        "fitted_point_delta": fitted_kl_delta,
+                        "removed_fraction": (
+                            None
+                            if raw_kl_delta == 0
+                            else (raw_kl_delta - fitted_kl_delta) / raw_kl_delta
+                        ),
+                    },
+                },
+            },
+        }
     atomic_write_json(
         args.output,
         {
@@ -573,6 +992,11 @@ def run(args: argparse.Namespace) -> int:
                 ),
                 **primary,
             },
+            **(
+                {}
+                if temperature_report is None
+                else {"temperature_reporting": temperature_report}
+            ),
         },
     )
     checkpoint["status"] = "completed"
