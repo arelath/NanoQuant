@@ -31,10 +31,26 @@ and adds exact-objective rollback around these moves:
 The joint search canonicalizes row, column, and component sign gauges before
 enumeration. Its exponential work is capped at `2^joint_bits`. It selects
 complementary balanced, left-heavy, and right-heavy windows using one-bit
-margins and residual energy. Small workloads receive batched post/pre/mid ALS
-screening; large workloads retain an affected-row/column screen so they do not
-materialize a population of full matrix reconstructions. Only the best screened
-candidates receive the full scale refit.
+margins and residual energy. Every workload now receives the same post/pre/mid
+ALS screening semantics. A memory-derived dynamic batch size replaces the old
+100-million-element algorithm cliff, and bounded `bmm` operations avoid the
+multi-gigabyte einsum intermediates found by the first production-shape probe.
+Only the best screened candidates receive the full scale refit.
+
+The screen uses at least as many ALS passes as the retained full refit. On the
+retained 5x5/rank-3 recall corpus, an 8-pass screen recovered the fully refitted
+winner at rank 1 in 28/32 cases and within the top four in 30/32. Matching the
+16-pass refit depth recovered the winner at rank 1 in all 32 cases. The old
+fixed-scale screen recovered none at rank 1 and only one within the top 16.
+
+Two other selection defects were corrected during the review:
+
+- hard rows and columns are ranked by actual weighted residual energy,
+  `weight * (target_energy - explained_energy)`, rather than distance from the
+  maximum explained energy;
+- component replacement interleaves weak/removal-cost, strong-middle-scale,
+  and residual-aligned component pools instead of considering only descending
+  `abs(scale_mid)`.
 
 The ADMM implementation also has an opt-in `exact_svd` SVID projection method.
 The existing `power` method remains the default, preserving existing behavior.
@@ -124,6 +140,83 @@ real crop, while the complete bounded ladder reduces the planted target's
 squared error by 97.99%. This confirms bounded runtime and numerical rollback,
 but it does not justify running joint windows on every production group.
 
+## Representative real-layer crop study
+
+The follow-up study moved beyond 10x10 while retaining tractable search. The
+ladder probe now accepts rectangular crops, so attention used 256x256/rank-128
+and MLP projections used 512x128 or 128x512/rank-128 crops. Ten deterministic
+Fisher-weighted crops covered Q, gate, and down projections in blocks 0, 12,
+and 24.
+
+Starting from 200-iteration ADMM/SVID candidates, direct polishing improved
+weighted squared error on all ten crops by 0.34%-1.69%, averaging 0.85%. The
+stage-average cumulative gains were:
+
+| Last included tier | Mean gain vs power ADMM |
+|---|---:|
+| Continuous candidate | 0.11% |
+| One-bit | 0.44% |
+| Codebook | 0.44% |
+| Variable-depth | 0.75% |
+| Pair | 0.78% |
+| Block | 0.84% |
+| Component | 0.85% |
+| Joint | 0.85% |
+
+Thus codebook transfer, full-component replacement, and joint enumeration add
+almost nothing at this crop scale. Cheap sign descent, short variable-depth
+chains, and small block moves account for nearly all measured benefit.
+
+### ADMM compute control
+
+The initial crop gain was mostly an under-convergence artifact. On the same
+block-12 crops, four-times-longer ADMM beat the complete 200-iteration direct
+ladder at comparable wall time:
+
+| Crop | 200-iteration direct NRMSE | 800-iteration ADMM NRMSE | Squared-error gain of longer ADMM vs direct |
+|---|---:|---:|---:|
+| Q, 256x256/rank-128 | 0.411828 | 0.407202 | 2.23% |
+| Gate, 512x128/rank-128 | 0.338912 | 0.329457 | 5.50% |
+| Down, 128x512/rank-128 | 0.480876 | 0.468933 | 4.91% |
+
+Direct search after mature 800-iteration ADMM remained complementary, but the
+residual gains were only 0.29% for Q, 0.53% for gate, and 0.25% for down. Four
+gauge-distinct mature gate starts, each receiving the full combined polish,
+did not beat the polished best incumbent.
+
+## Deep 32x32 and 64x64 basin search
+
+The intensive oracle was extended with:
+
+- chunked population scale fitting with bounded batched systems and `bmm`
+  contractions;
+- arbitrary heuristic rank;
+- geometric mutation radii rather than nearly uniform destructive radii;
+- random and residual-gradient component-centered coupled mutations;
+- local reoptimization before generation selection;
+- a gauge-canonical archive split between quality and Hamming novelty;
+- canonical deduplication before archive selection.
+
+Synthetic 32x32/rank-16 controls showed 47%-56% improvements over deliberately
+short ADMM, proving that the machinery can escape to a materially better basin
+when one is accessible. Real Fisher-weighted crops were much closer to their
+measured floors:
+
+| Real crop | Mature production NRMSE | Deep-search NRMSE | Squared-error gain | Canonical sign distance |
+|---|---:|---:|---:|---:|
+| Block-12 Q, 32x32/rank-32 | 0.237324 | 0.236913 | 0.35% | not retained by the early schema |
+| Block-12 Q, 64x64/rank-64 | 0.273126 | 0.272757 | 0.27% | not retained by the early schema |
+| Block-12 Q, 32x32/rank-16 | 0.416987 | 0.416898 | 0.043% | 2 |
+| Block-12 gate, 32x32 crop A | 0.279255 | 0.278882 | 0.27% | 8 |
+| Block-12 gate, 32x32 crop B | 0.278871 | 0.276754 | 1.51% | 20 |
+| Block-12 gate, 32x32 crop C | 0.291879 | 0.290959 | 0.63% | 1,028 |
+
+Crop C proves that a genuinely distant real basin can survive the novelty
+archive and improve the objective. Its advantage is nevertheless modest. For
+the best crop B, a maximum-depth confirmation doubled the population to 8,192,
+used 64 elites, 32 generations, 32 mature ADMM starts, and 12 final local
+sweeps. It saturated at exactly the same 1.51% gain.
+
 ## Conclusions and deployment policy
 
 1. Five power iterations are not the principal cause of the known real-crop
@@ -138,16 +231,22 @@ but it does not justify running joint windows on every production group.
    weak scale screen can visit the optimal signs and still discard them.
 6. Natural low-rank targets are frequently already solved by ADMM. Joint search
    must therefore be selective rather than universal.
+7. On representative real crops, spending comparable compute on ADMM
+   convergence is substantially better than polishing an under-converged
+   incumbent.
+8. Deep novelty-preserving population search can find distant real basins, but
+   the best measured static-objective gain is 1.51% and saturates under a much
+   larger confirmation.
 
-The safe next production experiment is an opt-in, staged policy:
+The production recommendation is therefore narrower than the original one:
 
-- always retain normal ADMM and exact scale fitting;
-- run the cheap one-bit tier and keep exact-objective rollback;
-- run 10- or 12-bit joint windows only on a capped set of high-error groups;
-- use multiple complementary windows and 4-8 scale-screening passes where the
-  candidate workload is small enough;
-- compare held-out splice behavior before composing any change into a complete
-  compressed model.
+- increase or convergence-check ADMM before invoking any combinatorial tier;
+- retain one-bit, variable-depth, pair, and small block moves as diagnostic or
+  capped incumbent-polishing tools;
+- do not spend production compute on codebook, full-component, joint, or broad
+  static-objective population search based on the current evidence;
+- do not promote any static improvement without disjoint block-output and
+  language gates.
 
 Exact SVID, 16-20-bit exhaustive diagnostics, and complete low-rank oracles
 should remain diagnostic tools. The prior covariance experiment showed that a
@@ -164,6 +263,12 @@ solver improvement is not a substitute for a compressed-model benchmark.
 - `evidence/052/ladder10-rank2-joint16-als8-sixwindows.json`
 - `evidence/052/ladder10-v1.json`
 - `evidence/052/ladder32-rank3-v1.json`
+- `evidence/052/crop-study-b0-{q,gate,down}.json`
+- `evidence/052/crop-study-b12-{q,gate,down}-*.json`
+- `evidence/052/crop-study-b24-{q,gate,down}.json`
+- `evidence/052/crop-control-b12-*-admm800*.json`
+- `evidence/052/deep-basin-b12-q-{32x32,64x64}*.json`
+- `evidence/052/deep-basin-b12-gate-32x32-*.json`
 
 The evidence directory is intentionally ignored; the reproducible tools,
 tests, and this report are the durable record.

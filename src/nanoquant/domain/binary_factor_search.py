@@ -10,6 +10,8 @@ import torch
 
 from nanoquant.domain.scale_fit import fit_scales, reconstruct
 
+_JOINT_SCALE_SCREEN_BATCH_ELEMENTS = 16_000_000
+
 
 @dataclass(frozen=True, slots=True)
 class BinaryFactorSearchResult:
@@ -342,6 +344,7 @@ def _block_pass(
     scales: torch.Tensor,
     scores: torch.Tensor,
     vector_weights: torch.Tensor,
+    target_energy: torch.Tensor,
     block_bits: int,
     hard_vectors: int,
     epsilon: float,
@@ -359,7 +362,7 @@ def _block_pass(
         + 4.0 * gram.diagonal()[None, :]
     ).clamp_min(epsilon)
     one_scores = one_alpha.square() / one_beta
-    hard = (vector_weights * (current_scores.max() - current_scores)).topk(hard_vectors).indices
+    hard = _hard_vector_indices(current_scores, vector_weights, target_energy, hard_vectors)
     signs = _patterns(block_bits, vectors.device, vectors.dtype)
     updated = vectors.clone()
     updated_scales = scales.clone()
@@ -383,12 +386,25 @@ def _block_pass(
     return updated, updated_scales, updated_scores, accepted, evaluated
 
 
+def _hard_vector_indices(
+    current_scores: torch.Tensor,
+    vector_weights: torch.Tensor,
+    target_energy: torch.Tensor,
+    count: int,
+) -> torch.Tensor:
+    """Select vectors by their actual weighted residual after scale profiling."""
+
+    residual = vector_weights * (target_energy - current_scores).clamp_min(0)
+    return residual.topk(min(count, residual.numel())).indices
+
+
 def _refine_vectors(
     vectors: torch.Tensor,
     cross: torch.Tensor,
     gram: torch.Tensor,
     scales: torch.Tensor,
     vector_weights: torch.Tensor,
+    target_energy: torch.Tensor,
     *,
     continuous: bool,
     one_bit_passes: int,
@@ -486,6 +502,7 @@ def _refine_vectors(
             scales,
             scores,
             vector_weights,
+            target_energy,
             block_bits,
             hard_vectors,
             epsilon,
@@ -519,7 +536,21 @@ def _component_replacement_sweep(
     prediction = reconstruct(left, right, pre, mid, post).float()
     weighted_target = output_weight[:, None] * input_weight[None, :]
     error = float(((prediction - target).square() * weighted_target).sum())
-    order = mid.abs().argsort(descending=True)[: min(component_limit, mid.numel())]
+    residual = target - prediction
+    scaled_residual = residual * weighted_target * post[:, None] * pre[None, :]
+    residual_responses = (left * (scaled_residual @ right.mT)).sum(dim=0) * mid
+    component_energy = (
+        mid.square()
+        * (post.square() * output_weight).sum()
+        * (pre.square() * input_weight).sum()
+    )
+    removal_cost = component_energy + 2.0 * residual_responses
+    order = _component_candidate_order(
+        mid,
+        removal_cost,
+        residual_responses.abs(),
+        component_limit,
+    )
     updates = 0
     for component in order.tolist():
         old_component = torch.outer(post * left[:, component], pre * right[component]) * mid[component]
@@ -591,6 +622,36 @@ def _component_replacement_sweep(
     return left, right, mid, updates
 
 
+def _component_candidate_order(
+    mid: torch.Tensor,
+    removal_cost: torch.Tensor,
+    residual_alignment: torch.Tensor,
+    limit: int,
+) -> torch.Tensor:
+    """Interleave weak, strong, and residual-aligned component pools."""
+
+    count = min(limit, mid.numel())
+    if count <= 0:
+        return torch.empty(0, dtype=torch.long, device=mid.device)
+    pools = (
+        removal_cost.argsort(),
+        mid.abs().argsort(descending=True),
+        residual_alignment.argsort(descending=True),
+    )
+    selected: list[int] = []
+    seen: set[int] = set()
+    for position in range(mid.numel()):
+        for pool in pools:
+            component = int(pool[position])
+            if component in seen:
+                continue
+            selected.append(component)
+            seen.add(component)
+            if len(selected) == count:
+                return torch.tensor(selected, dtype=torch.long, device=mid.device)
+    return torch.tensor(selected, dtype=torch.long, device=mid.device)
+
+
 def _canonicalize_sign_gauges(
     left: torch.Tensor,
     right: torch.Tensor,
@@ -611,6 +672,84 @@ def _canonicalize_sign_gauges(
     right *= column_signs[None, :]
     pre *= column_signs
     return left, right, pre, post
+
+
+def _joint_scale_screen_batch(
+    target: torch.Tensor,
+    candidate_left: torch.Tensor,
+    candidate_right: torch.Tensor,
+    pre: torch.Tensor,
+    mid: torch.Tensor,
+    post: torch.Tensor,
+    input_weight: torch.Tensor,
+    output_weight: torch.Tensor,
+    scale_passes: int,
+    epsilon: float,
+) -> torch.Tensor:
+    """Rank a candidate batch after the same bounded pre/mid/post ALS fit."""
+
+    count = candidate_left.shape[0]
+    candidate_pre = pre[None, :].expand(count, -1).clone()
+    candidate_mid = mid[None, :].expand(count, -1).clone()
+    candidate_post = post[None, :].expand(count, -1).clone()
+    candidate_prediction = torch.bmm(
+        candidate_left * candidate_post[:, :, None],
+        candidate_right * (candidate_mid[:, :, None] * candidate_pre[:, None, :]),
+    )
+    screen_errors = (
+        (candidate_prediction - target[None]).square()
+        * output_weight[None, :, None]
+        * input_weight[None, None, :]
+    ).sum(dim=(1, 2))
+    for _screen_pass in range(scale_passes):
+        base = torch.bmm(
+            candidate_left,
+            candidate_right * (candidate_mid[:, :, None] * candidate_pre[:, None, :]),
+        )
+        candidate_post = torch.nan_to_num(
+            (base * target[None] * input_weight[None, None, :]).sum(dim=2)
+            / (base.square() * input_weight[None, None, :]).sum(dim=2).clamp_min(epsilon)
+        )
+        base = torch.bmm(
+            candidate_left * (candidate_post[:, :, None] * candidate_mid[:, None, :]),
+            candidate_right,
+        )
+        candidate_pre = torch.nan_to_num(
+            (base * target[None] * output_weight[None, :, None]).sum(dim=1)
+            / (base.square() * output_weight[None, :, None]).sum(dim=1).clamp_min(epsilon)
+        )
+        scaled_left = candidate_left * candidate_post[:, :, None]
+        scaled_right = candidate_right * candidate_pre[:, None, :]
+        weighted_left = scaled_left * output_weight.sqrt()[None, :, None]
+        weighted_right = scaled_right * input_weight.sqrt()[None, None, :]
+        left_gram = torch.bmm(weighted_left.mT, weighted_left)
+        right_gram = torch.bmm(weighted_right, weighted_right.mT)
+        middle_system = left_gram * right_gram
+        middle_system = 0.5 * (middle_system + middle_system.mT)
+        middle_ridge = (
+            middle_system.diagonal(dim1=-2, dim2=-1).abs().mean(dim=1) * 1e-6
+        ).clamp_min(epsilon)
+        middle_system.diagonal(dim1=-2, dim2=-1).add_(middle_ridge[:, None])
+        weighted_target = target * output_weight[:, None] * input_weight[None, :]
+        target_times_right = torch.bmm(
+            weighted_target[None].expand(count, -1, -1),
+            scaled_right.mT,
+        )
+        middle_rhs = (scaled_left * target_times_right).sum(dim=1)
+        candidate_mid, info = torch.linalg.solve_ex(middle_system, middle_rhs[:, :, None])
+        candidate_mid = torch.nan_to_num(candidate_mid.squeeze(2))
+        candidate_mid[info != 0] = mid
+        candidate_prediction = torch.bmm(
+            candidate_left * candidate_post[:, :, None],
+            candidate_right * (candidate_mid[:, :, None] * candidate_pre[:, None, :]),
+        )
+        current_errors = (
+            (candidate_prediction - target[None]).square()
+            * output_weight[None, :, None]
+            * input_weight[None, None, :]
+        ).sum(dim=(1, 2))
+        screen_errors = torch.minimum(screen_errors, current_errors)
+    return screen_errors
 
 
 def _joint_bit_window(
@@ -705,18 +844,18 @@ def _joint_bit_window(
         selected_right = free_right[right_values.topk(right_quota, largest=False).indices]
     actual_bits = selected_left.shape[0] + selected_right.shape[0]
     patterns = _patterns(actual_bits, left.device, left.dtype)
-    left_rows = torch.unique(selected_left[:, 0])
-    right_columns = torch.unique(selected_right[:, 1])
-    current_affected = torch.zeros_like(weighted_difference, dtype=torch.bool)
-    if left_rows.numel() > 0:
-        current_affected[left_rows] = True
-    if right_columns.numel() > 0:
-        current_affected[:, right_columns] = True
-    unaffected_error = float(weighted_difference[~current_affected].sum())
     errors = torch.empty(patterns.shape[0], device=left.device)
-    use_middle_scale_screen = target.numel() * patterns.shape[0] <= 100_000_000
-    for start in range(0, patterns.shape[0], batch_size):
-        signs = patterns[start : start + batch_size]
+    # Joint search is explicitly opt-in. Keep the scale-profiled screening
+    # semantics at every matrix size and bound peak memory by reducing the
+    # candidate batch, rather than switching large matrices to a weaker
+    # fixed-scale objective. The old total-work threshold created a recall
+    # cliff precisely for production-shaped owners.
+    screen_batch_size = min(
+        batch_size,
+        max(1, _JOINT_SCALE_SCREEN_BATCH_ELEMENTS // max(1, target.numel())),
+    )
+    for start in range(0, patterns.shape[0], screen_batch_size):
+        signs = patterns[start : start + screen_batch_size]
         count = signs.shape[0]
         candidate_left = left.expand(count, -1, -1).clone()
         candidate_right = right.expand(count, -1, -1).clone()
@@ -725,91 +864,18 @@ def _joint_bit_window(
             candidate_left[:, selected_left[:, 0], selected_left[:, 1]] = signs[:, :split]
         if selected_right.shape[0] > 0:
             candidate_right[:, selected_right[:, 0], selected_right[:, 1]] = signs[:, split:]
-        candidate_mid = mid[None, :].expand(count, -1)
-        if use_middle_scale_screen:
-            candidate_pre = pre[None, :].expand(count, -1).clone()
-            candidate_post = post[None, :].expand(count, -1).clone()
-            screen_errors = torch.full((count,), torch.inf, device=left.device)
-            for screen_pass in range(screen_scale_passes + 1):
-                scaled_left = candidate_left * candidate_post[:, :, None]
-                scaled_right = candidate_right * candidate_pre[:, None, :]
-                left_gram = torch.einsum("bir,bis,i->brs", scaled_left, scaled_left, output_weight)
-                right_gram = torch.einsum("brj,bsj,j->brs", scaled_right, scaled_right, input_weight)
-                middle_system = left_gram * right_gram
-                middle_system = 0.5 * (middle_system + middle_system.mT)
-                middle_ridge = (
-                    middle_system.diagonal(dim1=-2, dim2=-1).abs().mean(dim=1) * 1e-6
-                ).clamp_min(epsilon)
-                middle_system.diagonal(dim1=-2, dim2=-1).add_(middle_ridge[:, None])
-                middle_rhs = torch.einsum(
-                    "bir,ij,brj,i,j->br",
-                    scaled_left,
-                    target,
-                    scaled_right,
-                    output_weight,
-                    input_weight,
-                )
-                candidate_mid, info = torch.linalg.solve_ex(middle_system, middle_rhs[:, :, None])
-                candidate_mid = torch.nan_to_num(candidate_mid.squeeze(2))
-                candidate_mid[info != 0] = mid
-                candidate_prediction = torch.bmm(
-                    candidate_left * candidate_post[:, :, None],
-                    candidate_right * (candidate_mid[:, :, None] * candidate_pre[:, None, :]),
-                )
-                current_errors = (
-                    (candidate_prediction - target[None]).square()
-                    * output_weight[None, :, None]
-                    * input_weight[None, None, :]
-                ).sum(dim=(1, 2))
-                screen_errors = torch.minimum(screen_errors, current_errors)
-                if screen_pass == screen_scale_passes:
-                    break
-                base = torch.bmm(
-                    candidate_left,
-                    candidate_right * (candidate_mid[:, :, None] * candidate_pre[:, None, :]),
-                )
-                candidate_post = torch.nan_to_num(
-                    (base * target[None] * input_weight[None, None, :]).sum(dim=2)
-                    / (base.square() * input_weight[None, None, :]).sum(dim=2).clamp_min(epsilon)
-                )
-                base = torch.bmm(
-                    candidate_left * (candidate_post[:, :, None] * candidate_mid[:, None, :]),
-                    candidate_right,
-                )
-                candidate_pre = torch.nan_to_num(
-                    (base * target[None] * output_weight[None, :, None]).sum(dim=1)
-                    / (base.square() * output_weight[None, :, None]).sum(dim=1).clamp_min(epsilon)
-                )
-            errors[start : start + count] = screen_errors
-            continue
-        batch_error = torch.full((count,), unaffected_error, device=left.device)
-        if left_rows.numel() > 0:
-            row_prediction = torch.bmm(
-                candidate_left[:, left_rows] * post[left_rows][None, :, None],
-                candidate_right * (candidate_mid[:, :, None] * pre[None, None, :]),
-            )
-            row_difference = row_prediction - target[left_rows][None, :, :]
-            batch_error += (
-                row_difference.square()
-                * output_weight[left_rows][None, :, None]
-                * input_weight[None, None, :]
-            ).sum(dim=(1, 2))
-        if right_columns.numel() > 0:
-            column_prediction = torch.bmm(
-                candidate_left * post[None, :, None],
-                candidate_right[:, :, right_columns]
-                * (candidate_mid[:, :, None] * pre[right_columns][None, None, :]),
-            )
-            column_difference = column_prediction - target[:, right_columns][None, :, :]
-            column_error = (
-                column_difference.square()
-                * output_weight[None, :, None]
-                * input_weight[right_columns][None, None, :]
-            )
-            if left_rows.numel() > 0:
-                column_error[:, left_rows] = 0
-            batch_error += column_error.sum(dim=(1, 2))
-        errors[start : start + count] = batch_error
+        errors[start : start + count] = _joint_scale_screen_batch(
+            target,
+            candidate_left,
+            candidate_right,
+            pre,
+            mid,
+            post,
+            input_weight,
+            output_weight,
+            max(screen_scale_passes, scale_passes),
+            epsilon,
+        )
 
     best_error = baseline_error
     best = (left, right, pre, mid, post)
@@ -975,6 +1041,7 @@ def refine_binary_factors_separable(
             left_gram,
             post,
             output_weight,
+            (target32.square() * input_weight[None, :]).sum(dim=1),
             continuous=continuous_candidates,
             one_bit_passes=one_bit_passes,
             one_bit_vectors=one_bit_left,
@@ -1002,6 +1069,7 @@ def refine_binary_factors_separable(
             right_gram,
             pre,
             input_weight,
+            (target32.square() * output_weight[:, None]).sum(dim=0),
             continuous=continuous_candidates,
             one_bit_passes=one_bit_passes,
             one_bit_vectors=one_bit_right,

@@ -632,6 +632,11 @@ def _group_pair(
     direct_max_one_bit_vectors: int,
     direct_codebook_passes: int,
     direct_codebook_size: int,
+    direct_joint_passes: int,
+    direct_joint_bits: int,
+    direct_joint_candidate_refits: int,
+    direct_joint_batch_size: int,
+    direct_joint_screen_scale_passes: int,
 ) -> tuple[
     tuple[dict[str, Any], tuple[tuple[MemberSpec, torch.Tensor, float], ...]],
     tuple[dict[str, Any], tuple[tuple[MemberSpec, torch.Tensor, float], ...]],
@@ -749,7 +754,11 @@ def _group_pair(
             pair_passes=0,
             block_bits=0,
             component_passes=0,
-            joint_passes=0,
+            joint_passes=direct_joint_passes,
+            joint_bits=direct_joint_bits,
+            joint_candidate_refits=direct_joint_candidate_refits,
+            joint_batch_size=direct_joint_batch_size,
+            joint_screen_scale_passes=direct_joint_screen_scale_passes,
         )
         if protocol.device.startswith("cuda"):
             torch.cuda.synchronize(protocol.device)
@@ -759,6 +768,8 @@ def _group_pair(
             "accepted_outer_passes": direct.accepted_outer_passes,
             "one_bit_updates": direct.one_bit_updates,
             "codebook_updates": direct.codebook_updates,
+            "joint_updates": direct.joint_updates,
+            "joint_patterns_evaluated": direct.joint_patterns_evaluated,
             "wall_seconds": time.perf_counter() - candidate_started,
             "peak_device_bytes": (
                 int(torch.cuda.max_memory_allocated(protocol.device))
@@ -974,6 +985,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--direct-max-one-bit-vectors", type=int, default=2**31 - 1)
     parser.add_argument("--direct-codebook-passes", type=int, default=2)
     parser.add_argument("--direct-codebook-size", type=int, default=512)
+    parser.add_argument("--direct-joint-passes", type=int, default=0)
+    parser.add_argument("--direct-joint-bits", type=int, default=10)
+    parser.add_argument("--direct-joint-candidate-refits", type=int, default=4)
+    parser.add_argument("--direct-joint-batch-size", type=int, default=64)
+    parser.add_argument("--direct-joint-screen-scale-passes", type=int, default=4)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--local-files-only", action="store_true")
@@ -1006,6 +1022,11 @@ def run(args: argparse.Namespace) -> int:
         or args.direct_max_one_bit_vectors < 0
         or args.direct_codebook_passes < 0
         or args.direct_codebook_size < 0
+        or args.direct_joint_passes < 0
+        or not 0 <= args.direct_joint_bits <= 20
+        or args.direct_joint_candidate_refits <= 0
+        or args.direct_joint_batch_size <= 0
+        or args.direct_joint_screen_scale_passes < 0
     ):
         raise ValueError("direct binary refinement settings are invalid")
     if (
@@ -1118,6 +1139,11 @@ def run(args: argparse.Namespace) -> int:
                         direct_max_one_bit_vectors=args.direct_max_one_bit_vectors,
                         direct_codebook_passes=args.direct_codebook_passes,
                         direct_codebook_size=args.direct_codebook_size,
+                        direct_joint_passes=args.direct_joint_passes,
+                        direct_joint_bits=args.direct_joint_bits,
+                        direct_joint_candidate_refits=args.direct_joint_candidate_refits,
+                        direct_joint_batch_size=args.direct_joint_batch_size,
+                        direct_joint_screen_scale_passes=args.direct_joint_screen_scale_passes,
                     )
                     baseline_groups[key], baseline_members[key] = baseline
                     candidate_groups[key], candidate_members[key] = candidate
@@ -1259,6 +1285,11 @@ def run(args: argparse.Namespace) -> int:
             "direct_max_one_bit_vectors": args.direct_max_one_bit_vectors,
             "direct_codebook_passes": args.direct_codebook_passes,
             "direct_codebook_size": args.direct_codebook_size,
+            "direct_joint_passes": args.direct_joint_passes,
+            "direct_joint_bits": args.direct_joint_bits,
+            "direct_joint_candidate_refits": args.direct_joint_candidate_refits,
+            "direct_joint_batch_size": args.direct_joint_batch_size,
+            "direct_joint_screen_scale_passes": args.direct_joint_screen_scale_passes,
         },
         "teacher_baseline_nll": baseline_nll,
         "reconstruction": reconstruction_metrics,

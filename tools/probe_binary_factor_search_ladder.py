@@ -1,4 +1,4 @@
-"""Measure bounded direct binary search against the tiny exhaustive oracle."""
+"""Measure bounded direct binary search on synthetic or real matrix crops."""
 
 from __future__ import annotations
 
@@ -22,6 +22,10 @@ from nanoquant.domain.binary_factor_search import (
 )
 from nanoquant.domain.calibration_math import shrink_importance
 from nanoquant.domain.factorization import AdmmParameters, factorize_admm_with_parameters
+from nanoquant.domain.functional_binary_population import (
+    canonical_binary_hash,
+    canonical_binary_signs,
+)
 from nanoquant.domain.scale_fit import fit_scales, reconstruct
 from nanoquant.infrastructure.io_utils import atomic_write_json
 
@@ -29,7 +33,8 @@ from nanoquant.infrastructure.io_utils import atomic_write_json
 @dataclass(frozen=True, slots=True)
 class LadderProtocol:
     schema_version: int
-    size: int
+    rows: int
+    columns: int
     rank: int
     seeds: int
     outer_iterations: int
@@ -55,6 +60,7 @@ class LadderProtocol:
     exact_scale_starts: int
     exact_scale_passes: int
     exact_batch_size: int
+    population_warm_starts: int
     include_oracle: bool
     synthetic_cases: int
     real_crops: int
@@ -111,7 +117,7 @@ def _search_stage(
         "outer_passes": protocol.search_outer_passes,
         "scale_passes": protocol.scale_passes,
         "hard_fraction": 1.0,
-        "max_hard_vectors": target.shape[0],
+        "max_hard_vectors": max(target.shape),
     }
     search_settings.update(settings)
     result = refine_binary_factors_separable(
@@ -152,8 +158,13 @@ def _factorization_candidates(
     output_importance: torch.Tensor,
     protocol: LadderProtocol,
     key: str,
-) -> tuple[list[dict[str, Any]], dict[str, tuple[torch.Tensor, ...]]]:
+) -> tuple[
+    list[dict[str, Any]],
+    dict[str, tuple[torch.Tensor, ...]],
+    list[tuple[dict[str, Any], tuple[torch.Tensor, ...]]],
+]:
     records: list[dict[str, Any]] = []
+    candidates: list[tuple[dict[str, Any], tuple[torch.Tensor, ...]]] = []
     best_states: dict[str, tuple[float, tuple[torch.Tensor, ...]]] = {}
     for method in ("power", "exact_svd"):
         for seed_index in range(protocol.seeds):
@@ -196,19 +207,133 @@ def _factorization_candidates(
                 fitted.scale_mid,
                 fitted.scale_post,
             )
-            records.append(
-                {
-                    "method": method,
-                    "seed": seed_index,
-                    "raw_error": raw_error,
-                    "scaled_error": fitted.after_error,
-                    "wall_seconds": time.perf_counter() - started,
-                }
-            )
+            record = {
+                "method": method,
+                "seed": seed_index,
+                "raw_error": raw_error,
+                "scaled_error": fitted.after_error,
+                "wall_seconds": time.perf_counter() - started,
+                "canonical_hash": canonical_binary_hash(
+                    result.left_binary, result.right_binary
+                ),
+            }
+            records.append(record)
+            candidates.append((record, state))
             current = best_states.get(method)
             if current is None or fitted.after_error < current[0]:
                 best_states[method] = (fitted.after_error, state)
-    return records, {key: value[1] for key, value in best_states.items()}
+    return records, {key: value[1] for key, value in best_states.items()}, candidates
+
+
+def _canonical_flat(state: tuple[torch.Tensor, ...]) -> torch.Tensor:
+    left, right = canonical_binary_signs(state[0], state[1])
+    return torch.cat((left.reshape(-1), right.reshape(-1))).gt(0)
+
+
+def _diverse_warm_starts(
+    candidates: list[tuple[dict[str, Any], tuple[torch.Tensor, ...]]],
+    count: int,
+) -> list[tuple[dict[str, Any], tuple[torch.Tensor, ...]]]:
+    if count <= 0:
+        return []
+    unique: list[tuple[dict[str, Any], tuple[torch.Tensor, ...]]] = []
+    seen: set[str] = set()
+    for candidate in sorted(candidates, key=lambda item: float(item[0]["scaled_error"])):
+        candidate_hash = str(candidate[0]["canonical_hash"])
+        if candidate_hash not in seen:
+            seen.add(candidate_hash)
+            unique.append(candidate)
+    if len(unique) <= count:
+        return unique
+    selected = [unique.pop(0)]
+    while len(selected) < count:
+        # Alternate a high-quality incumbent with the candidate farthest from
+        # every selected canonical sign pair.
+        if len(selected) % 2 == 1:
+            selected.append(unique.pop(0))
+            continue
+        selected_bits = tuple(_canonical_flat(state) for _record, state in selected)
+        distances = [
+            min(
+                int((_canonical_flat(state) != prior).sum())
+                for prior in selected_bits
+            )
+            for _record, state in unique
+        ]
+        selected.append(unique.pop(max(range(len(unique)), key=distances.__getitem__)))
+    return selected
+
+
+def _population_polish(
+    target: torch.Tensor,
+    input_importance: torch.Tensor,
+    output_importance: torch.Tensor,
+    candidates: list[tuple[dict[str, Any], tuple[torch.Tensor, ...]]],
+    protocol: LadderProtocol,
+) -> list[dict[str, Any]]:
+    records = []
+    for source_record, state in _diverse_warm_starts(
+        candidates, protocol.population_warm_starts
+    ):
+        left, right, pre, mid, post = state
+        before_left, before_right = canonical_binary_signs(left, right)
+        started = time.perf_counter()
+        result = refine_binary_factors_separable(
+            target,
+            left,
+            right,
+            pre,
+            mid,
+            post,
+            input_importance,
+            output_importance,
+            outer_passes=protocol.search_outer_passes,
+            scale_passes=protocol.scale_passes,
+            continuous_candidates=True,
+            one_bit_passes=protocol.one_bit_passes,
+            one_bit_fraction=protocol.one_bit_fraction,
+            max_one_bit_vectors=protocol.max_one_bit_vectors,
+            codebook_passes=protocol.codebook_passes,
+            codebook_size=protocol.codebook_size,
+            variable_depth_passes=protocol.variable_depth_passes,
+            variable_depth_length=protocol.variable_depth_length,
+            pair_passes=protocol.pair_passes,
+            pair_pool_size=protocol.rank,
+            block_bits=min(protocol.block_bits, protocol.rank),
+            block_passes=protocol.block_passes,
+            component_passes=protocol.component_passes,
+            component_limit=protocol.rank,
+            joint_passes=protocol.joint_passes,
+            joint_bits=protocol.joint_bits,
+            joint_candidate_refits=protocol.joint_candidate_refits,
+            joint_batch_size=protocol.joint_batch_size,
+            joint_screen_scale_passes=protocol.joint_screen_scale_passes,
+            hard_fraction=1.0,
+            max_hard_vectors=max(target.shape),
+        )
+        after_left, after_right = canonical_binary_signs(
+            result.left_binary, result.right_binary
+        )
+        records.append(
+            {
+                "source_method": source_record["method"],
+                "source_seed": source_record["seed"],
+                "source_error": source_record["scaled_error"],
+                "source_canonical_hash": source_record["canonical_hash"],
+                "after_error": result.after_error,
+                "gain_from_source_fraction": 1.0
+                - result.after_error / max(float(source_record["scaled_error"]), 1e-30),
+                "canonical_sign_distance": int(
+                    (before_left != after_left).sum() + (before_right != after_right).sum()
+                ),
+                "result_canonical_hash": canonical_binary_hash(
+                    result.left_binary, result.right_binary
+                ),
+                "wall_seconds": time.perf_counter() - started,
+                "joint_patterns_evaluated": result.joint_patterns_evaluated,
+            }
+        )
+    return records
 
 
 def _score_case(
@@ -222,7 +347,7 @@ def _score_case(
     input_importance = input_importance.to(protocol.device).float()
     output_importance = output_importance.to(protocol.device).float()
     energy = float((target.square() * input_importance[None, :] * output_importance[:, None]).sum())
-    factor_records, best_states = _factorization_candidates(
+    factor_records, best_states, factor_candidates = _factorization_candidates(
         target, input_importance, output_importance, protocol, name
     )
     power_scaled = min(record["scaled_error"] for record in factor_records if record["method"] == "power")
@@ -251,6 +376,18 @@ def _score_case(
         joint_passes=0,
     )
     stages.append(stage)
+    population_records = _population_polish(
+        target,
+        input_importance,
+        output_importance,
+        factor_candidates,
+        protocol,
+    )
+    population_error = (
+        None
+        if not population_records
+        else min(float(record["after_error"]) for record in population_records)
+    )
     stage, state = _search_stage(
         "one_bit",
         target,
@@ -413,6 +550,21 @@ def _score_case(
         "best_exact_svd_scaled_error": exact_scaled,
         "exact_svd_gain_vs_power_fraction": 1.0 - exact_scaled / max(power_scaled, 1e-30),
         "stages": stages,
+        "population_polish": {
+            "selected_warm_starts": len(population_records),
+            "records": population_records,
+            "best_error": population_error,
+            "single_incumbent_combined_error": (
+                None if not population_records else population_records[0]["after_error"]
+            ),
+            "gain_vs_single_incumbent_combined_fraction": (
+                None
+                if population_error is None or not population_records
+                else 1.0
+                - population_error
+                / max(float(population_records[0]["after_error"]), 1e-30)
+            ),
+        },
         "oracle_error": oracle_error,
         "oracle_nrmse": oracle_nrmse,
         "oracle_sign_configurations": configurations,
@@ -421,30 +573,33 @@ def _score_case(
 
 
 def _synthetic_cases(
-    size: int, rank: int, count: int, seed: int
+    rows: int, columns: int, rank: int, count: int, seed: int
 ) -> list[tuple[str, torch.Tensor, torch.Tensor, torch.Tensor]]:
     cases = []
     for index in range(count):
-        generator = torch.Generator().manual_seed(_logical_seed(seed, f"synthetic|{size}|{index}"))
+        geometry = f"{rows}x{columns}"
+        generator = torch.Generator().manual_seed(
+            _logical_seed(seed, f"synthetic|{geometry}|{index}")
+        )
         cases.append(
             (
-                f"gaussian-{size}x{size}-{index}",
-                torch.randn((size, size), generator=generator),
-                torch.ones(size),
-                torch.ones(size),
+                f"gaussian-{geometry}-{index}",
+                torch.randn((rows, columns), generator=generator),
+                torch.ones(columns),
+                torch.ones(rows),
             )
         )
-        left = torch.randint(0, 2, (size, rank), generator=generator).float().mul_(2).sub_(1)
-        right = torch.randint(0, 2, (rank, size), generator=generator).float().mul_(2).sub_(1)
-        pre = torch.exp(0.35 * torch.randn(size, generator=generator))
+        left = torch.randint(0, 2, (rows, rank), generator=generator).float().mul_(2).sub_(1)
+        right = torch.randint(0, 2, (rank, columns), generator=generator).float().mul_(2).sub_(1)
+        pre = torch.exp(0.35 * torch.randn(columns, generator=generator))
         mid = torch.exp(0.35 * torch.randn(rank, generator=generator))
-        post = torch.exp(0.35 * torch.randn(size, generator=generator))
+        post = torch.exp(0.35 * torch.randn(rows, generator=generator))
         cases.append(
             (
-                f"represented-{size}x{size}-{index}",
+                f"represented-{geometry}-{index}",
                 reconstruct(left, right, pre, mid, post),
-                torch.ones(size),
-                torch.ones(size),
+                torch.ones(columns),
+                torch.ones(rows),
             )
         )
     return cases
@@ -474,26 +629,35 @@ def _real_cases(args: argparse.Namespace) -> list[tuple[str, torch.Tensor, torch
     )
     with safe_open(str(args.model), framework="pt", device="cpu") as handle:
         weight = handle.get_tensor(args.tensor_key).float()
+    if weight.shape[0] < args.rows or weight.shape[1] < args.columns:
+        raise ValueError("real tensor is smaller than the requested crop")
     cases = []
     for index in range(args.real_crops):
-        generator = torch.Generator().manual_seed(_logical_seed(args.seed, f"real|{args.size}|{index}"))
-        row = int(torch.randint(0, weight.shape[0] - args.size + 1, (), generator=generator))
-        column = int(torch.randint(0, weight.shape[1] - args.size + 1, (), generator=generator))
+        geometry = f"{args.rows}x{args.columns}"
+        generator = torch.Generator().manual_seed(
+            _logical_seed(args.seed, f"real|{geometry}|{args.tensor_key}|{index}")
+        )
+        row = int(torch.randint(0, weight.shape[0] - args.rows + 1, (), generator=generator))
+        column = int(
+            torch.randint(0, weight.shape[1] - args.columns + 1, (), generator=generator)
+        )
         cases.append(
             (
-                f"real-{args.size}x{args.size}-{index}-r{row}-c{column}",
-                weight[row : row + args.size, column : column + args.size],
-                input_importance[column : column + args.size],
-                output_importance[row : row + args.size],
+                f"real-{geometry}-{index}-r{row}-c{column}",
+                weight[row : row + args.rows, column : column + args.columns],
+                input_importance[column : column + args.columns],
+                output_importance[row : row + args.rows],
             )
         )
     return cases
 
 
 def run(args: argparse.Namespace) -> int:
-    rank = args.size if args.rank is None else args.rank
-    if rank <= 0 or rank > args.size:
-        raise ValueError("rank must be between one and matrix size")
+    args.rows = args.size if args.rows is None else args.rows
+    args.columns = args.size if args.columns is None else args.columns
+    rank = min(args.rows, args.columns) if args.rank is None else args.rank
+    if args.rows <= 0 or args.columns <= 0 or rank <= 0 or rank > min(args.rows, args.columns):
+        raise ValueError("rank must be between one and the smaller matrix dimension")
     if (
         args.one_bit_passes < 0
         or not 0.0 <= args.one_bit_fraction <= 1.0
@@ -502,11 +666,13 @@ def run(args: argparse.Namespace) -> int:
         or args.codebook_size < 0
         or args.variable_depth_passes < 0
         or args.variable_depth_length < 0
+        or args.population_warm_starts < 0
     ):
         raise ValueError("binary search ladder settings are invalid")
     protocol = LadderProtocol(
-        1,
-        args.size,
+        2,
+        args.rows,
+        args.columns,
         rank,
         args.seeds,
         args.outer_iterations,
@@ -532,6 +698,7 @@ def run(args: argparse.Namespace) -> int:
         args.exact_scale_starts,
         args.exact_scale_passes,
         args.exact_batch_size,
+        args.population_warm_starts,
         not args.skip_oracle,
         args.synthetic_cases,
         args.real_crops,
@@ -549,7 +716,13 @@ def run(args: argparse.Namespace) -> int:
         "results": {},
     }
     atomic_write_json(args.output, payload)
-    cases = _synthetic_cases(args.size, rank, args.synthetic_cases, args.seed) + _real_cases(args)
+    cases = _synthetic_cases(
+        args.rows,
+        args.columns,
+        rank,
+        args.synthetic_cases,
+        args.seed,
+    ) + _real_cases(args)
     for name, target, input_importance, output_importance in cases:
         print(f"running {name}", flush=True)
         result = _score_case(name, target, input_importance, output_importance, protocol)
@@ -581,6 +754,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tensor-key")
     parser.add_argument("--profile-key")
     parser.add_argument("--size", type=int, default=3)
+    parser.add_argument("--rows", type=int)
+    parser.add_argument("--columns", type=int)
     parser.add_argument("--rank", type=int)
     parser.add_argument("--seeds", type=int, default=8)
     parser.add_argument("--outer-iterations", type=int, default=800)
@@ -606,6 +781,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--exact-scale-starts", type=int, default=16)
     parser.add_argument("--exact-scale-passes", type=int, default=64)
     parser.add_argument("--exact-batch-size", type=int, default=65536)
+    parser.add_argument(
+        "--population-warm-starts",
+        type=int,
+        default=0,
+        help="polish this many gauge-distinct ADMM/SVID starts, alternating quality and novelty",
+    )
     parser.add_argument("--skip-oracle", action="store_true")
     parser.add_argument("--synthetic-cases", type=int, default=1)
     parser.add_argument("--real-crops", type=int, default=1)

@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import pytest
 import torch
 
+import tools.probe_tiny_factorization_optimality as tiny_optimality
 from tools.probe_tiny_factorization_optimality import (
     PopulationFit,
+    _canonical_population_bits,
+    _diverse_elite,
     exhaustive_row_column_descent,
     exhaustive_sign_oracle,
     fit_scale_population,
@@ -148,3 +152,40 @@ def test_exhaustive_row_column_descent_never_regresses_candidate() -> None:
     )
 
     assert float(refined.errors[0]) <= float(initial.errors[0])
+
+
+def test_population_scale_fit_chunking_preserves_one_start_results(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    generator = torch.Generator().manual_seed(22)
+    target = torch.randn((4, 4), generator=generator)
+    left = torch.randint(0, 2, (7, 4, 4), generator=generator).float().mul_(2).sub_(1)
+    right = torch.randint(0, 2, (7, 4, 4), generator=generator).float().mul_(2).sub_(1)
+    arguments = (target, left, right, torch.ones(4), torch.ones(4))
+    unbatched = fit_scale_population(*arguments, starts=1, passes=4, seed=7)
+    monkeypatch.setattr(tiny_optimality, "_POPULATION_SCALE_SYSTEM_ELEMENTS", 32)
+
+    batched = fit_scale_population(*arguments, starts=1, passes=4, seed=7)
+
+    torch.testing.assert_close(batched.errors, unbatched.errors)
+    torch.testing.assert_close(batched.mid, unbatched.mid)
+
+
+def test_diverse_elite_keeps_quality_and_canonical_novelty() -> None:
+    generator = torch.Generator().manual_seed(31)
+    left = torch.randint(0, 2, (8, 4, 4), generator=generator).float().mul_(2).sub_(1)
+    right = torch.randint(0, 2, (8, 4, 4), generator=generator).float().mul_(2).sub_(1)
+    population = PopulationFit(
+        left,
+        right,
+        torch.ones((8, 4)),
+        torch.ones((8, 4)),
+        torch.ones((8, 4)),
+        torch.arange(8, dtype=torch.float32),
+    )
+
+    elite = _diverse_elite(population, 4, quality_fraction=0.5, pool_multiplier=2)
+
+    assert elite.errors[:2].tolist() == [0.0, 1.0]
+    bits = _canonical_population_bits(elite.left, elite.right)
+    assert torch.unique(bits, dim=0).shape[0] == 4

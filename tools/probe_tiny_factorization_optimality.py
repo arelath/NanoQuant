@@ -16,6 +16,7 @@ import torch
 from safetensors import safe_open
 
 from nanoquant.config.codec import semantic_hash
+from nanoquant.domain.binary_factor_search import refine_binary_factors_separable
 from nanoquant.domain.calibration_math import shrink_importance
 from nanoquant.domain.covariance_refinement import refine_binary_factors_under_covariance
 from nanoquant.domain.factorization import AdmmParameters, factorize_admm_with_parameters
@@ -23,6 +24,7 @@ from nanoquant.domain.scale_fit import fit_scales, reconstruct
 from nanoquant.infrastructure.io_utils import atomic_write_json
 
 PINNED_MODEL_REVISION = "dcc83ea841ab6100d6b47a070329e1ba4cf78752"
+_POPULATION_SCALE_SYSTEM_ELEMENTS = 4_000_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,10 +33,12 @@ class TinyOptimalityProtocol:
     model_revision: str
     exact_size: int
     heuristic_size: int
+    heuristic_rank: int | None
     include_exact: bool
     include_heuristic: bool
     synthetic_cases: int
     real_crops: int
+    real_crop_offset: int
     tensor_key: str | None
     profile_key: str | None
     calibration_shrinkage: float
@@ -49,6 +53,8 @@ class TinyOptimalityProtocol:
     elite: int
     offspring_per_elite: int
     generations: int
+    generation_local_candidates: int
+    generation_local_sweeps: int
     heuristic_scale_starts: int
     heuristic_scale_passes: int
     local_sweeps: int
@@ -197,6 +203,30 @@ def fit_scale_population(
         or left.shape[2] != right.shape[1]
     ):
         raise ValueError("population scale-fit geometry or settings are invalid")
+    rank = left.shape[2]
+    expanded_system_elements = left.shape[0] * starts * rank * rank
+    if expanded_system_elements > _POPULATION_SCALE_SYSTEM_ELEMENTS:
+        batch_size = max(
+            1,
+            _POPULATION_SCALE_SYSTEM_ELEMENTS // max(starts * rank * rank, 1),
+        )
+        batches = []
+        for start in range(0, left.shape[0], batch_size):
+            end = min(start + batch_size, left.shape[0])
+            batches.append(
+                fit_scale_population(
+                    target,
+                    left[start:end],
+                    right[start:end],
+                    input_importance,
+                    output_importance,
+                    starts=starts,
+                    passes=passes,
+                    seed=_logical_seed(seed, f"population-batch|{start}|{end}"),
+                    epsilon=epsilon,
+                )
+            )
+        return _concatenate_populations(*batches)
     device = left.device
     dtype = torch.float64 if device.type == "cpu" else torch.float32
     target = target.to(device=device, dtype=dtype)
@@ -239,21 +269,21 @@ def fit_scale_population(
     for _ in range(passes + 1):
         scaled_left = left * post[:, :, None]
         scaled_right = right * pre[:, None, :]
-        left_gram = torch.einsum("bir,bis,i->brs", scaled_left, scaled_left, output_weight)
-        right_gram = torch.einsum("brj,bsj,j->brs", scaled_right, scaled_right, input_weight)
+        weighted_left = scaled_left * output_weight.sqrt()[None, :, None]
+        weighted_right = scaled_right * input_weight.sqrt()[None, None, :]
+        left_gram = torch.bmm(weighted_left.mT, weighted_left)
+        right_gram = torch.bmm(weighted_right, weighted_right.mT)
         system = left_gram * right_gram
         system = 0.5 * (system + system.mT)
         diagonal = system.diagonal(dim1=-2, dim2=-1)
         ridge = (diagonal.abs().mean(dim=1) * 1e-6).clamp_min(max(epsilon, 1e-6))
         diagonal.add_(ridge[:, None])
-        rhs = torch.einsum(
-            "bir,ij,brj,i,j->br",
-            scaled_left,
-            target,
-            scaled_right,
-            output_weight,
-            input_weight,
+        weighted_target = target * output_weight[:, None] * input_weight[None, :]
+        target_times_right = torch.bmm(
+            weighted_target[None].expand(count, -1, -1),
+            scaled_right.mT,
         )
+        rhs = (scaled_left * target_times_right).sum(dim=1)
         solution, info = torch.linalg.solve_ex(system, rhs[:, :, None])
         failed = info != 0
         if bool(failed.any()):
@@ -303,6 +333,101 @@ def _best_population(fit: PopulationFit, count: int) -> PopulationFit:
         fit.post.index_select(0, indices),
         fit.errors.index_select(0, indices),
     )
+
+
+def _population_at_indices(fit: PopulationFit, indices: torch.Tensor) -> PopulationFit:
+    return PopulationFit(
+        fit.left.index_select(0, indices),
+        fit.right.index_select(0, indices),
+        fit.pre.index_select(0, indices),
+        fit.mid.index_select(0, indices),
+        fit.post.index_select(0, indices),
+        fit.errors.index_select(0, indices),
+    )
+
+
+def _canonical_population_bits(left: torch.Tensor, right: torch.Tensor) -> torch.Tensor:
+    left = torch.sign(left).clone()
+    right = torch.sign(right).clone()
+    row_signs = left[:, :, 0].clone()
+    left *= row_signs[:, :, None]
+    component_signs = left[:, 0, :].clone()
+    left *= component_signs[:, None, :]
+    right *= component_signs[:, :, None]
+    column_signs = right[:, 0, :].clone()
+    right *= column_signs[:, None, :]
+    return torch.cat((left.reshape(left.shape[0], -1), right.reshape(right.shape[0], -1)), dim=1).gt(0)
+
+
+def _diverse_elite(
+    fit: PopulationFit,
+    count: int,
+    *,
+    quality_fraction: float = 0.5,
+    pool_multiplier: int = 16,
+) -> PopulationFit:
+    """Retain both low-error and gauge-canonical Hamming-novel candidates."""
+
+    count = min(count, fit.errors.numel())
+    if count <= 0 or not 0.0 < quality_fraction <= 1.0 or pool_multiplier <= 0:
+        raise ValueError("diverse elite settings are invalid")
+    pool_count = min(fit.errors.numel(), max(count, count * pool_multiplier))
+    pool_indices = torch.topk(fit.errors, pool_count, largest=False).indices
+    pool = _population_at_indices(fit, pool_indices)
+    pool_bits = _canonical_population_bits(pool.left, pool.right)
+    unique_positions = []
+    seen: set[bytes] = set()
+    for position, row in enumerate(pool_bits):
+        key = row.cpu().numpy().tobytes()
+        if key not in seen:
+            seen.add(key)
+            unique_positions.append(position)
+    unique_indices = torch.tensor(
+        unique_positions, dtype=torch.long, device=fit.errors.device
+    )
+    pool = _population_at_indices(pool, unique_indices)
+    pool_count = pool.errors.numel()
+    count = min(count, pool_count)
+    quality_count = max(1, min(count, round(count * quality_fraction)))
+    selected = list(range(quality_count))
+    bits = _canonical_population_bits(pool.left, pool.right)
+    available = torch.ones(pool_count, dtype=torch.bool, device=bits.device)
+    available[:quality_count] = False
+    minimum_distance = torch.full(
+        (pool_count,), bits.shape[1] + 1, dtype=torch.long, device=bits.device
+    )
+    for chosen in selected:
+        minimum_distance = torch.minimum(
+            minimum_distance,
+            (bits != bits[chosen]).sum(dim=1),
+        )
+    while len(selected) < count and bool(available.any()):
+        scores = torch.where(available, minimum_distance, -1)
+        chosen = int(scores.argmax())
+        selected.append(chosen)
+        available[chosen] = False
+        minimum_distance = torch.minimum(
+            minimum_distance,
+            (bits != bits[chosen]).sum(dim=1),
+        )
+    indices = torch.tensor(selected, dtype=torch.long, device=fit.errors.device)
+    return _population_at_indices(pool, indices)
+
+
+def _population_diversity(population: PopulationFit) -> dict[str, float | int]:
+    bits = _canonical_population_bits(population.left, population.right)
+    hashes = {row.cpu().numpy().tobytes() for row in bits}
+    if bits.shape[0] < 2:
+        return {"unique": len(hashes), "minimum_hamming": 0, "mean_hamming": 0.0}
+    distances = []
+    for index in range(bits.shape[0] - 1):
+        distances.append((bits[index + 1 :] != bits[index]).sum(dim=1).float())
+    joined = torch.cat(distances)
+    return {
+        "unique": len(hashes),
+        "minimum_hamming": int(joined.min()),
+        "mean_hamming": float(joined.mean()),
+    }
 
 
 def _concatenate_populations(*populations: PopulationFit) -> PopulationFit:
@@ -378,11 +503,16 @@ def _production_candidates(
         generator = torch.Generator(device=protocol.device).manual_seed(
             _logical_seed(protocol.seed, f"{key}|admm|{seed_index}")
         )
+        rank = (
+            target.shape[0]
+            if protocol.heuristic_rank is None or target.shape[0] != protocol.heuristic_size
+            else protocol.heuristic_rank
+        )
         result = factorize_admm_with_parameters(
             target_device,
             input_device,
             output_device,
-            target.shape[0],
+            rank,
             generator,
             AdmmParameters(
                 outer_iterations=protocol.outer_iterations,
@@ -432,9 +562,17 @@ def _production_candidates(
     )
 
 
-def _random_signs(count: int, size: int, generator: torch.Generator, device: str) -> tuple[torch.Tensor, torch.Tensor]:
-    left = torch.randint(0, 2, (count, size, size), generator=generator, device=device).float().mul_(2).sub_(1)
-    right = torch.randint(0, 2, (count, size, size), generator=generator, device=device).float().mul_(2).sub_(1)
+def _random_signs(
+    count: int,
+    size: int,
+    generator: torch.Generator,
+    device: str,
+    *,
+    rank: int | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    rank = size if rank is None else rank
+    left = torch.randint(0, 2, (count, size, rank), generator=generator, device=device).float().mul_(2).sub_(1)
+    right = torch.randint(0, 2, (count, rank, size), generator=generator, device=device).float().mul_(2).sub_(1)
     return left, right
 
 
@@ -442,17 +580,89 @@ def _mutate_elites(
     elite: PopulationFit,
     offspring_per_elite: int,
     generator: torch.Generator,
+    target: torch.Tensor,
+    input_importance: torch.Tensor,
+    output_importance: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     left = elite.left.repeat_interleave(offspring_per_elite, dim=0).clone()
     right = elite.right.repeat_interleave(offspring_per_elite, dim=0).clone()
-    count, size, _ = left.shape
-    flat = torch.cat((left.reshape(count, -1), right.reshape(count, -1)), dim=1)
-    maximum = flat.shape[1]
-    mutation_counts = torch.randint(1, max(2, maximum // 10 + 1), (count,), generator=generator, device=flat.device)
+    count, size, rank = left.shape
+    columns = right.shape[2]
+    maximum = size * rank + rank * columns
+    maximum_radius = max(1, maximum // 8)
+    radii = []
+    radius = 1
+    while radius <= maximum_radius:
+        radii.append(radius)
+        radius *= 2
+    prediction = _population_reconstruct(
+        elite.left, elite.right, elite.pre, elite.mid, elite.post
+    )
+    weighted_residual = (
+        (prediction - target[None])
+        * output_importance[None, :, None]
+        * input_importance[None, None, :]
+    )
+    scaled_right = (
+        elite.right * elite.mid[:, :, None] * elite.pre[:, None, :]
+    )
+    left_gradient = 2 * elite.post[:, :, None] * torch.bmm(
+        weighted_residual, scaled_right.mT
+    )
+    scaled_left = elite.left * elite.post[:, :, None]
+    right_gradient = (
+        2
+        * torch.bmm(scaled_left.mT, weighted_residual)
+        * elite.mid[:, :, None]
+        * elite.pre[:, None, :]
+    )
+    left_scores = elite.left * left_gradient
+    right_scores = elite.right * right_gradient
     for index in range(count):
-        selected = torch.randperm(maximum, generator=generator, device=flat.device)[: int(mutation_counts[index])]
-        flat[index, selected] *= -1
-    return flat[:, : size * size].reshape(count, size, size), flat[:, size * size :].reshape(count, size, size)
+        mutation_count = radii[index % len(radii)]
+        mutation_kind = index % 3
+        if mutation_kind == 0:
+            flat = torch.cat((left[index].reshape(-1), right[index].reshape(-1)))
+            selected = torch.randperm(
+                maximum, generator=generator, device=flat.device
+            )[:mutation_count]
+            flat[selected] *= -1
+            left_elements = size * rank
+            left[index] = flat[:left_elements].reshape(size, rank)
+            right[index] = flat[left_elements:].reshape(rank, columns)
+        elif mutation_kind == 1:
+            # Couple both factors through one rank component so a proposal can
+            # cross a left/right interaction barrier without randomizing the
+            # rest of the product.
+            component = int(
+                torch.randint(rank, (), generator=generator, device=left.device)
+            )
+            per_side = max(1, mutation_count // 2)
+            left_rows = torch.randperm(
+                size, generator=generator, device=left.device
+            )[: min(size, per_side)]
+            right_columns = torch.randperm(
+                columns, generator=generator, device=right.device
+            )[: min(columns, max(1, mutation_count - min(size, per_side)))]
+            left[index, left_rows, component] *= -1
+            right[index, component, right_columns] *= -1
+        else:
+            parent = index // offspring_per_elite
+            per_side = max(1, mutation_count // 2)
+            component_scores = (
+                left_scores[parent].clamp_min(0).mean(dim=0)
+                + right_scores[parent].clamp_min(0).mean(dim=1)
+            )
+            component = int(component_scores.argmax())
+            left_rows = left_scores[parent, :, component].topk(
+                min(size, per_side)
+            ).indices
+            right_columns = right_scores[parent, component].topk(
+                min(columns, max(1, mutation_count - min(size, per_side)))
+            ).indices
+            left[index, left_rows, component] *= -1
+            right[index, component, right_columns] *= -1
+    return left, right
 
 
 def _local_refine(
@@ -474,26 +684,56 @@ def _local_refine(
         mid = population.mid[index]
         post = population.post[index]
         best_error = float(population.errors[index])
-        for _ in range(sweeps):
-            refined = refine_binary_factors_under_covariance(
+        if target.shape[0] > 16:
+            refined = refine_binary_factors_separable(
                 target,
                 left,
                 right,
                 pre,
                 mid,
                 post,
-                covariance,
-                output,
+                input_importance,
+                output_importance,
+                outer_passes=sweeps,
                 scale_passes=scale_passes,
-                left_steps=target.shape[0] * target.shape[0],
-                right_batches=target.shape[0] * target.shape[0],
-                right_batch_size=1,
+                one_bit_passes=8,
+                variable_depth_passes=2,
+                variable_depth_length=min(32, target.shape[0]),
+                pair_passes=2,
+                pair_pool_size=min(32, target.shape[0]),
+                block_bits=min(10, target.shape[0]),
+                block_passes=2,
+                component_passes=1,
+                component_limit=min(16, target.shape[0]),
+                joint_passes=2,
+                joint_bits=10,
+                joint_candidate_refits=8,
+                joint_screen_scale_passes=scale_passes,
             )
-            if refined.after_error >= best_error * (1.0 - 1e-10):
-                break
             left, right = refined.left_binary, refined.right_binary
             pre, mid, post = refined.scale_pre, refined.scale_mid, refined.scale_post
             best_error = refined.after_error
+        else:
+            for _ in range(sweeps):
+                refined = refine_binary_factors_under_covariance(
+                    target,
+                    left,
+                    right,
+                    pre,
+                    mid,
+                    post,
+                    covariance,
+                    output,
+                    scale_passes=scale_passes,
+                    left_steps=target.shape[0] * target.shape[0],
+                    right_batches=target.shape[0] * target.shape[0],
+                    right_batch_size=1,
+                )
+                if refined.after_error >= best_error * (1.0 - 1e-10):
+                    break
+                left, right = refined.left_binary, refined.right_binary
+                pre, mid, post = refined.scale_pre, refined.scale_mid, refined.scale_post
+                best_error = refined.after_error
         candidates.append((left, right, pre, mid, post))
         errors.append(best_error)
     best = min(range(len(errors)), key=errors.__getitem__)
@@ -612,7 +852,13 @@ def heuristic_oracle(
     key: str,
 ) -> tuple[PopulationFit, dict[str, Any]]:
     generator = torch.Generator(device=protocol.device).manual_seed(_logical_seed(protocol.seed, f"{key}|heuristic"))
-    left, right = _random_signs(protocol.population, target.shape[0], generator, protocol.device)
+    left, right = _random_signs(
+        protocol.population,
+        target.shape[0],
+        generator,
+        protocol.device,
+        rank=protocol.heuristic_rank,
+    )
     left = torch.cat((left, production.left), dim=0)
     right = torch.cat((right, production.right), dim=0)
     population = fit_scale_population(
@@ -625,10 +871,18 @@ def heuristic_oracle(
         passes=protocol.heuristic_scale_passes,
         seed=_logical_seed(protocol.seed, f"{key}|initial-scales"),
     )
-    elite = _best_population(population, protocol.elite)
+    elite = _diverse_elite(population, protocol.elite)
+    initial_diversity = _population_diversity(elite)
     history = [float(elite.errors.min())]
     for generation in range(protocol.generations):
-        mutated_left, mutated_right = _mutate_elites(elite, protocol.offspring_per_elite, generator)
+        mutated_left, mutated_right = _mutate_elites(
+            elite,
+            protocol.offspring_per_elite,
+            generator,
+            target,
+            input_importance,
+            output_importance,
+        )
         fitted = fit_scale_population(
             target,
             torch.cat((elite.left, mutated_left), dim=0),
@@ -639,7 +893,20 @@ def heuristic_oracle(
             passes=protocol.heuristic_scale_passes,
             seed=_logical_seed(protocol.seed, f"{key}|generation|{generation}"),
         )
-        elite = _best_population(fitted, protocol.elite)
+        generation_candidates = min(
+            protocol.generation_local_candidates, fitted.errors.numel()
+        )
+        if generation_candidates and protocol.generation_local_sweeps:
+            locally_refined = _local_refine(
+                target.to(protocol.device),
+                input_importance.to(protocol.device),
+                output_importance.to(protocol.device),
+                _diverse_elite(fitted, generation_candidates),
+                protocol.generation_local_sweeps,
+                protocol.scale_passes,
+            )
+            fitted = _concatenate_populations(fitted, locally_refined)
+        elite = _diverse_elite(fitted, protocol.elite)
         history.append(float(elite.errors.min()))
     refined = _local_refine(
         target.to(protocol.device),
@@ -653,27 +920,42 @@ def heuristic_oracle(
         _best_population(production, min(16, production.errors.numel())),
         _best_population(elite, min(8, protocol.elite)),
     )
-    block_coordinate = exhaustive_row_column_descent(
-        target.to(protocol.device),
-        input_importance.to(protocol.device),
-        output_importance.to(protocol.device),
-        block_starts,
-        sweeps=protocol.block_coordinate_sweeps,
-        scale_passes=protocol.scale_passes,
+    block_coordinate = (
+        exhaustive_row_column_descent(
+            target.to(protocol.device),
+            input_importance.to(protocol.device),
+            output_importance.to(protocol.device),
+            block_starts,
+            sweeps=protocol.block_coordinate_sweeps,
+            scale_passes=protocol.scale_passes,
+        )
+        if target.shape[0] <= 16 and protocol.block_coordinate_sweeps
+        else None
     )
-    best = refined if float(refined.errors[0]) <= float(block_coordinate.errors[0]) else block_coordinate
+    best = (
+        refined
+        if block_coordinate is None or float(refined.errors[0]) <= float(block_coordinate.errors[0])
+        else block_coordinate
+    )
     return best, {
         "random_candidates": protocol.population,
+        "rank": left.shape[2],
         "elite": protocol.elite,
         "offspring_per_elite": protocol.offspring_per_elite,
         "generations": protocol.generations,
+        "generation_local_candidates": protocol.generation_local_candidates,
+        "generation_local_sweeps": protocol.generation_local_sweeps,
         "local_candidates": min(8, protocol.elite),
         "block_coordinate_candidates": block_starts.errors.numel(),
         "block_coordinate_sweeps": protocol.block_coordinate_sweeps,
         "one_block_update_patterns": 1 << target.shape[0],
         "post_evolution_one_bit_error": float(refined.errors[0]),
-        "post_evolution_block_coordinate_error": float(block_coordinate.errors[0]),
+        "post_evolution_block_coordinate_error": (
+            None if block_coordinate is None else float(block_coordinate.errors[0])
+        ),
         "best_error_history": history,
+        "initial_elite_diversity": initial_diversity,
+        "final_elite_diversity": _population_diversity(elite),
     }
 
 
@@ -724,6 +1006,30 @@ def _score_case(
         search["kind"] = "population-evolution-plus-exact-one-bit-descent"
     oracle_error = float(oracle.errors[0])
     floor = oracle_error if known_optimum is None else min(known_optimum, oracle_error)
+    production_best_state = _best_population(production, 1)
+    production_bits = _canonical_population_bits(
+        production_best_state.left, production_best_state.right
+    )
+    oracle_bits = _canonical_population_bits(oracle.left, oracle.right)
+    production_prediction = _population_reconstruct(
+        production_best_state.left,
+        production_best_state.right,
+        production_best_state.pre,
+        production_best_state.mid,
+        production_best_state.post,
+    )[0]
+    oracle_prediction = _population_reconstruct(
+        oracle.left, oracle.right, oracle.pre, oracle.mid, oracle.post
+    )[0]
+    comparison_device = oracle_prediction.device
+    production_prediction = production_prediction.to(comparison_device)
+    reconstruction_distance = float(
+        (
+            (production_prediction - oracle_prediction).square()
+            * output_importance.to(comparison_device)[:, None]
+            * input_importance.to(comparison_device)[None, :]
+        ).sum()
+    )
     return {
         "name": name,
         "size": target.shape[0],
@@ -739,6 +1045,10 @@ def _score_case(
         "oracle_improvement_vs_seed0_fraction": 1.0 - oracle_error / max(production_seed0, 1e-30),
         "oracle_improvement_vs_best_production_fraction": 1.0 - oracle_error / max(production_best, 1e-30),
         "production_excess_over_oracle_fraction": production_best / max(oracle_error, 1e-30) - 1.0,
+        "oracle_canonical_sign_distance_from_best_production": int(
+            (production_bits.cpu() != oracle_bits.cpu()).sum()
+        ),
+        "oracle_reconstruction_distance_from_best_production": reconstruction_distance,
         "search_wall_seconds": time.perf_counter() - started,
         "production_seeds": production_records,
         "search": search,
@@ -792,7 +1102,7 @@ def _real_cases(
     if min(weight.shape) < size:
         raise ValueError("real tensor is smaller than the requested crop")
     result = []
-    for index in range(args.real_crops):
+    for index in range(args.real_crop_offset, args.real_crop_offset + args.real_crops):
         generator = torch.Generator().manual_seed(_logical_seed(args.seed, f"real|{size}|{index}"))
         row = int(torch.randint(0, weight.shape[0] - size + 1, (), generator=generator))
         column = int(torch.randint(0, weight.shape[1] - size + 1, (), generator=generator))
@@ -809,15 +1119,21 @@ def _real_cases(
 
 
 def run(args: argparse.Namespace) -> int:
+    if args.heuristic_rank is not None and not 0 < args.heuristic_rank <= args.heuristic_size:
+        raise ValueError("heuristic rank must fit the heuristic crop")
+    if args.real_crops < 0 or args.real_crop_offset < 0:
+        raise ValueError("real crop count and offset must be non-negative")
     protocol = TinyOptimalityProtocol(
-        5,
+        8,
         args.model_revision,
         args.exact_size,
         args.heuristic_size,
+        args.heuristic_rank,
         not args.skip_exact,
         not args.skip_heuristic,
         args.synthetic_cases,
         args.real_crops,
+        args.real_crop_offset,
         args.tensor_key,
         args.profile_key,
         args.calibration_shrinkage,
@@ -832,6 +1148,8 @@ def run(args: argparse.Namespace) -> int:
         args.elite,
         args.offspring_per_elite,
         args.generations,
+        args.generation_local_candidates,
+        args.generation_local_sweeps,
         args.heuristic_scale_starts,
         args.heuristic_scale_passes,
         args.local_sweeps,
@@ -897,10 +1215,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-revision", default=PINNED_MODEL_REVISION)
     parser.add_argument("--exact-size", type=int, default=3)
     parser.add_argument("--heuristic-size", type=int, default=10)
+    parser.add_argument("--heuristic-rank", type=int)
     parser.add_argument("--skip-exact", action="store_true")
     parser.add_argument("--skip-heuristic", action="store_true")
     parser.add_argument("--synthetic-cases", type=int, default=3)
     parser.add_argument("--real-crops", type=int, default=3)
+    parser.add_argument("--real-crop-offset", type=int, default=0)
     parser.add_argument("--calibration-shrinkage", type=float, default=0.6)
     parser.add_argument("--production-seeds", type=int, default=16)
     parser.add_argument("--outer-iterations", type=int, default=800)
@@ -913,6 +1233,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--elite", type=int, default=32)
     parser.add_argument("--offspring-per-elite", type=int, default=16)
     parser.add_argument("--generations", type=int, default=8)
+    parser.add_argument("--generation-local-candidates", type=int, default=8)
+    parser.add_argument("--generation-local-sweeps", type=int, default=2)
     parser.add_argument("--heuristic-scale-starts", type=int, default=2)
     parser.add_argument("--heuristic-scale-passes", type=int, default=24)
     parser.add_argument("--local-sweeps", type=int, default=8)

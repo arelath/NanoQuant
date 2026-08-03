@@ -3,13 +3,16 @@ from __future__ import annotations
 import pytest
 import torch
 
+import nanoquant.domain.binary_factor_search as binary_factor_search
 from nanoquant.domain.binary_factor_search import (
+    _component_candidate_order,
+    _hard_vector_indices,
     _one_bit_pass,
     _scores,
     _variable_depth_pass,
     refine_binary_factors_separable,
 )
-from nanoquant.domain.scale_fit import reconstruct
+from nanoquant.domain.scale_fit import fit_scales, reconstruct
 
 
 def _random_problem(size: int, seed: int) -> tuple[torch.Tensor, ...]:
@@ -226,6 +229,26 @@ def test_one_bit_pass_honors_the_highest_gain_update_cap() -> None:
     assert float(refined_scores.sum()) > float(scores.sum())
 
 
+def test_hard_vectors_use_actual_weighted_residual_not_relative_explained_energy() -> None:
+    scores = torch.tensor([1.0, 9.0, 5.0])
+    vector_weights = torch.tensor([1.0, 2.0, 0.5])
+    target_energy = torch.tensor([1.1, 20.0, 30.0])
+
+    selected = _hard_vector_indices(scores, vector_weights, target_energy, 2)
+
+    assert selected.tolist() == [1, 2]
+
+
+def test_component_candidates_interleave_weak_strong_and_residual_aligned_pools() -> None:
+    mid = torch.tensor([0.1, 0.5, 3.0, 1.0])
+    removal_cost = torch.tensor([-2.0, 4.0, 6.0, 3.0])
+    residual_alignment = torch.tensor([0.2, 9.0, 1.0, 0.5])
+
+    selected = _component_candidate_order(mid, removal_cost, residual_alignment, 3)
+
+    assert selected.tolist() == [0, 2, 1]
+
+
 def test_joint_window_exhausts_the_gauge_reduced_three_by_three_signs() -> None:
     target, left, right, pre, mid, post = _random_problem(3, 81)
 
@@ -252,6 +275,94 @@ def test_joint_window_exhausts_the_gauge_reduced_three_by_three_signs() -> None:
 
     assert result.after_error <= result.before_error
     assert result.joint_patterns_evaluated == 1024
+
+
+def test_joint_window_keeps_scale_profiled_screening_when_batches_are_forced_small(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target, left, right, pre, mid, post = _random_problem(3, 91)
+    observed_batch_sizes: list[int] = []
+    original = binary_factor_search._joint_scale_screen_batch
+
+    def observe(*args: object, **kwargs: object) -> torch.Tensor:
+        candidate_left = args[1]
+        assert isinstance(candidate_left, torch.Tensor)
+        observed_batch_sizes.append(candidate_left.shape[0])
+        return original(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(binary_factor_search, "_JOINT_SCALE_SCREEN_BATCH_ELEMENTS", 18)
+    monkeypatch.setattr(binary_factor_search, "_joint_scale_screen_batch", observe)
+
+    result = refine_binary_factors_separable(
+        target,
+        left,
+        right,
+        pre,
+        mid,
+        post,
+        torch.ones(3),
+        torch.ones(3),
+        outer_passes=1,
+        scale_passes=8,
+        continuous_candidates=False,
+        one_bit_passes=0,
+        pair_passes=0,
+        block_bits=0,
+        component_passes=0,
+        joint_passes=1,
+        joint_bits=10,
+        joint_candidate_refits=4,
+        joint_batch_size=64,
+        joint_screen_scale_passes=2,
+    )
+
+    assert result.joint_patterns_evaluated == 1024
+    assert sum(observed_batch_sizes) == 1024
+    assert max(observed_batch_sizes) == 2
+
+
+def test_joint_scale_screen_matches_the_full_scale_refit_ranking() -> None:
+    target, left, right, pre, mid, post = _random_problem(3, 101)
+    input_importance = torch.tensor([0.7, 1.1, 1.8])
+    output_importance = torch.tensor([1.4, 0.6, 1.2])
+    candidate_left = left.expand(4, -1, -1).clone()
+    candidate_right = right.expand(4, -1, -1).clone()
+    candidate_left[1, 1, 0] *= -1
+    candidate_right[2, 1, 1] *= -1
+    candidate_left[3, 2, 1] *= -1
+    candidate_right[3, 2, 2] *= -1
+
+    screened = binary_factor_search._joint_scale_screen_batch(
+        target,
+        candidate_left,
+        candidate_right,
+        pre,
+        mid,
+        post,
+        input_importance,
+        output_importance,
+        8,
+        1e-8,
+    )
+    refitted = torch.tensor(
+        [
+            fit_scales(
+                target,
+                candidate_left[index],
+                candidate_right[index],
+                pre,
+                mid,
+                post,
+                input_importance,
+                output_importance,
+                alternating_passes=8,
+            ).after_error
+            for index in range(candidate_left.shape[0])
+        ]
+    )
+
+    assert torch.allclose(screened, refitted, rtol=1e-5, atol=1e-6)
+    assert int(screened.argmin()) == int(refitted.argmin())
 
 
 def test_direct_binary_search_rejects_an_unbounded_block() -> None:
