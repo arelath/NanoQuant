@@ -252,6 +252,71 @@ crops. It was removed rather than adding an unproductive second block selector.
 This does not disprove structured blocks in general, but the proposed
 coupling-to-margin heuristic does not clear the measured keep threshold.
 
+## Production-sized retained-owner validation
+
+The crop result was replayed on full retained owners from Experiment 054 rather
+than on newly factorized slices. This preserves the production allocation,
+outlier-removal policy, shared-QKV objective multipliers, and exact committed
+factor warm starts. Blocks 0, 12, and 25 cover early, middle, and late model
+positions. Each block contributes fused QKV, gate, and down owners at its
+allocated rank.
+
+The comparison closes two fairness gaps that a simple continuation would leave
+open. Both arms start after the same 64-pass post-control scale refit. The
+control then repeats the existing full-vector 16-pass one-bit and two-pass,
+length-64 variable-depth search until it matches tabu wall time or reaches a
+fixed point. Tabu uses two 256-step passes with tenure 8 and deterministic
+jitter 0-4. Thus the reported gain is over the best continued conventional
+control, not over an arm with fewer scale fits or arbitrarily less search time.
+
+Tabu improved the exact retained weighted residual objective in all nine
+owners. Gains ranged from 0.0727% to 0.8454% and averaged 0.4298%. This is much
+stronger transfer than the 2/6 crop hit rate and establishes that tabu can
+cross production-sized sign basins cheaply. It does **not** establish that the
+new basins are functionally better.
+
+The dense control and tabu weights were therefore spliced independently into
+the pinned BF16 Gemma teacher. The discovery gate used the retained eight
+WikiText-2 sequences of length 512, a paired 10,000-resample sequence bootstrap,
+and four-sequence decoder-output captures. Negative functional deltas are
+better.
+
+| Block | Owner | Rank | Objective gain vs continued control | Relative KL delta | 95% absolute KL-delta interval | Decoder-output NRMSE delta |
+|---:|---|---:|---:|---:|---:|---:|
+| 0 | `self_attn.attn_qkv` | 832 | 0.8454% | +11.58% | [-0.002342, +0.009724] | -2.32% |
+| 0 | `mlp.gate_proj` | 1,152 | 0.2813% | -1.31% | [-0.006935, +0.006044] | +0.45% |
+| 0 | `mlp.down_proj` | 1,152 | 0.5428% | -7.13% | [-0.021461, +0.002001] | +0.70% |
+| 12 | `self_attn.attn_qkv` | 832 | 0.3317% | +4.24% | [-0.000322, +0.001676] | +1.78% |
+| 12 | `mlp.gate_proj` | 608 | 0.0727% | +1.63% | [+0.000108, +0.001131] | +1.27% |
+| 12 | `mlp.down_proj` | 1,152 | 0.7489% | -0.98% | [-0.001108, +0.000582] | -0.34% |
+| 25 | `self_attn.attn_qkv` | 512 | 0.1285% | -3.95% | [-0.000232, -0.000106] | -1.11% |
+| 25 | `mlp.gate_proj` | 1,088 | 0.2458% | +1.78% | [-0.000143, +0.001182] | +2.07% |
+| 25 | `mlp.down_proj` | 1,152 | 0.6713% | -1.80% | [-0.001815, +0.000562] | +0.02% |
+
+Composing QKV, gate, and down within each block made held-out KL worse by 1.77%
+in block 0 and 2.11% in block 12. Block 25 improved by 0.59%, but its interval
+crossed zero. Composing all three tested blocks worsened KL by 2.07%. Decoder
+output error worsened for every composed block. Static residual gains therefore
+have no reliable sign relationship with functional quality, even when every
+owner wins and the conventional search control has converged.
+
+Only block-25 QKV improved both discovery metrics and cleared the paired KL
+confidence gate. It was confirmed on 32 disjoint WikiText-2 sequences of length
+512, starting after the eight discovery sequences. The confirmation improved
+KL by 4.45%, with absolute delta interval [-0.000251, -0.000138], and reduced
+decoder-output NRMSE by 2.81%.
+
+The deployment decision remains conservative:
+
+- keep tabu disabled as a broad resident-search tier;
+- retain it as a cheap per-owner candidate generator;
+- require a disjoint functional selection gate, because the diagonal objective
+  cannot identify the useful basin;
+- treat block-25 QKV as a reproducible candidate, not as evidence that all late
+  QKV owners or all models should use tabu;
+- require a complete compressed-model quality benchmark before any selected
+  candidates become part of a production recipe.
+
 ## Conclusions and deployment policy
 
 1. Five power iterations are not the principal cause of the known real-crop
@@ -272,6 +337,9 @@ coupling-to-margin heuristic does not clear the measured keep threshold.
 8. Deep novelty-preserving population search can find distant real basins, but
    the best measured static-objective gain is 1.51% and saturates under a much
    larger confirmation.
+9. Reactive tabu transfers to full retained owners and beats a continued
+   conventional-search control in all nine sampled cases, but eight-sequence
+   functional selection retains only one of those nine candidates.
 
 The production recommendation is therefore narrower than the original one:
 
@@ -306,6 +374,10 @@ solver improvement is not a substitute for a compressed-model benchmark.
 - `evidence/052/deep-basin-b12-gate-32x32-*.json`
 - `evidence/052/second-viewpoint-{q12,gate12,down12}-64x64-r64-*.json`
 - `evidence/052/retained-tabu-{q12-seed0,gate12-seed1}-64x64-r64-*.json`
+- `evidence/052/real-block-tabu-b0-b12-b25-fair.json`
+- `evidence/052/real-block-tabu-b0-b12-b25-fair.safetensors`
+- `evidence/052/real-block-tabu-b0-b12-b25-functional-by-owner.json`
+- `evidence/052/real-block-tabu-b25-qkv-functional-confirmation.json`
 
 The evidence directory is intentionally ignored; the reproducible tools,
 tests, and this report are the durable record.
