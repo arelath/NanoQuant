@@ -1,4 +1,5 @@
 import runpy
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -65,9 +66,19 @@ def test_experiment055_launcher_controls_slices_and_marks_workers(
     namespace = runpy.run_path(str(launcher))
     entry = namespace["_run_worker_or_campaign"]
 
+    assert namespace["_WORKER_ENVIRONMENT_VARIABLE"] == campaign.WORKER_ENVIRONMENT_VARIABLE
     monkeypatch.delenv(campaign.WORKER_ENVIRONMENT_VARIABLE, raising=False)
-    monkeypatch.setattr(campaign, "main", lambda: 17)
+    observed_controller: dict[str, Any] = {}
+
+    def run_controller(command: list[str], *, cwd: Path, check: bool) -> subprocess.CompletedProcess[str]:
+        observed_controller.update(command=command, cwd=cwd, check=check)
+        return subprocess.CompletedProcess(command, 17)
+
+    monkeypatch.setattr(namespace["subprocess"], "run", run_controller)
     assert entry() == 17
+    assert Path(observed_controller["command"][1]).name == "run_experiment055_campaign.py"
+    assert observed_controller["cwd"] == Path.cwd()
+    assert observed_controller["check"] is False
 
     observed: dict[str, Any] = {}
 

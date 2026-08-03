@@ -1,7 +1,10 @@
 """Experiment 055: equal-budget D2 allocation with bounded over-complete binary rank."""
 
 import os
+import subprocess
+import sys
 from dataclasses import replace
+from pathlib import Path
 
 from recipes import (
     ARCHITECTURE_PROTECTED_RECONSTRUCTION_COMPRESSION_TEMPLATE,
@@ -27,6 +30,7 @@ from nanoquant.config.schema import (
 )
 
 BASELINE = ExperimentRef(54, "functional-binary-lr-d2-compress-and-benchmark-gemma-3-1b-it")
+_WORKER_ENVIRONMENT_VARIABLE = "NANOQUANT_EXPERIMENT_055_SLICE_WORKER"
 PROFILE = "evidence/054/054-d2-uniform-control-kl-profile"
 PROFILE_KEY = "sha256:4a67e45d5266763b09e3b487a3820f4ad8520201b144807241e2744d9c271bf9"
 
@@ -154,16 +158,15 @@ EXPERIMENT = replace(
 def _run_worker_or_campaign() -> int:
     """Keep each CUDA block in a fresh child while preserving zero-argument launch."""
 
-    from tools.run_experiment055_campaign import (
-        WORKER_ENVIRONMENT_VARIABLE,
-    )
-    from tools.run_experiment055_campaign import (
-        main as campaign_main,
-    )
-
-    if os.environ.get(WORKER_ENVIRONMENT_VARIABLE) == "1":
+    if os.environ.get(_WORKER_ENVIRONMENT_VARIABLE) == "1":
         return run_experiment(EXPERIMENT, launcher_path=__file__)
-    return campaign_main()
+    repository = Path(__file__).resolve().parent.parent
+    controller = repository / "tools" / "run_experiment055_campaign.py"
+    return subprocess.run(
+        [sys.executable, str(controller)],
+        cwd=repository,
+        check=False,
+    ).returncode
 
 
 experiment_callable_main(__name__, _run_worker_or_campaign)
