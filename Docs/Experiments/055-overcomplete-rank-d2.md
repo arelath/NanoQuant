@@ -29,6 +29,8 @@ The retained profile is
 `evidence/054/054-d2-uniform-control-kl-profile`, key
 `sha256:4a67e45d5266763b09e3b487a3820f4ad8520201b144807241e2744d9c271bf9`. The uniform control that produced this
 profile is numerically unchanged, so Experiment 055 reuses it and measures new response points above the old cap.
+The campaign permits dataset-hub access only so 055 can create its required run-owned calibration receipt; model
+resolution remains pinned to the local snapshot. Later slices reuse the validated receipt from this run.
 
 The resident algorithm version advances from 54 to 55 because the new ceiling changes factor shapes and durable
 commits. The packed layout and runtime are rank-agnostic; no format change is required.

@@ -40,6 +40,20 @@ def _next_slice_index(campaign_root: Path) -> int:
     return max(indexes, default=0) + 1
 
 
+def _campaign_environment() -> dict[str, str]:
+    """Keep model resolution local while allowing this run to prepare its own calibration receipt."""
+
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "HF_HUB_OFFLINE": "0",
+            "HF_DATASETS_OFFLINE": "0",
+            "TRANSFORMERS_OFFLINE": "1",
+        }
+    )
+    return environment
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--maximum-slices", type=int, default=64)
@@ -57,14 +71,7 @@ def main() -> int:
     campaign_root = repository / "evidence" / "055"
     run_root = campaign_root / _RUN_NAME
     launcher = repository / "experiments" / f"{_RUN_NAME}.py"
-    environment = os.environ.copy()
-    environment.update(
-        {
-            "HF_HUB_OFFLINE": "1",
-            "HF_DATASETS_OFFLINE": "1",
-            "TRANSFORMERS_OFFLINE": "1",
-        }
-    )
+    environment = _campaign_environment()
     campaign_root.mkdir(parents=True, exist_ok=True)
     first_slice = _next_slice_index(campaign_root)
     if first_slice > args.maximum_slices:

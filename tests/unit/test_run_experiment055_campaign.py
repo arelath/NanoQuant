@@ -1,7 +1,11 @@
 import json
 from pathlib import Path
 
-from tools.run_experiment055_campaign import _completed_blocks, _next_slice_index
+from tools.run_experiment055_campaign import (
+    _campaign_environment,
+    _completed_blocks,
+    _next_slice_index,
+)
 
 
 def test_completed_blocks_counts_only_candidate_run(tmp_path: Path) -> None:
@@ -33,3 +37,11 @@ def test_next_slice_index_preserves_existing_logs(tmp_path: Path) -> None:
     (tmp_path / "campaign-slice-not-an-index.log").touch()
 
     assert _next_slice_index(tmp_path) == 15
+
+
+def test_campaign_allows_run_owned_calibration_bootstrap() -> None:
+    environment = _campaign_environment()
+
+    assert environment["HF_HUB_OFFLINE"] == "0"
+    assert environment["HF_DATASETS_OFFLINE"] == "0"
+    assert environment["TRANSFORMERS_OFFLINE"] == "1"
