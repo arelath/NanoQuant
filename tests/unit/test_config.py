@@ -20,6 +20,7 @@ from nanoquant.config.schema import (
     ActivationStoreKind,
     AllocationStrategy,
     BehaviorSliceConfig,
+    BinaryFactorSearchConfig,
     DatasetConfig,
     DatasetSourceConfig,
     DistillationLoss,
@@ -381,6 +382,37 @@ def test_low_rank_patch_fit_and_held_out_windows_must_be_positive() -> None:
     )
 
     assert {issue.code for issue in validate(invalid)} == {"CFG084", "CFG085"}
+
+
+def test_binary_factor_search_protocol_is_typed_and_bounded() -> None:
+    base = RunConfig(ModelConfig("x"))
+    enabled = replace(
+        base,
+        factorization=replace(
+            base.factorization,
+            binary_search=BinaryFactorSearchConfig(enabled=True),
+        ),
+    )
+    invalid = replace(
+        enabled,
+        factorization=replace(
+            enabled.factorization,
+            binary_search=replace(
+                enabled.factorization.binary_search,
+                layer_patterns=("", ""),
+                tabu_steps=0,
+                one_bit_fraction=math.nan,
+            ),
+        ),
+    )
+
+    assert validate(enabled) == ()
+    assert from_dict(RunConfig, to_dict(enabled)) == enabled
+    assert {issue.code for issue in validate(invalid)} == {
+        "CFG133",
+        "CFG134",
+        "CFG135",
+    }
 
 
 def test_observability_levels_are_validated_without_changing_schema() -> None:

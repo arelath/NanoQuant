@@ -417,6 +417,7 @@ def resident_request_from_config(
         layer_order=config.block_tuning.layer_order,
         shared_input_groups=config.factorization.shared_input.groups,
         admm=config.factorization.admm,
+        binary_factor_search=config.factorization.binary_search,
         outliers=config.outliers,
         scale_fit=config.factorization.scale_fit,
         bias_correction=config.factorization.bias_correction,

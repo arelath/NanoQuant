@@ -9,6 +9,7 @@ import nanoquant.resident_quantization as resident
 from nanoquant.config.schema import (
     ActivationGpuCacheMode,
     ADMMConfig,
+    BinaryFactorSearchConfig,
     ExecutorKind,
     LayerRankBudgetConfig,
     ObjectiveConfig,
@@ -84,6 +85,19 @@ def test_admm_orientation_invalidates_commit_identity() -> None:
 
     assert resident._resident_config_hash(request) != resident._resident_config_hash(
         replace(request, admm=ADMMConfig(outer_iterations=1, inner_iterations=1, transpose_wide=True))
+    )
+
+
+def test_binary_factor_search_policy_invalidates_commit_identity() -> None:
+    request = ResidentQuantizationRequest(
+        Path("snapshot"), Path("output"), "fixture/model", "revision", ((1, 2, 3),), device="cpu"
+    )
+
+    assert resident._resident_config_hash(request) != resident._resident_config_hash(
+        replace(
+            request,
+            binary_factor_search=BinaryFactorSearchConfig(enabled=True),
+        )
     )
 
 

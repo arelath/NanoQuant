@@ -78,6 +78,7 @@ from nanoquant.config.schema import (
     ADMMConfig,
     AllocationStrategy,
     BiasCorrectionConfig,
+    BinaryFactorSearchConfig,
     ExecutorKind,
     KlAllocationObjective,
     KlSensitivityGranularity,
@@ -103,6 +104,10 @@ from nanoquant.config.schema import (
     ScaleFitConfig,
     SharedInputGroupConfig,
 )
+from nanoquant.domain.binary_factor_search import (
+    BinaryFactorSearchResult,
+    refine_binary_factors_control_then_tabu,
+)
 from nanoquant.domain.calibration_math import weighted_group_output_importance
 from nanoquant.domain.covariance_refinement import refine_binary_factors_under_covariance
 from nanoquant.domain.factorization import AdmmParameters, factorize_admm_with_parameters
@@ -112,6 +117,7 @@ from nanoquant.domain.models import (
     ArtifactRef,
     ArtifactTypes,
     BiasCorrectionResult,
+    BinaryFactorSearchMetrics,
     BlockPlan,
     BlockResult,
     CalibrationStats,
@@ -217,7 +223,7 @@ from nanoquant.infrastructure.tuning_checkpoint import (
 from nanoquant.ports.event_sink import EventSink, LayerCommittedPayload, emit_layer_committed
 from nanoquant.ports.model_adapter import ModelAdapter
 
-RESIDENT_ALGORITHM_VERSION = 55
+RESIDENT_ALGORITHM_VERSION = 56
 COVARIANCE_REFINEMENT_MAX_INPUT_FEATURES = 2048
 _THROUGHPUT_PROBE_REPETITIONS = 5
 _THROUGHPUT_PROBE_WARMUP_WORKLOADS = 3
@@ -363,6 +369,7 @@ class ResidentQuantizationRequest:
     layer_order: tuple[str, ...] = ()
     shared_input_groups: tuple[SharedInputGroupConfig, ...] = ()
     admm: ADMMConfig = ADMMConfig(outer_iterations=1, inner_iterations=1)
+    binary_factor_search: BinaryFactorSearchConfig = BinaryFactorSearchConfig()
     outliers: OutlierConfig = OutlierConfig()
     scale_fit: ScaleFitConfig = ScaleFitConfig(enabled=False)
     bias_correction: BiasCorrectionConfig = BiasCorrectionConfig()
@@ -2287,6 +2294,7 @@ def _resident_config_hash(request: ResidentQuantizationRequest) -> str:
         "layer_order": request.layer_order,
         "shared_input_groups": request.shared_input_groups,
         "admm": request.admm,
+        "binary_factor_search": request.binary_factor_search,
         "outliers": request.outliers,
         "scale_fit": request.scale_fit,
         "bias_correction": request.bias_correction,
@@ -2338,6 +2346,230 @@ def _resident_config_hash(request: ResidentQuantizationRequest) -> str:
             "tuning_microbatch_maximum": request.run_config.block_tuning.microbatch_size,
         }
     return semantic_hash(semantic_config)
+
+
+def _binary_factor_search_selected(
+    config: BinaryFactorSearchConfig,
+    owner: str,
+) -> bool:
+    return config.enabled and any(fnmatchcase(owner, pattern) for pattern in config.layer_patterns)
+
+
+def _stored_search_error(
+    target: torch.Tensor,
+    result: BinaryFactorSearchResult,
+    input_importance: torch.Tensor,
+    output_importance: torch.Tensor,
+    storage_dtype: torch.dtype,
+) -> float:
+    prediction = reconstruct(
+        result.left_binary.float(),
+        result.right_binary.float(),
+        result.scale_pre.to(storage_dtype).float(),
+        result.scale_mid.to(storage_dtype).float(),
+        result.scale_post.to(storage_dtype).float(),
+    )
+    return float(
+        (
+            (prediction - target.float()).square()
+            * output_importance.float().clamp_min(1e-8)[:, None]
+            * input_importance.float().clamp_min(1e-8)[None, :]
+        ).sum()
+    )
+
+
+def _execute_binary_factor_search(
+    target: torch.Tensor,
+    left: torch.Tensor,
+    right: torch.Tensor,
+    scale_pre: torch.Tensor,
+    scale_mid: torch.Tensor,
+    scale_post: torch.Tensor,
+    input_importance: torch.Tensor,
+    output_importance: torch.Tensor,
+    config: BinaryFactorSearchConfig,
+) -> tuple[BinaryFactorSearchResult, BinaryFactorSearchMetrics]:
+    started = time.perf_counter()
+    control, tabu = refine_binary_factors_control_then_tabu(
+        target,
+        left,
+        right,
+        scale_pre,
+        scale_mid,
+        scale_post,
+        input_importance,
+        output_importance,
+        scale_passes=config.scale_passes,
+        control_outer_passes=config.control_outer_passes,
+        one_bit_passes=config.one_bit_passes,
+        one_bit_fraction=config.one_bit_fraction,
+        max_one_bit_vectors=config.max_one_bit_vectors,
+        variable_depth_passes=config.variable_depth_passes,
+        variable_depth_length=config.variable_depth_length,
+        tabu_outer_passes=config.tabu_outer_passes,
+        tabu_passes=config.tabu_passes,
+        tabu_steps=config.tabu_steps,
+        tabu_tenure=config.tabu_tenure,
+        tabu_tenure_jitter=config.tabu_tenure_jitter,
+    )
+    storage_dtype = scale_pre.dtype
+    initial_left = torch.where(left.detach() >= 0, 1.0, -1.0).to(left.dtype)
+    initial_right = torch.where(right.detach() >= 0, 1.0, -1.0).to(right.dtype)
+    initial = replace(
+        control,
+        left_binary=initial_left,
+        right_binary=initial_right,
+        scale_pre=scale_pre.detach().clone(),
+        scale_mid=scale_mid.detach().clone(),
+        scale_post=scale_post.detach().clone(),
+    )
+    initial_error = _stored_search_error(
+        target,
+        initial,
+        input_importance,
+        output_importance,
+        storage_dtype,
+    )
+    initial = replace(
+        initial,
+        reconstruction=reconstruct(
+            initial_left.float(),
+            initial_right.float(),
+            scale_pre.to(storage_dtype).float(),
+            scale_mid.to(storage_dtype).float(),
+            scale_post.to(storage_dtype).float(),
+        ).to(target.dtype),
+        before_error=initial_error,
+        after_error=initial_error,
+        accepted_outer_passes=0,
+        continuous_updates=0,
+        one_bit_updates=0,
+        codebook_updates=0,
+        variable_depth_updates=0,
+        tabu_updates=0,
+        pair_updates=0,
+        block_updates=0,
+        block_patterns_evaluated=0,
+        component_updates=0,
+        joint_updates=0,
+        joint_patterns_evaluated=0,
+    )
+    control_error = _stored_search_error(
+        target,
+        control,
+        input_importance,
+        output_importance,
+        storage_dtype,
+    )
+    tabu_error = _stored_search_error(
+        target,
+        tabu,
+        input_importance,
+        output_importance,
+        storage_dtype,
+    )
+    selected = initial
+    selected_error = initial_error
+    if math.isfinite(control_error) and (
+        not math.isfinite(selected_error) or control_error < selected_error
+    ):
+        selected = control
+        selected_error = control_error
+    if math.isfinite(tabu_error) and (
+        not math.isfinite(selected_error) or tabu_error < selected_error
+    ):
+        selected = tabu
+    selected_initial = selected is initial
+    selected_tabu = selected is tabu
+    return (
+        selected,
+        BinaryFactorSearchMetrics(
+            initial_error,
+            control_error,
+            tabu_error,
+            control.accepted_outer_passes,
+            tabu.accepted_outer_passes,
+            control.one_bit_updates,
+            control.variable_depth_updates,
+            tabu.tabu_updates,
+            int(
+                (tabu.left_binary != control.left_binary).sum()
+                + (tabu.right_binary != control.right_binary).sum()
+            ),
+            selected_initial,
+            selected_tabu,
+            time.perf_counter() - started,
+        ),
+    )
+
+
+def _refine_trainable_binary_factors(
+    request: ResidentQuantizationRequest,
+    owner: LayerId,
+    target: TensorRef,
+    input_importance: TensorRef,
+    output_importance: TensorRef,
+    trainable: TrainableFactorizedLinear,
+    tensors: LocalTensorStore,
+    events: EventSink,
+) -> BinaryFactorSearchMetrics | None:
+    config = request.binary_factor_search
+    if not _binary_factor_search_selected(config, owner.path):
+        return None
+    with (
+        tensors.read(target, request.device) as target_value,
+        tensors.read(input_importance, request.device) as input_value,
+        tensors.read(output_importance, request.device) as output_value,
+    ):
+        selected, metrics = _execute_binary_factor_search(
+            target_value,
+            trainable.left_latent.detach(),
+            trainable.right_latent.detach(),
+            trainable.scale_pre.detach(),
+            trainable.scale_mid.detach(),
+            trainable.scale_post.detach(),
+            input_value,
+            output_value,
+            config,
+        )
+    with torch.no_grad():
+        for parameter, value in (
+            (trainable.left_latent, selected.left_binary),
+            (trainable.right_latent, selected.right_binary),
+            (trainable.scale_pre, selected.scale_pre),
+            (trainable.scale_mid, selected.scale_mid),
+            (trainable.scale_post, selected.scale_post),
+        ):
+            parameter.copy_(value.to(device=parameter.device, dtype=parameter.dtype))
+    events.emit(
+        "resident-quantization",
+        "info",
+        "binary_factor_search.completed",
+        block=owner.block.index,
+        layer=owner.path,
+        initial_weighted_squared_error=metrics.initial_weighted_squared_error,
+        control_weighted_squared_error=metrics.control_weighted_squared_error,
+        tabu_weighted_squared_error=metrics.tabu_weighted_squared_error,
+        control_improvement_fraction=(
+            1
+            - metrics.control_weighted_squared_error
+            / max(metrics.initial_weighted_squared_error, 1e-30)
+        ),
+        tabu_improvement_vs_control_fraction=(
+            1
+            - metrics.tabu_weighted_squared_error
+            / max(metrics.control_weighted_squared_error, 1e-30)
+        ),
+        selected_initial=metrics.selected_initial,
+        selected_control=not metrics.selected_initial and not metrics.selected_tabu,
+        selected_tabu=metrics.selected_tabu,
+        one_bit_updates=metrics.one_bit_updates,
+        variable_depth_updates=metrics.variable_depth_updates,
+        tabu_updates=metrics.tabu_updates,
+        tabu_sign_distance_from_control=metrics.tabu_sign_distance_from_control,
+        wall_seconds=metrics.wall_seconds,
+    )
+    return metrics
 
 
 def _manifest_tensor_identity(value: torch.Tensor | tuple[tuple[int, ...], ...] | None) -> object:
@@ -3087,9 +3319,10 @@ def _run_reconstruction_rank_probes(
                 probe_weight: torch.Tensor = stacked,
                 probe_input: torch.Tensor = probe_input_importance,
                 probe_output: torch.Tensor = probe_output_importance,
+                probe_owner: str = unit_name,
             ) -> Any:
                 generator = torch.Generator(device=request.device).manual_seed(probe_seed)
-                return factorize_admm_with_parameters(
+                result = factorize_admm_with_parameters(
                     probe_weight,
                     probe_input,
                     probe_output,
@@ -3104,6 +3337,41 @@ def _run_reconstruction_rank_probes(
                         early_stop_tolerance=probe_admm.early_stop_tolerance,
                         transpose_wide=probe_admm.transpose_wide,
                     ),
+                )
+                if not _binary_factor_search_selected(request.binary_factor_search, probe_owner):
+                    return result
+                selected, _metrics = _execute_binary_factor_search(
+                    probe_weight,
+                    result.left_binary,
+                    result.right_binary,
+                    result.scale_pre,
+                    result.scale_mid,
+                    result.scale_post,
+                    probe_input,
+                    probe_output,
+                    request.binary_factor_search,
+                )
+                stored_pre = selected.scale_pre.to(result.scale_pre.dtype)
+                stored_mid = selected.scale_mid.to(result.scale_mid.dtype)
+                stored_post = selected.scale_post.to(result.scale_post.dtype)
+                stored_left = selected.left_binary.to(result.left_binary.dtype)
+                stored_right = selected.right_binary.to(result.right_binary.dtype)
+                return replace(
+                    result,
+                    left_latent=stored_left,
+                    right_latent=stored_right,
+                    left_binary=stored_left,
+                    right_binary=stored_right,
+                    scale_pre=stored_pre,
+                    scale_mid=stored_mid,
+                    scale_post=stored_post,
+                    reconstruction=reconstruct(
+                        stored_left,
+                        stored_right,
+                        stored_pre,
+                        stored_mid,
+                        stored_post,
+                    ).to(probe_weight.dtype),
                 )
 
             with recorder.phase("rank_probe", unit=unit_id):
@@ -4082,6 +4350,26 @@ def _validate_resident_request(request: ResidentQuantizationRequest) -> None:
         raise ValueError("activation GPU cache reserve must not be negative")
     if request.block_forward_batch_size <= 0:
         raise ValueError("resident quantization block forward batch size must be positive")
+    binary_search = request.binary_factor_search
+    if (
+        not binary_search.layer_patterns
+        or len(set(binary_search.layer_patterns)) != len(binary_search.layer_patterns)
+        or any(not pattern.strip() for pattern in binary_search.layer_patterns)
+        or binary_search.scale_passes <= 0
+        or binary_search.control_outer_passes <= 0
+        or binary_search.one_bit_passes <= 0
+        or not math.isfinite(binary_search.one_bit_fraction)
+        or not 0 < binary_search.one_bit_fraction <= 1
+        or binary_search.max_one_bit_vectors <= 0
+        or binary_search.variable_depth_passes <= 0
+        or binary_search.variable_depth_length <= 0
+        or binary_search.tabu_outer_passes <= 0
+        or binary_search.tabu_passes <= 0
+        or binary_search.tabu_steps <= 0
+        or binary_search.tabu_tenure <= 0
+        or binary_search.tabu_tenure_jitter < 0
+    ):
+        raise ValueError("resident binary-factor search policy is invalid")
     if request.factorized_tuning_epoch_cooldown_seconds < 0:
         raise ValueError("factorized tuning epoch cooldown must be non-negative")
     if request.nonfactorized_tuning_epoch_cooldown_seconds < 0:
@@ -5717,6 +6005,27 @@ def _execute_resident_quantization_pipeline(
                             tuning_recorder,
                             learning_rates=_factorized_tuning_learning_rates(request),
                         )
+                binary_factor_search = None
+                if _binary_factor_search_selected(
+                    request.binary_factor_search,
+                    group_plan.name,
+                ):
+                    with _profile_layer_phase(
+                        recorder,
+                        block_index,
+                        group_plan.name,
+                        "binary_factor_search",
+                    ):
+                        binary_factor_search = _refine_trainable_binary_factors(
+                            request,
+                            synthetic_plan.layer,
+                            outliers.residual_weight,
+                            outliers.factor_input_importance,
+                            synthetic_plan.objective.output_importance,
+                            trainable_group,
+                            tensors,
+                            events,
+                        )
                 with _profile_layer_phase(recorder, block_index, group_plan.name, "freeze"):
                     frozen_group = SharedInputGroupFreezer().freeze(
                         member_ids,
@@ -5787,6 +6096,7 @@ def _execute_resident_quantization_pipeline(
                         accepted.extra_retry_bits,
                         (),
                         bias_correction,
+                        binary_factor_search,
                     )
                 with _logged_operation(
                     events,
@@ -6214,6 +6524,27 @@ def _execute_resident_quantization_pipeline(
                                 resume=None if active_checkpoint is None else active_checkpoint.state,
                                 checkpoint_sink=checkpoint_sink,
                             )
+                binary_factor_search = None
+                if _binary_factor_search_selected(
+                    request.binary_factor_search,
+                    layer_plan.layer.path,
+                ):
+                    with _profile_layer_phase(
+                        recorder,
+                        block_index,
+                        layer_plan.layer.path,
+                        "binary_factor_search",
+                    ):
+                        binary_factor_search = _refine_trainable_binary_factors(
+                            request,
+                            layer_plan.layer,
+                            outliers.residual_weight,
+                            outliers.factor_input_importance,
+                            layer_plan.objective.output_importance,
+                            trainable,
+                            tensors,
+                            events,
+                        )
                 with _profile_layer_phase(recorder, block_index, layer_plan.layer.path, "freeze"):
                     frozen_outliers = (
                         None
@@ -6268,6 +6599,7 @@ def _execute_resident_quantization_pipeline(
                         ),
                         bias_correction,
                         low_rank_patch,
+                        binary_factor_search,
                     )
                 with _logged_operation(
                     events,
@@ -7002,6 +7334,16 @@ def _run_resident_factorization_slice_impl(
                 outlier_values=outlier_values,
                 outlier_scales=outlier_scales,
             )
+        binary_factor_search = _refine_trainable_binary_factors(
+            request,
+            layer_plan.layer,
+            outliers.residual_weight,
+            outliers.factor_input_importance,
+            layer_plan.objective.output_importance,
+            trainable,
+            tensors,
+            events,
+        )
         frozen_outliers = (
             None
             if layer_plan.outliers.count == 0
@@ -7045,6 +7387,7 @@ def _run_resident_factorization_slice_impl(
             ("tuning_disabled",) if request.scale_fit.enabled else ("scale_fit_disabled", "tuning_disabled"),
             bias_correction,
             None,
+            binary_factor_search,
         )
         committed = commit_layer(layer_result, artifacts, identity)
         journal_record = journal.append(

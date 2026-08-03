@@ -14,6 +14,17 @@ def test_experiment055_is_an_equal_budget_overcomplete_replay_of_054() -> None:
         "evidence/054/054-d2-uniform-control-kl-profile"
     )
     assert candidate.config.block_tuning.factorized.learning_rates.binary == 3e-5
+    search = candidate.config.factorization.binary_search
+    assert search.enabled is True
+    assert search.control_outer_passes == 8
+    assert search.one_bit_passes == 16
+    assert search.variable_depth_passes == 2
+    assert search.variable_depth_length == 64
+    assert search.tabu_outer_passes == 8
+    assert search.tabu_passes == 2
+    assert search.tabu_steps == 256
+    assert search.tabu_tenure == 8
+    assert search.tabu_tenure_jitter == 4
     assert candidate.workflow.task_limit == 1000
     assert candidate.workflow.interrupt_after_block_commits == 1
     assert config_diff_paths(baseline.config, candidate.config) == {
@@ -21,6 +32,7 @@ def test_experiment055_is_an_equal_budget_overcomplete_replay_of_054() -> None:
         "allocation.bounds.overcomplete_rank_ceiling_fraction",
         "allocation.kl_profile_artifact",
         "allocation.kl_profile_key",
+        "factorization.binary_search.enabled",
         "intent.baseline_run",
         "intent.experiment_number",
         "intent.hypothesis",

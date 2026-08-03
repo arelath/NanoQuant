@@ -1296,3 +1296,81 @@ def refine_binary_factors_separable(
         totals.joint_updates,
         totals.joint_patterns_evaluated,
     )
+
+
+def refine_binary_factors_control_then_tabu(
+    target: torch.Tensor,
+    left_binary: torch.Tensor,
+    right_binary: torch.Tensor,
+    scale_pre: torch.Tensor,
+    scale_mid: torch.Tensor,
+    scale_post: torch.Tensor,
+    input_importance: torch.Tensor,
+    output_importance: torch.Tensor,
+    *,
+    scale_passes: int,
+    control_outer_passes: int,
+    one_bit_passes: int,
+    one_bit_fraction: float,
+    max_one_bit_vectors: int,
+    variable_depth_passes: int,
+    variable_depth_length: int,
+    tabu_outer_passes: int,
+    tabu_passes: int,
+    tabu_steps: int,
+    tabu_tenure: int,
+    tabu_tenure_jitter: int,
+) -> tuple[BinaryFactorSearchResult, BinaryFactorSearchResult]:
+    """Run the retained local control to convergence, then add only tabu.
+
+    Both phases retain exact separable-objective rollback.  The second call's
+    mandatory initial scale fit gives tabu the same common-refit semantics used
+    by the production-sized Experiment 052 validation.
+    """
+
+    control = refine_binary_factors_separable(
+        target,
+        left_binary,
+        right_binary,
+        scale_pre,
+        scale_mid,
+        scale_post,
+        input_importance,
+        output_importance,
+        outer_passes=control_outer_passes,
+        scale_passes=scale_passes,
+        continuous_candidates=False,
+        one_bit_passes=one_bit_passes,
+        one_bit_fraction=one_bit_fraction,
+        max_one_bit_vectors=max_one_bit_vectors,
+        variable_depth_passes=variable_depth_passes,
+        variable_depth_length=variable_depth_length,
+        pair_passes=0,
+        block_bits=0,
+        block_passes=0,
+        component_passes=0,
+    )
+    tabu = refine_binary_factors_separable(
+        target,
+        control.left_binary,
+        control.right_binary,
+        control.scale_pre,
+        control.scale_mid,
+        control.scale_post,
+        input_importance,
+        output_importance,
+        outer_passes=tabu_outer_passes,
+        scale_passes=scale_passes,
+        continuous_candidates=False,
+        one_bit_passes=0,
+        variable_depth_passes=0,
+        tabu_passes=tabu_passes,
+        tabu_steps=tabu_steps,
+        tabu_tenure=tabu_tenure,
+        tabu_tenure_jitter=tabu_tenure_jitter,
+        pair_passes=0,
+        block_bits=0,
+        block_passes=0,
+        component_passes=0,
+    )
+    return control, tabu

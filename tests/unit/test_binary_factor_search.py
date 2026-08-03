@@ -11,6 +11,7 @@ from nanoquant.domain.binary_factor_search import (
     _scores,
     _tabu_pass,
     _variable_depth_pass,
+    refine_binary_factors_control_then_tabu,
     refine_binary_factors_separable,
 )
 from nanoquant.domain.scale_fit import fit_scales, reconstruct
@@ -54,6 +55,36 @@ def test_direct_binary_search_never_regresses_weighted_objective() -> None:
     torch.testing.assert_close(result.reconstruction, expected)
     assert result.after_error <= result.before_error
     assert result.block_patterns_evaluated <= 4 * 2 * 4 * (1 << 4)
+
+
+def test_control_then_tabu_protocol_preserves_the_control_floor() -> None:
+    target, left, right, pre, mid, post = _random_problem(5, 71)
+
+    control, tabu = refine_binary_factors_control_then_tabu(
+        target,
+        left,
+        right,
+        pre,
+        mid,
+        post,
+        torch.ones(5),
+        torch.ones(5),
+        scale_passes=8,
+        control_outer_passes=3,
+        one_bit_passes=4,
+        one_bit_fraction=1.0,
+        max_one_bit_vectors=5,
+        variable_depth_passes=1,
+        variable_depth_length=5,
+        tabu_outer_passes=2,
+        tabu_passes=1,
+        tabu_steps=16,
+        tabu_tenure=3,
+        tabu_tenure_jitter=2,
+    )
+
+    assert control.after_error <= control.before_error
+    assert tabu.after_error <= control.after_error + 1e-6
 
 
 def test_full_rank_block_search_is_at_least_as_strong_as_one_bit_search() -> None:

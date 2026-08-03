@@ -672,6 +672,22 @@ class FrozenSharedInputGroupState:
 
 
 @dataclass(frozen=True, slots=True)
+class BinaryFactorSearchMetrics:
+    initial_weighted_squared_error: float
+    control_weighted_squared_error: float
+    tabu_weighted_squared_error: float
+    control_accepted_outer_passes: int
+    tabu_accepted_outer_passes: int
+    one_bit_updates: int
+    variable_depth_updates: int
+    tabu_updates: int
+    tabu_sign_distance_from_control: int
+    selected_initial: bool
+    selected_tabu: bool
+    wall_seconds: float
+
+
+@dataclass(frozen=True, slots=True)
 class LayerResult:
     schema_version: int
     layer: LayerId
@@ -688,6 +704,7 @@ class LayerResult:
     warnings: tuple[str, ...]
     bias_correction: BiasCorrectionResult | None = None
     low_rank_patch: LowRankPatchResult | None = None
+    binary_factor_search: BinaryFactorSearchMetrics | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -708,6 +725,7 @@ class SharedInputGroupResult:
     extra_retry_bits: int
     warnings: tuple[str, ...]
     bias_correction: BiasCorrectionResult | None = None
+    binary_factor_search: BinaryFactorSearchMetrics | None = None
 
 
 @dataclass(frozen=True, slots=True)

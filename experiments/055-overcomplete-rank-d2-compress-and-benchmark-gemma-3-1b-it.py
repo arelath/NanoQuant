@@ -14,6 +14,7 @@ from recipes import (
 from nanoquant.config.schema import (
     AllocationStrategy,
     BiasCorrectionConfig,
+    BinaryFactorSearchConfig,
     KlAllocationObjective,
     KlSensitivityGranularity,
     LowRankPatchConfig,
@@ -64,6 +65,7 @@ CONFIG = replace(
     ),
     factorization=replace(
         BASE_CONFIG.factorization,
+        binary_search=BinaryFactorSearchConfig(enabled=True),
         bias_correction=BiasCorrectionConfig(enabled=False),
         low_rank_patch=LowRankPatchConfig(enabled=False),
         shared_input=replace(
@@ -99,7 +101,8 @@ _DEFINED_EXPERIMENT = define_compression_quality_experiment(
         purpose=(
             "Remove the algebraic-dimension rank ceiling from the measured D2 allocation, "
             "permit bounded over-complete binary factors at unchanged target BPW, and determine "
-            "whether saturated projections—especially down_proj—earn and use the extra capacity."
+            "whether saturated projections—especially down_proj—earn and use the extra capacity, "
+            "with the retained control-then-tabu sign search applied before each owner is frozen."
         ),
         hypothesis=(
             "Because rank=min(m,n) does not span arbitrary matrices under binary factors and "
@@ -116,6 +119,7 @@ _DEFINED_EXPERIMENT = define_compression_quality_experiment(
             "overcomplete-rank",
             "rank-ceiling-1p5x",
             "same-bpw",
+            "reactive-tabu",
             "functional-binary-tuning",
             "experiment-054-comparison",
         ),

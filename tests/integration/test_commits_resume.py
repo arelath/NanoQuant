@@ -8,6 +8,7 @@ from nanoquant.config.schema import ProfilingConfig, ProfilingLevel
 from nanoquant.domain.models import (
     ArtifactRef,
     AttemptSummary,
+    BinaryFactorSearchMetrics,
     BitCost,
     BlockId,
     BlockPlan,
@@ -73,7 +74,36 @@ def _objects() -> tuple[LayerResult, QuantizationPlan, FrozenBlockState, object]
     metrics = ReconstructionMetrics("diagonal", 1, None, None, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1)
     attempt = AttemptSummary(0, 1, artifact, 0.1, 0.1, cost, 0.1, True, "accepted")
     frozen = FrozenNanoQuantState(layer, 1, tensor, tensor, scales, None, None, "nanoquant-v1")
-    result = LayerResult(1, layer, layer_plan, (attempt,), 0, artifact, None, None, frozen, metrics, cost, 0, ())
+    binary_search = BinaryFactorSearchMetrics(
+        1.0,
+        0.9,
+        0.8,
+        2,
+        1,
+        3,
+        4,
+        5,
+        6,
+        False,
+        True,
+        7.0,
+    )
+    result = LayerResult(
+        1,
+        layer,
+        layer_plan,
+        (attempt,),
+        0,
+        artifact,
+        None,
+        None,
+        frozen,
+        metrics,
+        cost,
+        0,
+        (),
+        binary_factor_search=binary_search,
+    )
     model = ModelIdentity("fixture", "rev", "config", "fixture", "tok", ComponentRef("tiny", "1"))
     plan = QuantizationPlan(
         1, ComponentRef("planner", "1"), model, artifact, (BlockPlan(block, (layer,), (layer_plan,), 16),), 1.0, cost

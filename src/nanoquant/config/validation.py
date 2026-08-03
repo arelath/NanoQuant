@@ -586,6 +586,38 @@ def validate(config: RunConfig, phase: ValidationPhase = ValidationPhase.PRE_RES
         "factorization.shared_input.groups.member_multipliers",
         "multipliers must be finite and positive",
     )
+    binary_search = config.factorization.binary_search
+    require(
+        bool(binary_search.layer_patterns)
+        and len(set(binary_search.layer_patterns)) == len(binary_search.layer_patterns)
+        and all(bool(pattern.strip()) for pattern in binary_search.layer_patterns),
+        "CFG133",
+        "factorization.binary_search.layer_patterns",
+        "must contain unique non-empty patterns",
+    )
+    require(
+        binary_search.scale_passes > 0
+        and binary_search.control_outer_passes > 0
+        and binary_search.one_bit_passes > 0
+        and binary_search.max_one_bit_vectors > 0
+        and binary_search.variable_depth_passes > 0
+        and binary_search.variable_depth_length > 0
+        and binary_search.tabu_outer_passes > 0
+        and binary_search.tabu_passes > 0
+        and binary_search.tabu_steps > 0
+        and binary_search.tabu_tenure > 0
+        and binary_search.tabu_tenure_jitter >= 0,
+        "CFG134",
+        "factorization.binary_search",
+        "enabled protocol depths and bounds must be positive",
+    )
+    require(
+        math.isfinite(binary_search.one_bit_fraction)
+        and 0 < binary_search.one_bit_fraction <= 1,
+        "CFG135",
+        "factorization.binary_search.one_bit_fraction",
+        "must be finite and in (0, 1]",
+    )
     bias = config.factorization.bias_correction
     require(
         bias.storage_dtype in {DType.FLOAT16, DType.BFLOAT16},

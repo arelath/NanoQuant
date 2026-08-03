@@ -72,6 +72,7 @@ def test_resident_recipe_maps_every_hidden_parity_semantic(tmp_path: Path) -> No
     assert request.rank_retry.thresholds.raw_normalized_error == 0.5
     assert request.maximum_rank_layer_patterns == config.allocation.maximum_rank_layer_patterns
     assert request.layer_budget_multipliers == config.allocation.layer_budget_multipliers
+    assert request.binary_factor_search == config.factorization.binary_search
     assert request.nonfactorized_tuning_epochs == 0
     assert request.nonfactorized_tuning_epochs_by_layer == (8, 4, 3, 2, 2, 2, 2)
     assert request.factorized_tuning_epochs == 8

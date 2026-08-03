@@ -380,6 +380,26 @@ class ScaleFitConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class BinaryFactorSearchConfig:
+    """Bounded post-tuning sign search with an exact-objective rollback gate."""
+
+    enabled: bool = False
+    layer_patterns: tuple[str, ...] = ("*",)
+    scale_passes: int = 64
+    control_outer_passes: int = 8
+    one_bit_passes: int = 16
+    one_bit_fraction: float = 1.0
+    max_one_bit_vectors: int = 2**31 - 1
+    variable_depth_passes: int = 2
+    variable_depth_length: int = 64
+    tabu_outer_passes: int = 8
+    tabu_passes: int = 2
+    tabu_steps: int = 256
+    tabu_tenure: int = 8
+    tabu_tenure_jitter: int = 4
+
+
+@dataclass(frozen=True, slots=True)
 class BiasCorrectionConfig:
     enabled: bool = False
     storage_dtype: DType = DType.FLOAT16
@@ -425,6 +445,7 @@ class FactorizationConfig:
     solve_dtype: DType = DType.FLOAT32
     admm: ADMMConfig = field(default_factory=ADMMConfig)
     scale_fit: ScaleFitConfig = field(default_factory=ScaleFitConfig)
+    binary_search: BinaryFactorSearchConfig = field(default_factory=BinaryFactorSearchConfig)
     bias_correction: BiasCorrectionConfig = field(default_factory=BiasCorrectionConfig)
     low_rank_patch: LowRankPatchConfig = field(default_factory=LowRankPatchConfig)
     shared_input: SharedInputFactorizationConfig = field(default_factory=SharedInputFactorizationConfig)

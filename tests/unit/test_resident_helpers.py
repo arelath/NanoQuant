@@ -7,11 +7,14 @@ from typing import cast
 import pytest
 import torch
 
+from nanoquant.config.schema import BinaryFactorSearchConfig
 from nanoquant.resident_quantization import (
     ResidentQuantizationRequest,
     _clone_forward_metadata,
     _epoch_cooldown_observer,
+    _execute_binary_factor_search,
     _resident_config_hash,
+    _stored_search_error,
 )
 
 
@@ -73,3 +76,99 @@ def test_forward_metadata_clone_isolates_nested_tensor_mutation() -> None:
     source_positions = cast(tuple[torch.Tensor, dict[str, torch.Tensor]], source["position_embeddings"])
     assert torch.equal(source_positions[0], torch.tensor([3.0]))
     assert torch.equal(source_positions[1]["sin"], torch.tensor([4.0]))
+
+
+def test_binary_factor_search_selects_the_best_stored_dtype_state() -> None:
+    generator = torch.Generator().manual_seed(91)
+    target = torch.randn((5, 5), generator=generator)
+    left = torch.randint(0, 2, (5, 5), generator=generator).float().mul_(2).sub_(1)
+    right = torch.randint(0, 2, (5, 5), generator=generator).float().mul_(2).sub_(1)
+    scales = torch.ones(5, dtype=torch.bfloat16)
+    importance = torch.ones(5)
+    config = BinaryFactorSearchConfig(
+        enabled=True,
+        scale_passes=8,
+        control_outer_passes=2,
+        one_bit_passes=4,
+        max_one_bit_vectors=5,
+        variable_depth_passes=1,
+        variable_depth_length=5,
+        tabu_outer_passes=2,
+        tabu_passes=1,
+        tabu_steps=16,
+        tabu_tenure=3,
+        tabu_tenure_jitter=2,
+    )
+
+    selected, metrics = _execute_binary_factor_search(
+        target,
+        left,
+        right,
+        scales,
+        scales,
+        scales,
+        importance,
+        importance,
+        config,
+    )
+    selected_error = _stored_search_error(
+        target,
+        selected,
+        importance,
+        importance,
+        torch.bfloat16,
+    )
+
+    assert selected_error == pytest.approx(
+        min(
+            metrics.initial_weighted_squared_error,
+            metrics.control_weighted_squared_error,
+            metrics.tabu_weighted_squared_error,
+        )
+    )
+    assert metrics.selected_initial == (
+        metrics.initial_weighted_squared_error
+        <= min(metrics.control_weighted_squared_error, metrics.tabu_weighted_squared_error)
+    )
+    assert metrics.selected_tabu == (
+        metrics.tabu_weighted_squared_error
+        < min(metrics.initial_weighted_squared_error, metrics.control_weighted_squared_error)
+    )
+
+
+def test_binary_factor_search_retains_the_incumbent_on_a_stored_dtype_tie() -> None:
+    left = torch.tensor([[1.0, -1.0], [-1.0, 1.0]])
+    right = left.clone()
+    scales = torch.zeros(2, dtype=torch.bfloat16)
+    config = BinaryFactorSearchConfig(
+        enabled=True,
+        scale_passes=2,
+        control_outer_passes=1,
+        one_bit_passes=1,
+        max_one_bit_vectors=2,
+        variable_depth_passes=1,
+        variable_depth_length=2,
+        tabu_outer_passes=1,
+        tabu_passes=1,
+        tabu_steps=2,
+        tabu_tenure=1,
+        tabu_tenure_jitter=0,
+    )
+
+    selected, metrics = _execute_binary_factor_search(
+        torch.zeros((2, 2)),
+        left,
+        right,
+        scales,
+        scales,
+        scales,
+        torch.ones(2),
+        torch.ones(2),
+        config,
+    )
+
+    assert metrics.initial_weighted_squared_error == 0.0
+    assert metrics.selected_initial is True
+    assert metrics.selected_tabu is False
+    assert torch.equal(selected.left_binary, left)
+    assert torch.equal(selected.right_binary, right)
