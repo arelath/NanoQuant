@@ -71,7 +71,8 @@ ADMM-only. The packed layout and runtime are rank-agnostic; no format change is 
 
 Status: **Not run under the version-57 approximate-probe policy**. Earlier attempts completed only part of the
 rank-response probe and no block commits. Their probe-plan identities are incompatible with version 57 and will not
-be reused; retained evidence remains preserved rather than rewritten.
+be reused. The interrupted version-56 run was rolled over without deleting or rewriting it and is retained at
+`evidence/055/055-overcomplete-rank-d2-compress-and-benchmark-gemma-3-1b-it--archive-535f37b234c1`.
 
 Promotion requires:
 

@@ -151,7 +151,15 @@ def test_rollover_compares_expected_hash_with_embedded_canonical_run_config(
         )
 
 
-def test_rollover_requires_explicit_acceptance_and_preserves_failed_run(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("status", "acceptance"),
+    (("failed", {"allow_failed": True}), ("interrupted", {"allow_interrupted": True})),
+)
+def test_rollover_requires_explicit_acceptance_and_preserves_incomplete_run(
+    tmp_path: Path,
+    status: str,
+    acceptance: dict[str, bool],
+) -> None:
     run = tmp_path / "evidence" / "054" / "054-fixture"
     outputs = tmp_path / "outputs" / "054"
     results = tmp_path / "Results" / "054"
@@ -159,7 +167,7 @@ def test_rollover_requires_explicit_acceptance_and_preserves_failed_run(tmp_path
     old_hash = "sha256:" + "a" * 64
     new_hash = "sha256:" + "b" * 64
     (run / "manifest.json").write_text(
-        json.dumps({"status": "failed", "config_hash": old_hash}),
+        json.dumps({"status": status, "config_hash": old_hash}),
         encoding="utf-8",
     )
 
@@ -171,12 +179,12 @@ def test_rollover_requires_explicit_acceptance_and_preserves_failed_run(tmp_path
         outputs,
         results,
         expected_config_hash=new_hash,
-        allow_failed=True,
+        **acceptance,
     )
     fresh = execute_rollover(plan)
 
-    assert plan.stored_status == "failed"
+    assert plan.stored_status == status
     assert plan.run_archive.joinpath("manifest.json").is_file()
     assert not fresh.joinpath("manifest.json").exists()
     rollover = json.loads((fresh / "state" / "config-rollover.json").read_text(encoding="utf-8"))
-    assert rollover["stored_status"] == "failed"
+    assert rollover["stored_status"] == status
