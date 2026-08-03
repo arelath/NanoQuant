@@ -152,9 +152,15 @@ def execute_kl_budget(args: argparse.Namespace) -> int:
         samples=args.wikitext_samples,
         sequence_length=args.sequence_length,
         local_files_only=args.local_files_only,
+        progress=lambda event, fields: print(
+            f"[kl-budget] {event}"
+            + (" " + " ".join(f"{key}={value}" for key, value in sorted(fields.items())) if fields else ""),
+            flush=True,
+        ),
     )
     token_hash = _token_hash(tokens)
     with acquire_device_lease(args.device):
+        print("[kl-budget] loading tuned splice reconstructions", flush=True)
         loaded = load_splice_reconstructions_from_run(
             args.run_output,
             _expected_blocks(config),
@@ -163,7 +169,12 @@ def execute_kl_budget(args: argparse.Namespace) -> int:
             revision=args.revision,
             model_config_hash=_model_config_hash(config),
             use_global_tuning=args.use_global_tuning,
+            progress=lambda block, total: print(
+                f"[kl-budget] reconstructing block {block}/{total}",
+                flush=True,
+            ),
         )
+        print("[kl-budget] splice reconstructions loaded", flush=True)
         reconstructions = loaded.reconstructions
         identity = loaded.identity
         model_hash = identity.model_hash
@@ -171,6 +182,7 @@ def execute_kl_budget(args: argparse.Namespace) -> int:
         del loaded
         gc.collect()
         model_dtype = _dtype(config)
+        print("[kl-budget] loading BF16 teacher", flush=True)
         teacher = load_causal_language_model(
             args.snapshot,
             torch_dtype=model_dtype,
@@ -178,6 +190,7 @@ def execute_kl_budget(args: argparse.Namespace) -> int:
             local_files_only=args.local_files_only,
         ).to(args.device)
         teacher.eval()
+        print("[kl-budget] BF16 teacher loaded", flush=True)
         evaluator = DenseKlSpliceEvaluator(
             teacher,
             reconstructions,
@@ -217,6 +230,7 @@ def execute_kl_budget(args: argparse.Namespace) -> int:
                     teacher_cache.batches,
                 )
                 teacher_cache_reused = True
+        print("[kl-budget] measuring sensitivity arms", flush=True)
         base_recipe_hash = identity.config_hash
         base_source_identity = f"{identity.config_hash}|{identity.model_hash}|{identity.plan_hash}"
         recipe_hash = _profile_recipe_hash(
@@ -248,6 +262,7 @@ def execute_kl_budget(args: argparse.Namespace) -> int:
             resume=checkpoint,
             checkpoint=save_checkpoint,
         )
+        print("[kl-budget] sensitivity profile complete", flush=True)
         save_checkpoint(profile)
         persisted = persist_kl_budget_profile(profile, LocalArtifactStore(args.profile_output / "artifacts"))
         atomic_write_json(

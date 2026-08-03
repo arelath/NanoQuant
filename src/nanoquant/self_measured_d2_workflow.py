@@ -291,7 +291,7 @@ def _prepare_automatic_kl_inputs(
             teacher_cache_mode="cpu",
             teacher_cache_root=campaign_root / _TEACHER_CACHE_NAME,
             use_global_tuning=profile_options.tuned_operating_point,
-            local_files_only=False,
+            local_files_only=experiment.workflow.local_files_only,
         )
     )
     return profile_path, control_run

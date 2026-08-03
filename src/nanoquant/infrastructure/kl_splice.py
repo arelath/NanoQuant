@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -135,6 +136,7 @@ def load_splice_reconstructions_from_run(
     revision: str,
     model_config_hash: str,
     use_global_tuning: bool = False,
+    progress: Callable[[int, int], None] | None = None,
 ) -> LoadedSpliceReconstructionRun:
     """Materialize committed splice weights without constructing a candidate model shell."""
 
@@ -202,7 +204,12 @@ def load_splice_reconstructions_from_run(
     layer_freezer = LayerFreezer()
     group_freezer = SharedInputGroupFreezer()
     with torch.inference_mode():
-        for block_result, frozen_block in zip(committed, frozen_blocks, strict=True):
+        for block_position, (block_result, frozen_block) in enumerate(
+            zip(committed, frozen_blocks, strict=True),
+            start=1,
+        ):
+            if progress is not None:
+                progress(block_position, len(frozen_blocks))
             if block_result.block != frozen_block.block:
                 raise ValueError("splice block result and selected frozen state differ")
             layer_states = {state.layer: state for state in frozen_block.quantized_layers}
