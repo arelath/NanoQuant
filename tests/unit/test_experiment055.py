@@ -1,4 +1,11 @@
+import runpy
+from pathlib import Path
+from typing import Any
+
+import pytest
+
 from tests.support.experiments import config_diff_paths, load_experiment
+from tools import run_experiment055_campaign as campaign
 
 
 def test_experiment055_is_an_equal_budget_overcomplete_replay_of_054() -> None:
@@ -49,3 +56,27 @@ def test_experiment055_is_an_equal_budget_overcomplete_replay_of_054() -> None:
         "intent.tags",
         "output.run_root",
     }
+
+
+def test_experiment055_launcher_controls_slices_and_marks_workers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    launcher = next(Path("experiments").glob("055-*.py"))
+    namespace = runpy.run_path(str(launcher))
+    entry = namespace["_run_worker_or_campaign"]
+
+    monkeypatch.delenv(campaign.WORKER_ENVIRONMENT_VARIABLE, raising=False)
+    monkeypatch.setattr(campaign, "main", lambda: 17)
+    assert entry() == 17
+
+    observed: dict[str, Any] = {}
+
+    def run_worker(definition: object, *, launcher_path: str) -> int:
+        observed.update(definition=definition, launcher_path=launcher_path)
+        return 23
+
+    monkeypatch.setenv(campaign.WORKER_ENVIRONMENT_VARIABLE, "1")
+    monkeypatch.setitem(entry.__globals__, "run_experiment", run_worker)
+    assert entry() == 23
+    assert observed["definition"] is namespace["EXPERIMENT"]
+    assert Path(observed["launcher_path"]).name == launcher.name

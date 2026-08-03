@@ -13,6 +13,7 @@ from pathlib import Path
 _INTERRUPTION_MARKER = "injected interruption after 1 new block commits"
 _SLICE_LOG_PREFIX = "campaign-slice-"
 _RUN_NAME = "055-overcomplete-rank-d2-compress-and-benchmark-gemma-3-1b-it"
+WORKER_ENVIRONMENT_VARIABLE = "NANOQUANT_EXPERIMENT_055_SLICE_WORKER"
 
 
 def _completed_blocks(run_root: Path) -> int:
@@ -49,6 +50,7 @@ def _campaign_environment() -> dict[str, str]:
             "HF_HUB_OFFLINE": "0",
             "HF_DATASETS_OFFLINE": "0",
             "TRANSFORMERS_OFFLINE": "1",
+            WORKER_ENVIRONMENT_VARIABLE: "1",
         }
     )
     return environment

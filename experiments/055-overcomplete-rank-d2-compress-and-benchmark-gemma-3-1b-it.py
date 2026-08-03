@@ -1,5 +1,6 @@
 """Experiment 055: equal-budget D2 allocation with bounded over-complete binary rank."""
 
+import os
 from dataclasses import replace
 
 from recipes import (
@@ -8,7 +9,8 @@ from recipes import (
     ExperimentIdentity,
     ExperimentRef,
     define_compression_quality_experiment,
-    experiment_main,
+    experiment_callable_main,
+    run_experiment,
 )
 
 from nanoquant.config.schema import (
@@ -149,4 +151,19 @@ EXPERIMENT = replace(
 )
 
 
-experiment_main(__name__, __file__, EXPERIMENT)
+def _run_worker_or_campaign() -> int:
+    """Keep each CUDA block in a fresh child while preserving zero-argument launch."""
+
+    from tools.run_experiment055_campaign import (
+        WORKER_ENVIRONMENT_VARIABLE,
+    )
+    from tools.run_experiment055_campaign import (
+        main as campaign_main,
+    )
+
+    if os.environ.get(WORKER_ENVIRONMENT_VARIABLE) == "1":
+        return run_experiment(EXPERIMENT, launcher_path=__file__)
+    return campaign_main()
+
+
+experiment_callable_main(__name__, _run_worker_or_campaign)

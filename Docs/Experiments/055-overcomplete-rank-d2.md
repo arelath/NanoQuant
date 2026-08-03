@@ -61,7 +61,11 @@ The retained profile is
 `sha256:4a67e45d5266763b09e3b487a3820f4ad8520201b144807241e2744d9c271bf9`. The uniform control that produced this
 profile is numerically unchanged, so Experiment 055 reuses it and measures new response points above the old cap.
 The campaign permits dataset-hub access only so 055 can create its required run-owned calibration receipt; model
-resolution remains pinned to the local snapshot. Later slices reuse the validated receipt from this run.
+resolution remains pinned to the local snapshot. Later slices reuse the validated receipt from this run. The normal
+zero-argument Experiment 055 launcher is the campaign controller: it starts a fresh child for each one-block slice,
+recognizes the expected injected interruption only after the durable block count advances, and continues through the
+final unbounded completion/export slice. The worker-only environment marker prevents recursive controllers. Ordinary
+worker failures still stop the controller and surface the retained child stderr.
 
 The resident algorithm version advances from 54 to 58. Version 55 introduced the over-complete ceiling; version 56
 added the post-tuning binary-search path and persisted search metrics; version 57 makes reconstruction rank probes

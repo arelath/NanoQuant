@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 from tools.run_experiment055_campaign import (
+    WORKER_ENVIRONMENT_VARIABLE,
     _campaign_environment,
     _completed_blocks,
     _next_slice_index,
@@ -45,3 +46,4 @@ def test_campaign_allows_run_owned_calibration_bootstrap() -> None:
     assert environment["HF_HUB_OFFLINE"] == "0"
     assert environment["HF_DATASETS_OFFLINE"] == "0"
     assert environment["TRANSFORMERS_OFFLINE"] == "1"
+    assert environment[WORKER_ENVIRONMENT_VARIABLE] == "1"
