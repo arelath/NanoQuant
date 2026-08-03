@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import torch
+from safetensors.torch import save_file
 
 from nanoquant.domain.planning import factor_bit_cost
 from tools.probe_factor_grouping import (
@@ -12,7 +16,9 @@ from tools.probe_factor_grouping import (
     adjacent_topologies,
     attention_partition_topologies,
     attention_topologies,
+    load_objective_profiles,
     maximum_rank_for_budget,
+    mlp_partition_topologies,
     requested_topologies,
     summarize_topology,
 )
@@ -81,6 +87,58 @@ def test_attention_partition_cache_reuses_identical_member_subsets() -> None:
         second_group,
         586,
     )
+
+
+def test_mlp_partitions_enumerate_bell_three_once() -> None:
+    topologies = mlp_partition_topologies(7)
+
+    assert [topology.variant for topology in topologies] == [
+        "partition-g-u-d",
+        "partition-gu-d",
+        "partition-gd-u",
+        "partition-ud-g",
+        "partition-gud",
+    ]
+    canonical_partitions = set()
+    for topology in topologies:
+        groups = tuple(
+            sorted(tuple(sorted(member.label for member in group.members)) for group in topology.groups)
+        )
+        canonical_partitions.add(groups)
+        covered = sorted(member for group in groups for member in group)
+        assert covered == ["7:down^T", "7:gate", "7:up"]
+    assert len(canonical_partitions) == 5
+
+
+def test_load_objective_profiles_reads_resident_artifact(tmp_path: Path) -> None:
+    artifact_id = "sha256-" + "a" * 64
+    artifact_directory = tmp_path / "artifacts" / "aa" / artifact_id
+    artifact_directory.mkdir(parents=True)
+    save_file(
+        {
+            "block_7.mlp.gate_proj.input_importance": torch.tensor([1.0, 2.0]),
+            "block_7.mlp.gate_proj.output_importance": torch.tensor([3.0, 4.0, 5.0]),
+        },
+        artifact_directory / "tensors.safetensors",
+    )
+    objectives_directory = tmp_path / "artifacts" / "bb" / ("sha256-" + "b" * 64)
+    objectives_directory.mkdir(parents=True)
+    reference = {"artifact": {"artifact_id": artifact_id}}
+    objectives = [
+        {
+            "layer": {"block": {"index": 7}, "path": "mlp.gate_proj"},
+            "input_importance": reference | {"key": "block_7.mlp.gate_proj.input_importance"},
+            "output_importance": reference | {"key": "block_7.mlp.gate_proj.output_importance"},
+        }
+    ]
+    objectives_path = objectives_directory / "objectives.json"
+    objectives_path.write_text(json.dumps(objectives), encoding="utf-8")
+
+    profiles = load_objective_profiles(objectives_path)
+
+    input_importance, output_importance = profiles["block.7.mlp.gate_proj"]
+    assert torch.equal(input_importance, torch.tensor([1.0, 2.0]))
+    assert torch.equal(output_importance, torch.tensor([3.0, 4.0, 5.0]))
 
 
 def test_reciprocal_group_charges_distinct_fisher_input_profiles() -> None:
@@ -169,6 +227,21 @@ def test_requested_topologies_filters_attention_partitions() -> None:
     assert [topology.variant for topology in topologies] == [
         "partition-qkv-o",
         "partition-qv-ko",
+    ]
+
+
+def test_requested_topologies_filters_mlp_partitions() -> None:
+    topologies = requested_topologies(
+        ("mlp-partitions",),
+        (),
+        (),
+        mlp_blocks=(5,),
+        mlp_partition_variants=("partition-g-u-d", "partition-gd-u"),
+    )
+
+    assert [topology.variant for topology in topologies] == [
+        "partition-g-u-d",
+        "partition-gd-u",
     ]
 
 

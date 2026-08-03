@@ -41,6 +41,7 @@ PROJECTION_PATHS = {
 SUPPORTED_ARMS = (
     "attention-reciprocal",
     "attention-partitions",
+    "mlp-partitions",
     "adjacent-qkv",
     "adjacent-gate",
     "adjacent-up",
@@ -105,6 +106,7 @@ class ProbeProtocol:
     device: str
     calibration_state: str | None = None
     calibration_shrinkage: float = 0.0
+    objective_specs: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -224,6 +226,38 @@ def attention_partition_topologies(block: int) -> tuple[TopologySpec, ...]:
     return tuple(result)
 
 
+def mlp_partition_topologies(block: int) -> tuple[TopologySpec, ...]:
+    """Return every set partition of gate, up, and transposed down once."""
+
+    members = {
+        "g": MemberSpec(block, "gate"),
+        "u": MemberSpec(block, "up"),
+        "d": MemberSpec(block, "down", True),
+    }
+    partitions = (
+        (("g",), ("u",), ("d",)),
+        (("g", "u"), ("d",)),
+        (("g", "d"), ("u",)),
+        (("u", "d"), ("g",)),
+        (("g", "u", "d"),),
+    )
+    return tuple(
+        TopologySpec(
+            "mlp-partitions",
+            "partition-" + "-".join("".join(names) for names in partition),
+            str(block),
+            tuple(
+                GroupSpec(
+                    "".join(names),
+                    tuple(members[name] for name in names),
+                )
+                for names in partition
+            ),
+        )
+        for partition in partitions
+    )
+
+
 def adjacent_topologies(projection: str, first: int, second: int) -> tuple[TopologySpec, TopologySpec]:
     if projection not in {"qkv", "gate", "up", "down"}:
         raise ValueError(f"unsupported adjacent projection group: {projection}")
@@ -257,6 +291,8 @@ def requested_topologies(
     adjacent_pairs: tuple[tuple[int, int], ...],
     reciprocal_vo_rank_shifts: tuple[int, ...] = (0,),
     attention_partition_variants: tuple[str, ...] = (),
+    mlp_blocks: tuple[int, ...] = (),
+    mlp_partition_variants: tuple[str, ...] = (),
 ) -> tuple[TopologySpec, ...]:
     result: list[TopologySpec] = []
     if "attention-reciprocal" in arms:
@@ -277,6 +313,20 @@ def requested_topologies(
                     topology
                     for topology in candidates
                     if topology.variant in attention_partition_variants
+                )
+            result.extend(candidates)
+    if "mlp-partitions" in arms:
+        for block in mlp_blocks:
+            candidates = mlp_partition_topologies(block)
+            if mlp_partition_variants:
+                available = {topology.variant for topology in candidates}
+                unknown = sorted(set(mlp_partition_variants) - available)
+                if unknown:
+                    raise ValueError(f"unknown MLP partition variants: {', '.join(unknown)}")
+                candidates = tuple(
+                    topology
+                    for topology in candidates
+                    if topology.variant in mlp_partition_variants
                 )
             result.extend(candidates)
     for arm in arms:
@@ -439,6 +489,41 @@ def load_calibration_profiles(
                 shrinkage,
             )
             result[path] = (input_importance, output_importance)
+    return result
+
+
+def load_objective_profiles(objectives_path: Path) -> dict[str, tuple[torch.Tensor, torch.Tensor]]:
+    """Load already-shrunk diagonal profiles from a resident objective artifact."""
+
+    objectives = json.loads(objectives_path.read_text(encoding="utf-8"))
+    if not isinstance(objectives, list) or not objectives:
+        raise ValueError("objective specs contain no layers")
+    try:
+        artifact_root = objectives_path.parents[2]
+    except IndexError as exc:
+        raise ValueError("objective specs path is not inside an artifact store") from exc
+    tensor_handles: dict[str, Any] = {}
+    result: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
+    try:
+        for objective in objectives:
+            layer = objective["layer"]
+            block = int(layer["block"]["index"])
+            path = str(layer["path"])
+            tensors: list[torch.Tensor] = []
+            for field in ("input_importance", "output_importance"):
+                reference = objective[field]
+                artifact_id = str(reference["artifact"]["artifact_id"])
+                tensor_path = artifact_root / artifact_id.split("-", 1)[1][:2] / artifact_id / "tensors.safetensors"
+                handle = tensor_handles.get(artifact_id)
+                if handle is None:
+                    handle = safe_open(str(tensor_path), framework="pt", device="cpu")
+                    handle.__enter__()
+                    tensor_handles[artifact_id] = handle
+                tensors.append(handle.get_tensor(str(reference["key"])).float())
+            result[f"block.{block}.{path}"] = (tensors[0], tensors[1])
+    finally:
+        for handle in tensor_handles.values():
+            handle.__exit__(None, None, None)
     return result
 
 
@@ -741,9 +826,12 @@ def _comparison_lines(topologies: dict[str, Any]) -> tuple[str, ...]:
     lines: list[str] = []
     for (comparison, location), variants in sorted(grouped.items()):
         ordered = sorted(variants, key=lambda item: str(item["variant"]))
-        if comparison == "attention-partitions" and len(ordered) > 2:
+        if comparison in {"attention-partitions", "mlp-partitions"} and len(ordered) > 2:
+            baseline_variant = (
+                "partition-qkv-o" if comparison == "attention-partitions" else "partition-g-u-d"
+            )
             baseline = next(
-                (item for item in ordered if item["variant"] == "partition-qkv-o"),
+                (item for item in ordered if item["variant"] == baseline_variant),
                 None,
             )
             if baseline is None:
@@ -774,9 +862,12 @@ def _comparison_lines(topologies: dict[str, Any]) -> tuple[str, ...]:
 
 
 def run(args: argparse.Namespace) -> int:
+    if args.calibration_state is not None and args.objective_specs is not None:
+        raise ValueError("calibration state and objective specs are mutually exclusive")
     calibration_state = None if args.calibration_state is None else str(args.calibration_state.resolve())
+    objective_specs = None if args.objective_specs is None else str(args.objective_specs.resolve())
     protocol = ProbeProtocol(
-        1,
+        2,
         args.model_revision,
         args.target_bpw,
         args.rank_alignment,
@@ -792,6 +883,7 @@ def run(args: argparse.Namespace) -> int:
         args.device,
         calibration_state,
         args.calibration_shrinkage,
+        objective_specs,
     )
     output = _load_output(args.output, protocol)
     topologies = requested_topologies(
@@ -800,14 +892,17 @@ def run(args: argparse.Namespace) -> int:
         args.adjacent_pairs,
         args.reciprocal_vo_rank_shifts,
         args.attention_partition_variants,
+        args.mlp_blocks,
+        args.mlp_partition_variants,
     )
     if not topologies:
         raise ValueError("the selected arms and block arguments produce no probe topologies")
-    profiles = (
-        None
-        if args.calibration_state is None
-        else load_calibration_profiles(args.calibration_state, args.calibration_shrinkage)
-    )
+    if args.objective_specs is not None:
+        profiles = load_objective_profiles(args.objective_specs)
+    elif args.calibration_state is not None:
+        profiles = load_calibration_profiles(args.calibration_state, args.calibration_shrinkage)
+    else:
+        profiles = None
     lease_context = acquire_device_lease(args.device) if args.device.startswith("cuda") else nullcontext()
     with lease_context, safe_open(str(args.model), framework="pt", device="cpu") as handle:
         for topology in topologies:
@@ -847,6 +942,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-revision", default=PINNED_MODEL_REVISION)
     parser.add_argument("--arms", type=_parse_arms, default=("attention-reciprocal",))
     parser.add_argument("--attention-blocks", type=_parse_ints, default=(16,))
+    parser.add_argument("--mlp-blocks", type=_parse_ints, default=())
     parser.add_argument("--adjacent-pairs", type=_parse_pairs, default=())
     parser.add_argument("--target-bpw", type=float, default=1.0)
     parser.add_argument("--rank-alignment", type=int, default=1)
@@ -858,9 +954,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--convergence-check-interval", type=int, default=100)
     parser.add_argument("--scale-fit-passes", type=int, default=2)
     parser.add_argument("--calibration-state", type=Path)
+    parser.add_argument("--objective-specs", type=Path)
     parser.add_argument("--calibration-shrinkage", type=float, default=0.6)
     parser.add_argument("--reciprocal-vo-rank-shifts", type=_parse_ints, default=(0,))
     parser.add_argument("--attention-partition-variants", type=_parse_names, default=())
+    parser.add_argument("--mlp-partition-variants", type=_parse_names, default=())
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="cuda:0")
     return parser
