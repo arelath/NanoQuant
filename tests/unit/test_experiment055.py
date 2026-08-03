@@ -14,6 +14,13 @@ def test_experiment055_is_an_equal_budget_overcomplete_replay_of_054() -> None:
         "evidence/054/054-d2-uniform-control-kl-profile"
     )
     assert candidate.config.block_tuning.factorized.learning_rates.binary == 3e-5
+    probe_admm = candidate.config.allocation.reconstruction.probe_admm
+    assert probe_admm is not None
+    assert probe_admm.outer_iterations == 100
+    assert probe_admm.inner_iterations == 5
+    assert probe_admm.regularization == 3e-2
+    assert probe_admm.penalty_schedule == "cubic"
+    assert probe_admm.transpose_wide is True
     search = candidate.config.factorization.binary_search
     assert search.enabled is True
     assert search.control_outer_passes == 8
@@ -32,6 +39,7 @@ def test_experiment055_is_an_equal_budget_overcomplete_replay_of_054() -> None:
         "allocation.bounds.overcomplete_rank_ceiling_fraction",
         "allocation.kl_profile_artifact",
         "allocation.kl_profile_key",
+        "allocation.reconstruction.probe_admm.outer_iterations",
         "factorization.binary_search.enabled",
         "intent.baseline_run",
         "intent.experiment_number",

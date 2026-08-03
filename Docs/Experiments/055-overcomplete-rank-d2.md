@@ -25,9 +25,9 @@ to the unchanged 1.0 target BPW, so selecting an over-complete owner requires an
 owners. For Gemma's MLP projections the measured ceiling is rank 1440, above the old rank-1152 limit; the independent
 hard ceiling is rank 1728.
 
-Experiment 055 also enables the retained Experiment 052 control-then-tabu sign search for every factor owner. This is
-an intentional second experimental variable requested before the compression run produced any complete block. Each
-rank-response point and each final owner uses:
+Experiment 055 also enables the retained Experiment 052 control-then-tabu sign search for every **final** factor
+owner. This is an intentional second experimental variable requested before the compression run produced any
+complete block. Each final owner uses:
 
 ```text
 scale fits:                 64 passes
@@ -43,7 +43,13 @@ For final owners the search runs after factorized tuning and before freezing. Th
 and tabu are rescored after casting scales to their persisted dtype. The lowest-error state is selected, with strict
 ties retaining the earlier state, so neither control nor tabu can replace the incumbent unless its stored
 representation improves the exact diagonal residual objective. Post-block scale refit then proceeds normally.
-Rank-response probes use the same search policy so the D2 allocator measures the capacity it will actually receive.
+
+Rank-response probes are deliberately cheaper approximations: they run ADMM only, with 100 outer iterations, five
+inner iterations, the unchanged `3e-2` regularization, and the normalized cubic penalty schedule. They do not run
+scale/control/one-bit/variable-depth/tabu refinement. ADMM has no learning-rate parameter, and the normalized schedule
+still reaches the same terminal penalty, so no learning-rate adjustment is applicable. This makes the allocation
+curve less representative of final post-search capacity but avoids repeating the expensive production search at all
+three response ranks for all 130 units. Production tuning and binary learning rates are unchanged.
 
 Experiment 052 showed why the final quality gate is binding: tabu improved the diagonal residual objective in all
 nine sampled real owners, but broad composition worsened held-out KL; only block-25 QKV survived a disjoint functional
@@ -57,16 +63,15 @@ profile is numerically unchanged, so Experiment 055 reuses it and measures new r
 The campaign permits dataset-hub access only so 055 can create its required run-owned calibration receipt; model
 resolution remains pinned to the local snapshot. Later slices reuse the validated receipt from this run.
 
-The resident algorithm version advances from 54 to 56. Version 55 introduced the over-complete ceiling; version 56
-adds the post-tuning binary-search path and persisted search metrics. The packed layout and runtime are rank-agnostic;
-no format change is required.
+The resident algorithm version advances from 54 to 57. Version 55 introduced the over-complete ceiling; version 56
+added the post-tuning binary-search path and persisted search metrics; version 57 makes reconstruction rank probes
+ADMM-only. The packed layout and runtime are rank-agnostic; no format change is required.
 
 ## Promotion gate
 
-Status: **Not run under the tabu policy**. A pre-tabu attempt completed only part of the rank-response probe and no
-block commits. Its probe-plan identity is incompatible with version 56 and will not be reused; the evidence is
-preserved at
-`evidence/055/aborted-pre-tabu-055-overcomplete-rank-d2-compress-and-benchmark-gemma-3-1b-it` rather than rewritten.
+Status: **Not run under the version-57 approximate-probe policy**. Earlier attempts completed only part of the
+rank-response probe and no block commits. Their probe-plan identities are incompatible with version 57 and will not
+be reused; retained evidence remains preserved rather than rewritten.
 
 Promotion requires:
 

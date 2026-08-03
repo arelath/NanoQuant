@@ -223,7 +223,7 @@ from nanoquant.infrastructure.tuning_checkpoint import (
 from nanoquant.ports.event_sink import EventSink, LayerCommittedPayload, emit_layer_committed
 from nanoquant.ports.model_adapter import ModelAdapter
 
-RESIDENT_ALGORITHM_VERSION = 56
+RESIDENT_ALGORITHM_VERSION = 57
 COVARIANCE_REFINEMENT_MAX_INPUT_FEATURES = 2048
 _THROUGHPUT_PROBE_REPETITIONS = 5
 _THROUGHPUT_PROBE_WARMUP_WORKLOADS = 3
@@ -3319,10 +3319,12 @@ def _run_reconstruction_rank_probes(
                 probe_weight: torch.Tensor = stacked,
                 probe_input: torch.Tensor = probe_input_importance,
                 probe_output: torch.Tensor = probe_output_importance,
-                probe_owner: str = unit_name,
             ) -> Any:
                 generator = torch.Generator(device=request.device).manual_seed(probe_seed)
-                result = factorize_admm_with_parameters(
+                # Rank planning is intentionally an ADMM-only approximation.
+                # Production-only sign search is too expensive to repeat at
+                # every lower/baseline/upper response point.
+                return factorize_admm_with_parameters(
                     probe_weight,
                     probe_input,
                     probe_output,
@@ -3337,41 +3339,6 @@ def _run_reconstruction_rank_probes(
                         early_stop_tolerance=probe_admm.early_stop_tolerance,
                         transpose_wide=probe_admm.transpose_wide,
                     ),
-                )
-                if not _binary_factor_search_selected(request.binary_factor_search, probe_owner):
-                    return result
-                selected, _metrics = _execute_binary_factor_search(
-                    probe_weight,
-                    result.left_binary,
-                    result.right_binary,
-                    result.scale_pre,
-                    result.scale_mid,
-                    result.scale_post,
-                    probe_input,
-                    probe_output,
-                    request.binary_factor_search,
-                )
-                stored_pre = selected.scale_pre.to(result.scale_pre.dtype)
-                stored_mid = selected.scale_mid.to(result.scale_mid.dtype)
-                stored_post = selected.scale_post.to(result.scale_post.dtype)
-                stored_left = selected.left_binary.to(result.left_binary.dtype)
-                stored_right = selected.right_binary.to(result.right_binary.dtype)
-                return replace(
-                    result,
-                    left_latent=stored_left,
-                    right_latent=stored_right,
-                    left_binary=stored_left,
-                    right_binary=stored_right,
-                    scale_pre=stored_pre,
-                    scale_mid=stored_mid,
-                    scale_post=stored_post,
-                    reconstruction=reconstruct(
-                        stored_left,
-                        stored_right,
-                        stored_pre,
-                        stored_mid,
-                        stored_post,
-                    ).to(probe_weight.dtype),
                 )
 
             with recorder.phase("rank_probe", unit=unit_id):

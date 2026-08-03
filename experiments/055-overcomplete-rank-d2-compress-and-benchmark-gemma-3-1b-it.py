@@ -12,6 +12,7 @@ from recipes import (
 )
 
 from nanoquant.config.schema import (
+    ADMMConfig,
     AllocationStrategy,
     BiasCorrectionConfig,
     BinaryFactorSearchConfig,
@@ -51,6 +52,14 @@ CONFIG = replace(
         reconstruction=replace(
             BASE_CONFIG.allocation.reconstruction,
             objective_mode="calibration_weighted",
+            probe_admm=ADMMConfig(
+                outer_iterations=100,
+                inner_iterations=5,
+                regularization=3e-2,
+                penalty_schedule="cubic",
+                convergence_check_interval=100,
+                transpose_wide=True,
+            ),
             response_source=RankResponseSource.MEASURED,
             response_curves=(),
             response_profile_provenance="",

@@ -15,6 +15,7 @@ import nanoquant.resident_quantization as resident
 from nanoquant.config.schema import (
     ADMMConfig,
     AllocationStrategy,
+    BinaryFactorSearchConfig,
     ExecutorKind,
     HessianSamplingConfig,
     ObjectiveConfig,
@@ -640,7 +641,9 @@ def test_preprocessing_only_runs_are_exact_and_resume_without_recomputation(tmp_
     assert selected[-1]["fields"]["reused"] is True
 
 
-def test_reconstruction_rank_probe_covers_every_physical_unit_before_fitting(tmp_path: Path) -> None:
+def test_reconstruction_rank_probe_covers_every_physical_unit_before_fitting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     snapshot = tmp_path / "snapshot"
     config = Gemma3TextConfig(
         vocab_size=24,
@@ -673,6 +676,20 @@ def test_reconstruction_rank_probe_covers_every_physical_unit_before_fitting(tmp
             target_protected_error_reduction_fraction=0,
         ),
         admm=ADMMConfig(outer_iterations=1, inner_iterations=1),
+        binary_factor_search=BinaryFactorSearchConfig(
+            enabled=True,
+            scale_passes=1,
+            control_outer_passes=1,
+            one_bit_passes=1,
+            max_one_bit_vectors=1,
+            variable_depth_passes=1,
+            variable_depth_length=1,
+            tabu_outer_passes=1,
+            tabu_passes=1,
+            tabu_steps=1,
+            tabu_tenure=1,
+            tabu_tenure_jitter=0,
+        ),
         shared_input_groups=(
             SharedInputGroupConfig(
                 "self_attn.attn_qkv",
@@ -682,8 +699,13 @@ def test_reconstruction_rank_probe_covers_every_physical_unit_before_fitting(tmp
         profiling=ProfilingConfig(level=ProfilingLevel.OFF),
     )
 
+    def reject_probe_search(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("rank probes must not execute production binary-factor search")
+
+    monkeypatch.setattr(resident, "_execute_binary_factor_search", reject_probe_search)
     with pytest.raises(InterruptedError, match="2 reconstruction rank probe commits"):
         run_resident_quantization(replace(request, interrupt_after_rank_probe_commits=2))
+    monkeypatch.undo()
     probe_journal = (request.output / "state" / "rank-probe-journal.jsonl").read_text().splitlines()
     assert len(probe_journal) == 2
 
