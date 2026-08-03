@@ -131,6 +131,10 @@ EXPERIMENT = replace(
         _DEFINED_EXPERIMENT.workflow,
         task_limit=1000,
         local_files_only=True,
+        # A non-finite post-block refit can still contaminate the next dense
+        # teacher forward even after transactional parameter/optimizer rollback.
+        # Re-enter from the validated activation commit in a clean process.
+        interrupt_after_block_commits=1,
     ),
 )
 

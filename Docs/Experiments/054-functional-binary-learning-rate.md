@@ -145,9 +145,24 @@ than hiding the rollback defect with a different objective scale.
 The production replay in
 `evidence/054/rollback-root-cause-diagnostic.stdout.log` then crossed the
 non-finite post-refit rollbacks in blocks 18, 19, 20, and 21 in one process and
-entered block 22 with finite teacher power. This is the repeated-rollback test
-that the old end-of-epoch behavior failed. Clean-process slicing is no longer
-enabled.
+entered block 22 with finite teacher power. That was useful evidence for the
+first-bad-step repair, but it did not establish that every rollback leaves a
+healthy process.
+
+A later candidate run reproduced the original failure at a new boundary:
+block 1 reported `post_block_refit.nonfinite_rollback`, committed a hash-valid
+activation generation, and block 2's dense teacher forward produced a
+non-finite target immediately afterward. A fresh validation followed all 180
+reachable artifacts (3.06 GB), and chunked audits found zero non-finite entries
+in both 256 x 2048 x 1152 activation tensors. The durable boundary remains
+sound; transactional rollback reduces the failure surface but does not fully
+remove process-local contamination.
+
+Experiment 054 therefore uses clean one-block process slices again. This is a
+runtime containment, not an algorithmic change: every slice resumes from the
+validated canonical activation generation and frozen prefix with identical
+ranks, bit accounting, and numerical recipe. Campaign restarts include a short
+cooldown so the Windows CUDA device lease is released before the next slice.
 
 Failed-run evidence:
 `evidence/054/054-d2-uniform-control-gemma-3-1b-it--archive-20154357dd00`,
