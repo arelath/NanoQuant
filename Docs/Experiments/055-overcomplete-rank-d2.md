@@ -63,9 +63,10 @@ profile is numerically unchanged, so Experiment 055 reuses it and measures new r
 The campaign permits dataset-hub access only so 055 can create its required run-owned calibration receipt; model
 resolution remains pinned to the local snapshot. Later slices reuse the validated receipt from this run.
 
-The resident algorithm version advances from 54 to 57. Version 55 introduced the over-complete ceiling; version 56
+The resident algorithm version advances from 54 to 58. Version 55 introduced the over-complete ceiling; version 56
 added the post-tuning binary-search path and persisted search metrics; version 57 makes reconstruction rank probes
-ADMM-only. The packed layout and runtime are rank-agnostic; no format change is required.
+ADMM-only; version 58 records the exact zero entry loss directly when the initial teacher and compressed activation
+streams are the same tensor. The packed layout and runtime are rank-agnostic; no format change is required.
 
 ## Promotion gate
 
@@ -73,6 +74,14 @@ Status: **Not run under the version-57 approximate-probe policy**. Earlier attem
 rank-response probe and no block commits. Their probe-plan identities are incompatible with version 57 and will not
 be reused. The interrupted version-56 run was rolled over without deleting or rewriting it and is retained at
 `evidence/055/055-overcomplete-rank-d2-compress-and-benchmark-gemma-3-1b-it--archive-535f37b234c1`.
+
+The first version-57 execution and a fresh-process resume both produced finite block-0 teacher outputs but non-finite
+outputs from the redundant entry-loss forward. Before block 0, teacher and compressed streams intentionally reference
+the same captured tensor and the untouched source block has just produced the teacher target, so the mathematical
+entry loss is exactly zero. Version 58 records that exact value without repeating the unstable CUDA forward; later
+blocks still measure entry loss normally because their streams differ. Both failed version-57 attempts and their
+complete 130-unit probe profile are retained under
+`evidence/055/055-overcomplete-rank-d2-compress-and-benchmark-gemma-3-1b-it--archive-c02c01a54919`.
 
 Promotion requires:
 

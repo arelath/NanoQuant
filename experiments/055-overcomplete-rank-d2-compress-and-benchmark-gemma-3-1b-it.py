@@ -130,6 +130,7 @@ _DEFINED_EXPERIMENT = define_compression_quality_experiment(
             "same-bpw",
             "reactive-tabu",
             "functional-binary-tuning",
+            "exact-initial-entry-loss",
             "experiment-054-comparison",
         ),
     ),

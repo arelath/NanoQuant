@@ -223,7 +223,7 @@ from nanoquant.infrastructure.tuning_checkpoint import (
 from nanoquant.ports.event_sink import EventSink, LayerCommittedPayload, emit_layer_committed
 from nanoquant.ports.model_adapter import ModelAdapter
 
-RESIDENT_ALGORITHM_VERSION = 57
+RESIDENT_ALGORITHM_VERSION = 58
 COVARIANCE_REFINEMENT_MAX_INPUT_FEATURES = 2048
 _THROUGHPUT_PROBE_REPETITIONS = 5
 _THROUGHPUT_PROBE_WARMUP_WORKLOADS = 3
@@ -4870,11 +4870,17 @@ def _process_resident_block(
         ),
         next(item for item in calibration.stats.layers if item.layer.block.index == block_index),
     )
+    # Before the first block both streams deliberately reference the same
+    # captured tensor and the untouched source block produced teacher_outputs.
+    # Its exact entry loss is therefore zero; a redundant second CUDA forward
+    # has produced non-finite Gemma outputs on otherwise finite inputs.
+    identical_entry_inputs = teacher_inputs is compressed_inputs
     with _logged_operation(
         events,
         "block_entry_loss",
         block=block_index,
         deferred=deferred_slice,
+        identical_inputs=identical_entry_inputs,
         samples=int(compressed_inputs.shape[0]),
     ):
         with _profile_block_phase(recorder, block_index, "entry_loss"):
@@ -4889,7 +4895,7 @@ def _process_resident_block(
             )
             loss_recorder.record_block_entry(
                 0.0
-                if deferred_slice
+                if deferred_slice or identical_entry_inputs
                 else _block_loss(
                     environment.adapter,
                     working_block,

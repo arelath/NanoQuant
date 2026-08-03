@@ -725,6 +725,8 @@ def test_reconstruction_rank_probe_covers_every_physical_unit_before_fitting(
     assert names.count("rank_probe.unit_completed") == 5
     assert names.count("rank_probe.unit_reused") == 2
     assert names.index("rank_probe.profile_committed") < names.index("compression.progress_initialized")
+    block_entry_started = next(event for event in events if event["name"] == "block_entry_loss.started")
+    assert block_entry_started["fields"]["identical_inputs"] is True
     gate_probe_started = next(
         event
         for event in events
