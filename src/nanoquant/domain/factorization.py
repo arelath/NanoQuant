@@ -185,8 +185,8 @@ def factorize_admm(
     transpose_wide: bool = False,
     projection_method: str = "power",
 ) -> ADMMResult:
-    if weight.ndim != 2 or rank <= 0 or rank > min(weight.shape):
-        raise ValueError("weight must be a matrix and rank within its dimensions")
+    if weight.ndim != 2 or rank <= 0:
+        raise ValueError("weight must be a matrix and rank must be positive")
     if input_importance.numel() != weight.shape[1] or output_importance.numel() != weight.shape[0]:
         raise ValueError("importance dimensions do not match weight")
     if outer_iterations < 0 or inner_iterations <= 0 or convergence_check_interval <= 0:

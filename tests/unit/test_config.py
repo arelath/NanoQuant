@@ -288,6 +288,23 @@ def test_maximum_rank_patterns_must_be_nonempty_and_unique() -> None:
     assert {issue.code for issue in validate(invalid)} == {"CFG039", "CFG040"}
 
 
+def test_overcomplete_rank_ceiling_must_be_finite_and_at_least_one() -> None:
+    base = RunConfig(ModelConfig("x"))
+
+    for value in (0.99, math.inf, math.nan):
+        invalid = replace(
+            base,
+            allocation=replace(
+                base.allocation,
+                bounds=replace(
+                    base.allocation.bounds,
+                    overcomplete_rank_ceiling_fraction=value,
+                ),
+            ),
+        )
+        assert {issue.code for issue in validate(invalid)} == {"CFG132"}
+
+
 def test_layer_budget_multipliers_must_be_valid_and_unique() -> None:
     config = RunConfig(ModelConfig("x"))
     invalid = replace(

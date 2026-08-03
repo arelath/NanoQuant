@@ -402,6 +402,9 @@ def resident_request_from_config(
         allocation_strategy=config.allocation.strategy,
         rank_floor_fraction=config.allocation.bounds.floor_fraction_of_uniform,
         rank_ceiling_fraction=config.allocation.bounds.ceiling_fraction_of_uniform,
+        overcomplete_rank_ceiling_fraction=(
+            config.allocation.bounds.overcomplete_rank_ceiling_fraction
+        ),
         rank_sensitivity_alpha=config.allocation.sensitivity_alpha,
         rank_edge_boost=config.allocation.bounds.edge_block_boost,
         maximum_rank_layer_patterns=config.allocation.maximum_rank_layer_patterns,

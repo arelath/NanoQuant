@@ -217,7 +217,7 @@ from nanoquant.infrastructure.tuning_checkpoint import (
 from nanoquant.ports.event_sink import EventSink, LayerCommittedPayload, emit_layer_committed
 from nanoquant.ports.model_adapter import ModelAdapter
 
-RESIDENT_ALGORITHM_VERSION = 54
+RESIDENT_ALGORITHM_VERSION = 55
 COVARIANCE_REFINEMENT_MAX_INPUT_FEATURES = 2048
 _THROUGHPUT_PROBE_REPETITIONS = 5
 _THROUGHPUT_PROBE_WARMUP_WORKLOADS = 3
@@ -350,6 +350,7 @@ class ResidentQuantizationRequest:
     allocation_strategy: AllocationStrategy = AllocationStrategy.SENSITIVITY
     rank_floor_fraction: float = 0.5
     rank_ceiling_fraction: float = 4.5
+    overcomplete_rank_ceiling_fraction: float = 1.0
     rank_sensitivity_alpha: float = 0.5
     rank_edge_boost: float = 0.0
     maximum_rank_layer_patterns: tuple[str, ...] = ()
@@ -2274,6 +2275,7 @@ def _resident_config_hash(request: ResidentQuantizationRequest) -> str:
         "allocation_strategy": request.allocation_strategy,
         "rank_floor_fraction": request.rank_floor_fraction,
         "rank_ceiling_fraction": request.rank_ceiling_fraction,
+        "overcomplete_rank_ceiling_fraction": request.overcomplete_rank_ceiling_fraction,
         "rank_sensitivity_alpha": request.rank_sensitivity_alpha,
         "rank_edge_boost": request.rank_edge_boost,
         "maximum_rank_layer_patterns": request.maximum_rank_layer_patterns,
@@ -2684,6 +2686,17 @@ def _aligned_probe_bounds(
     if not multiple <= floor_rank <= baseline_rank <= ceiling_rank:
         raise ValueError("measured rank-response bounds do not contain the aligned baseline rank")
     return floor_rank, ceiling_rank
+
+
+def _overcomplete_rank_cap(
+    shape: tuple[int, ...] | torch.Size,
+    *,
+    multiple: int,
+    ceiling_fraction: float,
+) -> int:
+    """Resolve the aligned hard ceiling for a possibly over-complete factorization."""
+
+    return math.floor(min(shape) * ceiling_fraction / multiple) * multiple
 
 
 def _measured_response_curve(
@@ -3146,7 +3159,11 @@ def _run_reconstruction_rank_probes(
             if reconstruction.response_source is RankResponseSource.MEASURED:
                 floor_rank, ceiling_rank = _aligned_probe_bounds(
                     unit.rank,
-                    min(stacked.shape),
+                    _overcomplete_rank_cap(
+                        stacked.shape,
+                        multiple=request.rank_multiple,
+                        ceiling_fraction=request.overcomplete_rank_ceiling_fraction,
+                    ),
                     multiple=request.rank_multiple,
                     floor_fraction=request.rank_floor_fraction,
                     ceiling_fraction=request.rank_ceiling_fraction,
@@ -3359,6 +3376,11 @@ def _run_reconstruction_rank_probes(
                     for segment in evidence.response_curve.segments
                 ),
                 fixed_bits,
+                _overcomplete_rank_cap(
+                    (out_features, in_features),
+                    multiple=request.rank_multiple,
+                    ceiling_fraction=request.overcomplete_rank_ceiling_fraction,
+                ),
             )
         )
     original_elements = sum(
@@ -5151,6 +5173,9 @@ def _execute_resident_quantization_pipeline(
                 multiple=request.rank_multiple,
                 floor_fraction_of_uniform=request.rank_floor_fraction,
                 ceiling_fraction_of_uniform=request.rank_ceiling_fraction,
+                overcomplete_rank_ceiling_fraction=(
+                    request.overcomplete_rank_ceiling_fraction
+                ),
                 edge_block_boost=request.rank_edge_boost,
             ),
             retry=request.rank_retry,

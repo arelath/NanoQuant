@@ -137,6 +137,16 @@ def test_maximum_rank_policy_invalidates_commit_identity() -> None:
     )
 
 
+def test_overcomplete_rank_ceiling_invalidates_commit_identity() -> None:
+    request = ResidentQuantizationRequest(
+        Path("snapshot"), Path("output"), "fixture/model", "revision", ((1, 2, 3),), device="cpu"
+    )
+
+    assert resident._resident_config_hash(request) != resident._resident_config_hash(
+        replace(request, overcomplete_rank_ceiling_fraction=1.5)
+    )
+
+
 def test_layer_budget_multiplier_invalidates_commit_identity() -> None:
     request = ResidentQuantizationRequest(
         Path("snapshot"), Path("output"), "fixture/model", "revision", ((1, 2, 3),), device="cpu"

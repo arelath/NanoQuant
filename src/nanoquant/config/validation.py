@@ -247,6 +247,13 @@ def validate(config: RunConfig, phase: ValidationPhase = ValidationPhase.PRE_RES
         "allocation.bounds",
         "floor must not exceed ceiling",
     )
+    require(
+        math.isfinite(config.allocation.bounds.overcomplete_rank_ceiling_fraction)
+        and config.allocation.bounds.overcomplete_rank_ceiling_fraction >= 1,
+        "CFG132",
+        "allocation.bounds.overcomplete_rank_ceiling_fraction",
+        "must be finite and at least one",
+    )
     reconstruction = config.allocation.reconstruction
     reconstruction_selected = config.allocation.strategy in {
         AllocationStrategy.RECONSTRUCTION_AWARE,

@@ -90,6 +90,20 @@ def _charged_side_bits(request: PlanningRequest, cost: BitCost) -> int:
     )
 
 
+def _maximum_factor_rank(out_features: int, in_features: int, allocation: RankAllocationConfig) -> int:
+    """Return the aligned hard rank ceiling, including an explicit over-complete allowance."""
+
+    physical_rank = min(out_features, in_features)
+    return (
+        math.floor(
+            physical_rank
+            * allocation.bounds.overcomplete_rank_ceiling_fraction
+            / allocation.bounds.multiple
+        )
+        * allocation.bounds.multiple
+    )
+
+
 def build_quantization_plan(request: PlanningRequest) -> QuantizationPlan:
     if request.shared_input_groups or request.allocation.strategy.value in {"reconstruction_aware", "kl_calibrated"}:
         return _build_grouped_quantization_plan(request)
@@ -131,13 +145,17 @@ def build_quantization_plan(request: PlanningRequest) -> QuantizationPlan:
             layer.in_features,
         )
     base_ranks: dict[object, int] = {}
+    maximum_ranks = {
+        layer.layer: _maximum_factor_rank(layer.out_features, layer.in_features, request.allocation)
+        for layer in layers
+    }
     for layer in layers:
         layer_target_bits = math.floor(layer.in_features * layer.out_features * request.allocation.target_bpw)
         charged = (
             outlier_costs[layer.layer].total if outlier_plans[layer.layer].charge_to_budget else 0
         ) + _charged_side_bits(request, side_costs[layer.layer])
         base_rank = 0
-        for candidate in range(multiple, min(layer.in_features, layer.out_features) + 1, multiple):
+        for candidate in range(multiple, maximum_ranks[layer.layer] + 1, multiple):
             if factor_bit_cost(layer.out_features, layer.in_features, candidate).total + charged > layer_target_bits:
                 break
             base_rank = candidate
@@ -148,7 +166,7 @@ def build_quantization_plan(request: PlanningRequest) -> QuantizationPlan:
     caps: dict[object, int] = {}
     utilities: dict[object, float] = {}
     for layer in layers:
-        maximum = min(layer.in_features, layer.out_features)
+        maximum = maximum_ranks[layer.layer]
         base_rank = base_ranks[layer.layer]
         if request.allocation.strategy.value == "uniform":
             floor = cap = base_rank
@@ -279,7 +297,7 @@ def build_quantization_plan(request: PlanningRequest) -> QuantizationPlan:
             continue
         rule = budget_matches[0]
         matched_budget_patterns.add(rule.pattern)
-        maximum = min(layer.in_features, layer.out_features)
+        maximum = maximum_ranks[layer.layer]
         original_factor_bits = factor_bit_cost(layer.out_features, layer.in_features, ranks[layer.layer]).total
         promoted_budget = math.floor(original_factor_bits * rule.multiplier)
         promoted_rank = ranks[layer.layer]
@@ -304,7 +322,7 @@ def build_quantization_plan(request: PlanningRequest) -> QuantizationPlan:
             if not maximum_matches:
                 continue
             matched_patterns.update(maximum_matches)
-            maximum = min(layer.in_features, layer.out_features)
+            maximum = maximum_ranks[layer.layer]
             if maximum % multiple:
                 raise ValueError(
                     f"maximum rank {maximum} for {layer.layer.path} is not aligned to "
@@ -339,7 +357,7 @@ def build_quantization_plan(request: PlanningRequest) -> QuantizationPlan:
                         request.allocation.retry.thresholds.weighted_normalized_error,
                         request.allocation.retry.thresholds.raw_normalized_error,
                         (
-                            min(layer.in_features, layer.out_features)
+                            maximum_ranks[layer.layer]
                             if request.allocation.retry.allow_above_allocator_cap
                             else caps[layer.layer]
                         ),
@@ -386,10 +404,6 @@ class _PlanningUnit:
     @property
     def out_features(self) -> int:
         return sum(member.out_features for member in self.members)
-
-    @property
-    def maximum_rank(self) -> int:
-        return min(self.in_features, self.out_features)
 
     @property
     def grouped(self) -> bool:
@@ -461,6 +475,10 @@ def _build_grouped_quantization_plan(request: PlanningRequest) -> QuantizationPl
     outlier_costs: dict[str, BitCost] = {}
     side_costs: dict[str, BitCost] = {}
     base_ranks: dict[str, int] = {}
+    maximum_ranks = {
+        unit.key: _maximum_factor_rank(unit.out_features, unit.in_features, request.allocation)
+        for unit in units
+    }
     for unit in units:
         count = 0
         if request.outliers.selector.value != "none" and request.outliers.fraction > 0:
@@ -487,7 +505,7 @@ def _build_grouped_quantization_plan(request: PlanningRequest) -> QuantizationPl
             request, side_costs[unit.key]
         )
         base_rank = 0
-        for candidate_rank in range(multiple, unit.maximum_rank + 1, multiple):
+        for candidate_rank in range(multiple, maximum_ranks[unit.key] + 1, multiple):
             if factor_bit_cost(unit.out_features, unit.in_features, candidate_rank).total + charged > funded_bits:
                 break
             base_rank = candidate_rank
@@ -508,7 +526,7 @@ def _build_grouped_quantization_plan(request: PlanningRequest) -> QuantizationPl
                 math.floor(base_rank * request.allocation.bounds.floor_fraction_of_uniform / multiple) * multiple,
             )
             cap = min(
-                unit.maximum_rank,
+                maximum_ranks[unit.key],
                 max(
                     multiple,
                     math.floor(base_rank * request.allocation.bounds.ceiling_fraction_of_uniform / multiple) * multiple,
@@ -606,7 +624,7 @@ def _build_grouped_quantization_plan(request: PlanningRequest) -> QuantizationPl
             promoted_budget = math.floor(
                 factor_bit_cost(unit.out_features, unit.in_features, ranks[unit.key]).total * rule.multiplier
             )
-            while ranks[unit.key] + multiple <= unit.maximum_rank:
+            while ranks[unit.key] + multiple <= maximum_ranks[unit.key]:
                 candidate_rank = ranks[unit.key] + multiple
                 if factor_bit_cost(unit.out_features, unit.in_features, candidate_rank).total > promoted_budget:
                     break
@@ -623,12 +641,12 @@ def _build_grouped_quantization_plan(request: PlanningRequest) -> QuantizationPl
         )
         if maximum_matches:
             matched_maximum.update(maximum_matches)
-            if unit.maximum_rank % multiple:
+            if maximum_ranks[unit.key] % multiple:
                 raise ValueError(
-                    f"maximum rank {unit.maximum_rank} for {unit.name} is not aligned to "
+                    f"maximum rank {maximum_ranks[unit.key]} for {unit.name} is not aligned to "
                     f"allocation rank multiple {multiple}"
                 )
-            ranks[unit.key] = caps[unit.key] = unit.maximum_rank
+            ranks[unit.key] = caps[unit.key] = maximum_ranks[unit.key]
     unmatched_maximum = set(request.allocation.maximum_rank_layer_patterns) - matched_maximum
     if unmatched_maximum:
         raise ValueError(f"maximum-rank patterns matched no quantization unit: {sorted(unmatched_maximum)}")
@@ -651,7 +669,9 @@ def _build_grouped_quantization_plan(request: PlanningRequest) -> QuantizationPl
                 request.allocation.retry.rank_increase_fraction,
                 request.allocation.retry.thresholds.weighted_normalized_error,
                 request.allocation.retry.thresholds.raw_normalized_error,
-                unit.maximum_rank if request.allocation.retry.allow_above_allocator_cap else caps[unit.key],
+                maximum_ranks[unit.key]
+                if request.allocation.retry.allow_above_allocator_cap
+                else caps[unit.key],
                 extra_budget,
             )
             if unit.grouped:

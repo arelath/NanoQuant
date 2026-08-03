@@ -207,8 +207,27 @@ def test_admm_rejects_invalid_schedule_and_dimensions() -> None:
             penalty_schedule="missing",
         )
     with pytest.raises(ValueError, match="rank"):
-        factorize_admm(torch.eye(2), torch.ones(2), torch.ones(2), 3, torch.Generator())
+        factorize_admm(torch.eye(2), torch.ones(2), torch.ones(2), 0, torch.Generator())
     assert all(0 <= function(0.3) <= 1 for function in SCHEDULES.values())
+
+
+def test_admm_supports_overcomplete_binary_rank() -> None:
+    result = factorize_admm(
+        torch.tensor([[0.2, -0.4], [0.7, 0.1]]),
+        torch.ones(2),
+        torch.ones(2),
+        3,
+        torch.Generator().manual_seed(7),
+        outer_iterations=2,
+        inner_iterations=1,
+        convergence_check_interval=1,
+    )
+
+    assert result.left_binary.shape == (2, 3)
+    assert result.right_binary.shape == (3, 2)
+    assert result.scale_mid.shape == (3,)
+    assert result.reconstruction.shape == (2, 2)
+    assert torch.isfinite(result.reconstruction).all()
 
 
 def test_exact_svid_projection_is_available_without_changing_the_default() -> None:

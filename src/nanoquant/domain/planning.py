@@ -27,6 +27,7 @@ class ReconstructionAllocationUnit:
     calibrated_rank_ceiling_fraction: float
     segments: tuple[RankResponseSegment, ...]
     fixed_bits: int = 0
+    maximum_rank: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,7 +126,9 @@ def allocate_reconstruction_rank_budget(
         effective_ceiling = min(ceiling_fraction, unit.calibrated_rank_ceiling_fraction)
         floor_rank = math.ceil(unit.baseline_rank * effective_floor / multiple) * multiple
         cap_rank = math.floor(unit.baseline_rank * effective_ceiling / multiple) * multiple
-        physical_cap = math.floor(min(unit.in_features, unit.out_features) / multiple) * multiple
+        physical_cap = math.floor(
+            (unit.maximum_rank or min(unit.in_features, unit.out_features)) / multiple
+        ) * multiple
         cap_rank = min(cap_rank, physical_cap)
         if floor_rank > cap_rank:
             raise ValueError(f"reconstruction rank floor exceeds cap for {unit.unit_id}")
@@ -250,7 +253,10 @@ def apply_reconstruction_rank_trust_region(
         cap_rank = math.floor(unit.baseline_rank * effective_ceiling / multiple) * multiple
         cap_rank = min(
             cap_rank,
-            math.floor(min(unit.in_features, unit.out_features) / multiple) * multiple,
+            math.floor(
+                (unit.maximum_rank or min(unit.in_features, unit.out_features)) / multiple
+            )
+            * multiple,
         )
         reference = references[unit.unit_id]
         reference_floor = math.ceil(unit.baseline_rank * calibrated_floor / multiple) * multiple

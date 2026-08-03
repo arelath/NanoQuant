@@ -81,6 +81,36 @@ def test_allocator_protects_sensitive_units_and_never_exceeds_exact_budget() -> 
     assert result.protected_planned_objective <= result.protected_baseline_objective
 
 
+def test_allocator_can_spend_into_an_explicit_overcomplete_rank_range() -> None:
+    unit = ReconstructionAllocationUnit(
+        "0:overcomplete",
+        64,
+        64,
+        48,
+        100.0,
+        1.0,
+        False,
+        0.5,
+        2.0,
+        (RankResponseSegment(2.0, 0.01),),
+        maximum_rank=96,
+    )
+
+    result = allocate_reconstruction_rank_budget(
+        (unit,),
+        target_bits=20_000,
+        multiple=8,
+        floor_fraction=0.5,
+        ceiling_fraction=2.0,
+        sensitivity_strength=1.0,
+        protected_rank_floor_fraction=1.0,
+        target_protected_error_reduction_fraction=0,
+    )
+
+    assert result.decisions[0].planned_rank == 96
+    assert result.decisions[0].planned_rank > min(unit.in_features, unit.out_features)
+
+
 def test_rank_trust_region_projects_and_trims_to_exact_budget() -> None:
     segments = (RankResponseSegment(1.5, 0.01),)
     units = (

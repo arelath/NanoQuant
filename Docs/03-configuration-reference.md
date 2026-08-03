@@ -245,6 +245,7 @@ class RankBoundsConfig:
     multiple: int = 32
     floor_fraction_of_uniform: float = 0.80
     ceiling_fraction_of_uniform: float = 1.15
+    overcomplete_rank_ceiling_fraction: float = 1.0
     edge_block_boost: float = 0.15
 
 
@@ -286,11 +287,17 @@ class RankAllocationConfig:
 
 `None` means a retry threshold is disabled. The rewrite does not overload numeric zero with boolean semantics.
 
+`overcomplete_rank_ceiling_fraction` controls the hard aligned rank ceiling relative to
+`min(in_features, out_features)`. Its default of `1.0` preserves the ordinary algebraic-dimension ceiling. Values
+above one explicitly allow over-complete binary factors; for example, `1.5` permits an aligned rank through 150% of
+the smaller matrix dimension. The ordinary floor/ceiling fractions and the exact bit budget still constrain what the
+allocator can select. The value must be finite and at least one.
+
 `maximum_rank_layer_patterns` contains `fnmatch` patterns matched against canonical quantizable layer paths such as
-`self_attn.v_proj`. Allocation first computes the ordinary target-BPW plan, then promotes every matched layer to its
-physical maximum rank (`min(in_features, out_features)`). This is deliberately additive: unmatched ranks do not
-shrink to compensate, and the plan's physical BPW reports the resulting cost above `target_bpw`. Patterns must be
-non-empty, unique, match at least one quantizable layer, and produce a maximum rank aligned to `bounds.multiple`.
+`self_attn.v_proj`. Allocation first computes the ordinary target-BPW plan, then promotes every matched layer to the
+hard rank ceiling defined above. This is deliberately additive: unmatched ranks do not shrink to compensate, and the
+plan's physical BPW reports the resulting cost above `target_bpw`. Patterns must be non-empty, unique, match at least
+one quantizable layer, and produce a maximum rank aligned to `bounds.multiple`.
 
 `layer_budget_multipliers` is also additive and runs before maximum-rank promotion. Each rule multiplies the matched
 layer's already-allocated packed factor budget and selects the greatest aligned rank that fits the enlarged budget.
@@ -753,6 +760,7 @@ allocation:
     multiple: 32
     floor_fraction_of_uniform: 0.9
     ceiling_fraction_of_uniform: 1.1
+    overcomplete_rank_ceiling_fraction: 1.0
     edge_block_boost: 0.15
   retry:
     enabled: true
@@ -978,6 +986,7 @@ NQ-CFG-040 allocation.maximum_rank_layer_patterns entries must be unique
 NQ-CFG-041 allocation.layer_budget_multipliers patterns must not be empty
 NQ-CFG-042 allocation.layer_budget_multipliers patterns must be unique
 NQ-CFG-043 allocation.layer_budget_multipliers multipliers must be finite and greater than one
+NQ-CFG-132 allocation.bounds.overcomplete_rank_ceiling_fraction must be finite and at least one
 NQ-CFG-009 outliers.fraction must be in [0, 1)
 NQ-CFG-044 int8 outlier training requires a supported trainable master policy
 NQ-CFG-050 post_block_refit.epochs must be > 0 when enabled=true

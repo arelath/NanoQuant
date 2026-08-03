@@ -206,6 +206,25 @@ def test_additive_maximum_rank_pattern_overrides_rank_after_budget_allocation() 
     assert overridden.planned_cost.total > nominal_target_bits
 
 
+def test_maximum_rank_pattern_can_select_an_explicit_overcomplete_ceiling() -> None:
+    request = _request(AllocationStrategy.SENSITIVITY)
+    allocation = replace(
+        request.allocation,
+        maximum_rank_layer_patterns=("self_attn.v_proj",),
+        bounds=replace(
+            request.allocation.bounds,
+            overcomplete_rank_ceiling_fraction=1.5,
+        ),
+    )
+
+    plan = build_quantization_plan(replace(request, allocation=allocation))
+    selected = plan.blocks[0].layers[0]
+
+    assert selected.rank == 96
+    assert selected.allocator_cap == 96
+    assert selected.retry.hard_rank_cap == 96
+
+
 def test_additive_maximum_rank_pattern_must_match_a_quantizable_layer() -> None:
     request = _request()
 

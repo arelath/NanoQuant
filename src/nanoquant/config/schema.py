@@ -276,6 +276,7 @@ class RankBoundsConfig:
     multiple: int = 32
     floor_fraction_of_uniform: float = 0.80
     ceiling_fraction_of_uniform: float = 1.15
+    overcomplete_rank_ceiling_fraction: float = 1.0
     edge_block_boost: float = 0.15
 
 

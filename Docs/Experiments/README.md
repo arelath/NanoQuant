@@ -1,6 +1,6 @@
 # Experiment archive
 
-This directory is the durable record of NanoQuant Rewrite experiments 001 through 034. It records the question each
+This directory is the durable record of NanoQuant Rewrite experiments 001 through 055. It records the question each
 experiment asked, the method used, the retained result, and the lesson that should survive removal of the Python
 launchers.
 
@@ -54,6 +54,10 @@ task-evaluation protocol, and Experiments 028 and 030 added Qwen-specific deploy
 | [049](049-cyclic-scale-rank.md) | Rejected at screen | Gemma 3 1B IT | Cyclic pre/post scale banks added tiny fixed-rank capacity but regressed all nine equal-bit comparisons by 4.07–14.76%. |
 | [050](050-tiny-factorization-optimality.md) | Completed diagnostic | Gemma 3 1B IT + synthetic | Exhaustive 3x3 search found large same-format optimizer gaps; exhaustive 10-bit row/column moves improved one of three real 10x10 crops by 3.12%. |
 | [051](051-four-by-four-exhaustive-sign-coverage.md) | Completed diagnostic | Gemma 3 1B IT + synthetic | Complete 4x4 coverage with 16 scale starts and 256 passes finished in 7:46 for one target and 12:41 for two; 5x5 is beyond the 20-minute bound. |
+| [052](052-bounded-direct-binary-factor-search.md) | Completed diagnostic | Gemma 3 1B IT + synthetic | Bounded direct binary-factor moves found solver headroom while preserving the packed representation. |
+| [053](053-direct-binary-search-held-out-gate.md) | Rejected at screen | Gemma 3 1B IT + synthetic | Additional direct-search tiers did not produce a sufficient held-out functional win. |
+| [054](054-functional-binary-learning-rate.md) | Completed | Gemma 3 1B IT | A separate binary learning rate improved functional tuning and the retained complete-model result. |
+| [055](055-overcomplete-rank-d2.md) | Not run | Gemma 3 1B IT | Bounded over-complete ranks test whether the old algebraic-dimension ceiling hides useful equal-budget capacity. |
 
 The original launchers were under `experiments/`. Retained measurements remain under `Results/` and `evidence/`;
 architecture and decision records remain elsewhere in `Docs/`.
