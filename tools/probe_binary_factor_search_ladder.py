@@ -48,6 +48,10 @@ class LadderProtocol:
     codebook_size: int
     variable_depth_passes: int
     variable_depth_length: int
+    tabu_passes: int
+    tabu_steps: int
+    tabu_tenure: int
+    tabu_tenure_jitter: int
     pair_passes: int
     block_passes: int
     block_bits: int
@@ -141,6 +145,7 @@ def _search_stage(
             "one_bit_updates": result.one_bit_updates,
             "codebook_updates": result.codebook_updates,
             "variable_depth_updates": result.variable_depth_updates,
+            "tabu_updates": result.tabu_updates,
             "pair_updates": result.pair_updates,
             "block_updates": result.block_updates,
             "block_patterns_evaluated": result.block_patterns_evaluated,
@@ -297,6 +302,10 @@ def _population_polish(
             codebook_size=protocol.codebook_size,
             variable_depth_passes=protocol.variable_depth_passes,
             variable_depth_length=protocol.variable_depth_length,
+            tabu_passes=protocol.tabu_passes,
+            tabu_steps=protocol.tabu_steps,
+            tabu_tenure=protocol.tabu_tenure,
+            tabu_tenure_jitter=protocol.tabu_tenure_jitter,
             pair_passes=protocol.pair_passes,
             pair_pool_size=protocol.rank,
             block_bits=min(protocol.block_bits, protocol.rank),
@@ -436,6 +445,28 @@ def _score_case(
         codebook_passes=0,
         variable_depth_passes=protocol.variable_depth_passes,
         variable_depth_length=protocol.variable_depth_length,
+        pair_passes=0,
+        block_bits=0,
+        block_passes=0,
+        component_passes=0,
+        joint_passes=0,
+    )
+    stages.append(stage)
+    stage, state = _search_stage(
+        "tabu",
+        target,
+        input_importance,
+        output_importance,
+        state,
+        protocol,
+        continuous_candidates=False,
+        one_bit_passes=0,
+        codebook_passes=0,
+        variable_depth_passes=0,
+        tabu_passes=protocol.tabu_passes,
+        tabu_steps=protocol.tabu_steps,
+        tabu_tenure=protocol.tabu_tenure,
+        tabu_tenure_jitter=protocol.tabu_tenure_jitter,
         pair_passes=0,
         block_bits=0,
         block_passes=0,
@@ -666,11 +697,15 @@ def run(args: argparse.Namespace) -> int:
         or args.codebook_size < 0
         or args.variable_depth_passes < 0
         or args.variable_depth_length < 0
+        or args.tabu_passes < 0
+        or args.tabu_steps < 0
+        or args.tabu_tenure <= 0
+        or args.tabu_tenure_jitter < 0
         or args.population_warm_starts < 0
     ):
         raise ValueError("binary search ladder settings are invalid")
     protocol = LadderProtocol(
-        2,
+        3,
         args.rows,
         args.columns,
         rank,
@@ -686,6 +721,10 @@ def run(args: argparse.Namespace) -> int:
         args.codebook_size,
         args.variable_depth_passes,
         args.variable_depth_length,
+        args.tabu_passes,
+        args.tabu_steps,
+        args.tabu_tenure,
+        args.tabu_tenure_jitter,
         args.pair_passes,
         args.block_passes,
         args.block_bits,
@@ -769,6 +808,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--codebook-size", type=int, default=512)
     parser.add_argument("--variable-depth-passes", type=int, default=2)
     parser.add_argument("--variable-depth-length", type=int, default=32)
+    parser.add_argument("--tabu-passes", type=int, default=0)
+    parser.add_argument("--tabu-steps", type=int, default=128)
+    parser.add_argument("--tabu-tenure", type=int, default=8)
+    parser.add_argument("--tabu-tenure-jitter", type=int, default=4)
     parser.add_argument("--pair-passes", type=int, default=4)
     parser.add_argument("--block-passes", type=int, default=4)
     parser.add_argument("--block-bits", type=int, default=10)

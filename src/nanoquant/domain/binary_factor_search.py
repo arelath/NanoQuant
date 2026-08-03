@@ -28,6 +28,7 @@ class BinaryFactorSearchResult:
     one_bit_updates: int
     codebook_updates: int
     variable_depth_updates: int
+    tabu_updates: int
     pair_updates: int
     block_updates: int
     block_patterns_evaluated: int
@@ -42,6 +43,7 @@ class _VectorSearchStats:
     one_bit_updates: int = 0
     codebook_updates: int = 0
     variable_depth_updates: int = 0
+    tabu_updates: int = 0
     pair_updates: int = 0
     block_updates: int = 0
     block_patterns_evaluated: int = 0
@@ -319,6 +321,82 @@ def _variable_depth_pass(
             best_scores[improved] = current_scores[improved]
             best_alpha[improved] = alpha[improved]
             best_beta[improved] = beta[improved]
+    # Recompute the selected prefix exactly before accepting it.
+    best_scores, best_alpha, best_beta, _ = _scores(best_vectors, cross, gram, epsilon)
+    return _accept_vectors(
+        vectors,
+        scales,
+        scores,
+        best_vectors,
+        best_scores,
+        best_alpha,
+        best_beta,
+        tolerance,
+    )
+
+
+def _tabu_pass(
+    vectors: torch.Tensor,
+    cross: torch.Tensor,
+    gram: torch.Tensor,
+    scales: torch.Tensor,
+    scores: torch.Tensor,
+    steps: int,
+    tenure: int,
+    tenure_jitter: int,
+    epsilon: float,
+    tolerance: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
+    """Run scale-profiled tabu chains and retain each row's best visited state."""
+
+    if steps == 0 or vectors.shape[1] == 0:
+        return vectors, scales, scores, 0
+    state = vectors.clone()
+    _, alpha, beta, gram_product = _scores(state, cross, gram, epsilon)
+    tabu_until = torch.zeros_like(state, dtype=torch.int64)
+    best_vectors = vectors.clone()
+    best_scores = scores.clone()
+    best_alpha = alpha.clone()
+    best_beta = beta.clone()
+    rows = torch.arange(vectors.shape[0], device=vectors.device)
+    diagonal = gram.diagonal()[None, :]
+    for step in range(steps):
+        candidate_alpha = alpha[:, None] - 2.0 * state * cross
+        candidate_beta = (
+            beta[:, None] - 4.0 * state * gram_product + 4.0 * diagonal
+        ).clamp_min(epsilon)
+        candidate_scores = candidate_alpha.square() / candidate_beta
+        aspiration = candidate_scores > best_scores[:, None]
+        forbidden = (tabu_until > step) & ~aspiration
+        choices_scores = candidate_scores.masked_fill(forbidden, -torch.inf)
+        fully_forbidden = torch.isneginf(choices_scores).all(dim=1)
+        if bool(fully_forbidden.any()):
+            fallback = tabu_until.argmin(dim=1)
+            choices_scores[fully_forbidden, fallback[fully_forbidden]] = candidate_scores[
+                fully_forbidden, fallback[fully_forbidden]
+            ]
+        choices = choices_scores.argmax(dim=1)
+        old_signs = state[rows, choices].clone()
+        alpha = candidate_alpha[rows, choices]
+        beta = candidate_beta[rows, choices]
+        state[rows, choices] *= -1
+        extra_tenure = (
+            torch.zeros_like(choices)
+            if tenure_jitter == 0
+            else (choices + step).remainder(tenure_jitter + 1)
+        )
+        tabu_until[rows, choices] = step + tenure + extra_tenure
+        gram_product -= 2.0 * old_signs[:, None] * gram.index_select(0, choices)
+        current_scores = alpha.square() / beta
+        improved = current_scores > best_scores
+        if bool(improved.any()):
+            best_vectors[improved] = state[improved]
+            best_scores[improved] = current_scores[improved]
+            best_alpha[improved] = alpha[improved]
+            best_beta[improved] = beta[improved]
+    # A tabu chain can revisit a sign state. Recompute its score exactly so
+    # incremental floating-point drift cannot turn a cycle into an update.
+    best_scores, best_alpha, best_beta, _ = _scores(best_vectors, cross, gram, epsilon)
     return _accept_vectors(
         vectors,
         scales,
@@ -413,6 +491,10 @@ def _refine_vectors(
     codebook_size: int,
     variable_depth_passes: int,
     variable_depth_length: int,
+    tabu_passes: int,
+    tabu_steps: int,
+    tabu_tenure: int,
+    tabu_tenure_jitter: int,
     pair_passes: int,
     pair_pool_size: int,
     block_bits: int,
@@ -478,6 +560,22 @@ def _refine_vectors(
             tolerance,
         )
         stats.variable_depth_updates += count
+        if count == 0:
+            break
+    for _ in range(tabu_passes):
+        vectors, scales, scores, count = _tabu_pass(
+            vectors,
+            cross,
+            gram,
+            scales,
+            scores,
+            tabu_steps,
+            tabu_tenure,
+            tabu_tenure_jitter,
+            epsilon,
+            tolerance,
+        )
+        stats.tabu_updates += count
         if count == 0:
             break
     for _ in range(pair_passes):
@@ -932,6 +1030,10 @@ def refine_binary_factors_separable(
     codebook_size: int = 512,
     variable_depth_passes: int = 0,
     variable_depth_length: int = 32,
+    tabu_passes: int = 0,
+    tabu_steps: int = 128,
+    tabu_tenure: int = 8,
+    tabu_tenure_jitter: int = 4,
     pair_passes: int = 2,
     pair_pool_size: int = 32,
     block_bits: int = 10,
@@ -979,6 +1081,10 @@ def refine_binary_factors_separable(
         or codebook_size < 0
         or variable_depth_passes < 0
         or variable_depth_length < 0
+        or tabu_passes < 0
+        or tabu_steps < 0
+        or tabu_tenure <= 0
+        or tabu_tenure_jitter < 0
         or pair_passes < 0
         or pair_pool_size < 0
         or block_bits < 0
@@ -1049,6 +1155,10 @@ def refine_binary_factors_separable(
             codebook_size=codebook_size,
             variable_depth_passes=variable_depth_passes,
             variable_depth_length=variable_depth_length,
+            tabu_passes=tabu_passes,
+            tabu_steps=tabu_steps,
+            tabu_tenure=tabu_tenure,
+            tabu_tenure_jitter=tabu_tenure_jitter,
             pair_passes=pair_passes,
             pair_pool_size=pair_pool_size,
             block_bits=block_bits,
@@ -1077,6 +1187,10 @@ def refine_binary_factors_separable(
             codebook_size=codebook_size,
             variable_depth_passes=variable_depth_passes,
             variable_depth_length=variable_depth_length,
+            tabu_passes=tabu_passes,
+            tabu_steps=tabu_steps,
+            tabu_tenure=tabu_tenure,
+            tabu_tenure_jitter=tabu_tenure_jitter,
             pair_passes=pair_passes,
             pair_pool_size=pair_pool_size,
             block_bits=block_bits,
@@ -1152,6 +1266,7 @@ def refine_binary_factors_separable(
             totals.one_bit_updates += stats.one_bit_updates
             totals.codebook_updates += stats.codebook_updates
             totals.variable_depth_updates += stats.variable_depth_updates
+            totals.tabu_updates += stats.tabu_updates
             totals.pair_updates += stats.pair_updates
             totals.block_updates += stats.block_updates
             totals.block_patterns_evaluated += stats.block_patterns_evaluated
@@ -1173,6 +1288,7 @@ def refine_binary_factors_separable(
         totals.one_bit_updates,
         totals.codebook_updates,
         totals.variable_depth_updates,
+        totals.tabu_updates,
         totals.pair_updates,
         totals.block_updates,
         totals.block_patterns_evaluated,

@@ -217,6 +217,41 @@ the best crop B, a maximum-depth confirmation doubled the population to 8,192,
 used 64 elites, 32 generations, 32 mature ADMM starts, and 12 final local
 sweeps. It saturated at exactly the same 1.51% gain.
 
+## Reactive-tabu and structured-block follow-up
+
+The second independent optimization review was compared with the implemented
+solver before adding more tiers. Shared-Q codebook transfer, scale-profiled
+one-bit/pair/variable-depth search, continuous candidates, and component-level
+bipartite replacement were already present. Two genuinely new proposals were
+prototyped: reactive tabu search with revisitable bits, and exact 12-bit blocks
+grown from low-margin variables plus normalized Gram coupling.
+
+Six disjoint 64x64/rank-64 crops used block-12 Q, gate, and down weights, full
+Fisher importance, eight power and exact-SVID seeds, 800x5 ADMM, and 64-pass
+scale fits. Tabu ran two 256-step scale-profiled chains with tenure 8 and
+deterministic jitter 0-4 after one-bit and variable-depth convergence.
+
+| Crop | Selected warm NRMSE | Before tabu NRMSE | After tabu NRMSE | Tabu squared-error gain | Total direct gain | Tabu time |
+|---|---:|---:|---:|---:|---:|---:|
+| Q seed 0 | 0.178726 | 0.178221 | 0.177868 | 0.3959% | 0.9578% | 2.260 s |
+| Q seed 1 | 0.281905 | 0.281826 | 0.281826 | 0.0000% | 0.0560% | 0.666 s |
+| Gate seed 0 | 0.293321 | 0.292336 | 0.292336 | 0.0000% | 0.6704% | 0.589 s |
+| Gate seed 1 | 0.287285 | 0.287161 | 0.287029 | 0.0915% | 0.1779% | 1.377 s |
+| Down seed 0 | 0.314880 | 0.314880 | 0.314880 | 0.0000% | 0.0000% | 0.624 s |
+| Down seed 1 | 0.312524 | 0.312302 | 0.312302 | 0.0000% | 0.1424% | 0.676 s |
+
+Tabu is complementary but selective: it improved two of six crops after the
+existing tiers, averaged 0.0812% incremental squared-error reduction, and
+peaked at 0.3959%. The exact profiled objective gates every accepted row, the
+best visited state is retained, and exact rescoring prevents a revisited state
+from being accepted due to incremental floating-point drift. The tier is kept
+as an opt-in diagnostic/candidate generator and remains disabled by default.
+
+The coupling-aware exact-block prototype accepted no move on any of the six
+crops. It was removed rather than adding an unproductive second block selector.
+This does not disprove structured blocks in general, but the proposed
+coupling-to-margin heuristic does not clear the measured keep threshold.
+
 ## Conclusions and deployment policy
 
 1. Five power iterations are not the principal cause of the known real-crop
@@ -269,6 +304,8 @@ solver improvement is not a substitute for a compressed-model benchmark.
 - `evidence/052/crop-control-b12-*-admm800*.json`
 - `evidence/052/deep-basin-b12-q-{32x32,64x64}*.json`
 - `evidence/052/deep-basin-b12-gate-32x32-*.json`
+- `evidence/052/second-viewpoint-{q12,gate12,down12}-64x64-r64-*.json`
+- `evidence/052/retained-tabu-{q12-seed0,gate12-seed1}-64x64-r64-*.json`
 
 The evidence directory is intentionally ignored; the reproducible tools,
 tests, and this report are the durable record.

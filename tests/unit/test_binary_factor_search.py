@@ -9,6 +9,7 @@ from nanoquant.domain.binary_factor_search import (
     _hard_vector_indices,
     _one_bit_pass,
     _scores,
+    _tabu_pass,
     _variable_depth_pass,
     refine_binary_factors_separable,
 )
@@ -203,6 +204,47 @@ def test_variable_depth_chain_crosses_a_two_bit_barrier() -> None:
     assert updates == 1
     assert float(refined_scores[0]) > local_score
     assert int((refined != one_bit_local).sum()) == 2
+
+
+def test_tabu_chain_revisits_bits_to_cross_a_two_bit_barrier() -> None:
+    generator = torch.Generator().manual_seed(6)
+    design = torch.randn((8, 8), generator=generator)
+    gram = design @ design.mT
+    cross = torch.randn((1, 8), generator=generator) * 2
+    vectors = torch.randint(0, 2, (1, 8), generator=generator).float().mul_(2).sub_(1)
+    scores, alpha, beta, _ = _scores(vectors, cross, gram, 1e-8)
+    scales = alpha / beta
+    for _ in range(20):
+        vectors, scales, scores, updates = _one_bit_pass(
+            vectors, cross, gram, scales, scores, 1e-8, 1e-10
+        )
+        if updates == 0:
+            break
+    local_score = float(scores[0])
+    one_bit_local = vectors.clone()
+
+    refined, _scales, refined_scores, updates = _tabu_pass(
+        vectors, cross, gram, scales, scores, 64, 3, 2, 1e-8, 1e-10
+    )
+
+    assert updates == 1
+    assert float(refined_scores[0]) > local_score
+    assert int((refined != one_bit_local).sum()) == 2
+
+
+def test_tabu_cycle_does_not_accept_incremental_score_drift() -> None:
+    vectors = torch.ones((1, 1))
+    cross = torch.ones((1, 1))
+    gram = torch.tensor([[3.0]])
+    scores, alpha, beta, _ = _scores(vectors, cross, gram, 1e-8)
+
+    refined, _scales, refined_scores, updates = _tabu_pass(
+        vectors, cross, gram, alpha / beta, scores, 32, 1, 0, 1e-8, 1e-10
+    )
+
+    assert updates == 0
+    assert torch.equal(refined, vectors)
+    assert torch.equal(refined_scores, scores)
 
 
 def test_one_bit_pass_honors_the_highest_gain_update_cap() -> None:
