@@ -22,6 +22,16 @@ from safetensors import safe_open
 
 from nanoquant.application.kl_budget import paired_bootstrap_kl_delta
 from nanoquant.config.codec import to_dict
+from nanoquant.config.schema import BinaryFactorSearchConfig
+from nanoquant.domain.binary_factor_search import (
+    BinaryFactorSearchResult,
+    refine_binary_factors_control_then_tabu,
+)
+from nanoquant.domain.codebook_payload_search import (
+    SignWordPayloadSearchConfig,
+    SignWordPayloadSearchResult,
+    refine_sign_word_payloads,
+)
 from nanoquant.domain.factorization import (
     AdmmParameters,
     factorize_admm_with_parameters,
@@ -36,8 +46,9 @@ from nanoquant.domain.mlp_operator_refit import (
 )
 from nanoquant.domain.models import BlockId, LayerId
 from nanoquant.domain.planning import factor_bit_cost
-from nanoquant.domain.scale_fit import fit_scales
+from nanoquant.domain.scale_fit import MaterializedScaleFitResult, fit_scales, reconstruct
 from nanoquant.domain.sign_word_codebook import (
+    FullSignCodebook,
     codebook_index_metrics,
     corrected_asymmetric_codebook_bit_cost,
     factorize_sign_word_codebook_admm,
@@ -66,7 +77,7 @@ from nanoquant.kl_budget_workflow import _token_hash
 from nanoquant.quality_evaluation import _wikitext_tokens
 
 MODEL_SOURCE = "google/gemma-3-1b-it"
-RECONSTRUCTION_CACHE_ALGORITHM_VERSION = 1
+RECONSTRUCTION_CACHE_ALGORITHM_VERSION = 2
 
 
 def _parse_ints(value: str) -> tuple[int, ...]:
@@ -215,8 +226,130 @@ def _reconstruction_cache_identity(
             args.corrected_assignment_candidates
         ),
         "scale_fit_passes": args.scale_fit_passes,
+        "binary_search": args.binary_search,
+        "payload_search": args.payload_search,
+        "payload_search_passes": args.payload_search_passes,
+        "payload_search_max_words": args.payload_search_max_words,
+        "payload_search_scale_passes": args.payload_search_scale_passes,
+        "payload_search_batch_words": args.payload_search_batch_words,
+        "payload_search_table_chunk": args.payload_search_table_chunk,
         "calibration_shrinkage": args.calibration_shrinkage,
         "seed": args.seed,
+    }
+
+
+def _binary_search_factors(
+    weight: torch.Tensor,
+    left_binary: torch.Tensor,
+    right_binary: torch.Tensor,
+    fitted: MaterializedScaleFitResult,
+    input_importance: torch.Tensor,
+    output_importance: torch.Tensor,
+    *,
+    right_free_rows: int | None,
+) -> tuple[BinaryFactorSearchResult, dict[str, object]]:
+    settings = BinaryFactorSearchConfig(enabled=True)
+    common_fit = fit_scales(
+        weight,
+        left_binary,
+        right_binary,
+        fitted.scale_pre,
+        fitted.scale_mid,
+        fitted.scale_post,
+        input_importance,
+        output_importance,
+        alternating_passes=settings.scale_passes,
+    )
+    right_mutable = None
+    if right_free_rows is not None:
+        right_mutable = torch.zeros(
+            right_binary.shape[0],
+            dtype=torch.bool,
+            device=right_binary.device,
+        )
+        right_mutable[:right_free_rows] = True
+    control, tabu = refine_binary_factors_control_then_tabu(
+        weight,
+        left_binary,
+        right_binary,
+        common_fit.scale_pre,
+        common_fit.scale_mid,
+        common_fit.scale_post,
+        input_importance,
+        output_importance,
+        scale_passes=settings.scale_passes,
+        control_outer_passes=settings.control_outer_passes,
+        one_bit_passes=settings.one_bit_passes,
+        one_bit_fraction=settings.one_bit_fraction,
+        max_one_bit_vectors=settings.max_one_bit_vectors,
+        variable_depth_passes=settings.variable_depth_passes,
+        variable_depth_length=settings.variable_depth_length,
+        tabu_outer_passes=settings.tabu_outer_passes,
+        tabu_passes=settings.tabu_passes,
+        tabu_steps=settings.tabu_steps,
+        tabu_tenure=settings.tabu_tenure,
+        tabu_tenure_jitter=settings.tabu_tenure_jitter,
+        right_mutable_components=right_mutable,
+    )
+    return tabu, {
+        "settings": asdict(settings),
+        "common_refit_error": common_fit.after_error,
+        "control_after_error": control.after_error,
+        "tabu_after_error": tabu.after_error,
+        "left_sign_distance": int((tabu.left_binary != left_binary).sum()),
+        "right_sign_distance": int((tabu.right_binary != right_binary).sum()),
+    }
+
+
+def _payload_search_factors(
+    args: argparse.Namespace,
+    weight: torch.Tensor,
+    left_binary: torch.Tensor,
+    right_binary: torch.Tensor,
+    scale_pre: torch.Tensor,
+    scale_mid: torch.Tensor,
+    scale_post: torch.Tensor,
+    input_importance: torch.Tensor,
+    output_importance: torch.Tensor,
+    *,
+    free_rows: int,
+    codebook: FullSignCodebook | None,
+    right_indices: torch.Tensor | None,
+    right_flip_positions: torch.Tensor | None,
+) -> tuple[SignWordPayloadSearchResult, dict[str, object]]:
+    settings = SignWordPayloadSearchConfig(
+        enabled=True,
+        outer_passes=args.payload_search_passes,
+        max_words_per_pass=args.payload_search_max_words,
+        scale_passes=args.payload_search_scale_passes,
+        candidate_batch_words=args.payload_search_batch_words,
+        table_chunk_size=args.payload_search_table_chunk,
+    )
+    result = refine_sign_word_payloads(
+        weight,
+        left_binary,
+        right_binary,
+        scale_pre,
+        scale_mid,
+        scale_post,
+        input_importance,
+        output_importance,
+        free_rows=free_rows,
+        codebook=codebook,
+        right_indices=right_indices,
+        right_flip_positions=right_flip_positions,
+        config=settings,
+    )
+    return result, {
+        "settings": asdict(settings),
+        "before_error": result.before_error,
+        "after_error": result.after_error,
+        "accepted_outer_passes": result.accepted_outer_passes,
+        "candidate_words_evaluated": result.candidate_words_evaluated,
+        "codebook_patterns_evaluated": result.codebook_patterns_evaluated,
+        "selected_words": result.selected_words,
+        "accepted_words": result.accepted_words,
+        "sign_updates": result.sign_updates,
     }
 
 
@@ -1266,6 +1399,13 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--assignment-batch-words", type=int, default=8192)
     parser.add_argument("--corrected-assignment-candidates", type=int, default=16)
     parser.add_argument("--scale-fit-passes", type=int, default=2)
+    parser.add_argument("--binary-search", action="store_true")
+    parser.add_argument("--payload-search", action="store_true")
+    parser.add_argument("--payload-search-passes", type=int, default=8)
+    parser.add_argument("--payload-search-max-words", type=int, default=8_192)
+    parser.add_argument("--payload-search-scale-passes", type=int, default=64)
+    parser.add_argument("--payload-search-batch-words", type=int, default=2_048)
+    parser.add_argument("--payload-search-table-chunk", type=int, default=128)
     parser.add_argument("--calibration-shrinkage", type=float, default=0.6)
     parser.add_argument("--wikitext-samples", type=int, default=12)
     parser.add_argument("--wikitext-offset", type=int, default=0)
@@ -1322,6 +1462,8 @@ def run(args: argparse.Namespace) -> int:
         or args.right_free_rows >= args.candidate_rank
     ):
         raise ValueError("candidate rank/free-row configuration is invalid")
+    if args.payload_search and not args.binary_search:
+        raise ValueError("payload search requires the matched binary-search control")
     if (
         args.wikitext_samples <= 0
         or args.wikitext_offset < 0
@@ -1502,6 +1644,7 @@ def run(args: argparse.Namespace) -> int:
         baseline_entries: list[tuple[LayerId, torch.Tensor, float]] = []
         candidate_entries: list[tuple[LayerId, torch.Tensor, float]] = []
         reconstruction_metrics: dict[str, dict[str, dict[str, float]]] = {}
+        search_metrics: dict[str, dict[str, object]] = {}
         candidate_index_metrics: dict[
             str,
             dict[str, dict[str, float | int | bool]],
@@ -1690,9 +1833,63 @@ def run(args: argparse.Namespace) -> int:
                     output_importance,
                     alternating_passes=args.scale_fit_passes,
                 )
+                baseline_left = baseline_factors.left_binary
+                baseline_right = baseline_factors.right_binary
+                baseline_pre = baseline_fit.scale_pre
+                baseline_mid = baseline_fit.scale_mid
+                baseline_post = baseline_fit.scale_post
+                unit_search_metrics: dict[str, object] = {}
+                if args.binary_search:
+                    baseline_search, baseline_search_metrics = (
+                        _binary_search_factors(
+                            weight,
+                            baseline_left,
+                            baseline_right,
+                            baseline_fit,
+                            input_importance,
+                            output_importance,
+                            right_free_rows=None,
+                        )
+                    )
+                    baseline_left = baseline_search.left_binary
+                    baseline_right = baseline_search.right_binary
+                    baseline_pre = baseline_search.scale_pre
+                    baseline_mid = baseline_search.scale_mid
+                    baseline_post = baseline_search.scale_post
+                    unit_search_metrics["free_binary"] = baseline_search_metrics
+                if args.payload_search:
+                    baseline_payload, baseline_payload_metrics = (
+                        _payload_search_factors(
+                            args,
+                            weight,
+                            baseline_left,
+                            baseline_right,
+                            baseline_pre,
+                            baseline_mid,
+                            baseline_post,
+                            input_importance,
+                            output_importance,
+                            free_rows=args.baseline_rank,
+                            codebook=None,
+                            right_indices=None,
+                            right_flip_positions=None,
+                        )
+                    )
+                    baseline_right = baseline_payload.right_binary
+                    baseline_pre = baseline_payload.scale_pre
+                    baseline_mid = baseline_payload.scale_mid
+                    baseline_post = baseline_payload.scale_post
+                    unit_search_metrics["free_payload"] = baseline_payload_metrics
+                baseline_reconstruction = reconstruct(
+                    baseline_left,
+                    baseline_right,
+                    baseline_pre,
+                    baseline_mid,
+                    baseline_post,
+                )
                 baseline_metrics = _metrics(
                     weight,
-                    baseline_fit.reconstruction,
+                    baseline_reconstruction,
                     input_importance,
                     output_importance,
                 )
@@ -1737,17 +1934,79 @@ def run(args: argparse.Namespace) -> int:
                     output_importance,
                     alternating_passes=args.scale_fit_passes,
                 )
+                candidate_left = candidate_factors.factors.left_binary
+                candidate_right = candidate_factors.factors.right_binary
+                candidate_pre = candidate_fit.scale_pre
+                candidate_mid = candidate_fit.scale_mid
+                candidate_post = candidate_fit.scale_post
+                if args.binary_search:
+                    candidate_search, candidate_search_metrics = (
+                        _binary_search_factors(
+                            weight,
+                            candidate_left,
+                            candidate_right,
+                            candidate_fit,
+                            input_importance,
+                            output_importance,
+                            right_free_rows=args.right_free_rows,
+                        )
+                    )
+                    candidate_left = candidate_search.left_binary
+                    candidate_right = candidate_search.right_binary
+                    candidate_pre = candidate_search.scale_pre
+                    candidate_mid = candidate_search.scale_mid
+                    candidate_post = candidate_search.scale_post
+                    unit_search_metrics["candidate_binary"] = (
+                        candidate_search_metrics
+                    )
+                if args.payload_search:
+                    if not isinstance(
+                        candidate_factors.right_codebook, FullSignCodebook
+                    ):
+                        raise ValueError("payload splice requires one full codebook")
+                    candidate_payload, candidate_payload_metrics = (
+                        _payload_search_factors(
+                            args,
+                            weight,
+                            candidate_left,
+                            candidate_right,
+                            candidate_pre,
+                            candidate_mid,
+                            candidate_post,
+                            input_importance,
+                            output_importance,
+                            free_rows=args.right_free_rows,
+                            codebook=candidate_factors.right_codebook,
+                            right_indices=candidate_factors.right_indices,
+                            right_flip_positions=(
+                                candidate_factors.right_flip_positions
+                            ),
+                        )
+                    )
+                    candidate_right = candidate_payload.right_binary
+                    candidate_pre = candidate_payload.scale_pre
+                    candidate_mid = candidate_payload.scale_mid
+                    candidate_post = candidate_payload.scale_post
+                    unit_search_metrics["candidate_payload"] = (
+                        candidate_payload_metrics
+                    )
+                candidate_reconstruction = reconstruct(
+                    candidate_left,
+                    candidate_right,
+                    candidate_pre,
+                    candidate_mid,
+                    candidate_post,
+                )
                 candidate_metrics = _metrics(
                     weight,
-                    candidate_fit.reconstruction,
+                    candidate_reconstruction,
                     input_importance,
                     output_importance,
                 )
                 candidate_index_metrics[unit_key] = codebook_index_metrics(
                     candidate_factors
                 )
-                baseline_reconstruction = baseline_fit.reconstruction
-                candidate_reconstruction = candidate_fit.reconstruction
+                search_metrics[unit_key] = unit_search_metrics
                 if transpose_current:
                     baseline_reconstruction = baseline_reconstruction.mT.contiguous()
                     candidate_reconstruction = candidate_reconstruction.mT.contiguous()
@@ -2273,6 +2532,7 @@ def run(args: argparse.Namespace) -> int:
             "index_metrics_by_block": candidate_index_metrics,
         },
         "reconstruction_by_block": reconstruction_metrics,
+        "search_by_block": search_metrics,
         "selection_results": selection_results,
         "operator_scale_refit": {
             "enabled": args.operator_scale_refit,

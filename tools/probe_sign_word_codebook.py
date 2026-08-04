@@ -27,6 +27,11 @@ from nanoquant.domain.binary_factor_search import (
     refine_binary_factors_control_then_tabu,
 )
 from nanoquant.domain.calibration_math import shrink_importance
+from nanoquant.domain.codebook_payload_search import (
+    SignWordPayloadSearchConfig,
+    SignWordPayloadSearchResult,
+    refine_sign_word_payloads,
+)
 from nanoquant.domain.factorization import AdmmParameters, factorize_admm_with_parameters
 from nanoquant.domain.planning import factor_bit_cost
 from nanoquant.domain.progressive_sign_fixing import (
@@ -41,9 +46,10 @@ from nanoquant.domain.relational_sign_code import (
     maximum_relational_rank_for_budget,
     relational_sign_bit_cost,
 )
-from nanoquant.domain.scale_fit import fit_scales
+from nanoquant.domain.scale_fit import fit_scales, reconstruct
 from nanoquant.domain.sign_word_codebook import (
     CORRECTED_ASSIGNMENT_CANDIDATES,
+    FullSignCodebook,
     asymmetric_sign_word_codebook_bit_cost,
     codebook_index_metrics,
     corrected_asymmetric_codebook_bit_cost,
@@ -98,6 +104,7 @@ class SignWordCodebookProtocol:
     corrected_assignment_candidates: int
     scale_fit_passes: int
     binary_search: BinaryFactorSearchConfig
+    payload_search: SignWordPayloadSearchConfig
     calibration_shrinkage: float
     calibration_state: str
     seed: int
@@ -311,6 +318,52 @@ def _run_binary_search(
     }
 
 
+def _run_payload_search(
+    weight: torch.Tensor,
+    left_binary: torch.Tensor,
+    right_binary: torch.Tensor,
+    scale_pre: torch.Tensor,
+    scale_mid: torch.Tensor,
+    scale_post: torch.Tensor,
+    input_importance: torch.Tensor,
+    output_importance: torch.Tensor,
+    protocol: SignWordCodebookProtocol,
+    *,
+    free_rows: int,
+    codebook: FullSignCodebook | None,
+    right_indices: torch.Tensor | None,
+    right_flip_positions: torch.Tensor | None,
+) -> tuple[SignWordPayloadSearchResult, dict[str, Any]]:
+    started = time.perf_counter()
+    result = refine_sign_word_payloads(
+        weight,
+        left_binary,
+        right_binary,
+        scale_pre,
+        scale_mid,
+        scale_post,
+        input_importance,
+        output_importance,
+        free_rows=free_rows,
+        codebook=codebook,
+        right_indices=right_indices,
+        right_flip_positions=right_flip_positions,
+        config=protocol.payload_search,
+    )
+    return result, {
+        "settings": asdict(protocol.payload_search),
+        "before_error": result.before_error,
+        "after_error": result.after_error,
+        "accepted_outer_passes": result.accepted_outer_passes,
+        "candidate_words_evaluated": result.candidate_words_evaluated,
+        "codebook_patterns_evaluated": result.codebook_patterns_evaluated,
+        "selected_words": result.selected_words,
+        "accepted_words": result.accepted_words,
+        "sign_updates": result.sign_updates,
+        "wall_seconds": time.perf_counter() - started,
+    }
+
+
 def _trace(trace: tuple[Any, ...]) -> list[dict[str, int | float]]:
     return [
         {
@@ -370,6 +423,12 @@ def _run_baseline(
         output_importance,
     )
     binary_search = None
+    payload_search = None
+    selected_left = factorized.left_binary
+    selected_right = factorized.right_binary
+    selected_pre = fitted.scale_pre
+    selected_mid = fitted.scale_mid
+    selected_post = fitted.scale_post
     reconstruction = fitted.reconstruction
     if protocol.binary_search.enabled:
         searched, binary_search = _run_binary_search(
@@ -384,7 +443,41 @@ def _run_baseline(
             protocol,
             right_free_rows=None,
         )
-        reconstruction = searched.reconstruction
+        selected_left = searched.left_binary
+        selected_right = searched.right_binary
+        selected_pre = searched.scale_pre
+        selected_mid = searched.scale_mid
+        selected_post = searched.scale_post
+        reconstruction = reconstruct(
+            searched.left_binary,
+            searched.right_binary,
+            searched.scale_pre,
+            searched.scale_mid,
+            searched.scale_post,
+        )
+    post_binary_search_metrics = _metrics(
+        weight,
+        reconstruction,
+        input_importance,
+        output_importance,
+    )
+    if protocol.payload_search.enabled:
+        payload, payload_search = _run_payload_search(
+            weight,
+            selected_left,
+            selected_right,
+            selected_pre,
+            selected_mid,
+            selected_post,
+            input_importance,
+            output_importance,
+            protocol,
+            free_rows=protocol.baseline_rank,
+            codebook=None,
+            right_indices=None,
+            right_flip_positions=None,
+        )
+        reconstruction = payload.reconstruction
     if protocol.device.startswith("cuda"):
         torch.cuda.synchronize(protocol.device)
     bit_cost = factor_bit_cost(
@@ -410,7 +503,9 @@ def _run_baseline(
             output_importance,
         ),
         "pre_search_metrics": pre_search_metrics,
+        "post_binary_search_metrics": post_binary_search_metrics,
         "binary_search": binary_search,
+        "payload_search": payload_search,
         "scale_fit_accepted": fitted.accepted,
         "scale_fit_rollback_reason": fitted.rollback_reason,
         "trace": _trace(factorized.trace),
@@ -441,6 +536,9 @@ def _run_codebook(
     correction_bits = {0: 0, 1: 5, 2: 9, 3: 13}[corrections_per_word]
     right_only = protocol.codebook_mode == "full-right" or corrections_per_word > 0
     corrected = corrections_per_word > 0
+    payload_codebook: FullSignCodebook | None = None
+    payload_indices: torch.Tensor | None = None
+    payload_positions: torch.Tensor | None = None
     if corrected:
         rank = maximum_corrected_asymmetric_rank_for_budget(
             weight.shape[0],
@@ -595,6 +693,10 @@ def _run_codebook(
             ),
         )
         factors = codebook_result.factors
+        if isinstance(codebook_result.right_codebook, FullSignCodebook):
+            payload_codebook = codebook_result.right_codebook
+            payload_indices = codebook_result.right_indices
+            payload_positions = codebook_result.right_flip_positions
         representation_metrics = {
             "index_metrics": codebook_index_metrics(codebook_result)
         }
@@ -693,6 +795,12 @@ def _run_codebook(
         output_importance,
     )
     binary_search = None
+    payload_search = None
+    selected_left = factors.left_binary
+    selected_right = factors.right_binary
+    selected_pre = fitted.scale_pre
+    selected_mid = fitted.scale_mid
+    selected_post = fitted.scale_post
     reconstruction = fitted.reconstruction
     if protocol.binary_search.enabled:
         searched, binary_search = _run_binary_search(
@@ -707,7 +815,43 @@ def _run_codebook(
             protocol,
             right_free_rows=protocol.right_free_rows,
         )
-        reconstruction = searched.reconstruction
+        selected_left = searched.left_binary
+        selected_right = searched.right_binary
+        selected_pre = searched.scale_pre
+        selected_mid = searched.scale_mid
+        selected_post = searched.scale_post
+        reconstruction = reconstruct(
+            searched.left_binary,
+            searched.right_binary,
+            searched.scale_pre,
+            searched.scale_mid,
+            searched.scale_post,
+        )
+    post_binary_search_metrics = _metrics(
+        weight,
+        reconstruction,
+        input_importance,
+        output_importance,
+    )
+    if protocol.payload_search.enabled:
+        if payload_codebook is None:
+            raise ValueError("payload search requires one full right codebook")
+        payload, payload_search = _run_payload_search(
+            weight,
+            selected_left,
+            selected_right,
+            selected_pre,
+            selected_mid,
+            selected_post,
+            input_importance,
+            output_importance,
+            protocol,
+            free_rows=protocol.right_free_rows,
+            codebook=payload_codebook,
+            right_indices=payload_indices,
+            right_flip_positions=payload_positions,
+        )
+        reconstruction = payload.reconstruction
     if protocol.device.startswith("cuda"):
         torch.cuda.synchronize(protocol.device)
     return {
@@ -728,7 +872,9 @@ def _run_codebook(
             output_importance,
         ),
         "pre_search_metrics": pre_search_metrics,
+        "post_binary_search_metrics": post_binary_search_metrics,
         "binary_search": binary_search,
+        "payload_search": payload_search,
         **representation_metrics,
         "scale_fit_accepted": fitted.accepted,
         "scale_fit_rollback_reason": fitted.rollback_reason,
@@ -830,6 +976,8 @@ def run(args: argparse.Namespace) -> int:
         raise ValueError(
             "representation-preserving binary search requires a corrected mixed-right codebook"
         )
+    if args.payload_search and not args.binary_search:
+        raise ValueError("payload search requires the matched binary-search control")
     if (
         args.right_codebook_banks <= 0
         or args.right_codebook_banks & (args.right_codebook_banks - 1)
@@ -855,7 +1003,7 @@ def run(args: argparse.Namespace) -> int:
             "partial corrected banks require a valid row-banked prefix"
         )
     protocol = SignWordCodebookProtocol(
-        20,
+        22,
         args.model_revision,
         args.block,
         args.projection,
@@ -883,6 +1031,14 @@ def run(args: argparse.Namespace) -> int:
         args.corrected_assignment_candidates,
         args.scale_fit_passes,
         BinaryFactorSearchConfig(enabled=args.binary_search),
+        SignWordPayloadSearchConfig(
+            enabled=args.payload_search,
+            outer_passes=args.payload_search_passes,
+            max_words_per_pass=args.payload_search_max_words,
+            scale_passes=args.payload_search_scale_passes,
+            candidate_batch_words=args.payload_search_batch_words,
+            table_chunk_size=args.payload_search_table_chunk,
+        ),
         args.calibration_shrinkage,
         str(args.calibration_state.resolve()),
         args.seed,
@@ -1112,6 +1268,12 @@ def build_parser() -> argparse.ArgumentParser:
             "and only the representation-free signs of the mixed codebook arm"
         ),
     )
+    parser.add_argument("--payload-search", action="store_true")
+    parser.add_argument("--payload-search-passes", type=int, default=2)
+    parser.add_argument("--payload-search-max-words", type=int, default=2_048)
+    parser.add_argument("--payload-search-scale-passes", type=int, default=64)
+    parser.add_argument("--payload-search-batch-words", type=int, default=2_048)
+    parser.add_argument("--payload-search-table-chunk", type=int, default=128)
     parser.add_argument("--calibration-shrinkage", type=float, default=0.6)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="cuda:0")
