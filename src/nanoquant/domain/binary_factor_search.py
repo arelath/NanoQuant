@@ -119,6 +119,7 @@ def _one_bit_pass(
     *,
     vector_weights: torch.Tensor | None = None,
     maximum_updates: int | None = None,
+    mutable_bits: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
     _, alpha, beta, gram_product = _scores(vectors, cross, gram, epsilon)
     candidate_alpha = alpha[:, None] - 2.0 * vectors * cross
@@ -128,6 +129,8 @@ def _one_bit_pass(
         + 4.0 * gram.diagonal()[None, :]
     ).clamp_min(epsilon)
     candidate_scores = candidate_alpha.square() / candidate_beta
+    if mutable_bits is not None:
+        candidate_scores.masked_fill_(~mutable_bits.reshape(1, -1), -torch.inf)
     best_scores, indices = candidate_scores.max(dim=1)
     if maximum_updates is not None and maximum_updates < vectors.shape[0]:
         weights = (
@@ -285,15 +288,21 @@ def _variable_depth_pass(
     chain_length: int,
     epsilon: float,
     tolerance: float,
+    mutable_bits: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
     """Build uphill-capable locked-bit chains and commit the best prefix."""
 
-    chain_length = min(chain_length, vectors.shape[1])
+    if mutable_bits is not None:
+        chain_length = min(chain_length, int(mutable_bits.sum()))
+    else:
+        chain_length = min(chain_length, vectors.shape[1])
     if chain_length == 0:
         return vectors, scales, scores, 0
     state = vectors.clone()
     _, alpha, beta, gram_product = _scores(state, cross, gram, epsilon)
     locked = torch.zeros_like(state, dtype=torch.bool)
+    if mutable_bits is not None:
+        locked |= ~mutable_bits.reshape(1, -1)
     best_vectors = vectors.clone()
     best_scores = scores.clone()
     best_alpha = alpha.clone()
@@ -346,10 +355,15 @@ def _tabu_pass(
     tenure_jitter: int,
     epsilon: float,
     tolerance: float,
+    mutable_bits: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
     """Run scale-profiled tabu chains and retain each row's best visited state."""
 
-    if steps == 0 or vectors.shape[1] == 0:
+    if (
+        steps == 0
+        or vectors.shape[1] == 0
+        or (mutable_bits is not None and not bool(mutable_bits.any()))
+    ):
         return vectors, scales, scores, 0
     state = vectors.clone()
     _, alpha, beta, gram_product = _scores(state, cross, gram, epsilon)
@@ -368,10 +382,18 @@ def _tabu_pass(
         candidate_scores = candidate_alpha.square() / candidate_beta
         aspiration = candidate_scores > best_scores[:, None]
         forbidden = (tabu_until > step) & ~aspiration
+        if mutable_bits is not None:
+            forbidden |= ~mutable_bits.reshape(1, -1)
         choices_scores = candidate_scores.masked_fill(forbidden, -torch.inf)
         fully_forbidden = torch.isneginf(choices_scores).all(dim=1)
         if bool(fully_forbidden.any()):
-            fallback = tabu_until.argmin(dim=1)
+            fallback_tenure = tabu_until
+            if mutable_bits is not None:
+                fallback_tenure = tabu_until.masked_fill(
+                    ~mutable_bits.reshape(1, -1),
+                    torch.iinfo(tabu_until.dtype).max,
+                )
+            fallback = fallback_tenure.argmin(dim=1)
             choices_scores[fully_forbidden, fallback[fully_forbidden]] = candidate_scores[
                 fully_forbidden, fallback[fully_forbidden]
             ]
@@ -502,6 +524,7 @@ def _refine_vectors(
     hard_vectors: int,
     epsilon: float,
     tolerance: float,
+    mutable_bits: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, _VectorSearchStats]:
     stats = _VectorSearchStats()
     scores, _, _, _ = _scores(vectors, cross, gram, epsilon)
@@ -530,6 +553,7 @@ def _refine_vectors(
             tolerance,
             vector_weights=vector_weights,
             maximum_updates=one_bit_vectors,
+            mutable_bits=mutable_bits,
         )
         stats.one_bit_updates += count
         if count == 0:
@@ -558,6 +582,7 @@ def _refine_vectors(
             variable_depth_length,
             epsilon,
             tolerance,
+            mutable_bits,
         )
         stats.variable_depth_updates += count
         if count == 0:
@@ -574,6 +599,7 @@ def _refine_vectors(
             tabu_tenure_jitter,
             epsilon,
             tolerance,
+            mutable_bits,
         )
         stats.tabu_updates += count
         if count == 0:
@@ -1050,6 +1076,8 @@ def refine_binary_factors_separable(
     joint_screen_scale_passes: int = 4,
     epsilon: float = 1e-8,
     acceptance_tolerance: float = 1e-10,
+    left_mutable_components: torch.Tensor | None = None,
+    right_mutable_components: torch.Tensor | None = None,
 ) -> BinaryFactorSearchResult:
     """Improve final binary factors with scale-eliminated bounded neighborhoods.
 
@@ -1061,6 +1089,27 @@ def refine_binary_factors_separable(
     if target.ndim != 2 or left_binary.ndim != 2 or right_binary.ndim != 2:
         raise ValueError("binary-factor search target and factors must be matrices")
     rank = left_binary.shape[1]
+    component_masks = (left_mutable_components, right_mutable_components)
+    if any(
+        mask is not None
+        and (mask.ndim != 1 or mask.numel() != rank or mask.dtype != torch.bool)
+        for mask in component_masks
+    ):
+        raise ValueError("binary-factor mutable-component masks must be boolean rank vectors")
+    has_immutable_components = any(
+        mask is not None and not bool(mask.all()) for mask in component_masks
+    )
+    if has_immutable_components and (
+        continuous_candidates
+        or codebook_passes
+        or pair_passes
+        or block_passes
+        or component_passes
+        or joint_passes
+    ):
+        raise ValueError(
+            "masked binary-factor search supports only one-bit, variable-depth, and tabu moves"
+        )
     if (
         left_binary.shape[0] != target.shape[0]
         or right_binary.shape != (rank, target.shape[1])
@@ -1114,6 +1163,16 @@ def refine_binary_factors_separable(
     post = scale_post.detach().float().reshape(-1).clone()
     input_weight = input_importance.detach().float().reshape(-1).clamp_min(epsilon)
     output_weight = output_importance.detach().float().reshape(-1).clamp_min(epsilon)
+    left_mutable = (
+        None
+        if left_mutable_components is None
+        else left_mutable_components.detach().to(device=left.device)
+    )
+    right_mutable = (
+        None
+        if right_mutable_components is None
+        else right_mutable_components.detach().to(device=right.device)
+    )
     initial_prediction = reconstruct(left, right, pre, mid, post)
     initial_error = float(
         ((initial_prediction - target32).square() * output_weight[:, None] * input_weight[None, :]).sum()
@@ -1166,6 +1225,7 @@ def refine_binary_factors_separable(
             hard_vectors=hard_left,
             epsilon=epsilon,
             tolerance=acceptance_tolerance,
+            mutable_bits=left_mutable,
         )
 
         scaled_left = left * (post[:, None] * mid[None, :])
@@ -1198,6 +1258,7 @@ def refine_binary_factors_separable(
             hard_vectors=hard_right,
             epsilon=epsilon,
             tolerance=acceptance_tolerance,
+            mutable_bits=right_mutable,
         )
         right = right_vectors.mT.contiguous()
         component_updates = 0
@@ -1320,6 +1381,8 @@ def refine_binary_factors_control_then_tabu(
     tabu_steps: int,
     tabu_tenure: int,
     tabu_tenure_jitter: int,
+    left_mutable_components: torch.Tensor | None = None,
+    right_mutable_components: torch.Tensor | None = None,
 ) -> tuple[BinaryFactorSearchResult, BinaryFactorSearchResult]:
     """Run the retained local control to convergence, then add only tabu.
 
@@ -1349,6 +1412,8 @@ def refine_binary_factors_control_then_tabu(
         block_bits=0,
         block_passes=0,
         component_passes=0,
+        left_mutable_components=left_mutable_components,
+        right_mutable_components=right_mutable_components,
     )
     tabu = refine_binary_factors_separable(
         target,
@@ -1372,5 +1437,7 @@ def refine_binary_factors_control_then_tabu(
         block_bits=0,
         block_passes=0,
         component_passes=0,
+        left_mutable_components=left_mutable_components,
+        right_mutable_components=right_mutable_components,
     )
     return control, tabu

@@ -87,6 +87,57 @@ def test_control_then_tabu_protocol_preserves_the_control_floor() -> None:
     assert tabu.after_error <= control.after_error + 1e-6
 
 
+def test_control_then_tabu_preserves_immutable_factor_components() -> None:
+    target, left, right, pre, mid, post = _random_problem(5, 72)
+    mutable = torch.tensor([True, True, False, False, False])
+    initial_right = right.clone()
+
+    control, tabu = refine_binary_factors_control_then_tabu(
+        target,
+        left,
+        right,
+        pre,
+        mid,
+        post,
+        torch.ones(5),
+        torch.ones(5),
+        scale_passes=8,
+        control_outer_passes=3,
+        one_bit_passes=4,
+        one_bit_fraction=1.0,
+        max_one_bit_vectors=5,
+        variable_depth_passes=1,
+        variable_depth_length=5,
+        tabu_outer_passes=2,
+        tabu_passes=1,
+        tabu_steps=16,
+        tabu_tenure=3,
+        tabu_tenure_jitter=2,
+        right_mutable_components=mutable,
+    )
+
+    torch.testing.assert_close(control.right_binary[~mutable], initial_right[~mutable])
+    torch.testing.assert_close(tabu.right_binary[~mutable], initial_right[~mutable])
+    assert tabu.after_error <= control.after_error + 1e-6
+
+
+def test_masked_search_rejects_moves_that_cannot_preserve_the_representation() -> None:
+    target, left, right, pre, mid, post = _random_problem(4, 73)
+
+    with pytest.raises(ValueError, match="supports only"):
+        refine_binary_factors_separable(
+            target,
+            left,
+            right,
+            pre,
+            mid,
+            post,
+            torch.ones(4),
+            torch.ones(4),
+            right_mutable_components=torch.tensor([True, False, False, False]),
+        )
+
+
 def test_full_rank_block_search_is_at_least_as_strong_as_one_bit_search() -> None:
     target, left, right, pre, mid, post = _random_problem(4, 21)
     common = dict(
@@ -276,6 +327,29 @@ def test_tabu_cycle_does_not_accept_incremental_score_drift() -> None:
     assert updates == 0
     assert torch.equal(refined, vectors)
     assert torch.equal(refined_scores, scores)
+
+
+def test_tabu_fallback_never_selects_an_immutable_bit() -> None:
+    vectors = torch.ones((1, 2))
+    cross = torch.tensor([[1.0, -0.5]])
+    gram = torch.eye(2)
+    scores, alpha, beta, _ = _scores(vectors, cross, gram, 1e-8)
+
+    refined, _scales, _scores_after, _updates = _tabu_pass(
+        vectors,
+        cross,
+        gram,
+        alpha / beta,
+        scores,
+        8,
+        3,
+        0,
+        1e-8,
+        1e-10,
+        torch.tensor([True, False]),
+    )
+
+    assert refined[0, 1] == vectors[0, 1]
 
 
 def test_one_bit_pass_honors_the_highest_gain_update_cap() -> None:

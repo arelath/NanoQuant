@@ -21,6 +21,11 @@ from typing import Any, cast
 import torch
 from safetensors import safe_open
 
+from nanoquant.config.schema import BinaryFactorSearchConfig
+from nanoquant.domain.binary_factor_search import (
+    BinaryFactorSearchResult,
+    refine_binary_factors_control_then_tabu,
+)
 from nanoquant.domain.calibration_math import shrink_importance
 from nanoquant.domain.factorization import AdmmParameters, factorize_admm_with_parameters
 from nanoquant.domain.planning import factor_bit_cost
@@ -92,6 +97,7 @@ class SignWordCodebookProtocol:
     assignment_batch_words: int
     corrected_assignment_candidates: int
     scale_fit_passes: int
+    binary_search: BinaryFactorSearchConfig
     calibration_shrinkage: float
     calibration_state: str
     seed: int
@@ -199,6 +205,112 @@ def _metrics(
     }
 
 
+def _binary_search_result_metrics(result: BinaryFactorSearchResult) -> dict[str, int | float]:
+    return {
+        "before_error": result.before_error,
+        "after_error": result.after_error,
+        "accepted_outer_passes": result.accepted_outer_passes,
+        "one_bit_updates": result.one_bit_updates,
+        "variable_depth_updates": result.variable_depth_updates,
+        "tabu_updates": result.tabu_updates,
+    }
+
+
+def _run_binary_search(
+    weight: torch.Tensor,
+    left_binary: torch.Tensor,
+    right_binary: torch.Tensor,
+    scale_pre: torch.Tensor,
+    scale_mid: torch.Tensor,
+    scale_post: torch.Tensor,
+    input_importance: torch.Tensor,
+    output_importance: torch.Tensor,
+    protocol: SignWordCodebookProtocol,
+    *,
+    right_free_rows: int | None,
+) -> tuple[BinaryFactorSearchResult, dict[str, Any]]:
+    search = protocol.binary_search
+    if not search.enabled:
+        raise ValueError("binary search was not enabled for this protocol")
+    common_fit = fit_scales(
+        weight,
+        left_binary,
+        right_binary,
+        scale_pre,
+        scale_mid,
+        scale_post,
+        input_importance,
+        output_importance,
+        alternating_passes=search.scale_passes,
+    )
+    right_mutable = None
+    if right_free_rows is not None:
+        right_mutable = torch.zeros(
+            right_binary.shape[0],
+            dtype=torch.bool,
+            device=right_binary.device,
+        )
+        right_mutable[:right_free_rows] = True
+    started = time.perf_counter()
+    control, tabu = refine_binary_factors_control_then_tabu(
+        weight,
+        left_binary,
+        right_binary,
+        common_fit.scale_pre,
+        common_fit.scale_mid,
+        common_fit.scale_post,
+        input_importance,
+        output_importance,
+        scale_passes=search.scale_passes,
+        control_outer_passes=search.control_outer_passes,
+        one_bit_passes=search.one_bit_passes,
+        one_bit_fraction=search.one_bit_fraction,
+        max_one_bit_vectors=search.max_one_bit_vectors,
+        variable_depth_passes=search.variable_depth_passes,
+        variable_depth_length=search.variable_depth_length,
+        tabu_outer_passes=search.tabu_outer_passes,
+        tabu_passes=search.tabu_passes,
+        tabu_steps=search.tabu_steps,
+        tabu_tenure=search.tabu_tenure,
+        tabu_tenure_jitter=search.tabu_tenure_jitter,
+        right_mutable_components=right_mutable,
+    )
+    if right_free_rows is not None and not torch.equal(
+        tabu.right_binary[right_free_rows:],
+        right_binary[right_free_rows:],
+    ):
+        raise RuntimeError("binary search changed codebook-constrained factor rows")
+    return tabu, {
+        "settings": asdict(search),
+        "right_mutable_rows": (
+            right_binary.shape[0] if right_free_rows is None else right_free_rows
+        ),
+        "right_immutable_rows": (
+            0 if right_free_rows is None else right_binary.shape[0] - right_free_rows
+        ),
+        "common_refit_error": common_fit.after_error,
+        "common_refit_metrics": _metrics(
+            weight,
+            common_fit.reconstruction,
+            input_importance,
+            output_importance,
+        ),
+        "control": _binary_search_result_metrics(control),
+        "tabu": _binary_search_result_metrics(tabu),
+        "left_sign_distance_from_admm": int(
+            (tabu.left_binary != left_binary).sum()
+        ),
+        "right_sign_distance_from_admm": int(
+            (tabu.right_binary != right_binary).sum()
+        ),
+        "tabu_sign_distance_from_control": int(
+            (tabu.left_binary != control.left_binary).sum()
+            + (tabu.right_binary != control.right_binary).sum()
+        ),
+        "wall_seconds": time.perf_counter() - started,
+    }
+
+
 def _trace(trace: tuple[Any, ...]) -> list[dict[str, int | float]]:
     return [
         {
@@ -251,6 +363,28 @@ def _run_baseline(
         output_importance,
         alternating_passes=protocol.scale_fit_passes,
     )
+    pre_search_metrics = _metrics(
+        weight,
+        fitted.reconstruction,
+        input_importance,
+        output_importance,
+    )
+    binary_search = None
+    reconstruction = fitted.reconstruction
+    if protocol.binary_search.enabled:
+        searched, binary_search = _run_binary_search(
+            weight,
+            factorized.left_binary,
+            factorized.right_binary,
+            fitted.scale_pre,
+            fitted.scale_mid,
+            fitted.scale_post,
+            input_importance,
+            output_importance,
+            protocol,
+            right_free_rows=None,
+        )
+        reconstruction = searched.reconstruction
     if protocol.device.startswith("cuda"):
         torch.cuda.synchronize(protocol.device)
     bit_cost = factor_bit_cost(
@@ -271,10 +405,12 @@ def _run_baseline(
         ),
         "metrics": _metrics(
             weight,
-            fitted.reconstruction,
+            reconstruction,
             input_importance,
             output_importance,
         ),
+        "pre_search_metrics": pre_search_metrics,
+        "binary_search": binary_search,
         "scale_fit_accepted": fitted.accepted,
         "scale_fit_rollback_reason": fitted.rollback_reason,
         "trace": _trace(factorized.trace),
@@ -550,6 +686,28 @@ def _run_codebook(
         output_importance,
         alternating_passes=protocol.scale_fit_passes,
     )
+    pre_search_metrics = _metrics(
+        weight,
+        fitted.reconstruction,
+        input_importance,
+        output_importance,
+    )
+    binary_search = None
+    reconstruction = fitted.reconstruction
+    if protocol.binary_search.enabled:
+        searched, binary_search = _run_binary_search(
+            weight,
+            factors.left_binary,
+            factors.right_binary,
+            fitted.scale_pre,
+            fitted.scale_mid,
+            fitted.scale_post,
+            input_importance,
+            output_importance,
+            protocol,
+            right_free_rows=protocol.right_free_rows,
+        )
+        reconstruction = searched.reconstruction
     if protocol.device.startswith("cuda"):
         torch.cuda.synchronize(protocol.device)
     return {
@@ -565,10 +723,12 @@ def _run_codebook(
         "factorized_work_over_dense": rank * sum(weight.shape) / weight.numel(),
         "metrics": _metrics(
             weight,
-            fitted.reconstruction,
+            reconstruction,
             input_importance,
             output_importance,
         ),
+        "pre_search_metrics": pre_search_metrics,
+        "binary_search": binary_search,
         **representation_metrics,
         "scale_fit_accepted": fitted.accepted,
         "scale_fit_rollback_reason": fitted.rollback_reason,
@@ -663,6 +823,13 @@ def run(args: argparse.Namespace) -> int:
         raise ValueError(
             "right free rows require a larger explicit corrected-code rank"
         )
+    if args.binary_search and (
+        args.right_free_rows <= 0
+        or not args.codebook_mode.startswith("full-right-flip")
+    ):
+        raise ValueError(
+            "representation-preserving binary search requires a corrected mixed-right codebook"
+        )
     if (
         args.right_codebook_banks <= 0
         or args.right_codebook_banks & (args.right_codebook_banks - 1)
@@ -688,7 +855,7 @@ def run(args: argparse.Namespace) -> int:
             "partial corrected banks require a valid row-banked prefix"
         )
     protocol = SignWordCodebookProtocol(
-        19,
+        20,
         args.model_revision,
         args.block,
         args.projection,
@@ -715,6 +882,7 @@ def run(args: argparse.Namespace) -> int:
         args.assignment_batch_words,
         args.corrected_assignment_candidates,
         args.scale_fit_passes,
+        BinaryFactorSearchConfig(enabled=args.binary_search),
         args.calibration_shrinkage,
         str(args.calibration_state.resolve()),
         args.seed,
@@ -936,6 +1104,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=CORRECTED_ASSIGNMENT_CANDIDATES,
     )
     parser.add_argument("--scale-fit-passes", type=int, default=2)
+    parser.add_argument(
+        "--binary-search",
+        action="store_true",
+        help=(
+            "apply the retained control-then-tabu search to the free-word baseline "
+            "and only the representation-free signs of the mixed codebook arm"
+        ),
+    )
     parser.add_argument("--calibration-shrinkage", type=float, default=0.6)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="cuda:0")
