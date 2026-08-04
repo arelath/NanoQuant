@@ -7,6 +7,7 @@ import torch
 
 from nanoquant.domain.codebook_payload_search import (
     SignWordPayloadSearchConfig,
+    SignWordPayloadSearchResult,
     _best_corrected_payload_candidates,
     refine_sign_word_payloads,
 )
@@ -171,3 +172,71 @@ def test_corrected_payload_search_rejects_mismatched_metadata() -> None:
             ),
             config=_config(),
         )
+
+
+def _functional_fixture(
+    held_out_inputs: torch.Tensor,
+) -> tuple[SignWordPayloadSearchConfig, SignWordPayloadSearchResult]:
+    initial_right = torch.ones((1, 32))
+    initial_right[0, 1] = -1
+    target = initial_right.clone()
+    target[0, 0] = -0.5
+    target[0, 1] = 0
+    fit_inputs = torch.zeros((1, 32))
+    fit_inputs[0, :2] = torch.tensor([1.0, -1.0])
+    config = SignWordPayloadSearchConfig(
+        enabled=True,
+        outer_passes=1,
+        max_words_per_pass=1,
+        scale_passes=0,
+        candidate_batch_words=1,
+        table_chunk_size=1,
+        functional_candidate_words_per_pass=1,
+    )
+    result = refine_sign_word_payloads(
+        target,
+        torch.ones((1, 1)),
+        initial_right,
+        torch.ones(32),
+        torch.ones(1),
+        torch.ones(1),
+        torch.ones(32),
+        torch.ones(1),
+        free_rows=1,
+        codebook=None,
+        right_indices=None,
+        right_flip_positions=None,
+        config=config,
+        functional_fit_inputs=fit_inputs,
+        functional_held_out_inputs=held_out_inputs,
+    )
+    return config, result
+
+
+def test_functional_payload_gate_rejects_held_out_regression() -> None:
+    held_out_inputs = torch.zeros((1, 32))
+    held_out_inputs[0, :2] = 1
+
+    _config_value, result = _functional_fixture(held_out_inputs)
+
+    assert result.accepted_words == 0
+    assert result.functional_candidates_ranked == 1
+    assert result.functional_fit_error_after == result.functional_fit_error_before
+    assert (
+        result.functional_held_out_error_after
+        == result.functional_held_out_error_before
+    )
+
+
+def test_functional_payload_gate_accepts_disjoint_improvement() -> None:
+    held_out_inputs = torch.zeros((1, 32))
+    held_out_inputs[0, :2] = torch.tensor([1.0, -1.0])
+
+    _config_value, result = _functional_fixture(held_out_inputs)
+
+    assert result.accepted_words == 1
+    assert result.functional_fit_error_after < result.functional_fit_error_before
+    assert (
+        result.functional_held_out_error_after
+        < result.functional_held_out_error_before
+    )

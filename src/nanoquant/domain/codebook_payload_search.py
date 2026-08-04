@@ -26,6 +26,7 @@ class SignWordPayloadSearchConfig:
     candidate_batch_words: int = 2_048
     table_chunk_size: int = 128
     acceptance_tolerance: float = 1e-10
+    functional_candidate_words_per_pass: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,6 +46,11 @@ class SignWordPayloadSearchResult:
     selected_words: int
     accepted_words: int
     sign_updates: int
+    functional_candidates_ranked: int = 0
+    functional_fit_error_before: float | None = None
+    functional_fit_error_after: float | None = None
+    functional_held_out_error_before: float | None = None
+    functional_held_out_error_after: float | None = None
 
 
 def _weighted_error(
@@ -60,6 +66,29 @@ def _weighted_error(
             * input_importance.float().reshape(1, -1)
         ).sum()
     )
+
+
+def _functional_residual(
+    inputs: torch.Tensor,
+    target: torch.Tensor,
+    prediction: torch.Tensor,
+) -> torch.Tensor:
+    return inputs.float() @ (target.float() - prediction.float()).mT
+
+
+def _functional_change(
+    inputs: torch.Tensor,
+    residual: torch.Tensor,
+    component_vector: torch.Tensor,
+    delta_word: torch.Tensor,
+    scale_pre_word: torch.Tensor,
+) -> tuple[float, torch.Tensor]:
+    latent_delta = inputs.float() @ (delta_word.float() * scale_pre_word.float())
+    output_delta = latent_delta[:, None] * component_vector.float()[None, :]
+    change = float(
+        (-2.0 * residual.float() * output_delta + output_delta.square()).sum()
+    )
+    return change, output_delta
 
 
 def _pad_words(value: torch.Tensor, padded_columns: int, fill: float) -> torch.Tensor:
@@ -185,6 +214,8 @@ def refine_sign_word_payloads(
     right_indices: torch.Tensor | None,
     right_flip_positions: torch.Tensor | None,
     config: SignWordPayloadSearchConfig,
+    functional_fit_inputs: torch.Tensor | None = None,
+    functional_held_out_inputs: torch.Tensor | None = None,
 ) -> SignWordPayloadSearchResult:
     """Refine right-factor words without changing their stored representation.
 
@@ -203,6 +234,7 @@ def refine_sign_word_payloads(
         or config.candidate_batch_words <= 0
         or config.table_chunk_size <= 0
         or config.acceptance_tolerance < 0
+        or config.functional_candidate_words_per_pass < 0
     ):
         raise ValueError("sign-word payload search settings are invalid")
     if target.ndim != 2 or left_binary.ndim != 2 or right_binary.ndim != 2:
@@ -219,6 +251,25 @@ def refine_sign_word_payloads(
         or not 0 <= free_rows <= rank
     ):
         raise ValueError("sign-word payload search dimensions do not match")
+    functional_enabled = config.functional_candidate_words_per_pass > 0
+    if functional_enabled:
+        if (
+            functional_fit_inputs is None
+            or functional_held_out_inputs is None
+            or functional_fit_inputs.ndim != 2
+            or functional_held_out_inputs.ndim != 2
+            or functional_fit_inputs.shape[1] != target.shape[1]
+            or functional_held_out_inputs.shape[1] != target.shape[1]
+            or functional_fit_inputs.shape[0] == 0
+            or functional_held_out_inputs.shape[0] == 0
+        ):
+            raise ValueError(
+                "functional payload acceptance requires non-empty matching inputs"
+            )
+    elif functional_fit_inputs is not None or functional_held_out_inputs is not None:
+        raise ValueError(
+            "functional payload inputs require a positive functional candidate budget"
+        )
     if codebook is None:
         if free_rows != rank or right_indices is not None or right_flip_positions is not None:
             raise ValueError("free-word search must expose every row and omit payload metadata")
@@ -261,6 +312,32 @@ def refine_sign_word_payloads(
         target32, prediction, input_weight, output_weight
     )
     before_error = best_error
+    fit_inputs = (
+        None
+        if functional_fit_inputs is None
+        else functional_fit_inputs.detach().to(device=target.device, dtype=torch.float32)
+    )
+    held_inputs = (
+        None
+        if functional_held_out_inputs is None
+        else functional_held_out_inputs.detach().to(
+            device=target.device, dtype=torch.float32
+        )
+    )
+    fit_residual = (
+        None if fit_inputs is None else _functional_residual(fit_inputs, target32, prediction)
+    )
+    held_residual = (
+        None
+        if held_inputs is None
+        else _functional_residual(held_inputs, target32, prediction)
+    )
+    fit_error = None if fit_residual is None else float(fit_residual.square().sum())
+    held_error = (
+        None if held_residual is None else float(held_residual.square().sum())
+    )
+    fit_error_before = fit_error
+    held_error_before = held_error
     columns = target.shape[1]
     words = math.ceil(columns / 32)
     padded_columns = words * 32
@@ -270,6 +347,7 @@ def refine_sign_word_payloads(
     accepted_words = 0
     sign_updates = 0
     accepted_outer_passes = 0
+    functional_candidates_ranked = 0
 
     for _ in range(config.outer_passes):
         previous = (
@@ -281,6 +359,10 @@ def refine_sign_word_payloads(
             post.clone(),
             prediction.clone(),
             best_error,
+            None if fit_residual is None else fit_residual.clone(),
+            None if held_residual is None else held_residual.clone(),
+            fit_error,
+            held_error,
         )
         residual = target32 - prediction
         scaled_left = left * (post[:, None] * mid[None, :])
@@ -365,6 +447,68 @@ def refine_sign_word_payloads(
         selected = selected[useful]
         if selected.numel() == 0:
             break
+        if functional_enabled:
+            assert fit_inputs is not None and held_inputs is not None
+            assert fit_residual is not None and held_residual is not None
+            assert fit_error is not None and held_error is not None
+            selected = selected[
+                : config.functional_candidate_words_per_pass
+            ]
+            ranked: list[tuple[float, int]] = []
+            fit_threshold = config.acceptance_tolerance * max(abs(fit_error), 1.0)
+            held_threshold = config.acceptance_tolerance * max(abs(held_error), 1.0)
+            for flat_index in selected.tolist():
+                component = flat_index // words
+                word = flat_index % words
+                start = word * 32
+                stop = min(start + 32, columns)
+                current = right[component, start:stop]
+                if component < free_rows:
+                    candidate = padded_right[component, word].clone()
+                    candidate[free_flip_mask[component, word]] *= -1
+                else:
+                    assert codebook is not None
+                    assert coded_indices is not None and coded_positions is not None
+                    coded_flat = (component - free_rows) * words + word
+                    candidate = _decode_candidate_word(
+                        codebook.entries,
+                        int(coded_indices[coded_flat]),
+                        coded_positions[coded_flat],
+                    )
+                delta = candidate[: stop - start] - current
+                if not bool(delta.any()):
+                    continue
+                component_vector = scaled_left[:, component]
+                fit_change, _fit_delta = _functional_change(
+                    fit_inputs[:, start:stop],
+                    fit_residual,
+                    component_vector,
+                    delta,
+                    pre[start:stop],
+                )
+                held_change, _held_delta = _functional_change(
+                    held_inputs[:, start:stop],
+                    held_residual,
+                    component_vector,
+                    delta,
+                    pre[start:stop],
+                )
+                functional_candidates_ranked += 1
+                if (
+                    math.isfinite(fit_change)
+                    and math.isfinite(held_change)
+                    and fit_change < -fit_threshold
+                    and held_change < -held_threshold
+                ):
+                    ranked.append((held_change, flat_index))
+            ranked.sort()
+            selected = torch.tensor(
+                [flat_index for _change, flat_index in ranked],
+                dtype=torch.int64,
+                device=target.device,
+            )
+            if selected.numel() == 0:
+                break
         selected_words += int(selected.numel())
 
         pass_accepted = 0
@@ -407,10 +551,50 @@ def refine_sign_word_payloads(
             )
             if not math.isfinite(change) or change >= -threshold:
                 continue
+            fit_delta = None
+            held_delta = None
+            if functional_enabled:
+                assert fit_inputs is not None and held_inputs is not None
+                assert fit_residual is not None and held_residual is not None
+                assert fit_error is not None and held_error is not None
+                fit_change, fit_delta = _functional_change(
+                    fit_inputs[:, start:stop],
+                    fit_residual,
+                    component_vector,
+                    delta,
+                    pre[start:stop],
+                )
+                held_change, held_delta = _functional_change(
+                    held_inputs[:, start:stop],
+                    held_residual,
+                    component_vector,
+                    delta,
+                    pre[start:stop],
+                )
+                fit_threshold = config.acceptance_tolerance * max(
+                    abs(fit_error), 1.0
+                )
+                held_threshold = config.acceptance_tolerance * max(
+                    abs(held_error), 1.0
+                )
+                if (
+                    not math.isfinite(fit_change)
+                    or not math.isfinite(held_change)
+                    or fit_change >= -fit_threshold
+                    or held_change >= -held_threshold
+                ):
+                    continue
             right[component, start:stop] = candidate
             prediction[:, start:stop] += component_vector[:, None] * (
                 delta * pre[start:stop]
             )[None, :]
+            if fit_delta is not None and held_delta is not None:
+                assert fit_residual is not None and held_residual is not None
+                assert fit_error is not None and held_error is not None
+                fit_residual -= fit_delta
+                held_residual -= held_delta
+                fit_error = float(fit_residual.square().sum())
+                held_error = float(held_residual.square().sum())
             if component >= free_rows:
                 assert indices is not None and positions is not None
                 assert coded_indices is not None and coded_positions is not None
@@ -434,7 +618,39 @@ def refine_sign_word_payloads(
             alternating_passes=config.scale_passes,
         )
         improvement = best_error - fitted.after_error
-        if not math.isfinite(fitted.after_error) or improvement <= threshold:
+        fitted_fit_residual = None
+        fitted_held_residual = None
+        fitted_fit_error = None
+        fitted_held_error = None
+        functional_pass_accepted = True
+        if functional_enabled:
+            assert fit_inputs is not None and held_inputs is not None
+            previous_fit_error = previous[-2]
+            previous_held_error = previous[-1]
+            assert previous_fit_error is not None and previous_held_error is not None
+            fitted_fit_residual = _functional_residual(
+                fit_inputs, target32, fitted.reconstruction
+            )
+            fitted_held_residual = _functional_residual(
+                held_inputs, target32, fitted.reconstruction
+            )
+            fitted_fit_error = float(fitted_fit_residual.square().sum())
+            fitted_held_error = float(fitted_held_residual.square().sum())
+            functional_pass_accepted = (
+                math.isfinite(fitted_fit_error)
+                and math.isfinite(fitted_held_error)
+                and fitted_fit_error
+                < previous_fit_error
+                - config.acceptance_tolerance * max(abs(previous_fit_error), 1.0)
+                and fitted_held_error
+                < previous_held_error
+                - config.acceptance_tolerance * max(abs(previous_held_error), 1.0)
+            )
+        if (
+            not math.isfinite(fitted.after_error)
+            or improvement <= threshold
+            or not functional_pass_accepted
+        ):
             (
                 right,
                 indices,
@@ -444,6 +660,10 @@ def refine_sign_word_payloads(
                 post,
                 prediction,
                 best_error,
+                fit_residual,
+                held_residual,
+                fit_error,
+                held_error,
             ) = previous
             break
         pre = fitted.scale_pre
@@ -451,6 +671,11 @@ def refine_sign_word_payloads(
         post = fitted.scale_post
         prediction = fitted.reconstruction.float()
         best_error = fitted.after_error
+        if functional_enabled:
+            fit_residual = fitted_fit_residual
+            held_residual = fitted_held_residual
+            fit_error = fitted_fit_error
+            held_error = fitted_held_error
         accepted_words += pass_accepted
         sign_updates += pass_sign_updates
         accepted_outer_passes += 1
@@ -474,4 +699,9 @@ def refine_sign_word_payloads(
         selected_words,
         accepted_words,
         sign_updates,
+        functional_candidates_ranked,
+        fit_error_before,
+        fit_error,
+        held_error_before,
+        held_error,
     )

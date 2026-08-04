@@ -74,29 +74,46 @@ streams are the same tensor. The packed layout and runtime are rank-agnostic; no
 
 ## Promotion gate
 
-Status: **Not run under the version-57 approximate-probe policy**. Earlier attempts completed only part of the
-rank-response probe and no block commits. Their probe-plan identities are incompatible with version 57 and will not
-be reused. The interrupted version-56 run was rolled over without deleting or rewriting it and is retained at
-`evidence/055/055-overcomplete-rank-d2-compress-and-benchmark-gemma-3-1b-it--archive-535f37b234c1`.
+Status: **completed; rejected**.
 
-The first version-57 execution and a fresh-process resume both produced finite block-0 teacher outputs but non-finite
-outputs from the redundant entry-loss forward. Before block 0, teacher and compressed streams intentionally reference
-the same captured tensor and the untouched source block has just produced the teacher target, so the mathematical
-entry loss is exactly zero. Version 58 records that exact value without repeating the unstable CUDA forward; later
-blocks still measure entry loss normally because their streams differ. Both failed version-57 attempts and their
-complete 130-unit probe profile are retained under
-`evidence/055/055-overcomplete-rank-d2-compress-and-benchmark-gemma-3-1b-it--archive-c02c01a54919`.
+The version-58 campaign completed all 26 blocks, global tuning, global distillation, logical and packed export, GGUF
+publication, and the retained quality benchmark. Fresh validation audited 768 transitive artifacts and all 156 active
+journal records without error.
 
-Promotion requires:
+The cap was active. The final allocation uses ranks through 1,440 and increases total rank from 111,456 in Experiment
+054 to 112,192. Many early MLP owners, including `down_proj`, receive rank 1,440 rather than the old rank-1,152
+physical-dimension ceiling. The result therefore answers the intended capacity question rather than merely repeating
+the capped allocation.
 
-1. New response probes actually sample ranks above the old algebraic-dimension ceiling.
-2. The planned allocation remains within the same exact target-bit budget as Experiment 054.
-3. At least one saturated owner earns an over-complete rank from measured marginal utility; otherwise the cap was not
-   the active allocation problem.
-4. Search telemetry reports control/tabu errors, stored-dtype selection, updates, sign distance, and wall time for every
-   selected owner; a nonzero tabu selection rate is required to claim that tabu was exercised.
-5. The complete resident run and export pass fresh artifact validation.
-6. The retained WikiText-2 protocol improves on Experiment 054 without a BPW increase, with rank, per-owner loss,
-   time, memory, and artifact-byte comparisons reported.
+| Measurement | Experiment 054 | Experiment 055 | Change |
+| --- | ---: | ---: | ---: |
+| Effective BPW | 1.024405 | 1.024416 | +0.000011 |
+| Rank sum | 111,456 | 112,192 | +736 (+0.66%) |
+| Block wall time | 8,331 s | 15,647 s | +87.8% |
+| Peak GPU bytes | 7,650,410,496 | 7,696,547,840 | +0.60% |
+| Peak host bytes | 9,056,464,896 | 7,806,263,296 | -13.8% |
+| Resident artifact bytes | 9,770,129,117 | 10,628,673,408 | +8.79% |
+| Packed quantized payload | 89,472,832 | 89,473,752 | +920 bytes |
+| GGUF bytes | 417,332,736 | 417,333,696 | +960 bytes |
+| WikiText-2 perplexity | 203.841821 | 285.496021 | **+40.06%** |
 
-A lower probe error or a partial block run is diagnostic evidence only and cannot complete the experiment.
+Task quality also fails to establish a compensating benefit: PIQA, ARC-Challenge, HellaSwag, Winogrande, and BoolQ
+all decline; only ARC-Easy rises slightly from 0.377 to 0.386. The exact target-bit allocator nearly preserves BPW,
+but the final representation is 7,680 bits above 054 because its changed rank distribution carries slightly different
+scale overhead. This is immaterial in size and still violates the strict no-BPW-increase gate.
+
+## Decision
+
+Reject bounded over-complete D2 allocation and do not use Experiment 055 as the next baseline. Extra binary rank is
+not equivalent to useful model capacity under the current response objective: it nearly doubles block processing
+time, increases retained artifact storage, and substantially worsens held-out perplexity despite a measured
+equal-budget redistribution.
+
+Retain the run, export, profiles, and archived failed identities as evidence. Experiment 054 remains the closer
+quality control for subsequent analysis.
+
+Evidence:
+
+- `evidence/055/055-overcomplete-rank-d2-compress-and-benchmark-gemma-3-1b-it`
+- `Results/055/055-overcomplete-rank-d2-compress-and-benchmark-gemma-3-1b-it-quality.md`
+- `Results/055/gemma-3-1b-it-nanoquant.gguf`

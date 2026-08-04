@@ -77,7 +77,7 @@ from nanoquant.kl_budget_workflow import _token_hash
 from nanoquant.quality_evaluation import _wikitext_tokens
 
 MODEL_SOURCE = "google/gemma-3-1b-it"
-RECONSTRUCTION_CACHE_ALGORITHM_VERSION = 2
+RECONSTRUCTION_CACHE_ALGORITHM_VERSION = 3
 
 
 def _parse_ints(value: str) -> tuple[int, ...]:
@@ -233,6 +233,18 @@ def _reconstruction_cache_identity(
         "payload_search_scale_passes": args.payload_search_scale_passes,
         "payload_search_batch_words": args.payload_search_batch_words,
         "payload_search_table_chunk": args.payload_search_table_chunk,
+        "functional_payload_search": args.functional_payload_search,
+        "functional_payload_fit_offset": args.functional_payload_fit_offset,
+        "functional_payload_fit_samples": args.functional_payload_fit_samples,
+        "functional_payload_validation_offset": (
+            args.functional_payload_validation_offset
+        ),
+        "functional_payload_validation_samples": (
+            args.functional_payload_validation_samples
+        ),
+        "functional_payload_candidate_words": (
+            args.functional_payload_candidate_words
+        ),
         "calibration_shrinkage": args.calibration_shrinkage,
         "seed": args.seed,
     }
@@ -316,6 +328,8 @@ def _payload_search_factors(
     codebook: FullSignCodebook | None,
     right_indices: torch.Tensor | None,
     right_flip_positions: torch.Tensor | None,
+    functional_fit_inputs: torch.Tensor | None,
+    functional_held_out_inputs: torch.Tensor | None,
 ) -> tuple[SignWordPayloadSearchResult, dict[str, object]]:
     settings = SignWordPayloadSearchConfig(
         enabled=True,
@@ -324,6 +338,11 @@ def _payload_search_factors(
         scale_passes=args.payload_search_scale_passes,
         candidate_batch_words=args.payload_search_batch_words,
         table_chunk_size=args.payload_search_table_chunk,
+        functional_candidate_words_per_pass=(
+            args.functional_payload_candidate_words
+            if args.functional_payload_search
+            else 0
+        ),
     )
     result = refine_sign_word_payloads(
         weight,
@@ -339,6 +358,8 @@ def _payload_search_factors(
         right_indices=right_indices,
         right_flip_positions=right_flip_positions,
         config=settings,
+        functional_fit_inputs=functional_fit_inputs,
+        functional_held_out_inputs=functional_held_out_inputs,
     )
     return result, {
         "settings": asdict(settings),
@@ -350,6 +371,15 @@ def _payload_search_factors(
         "selected_words": result.selected_words,
         "accepted_words": result.accepted_words,
         "sign_updates": result.sign_updates,
+        "functional_candidates_ranked": result.functional_candidates_ranked,
+        "functional_fit_error_before": result.functional_fit_error_before,
+        "functional_fit_error_after": result.functional_fit_error_after,
+        "functional_held_out_error_before": (
+            result.functional_held_out_error_before
+        ),
+        "functional_held_out_error_after": (
+            result.functional_held_out_error_after
+        ),
     }
 
 
@@ -1406,6 +1436,18 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--payload-search-scale-passes", type=int, default=64)
     parser.add_argument("--payload-search-batch-words", type=int, default=2_048)
     parser.add_argument("--payload-search-table-chunk", type=int, default=128)
+    parser.add_argument("--functional-payload-search", action="store_true")
+    parser.add_argument("--functional-payload-fit-offset", type=int, default=48)
+    parser.add_argument("--functional-payload-fit-samples", type=int, default=4)
+    parser.add_argument(
+        "--functional-payload-validation-offset", type=int, default=52
+    )
+    parser.add_argument(
+        "--functional-payload-validation-samples", type=int, default=4
+    )
+    parser.add_argument(
+        "--functional-payload-candidate-words", type=int, default=256
+    )
     parser.add_argument("--calibration-shrinkage", type=float, default=0.6)
     parser.add_argument("--wikitext-samples", type=int, default=12)
     parser.add_argument("--wikitext-offset", type=int, default=0)
@@ -1464,6 +1506,8 @@ def run(args: argparse.Namespace) -> int:
         raise ValueError("candidate rank/free-row configuration is invalid")
     if args.payload_search and not args.binary_search:
         raise ValueError("payload search requires the matched binary-search control")
+    if args.functional_payload_search and not args.payload_search:
+        raise ValueError("functional payload search requires payload search")
     if (
         args.wikitext_samples <= 0
         or args.wikitext_offset < 0
@@ -1548,6 +1592,33 @@ def run(args: argparse.Namespace) -> int:
             args.wikitext_offset + args.wikitext_samples,
         )
     )
+    functional_fit_inventory = set(
+        range(
+            args.functional_payload_fit_offset,
+            args.functional_payload_fit_offset
+            + args.functional_payload_fit_samples,
+        )
+    )
+    functional_validation_inventory = set(
+        range(
+            args.functional_payload_validation_offset,
+            args.functional_payload_validation_offset
+            + args.functional_payload_validation_samples,
+        )
+    )
+    if args.functional_payload_search and (
+        args.functional_payload_fit_offset < 0
+        or args.functional_payload_fit_samples <= 0
+        or args.functional_payload_validation_offset < 0
+        or args.functional_payload_validation_samples <= 0
+        or args.functional_payload_candidate_words <= 0
+        or functional_fit_inventory & functional_validation_inventory
+        or functional_fit_inventory & evaluation_inventory
+        or functional_validation_inventory & evaluation_inventory
+    ):
+        raise ValueError(
+            "functional payload fit, validation, and KL windows must be valid and disjoint"
+        )
     if args.operator_scale_refit and (
         fit_inventory & validation_inventory
         or fit_inventory & evaluation_inventory
@@ -1636,11 +1707,79 @@ def run(args: argparse.Namespace) -> int:
     cache_hits = 0
     cache_misses = 0
     cache_keys: dict[str, str] = {}
+    functional_fit_tokens = None
+    functional_validation_tokens = None
+    if args.functional_payload_search:
+        functional_required_samples = max(
+            args.functional_payload_fit_offset
+            + args.functional_payload_fit_samples,
+            args.functional_payload_validation_offset
+            + args.functional_payload_validation_samples,
+        )
+        functional_tokens, _functional_fingerprint, _functional_bos = (
+            _wikitext_tokens(
+                args.snapshot,
+                samples=functional_required_samples,
+                sequence_length=args.sequence_length,
+                local_files_only=args.local_files_only,
+            )
+        )
+        functional_fit_tokens = _select_token_window(
+            functional_tokens,
+            offset=args.functional_payload_fit_offset,
+            samples=args.functional_payload_fit_samples,
+        )
+        functional_validation_tokens = _select_token_window(
+            functional_tokens,
+            offset=args.functional_payload_validation_offset,
+            samples=args.functional_payload_validation_samples,
+        )
     with acquire_device_lease(args.device), safe_open(
         str(args.model),
         framework="pt",
         device="cpu",
     ) as handle:
+        functional_inputs: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
+        if args.functional_payload_search:
+            assert functional_fit_tokens is not None
+            assert functional_validation_tokens is not None
+            functional_teacher = load_causal_language_model(
+                args.snapshot,
+                torch_dtype=_dtype(config),
+                attention_implementation=adapter.attention_implementation,
+                local_files_only=args.local_files_only,
+            ).to(args.device)
+            functional_teacher.eval()
+            functional_blocks = _decoder_blocks(functional_teacher)
+            for block in blocks:
+                for projection, projection_path in zip(
+                    projections, projection_paths, strict=True
+                ):
+                    module = _module_at_path(
+                        functional_blocks[block], projection_path
+                    )
+                    key = (
+                        str(block)
+                        if len(projections) == 1
+                        else f"{block}:{projection}"
+                    )
+                    functional_inputs[key] = (
+                        _capture_linear_inputs(
+                            functional_teacher,
+                            module,
+                            functional_fit_tokens,
+                            device=args.device,
+                        ),
+                        _capture_linear_inputs(
+                            functional_teacher,
+                            module,
+                            functional_validation_tokens,
+                            device=args.device,
+                        ),
+                    )
+            del functional_blocks, functional_teacher
+            gc.collect()
+            torch.cuda.empty_cache()
         baseline_entries: list[tuple[LayerId, torch.Tensor, float]] = []
         candidate_entries: list[tuple[LayerId, torch.Tensor, float]] = []
         reconstruction_metrics: dict[str, dict[str, dict[str, float]]] = {}
@@ -1858,6 +1997,7 @@ def run(args: argparse.Namespace) -> int:
                     baseline_post = baseline_search.scale_post
                     unit_search_metrics["free_binary"] = baseline_search_metrics
                 if args.payload_search:
+                    functional_pair = functional_inputs.get(unit_key)
                     baseline_payload, baseline_payload_metrics = (
                         _payload_search_factors(
                             args,
@@ -1873,6 +2013,16 @@ def run(args: argparse.Namespace) -> int:
                             codebook=None,
                             right_indices=None,
                             right_flip_positions=None,
+                            functional_fit_inputs=(
+                                None
+                                if functional_pair is None
+                                else functional_pair[0]
+                            ),
+                            functional_held_out_inputs=(
+                                None
+                                if functional_pair is None
+                                else functional_pair[1]
+                            ),
                         )
                     )
                     baseline_right = baseline_payload.right_binary
@@ -1980,6 +2130,16 @@ def run(args: argparse.Namespace) -> int:
                             right_indices=candidate_factors.right_indices,
                             right_flip_positions=(
                                 candidate_factors.right_flip_positions
+                            ),
+                            functional_fit_inputs=(
+                                None
+                                if functional_pair is None
+                                else functional_pair[0]
+                            ),
+                            functional_held_out_inputs=(
+                                None
+                                if functional_pair is None
+                                else functional_pair[1]
                             ),
                         )
                     )
@@ -2533,6 +2693,14 @@ def run(args: argparse.Namespace) -> int:
         },
         "reconstruction_by_block": reconstruction_metrics,
         "search_by_block": search_metrics,
+        "functional_payload_search": {
+            "enabled": args.functional_payload_search,
+            "fit_offset": args.functional_payload_fit_offset,
+            "fit_samples": args.functional_payload_fit_samples,
+            "validation_offset": args.functional_payload_validation_offset,
+            "validation_samples": args.functional_payload_validation_samples,
+            "candidate_words_per_pass": args.functional_payload_candidate_words,
+        },
         "selection_results": selection_results,
         "operator_scale_refit": {
             "enabled": args.operator_scale_refit,
