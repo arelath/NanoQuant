@@ -12,6 +12,7 @@ from nanoquant.application.tuning import (
     FactorizedTuningLearningRates,
     TuningRequest,
     _PinnedBatchStager,
+    _quarantine_cuda_after_nonfinite_rollback,
     _release_cuda_cache_under_pressure,
     post_block_refit,
     tune_factorized,
@@ -124,6 +125,47 @@ def test_cuda_cache_release_is_gated_on_reserved_memory_pressure(
     _release_cuda_cache_under_pressure(torch.device("cuda"))
 
     assert calls == expected_calls
+
+
+def test_nonfinite_cuda_quarantine_synchronizes_before_unconditional_cache_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    device = torch.device("cuda")
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda value: calls.append(f"sync:{value}"))
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: calls.append("empty"))
+
+    _quarantine_cuda_after_nonfinite_rollback(device)
+
+    assert calls == ["sync:cuda", "empty"]
+
+
+def test_nonfinite_rollback_requests_device_quarantine(monkeypatch: pytest.MonkeyPatch) -> None:
+    quarantined: list[torch.device] = []
+
+    class PoisoningParityAdamW(ParityAdamW):
+        def step(self, closure: None = None) -> None:
+            assert closure is None
+            super().step()
+            parameter = self.param_groups[0]["params"][0]
+            assert isinstance(parameter, torch.Tensor)
+            with torch.no_grad():
+                parameter.fill_(float("nan"))
+
+    monkeypatch.setattr(tuning_module, "ParityAdamW", PoisoningParityAdamW)
+    monkeypatch.setattr(
+        tuning_module,
+        "_quarantine_cuda_after_nonfinite_rollback",
+        lambda device: quarantined.append(device),
+    )
+    model = Hybrid()
+    inputs = torch.randn(8, 3, generator=torch.Generator().manual_seed(43))
+    targets = torch.randn(8, 2, generator=torch.Generator().manual_seed(44))
+
+    metrics = post_block_refit(model, TuningRequest(inputs, targets, 2, 2, 0.02), _forward)
+
+    assert metrics.stopped_early is True
+    assert quarantined == [torch.device("cpu")]
 
 
 def test_pinned_batch_stager_reuses_fixed_device_slot_after_compute_consumption(

@@ -241,6 +241,23 @@ def _release_cuda_cache_under_pressure(device: torch.device) -> None:
         torch.cuda.empty_cache()
 
 
+def _quarantine_cuda_after_nonfinite_rollback(device: torch.device) -> None:
+    """Discard CUDA scratch allocations after a transactional rollback.
+
+    A non-finite optimizer step can leave NaNs in freed autograd and optimizer
+    workspaces. The ordinary pressure-gated cache release is insufficient here:
+    a later dense block forward may reuse those allocations even when the durable
+    activations and restored parameters are finite. Synchronize first so every
+    failed-step kernel is complete, then return all unoccupied allocations to the
+    driver before another block is allowed to run.
+    """
+
+    if device.type != "cuda":
+        return
+    torch.cuda.synchronize(device)
+    torch.cuda.empty_cache()
+
+
 def _loss_sum(prediction: torch.Tensor, target: torch.Tensor, importance: torch.Tensor | None) -> torch.Tensor:
     if prediction.shape != target.shape:
         raise ValueError("tuning prediction and target shapes differ")
@@ -536,6 +553,7 @@ def tune(
     stager = _pinned_batch_stager(request, device, maximum_microbatch_size)
     epochs_completed = starting_epoch
     stopped_early = False if resume is None else resume.stopped_early
+    nonfinite_rollback = False
     try:
         for epoch in range(starting_epoch, request.epochs):
             if stopped_early:
@@ -659,6 +677,7 @@ def tune(
                     # immediately rather than spending later epochs from parameters
                     # that an overflowing optimizer step may already have poisoned.
                     _sanitize_nonfinite_optimizer_step(optimizer, selected)
+                    nonfinite_rollback = True
                     stopped_early = True
                     break
                 previous_epoch_loss = epoch_losses[-2] if len(epoch_losses) > 2 else None
@@ -746,8 +765,13 @@ def tune(
             parameter.grad = None
             parameter.requires_grad_(original_requires_grad[id(parameter)])
     elements = request.targets.numel()
-    del optimizer, scheduler, best_state
-    if device.type == "cuda":
+    # Drop every failed-step allocation before quarantining the CUDA caching
+    # allocator. Keeping the stager or optimizer alive here would retain the
+    # exact buffers the quarantine is intended to discard.
+    del optimizer, scheduler, best_state, stager
+    if nonfinite_rollback:
+        _quarantine_cuda_after_nonfinite_rollback(device)
+    elif device.type == "cuda":
         _release_cuda_cache_under_pressure(device)
     return TuningMetrics(
         None if before_value is None else LossMetrics(before_value, elements, request.objective),

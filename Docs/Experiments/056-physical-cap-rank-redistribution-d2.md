@@ -49,6 +49,23 @@ process interruptions. If non-finite state escapes transactional rollback,
 that execution bug must be fixed at its source rather than hidden by process
 restarts.
 
+## First-run failure and root fix
+
+The first production attempt failed after block 0's post-block refit produced a
+non-finite optimizer step. Transactional rollback restored finite parameters
+and the committed teacher/compressed activation tensors were independently
+audited as entirely finite, but the same process's block-1 dense teacher forward
+was non-finite. A fresh process replay of that exact 256 x 2048 x 1152 teacher
+boundary through the pinned block-1 weights was finite, matching the previously
+documented process-local CUDA contamination in Experiment 054.
+
+The root fix removes the need for worker-process isolation: a non-finite tuning
+rollback now closes and drops staging/optimizer scratch, synchronizes CUDA, and
+unconditionally releases the caching allocator. Ordinary successful tuning
+retains the existing pressure-gated release. The hash-valid block-0 activation
+boundary remains the resume point because its two safetensors contain zero
+non-finite values; only process-local scratch was contaminated.
+
 ## Promotion gate
 
 Status: **not run**.
