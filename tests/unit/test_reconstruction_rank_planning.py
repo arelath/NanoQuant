@@ -111,6 +111,55 @@ def test_allocator_can_spend_into_an_explicit_overcomplete_rank_range() -> None:
     assert result.decisions[0].planned_rank > min(unit.in_features, unit.out_features)
 
 
+def test_allocator_redirects_rank_after_a_high_utility_unit_hits_its_cap() -> None:
+    segments = (RankResponseSegment(2.0, 0.01),)
+    units = (
+        ReconstructionAllocationUnit(
+            "0:saturated",
+            64,
+            64,
+            32,
+            100.0,
+            100.0,
+            False,
+            1.0,
+            2.0,
+            segments,
+            maximum_rank=32,
+        ),
+        ReconstructionAllocationUnit(
+            "1:recipient",
+            64,
+            64,
+            32,
+            100.0,
+            1.0,
+            False,
+            1.0,
+            2.0,
+            segments,
+            maximum_rank=64,
+        ),
+    )
+
+    result = allocate_reconstruction_rank_budget(
+        units,
+        target_bits=17_920,
+        multiple=8,
+        floor_fraction=1.0,
+        ceiling_fraction=2.0,
+        sensitivity_strength=1.0,
+        protected_rank_floor_fraction=1.0,
+        target_protected_error_reduction_fraction=0,
+    )
+    ranks = {
+        decision.unit_id: decision.planned_rank for decision in result.decisions
+    }
+
+    assert ranks == {"0:saturated": 32, "1:recipient": 64}
+    assert result.remaining_bits == 0
+
+
 def test_rank_trust_region_projects_and_trims_to_exact_budget() -> None:
     segments = (RankResponseSegment(1.5, 0.01),)
     units = (

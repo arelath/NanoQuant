@@ -57,7 +57,8 @@ task-evaluation protocol, and Experiments 028 and 030 added Qwen-specific deploy
 | [052](052-bounded-direct-binary-factor-search.md) | Completed diagnostic | Gemma 3 1B IT + synthetic | Bounded direct binary-factor moves found solver headroom while preserving the packed representation. |
 | [053](053-direct-binary-search-held-out-gate.md) | Rejected at screen | Gemma 3 1B IT + synthetic | Additional direct-search tiers did not produce a sufficient held-out functional win. |
 | [054](054-functional-binary-learning-rate.md) | Completed | Gemma 3 1B IT | A separate binary learning rate improved functional tuning and the retained complete-model result. |
-| [055](055-overcomplete-rank-d2.md) | Not run | Gemma 3 1B IT | Bounded over-complete ranks test whether the old algebraic-dimension ceiling hides useful equal-budget capacity. |
+| [055](055-overcomplete-rank-d2.md) | Completed; rejected | Gemma 3 1B IT | Over-complete ranks nearly preserved BPW but worsened retained perplexity by 40.06%. |
+| [056](056-physical-cap-rank-redistribution-d2.md) | Not run | Gemma 3 1B IT | Keep the wider allocation range, cap physical rank, and redirect saturated capacity to other blocks. |
 
 The original launchers were under `experiments/`. Retained measurements remain under `Results/` and `evidence/`;
 architecture and decision records remain elsewhere in `Docs/`.
