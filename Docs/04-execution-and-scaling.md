@@ -32,6 +32,13 @@ normalizer is the teacher activation's weighted mean square for that block, so
 `block.completed` plus the live `weight-errors.md` report carry entry/final normalized errors. This makes trends
 comparable when hidden-state magnitude and calibration importance change across depth.
 
+Dense teacher propagation is a fail-closed numerical boundary. Before each source-block forward, resident execution
+synchronizes the device and releases dead CUDA scratch left by prior tuning and search stages. Every output microbatch
+is checked before it enters the pageable teacher stream. A non-finite output is discarded, CUDA scratch is quarantined,
+and the identical input is retried at most twice; each retry is emitted as
+`block_teacher_forward.nonfinite_retry`. Non-finite inputs or three failed attempts abort with the exact batch index,
+so a persistent numerical defect cannot be committed as a resumable activation generation.
+
 Quality workflows paired with `cpu_offload` or `streaming` use block-streamed BF16 baseline evaluation. The source
 Transformers shell remains in pageable host RAM, exact prefix metadata is captured for each evaluation batch, one
 decoder block visits the compute device at a time, and only the final norm/head are loaded for the suffix. The

@@ -14,12 +14,27 @@ from nanoquant.resident_quantization import (
     _block_loss,
     _measure_warm_throughput_candidate,
     _place_completed_decoder_block,
+    _quarantine_cuda_forward_scratch,
     _release_throughput_probe_caches,
     _release_uncompleted_decoder_blocks,
     _run_block_batched,
     _run_quality_logits_batched,
     _streamed_quality_metrics,
 )
+
+
+def test_cuda_forward_quarantine_synchronizes_before_cache_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    device = torch.device("cuda")
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda value: calls.append(f"sync:{value}"))
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: calls.append("empty"))
+
+    _quarantine_cuda_forward_scratch(torch.device("cpu"))
+    _quarantine_cuda_forward_scratch(device)
+
+    assert calls == ["sync:cuda", "empty"]
 
 
 def test_throughput_probe_cache_release_clears_device_and_pinned_host_caches(
@@ -93,6 +108,18 @@ def test_throughput_candidate_warms_once_without_clearing_between_timed_repetiti
 
 class _BlockAdapter:
     def run_block(self, block: nn.Module, value: torch.Tensor, **_metadata: object) -> torch.Tensor:
+        return block(value)
+
+
+class _TransientNonfiniteBlockAdapter:
+    def __init__(self, failures: int) -> None:
+        self.failures = failures
+        self.calls = 0
+
+    def run_block(self, block: nn.Module, value: torch.Tensor, **_metadata: object) -> torch.Tensor:
+        self.calls += 1
+        if self.calls <= self.failures:
+            return torch.full_like(block(value), float("nan"))
         return block(value)
 
 
@@ -222,6 +249,51 @@ def test_block_forward_micro_profile_preserves_output_and_attributes_batches() -
     counters = {counter["name"]: counter for counter in payload["counters"]}
     assert counters["forward.batches"]["total"] == 3
     assert counters["forward.elements"]["total"] == actual.numel()
+
+
+def test_block_forward_retries_a_transient_nonfinite_batch_without_committing_it() -> None:
+    inputs = torch.randn(2, 4, generator=torch.Generator().manual_seed(54))
+    block = nn.Linear(4, 3, bias=False)
+    adapter = _TransientNonfiniteBlockAdapter(failures=1)
+    retries: list[tuple[int, int, int]] = []
+
+    actual = _run_block_batched(
+        adapter,
+        block,
+        inputs,
+        {},
+        2,
+        finite_output_attempts=3,
+        nonfinite_observer=lambda batch, attempt, nonfinite: retries.append(
+            (batch, attempt, nonfinite)
+        ),
+    )
+
+    assert torch.equal(actual, block(inputs))
+    assert adapter.calls == 2
+    assert retries == [(0, 1, actual.numel())]
+
+
+def test_block_forward_fails_closed_after_bounded_nonfinite_retries() -> None:
+    inputs = torch.randn(2, 4, generator=torch.Generator().manual_seed(55))
+    block = nn.Linear(4, 3, bias=False)
+    adapter = _TransientNonfiniteBlockAdapter(failures=3)
+
+    with pytest.raises(FloatingPointError, match="output batch 0.*after 3 attempts"):
+        _run_block_batched(adapter, block, inputs, {}, 2, finite_output_attempts=3)
+
+    assert adapter.calls == 3
+
+
+def test_block_forward_rejects_nonfinite_inputs_without_executing_the_block() -> None:
+    inputs = torch.tensor([[1.0, float("nan")]])
+    block = nn.Linear(2, 1, bias=False)
+    adapter = _TransientNonfiniteBlockAdapter(failures=0)
+
+    with pytest.raises(FloatingPointError, match="input batch 0 contains 1 non-finite"):
+        _run_block_batched(adapter, block, inputs, {}, 1, finite_output_attempts=3)
+
+    assert adapter.calls == 0
 
 
 def test_block_loss_micro_profile_preserves_accumulation_and_attributes_work() -> None:

@@ -59,12 +59,26 @@ was non-finite. A fresh process replay of that exact 256 x 2048 x 1152 teacher
 boundary through the pinned block-1 weights was finite, matching the previously
 documented process-local CUDA contamination in Experiment 054.
 
-The root fix removes the need for worker-process isolation: a non-finite tuning
-rollback now closes and drops staging/optimizer scratch, synchronizes CUDA, and
+The first root fix removed the known failed-step allocations: a non-finite tuning
+rollback closes and drops staging/optimizer scratch, synchronizes CUDA, and
 unconditionally releases the caching allocator. Ordinary successful tuning
 retains the existing pressure-gated release. The hash-valid block-0 activation
-boundary remains the resume point because its two safetensors contain zero
+boundary remained the resume point because its two safetensors contained zero
 non-finite values; only process-local scratch was contaminated.
+
+A later single-process resume committed finite blocks 1 and 2, then exposed the
+same process-local failure at block 3 even though block 2 had no reported
+non-finite rollback. The committed block-2 teacher and compressed streams were
+audited as entirely finite, block-3 calibration importance was finite, and an
+exact fresh-process replay of all 32 pinned block-3 teacher microbatches was
+finite with outputs from -1020 through 5952. Version 59 therefore treats dense
+teacher propagation itself as the isolation boundary: it synchronizes and
+releases dead CUDA scratch before the forward, validates every output batch,
+and performs at most two quarantined identical-input retries. A persistent
+failure remains fatal and identifies the batch; a transient recovery is a
+visible `block_teacher_forward.nonfinite_retry` event. Existing version-58
+commits remain retained evidence but cannot be adopted by the new semantic
+identity.
 
 ## Promotion gate
 
