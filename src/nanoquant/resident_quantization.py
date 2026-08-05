@@ -223,7 +223,7 @@ from nanoquant.infrastructure.tuning_checkpoint import (
 from nanoquant.ports.event_sink import EventSink, LayerCommittedPayload, emit_layer_committed
 from nanoquant.ports.model_adapter import ModelAdapter
 
-RESIDENT_ALGORITHM_VERSION = 59
+RESIDENT_ALGORITHM_VERSION = 60
 COVARIANCE_REFINEMENT_MAX_INPUT_FEATURES = 2048
 _THROUGHPUT_PROBE_REPETITIONS = 5
 _THROUGHPUT_PROBE_WARMUP_WORKLOADS = 3
@@ -738,7 +738,7 @@ def _run_block_batched(
     recorder: PhaseRecorder = NULL_RECORDER,
     *,
     finite_output_attempts: int | None = None,
-    nonfinite_observer: Callable[[int, int, int], None] | None = None,
+    nonfinite_observer: Callable[[int, int, int, str], None] | None = None,
 ) -> torch.Tensor:
     if batch_size <= 0:
         raise ValueError("block forward batch size must be positive")
@@ -747,18 +747,41 @@ def _run_block_batched(
     destination = inputs.device if storage_device is None else torch.device(storage_device)
     result: torch.Tensor | None = None
 
-    def run_finite(input_batch: torch.Tensor, batch_index: int) -> torch.Tensor:
+    def run_finite(
+        input_batch: torch.Tensor,
+        source_batch: torch.Tensor,
+        batch_index: int,
+    ) -> torch.Tensor:
         if finite_output_attempts is None:
             return cast(torch.Tensor, adapter.run_block(block, input_batch, **metadata))
         if finite_output_attempts <= 0:
             raise ValueError("finite block forward attempts must be positive")
-        input_finite = torch.isfinite(input_batch)
-        if not bool(input_finite.all()):
-            nonfinite = input_batch.numel() - int(input_finite.sum())
-            raise FloatingPointError(
-                f"block forward input batch {batch_index} contains {nonfinite} non-finite values"
-            )
         for attempt in range(1, finite_output_attempts + 1):
+            input_finite = torch.isfinite(input_batch)
+            if not bool(input_finite.all()):
+                nonfinite = input_batch.numel() - int(input_finite.sum())
+                source_finite = torch.isfinite(source_batch)
+                if not bool(source_finite.all()):
+                    source_nonfinite = source_batch.numel() - int(source_finite.sum())
+                    raise FloatingPointError(
+                        f"block forward input batch {batch_index} contains {source_nonfinite} non-finite values"
+                    )
+                if attempt == finite_output_attempts:
+                    raise FloatingPointError(
+                        f"block forward staged input batch {batch_index} contains {nonfinite} non-finite values "
+                        f"after {finite_output_attempts} attempts"
+                    )
+                if nonfinite_observer is not None:
+                    nonfinite_observer(batch_index, attempt, nonfinite, "input")
+                del input_batch, input_finite, source_finite
+                _quarantine_cuda_forward_scratch(compute_device)
+                input_batch = source_batch.to(compute_device, non_blocking=False, copy=True)
+                if source_batch.device.type == "cpu" and compute_device.type == "cuda":
+                    recorder.add(
+                        "transfer.h2d_bytes",
+                        input_batch.numel() * input_batch.element_size(),
+                    )
+                continue
             output = cast(torch.Tensor, adapter.run_block(block, input_batch, **metadata))
             output_finite = torch.isfinite(output)
             if bool(output_finite.all()):
@@ -771,7 +794,7 @@ def _run_block_batched(
                     f"after {finite_output_attempts} attempts"
                 )
             if nonfinite_observer is not None:
-                nonfinite_observer(batch_index, attempt, nonfinite)
+                nonfinite_observer(batch_index, attempt, nonfinite, "output")
             _quarantine_cuda_forward_scratch(compute_device)
         raise AssertionError("finite block forward retry loop did not return or raise")
 
@@ -789,7 +812,7 @@ def _run_block_batched(
             start = batch_index * batch_size
             end = min(start + batch_size, inputs.shape[0])
             with recorder.phase("forward"):
-                output = run_finite(input_batch, batch_index)
+                output = run_finite(input_batch, inputs[start:end], batch_index)
             if result is None:
                 shape = (inputs.shape[0], *output.shape[1:])
                 result = torch.empty(shape, device=destination, dtype=output.dtype)
@@ -808,7 +831,7 @@ def _run_block_batched(
     for batch_index, (input_batch,) in enumerate(iter_device_batches((inputs,), batch_size, compute_device)):
         start = batch_index * batch_size
         end = min(start + batch_size, inputs.shape[0])
-        output = run_finite(input_batch, batch_index)
+        output = run_finite(input_batch, inputs[start:end], batch_index)
         if result is None:
             shape = (inputs.shape[0], *output.shape[1:])
             result = torch.empty(shape, device=destination, dtype=output.dtype)
@@ -4898,7 +4921,12 @@ def _process_resident_block(
             if block_device is not None:
                 _quarantine_cuda_forward_scratch(block_device.device)
 
-            def observe_nonfinite_forward(batch: int, attempt: int, nonfinite: int) -> None:
+            def observe_nonfinite_forward(
+                batch: int,
+                attempt: int,
+                nonfinite: int,
+                location: str,
+            ) -> None:
                 events.emit(
                     "resident-quantization",
                     "warning",
@@ -4908,6 +4936,7 @@ def _process_resident_block(
                     attempt=attempt,
                     maximum_attempts=_FINITE_BLOCK_FORWARD_ATTEMPTS,
                     nonfinite_values=nonfinite,
+                    location=location,
                 )
                 micro_recorder.add("forward.nonfinite_retries", 1)
 

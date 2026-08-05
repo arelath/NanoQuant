@@ -255,7 +255,7 @@ def test_block_forward_retries_a_transient_nonfinite_batch_without_committing_it
     inputs = torch.randn(2, 4, generator=torch.Generator().manual_seed(54))
     block = nn.Linear(4, 3, bias=False)
     adapter = _TransientNonfiniteBlockAdapter(failures=1)
-    retries: list[tuple[int, int, int]] = []
+    retries: list[tuple[int, int, int, str]] = []
 
     actual = _run_block_batched(
         adapter,
@@ -264,14 +264,54 @@ def test_block_forward_retries_a_transient_nonfinite_batch_without_committing_it
         {},
         2,
         finite_output_attempts=3,
-        nonfinite_observer=lambda batch, attempt, nonfinite: retries.append(
-            (batch, attempt, nonfinite)
+        nonfinite_observer=lambda batch, attempt, nonfinite, location: retries.append(
+            (batch, attempt, nonfinite, location)
         ),
     )
 
     assert torch.equal(actual, block(inputs))
     assert adapter.calls == 2
-    assert retries == [(0, 1, actual.numel())]
+    assert retries == [(0, 1, actual.numel(), "output")]
+
+
+def test_block_forward_restages_a_transient_nonfinite_device_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inputs = torch.randn(2, 4, generator=torch.Generator().manual_seed(56))
+    block = nn.Linear(4, 3, bias=False)
+    adapter = _TransientNonfiniteBlockAdapter(failures=0)
+    retries: list[tuple[int, int, int, str]] = []
+
+    def corrupt_staged_batch(
+        values: tuple[torch.Tensor, ...],
+        batch_size: int,
+        device: torch.device,
+    ) -> object:
+        del batch_size, device
+        corrupted = values[0].clone()
+        corrupted[0, 0] = float("nan")
+        yield (corrupted,)
+
+    monkeypatch.setattr(
+        "nanoquant.resident_quantization.iter_device_batches",
+        corrupt_staged_batch,
+    )
+
+    actual = _run_block_batched(
+        adapter,
+        block,
+        inputs,
+        {},
+        2,
+        finite_output_attempts=3,
+        nonfinite_observer=lambda batch, attempt, nonfinite, location: retries.append(
+            (batch, attempt, nonfinite, location)
+        ),
+    )
+
+    assert torch.equal(actual, block(inputs))
+    assert adapter.calls == 1
+    assert retries == [(0, 1, 1, "input")]
 
 
 def test_block_forward_fails_closed_after_bounded_nonfinite_retries() -> None:

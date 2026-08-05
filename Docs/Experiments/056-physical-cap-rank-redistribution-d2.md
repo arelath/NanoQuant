@@ -80,6 +80,19 @@ visible `block_teacher_forward.nonfinite_retry` event. Existing version-58
 commits remain retained evidence but cannot be adopted by the new semantic
 identity.
 
+The version-59 continuation committed through block 10, then failed before the
+block-11 teacher forward because the first CPU-to-CUDA staged input contained
+891,904 non-finite values. A complete chunked audit of both committed block-10
+activation safetensors found zero non-finite values: the teacher stream ranged
+from -760 through 41,984 and the compressed stream from -672 through 41,728.
+The remaining hole was therefore input staging rather than durable state or a
+dense forward output. Version 60 extends the same bounded quarantine boundary
+to staged inputs: when the immutable source slice is finite but its device copy
+is not, it releases dead CUDA scratch and makes a fresh blocking copy. A
+non-finite source or a persistently bad staged copy remains fatal, and retry
+events now distinguish `input` from `output`. Version-59 commits remain valid
+evidence but are deliberately incompatible with the new numerical identity.
+
 ## Promotion gate
 
 Status: **not run**.
