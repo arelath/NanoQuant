@@ -6,6 +6,11 @@
 reconstruction wins but do not produce depth-stable or statistically reliable
 functional gains
 
+> **Superseded allocation result:** the later 704-free-row screen in
+> `Docs/93-product-codebook-free-row-allocation-screen.md` reverses the late
+> block failure and passes held-out gates across representative depth and two
+> seeds. This document remains authoritative for the rejected 672-row policy.
+
 ## Question
 
 Does the compact k16/no-flip product code remain better when both it and the
