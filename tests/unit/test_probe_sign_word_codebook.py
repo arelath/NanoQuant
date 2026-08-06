@@ -6,12 +6,14 @@ from nanoquant.domain.outliers import reconstruct_with_outliers
 from nanoquant.domain.planning import outlier_bit_cost
 from nanoquant.domain.sign_word_codebook import corrected_asymmetric_codebook_bit_cost
 from tools.probe_sign_word_codebook import (
+    _candidate_key,
     _combine_candidate_bit_cost,
     _fixed_outlier_bit_cost,
     _prepare_candidate_outliers,
     _prepare_fixed_outliers,
     _replace_exact_columns,
     _restore_fixed_outliers,
+    _right_free_row_counts,
     build_parser,
 )
 
@@ -56,6 +58,33 @@ def test_candidate_outlier_counts_are_parsed_as_a_tuple() -> None:
     )
 
     assert args.candidate_outlier_columns == (0, 1, 2)
+
+
+def test_right_free_row_sweep_is_parsed_and_names_distinct_candidates() -> None:
+    args = build_parser().parse_args(
+        [
+            "--model",
+            "model.safetensors",
+            "--calibration-state",
+            "calibration",
+            "--output",
+            "results.json",
+            "--right-free-row-counts",
+            "576,608,704",
+        ]
+    )
+
+    assert _right_free_row_counts(args) == (576, 608, 704)
+    assert (
+        _candidate_key(
+            "right_product_codebook",
+            16,
+            7,
+            608,
+            include_free_rows=True,
+        )
+        == "right_product_codebook_k16_free608_outliers7"
+    )
 
 
 def test_fixed_outlier_indices_are_parsed_and_remove_exact_columns() -> None:

@@ -14,7 +14,7 @@ import math
 import os
 import time
 from contextlib import nullcontext
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -93,6 +93,7 @@ class SignWordCodebookProtocol:
     candidate_outlier_selector: str
     fixed_outlier_indices: tuple[int, ...]
     right_free_rows: int
+    right_free_row_counts: tuple[int, ...]
     right_codebook_banks: int
     right_codebook_bank_axis: str
     right_corrected_codebook_banks: int | None
@@ -127,6 +128,24 @@ def _parse_ints(value: str) -> tuple[int, ...]:
     if not result:
         raise argparse.ArgumentTypeError("integer list must not be empty")
     return result
+
+
+def _right_free_row_counts(args: argparse.Namespace) -> tuple[int, ...]:
+    configured = args.right_free_row_counts
+    return configured if configured is not None else (args.right_free_rows,)
+
+
+def _candidate_key(
+    arm_prefix: str,
+    index_width: int,
+    outlier_count: int,
+    right_free_rows: int,
+    *,
+    include_free_rows: bool,
+) -> str:
+    free_suffix = f"_free{right_free_rows}" if include_free_rows else ""
+    outlier_suffix = "" if outlier_count == 0 else f"_outliers{outlier_count}"
+    return f"{arm_prefix}_k{index_width}{free_suffix}{outlier_suffix}"
 
 
 def _protocol_hash(protocol: SignWordCodebookProtocol) -> str:
@@ -1253,11 +1272,20 @@ def run(args: argparse.Namespace) -> int:
         raise ValueError(
             "fixed outlier indices require their count as the sole candidate count"
         )
-    if args.right_free_rows < 0 or args.right_free_rows % args.rank_multiple:
-        raise ValueError("right free rows must be non-negative and rank-aligned")
-    if args.right_free_rows and (
+    right_free_row_counts = _right_free_row_counts(args)
+    if (
+        len(right_free_row_counts) != len(set(right_free_row_counts))
+        or any(
+            count < 0 or count % args.rank_multiple
+            for count in right_free_row_counts
+        )
+    ):
+        raise ValueError(
+            "right free row counts must be unique, non-negative, and rank-aligned"
+        )
+    if any(right_free_row_counts) and (
         args.candidate_rank is None
-        or args.right_free_rows >= args.candidate_rank
+        or any(count >= args.candidate_rank for count in right_free_row_counts)
         or (
             not args.codebook_mode.startswith("full-right-flip")
             and args.codebook_mode != "product-right"
@@ -1268,7 +1296,7 @@ def run(args: argparse.Namespace) -> int:
             "right free rows require a larger explicit corrected-code rank"
         )
     if args.binary_search and (
-        args.right_free_rows <= 0
+        any(count <= 0 for count in right_free_row_counts)
         or (
             not args.codebook_mode.startswith("full-right-flip")
             and args.codebook_mode != "product-right"
@@ -1296,7 +1324,7 @@ def run(args: argparse.Namespace) -> int:
     if args.right_corrected_codebook_banks is not None and (
         args.right_corrected_codebook_banks <= 0
         or args.right_corrected_codebook_banks > args.right_codebook_banks
-        or args.right_free_rows == 0
+        or any(count == 0 for count in right_free_row_counts)
         or (
             args.right_corrected_codebook_banks
             != args.right_codebook_banks
@@ -1307,7 +1335,7 @@ def run(args: argparse.Namespace) -> int:
             "partial corrected banks require a valid row-banked prefix"
         )
     protocol = SignWordCodebookProtocol(
-        28,
+        29,
         args.model_revision,
         args.block,
         args.projection,
@@ -1316,7 +1344,8 @@ def run(args: argparse.Namespace) -> int:
         args.candidate_outlier_columns,
         args.candidate_outlier_selector,
         args.fixed_outlier_indices,
-        args.right_free_rows,
+        right_free_row_counts[0],
+        right_free_row_counts,
         args.right_codebook_banks,
         args.right_codebook_bank_axis,
         args.right_corrected_codebook_banks,
@@ -1427,95 +1456,103 @@ def run(args: argparse.Namespace) -> int:
             ),
         )
         candidate_keys: list[str] = []
+        include_free_rows = len(right_free_row_counts) > 1
         for width in args.index_widths:
-            for outlier_count in args.candidate_outlier_columns:
-                suffix = "" if outlier_count == 0 else f"_outliers{outlier_count}"
-                key = f"{arm_prefix}_k{width}{suffix}"
-                candidate_keys.append(key)
-                result = output["results"].get(key)
-                if result is not None:
-                    print(f"reusing {key}", flush=True)
-                    continue
-                if protocol.codebook_mode in {"product-right", "linear-right"}:
-                    if protocol.candidate_rank is None:
-                        raise ValueError(
-                            "compact mixed-right modes require an explicit candidate rank"
+            for right_free_rows in right_free_row_counts:
+                arm_protocol = replace(protocol, right_free_rows=right_free_rows)
+                for outlier_count in args.candidate_outlier_columns:
+                    key = _candidate_key(
+                        arm_prefix,
+                        width,
+                        outlier_count,
+                        right_free_rows,
+                        include_free_rows=include_free_rows,
+                    )
+                    candidate_keys.append(key)
+                    result = output["results"].get(key)
+                    if result is not None:
+                        print(f"reusing {key}", flush=True)
+                        continue
+                    if arm_protocol.codebook_mode in {"product-right", "linear-right"}:
+                        if arm_protocol.candidate_rank is None:
+                            raise ValueError(
+                                "compact mixed-right modes require an explicit candidate rank"
+                            )
+                        rank = arm_protocol.candidate_rank
+                    elif correction_count:
+                        rank = maximum_corrected_asymmetric_rank_for_budget(
+                            weight.shape[0],
+                            weight.shape[1],
+                            target_bits,
+                            left_index_width=None,
+                            right_index_width=width,
+                            right_flip_bits={1: 5, 2: 9, 3: 13}[
+                                correction_count
+                            ],
+                            rank_multiple=arm_protocol.rank_multiple,
+                            scale_width=arm_protocol.scale_bits,
                         )
-                    rank = protocol.candidate_rank
-                elif correction_count:
-                    rank = maximum_corrected_asymmetric_rank_for_budget(
-                        weight.shape[0],
-                        weight.shape[1],
-                        target_bits,
-                        left_index_width=None,
-                        right_index_width=width,
-                        right_flip_bits={1: 5, 2: 9, 3: 13}[
-                            correction_count
-                        ],
-                        rank_multiple=protocol.rank_multiple,
-                        scale_width=protocol.scale_bits,
+                    elif arm_protocol.codebook_mode == "full-right":
+                        rank = maximum_asymmetric_codebook_rank_for_budget(
+                            weight.shape[0],
+                            weight.shape[1],
+                            target_bits,
+                            left_index_width=None,
+                            right_index_width=width,
+                            rank_multiple=arm_protocol.rank_multiple,
+                            scale_width=arm_protocol.scale_bits,
+                        )
+                    elif arm_protocol.codebook_mode == "relational":
+                        rank = maximum_relational_rank_for_budget(
+                            weight.shape[0],
+                            weight.shape[1],
+                            target_bits,
+                            variable_bits_per_word=width,
+                            rank_multiple=arm_protocol.rank_multiple,
+                            scale_width=arm_protocol.scale_bits,
+                        )
+                    elif arm_protocol.codebook_mode == "progressive":
+                        rank = maximum_progressive_rank_for_budget(
+                            weight.shape[0],
+                            weight.shape[1],
+                            target_bits,
+                            variable_bits_per_word=width,
+                            rank_multiple=arm_protocol.rank_multiple,
+                            scale_width=arm_protocol.scale_bits,
+                        )
+                    else:
+                        rank = maximum_codebook_rank_for_budget(
+                            weight.shape[0],
+                            weight.shape[1],
+                            target_bits,
+                            index_width=width,
+                            rank_multiple=arm_protocol.rank_multiple,
+                            scale_width=arm_protocol.scale_bits,
+                        )
+                    if arm_protocol.candidate_rank is not None:
+                        rank = arm_protocol.candidate_rank
+                    print(
+                        f"running {key} rank={rank} outlier_columns={outlier_count}",
+                        flush=True,
                     )
-                elif protocol.codebook_mode == "full-right":
-                    rank = maximum_asymmetric_codebook_rank_for_budget(
-                        weight.shape[0],
-                        weight.shape[1],
+                    result = _run_codebook(
+                        weight,
+                        input_importance,
+                        output_importance,
+                        arm_protocol,
+                        width,
                         target_bits,
-                        left_index_width=None,
-                        right_index_width=width,
-                        rank_multiple=protocol.rank_multiple,
-                        scale_width=protocol.scale_bits,
+                        outlier_count,
                     )
-                elif protocol.codebook_mode == "relational":
-                    rank = maximum_relational_rank_for_budget(
-                        weight.shape[0],
-                        weight.shape[1],
-                        target_bits,
-                        variable_bits_per_word=width,
-                        rank_multiple=protocol.rank_multiple,
-                        scale_width=protocol.scale_bits,
+                    result["comparison_to_free_words"] = _comparison(result, baseline)
+                    output["results"][key] = result
+                    _write_output(args.output, output)
+                    print(
+                        f"completed {key} rank={rank} weighted_rmse="
+                        f"{result['metrics']['weighted_normalized_rmse']:.6f} "
+                        f"change={result['comparison_to_free_words']['weighted_rmse_change_fraction'] * 100:+.2f}%",
+                        flush=True,
                     )
-                elif protocol.codebook_mode == "progressive":
-                    rank = maximum_progressive_rank_for_budget(
-                        weight.shape[0],
-                        weight.shape[1],
-                        target_bits,
-                        variable_bits_per_word=width,
-                        rank_multiple=protocol.rank_multiple,
-                        scale_width=protocol.scale_bits,
-                    )
-                else:
-                    rank = maximum_codebook_rank_for_budget(
-                        weight.shape[0],
-                        weight.shape[1],
-                        target_bits,
-                        index_width=width,
-                        rank_multiple=protocol.rank_multiple,
-                        scale_width=protocol.scale_bits,
-                    )
-                if protocol.candidate_rank is not None:
-                    rank = protocol.candidate_rank
-                print(
-                    f"running {key} rank={rank} outlier_columns={outlier_count}",
-                    flush=True,
-                )
-                result = _run_codebook(
-                    weight,
-                    input_importance,
-                    output_importance,
-                    protocol,
-                    width,
-                    target_bits,
-                    outlier_count,
-                )
-                result["comparison_to_free_words"] = _comparison(result, baseline)
-                output["results"][key] = result
-                _write_output(args.output, output)
-                print(
-                    f"completed {key} rank={rank} weighted_rmse="
-                    f"{result['metrics']['weighted_normalized_rmse']:.6f} "
-                    f"change={result['comparison_to_free_words']['weighted_rmse_change_fraction'] * 100:+.2f}%",
-                    flush=True,
-                )
         output["decision_screen"] = {
             "candidate_arms": [
                 key
@@ -1572,6 +1609,14 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--right-free-rows", type=int, default=0)
+    parser.add_argument(
+        "--right-free-row-counts",
+        type=_parse_ints,
+        help=(
+            "comma-separated mixed-right free-row counts; candidates share one "
+            "free-word baseline"
+        ),
+    )
     parser.add_argument("--right-codebook-banks", type=int, default=1)
     parser.add_argument(
         "--right-codebook-bank-axis",
