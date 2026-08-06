@@ -17,6 +17,8 @@ from probe_sign_word_codebook import (
     _load_profile,
     _logical_seed,
     _metrics,
+    _prepare_fixed_outliers,
+    _restore_fixed_outliers,
 )
 from safetensors import safe_open
 
@@ -45,7 +47,6 @@ from nanoquant.domain.mlp_operator_refit import (
     linear_output_normalized_rmse,
 )
 from nanoquant.domain.models import BlockId, LayerId
-from nanoquant.domain.outliers import reconstruct_with_outliers, remove_columns
 from nanoquant.domain.planning import factor_bit_cost, outlier_bit_cost
 from nanoquant.domain.scale_fit import MaterializedScaleFitResult, fit_scales, reconstruct
 from nanoquant.domain.sign_word_codebook import (
@@ -80,7 +81,7 @@ from nanoquant.kl_budget_workflow import _token_hash
 from nanoquant.quality_evaluation import _wikitext_tokens
 
 MODEL_SOURCE = "google/gemma-3-1b-it"
-RECONSTRUCTION_CACHE_ALGORITHM_VERSION = 5
+RECONSTRUCTION_CACHE_ALGORITHM_VERSION = 6
 
 
 def _parse_ints(value: str) -> tuple[int, ...]:
@@ -1535,12 +1536,6 @@ def run(args: argparse.Namespace) -> int:
         or args.right_free_rows >= args.candidate_rank
     ):
         raise ValueError("candidate rank/free-row configuration is invalid")
-    if args.fixed_outlier_indices and (
-        args.transpose_matrix or args.projections is not None or args.projection != "down"
-    ):
-        raise ValueError(
-            "fixed outlier indices currently require one untransposed down projection"
-        )
     if args.payload_search and not args.binary_search:
         raise ValueError("payload search requires the matched binary-search control")
     if args.codebook_mode in {"product", "linear"} and args.payload_search:
@@ -1997,14 +1992,12 @@ def run(args: argparse.Namespace) -> int:
                         input_importance,
                     )
                 metric_weight = weight
-                outlier_indices = torch.tensor(
+                fixed_axis = 0 if transpose_current else 1
+                weight, outlier_indices, outlier_values = _prepare_fixed_outliers(
+                    weight,
                     args.fixed_outlier_indices,
-                    dtype=torch.long,
-                    device=weight.device,
+                    axis=fixed_axis,
                 )
-                outlier_values = weight[:, outlier_indices]
-                if args.fixed_outlier_indices:
-                    weight, outlier_values = remove_columns(weight, outlier_indices)
                 baseline_generator = torch.Generator(device=args.device).manual_seed(
                     _logical_seed(args.seed, "free-word-baseline")
                 )
@@ -2092,10 +2085,11 @@ def run(args: argparse.Namespace) -> int:
                     baseline_mid,
                     baseline_post,
                 )
-                baseline_reconstruction = reconstruct_with_outliers(
+                baseline_reconstruction = _restore_fixed_outliers(
                     baseline_reconstruction,
                     outlier_indices,
                     outlier_values,
+                    axis=fixed_axis,
                 )
                 baseline_metrics = _metrics(
                     metric_weight,
@@ -2224,10 +2218,11 @@ def run(args: argparse.Namespace) -> int:
                     candidate_mid,
                     candidate_post,
                 )
-                candidate_reconstruction = reconstruct_with_outliers(
+                candidate_reconstruction = _restore_fixed_outliers(
                     candidate_reconstruction,
                     outlier_indices,
                     outlier_values,
+                    axis=fixed_axis,
                 )
                 candidate_metrics = _metrics(
                     metric_weight,
@@ -2706,11 +2701,23 @@ def run(args: argparse.Namespace) -> int:
             right_flip_bits=args.correction_bits,
             scale_width=16,
         )
+    fixed_factorization_axis = (
+        0
+        if transpose_by_projection
+        and all(transpose_by_projection.values())
+        else 1
+    )
+    outlier_value_extent = (
+        matrix_shape[1] if fixed_factorization_axis == 0 else matrix_shape[0]
+    )
+    outlier_index_extent = (
+        matrix_shape[0] if fixed_factorization_axis == 0 else matrix_shape[1]
+    )
     outlier_cost = outlier_bit_cost(
-        matrix_shape[0],
+        outlier_value_extent,
         len(args.fixed_outlier_indices),
         value_bits=16,
-        index_bits=max(1, (matrix_shape[1] - 1).bit_length()),
+        index_bits=max(1, (outlier_index_extent - 1).bit_length()),
     )
     baseline_cost = factor_bit_cost(
         matrix_shape[0],
@@ -2738,7 +2745,7 @@ def run(args: argparse.Namespace) -> int:
         )
 
     output: dict[str, Any] = {
-        "schema_version": 16,
+        "schema_version": 17,
         "status": "completed",
         "role": "analysis-only sign-code splice gate",
         "reconstruction_export": reconstruction_export,
@@ -2813,6 +2820,9 @@ def run(args: argparse.Namespace) -> int:
         "fixed_outlier_columns": {
             "count": len(args.fixed_outlier_indices),
             "indices": list(args.fixed_outlier_indices),
+            "factorization_axis": (
+                "row" if fixed_factorization_axis == 0 else "column"
+            ),
             "bit_cost": asdict(outlier_cost),
             "applied_to": ["free_words", "corrected_codebook"],
         },

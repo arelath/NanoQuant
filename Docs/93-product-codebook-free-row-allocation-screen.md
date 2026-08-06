@@ -6,6 +6,11 @@
 candidate; full-format promotion still requires other projection shapes and
 constrained resident tuning
 
+> **Projection-family follow-up:**
+> `Docs/94-product-codebook-projection-family-screen.md` completes the other
+> shape screen. It rejects attention and joint gate/up replacement and narrows
+> the resident prototype to `mlp.down_proj` only.
+
 ## Question
 
 Can a small change in the free-versus-coded right-factor allocation remove the
@@ -94,7 +99,7 @@ complete run, the implementation must:
    materializing free signs;
 2. make coded/free allocation shape- and layer-aware under the global bit
    budget;
-3. screen the other projection families with their exact retained outliers;
+3. preserve the completed other-family fallback decision from Docs 94;
 4. add packed/runtime representation contracts and round-trip tests; and
 5. repeat the complete exact-quality protocol only after those boundaries pass.
 

@@ -328,6 +328,31 @@ def test_splice_probe_parses_fixed_outlier_indices() -> None:
     assert args.fixed_outlier_indices == (50, 1791, 3043)
 
 
+def test_splice_probe_allows_fixed_outliers_for_joint_projections() -> None:
+    probe = _probe_module()
+    args = probe._parser().parse_args(
+        [
+            "--model",
+            "model.safetensors",
+            "--snapshot",
+            "snapshot",
+            "--calibration-state",
+            "calibration",
+            "--output",
+            "result.json",
+            "--projections",
+            "gate,up",
+            "--transpose-matrix",
+            "--fixed-outlier-indices",
+            "768,890",
+        ]
+    )
+
+    assert args.projections == ("gate", "up")
+    assert args.transpose_matrix
+    assert args.fixed_outlier_indices == (768, 890)
+
+
 def test_splice_probe_parses_no_flip_linear_codebook_mode() -> None:
     probe = _probe_module()
     args = probe._parser().parse_args(

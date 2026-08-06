@@ -35,7 +35,6 @@ from nanoquant.domain.codebook_payload_search import (
 from nanoquant.domain.factorization import AdmmParameters, factorize_admm_with_parameters
 from nanoquant.domain.outliers import (
     fisher_scores,
-    reconstruct_with_outliers,
     remove_columns,
     select_top_columns,
 )
@@ -243,12 +242,54 @@ def _prepare_candidate_outliers(
 def _prepare_fixed_outliers(
     weight: torch.Tensor,
     indices: tuple[int, ...],
+    *,
+    axis: int = 1,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Remove an explicitly retained set of exact columns from a target."""
+    """Remove fixed source columns along their factorization-space axis."""
 
     index_tensor = torch.tensor(indices, dtype=torch.long, device=weight.device)
-    residual, values = remove_columns(weight, index_tensor)
+    if axis == 1:
+        residual, values = remove_columns(weight, index_tensor)
+    elif axis == 0:
+        residual = weight.detach().clone()
+        values = residual[index_tensor, :].clone()
+        residual[index_tensor, :] = 0
+    else:
+        raise ValueError("fixed outlier axis must be zero or one")
     return residual, index_tensor, values
+
+
+def _restore_fixed_outliers(
+    base: torch.Tensor,
+    indices: torch.Tensor,
+    values: torch.Tensor,
+    *,
+    axis: int,
+) -> torch.Tensor:
+    result = base.detach().clone()
+    if axis == 1:
+        result[:, indices] = values.detach().to(result)
+    elif axis == 0:
+        result[indices, :] = values.detach().to(result)
+    else:
+        raise ValueError("fixed outlier axis must be zero or one")
+    return result
+
+
+def _fixed_outlier_bit_cost(
+    weight: torch.Tensor,
+    count: int,
+    *,
+    axis: int,
+) -> Any:
+    value_extent = weight.shape[0] if axis == 1 else weight.shape[1]
+    index_extent = weight.shape[1] if axis == 1 else weight.shape[0]
+    return outlier_bit_cost(
+        value_extent,
+        count,
+        value_bits=16,
+        index_bits=max(1, math.ceil(math.log2(max(2, index_extent)))),
+    )
 
 
 def _replace_exact_columns(
@@ -446,23 +487,30 @@ def _run_baseline(
     protocol: SignWordCodebookProtocol,
 ) -> dict[str, Any]:
     source_weight = weight
+    fixed_axis = 0 if protocol.transpose_matrix else 1
+    reconstruction_axis = fixed_axis if protocol.fixed_outlier_indices else 1
     if protocol.fixed_outlier_indices:
         weight, outlier_indices, outlier_values = _prepare_fixed_outliers(
             source_weight,
             protocol.fixed_outlier_indices,
+            axis=fixed_axis,
         )
     else:
         outlier_indices = torch.empty(0, dtype=torch.long, device=weight.device)
         outlier_values = weight[:, outlier_indices]
-    outlier_cost = outlier_bit_cost(
-        source_weight.shape[0],
+    outlier_cost = _fixed_outlier_bit_cost(
+        source_weight,
         len(protocol.fixed_outlier_indices),
-        value_bits=16,
-        index_bits=max(1, math.ceil(math.log2(max(2, source_weight.shape[1])))),
+        axis=fixed_axis,
     )
 
     def complete_reconstruction(base: torch.Tensor) -> torch.Tensor:
-        return reconstruct_with_outliers(base, outlier_indices, outlier_values)
+        return _restore_fixed_outliers(
+            base,
+            outlier_indices,
+            outlier_values,
+            axis=reconstruction_axis,
+        )
 
     generator = torch.Generator(device=protocol.device).manual_seed(
         _logical_seed(protocol.seed, "free-word-baseline")
@@ -579,6 +627,9 @@ def _run_baseline(
             "count": len(protocol.fixed_outlier_indices),
             "indices": outlier_indices.to("cpu").tolist(),
             "selector": "fixed" if protocol.fixed_outlier_indices else "none",
+            "factorization_axis": (
+                "row" if reconstruction_axis == 0 else "column"
+            ),
             "storage_dtype": "bfloat16",
             "bit_cost": asdict(outlier_cost),
         },
@@ -621,10 +672,13 @@ def _run_codebook(
     outlier_count: int,
 ) -> dict[str, Any]:
     source_weight = weight
+    fixed_axis = 0 if protocol.transpose_matrix else 1
+    reconstruction_axis = fixed_axis if protocol.fixed_outlier_indices else 1
     if protocol.fixed_outlier_indices:
         weight, outlier_indices, outlier_values = _prepare_fixed_outliers(
             source_weight,
             protocol.fixed_outlier_indices,
+            axis=fixed_axis,
         )
         outlier_count = len(protocol.fixed_outlier_indices)
     elif protocol.candidate_outlier_selector == "fisher":
@@ -642,21 +696,26 @@ def _run_codebook(
             device=weight.device,
         )
         outlier_values = weight[:, outlier_indices]
-    outlier_cost = outlier_bit_cost(
-        weight.shape[0],
-        outlier_count,
-        value_bits=16,
-        index_bits=max(1, math.ceil(math.log2(max(2, weight.shape[1])))),
+    outlier_cost = (
+        _fixed_outlier_bit_cost(source_weight, outlier_count, axis=fixed_axis)
+        if protocol.fixed_outlier_indices
+        else outlier_bit_cost(
+            weight.shape[0],
+            outlier_count,
+            value_bits=16,
+            index_bits=max(1, math.ceil(math.log2(max(2, weight.shape[1])))),
+        )
     )
     factor_target_bits = target_bits - outlier_cost.total
     if factor_target_bits <= 0:
         raise ValueError("outlier columns exhaust the candidate bit budget")
 
     def complete_reconstruction(base: torch.Tensor) -> torch.Tensor:
-        return reconstruct_with_outliers(
+        return _restore_fixed_outliers(
             base,
             outlier_indices,
             outlier_values,
+            axis=reconstruction_axis,
         )
 
     progressive = protocol.codebook_mode == "progressive"
@@ -1062,6 +1121,9 @@ def _run_codebook(
                 if protocol.fixed_outlier_indices
                 else protocol.candidate_outlier_selector
             ),
+            "factorization_axis": (
+                "row" if reconstruction_axis == 0 else "column"
+            ),
             "storage_dtype": "bfloat16",
             "bit_cost": asdict(outlier_cost),
         },
@@ -1245,7 +1307,7 @@ def run(args: argparse.Namespace) -> int:
             "partial corrected banks require a valid row-banked prefix"
         )
     protocol = SignWordCodebookProtocol(
-        27,
+        28,
         args.model_revision,
         args.block,
         args.projection,

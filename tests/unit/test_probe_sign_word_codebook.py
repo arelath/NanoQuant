@@ -7,9 +7,11 @@ from nanoquant.domain.planning import outlier_bit_cost
 from nanoquant.domain.sign_word_codebook import corrected_asymmetric_codebook_bit_cost
 from tools.probe_sign_word_codebook import (
     _combine_candidate_bit_cost,
+    _fixed_outlier_bit_cost,
     _prepare_candidate_outliers,
     _prepare_fixed_outliers,
     _replace_exact_columns,
+    _restore_fixed_outliers,
     build_parser,
 )
 
@@ -80,6 +82,34 @@ def test_fixed_outlier_indices_are_parsed_and_remove_exact_columns() -> None:
     assert indices.tolist() == [1, 3]
     assert torch.count_nonzero(residual[:, indices]) == 0
     assert torch.equal(values, weight[:, indices])
+
+
+def test_fixed_outlier_columns_round_trip_as_rows_after_transpose() -> None:
+    weight = torch.arange(12, dtype=torch.float32).reshape(3, 4)
+
+    residual, indices, values = _prepare_fixed_outliers(
+        weight,
+        (0, 2),
+        axis=0,
+    )
+    restored = _restore_fixed_outliers(
+        residual,
+        indices,
+        values,
+        axis=0,
+    )
+
+    assert torch.count_nonzero(residual[indices, :]) == 0
+    assert torch.equal(restored, weight)
+
+
+def test_transposed_fixed_outlier_cost_uses_source_output_extent() -> None:
+    transposed_weight = torch.zeros((3, 4))
+
+    cost = _fixed_outlier_bit_cost(transposed_weight, 2, axis=0)
+
+    assert cost.outlier_value_bits == 4 * 2 * 16
+    assert cost.outlier_index_bits == 2 * 2
 
 
 def test_extended_binary_search_outer_passes_are_parsed() -> None:
