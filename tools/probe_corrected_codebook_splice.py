@@ -45,7 +45,8 @@ from nanoquant.domain.mlp_operator_refit import (
     linear_output_normalized_rmse,
 )
 from nanoquant.domain.models import BlockId, LayerId
-from nanoquant.domain.planning import factor_bit_cost
+from nanoquant.domain.outliers import reconstruct_with_outliers, remove_columns
+from nanoquant.domain.planning import factor_bit_cost, outlier_bit_cost
 from nanoquant.domain.scale_fit import MaterializedScaleFitResult, fit_scales, reconstruct
 from nanoquant.domain.sign_word_codebook import (
     FullSignCodebook,
@@ -79,7 +80,7 @@ from nanoquant.kl_budget_workflow import _token_hash
 from nanoquant.quality_evaluation import _wikitext_tokens
 
 MODEL_SOURCE = "google/gemma-3-1b-it"
-RECONSTRUCTION_CACHE_ALGORITHM_VERSION = 4
+RECONSTRUCTION_CACHE_ALGORITHM_VERSION = 5
 
 
 def _parse_ints(value: str) -> tuple[int, ...]:
@@ -215,6 +216,7 @@ def _reconstruction_cache_identity(
         "index_width": args.index_width,
         "corrections_per_word": args.corrections_per_word,
         "correction_bits": args.correction_bits,
+        "fixed_outlier_indices": list(args.fixed_outlier_indices),
         "outer_iterations": args.outer_iterations,
         "inner_iterations": args.inner_iterations,
         "regularization": args.regularization,
@@ -1420,6 +1422,15 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--baseline-rank", type=int, default=970)
     parser.add_argument("--candidate-rank", type=int)
     parser.add_argument("--right-free-rows", type=int, default=0)
+    parser.add_argument(
+        "--fixed-outlier-indices",
+        type=_parse_ints,
+        default=(),
+        help=(
+            "comma-separated exact input-column indices applied symmetrically "
+            "to both reconstruction arms"
+        ),
+    )
     parser.add_argument("--index-width", type=int, default=10)
     parser.add_argument(
         "--codebook-mode",
@@ -1524,6 +1535,12 @@ def run(args: argparse.Namespace) -> int:
         or args.right_free_rows >= args.candidate_rank
     ):
         raise ValueError("candidate rank/free-row configuration is invalid")
+    if args.fixed_outlier_indices and (
+        args.transpose_matrix or args.projections is not None or args.projection != "down"
+    ):
+        raise ValueError(
+            "fixed outlier indices currently require one untransposed down projection"
+        )
     if args.payload_search and not args.binary_search:
         raise ValueError("payload search requires the matched binary-search control")
     if args.codebook_mode in {"product", "linear"} and args.payload_search:
@@ -1979,6 +1996,15 @@ def run(args: argparse.Namespace) -> int:
                         output_importance,
                         input_importance,
                     )
+                metric_weight = weight
+                outlier_indices = torch.tensor(
+                    args.fixed_outlier_indices,
+                    dtype=torch.long,
+                    device=weight.device,
+                )
+                outlier_values = weight[:, outlier_indices]
+                if args.fixed_outlier_indices:
+                    weight, outlier_values = remove_columns(weight, outlier_indices)
                 baseline_generator = torch.Generator(device=args.device).manual_seed(
                     _logical_seed(args.seed, "free-word-baseline")
                 )
@@ -2066,8 +2092,13 @@ def run(args: argparse.Namespace) -> int:
                     baseline_mid,
                     baseline_post,
                 )
+                baseline_reconstruction = reconstruct_with_outliers(
+                    baseline_reconstruction,
+                    outlier_indices,
+                    outlier_values,
+                )
                 baseline_metrics = _metrics(
-                    weight,
+                    metric_weight,
                     baseline_reconstruction,
                     input_importance,
                     output_importance,
@@ -2193,8 +2224,13 @@ def run(args: argparse.Namespace) -> int:
                     candidate_mid,
                     candidate_post,
                 )
+                candidate_reconstruction = reconstruct_with_outliers(
+                    candidate_reconstruction,
+                    outlier_indices,
+                    outlier_values,
+                )
                 candidate_metrics = _metrics(
-                    weight,
+                    metric_weight,
                     candidate_reconstruction,
                     input_importance,
                     output_importance,
@@ -2670,6 +2706,25 @@ def run(args: argparse.Namespace) -> int:
             right_flip_bits=args.correction_bits,
             scale_width=16,
         )
+    outlier_cost = outlier_bit_cost(
+        matrix_shape[0],
+        len(args.fixed_outlier_indices),
+        value_bits=16,
+        index_bits=max(1, (matrix_shape[1] - 1).bit_length()),
+    )
+    baseline_cost = factor_bit_cost(
+        matrix_shape[0],
+        matrix_shape[1],
+        args.baseline_rank,
+        scale_bits=16,
+    )
+    candidate_bit_cost = asdict(cost)
+    baseline_bit_cost = asdict(baseline_cost)
+    for bit_cost in (candidate_bit_cost, baseline_bit_cost):
+        bit_cost["outlier_value_bits"] = outlier_cost.outlier_value_bits
+        bit_cost["outlier_index_bits"] = outlier_cost.outlier_index_bits
+    candidate_total_bits = cost.total + outlier_cost.total
+    baseline_total_bits = baseline_cost.total + outlier_cost.total
     reconstruction_export = None
     if args.export_reconstruction_set is not None:
         if args.export_arm not in all_reconstruction_sets:
@@ -2683,7 +2738,7 @@ def run(args: argparse.Namespace) -> int:
         )
 
     output: dict[str, Any] = {
-        "schema_version": 15,
+        "schema_version": 16,
         "status": "completed",
         "role": "analysis-only sign-code splice gate",
         "reconstruction_export": reconstruction_export,
@@ -2731,6 +2786,13 @@ def run(args: argparse.Namespace) -> int:
         "wikitext_offset": args.wikitext_offset,
         "sequence_length": args.sequence_length,
         "teacher_baseline_nll": teacher_nll,
+        "baseline": {
+            "rank": args.baseline_rank,
+            "bit_cost": baseline_bit_cost,
+            "total_bits": baseline_total_bits,
+            "actual_bpw": baseline_total_bits
+            / (matrix_shape[0] * matrix_shape[1]),
+        },
         "candidate": {
             "codebook_mode": args.codebook_mode,
             "index_width": args.index_width,
@@ -2742,9 +2804,17 @@ def run(args: argparse.Namespace) -> int:
             "corrected_assignment_candidates": (
                 args.corrected_assignment_candidates
             ),
-            "bit_cost": asdict(cost),
-            "actual_bpw": cost.total / (matrix_shape[0] * matrix_shape[1]),
+            "bit_cost": candidate_bit_cost,
+            "total_bits": candidate_total_bits,
+            "actual_bpw": candidate_total_bits
+            / (matrix_shape[0] * matrix_shape[1]),
             "index_metrics_by_block": candidate_index_metrics,
+        },
+        "fixed_outlier_columns": {
+            "count": len(args.fixed_outlier_indices),
+            "indices": list(args.fixed_outlier_indices),
+            "bit_cost": asdict(outlier_cost),
+            "applied_to": ["free_words", "corrected_codebook"],
         },
         "reconstruction_by_block": reconstruction_metrics,
         "search_by_block": search_metrics,

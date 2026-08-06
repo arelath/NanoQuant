@@ -92,6 +92,7 @@ class SignWordCodebookProtocol:
     candidate_rank: int | None
     candidate_outlier_columns: tuple[int, ...]
     candidate_outlier_selector: str
+    fixed_outlier_indices: tuple[int, ...]
     right_free_rows: int
     right_codebook_banks: int
     right_codebook_bank_axis: str
@@ -237,6 +238,17 @@ def _prepare_candidate_outliers(
     )
     residual, values = remove_columns(weight, indices)
     return residual, indices, values
+
+
+def _prepare_fixed_outliers(
+    weight: torch.Tensor,
+    indices: tuple[int, ...],
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Remove an explicitly retained set of exact columns from a target."""
+
+    index_tensor = torch.tensor(indices, dtype=torch.long, device=weight.device)
+    residual, values = remove_columns(weight, index_tensor)
+    return residual, index_tensor, values
 
 
 def _replace_exact_columns(
@@ -433,6 +445,25 @@ def _run_baseline(
     output_importance: torch.Tensor,
     protocol: SignWordCodebookProtocol,
 ) -> dict[str, Any]:
+    source_weight = weight
+    if protocol.fixed_outlier_indices:
+        weight, outlier_indices, outlier_values = _prepare_fixed_outliers(
+            source_weight,
+            protocol.fixed_outlier_indices,
+        )
+    else:
+        outlier_indices = torch.empty(0, dtype=torch.long, device=weight.device)
+        outlier_values = weight[:, outlier_indices]
+    outlier_cost = outlier_bit_cost(
+        source_weight.shape[0],
+        len(protocol.fixed_outlier_indices),
+        value_bits=16,
+        index_bits=max(1, math.ceil(math.log2(max(2, source_weight.shape[1])))),
+    )
+
+    def complete_reconstruction(base: torch.Tensor) -> torch.Tensor:
+        return reconstruct_with_outliers(base, outlier_indices, outlier_values)
+
     generator = torch.Generator(device=protocol.device).manual_seed(
         _logical_seed(protocol.seed, "free-word-baseline")
     )
@@ -468,8 +499,8 @@ def _run_baseline(
         alternating_passes=protocol.scale_fit_passes,
     )
     pre_search_metrics = _metrics(
-        weight,
-        fitted.reconstruction,
+        source_weight,
+        complete_reconstruction(fitted.reconstruction),
         input_importance,
         output_importance,
     )
@@ -507,8 +538,8 @@ def _run_baseline(
             searched.scale_post,
         )
     post_binary_search_metrics = _metrics(
-        weight,
-        reconstruction,
+        source_weight,
+        complete_reconstruction(reconstruction),
         input_importance,
         output_importance,
     )
@@ -537,19 +568,30 @@ def _run_baseline(
         protocol.baseline_rank,
         scale_bits=protocol.scale_bits,
     )
+    combined_bit_cost, total_bits = _combine_candidate_bit_cost(
+        bit_cost,
+        outlier_cost,
+    )
     return {
         "arm": "free_words",
         "rank": protocol.baseline_rank,
-        "bit_cost": asdict(bit_cost),
-        "total_bits": bit_cost.total,
-        "actual_bpw": bit_cost.total / weight.numel(),
+        "outlier_columns": {
+            "count": len(protocol.fixed_outlier_indices),
+            "indices": outlier_indices.to("cpu").tolist(),
+            "selector": "fixed" if protocol.fixed_outlier_indices else "none",
+            "storage_dtype": "bfloat16",
+            "bit_cost": asdict(outlier_cost),
+        },
+        "bit_cost": combined_bit_cost,
+        "total_bits": total_bits,
+        "actual_bpw": total_bits / source_weight.numel(),
         "signed_contributions_per_weight": protocol.baseline_rank,
         "factorized_work_over_dense": (
             protocol.baseline_rank * sum(weight.shape) / weight.numel()
         ),
         "metrics": _metrics(
-            weight,
-            reconstruction,
+            source_weight,
+            complete_reconstruction(reconstruction),
             input_importance,
             output_importance,
         ),
@@ -579,7 +621,13 @@ def _run_codebook(
     outlier_count: int,
 ) -> dict[str, Any]:
     source_weight = weight
-    if protocol.candidate_outlier_selector == "fisher":
+    if protocol.fixed_outlier_indices:
+        weight, outlier_indices, outlier_values = _prepare_fixed_outliers(
+            source_weight,
+            protocol.fixed_outlier_indices,
+        )
+        outlier_count = len(protocol.fixed_outlier_indices)
+    elif protocol.candidate_outlier_selector == "fisher":
         weight, outlier_indices, outlier_values = _prepare_candidate_outliers(
             source_weight,
             input_importance,
@@ -979,7 +1027,10 @@ def _run_codebook(
         reconstruction = payload.reconstruction
     if protocol.device.startswith("cuda"):
         torch.cuda.synchronize(protocol.device)
-    if protocol.candidate_outlier_selector == "post-search-residual":
+    if (
+        not protocol.fixed_outlier_indices
+        and protocol.candidate_outlier_selector == "post-search-residual"
+    ):
         outlier_indices = select_top_columns(
             fisher_scores(
                 source_weight - reconstruction,
@@ -1006,7 +1057,11 @@ def _run_codebook(
         "outlier_columns": {
             "count": outlier_count,
             "indices": outlier_indices.to("cpu").tolist(),
-            "selector": protocol.candidate_outlier_selector,
+            "selector": (
+                "fixed"
+                if protocol.fixed_outlier_indices
+                else protocol.candidate_outlier_selector
+            ),
             "storage_dtype": "bfloat16",
             "bit_cost": asdict(outlier_cost),
         },
@@ -1125,6 +1180,17 @@ def run(args: argparse.Namespace) -> int:
         or any(count < 0 for count in args.candidate_outlier_columns)
     ):
         raise ValueError("candidate outlier counts must be unique and non-negative")
+    if (
+        len(args.fixed_outlier_indices) != len(set(args.fixed_outlier_indices))
+        or any(index < 0 for index in args.fixed_outlier_indices)
+    ):
+        raise ValueError("fixed outlier indices must be unique and non-negative")
+    if args.fixed_outlier_indices and args.candidate_outlier_columns != (
+        len(args.fixed_outlier_indices),
+    ):
+        raise ValueError(
+            "fixed outlier indices require their count as the sole candidate count"
+        )
     if args.right_free_rows < 0 or args.right_free_rows % args.rank_multiple:
         raise ValueError("right free rows must be non-negative and rank-aligned")
     if args.right_free_rows and (
@@ -1179,7 +1245,7 @@ def run(args: argparse.Namespace) -> int:
             "partial corrected banks require a valid row-banked prefix"
         )
     protocol = SignWordCodebookProtocol(
-        26,
+        27,
         args.model_revision,
         args.block,
         args.projection,
@@ -1187,6 +1253,7 @@ def run(args: argparse.Namespace) -> int:
         args.candidate_rank,
         args.candidate_outlier_columns,
         args.candidate_outlier_selector,
+        args.fixed_outlier_indices,
         args.right_free_rows,
         args.right_codebook_banks,
         args.right_codebook_bank_axis,
@@ -1431,6 +1498,15 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "select exact columns before factorization by Fisher salience or "
             "optimistically from the final candidate residual"
+        ),
+    )
+    parser.add_argument(
+        "--fixed-outlier-indices",
+        type=_parse_ints,
+        default=(),
+        help=(
+            "comma-separated exact column indices applied symmetrically to the "
+            "free-word baseline and every codebook candidate"
         ),
     )
     parser.add_argument("--right-free-rows", type=int, default=0)

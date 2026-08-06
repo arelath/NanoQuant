@@ -308,6 +308,26 @@ def test_splice_probe_parses_no_flip_product_codebook_mode() -> None:
     assert args.corrections_per_word == 0
 
 
+def test_splice_probe_parses_fixed_outlier_indices() -> None:
+    probe = _probe_module()
+    args = probe._parser().parse_args(
+        [
+            "--model",
+            "model.safetensors",
+            "--snapshot",
+            "snapshot",
+            "--calibration-state",
+            "calibration",
+            "--output",
+            "result.json",
+            "--fixed-outlier-indices",
+            "50,1791,3043",
+        ]
+    )
+
+    assert args.fixed_outlier_indices == (50, 1791, 3043)
+
+
 def test_splice_probe_parses_no_flip_linear_codebook_mode() -> None:
     probe = _probe_module()
     args = probe._parser().parse_args(

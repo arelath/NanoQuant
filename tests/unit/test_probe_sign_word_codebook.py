@@ -8,6 +8,7 @@ from nanoquant.domain.sign_word_codebook import corrected_asymmetric_codebook_bi
 from tools.probe_sign_word_codebook import (
     _combine_candidate_bit_cost,
     _prepare_candidate_outliers,
+    _prepare_fixed_outliers,
     _replace_exact_columns,
     build_parser,
 )
@@ -53,6 +54,32 @@ def test_candidate_outlier_counts_are_parsed_as_a_tuple() -> None:
     )
 
     assert args.candidate_outlier_columns == (0, 1, 2)
+
+
+def test_fixed_outlier_indices_are_parsed_and_remove_exact_columns() -> None:
+    args = build_parser().parse_args(
+        [
+            "--model",
+            "model.safetensors",
+            "--calibration-state",
+            "calibration",
+            "--output",
+            "results.json",
+            "--fixed-outlier-indices",
+            "1,3",
+        ]
+    )
+    weight = torch.arange(8, dtype=torch.float32).reshape(2, 4)
+
+    residual, indices, values = _prepare_fixed_outliers(
+        weight,
+        args.fixed_outlier_indices,
+    )
+
+    assert args.fixed_outlier_indices == (1, 3)
+    assert indices.tolist() == [1, 3]
+    assert torch.count_nonzero(residual[:, indices]) == 0
+    assert torch.equal(values, weight[:, indices])
 
 
 def test_extended_binary_search_outer_passes_are_parsed() -> None:
