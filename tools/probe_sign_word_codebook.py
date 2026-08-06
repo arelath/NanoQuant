@@ -64,6 +64,7 @@ from nanoquant.domain.sign_word_codebook import (
     maximum_codebook_rank_for_budget,
     maximum_corrected_asymmetric_rank_for_budget,
     mixed_right_corrected_codebook_bit_cost,
+    mixed_right_linear_codebook_bit_cost,
     mixed_right_product_codebook_bit_cost,
     sign_word_codebook_bit_cost,
 )
@@ -110,6 +111,7 @@ class SignWordCodebookProtocol:
     transpose_matrix: bool
     codebook_mode: str
     assignment_batch_words: int
+    linear_assignment_sweeps: int
     corrected_assignment_candidates: int
     scale_fit_passes: int
     binary_search: BinaryFactorSearchConfig
@@ -612,6 +614,7 @@ def _run_codebook(
     progressive = protocol.codebook_mode == "progressive"
     relational = protocol.codebook_mode == "relational"
     product_right = protocol.codebook_mode == "product-right"
+    linear_right = protocol.codebook_mode == "linear-right"
     corrections_per_word = {
         "full-right-flip1": 1,
         "full-right-flip2": 2,
@@ -621,15 +624,18 @@ def _run_codebook(
     right_only = (
         protocol.codebook_mode == "full-right"
         or product_right
+        or linear_right
         or corrections_per_word > 0
     )
     corrected = corrections_per_word > 0
     payload_codebook: FullSignCodebook | None = None
     payload_indices: torch.Tensor | None = None
     payload_positions: torch.Tensor | None = None
-    if product_right:
+    if product_right or linear_right:
         if protocol.candidate_rank is None:
-            raise ValueError("product-right mode requires an explicit candidate rank")
+            raise ValueError(
+                "compact mixed-right modes require an explicit candidate rank"
+            )
         rank = protocol.candidate_rank
     elif corrected:
         rank = maximum_corrected_asymmetric_rank_for_budget(
@@ -771,12 +777,15 @@ def _run_codebook(
             codebook_warmup_fraction=protocol.codebook_warmup_fraction,
             codebook_freeze_fraction=protocol.codebook_freeze_fraction,
             assignment_batch_words=protocol.assignment_batch_words,
+            linear_assignment_sweeps=protocol.linear_assignment_sweeps,
             corrected_assignment_candidates=(
                 protocol.corrected_assignment_candidates
             ),
             codebook_mode=(
                 "product"
                 if product_right
+                else "linear"
+                if linear_right
                 else "full" if right_only else protocol.codebook_mode
             ),
             constrain_left=not right_only,
@@ -827,6 +836,16 @@ def _run_codebook(
                 scale_width=protocol.scale_bits,
             )
             arm_name = f"right_product_codebook_k{index_width}"
+        elif linear_right:
+            bit_cost = mixed_right_linear_codebook_bit_cost(
+                weight.shape[0],
+                weight.shape[1],
+                rank,
+                right_free_rows=protocol.right_free_rows,
+                right_index_width=index_width,
+                scale_width=protocol.scale_bits,
+            )
+            arm_name = f"right_linear_codebook_k{index_width}"
         elif corrected:
             corrected_rows = (
                 None
@@ -1087,6 +1106,8 @@ def run(args: argparse.Namespace) -> int:
         raise ValueError(
             "baseline rank must be positive and index widths valid for the codebook"
         )
+    if args.linear_assignment_sweeps <= 0:
+        raise ValueError("linear assignment sweeps must be positive")
     if args.candidate_rank is not None and (
         args.candidate_rank <= 0
         or args.candidate_rank % args.rank_multiple
@@ -1107,6 +1128,7 @@ def run(args: argparse.Namespace) -> int:
         or (
             not args.codebook_mode.startswith("full-right-flip")
             and args.codebook_mode != "product-right"
+            and args.codebook_mode != "linear-right"
         )
     ):
         raise ValueError(
@@ -1117,6 +1139,7 @@ def run(args: argparse.Namespace) -> int:
         or (
             not args.codebook_mode.startswith("full-right-flip")
             and args.codebook_mode != "product-right"
+            and args.codebook_mode != "linear-right"
         )
     ):
         raise ValueError(
@@ -1124,6 +1147,8 @@ def run(args: argparse.Namespace) -> int:
         )
     if args.payload_search and not args.binary_search:
         raise ValueError("payload search requires the matched binary-search control")
+    if args.codebook_mode == "linear-right" and args.payload_search:
+        raise ValueError("payload search does not support linear codebooks")
     if (
         args.right_codebook_banks <= 0
         or args.right_codebook_banks & (args.right_codebook_banks - 1)
@@ -1149,7 +1174,7 @@ def run(args: argparse.Namespace) -> int:
             "partial corrected banks require a valid row-banked prefix"
         )
     protocol = SignWordCodebookProtocol(
-        24,
+        25,
         args.model_revision,
         args.block,
         args.projection,
@@ -1176,6 +1201,7 @@ def run(args: argparse.Namespace) -> int:
         args.transpose_matrix,
         args.codebook_mode,
         args.assignment_batch_words,
+        args.linear_assignment_sweeps,
         args.corrected_assignment_candidates,
         args.scale_fit_passes,
         BinaryFactorSearchConfig(enabled=args.binary_search),
@@ -1253,6 +1279,7 @@ def run(args: argparse.Namespace) -> int:
             "relational": "relational",
             "full-right": "right_codebook",
             "product-right": "right_product_codebook",
+            "linear-right": "right_linear_codebook",
         }.get(
             protocol.codebook_mode,
             (
@@ -1271,10 +1298,10 @@ def run(args: argparse.Namespace) -> int:
                 if result is not None:
                     print(f"reusing {key}", flush=True)
                     continue
-                if protocol.codebook_mode == "product-right":
+                if protocol.codebook_mode in {"product-right", "linear-right"}:
                     if protocol.candidate_rank is None:
                         raise ValueError(
-                            "product-right mode requires an explicit candidate rank"
+                            "compact mixed-right modes require an explicit candidate rank"
                         )
                     rank = protocol.candidate_rank
                 elif correction_count:
@@ -1425,6 +1452,7 @@ def build_parser() -> argparse.ArgumentParser:
             "full",
             "full-right",
             "product-right",
+            "linear-right",
             "full-right-flip1",
             "full-right-flip2",
             "full-right-flip3",
@@ -1434,6 +1462,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="product",
     )
     parser.add_argument("--assignment-batch-words", type=int, default=65_536)
+    parser.add_argument("--linear-assignment-sweeps", type=int, default=2)
     parser.add_argument(
         "--corrected-assignment-candidates",
         type=int,

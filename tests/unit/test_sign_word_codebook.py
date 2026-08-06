@@ -6,12 +6,16 @@ from nanoquant.domain.planning import factor_bit_cost
 from nanoquant.domain.sign_word_codebook import (
     BankedFullSignCodebook,
     FullSignCodebook,
+    LinearSignCodebook,
     ProductSignCodebook,
     _assign_corrected_flat_words,
+    _assign_linear_flat_words,
     apply_single_word_flip,
     apply_word_flips,
     asymmetric_sign_word_codebook_bit_cost,
+    codebook_index_metrics,
     corrected_asymmetric_codebook_bit_cost,
+    decode_linear_codebook,
     decode_product_codebook,
     decode_sign_codebook,
     factorize_sign_word_codebook_admm,
@@ -19,8 +23,10 @@ from nanoquant.domain.sign_word_codebook import (
     maximum_codebook_rank_for_budget,
     maximum_corrected_asymmetric_rank_for_budget,
     maximum_mixed_right_free_rows_for_budget,
+    maximum_mixed_right_linear_free_rows_for_budget,
     maximum_mixed_right_product_free_rows_for_budget,
     mixed_right_corrected_codebook_bit_cost,
+    mixed_right_linear_codebook_bit_cost,
     mixed_right_product_codebook_bit_cost,
     sign_word_codebook_bit_cost,
 )
@@ -131,6 +137,65 @@ def test_compact_product_code_charges_half_tables_and_funds_free_prefix() -> Non
     assert free_rows == 416
     assert cost.codebook_bits == 8_208
     assert cost.total + outlier_bits <= baseline
+
+
+def test_compact_linear_code_charges_generator_and_funds_free_prefix() -> None:
+    baseline = factor_bit_cost(1152, 6912, 970, scale_bits=16).total
+    outlier_bits = 1152 * 7 * 16 + 7 * 13
+    free_rows = maximum_mixed_right_linear_free_rows_for_budget(
+        1152,
+        6912,
+        1344,
+        baseline - outlier_bits,
+        right_index_width=16,
+    )
+    cost = mixed_right_linear_codebook_bit_cost(
+        1152,
+        6912,
+        1344,
+        right_free_rows=free_rows,
+        right_index_width=16,
+    )
+
+    assert free_rows == 416
+    assert cost.codebook_bits == 528
+    assert cost.total + outlier_bits <= baseline
+
+
+def test_linear_codebook_decodes_gf2_generator_messages() -> None:
+    generator = torch.ones((4, 32))
+    generator[torch.arange(4), torch.arange(4)] = -1
+    codebook = LinearSignCodebook(4, generator)
+    decoded = decode_linear_codebook(
+        torch.tensor([[0, 5], [15, 2]], dtype=torch.int32),
+        codebook,
+        64,
+    )
+
+    assert torch.equal(decoded[0, :32], torch.ones(32))
+    assert decoded[0, 32] == -1
+    assert decoded[0, 34] == -1
+    assert int((decoded[0, 32:] == -1).sum()) == 2
+    assert int((decoded[1, :32] == -1).sum()) == 4
+    assert decoded[1, 33] == -1
+
+
+def test_linear_assignment_recovers_exact_codewords_from_information_set() -> None:
+    generator = torch.ones((4, 32))
+    generator[torch.arange(4), torch.arange(4)] = -1
+    codebook = LinearSignCodebook(4, generator)
+    expected = torch.arange(16, dtype=torch.int32).reshape(16, 1)
+    decoded = decode_linear_codebook(expected, codebook, 32)
+    weights = torch.linspace(0.5, 1.5, 32).reshape(1, -1)
+    assigned, reconstructed = _assign_linear_flat_words(
+        decoded * weights,
+        codebook,
+        batch_words=8,
+        sweeps=1,
+    )
+
+    assert torch.equal(assigned.to(torch.int32), expected.reshape(-1))
+    assert torch.equal(reconstructed, decoded)
 
 
 def test_banked_mixed_right_cost_charges_every_implicit_table() -> None:
@@ -567,6 +632,39 @@ def test_product_codebook_exports_an_uncorrected_free_right_prefix() -> None:
     assert result.right_indices is not None
     assert result.right_flip_positions is None
     decoded = decode_product_codebook(
+        result.right_indices,
+        result.right_codebook,
+        result.factors.right_binary.shape[1],
+    )
+    assert torch.equal(decoded, result.factors.right_binary[1:])
+
+
+def test_linear_codebook_learns_full_rank_uncorrected_right_factor() -> None:
+    result = factorize_sign_word_codebook_admm(
+        torch.randn((4, 32), generator=torch.Generator().manual_seed(73)),
+        torch.ones(32),
+        torch.ones(4),
+        4,
+        torch.Generator().manual_seed(79),
+        index_bits=4,
+        outer_iterations=2,
+        inner_iterations=2,
+        codebook_update_interval=1,
+        linear_assignment_sweeps=1,
+        codebook_mode="linear",
+        constrain_left=False,
+        right_free_rows=1,
+    )
+
+    assert result.left_codebook is None
+    assert isinstance(result.right_codebook, LinearSignCodebook)
+    assert result.right_indices is not None
+    assert result.right_flip_positions is None
+    assert torch.all((result.right_codebook.generator < 0).sum(dim=1) == 16)
+    assert codebook_index_metrics(result)["right"][
+        "generator_minimum_distance"
+    ] >= 4
+    decoded = decode_linear_codebook(
         result.right_indices,
         result.right_codebook,
         result.factors.right_binary.shape[1],

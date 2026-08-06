@@ -1,12 +1,10 @@
 """Analysis-grade sign-word-codebook factorization.
 
 The production format stores one bit per sign.  This module supplies a bounded
-research implementation of the fixed-width codebook alternative without
-changing any persisted or runtime contract.  A 32-sign word is represented as
-the Cartesian product of two independently fitted 16-sign half-codebooks.  The
-two half indices pack into one fixed-width word index, so the decoded set is a
-valid ``2**index_bits``-entry 32-sign codebook while assignment remains small
-enough for a real Gemma matrix.
+research implementation of fixed-width codebook alternatives without changing
+any persisted or runtime contract.  It includes Cartesian-product, full-table,
+and compact learned GF(2) linear codes with tractable assignment on a real
+Gemma matrix.
 """
 
 from __future__ import annotations
@@ -54,6 +52,29 @@ class ProductSignCodebook:
         for table in (self.first, self.second):
             if not torch.all((table == 1) | (table == -1)):
                 raise ValueError("codebook entries must be signs")
+
+    @property
+    def entry_count(self) -> int:
+        return 1 << self.index_bits
+
+
+@dataclass(frozen=True, slots=True)
+class LinearSignCodebook:
+    """A full-rank GF(2) generator for fixed-width sign words."""
+
+    index_bits: int
+    generator: torch.Tensor
+
+    def __post_init__(self) -> None:
+        expected = (self.index_bits, 32)
+        if self.index_bits <= 0 or self.index_bits > 16:
+            raise ValueError("linear codebook index width must lie in [1, 16]")
+        if tuple(self.generator.shape) != expected:
+            raise ValueError(f"linear generator shape must be {expected}")
+        if not torch.all((self.generator == 1) | (self.generator == -1)):
+            raise ValueError("linear generator entries must be signs")
+        if _gf2_sign_rank(self.generator) != self.index_bits:
+            raise ValueError("linear generator must have full row rank over GF(2)")
 
     @property
     def entry_count(self) -> int:
@@ -115,7 +136,12 @@ class BankedFullSignCodebook:
         return self.entries.shape[0]
 
 
-SignCodebook = ProductSignCodebook | FullSignCodebook | BankedFullSignCodebook
+SignCodebook = (
+    ProductSignCodebook
+    | LinearSignCodebook
+    | FullSignCodebook
+    | BankedFullSignCodebook
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -515,6 +541,78 @@ def maximum_mixed_right_product_free_rows_for_budget(
     return accepted
 
 
+def mixed_right_linear_codebook_bit_cost(
+    out_features: int,
+    in_features: int,
+    rank: int,
+    *,
+    right_free_rows: int,
+    right_index_width: int,
+    scale_width: int = 16,
+    word_width: int = 32,
+    free_row_count_bits: int = 16,
+) -> SignWordCodebookCost:
+    """Charge free U and a mixed V encoded by a GF(2) generator."""
+
+    if not 0 <= right_free_rows < rank:
+        raise ValueError("right free rows must leave at least one coded row")
+    if (
+        right_index_width <= 0
+        or right_index_width > 16
+        or scale_width < 0
+        or word_width <= 0
+        or free_row_count_bits < 0
+    ):
+        raise ValueError("mixed linear-code widths are invalid")
+    left_words = out_features * math.ceil(rank / word_width)
+    right_words_per_row = math.ceil(in_features / word_width)
+    coded_rows = rank - right_free_rows
+    right_words = rank * right_words_per_row
+    payload_bits = (
+        left_words * word_width
+        + right_free_rows * right_words_per_row * word_width
+        + coded_rows * right_words_per_row * right_index_width
+    )
+    return SignWordCodebookCost(
+        index_bits=payload_bits,
+        scale_bits=scale_width * (out_features + in_features + rank),
+        codebook_bits=(
+            right_index_width * word_width + free_row_count_bits
+        ),
+        word_count=left_words + right_words,
+    )
+
+
+def maximum_mixed_right_linear_free_rows_for_budget(
+    out_features: int,
+    in_features: int,
+    rank: int,
+    target_bits: int,
+    *,
+    right_index_width: int,
+    free_row_multiple: int = 32,
+    scale_width: int = 16,
+) -> int:
+    """Return the largest aligned free prefix for a compact linear code."""
+
+    if target_bits <= 0 or free_row_multiple <= 0:
+        raise ValueError("mixed linear-code budget and alignment must be positive")
+    accepted = 0
+    for free_rows in range(0, rank, free_row_multiple):
+        cost = mixed_right_linear_codebook_bit_cost(
+            out_features,
+            in_features,
+            rank,
+            right_free_rows=free_rows,
+            right_index_width=right_index_width,
+            scale_width=scale_width,
+        )
+        if cost.total > target_bits:
+            break
+        accepted = free_rows
+    return accepted
+
+
 def decode_product_codebook(
     indices: torch.Tensor,
     codebook: ProductSignCodebook,
@@ -536,15 +634,141 @@ def decode_product_codebook(
     return decoded[:, :columns].contiguous()
 
 
+def _gf2_sign_rank(generator: torch.Tensor) -> int:
+    """Return the GF(2) row rank of a small sign-valued generator."""
+
+    bits = (generator.detach().to(device="cpu") < 0).to(torch.int64).tolist()
+    packed = [
+        sum(int(bit) << column for column, bit in enumerate(row))
+        for row in bits
+    ]
+    rank = 0
+    for column in range(generator.shape[1] - 1, -1, -1):
+        pivot = next(
+            (row for row in range(rank, len(packed)) if packed[row] & (1 << column)),
+            None,
+        )
+        if pivot is None:
+            continue
+        packed[rank], packed[pivot] = packed[pivot], packed[rank]
+        for row in range(len(packed)):
+            if row != rank and packed[row] & (1 << column):
+                packed[row] ^= packed[rank]
+        rank += 1
+        if rank == len(packed):
+            break
+    return rank
+
+
+def _linear_subcode_table(generator: torch.Tensor) -> torch.Tensor:
+    """Enumerate a small GF(2) subcode as signs."""
+
+    dimensions = generator.shape[0]
+    messages = torch.arange(
+        1 << dimensions,
+        dtype=torch.int64,
+        device=generator.device,
+    )
+    bits = messages.reshape(-1, 1).bitwise_right_shift(
+        torch.arange(dimensions, dtype=torch.int64, device=generator.device)
+    ).bitwise_and(1)
+    generator_bits = (generator < 0).float()
+    code_bits = (bits.float() @ generator_bits).remainder_(2)
+    return code_bits.to(generator.dtype).mul_(-2).add_(1)
+
+
+def _linear_minimum_distance(generator: torch.Tensor) -> int:
+    """Return the minimum non-zero Hamming weight of a small linear code."""
+
+    table = _linear_subcode_table(generator)
+    if table.shape[0] <= 1:
+        return 0
+    return int((table[1:] < 0).sum(dim=1).min())
+
+
+def _linear_information_decoder(
+    generator: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return independent code positions and their GF(2) inverse."""
+
+    bits = (generator.detach().to(device="cpu") < 0).to(torch.int64)
+    work = bits.clone()
+    pivot_columns: list[int] = []
+    pivot_row = 0
+    for column in range(bits.shape[1]):
+        candidates = torch.nonzero(work[pivot_row:, column], as_tuple=False)
+        if candidates.numel() == 0:
+            continue
+        selected = pivot_row + int(candidates[0, 0])
+        if selected != pivot_row:
+            temporary = work[pivot_row].clone()
+            work[pivot_row] = work[selected]
+            work[selected] = temporary
+        for row in range(work.shape[0]):
+            if row != pivot_row and int(work[row, column]):
+                work[row].bitwise_xor_(work[pivot_row])
+        pivot_columns.append(column)
+        pivot_row += 1
+        if pivot_row == bits.shape[0]:
+            break
+    if len(pivot_columns) != bits.shape[0]:
+        raise ValueError("linear generator has no complete information set")
+
+    matrix = bits[:, pivot_columns].clone()
+    inverse = torch.eye(bits.shape[0], dtype=torch.int64)
+    for column in range(bits.shape[0]):
+        candidates = torch.nonzero(matrix[column:, column], as_tuple=False)
+        if candidates.numel() == 0:
+            raise ValueError("linear information matrix is singular")
+        selected = column + int(candidates[0, 0])
+        if selected != column:
+            matrix[[column, selected]] = matrix[[selected, column]]
+            inverse[[column, selected]] = inverse[[selected, column]]
+        for row in range(bits.shape[0]):
+            if row != column and int(matrix[row, column]):
+                matrix[row].bitwise_xor_(matrix[column])
+                inverse[row].bitwise_xor_(inverse[column])
+    return (
+        torch.tensor(pivot_columns, dtype=torch.int64, device=generator.device),
+        inverse.to(device=generator.device, dtype=torch.float32),
+    )
+
+
+def decode_linear_codebook(
+    indices: torch.Tensor,
+    codebook: LinearSignCodebook,
+    columns: int,
+) -> torch.Tensor:
+    """Decode row-major GF(2) messages to a sign matrix."""
+
+    if indices.ndim != 2 or columns <= 0:
+        raise ValueError("codebook indices must be a matrix and columns positive")
+    expected_words = math.ceil(columns / 32)
+    if indices.shape[1] != expected_words:
+        raise ValueError("codebook index word count does not match columns")
+    split = codebook.index_bits // 2
+    first = _linear_subcode_table(codebook.generator[:split])
+    second = _linear_subcode_table(codebook.generator[split:])
+    values = indices.to(torch.int64)
+    mask = (1 << split) - 1
+    decoded = (
+        first[values.bitwise_and(mask)]
+        * second[values.bitwise_right_shift(split)]
+    ).reshape(indices.shape[0], expected_words * 32)
+    return decoded[:, :columns].contiguous()
+
+
 def decode_sign_codebook(
     indices: torch.Tensor,
     codebook: SignCodebook,
     columns: int,
 ) -> torch.Tensor:
-    """Decode either supported fixed-width sign-word table."""
+    """Decode a supported fixed-width sign-word codebook."""
 
     if isinstance(codebook, ProductSignCodebook):
         return decode_product_codebook(indices, codebook, columns)
+    if isinstance(codebook, LinearSignCodebook):
+        return decode_linear_codebook(indices, codebook, columns)
     if indices.ndim != 2 or columns <= 0:
         raise ValueError("codebook indices must be a matrix and columns positive")
     expected_words = math.ceil(columns / 32)
@@ -671,6 +895,21 @@ def _random_codebook(
         )
     if bank_count != 1:
         raise ValueError("only full codebooks support word banks")
+    if mode == "linear":
+        while True:
+            generator_signs = torch.ones(
+                (index_bits, 32), dtype=dtype, device=device
+            )
+            for dimension in range(index_bits):
+                negative = torch.randperm(
+                    32, device=device, generator=generator
+                )[:16]
+                generator_signs[dimension, negative] = -1
+            if (
+                _gf2_sign_rank(generator_signs) == index_bits
+                and _linear_minimum_distance(generator_signs) >= 4
+            ):
+                return LinearSignCodebook(index_bits, generator_signs)
     if mode != "product":
         raise ValueError(f"unsupported codebook mode: {mode}")
     half_entries = 1 << (index_bits // 2)
@@ -786,6 +1025,141 @@ def _assign_product_words(
     )
     decoded = decode_product_codebook(indices, updated, padded_columns)[:, :columns]
     return decoded, indices, updated
+
+
+def _assign_linear_flat_words(
+    values: torch.Tensor,
+    codebook: LinearSignCodebook,
+    *,
+    batch_words: int,
+    sweeps: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Approximately decode a linear code by alternating two exact subcodes."""
+
+    if values.ndim != 2 or values.shape[1] != 32:
+        raise ValueError("linear assignment requires flat 32-sign words")
+    if batch_words <= 0 or sweeps <= 0:
+        raise ValueError("linear assignment batch size and sweeps must be positive")
+    split = codebook.index_bits // 2
+    first_table = _linear_subcode_table(codebook.generator[:split]).float()
+    second_table = _linear_subcode_table(codebook.generator[split:]).float()
+    information_positions, information_inverse = _linear_information_decoder(
+        codebook.generator
+    )
+    message_powers = torch.bitwise_left_shift(
+        torch.ones(
+            codebook.index_bits,
+            dtype=torch.int64,
+            device=values.device,
+        ),
+        torch.arange(
+            codebook.index_bits,
+            dtype=torch.int64,
+            device=values.device,
+        ),
+    )
+    assignments = torch.empty(
+        values.shape[0], dtype=torch.int64, device=values.device
+    )
+    decoded = torch.empty_like(values)
+    for start in range(0, values.shape[0], batch_words):
+        stop = min(values.shape[0], start + batch_words)
+        batch = values[start:stop].float()
+        information_bits = (batch[:, information_positions] < 0).float()
+        message_bits = (
+            information_bits @ information_inverse
+        ).remainder_(2).round_().to(torch.int64)
+        initialized = (message_bits * message_powers).sum(dim=1)
+        first_indices = initialized.bitwise_and((1 << split) - 1)
+        second_indices = initialized.bitwise_right_shift(split)
+        for _ in range(sweeps):
+            first_words = first_table[first_indices]
+            second_indices = (
+                (batch * first_words) @ second_table.mT
+            ).argmax(dim=1)
+            second_words = second_table[second_indices]
+            first_indices = (
+                (batch * second_words) @ first_table.mT
+            ).argmax(dim=1)
+        first_words = first_table[first_indices]
+        second_indices = (
+            (batch * first_words) @ second_table.mT
+        ).argmax(dim=1)
+        batch_decoded = first_words * second_table[second_indices]
+        assignments[start:stop] = first_indices.bitwise_or(
+            second_indices.bitwise_left_shift(split)
+        )
+        decoded[start:stop] = batch_decoded.to(values.dtype)
+    return assignments, decoded
+
+
+def _update_linear_generator(
+    values: torch.Tensor,
+    assignments: torch.Tensor,
+    decoded: torch.Tensor,
+    codebook: LinearSignCodebook,
+) -> LinearSignCodebook:
+    """Coordinate-optimize generator rows while preserving full GF(2) rank."""
+
+    updated_generator = codebook.generator.clone()
+    updated_decoded = decoded.clone()
+    for dimension in range(codebook.index_bits):
+        selected = assignments.bitwise_right_shift(dimension).bitwise_and(1).bool()
+        if not torch.any(selected):
+            continue
+        old_basis = updated_generator[dimension]
+        excluding = updated_decoded[selected] * old_basis
+        scores = (values[selected] * excluding).sum(dim=0)
+        proposal = torch.ones_like(old_basis)
+        proposal[scores.topk(16, largest=False).indices] = -1
+        updated_generator[dimension] = proposal
+        updated_decoded[selected] = excluding * proposal
+    if (
+        _gf2_sign_rank(updated_generator) != codebook.index_bits
+        or _linear_minimum_distance(updated_generator) < 4
+    ):
+        return codebook
+    return LinearSignCodebook(codebook.index_bits, updated_generator)
+
+
+def _assign_linear_words(
+    weighted_value: torch.Tensor,
+    codebook: LinearSignCodebook,
+    *,
+    update: bool,
+    batch_words: int,
+    sweeps: int,
+) -> tuple[torch.Tensor, torch.Tensor, LinearSignCodebook]:
+    rows, columns = weighted_value.shape
+    words = math.ceil(columns / 32)
+    padded_columns = words * 32
+    padded = torch.zeros(
+        (rows, padded_columns),
+        dtype=weighted_value.dtype,
+        device=weighted_value.device,
+    )
+    padded[:, :columns] = weighted_value
+    word_values = padded.reshape(-1, 32).contiguous()
+    assignments, decoded = _assign_linear_flat_words(
+        word_values,
+        codebook,
+        batch_words=batch_words,
+        sweeps=sweeps,
+    )
+    updated = (
+        _update_linear_generator(word_values, assignments, decoded, codebook)
+        if update
+        else codebook
+    )
+    if update:
+        assignments, decoded = _assign_linear_flat_words(
+            word_values,
+            updated,
+            batch_words=batch_words,
+            sweeps=sweeps,
+        )
+    indices = assignments.reshape(rows, words).to(torch.int32)
+    return decoded.reshape(rows, padded_columns)[:, :columns], indices, updated
 
 
 def _assign_full_words(
@@ -1170,6 +1544,7 @@ def _project(
     generator: torch.Generator,
     epsilon: float,
     assignment_batch_words: int,
+    linear_assignment_sweeps: int,
     corrected_assignment_candidates: int,
     flips_per_word: int,
     free_rows: int,
@@ -1210,6 +1585,17 @@ def _project(
                 decoded,
                 flips_per_word,
             )
+    elif isinstance(codebook, LinearSignCodebook):
+        if flips_per_word:
+            raise ValueError("linear codebooks do not support word corrections")
+        decoded, indices, linear_updated = _assign_linear_words(
+            coded_weighted,
+            codebook,
+            update=update_codebook,
+            batch_words=assignment_batch_words,
+            sweeps=linear_assignment_sweeps,
+        )
+        updated = linear_updated
     elif isinstance(codebook, FullSignCodebook):
         if flips_per_word:
             (
@@ -1388,6 +1774,20 @@ def codebook_index_metrics(
             )
         )
         metrics[side]["free_row_count"] = free_rows
+        if isinstance(codebook, LinearSignCodebook):
+            row_weights = (codebook.generator < 0).sum(dim=1)
+            metrics[side]["generator_rank"] = _gf2_sign_rank(
+                codebook.generator
+            )
+            metrics[side]["generator_minimum_distance"] = (
+                _linear_minimum_distance(codebook.generator)
+            )
+            metrics[side]["generator_row_weight_minimum"] = int(
+                row_weights.min()
+            )
+            metrics[side]["generator_row_weight_maximum"] = int(
+                row_weights.max()
+            )
         if isinstance(codebook, BankedFullSignCodebook):
             metrics[side]["implicit_codebook_banks"] = codebook.bank_count
             metrics[side]["codebook_banks_by_row"] = codebook.bank_axis == "row"
@@ -1411,6 +1811,7 @@ def factorize_sign_word_codebook_admm(
     codebook_freeze_fraction: float = 0.5,
     codebook_warmup_fraction: float = 0.0,
     assignment_batch_words: int = 65_536,
+    linear_assignment_sweeps: int = 2,
     corrected_assignment_candidates: int = CORRECTED_ASSIGNMENT_CANDIDATES,
     codebook_mode: str = "product",
     constrain_left: bool = True,
@@ -1433,12 +1834,14 @@ def factorize_sign_word_codebook_admm(
         raise ValueError("weight must be a matrix and rank positive")
     if input_importance.numel() != weight.shape[1] or output_importance.numel() != weight.shape[0]:
         raise ValueError("importance dimensions do not match weight")
-    if codebook_mode not in {"product", "full"}:
-        raise ValueError("codebook mode must be 'product' or 'full'")
+    if codebook_mode not in {"product", "linear", "full"}:
+        raise ValueError("codebook mode must be 'product', 'linear', or 'full'")
     if index_bits <= 0 or (codebook_mode == "product" and index_bits % 2):
         raise ValueError(
             "index bits must be positive and even for product codebooks"
         )
+    if codebook_mode == "linear" and index_bits > 16:
+        raise ValueError("linear codebooks support at most 16 message bits")
     for banks in (left_codebook_banks, right_codebook_banks):
         if banks <= 0 or banks & (banks - 1):
             raise ValueError("codebook bank counts must be positive powers of two")
@@ -1446,6 +1849,10 @@ def factorize_sign_word_codebook_admm(
         left_codebook_banks != 1 or right_codebook_banks != 1
     ):
         raise ValueError("only full codebooks support word banks")
+    if codebook_mode == "linear" and (
+        left_flips_per_word or right_flips_per_word
+    ):
+        raise ValueError("linear codebooks do not support correction streams")
     if left_codebook_bank_axis not in {"word", "row"} or (
         right_codebook_bank_axis not in {"word", "row"}
     ):
@@ -1518,6 +1925,7 @@ def factorize_sign_word_codebook_admm(
         or inner_iterations <= 0
         or convergence_check_interval <= 0
         or codebook_update_interval <= 0
+        or linear_assignment_sweeps <= 0
         or corrected_assignment_candidates <= 0
     ):
         raise ValueError("iteration settings must be positive")
@@ -1593,6 +2001,7 @@ def factorize_sign_word_codebook_admm(
         generator=generator,
         epsilon=epsilon,
         assignment_batch_words=assignment_batch_words,
+        linear_assignment_sweeps=linear_assignment_sweeps,
         corrected_assignment_candidates=corrected_assignment_candidates,
         flips_per_word=left_flips_per_word,
         free_rows=left_free_rows,
@@ -1611,6 +2020,7 @@ def factorize_sign_word_codebook_admm(
         generator=generator,
         epsilon=epsilon,
         assignment_batch_words=assignment_batch_words,
+        linear_assignment_sweeps=linear_assignment_sweeps,
         corrected_assignment_candidates=corrected_assignment_candidates,
         flips_per_word=right_flips_per_word,
         free_rows=right_free_rows,
@@ -1678,6 +2088,7 @@ def factorize_sign_word_codebook_admm(
             generator=generator,
             epsilon=epsilon,
             assignment_batch_words=assignment_batch_words,
+            linear_assignment_sweeps=linear_assignment_sweeps,
             corrected_assignment_candidates=corrected_assignment_candidates,
             flips_per_word=left_flips_per_word,
             free_rows=left_free_rows,
@@ -1696,6 +2107,7 @@ def factorize_sign_word_codebook_admm(
             generator=generator,
             epsilon=epsilon,
             assignment_batch_words=assignment_batch_words,
+            linear_assignment_sweeps=linear_assignment_sweeps,
             corrected_assignment_candidates=corrected_assignment_candidates,
             flips_per_word=right_flips_per_word,
             free_rows=right_free_rows,

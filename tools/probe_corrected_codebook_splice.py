@@ -54,6 +54,7 @@ from nanoquant.domain.sign_word_codebook import (
     factorize_sign_word_codebook_admm,
     maximum_corrected_asymmetric_rank_for_budget,
     mixed_right_corrected_codebook_bit_cost,
+    mixed_right_linear_codebook_bit_cost,
     mixed_right_product_codebook_bit_cost,
 )
 from nanoquant.infrastructure.device_lease import acquire_device_lease
@@ -78,7 +79,7 @@ from nanoquant.kl_budget_workflow import _token_hash
 from nanoquant.quality_evaluation import _wikitext_tokens
 
 MODEL_SOURCE = "google/gemma-3-1b-it"
-RECONSTRUCTION_CACHE_ALGORITHM_VERSION = 3
+RECONSTRUCTION_CACHE_ALGORITHM_VERSION = 4
 
 
 def _parse_ints(value: str) -> tuple[int, ...]:
@@ -224,6 +225,7 @@ def _reconstruction_cache_identity(
         "codebook_update_interval": args.codebook_update_interval,
         "codebook_freeze_fraction": args.codebook_freeze_fraction,
         "assignment_batch_words": args.assignment_batch_words,
+        "linear_assignment_sweeps": args.linear_assignment_sweeps,
         "corrected_assignment_candidates": (
             args.corrected_assignment_candidates
         ),
@@ -1421,7 +1423,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--index-width", type=int, default=10)
     parser.add_argument(
         "--codebook-mode",
-        choices=("corrected-full", "product"),
+        choices=("corrected-full", "product", "linear"),
         default="corrected-full",
     )
     parser.add_argument("--corrections-per-word", type=int, default=2)
@@ -1434,6 +1436,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--codebook-update-interval", type=int, default=10)
     parser.add_argument("--codebook-freeze-fraction", type=float, default=0.5)
     parser.add_argument("--assignment-batch-words", type=int, default=8192)
+    parser.add_argument("--linear-assignment-sweeps", type=int, default=2)
     parser.add_argument("--corrected-assignment-candidates", type=int, default=16)
     parser.add_argument("--scale-fit-passes", type=int, default=2)
     parser.add_argument("--binary-search", action="store_true")
@@ -1499,15 +1502,17 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def run(args: argparse.Namespace) -> int:
+    if args.linear_assignment_sweeps <= 0:
+        raise ValueError("linear assignment sweeps must be positive")
     if (
         args.codebook_mode == "corrected-full"
         and args.corrections_per_word not in {1, 2, 3}
     ) or (
-        args.codebook_mode == "product"
+        args.codebook_mode in {"product", "linear"}
         and args.corrections_per_word != 0
     ):
         raise ValueError(
-            "corrected-full mode requires one to three corrections and product mode requires zero"
+            "corrected-full mode requires one to three corrections and compact modes require zero"
         )
     if (args.export_reconstruction_set is None) != (args.export_arm is None):
         raise ValueError(
@@ -1521,8 +1526,8 @@ def run(args: argparse.Namespace) -> int:
         raise ValueError("candidate rank/free-row configuration is invalid")
     if args.payload_search and not args.binary_search:
         raise ValueError("payload search requires the matched binary-search control")
-    if args.codebook_mode == "product" and args.payload_search:
-        raise ValueError("payload search does not support product codebooks")
+    if args.codebook_mode in {"product", "linear"} and args.payload_search:
+        raise ValueError("payload search does not support compact codebooks")
     if args.functional_payload_search and not args.payload_search:
         raise ValueError("functional payload search requires payload search")
     if (
@@ -1852,10 +1857,10 @@ def run(args: argparse.Namespace) -> int:
                     args.baseline_rank,
                     scale_bits=16,
                 ).total
-                if args.codebook_mode == "product":
+                if args.codebook_mode in {"product", "linear"}:
                     if args.candidate_rank is None:
                         raise ValueError(
-                            "product codebook splice requires an explicit candidate rank"
+                            "compact codebook splice requires an explicit candidate rank"
                         )
                     rank = args.candidate_rank
                 else:
@@ -2089,12 +2094,15 @@ def run(args: argparse.Namespace) -> int:
                     codebook_update_interval=args.codebook_update_interval,
                     codebook_freeze_fraction=args.codebook_freeze_fraction,
                     assignment_batch_words=args.assignment_batch_words,
+                    linear_assignment_sweeps=args.linear_assignment_sweeps,
                     corrected_assignment_candidates=(
                         args.corrected_assignment_candidates
                     ),
                     codebook_mode=(
                         "product"
                         if args.codebook_mode == "product"
+                        else "linear"
+                        if args.codebook_mode == "linear"
                         else "full"
                     ),
                     constrain_left=False,
@@ -2624,8 +2632,8 @@ def run(args: argparse.Namespace) -> int:
             selection_results[name] = selection_result
         del teacher
 
-    cost = (
-        mixed_right_product_codebook_bit_cost(
+    if args.codebook_mode == "product":
+        cost = mixed_right_product_codebook_bit_cost(
             matrix_shape[0],
             matrix_shape[1],
             rank,
@@ -2633,8 +2641,17 @@ def run(args: argparse.Namespace) -> int:
             right_index_width=args.index_width,
             scale_width=16,
         )
-        if args.codebook_mode == "product"
-        else mixed_right_corrected_codebook_bit_cost(
+    elif args.codebook_mode == "linear":
+        cost = mixed_right_linear_codebook_bit_cost(
+            matrix_shape[0],
+            matrix_shape[1],
+            rank,
+            right_free_rows=args.right_free_rows,
+            right_index_width=args.index_width,
+            scale_width=16,
+        )
+    elif args.right_free_rows:
+        cost = mixed_right_corrected_codebook_bit_cost(
             matrix_shape[0],
             matrix_shape[1],
             rank,
@@ -2643,8 +2660,8 @@ def run(args: argparse.Namespace) -> int:
             right_flip_bits=args.correction_bits,
             scale_width=16,
         )
-        if args.right_free_rows
-        else corrected_asymmetric_codebook_bit_cost(
+    else:
+        cost = corrected_asymmetric_codebook_bit_cost(
             matrix_shape[0],
             matrix_shape[1],
             rank,
@@ -2653,7 +2670,6 @@ def run(args: argparse.Namespace) -> int:
             right_flip_bits=args.correction_bits,
             scale_width=16,
         )
-    )
     reconstruction_export = None
     if args.export_reconstruction_set is not None:
         if args.export_arm not in all_reconstruction_sets:
@@ -2667,7 +2683,7 @@ def run(args: argparse.Namespace) -> int:
         )
 
     output: dict[str, Any] = {
-        "schema_version": 14,
+        "schema_version": 15,
         "status": "completed",
         "role": "analysis-only sign-code splice gate",
         "reconstruction_export": reconstruction_export,
@@ -2722,6 +2738,7 @@ def run(args: argparse.Namespace) -> int:
             "correction_bits": args.correction_bits,
             "rank": rank,
             "right_free_rows": args.right_free_rows,
+            "linear_assignment_sweeps": args.linear_assignment_sweeps,
             "corrected_assignment_candidates": (
                 args.corrected_assignment_candidates
             ),

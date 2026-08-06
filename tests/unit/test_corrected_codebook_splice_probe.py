@@ -306,3 +306,29 @@ def test_splice_probe_parses_no_flip_product_codebook_mode() -> None:
 
     assert args.codebook_mode == "product"
     assert args.corrections_per_word == 0
+
+
+def test_splice_probe_parses_no_flip_linear_codebook_mode() -> None:
+    probe = _probe_module()
+    args = probe._parser().parse_args(
+        [
+            "--model",
+            "model.safetensors",
+            "--snapshot",
+            "snapshot",
+            "--calibration-state",
+            "calibration",
+            "--output",
+            "result.json",
+            "--codebook-mode",
+            "linear",
+            "--corrections-per-word",
+            "0",
+            "--linear-assignment-sweeps",
+            "3",
+        ]
+    )
+
+    assert args.codebook_mode == "linear"
+    assert args.corrections_per_word == 0
+    assert args.linear_assignment_sweeps == 3
