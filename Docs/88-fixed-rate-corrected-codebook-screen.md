@@ -71,10 +71,45 @@ crosses zero, and it gives back 44.3% of the retained format's KL improvement.
 Its small reconstruction lead over the 19-bit format does not transfer to the
 held-out model-level signal.
 
+## Exact-column follow-up
+
+The 15-bit format leaves enough unused storage to add one or two exact BF16
+columns without displacing factor rank. Each block-12 down-projection column
+costs 18,445 bits: 1,152 BF16 values and one 13-bit input-column index. Two
+selection policies were screened:
+
+- production-shaped Fisher salience, selected from the source weight before
+  factorization and removed from the factor target; and
+- an optimistic post-search residual oracle, which selects the final
+  reconstruction's largest corrected-Fisher column errors and replaces those
+  columns exactly.
+
+| 15-bit arm | Selector | Exact columns | Actual BPW | Weighted NRMSE | Change vs free words |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Free 256 | none | 0 | 0.882397 | 0.565603 | +6.223% |
+| Free 256 | Fisher | 1 | 0.884713 | 0.565805 | +6.261% |
+| Free 256 | Fisher | 2 | 0.887029 | 0.565333 | +6.173% |
+| Free 448 | none | 0 | 0.970938 | 0.536774 | +0.809% |
+| Free 448 | Fisher | 1 | 0.973255 | 0.536856 | +0.825% |
+| Free 448 | Fisher | 2 | 0.975571 | 0.536759 | +0.807% |
+| Free 448 | residual oracle | 1 | 0.973255 | 0.536696 | +0.795% |
+| Free 448 | residual oracle | 2 | 0.975571 | 0.536622 | +0.781% |
+
+The exact columns recover almost none of the coded-word loss. Even the
+post-search oracle closes only 0.028 percentage points of the free-448 arm's
+0.809% regression while consuming about 0.00463 BPW. The free-256 arm remains
+more than 6% worse. This rules out advancing either arm to the splice gate:
+the error is distributed through the coded factor rather than concentrated in
+one or two input channels.
+
 ## Decision
 
 Reject the tested 14- and 15-bit fixed-rate arms as storage candidates. Do not
 change the mixed overlay, resident algorithm, GGUF, or runtime codec.
+
+Also reject one or two exact outlier columns as a rescue for these fixed-rate
+arms. The optimistic residual oracle remains worse than free words, so a
+deployable held-out selector cannot justify a model-level evaluation.
 
 The result also rejects a simple use of the new binary-factor search as a way
 to compensate for fewer payload bits: its improvement is two orders of
@@ -96,3 +131,6 @@ point beats the free-word reconstruction control before splice evaluation.
 - `evidence/m4/sign-word-codebook-probe/block12-down-r970-800-mixed-right-flip1-k10-rank1344-free448-binary-search-fixed-rate.json`
 - `evidence/m4/sign-word-codebook-probe/block12-down-r970-800-mixed-right-flip1-k10-rank1344-free512-binary-search-fixed-rate.json`
 - `evidence/m4/sign-word-codebook-probe/block12-down-mixed-flip1-k10-r1344-free512-binary-search-splice-48.json`
+- `evidence/m4/sign-word-codebook-probe/block12-down-r970-800-mixed-right-flip1-k10-rank1344-free256-binary-search-outliers0-1-2.json`
+- `evidence/m4/sign-word-codebook-probe/block12-down-r970-800-mixed-right-flip1-k10-rank1344-free448-binary-search-outliers1-2.json`
+- `evidence/m4/sign-word-codebook-probe/block12-down-r970-800-mixed-right-flip1-k10-rank1344-free448-binary-search-residual-outliers1-2.json`

@@ -33,7 +33,13 @@ from nanoquant.domain.codebook_payload_search import (
     refine_sign_word_payloads,
 )
 from nanoquant.domain.factorization import AdmmParameters, factorize_admm_with_parameters
-from nanoquant.domain.planning import factor_bit_cost
+from nanoquant.domain.outliers import (
+    fisher_scores,
+    reconstruct_with_outliers,
+    remove_columns,
+    select_top_columns,
+)
+from nanoquant.domain.planning import factor_bit_cost, outlier_bit_cost
 from nanoquant.domain.progressive_sign_fixing import (
     ProgressiveSignConstraint,
     factorize_progressive_sign_fixing_admm,
@@ -82,6 +88,8 @@ class SignWordCodebookProtocol:
     projection: str
     baseline_rank: int
     candidate_rank: int | None
+    candidate_outlier_columns: tuple[int, ...]
+    candidate_outlier_selector: str
     right_free_rows: int
     right_codebook_banks: int
     right_codebook_bank_axis: str
@@ -210,6 +218,46 @@ def _metrics(
         "weighted_target_energy": weighted_target,
         "weighted_normalized_rmse": math.sqrt(weighted_error / max(weighted_target, 1e-30)),
     }
+
+
+def _prepare_candidate_outliers(
+    weight: torch.Tensor,
+    input_importance: torch.Tensor,
+    output_importance: torch.Tensor,
+    count: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Remove production-style Fisher-selected columns from a candidate target."""
+
+    indices = select_top_columns(
+        fisher_scores(weight, input_importance, output_importance),
+        count,
+    )
+    residual, values = remove_columns(weight, indices)
+    return residual, indices, values
+
+
+def _replace_exact_columns(
+    base: torch.Tensor,
+    source: torch.Tensor,
+    indices: torch.Tensor,
+) -> torch.Tensor:
+    result = base.detach().clone()
+    result[:, indices] = source.detach().to(result)[:, indices]
+    return result
+
+
+def _combine_candidate_bit_cost(
+    factor_cost: Any,
+    outlier_cost: Any,
+) -> tuple[dict[str, int], int]:
+    combined = cast(dict[str, int], asdict(factor_cost))
+    combined.update(
+        {
+            "outlier_value_bits": int(outlier_cost.outlier_value_bits),
+            "outlier_index_bits": int(outlier_cost.outlier_index_bits),
+        }
+    )
+    return combined, int(factor_cost.total + outlier_cost.total)
 
 
 def _binary_search_result_metrics(result: BinaryFactorSearchResult) -> dict[str, int | float]:
@@ -525,7 +573,41 @@ def _run_codebook(
     protocol: SignWordCodebookProtocol,
     index_width: int,
     target_bits: int,
+    outlier_count: int,
 ) -> dict[str, Any]:
+    source_weight = weight
+    if protocol.candidate_outlier_selector == "fisher":
+        weight, outlier_indices, outlier_values = _prepare_candidate_outliers(
+            source_weight,
+            input_importance,
+            output_importance,
+            outlier_count,
+        )
+    else:
+        weight = source_weight
+        outlier_indices = torch.empty(
+            0,
+            dtype=torch.long,
+            device=weight.device,
+        )
+        outlier_values = weight[:, outlier_indices]
+    outlier_cost = outlier_bit_cost(
+        weight.shape[0],
+        outlier_count,
+        value_bits=16,
+        index_bits=max(1, math.ceil(math.log2(max(2, weight.shape[1])))),
+    )
+    factor_target_bits = target_bits - outlier_cost.total
+    if factor_target_bits <= 0:
+        raise ValueError("outlier columns exhaust the candidate bit budget")
+
+    def complete_reconstruction(base: torch.Tensor) -> torch.Tensor:
+        return reconstruct_with_outliers(
+            base,
+            outlier_indices,
+            outlier_values,
+        )
+
     progressive = protocol.codebook_mode == "progressive"
     relational = protocol.codebook_mode == "relational"
     corrections_per_word = {
@@ -543,7 +625,7 @@ def _run_codebook(
         rank = maximum_corrected_asymmetric_rank_for_budget(
             weight.shape[0],
             weight.shape[1],
-            target_bits,
+            factor_target_bits,
             left_index_width=None,
             right_index_width=index_width,
             right_flip_bits=correction_bits,
@@ -554,7 +636,7 @@ def _run_codebook(
         rank = maximum_asymmetric_codebook_rank_for_budget(
             weight.shape[0],
             weight.shape[1],
-            target_bits,
+            factor_target_bits,
             left_index_width=None,
             right_index_width=index_width,
             rank_multiple=protocol.rank_multiple,
@@ -564,7 +646,7 @@ def _run_codebook(
         rank = maximum_relational_rank_for_budget(
             weight.shape[0],
             weight.shape[1],
-            target_bits,
+            factor_target_bits,
             variable_bits_per_word=index_width,
             rank_multiple=protocol.rank_multiple,
             scale_width=protocol.scale_bits,
@@ -573,7 +655,7 @@ def _run_codebook(
         rank = maximum_progressive_rank_for_budget(
             weight.shape[0],
             weight.shape[1],
-            target_bits,
+            factor_target_bits,
             variable_bits_per_word=index_width,
             rank_multiple=protocol.rank_multiple,
             scale_width=protocol.scale_bits,
@@ -582,7 +664,7 @@ def _run_codebook(
         rank = maximum_codebook_rank_for_budget(
             weight.shape[0],
             weight.shape[1],
-            target_bits,
+            factor_target_bits,
             index_width=index_width,
             rank_multiple=protocol.rank_multiple,
             scale_width=protocol.scale_bits,
@@ -789,8 +871,8 @@ def _run_codebook(
         alternating_passes=protocol.scale_fit_passes,
     )
     pre_search_metrics = _metrics(
-        weight,
-        fitted.reconstruction,
+        source_weight,
+        complete_reconstruction(fitted.reconstruction),
         input_importance,
         output_importance,
     )
@@ -828,8 +910,8 @@ def _run_codebook(
             searched.scale_post,
         )
     post_binary_search_metrics = _metrics(
-        weight,
-        reconstruction,
+        source_weight,
+        complete_reconstruction(reconstruction),
         input_importance,
         output_importance,
     )
@@ -854,19 +936,46 @@ def _run_codebook(
         reconstruction = payload.reconstruction
     if protocol.device.startswith("cuda"):
         torch.cuda.synchronize(protocol.device)
+    if protocol.candidate_outlier_selector == "post-search-residual":
+        outlier_indices = select_top_columns(
+            fisher_scores(
+                source_weight - reconstruction,
+                input_importance,
+                output_importance,
+            ),
+            outlier_count,
+        )
+        reconstruction = _replace_exact_columns(
+            reconstruction,
+            source_weight,
+            outlier_indices,
+        )
+    else:
+        reconstruction = complete_reconstruction(reconstruction)
+    combined_bit_cost, total_bits = _combine_candidate_bit_cost(
+        bit_cost,
+        outlier_cost,
+    )
     return {
         "arm": arm_name,
         "rank": rank,
         "right_free_rows": protocol.right_free_rows,
+        "outlier_columns": {
+            "count": outlier_count,
+            "indices": outlier_indices.to("cpu").tolist(),
+            "selector": protocol.candidate_outlier_selector,
+            "storage_dtype": "bfloat16",
+            "bit_cost": asdict(outlier_cost),
+        },
         "rank_multiple_vs_baseline": rank / protocol.baseline_rank,
-        "bit_cost": asdict(bit_cost),
-        "total_bits": bit_cost.total,
-        "unused_budget_bits": target_bits - bit_cost.total,
-        "actual_bpw": bit_cost.total / weight.numel(),
+        "bit_cost": combined_bit_cost,
+        "total_bits": total_bits,
+        "unused_budget_bits": target_bits - total_bits,
+        "actual_bpw": total_bits / weight.numel(),
         "signed_contributions_per_weight": rank,
         "factorized_work_over_dense": rank * sum(weight.shape) / weight.numel(),
         "metrics": _metrics(
-            weight,
+            source_weight,
             reconstruction,
             input_importance,
             output_importance,
@@ -959,6 +1068,13 @@ def run(args: argparse.Namespace) -> int:
         or args.candidate_rank % args.rank_multiple
     ):
         raise ValueError("candidate rank must be positive and rank-aligned")
+    if (
+        not args.candidate_outlier_columns
+        or len(args.candidate_outlier_columns)
+        != len(set(args.candidate_outlier_columns))
+        or any(count < 0 for count in args.candidate_outlier_columns)
+    ):
+        raise ValueError("candidate outlier counts must be unique and non-negative")
     if args.right_free_rows < 0 or args.right_free_rows % args.rank_multiple:
         raise ValueError("right free rows must be non-negative and rank-aligned")
     if args.right_free_rows and (
@@ -1003,12 +1119,14 @@ def run(args: argparse.Namespace) -> int:
             "partial corrected banks require a valid row-banked prefix"
         )
     protocol = SignWordCodebookProtocol(
-        22,
+        24,
         args.model_revision,
         args.block,
         args.projection,
         args.baseline_rank,
         args.candidate_rank,
+        args.candidate_outlier_columns,
+        args.candidate_outlier_selector,
         args.right_free_rows,
         args.right_codebook_banks,
         args.right_codebook_bank_axis,
@@ -1112,10 +1230,16 @@ def run(args: argparse.Namespace) -> int:
                 else "codebook"
             ),
         )
+        candidate_keys: list[str] = []
         for width in args.index_widths:
-            key = f"{arm_prefix}_k{width}"
-            result = output["results"].get(key)
-            if result is None:
+            for outlier_count in args.candidate_outlier_columns:
+                suffix = "" if outlier_count == 0 else f"_outliers{outlier_count}"
+                key = f"{arm_prefix}_k{width}{suffix}"
+                candidate_keys.append(key)
+                result = output["results"].get(key)
+                if result is not None:
+                    print(f"reusing {key}", flush=True)
+                    continue
                 if correction_count:
                     rank = maximum_corrected_asymmetric_rank_for_budget(
                         weight.shape[0],
@@ -1168,7 +1292,10 @@ def run(args: argparse.Namespace) -> int:
                     )
                 if protocol.candidate_rank is not None:
                     rank = protocol.candidate_rank
-                print(f"running {key} rank={rank}", flush=True)
+                print(
+                    f"running {key} rank={rank} outlier_columns={outlier_count}",
+                    flush=True,
+                )
                 result = _run_codebook(
                     weight,
                     input_importance,
@@ -1176,6 +1303,7 @@ def run(args: argparse.Namespace) -> int:
                     protocol,
                     width,
                     target_bits,
+                    outlier_count,
                 )
                 result["comparison_to_free_words"] = _comparison(result, baseline)
                 output["results"][key] = result
@@ -1186,14 +1314,10 @@ def run(args: argparse.Namespace) -> int:
                     f"change={result['comparison_to_free_words']['weighted_rmse_change_fraction'] * 100:+.2f}%",
                     flush=True,
                 )
-            else:
-                print(f"reusing {key}", flush=True)
         output["decision_screen"] = {
             "candidate_arms": [
                 key
-                for key in (
-                    f"{arm_prefix}_k{width}" for width in args.index_widths
-                )
+                for key in candidate_keys
                 if float(
                     output["results"][key]["comparison_to_free_words"][
                         "weighted_error_energy_change_fraction"
@@ -1218,6 +1342,24 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--projection", default="down")
     parser.add_argument("--baseline-rank", type=int, default=970)
     parser.add_argument("--candidate-rank", type=int)
+    parser.add_argument(
+        "--candidate-outlier-columns",
+        type=_parse_ints,
+        default=(0,),
+        help=(
+            "comma-separated exact BF16 Fisher-selected column counts applied "
+            "only to codebook candidates"
+        ),
+    )
+    parser.add_argument(
+        "--candidate-outlier-selector",
+        choices=("fisher", "post-search-residual"),
+        default="fisher",
+        help=(
+            "select exact columns before factorization by Fisher salience or "
+            "optimistically from the final candidate residual"
+        ),
+    )
     parser.add_argument("--right-free-rows", type=int, default=0)
     parser.add_argument("--right-codebook-banks", type=int, default=1)
     parser.add_argument(
