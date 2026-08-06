@@ -283,3 +283,26 @@ def test_splice_probe_reconstruction_identity_tracks_numerical_settings() -> Non
     )
 
     assert first != second
+
+
+def test_splice_probe_parses_no_flip_product_codebook_mode() -> None:
+    probe = _probe_module()
+    args = probe._parser().parse_args(
+        [
+            "--model",
+            "model.safetensors",
+            "--snapshot",
+            "snapshot",
+            "--calibration-state",
+            "calibration",
+            "--output",
+            "result.json",
+            "--codebook-mode",
+            "product",
+            "--corrections-per-word",
+            "0",
+        ]
+    )
+
+    assert args.codebook_mode == "product"
+    assert args.corrections_per_word == 0

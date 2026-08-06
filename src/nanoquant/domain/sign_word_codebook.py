@@ -442,6 +442,79 @@ def maximum_mixed_right_free_rows_for_budget(
     return accepted
 
 
+def mixed_right_product_codebook_bit_cost(
+    out_features: int,
+    in_features: int,
+    rank: int,
+    *,
+    right_free_rows: int,
+    right_index_width: int,
+    scale_width: int = 16,
+    word_width: int = 32,
+    free_row_count_bits: int = 16,
+) -> SignWordCodebookCost:
+    """Charge free U and a mixed V encoded by two learned half-word tables."""
+
+    if not 0 <= right_free_rows < rank:
+        raise ValueError("right free rows must leave at least one coded row")
+    if (
+        right_index_width <= 0
+        or right_index_width % 2
+        or scale_width < 0
+        or word_width <= 0
+        or word_width % 2
+        or free_row_count_bits < 0
+    ):
+        raise ValueError("mixed product-code widths are invalid")
+    left_words = out_features * math.ceil(rank / word_width)
+    right_words_per_row = math.ceil(in_features / word_width)
+    coded_rows = rank - right_free_rows
+    right_words = rank * right_words_per_row
+    payload_bits = (
+        left_words * word_width
+        + right_free_rows * right_words_per_row * word_width
+        + coded_rows * right_words_per_row * right_index_width
+    )
+    half_width = word_width // 2
+    table_bits = 2 * (1 << (right_index_width // 2)) * half_width
+    return SignWordCodebookCost(
+        index_bits=payload_bits,
+        scale_bits=scale_width * (out_features + in_features + rank),
+        codebook_bits=table_bits + free_row_count_bits,
+        word_count=left_words + right_words,
+    )
+
+
+def maximum_mixed_right_product_free_rows_for_budget(
+    out_features: int,
+    in_features: int,
+    rank: int,
+    target_bits: int,
+    *,
+    right_index_width: int,
+    free_row_multiple: int = 32,
+    scale_width: int = 16,
+) -> int:
+    """Return the largest aligned free prefix for a compact product code."""
+
+    if target_bits <= 0 or free_row_multiple <= 0:
+        raise ValueError("mixed product-code budget and alignment must be positive")
+    accepted = 0
+    for free_rows in range(0, rank, free_row_multiple):
+        cost = mixed_right_product_codebook_bit_cost(
+            out_features,
+            in_features,
+            rank,
+            right_free_rows=free_rows,
+            right_index_width=right_index_width,
+            scale_width=scale_width,
+        )
+        if cost.total > target_bits:
+            break
+        accepted = free_rows
+    return accepted
+
+
 def decode_product_codebook(
     indices: torch.Tensor,
     codebook: ProductSignCodebook,

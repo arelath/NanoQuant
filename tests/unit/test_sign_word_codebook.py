@@ -19,7 +19,9 @@ from nanoquant.domain.sign_word_codebook import (
     maximum_codebook_rank_for_budget,
     maximum_corrected_asymmetric_rank_for_budget,
     maximum_mixed_right_free_rows_for_budget,
+    maximum_mixed_right_product_free_rows_for_budget,
     mixed_right_corrected_codebook_bit_cost,
+    mixed_right_product_codebook_bit_cost,
     sign_word_codebook_bit_cost,
 )
 
@@ -106,6 +108,29 @@ def test_mixed_right_budget_funds_an_aligned_free_prefix() -> None:
 
     assert free_rows == 128
     assert cost.total <= baseline
+
+
+def test_compact_product_code_charges_half_tables_and_funds_free_prefix() -> None:
+    baseline = factor_bit_cost(1152, 6912, 970, scale_bits=16).total
+    outlier_bits = 1152 * 7 * 16 + 7 * 13
+    free_rows = maximum_mixed_right_product_free_rows_for_budget(
+        1152,
+        6912,
+        1344,
+        baseline - outlier_bits,
+        right_index_width=16,
+    )
+    cost = mixed_right_product_codebook_bit_cost(
+        1152,
+        6912,
+        1344,
+        right_free_rows=free_rows,
+        right_index_width=16,
+    )
+
+    assert free_rows == 416
+    assert cost.codebook_bits == 8_208
+    assert cost.total + outlier_bits <= baseline
 
 
 def test_banked_mixed_right_cost_charges_every_implicit_table() -> None:
@@ -519,3 +544,31 @@ def test_codebook_admm_exports_a_free_right_prefix() -> None:
     )
     corrected = apply_single_word_flip(coded, result.right_flip_positions)
     assert torch.equal(corrected, result.factors.right_binary[1:])
+
+
+def test_product_codebook_exports_an_uncorrected_free_right_prefix() -> None:
+    result = factorize_sign_word_codebook_admm(
+        torch.randn((4, 32), generator=torch.Generator().manual_seed(67)),
+        torch.ones(32),
+        torch.ones(4),
+        4,
+        torch.Generator().manual_seed(71),
+        index_bits=4,
+        outer_iterations=2,
+        inner_iterations=2,
+        codebook_update_interval=1,
+        codebook_mode="product",
+        constrain_left=False,
+        right_free_rows=1,
+    )
+
+    assert result.left_codebook is None
+    assert isinstance(result.right_codebook, ProductSignCodebook)
+    assert result.right_indices is not None
+    assert result.right_flip_positions is None
+    decoded = decode_product_codebook(
+        result.right_indices,
+        result.right_codebook,
+        result.factors.right_binary.shape[1],
+    )
+    assert torch.equal(decoded, result.factors.right_binary[1:])

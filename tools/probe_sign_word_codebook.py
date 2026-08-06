@@ -64,6 +64,7 @@ from nanoquant.domain.sign_word_codebook import (
     maximum_codebook_rank_for_budget,
     maximum_corrected_asymmetric_rank_for_budget,
     mixed_right_corrected_codebook_bit_cost,
+    mixed_right_product_codebook_bit_cost,
     sign_word_codebook_bit_cost,
 )
 from nanoquant.infrastructure.device_lease import acquire_device_lease
@@ -610,18 +611,27 @@ def _run_codebook(
 
     progressive = protocol.codebook_mode == "progressive"
     relational = protocol.codebook_mode == "relational"
+    product_right = protocol.codebook_mode == "product-right"
     corrections_per_word = {
         "full-right-flip1": 1,
         "full-right-flip2": 2,
         "full-right-flip3": 3,
     }.get(protocol.codebook_mode, 0)
     correction_bits = {0: 0, 1: 5, 2: 9, 3: 13}[corrections_per_word]
-    right_only = protocol.codebook_mode == "full-right" or corrections_per_word > 0
+    right_only = (
+        protocol.codebook_mode == "full-right"
+        or product_right
+        or corrections_per_word > 0
+    )
     corrected = corrections_per_word > 0
     payload_codebook: FullSignCodebook | None = None
     payload_indices: torch.Tensor | None = None
     payload_positions: torch.Tensor | None = None
-    if corrected:
+    if product_right:
+        if protocol.candidate_rank is None:
+            raise ValueError("product-right mode requires an explicit candidate rank")
+        rank = protocol.candidate_rank
+    elif corrected:
         rank = maximum_corrected_asymmetric_rank_for_budget(
             weight.shape[0],
             weight.shape[1],
@@ -764,7 +774,11 @@ def _run_codebook(
             corrected_assignment_candidates=(
                 protocol.corrected_assignment_candidates
             ),
-            codebook_mode="full" if right_only else protocol.codebook_mode,
+            codebook_mode=(
+                "product"
+                if product_right
+                else "full" if right_only else protocol.codebook_mode
+            ),
             constrain_left=not right_only,
             right_flips_per_word=corrections_per_word,
             right_free_rows=protocol.right_free_rows,
@@ -803,7 +817,17 @@ def _run_codebook(
                 ),
                 "maximum_position_frequency": float(probabilities.max()),
             }
-        if corrected:
+        if product_right:
+            bit_cost = mixed_right_product_codebook_bit_cost(
+                weight.shape[0],
+                weight.shape[1],
+                rank,
+                right_free_rows=protocol.right_free_rows,
+                right_index_width=index_width,
+                scale_width=protocol.scale_bits,
+            )
+            arm_name = f"right_product_codebook_k{index_width}"
+        elif corrected:
             corrected_rows = (
                 None
                 if protocol.right_corrected_codebook_banks is None
@@ -1080,17 +1104,23 @@ def run(args: argparse.Namespace) -> int:
     if args.right_free_rows and (
         args.candidate_rank is None
         or args.right_free_rows >= args.candidate_rank
-        or not args.codebook_mode.startswith("full-right-flip")
+        or (
+            not args.codebook_mode.startswith("full-right-flip")
+            and args.codebook_mode != "product-right"
+        )
     ):
         raise ValueError(
             "right free rows require a larger explicit corrected-code rank"
         )
     if args.binary_search and (
         args.right_free_rows <= 0
-        or not args.codebook_mode.startswith("full-right-flip")
+        or (
+            not args.codebook_mode.startswith("full-right-flip")
+            and args.codebook_mode != "product-right"
+        )
     ):
         raise ValueError(
-            "representation-preserving binary search requires a corrected mixed-right codebook"
+            "representation-preserving binary search requires a mixed-right codebook"
         )
     if args.payload_search and not args.binary_search:
         raise ValueError("payload search requires the matched binary-search control")
@@ -1222,6 +1252,7 @@ def run(args: argparse.Namespace) -> int:
             "progressive": "progressive",
             "relational": "relational",
             "full-right": "right_codebook",
+            "product-right": "right_product_codebook",
         }.get(
             protocol.codebook_mode,
             (
@@ -1240,7 +1271,13 @@ def run(args: argparse.Namespace) -> int:
                 if result is not None:
                     print(f"reusing {key}", flush=True)
                     continue
-                if correction_count:
+                if protocol.codebook_mode == "product-right":
+                    if protocol.candidate_rank is None:
+                        raise ValueError(
+                            "product-right mode requires an explicit candidate rank"
+                        )
+                    rank = protocol.candidate_rank
+                elif correction_count:
                     rank = maximum_corrected_asymmetric_rank_for_budget(
                         weight.shape[0],
                         weight.shape[1],
@@ -1387,6 +1424,7 @@ def build_parser() -> argparse.ArgumentParser:
             "product",
             "full",
             "full-right",
+            "product-right",
             "full-right-flip1",
             "full-right-flip2",
             "full-right-flip3",

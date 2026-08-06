@@ -54,6 +54,7 @@ from nanoquant.domain.sign_word_codebook import (
     factorize_sign_word_codebook_admm,
     maximum_corrected_asymmetric_rank_for_budget,
     mixed_right_corrected_codebook_bit_cost,
+    mixed_right_product_codebook_bit_cost,
 )
 from nanoquant.infrastructure.device_lease import acquire_device_lease
 from nanoquant.infrastructure.hf_language_model import load_causal_language_model
@@ -209,6 +210,7 @@ def _reconstruction_cache_identity(
         "baseline_rank": args.baseline_rank,
         "candidate_rank": rank,
         "right_free_rows": args.right_free_rows,
+        "codebook_mode": args.codebook_mode,
         "index_width": args.index_width,
         "corrections_per_word": args.corrections_per_word,
         "correction_bits": args.correction_bits,
@@ -1417,6 +1419,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--candidate-rank", type=int)
     parser.add_argument("--right-free-rows", type=int, default=0)
     parser.add_argument("--index-width", type=int, default=10)
+    parser.add_argument(
+        "--codebook-mode",
+        choices=("corrected-full", "product"),
+        default="corrected-full",
+    )
     parser.add_argument("--corrections-per-word", type=int, default=2)
     parser.add_argument("--correction-bits", type=int, default=9)
     parser.add_argument("--outer-iterations", type=int, default=800)
@@ -1492,8 +1499,16 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def run(args: argparse.Namespace) -> int:
-    if args.corrections_per_word not in {1, 2, 3}:
-        raise ValueError("splice probe supports one to three corrections")
+    if (
+        args.codebook_mode == "corrected-full"
+        and args.corrections_per_word not in {1, 2, 3}
+    ) or (
+        args.codebook_mode == "product"
+        and args.corrections_per_word != 0
+    ):
+        raise ValueError(
+            "corrected-full mode requires one to three corrections and product mode requires zero"
+        )
     if (args.export_reconstruction_set is None) != (args.export_arm is None):
         raise ValueError(
             "reconstruction export requires both destination and arm"
@@ -1506,6 +1521,8 @@ def run(args: argparse.Namespace) -> int:
         raise ValueError("candidate rank/free-row configuration is invalid")
     if args.payload_search and not args.binary_search:
         raise ValueError("payload search requires the matched binary-search control")
+    if args.codebook_mode == "product" and args.payload_search:
+        raise ValueError("payload search does not support product codebooks")
     if args.functional_payload_search and not args.payload_search:
         raise ValueError("functional payload search requires payload search")
     if (
@@ -1835,16 +1852,23 @@ def run(args: argparse.Namespace) -> int:
                     args.baseline_rank,
                     scale_bits=16,
                 ).total
-                rank = maximum_corrected_asymmetric_rank_for_budget(
-                    current_shape[0],
-                    current_shape[1],
-                    target_bits,
-                    left_index_width=None,
-                    right_index_width=args.index_width,
-                    right_flip_bits=args.correction_bits,
-                    rank_multiple=32,
-                    scale_width=16,
-                )
+                if args.codebook_mode == "product":
+                    if args.candidate_rank is None:
+                        raise ValueError(
+                            "product codebook splice requires an explicit candidate rank"
+                        )
+                    rank = args.candidate_rank
+                else:
+                    rank = maximum_corrected_asymmetric_rank_for_budget(
+                        current_shape[0],
+                        current_shape[1],
+                        target_bits,
+                        left_index_width=None,
+                        right_index_width=args.index_width,
+                        right_flip_bits=args.correction_bits,
+                        rank_multiple=32,
+                        scale_width=16,
+                    )
                 if args.candidate_rank is not None:
                     rank = args.candidate_rank
                 cache_identity = (
@@ -2046,7 +2070,7 @@ def run(args: argparse.Namespace) -> int:
                 candidate_generator = torch.Generator(device=args.device).manual_seed(
                     _logical_seed(
                         args.seed,
-                        f"full-right-flip{args.corrections_per_word}-"
+                        f"{args.codebook_mode}-flip{args.corrections_per_word}-"
                         f"{args.index_width}-rank-{rank}",
                     )
                 )
@@ -2068,7 +2092,11 @@ def run(args: argparse.Namespace) -> int:
                     corrected_assignment_candidates=(
                         args.corrected_assignment_candidates
                     ),
-                    codebook_mode="full",
+                    codebook_mode=(
+                        "product"
+                        if args.codebook_mode == "product"
+                        else "full"
+                    ),
                     constrain_left=False,
                     right_flips_per_word=args.corrections_per_word,
                     right_free_rows=args.right_free_rows,
@@ -2597,7 +2625,16 @@ def run(args: argparse.Namespace) -> int:
         del teacher
 
     cost = (
-        mixed_right_corrected_codebook_bit_cost(
+        mixed_right_product_codebook_bit_cost(
+            matrix_shape[0],
+            matrix_shape[1],
+            rank,
+            right_free_rows=args.right_free_rows,
+            right_index_width=args.index_width,
+            scale_width=16,
+        )
+        if args.codebook_mode == "product"
+        else mixed_right_corrected_codebook_bit_cost(
             matrix_shape[0],
             matrix_shape[1],
             rank,
@@ -2630,9 +2667,9 @@ def run(args: argparse.Namespace) -> int:
         )
 
     output: dict[str, Any] = {
-        "schema_version": 13,
+        "schema_version": 14,
         "status": "completed",
-        "role": "analysis-only corrected-codebook splice gate",
+        "role": "analysis-only sign-code splice gate",
         "reconstruction_export": reconstruction_export,
         "reconstruction_cache": {
             "enabled": reconstruction_cache is not None,
@@ -2679,6 +2716,7 @@ def run(args: argparse.Namespace) -> int:
         "sequence_length": args.sequence_length,
         "teacher_baseline_nll": teacher_nll,
         "candidate": {
+            "codebook_mode": args.codebook_mode,
             "index_width": args.index_width,
             "corrections_per_word": args.corrections_per_word,
             "correction_bits": args.correction_bits,
