@@ -6,6 +6,11 @@
 candidate; full-format promotion still requires other projection shapes and
 constrained resident tuning
 
+> **All-layer follow-up:**
+> `Docs/95-product-codebook-per-layer-free-row-sweep.md` completes the 26-layer
+> reconstruction sweep. Fourteen layers first beat the matched control at 672
+> free rows and twelve require 704, supporting a layer-aware 672/704 policy.
+
 > **Projection-family follow-up:**
 > `Docs/94-product-codebook-projection-family-screen.md` completes the other
 > shape screen. It rejects attention and joint gate/up replacement and narrows
