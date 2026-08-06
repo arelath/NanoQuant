@@ -55,6 +55,28 @@ def test_candidate_outlier_counts_are_parsed_as_a_tuple() -> None:
     assert args.candidate_outlier_columns == (0, 1, 2)
 
 
+def test_extended_binary_search_outer_passes_are_parsed() -> None:
+    args = build_parser().parse_args(
+        [
+            "--model",
+            "model.safetensors",
+            "--calibration-state",
+            "calibration",
+            "--output",
+            "results.json",
+            "--binary-search",
+            "--binary-search-control-outer-passes",
+            "16",
+            "--binary-search-tabu-outer-passes",
+            "24",
+        ]
+    )
+
+    assert args.binary_search
+    assert args.binary_search_control_outer_passes == 16
+    assert args.binary_search_tabu_outer_passes == 24
+
+
 def test_codebook_and_outlier_costs_are_combined_without_losing_components() -> None:
     factor_cost = corrected_asymmetric_codebook_bit_cost(
         8,

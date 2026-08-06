@@ -5,6 +5,11 @@
 **Status:** physical-cap reconstruction gate passed; two held-out functional
 windows directionally favorable but combined confidence interval crosses zero
 
+**Follow-up:** the 1,200-iteration duration screen in
+`Docs/91-product-codebook-search-duration-screen.md` strengthens the combined
+96-sequence KL improvement to 3.81% with a paired interval excluding zero.
+The 1,200-step setting supersedes this document's 800-step optimizer choice.
+
 ## Question
 
 Can a compact 16-bit encoding replace the retained 19-bit

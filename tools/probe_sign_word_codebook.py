@@ -1108,6 +1108,11 @@ def run(args: argparse.Namespace) -> int:
         )
     if args.linear_assignment_sweeps <= 0:
         raise ValueError("linear assignment sweeps must be positive")
+    if (
+        args.binary_search_control_outer_passes <= 0
+        or args.binary_search_tabu_outer_passes <= 0
+    ):
+        raise ValueError("binary search outer pass counts must be positive")
     if args.candidate_rank is not None and (
         args.candidate_rank <= 0
         or args.candidate_rank % args.rank_multiple
@@ -1174,7 +1179,7 @@ def run(args: argparse.Namespace) -> int:
             "partial corrected banks require a valid row-banked prefix"
         )
     protocol = SignWordCodebookProtocol(
-        25,
+        26,
         args.model_revision,
         args.block,
         args.projection,
@@ -1204,7 +1209,11 @@ def run(args: argparse.Namespace) -> int:
         args.linear_assignment_sweeps,
         args.corrected_assignment_candidates,
         args.scale_fit_passes,
-        BinaryFactorSearchConfig(enabled=args.binary_search),
+        BinaryFactorSearchConfig(
+            enabled=args.binary_search,
+            control_outer_passes=args.binary_search_control_outer_passes,
+            tabu_outer_passes=args.binary_search_tabu_outer_passes,
+        ),
         SignWordPayloadSearchConfig(
             enabled=args.payload_search,
             outer_passes=args.payload_search_passes,
@@ -1476,6 +1485,16 @@ def build_parser() -> argparse.ArgumentParser:
             "apply the retained control-then-tabu search to the free-word baseline "
             "and only the representation-free signs of the mixed codebook arm"
         ),
+    )
+    parser.add_argument(
+        "--binary-search-control-outer-passes",
+        type=int,
+        default=8,
+    )
+    parser.add_argument(
+        "--binary-search-tabu-outer-passes",
+        type=int,
+        default=8,
     )
     parser.add_argument("--payload-search", action="store_true")
     parser.add_argument("--payload-search-passes", type=int, default=2)
