@@ -199,6 +199,71 @@ def _limit_option_regression(
     return tuple(limited)
 
 
+def _parse_group_free_row_floors(value: str) -> dict[str, int]:
+    floors: dict[str, int] = {}
+    for item in value.split(","):
+        parts = item.strip().split("=", maxsplit=1)
+        if len(parts) != 2 or not parts[0]:
+            raise argparse.ArgumentTypeError(
+                "group free-row floors must use group=count entries"
+            )
+        try:
+            free_rows = int(parts[1])
+        except ValueError as error:
+            raise argparse.ArgumentTypeError(
+                "group free-row floors must be integers"
+            ) from error
+        if free_rows < 0 or parts[0] in floors:
+            raise argparse.ArgumentTypeError(
+                "group free-row floors must be nonnegative and unique"
+            )
+        floors[parts[0]] = free_rows
+    if not floors:
+        raise argparse.ArgumentTypeError("group free-row floors must not be empty")
+    return floors
+
+
+def _option_free_rows(option: AllocationOption) -> int | None:
+    marker = "_free"
+    if marker not in option.name:
+        return None
+    suffix = option.name.split(marker, maxsplit=1)[1]
+    digits = suffix.split("_", maxsplit=1)[0]
+    return int(digits)
+
+
+def _limit_group_free_rows(
+    groups: tuple[AllocationGroup, ...],
+    minimum_by_group: dict[str, int] | None,
+) -> tuple[AllocationGroup, ...]:
+    if minimum_by_group is None:
+        return groups
+    known = {group.key for group in groups}
+    if not set(minimum_by_group) <= known:
+        unknown = sorted(set(minimum_by_group) - known)
+        raise ValueError(f"unknown allocation groups in free-row floors: {unknown}")
+    limited: list[AllocationGroup] = []
+    for group in groups:
+        minimum = minimum_by_group.get(group.key)
+        options = group.options
+        if minimum is not None:
+            options = tuple(
+                option
+                for option in options
+                if option.name == "free_words"
+                or (
+                    _option_free_rows(option) is not None
+                    and _option_free_rows(option) >= minimum
+                )
+            )
+        if not options:
+            raise ValueError(f"free-row floor removes every option for {group.key}")
+        limited.append(
+            AllocationGroup(group.key, group.projection, group.block, options)
+        )
+    return tuple(limited)
+
+
 def run(args: argparse.Namespace) -> int:
     if not 0 < args.target_bpw <= 2:
         raise ValueError("target BPW must be in (0, 2]")
@@ -207,9 +272,12 @@ def run(args: argparse.Namespace) -> int:
         and args.maximum_matrix_error_regression_fraction < 0
     ):
         raise ValueError("maximum matrix error regression must not be negative")
-    groups = _limit_option_regression(
-        _load_groups(args.down_dir, args.mlp_dir),
-        args.maximum_matrix_error_regression_fraction,
+    groups = _limit_group_free_rows(
+        _limit_option_regression(
+            _load_groups(args.down_dir, args.mlp_dir),
+            args.maximum_matrix_error_regression_fraction,
+        ),
+        args.minimum_free_rows_by_group,
     )
     total_elements = BLOCK_COUNT * ELEMENTS_PER_BLOCK
     budget_bits = math.floor(args.target_bpw * total_elements)
@@ -259,7 +327,7 @@ def run(args: argparse.Namespace) -> int:
 
     total_bits = fixed_attention_bits + selected_bits
     result = {
-        "schema_version": 2,
+        "schema_version": 3,
         "status": "completed",
         "objective": "minimum summed calibration-weighted MLP error energy",
         "target_bpw": args.target_bpw,
@@ -273,6 +341,7 @@ def run(args: argparse.Namespace) -> int:
             "maximum_matrix_weighted_error_regression_fraction": (
                 args.maximum_matrix_error_regression_fraction
             ),
+            "minimum_free_rows_by_group": args.minimum_free_rows_by_group,
         },
         "fixed_attention": {
             "policy": "matched free-factor controls",
@@ -328,6 +397,14 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "discard options whose weighted error energy exceeds their "
             "matrix's free control by more than this fraction"
+        ),
+    )
+    parser.add_argument(
+        "--minimum-free-rows-by-group",
+        type=_parse_group_free_row_floors,
+        help=(
+            "comma-separated group=count floors, for example "
+            "block-12:gate=672,block-12:up=672"
         ),
     )
     return parser

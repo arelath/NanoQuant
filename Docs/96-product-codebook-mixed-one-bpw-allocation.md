@@ -91,20 +91,46 @@ combined KL by 5.977%. The exact selected combination is therefore not relying
 on that more expensive proxy and passes the representative late-depth gate on
 its own terms.
 
+## Middle-depth functional floor
+
+The original bounded policy selected gate640/up640 at block 12. Its first
+window improved by 3.193%, but the second regressed by 2.577%. Combined KL
+changed from 0.061293 to 0.060874, only -0.684%, with interval
+`[-0.002426, +0.001499]`. This point is neutral and not a robust promotion
+gate.
+
+Raising only up to 672 does not rescue the instability. Gate640/up672 improves
+the first window by 4.360%, but the second is confidently 4.307% worse;
+combined improvement is only 0.592% with a zero-crossing interval. The earlier
+exact gate672/up672 receipt is therefore the retained middle-depth boundary:
+combined KL improves 3.775%, with interval `[-0.004604, -0.000159]`.
+
+The allocator's group floor records this functional constraint explicitly:
+`block-12:gate=672,block-12:up=672`. The revised policy remains at
+0.999987735 BPW with 8,558 slack bits. It upgrades those two block-12 matrices
+and pays for both by changing only block-3 gate from free704 to free640. The
+aggregate weighted-error proxy still improves by 0.528%, with NRMSE changing
+from 0.510161 to 0.508813.
+
 ## Decision
 
 Do not promote or integrate the unconstrained exact-1.0 policy. Retain the 1%
-bounded policy as the leading candidate. Its exact late-depth gate passes, but
-representative early- and middle-depth exact mixed-row splices remain required
-before resident or packed-format work.
+bounded, functionally floored policy as the leading candidate. Its exact middle
+and late gates pass. The compensating block-3 gate640/up704 choice now requires
+an exact early-depth functional splice before resident or packed-format work.
 
 ## Evidence
 
 - `evidence/m4/product-codebook-mixed-allocation-1bpw.json`
 - `evidence/m4/product-codebook-mixed-allocation-1bpw-max-regression-1pct.json`
+- `evidence/m4/product-codebook-mixed-allocation-1bpw-functional-floors.json`
 - `evidence/m4/product-codebook-mixed-allocation-functional-gates/block24-gate-up-free576-offset0-48.json`
 - `evidence/m4/product-codebook-mixed-allocation-functional-gates/block24-gate-up-free576-offset48-48.json`
 - `evidence/m4/product-codebook-mixed-allocation-functional-gates/block24-gate-up-free672-offset0-48.json`
 - `evidence/m4/product-codebook-mixed-allocation-functional-gates/block24-gate-up-free672-offset48-48.json`
 - `evidence/m4/product-codebook-mixed-allocation-functional-gates/block24-gate640-up672-offset0-48.json`
 - `evidence/m4/product-codebook-mixed-allocation-functional-gates/block24-gate640-up672-offset48-48.json`
+- `evidence/m4/product-codebook-mixed-allocation-functional-gates/block12-gate-up-free640-offset0-48.json`
+- `evidence/m4/product-codebook-mixed-allocation-functional-gates/block12-gate-up-free640-offset48-48.json`
+- `evidence/m4/product-codebook-mixed-allocation-functional-gates/block12-gate640-up672-offset0-48.json`
+- `evidence/m4/product-codebook-mixed-allocation-functional-gates/block12-gate640-up672-offset48-48.json`

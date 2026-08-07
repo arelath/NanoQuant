@@ -6,9 +6,11 @@ from pathlib import Path
 from tools.optimize_product_codebook_mixed_allocation import (
     AllocationGroup,
     AllocationOption,
+    _limit_group_free_rows,
     _limit_option_regression,
     _load_probe_options,
     _pareto_allocate,
+    _parse_group_free_row_floors,
 )
 
 
@@ -153,3 +155,33 @@ def test_option_regression_limit_is_optional() -> None:
     )
 
     assert _limit_option_regression(groups, None) is groups
+
+
+def test_group_free_row_floor_filters_only_named_group() -> None:
+    groups = (
+        AllocationGroup(
+            "block-12:gate",
+            "gate",
+            12,
+            (
+                _option("right_product_codebook_k16_free640_outliers2", 1, 2.0),
+                _option("right_product_codebook_k16_free672_outliers2", 2, 1.5),
+                _option("free_words", 3, 1.0),
+            ),
+        ),
+        AllocationGroup(
+            "block-12:up",
+            "up",
+            12,
+            (_option("cheap", 1, 2.0), _option("free_words", 3, 1.0)),
+        ),
+    )
+
+    floors = _parse_group_free_row_floors("block-12:gate=672")
+    limited = _limit_group_free_rows(groups, floors)
+
+    assert [option.name for option in limited[0].options] == [
+        "right_product_codebook_k16_free672_outliers2",
+        "free_words",
+    ]
+    assert limited[1] == groups[1]
