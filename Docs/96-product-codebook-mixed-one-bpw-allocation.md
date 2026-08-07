@@ -169,6 +169,27 @@ an additive matrix proxy. The next promotion gate is a composed multi-block or
 full-policy KL comparison using the exact v3 selections. Resident and packed
 format integration should follow only if that composed test passes.
 
+## Full-policy materialization protocol
+
+`tools/materialize_product_codebook_mixed_policy.py` turns the exact allocation
+receipt into the two complete dense overlays required by the existing composed
+KL evaluator. It is intentionally an analysis-only bridge, not a resident or
+packed-format implementation.
+
+The driver validates all 78 allocation choices against their retained source
+sweep receipts. V3 requires 64 sequential jobs: 14 joint gate/up jobs, 24
+single gate or up jobs where their exact outliers differ, and 26 down jobs.
+Every job preserves its projection's selected free-row count and exact
+Experiment 056 outliers, uses the content-keyed reconstruction cache, and
+retains the 1,200-iteration binary-search protocol. A versioned root manifest
+records the current job and completed receipt inventory, so a stopped campaign
+resumes without overwriting valid evidence.
+
+Only after all cache identities and hashes validate does the driver atomically
+publish complete 78-matrix `free-words` and `corrected-codebook` overlays. Those
+overlays are the inputs to `tools/probe_mlp_overlays_kl.py`; their existence is
+not itself a quality result or a promotion gate.
+
 ## Evidence
 
 - `evidence/m4/product-codebook-mixed-allocation-1bpw.json`
