@@ -2,8 +2,9 @@
 
 **Date:** 2026-08-07
 
-**Status:** reject the unconstrained weighted-energy policy; retain the
-per-matrix-regression-bounded policy after its exact late-layer functional gate
+**Status:** reject the unconstrained weighted-energy policy; retain the v3
+per-matrix-regression-bounded policy for composed full-policy validation, not
+resident or packed-format promotion
 
 ## Question
 
@@ -112,18 +113,69 @@ and pays for both by changing only block-3 gate from free704 to free640. The
 aggregate weighted-error proxy still improves by 0.528%, with NRMSE changing
 from 0.510161 to 0.508813.
 
+## Early-depth payment search
+
+The first functionally floored allocation is not safe. Its compensating
+block-3 gate640/up704 choice is worse on both disjoint windows and changes
+combined KL from 0.197948 to 0.202763, or **+2.432%**, with interval
+`[-0.001481, +0.011180]`.
+
+Forcing block-3 gate back to at least 672 rows makes the exact allocator pay
+the same 110,592 bits by reducing block-1 down from free704 to free672. That
+trade also points worse on both windows: combined KL changes from 0.095487 to
+0.097637, or **+2.252%**, with interval `[-0.002648, +0.007386]`. It is rejected
+despite the interval crossing zero because the two independent point estimates
+agree on the adverse direction.
+
+The v3 allocation also protects block-1 down at free704. The next exact payment
+is block-4 up free704 to free672, making block 4's selected gate/up pair
+free640/free672. Its two windows disagree, and their combined result is
+effectively neutral:
+
+| WikiText-2 window | Free KL | Gate640/up672 KL | Relative change | Paired 95% interval |
+| --- | ---: | ---: | ---: | ---: |
+| sequences 0-47 | 0.199502 | 0.201919 | +1.211% | [-0.003913, +0.008637] |
+| sequences 48-95 | 0.179261 | 0.176487 | -1.548% | [-0.008475, +0.003049] |
+| combined 0-95 | 0.189382 | 0.189203 | -0.094% | [-0.004493, +0.004084] |
+
+The restored block-3 gate672/up704 pair improves the first two windows and
+regresses on the next two. Over the expanded 192-sequence inventory it is also
+neutral rather than a statistically supported win:
+
+| WikiText-2 window | Free KL | Gate672/up704 KL | Relative change |
+| --- | ---: | ---: | ---: |
+| sequences 0-47 | 0.212287 | 0.206864 | -2.555% |
+| sequences 48-95 | 0.183609 | 0.176758 | -3.731% |
+| sequences 96-143 | 0.195087 | 0.202949 | +4.030% |
+| sequences 144-191 | 0.213165 | 0.215127 | +0.921% |
+| combined 0-191 | 0.201037 | 0.200425 | -0.304% |
+
+The combined paired interval is `[-0.005435, +0.004197]`. This larger sample
+shows why two favorable windows were not enough for promotion.
+
+V3 still uses exactly 697,753,234 bits (0.999987735 BPW, 8,558 slack bits).
+Its aggregate calibration-weighted error improves by 0.522%, and proxy NRMSE
+changes from 0.510161 to 0.508828. Relative to the first functionally floored
+receipt it changes only block-3 gate free640 to free672 and block-4 up free704
+to free672, while protecting block-1 down at free704.
+
 ## Decision
 
-Do not promote or integrate the unconstrained exact-1.0 policy. Retain the 1%
-bounded, functionally floored policy as the leading candidate. Its exact middle
-and late gates pass. The compensating block-3 gate640/up704 choice now requires
-an exact early-depth functional splice before resident or packed-format work.
+Do not promote or integrate the unconstrained policy or either rejected early
+payment. V3 is the leading exact-1.0 candidate: its middle and late gates pass,
+and its tested early gates are neutral overall rather than adverse. However,
+the early gates do not prove a quality improvement, and the allocation remains
+an additive matrix proxy. The next promotion gate is a composed multi-block or
+full-policy KL comparison using the exact v3 selections. Resident and packed
+format integration should follow only if that composed test passes.
 
 ## Evidence
 
 - `evidence/m4/product-codebook-mixed-allocation-1bpw.json`
 - `evidence/m4/product-codebook-mixed-allocation-1bpw-max-regression-1pct.json`
 - `evidence/m4/product-codebook-mixed-allocation-1bpw-functional-floors.json`
+- `evidence/m4/product-codebook-mixed-allocation-1bpw-functional-floors-v2.json`
+- `evidence/m4/product-codebook-mixed-allocation-1bpw-functional-floors-v3.json`
 - `evidence/m4/product-codebook-mixed-allocation-functional-gates/block24-gate-up-free576-offset0-48.json`
 - `evidence/m4/product-codebook-mixed-allocation-functional-gates/block24-gate-up-free576-offset48-48.json`
 - `evidence/m4/product-codebook-mixed-allocation-functional-gates/block24-gate-up-free672-offset0-48.json`
@@ -134,3 +186,13 @@ an exact early-depth functional splice before resident or packed-format work.
 - `evidence/m4/product-codebook-mixed-allocation-functional-gates/block12-gate-up-free640-offset48-48.json`
 - `evidence/m4/product-codebook-mixed-allocation-functional-gates/block12-gate640-up672-offset0-48.json`
 - `evidence/m4/product-codebook-mixed-allocation-functional-gates/block12-gate640-up672-offset48-48.json`
+- `evidence/m4/product-codebook-mixed-allocation-functional-gates/block03-gate640-up704-offset0-48.json`
+- `evidence/m4/product-codebook-mixed-allocation-functional-gates/block03-gate640-up704-offset48-48.json`
+- `evidence/m4/product-codebook-mixed-allocation-functional-gates/block01-down672-offset0-48.json`
+- `evidence/m4/product-codebook-mixed-allocation-functional-gates/block01-down672-offset48-48.json`
+- `evidence/m4/product-codebook-mixed-allocation-functional-gates/block04-gate640-up672-offset0-48.json`
+- `evidence/m4/product-codebook-mixed-allocation-functional-gates/block04-gate640-up672-offset48-48.json`
+- `evidence/m4/product-codebook-mixed-allocation-functional-gates/block03-gate672-up704-offset0-48.json`
+- `evidence/m4/product-codebook-mixed-allocation-functional-gates/block03-gate672-up704-offset48-48.json`
+- `evidence/m4/product-codebook-mixed-allocation-functional-gates/block03-gate672-up704-offset96-48.json`
+- `evidence/m4/product-codebook-mixed-allocation-functional-gates/block03-gate672-up704-offset144-48.json`
