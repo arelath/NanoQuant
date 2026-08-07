@@ -368,13 +368,13 @@ def validate_job_receipt(
     if (
         payload.get("status") != "completed"
         or payload.get("blocks") != [job.block]
-        or payload.get("projections") != list(job.projections)
+        or payload.get("projections") != [MLP_PATHS[projection] for projection in job.projections]
         or not isinstance(candidate, dict)
         or candidate.get("right_free_rows_by_projection") != job.free_rows_by_projection
         or not isinstance(fixed_outliers, dict)
         or fixed_outliers.get("indices") != list(job.fixed_outliers)
         or not isinstance(cache, dict)
-        or Path(str(cache.get("directory"))).resolve() != reconstruction_cache.resolve()
+        or Path(str(cache.get("root"))).resolve() != reconstruction_cache.resolve()
     ):
         raise ValueError(f"materialization job receipt is incompatible: {path}")
     keys = cache.get("keys_by_unit")

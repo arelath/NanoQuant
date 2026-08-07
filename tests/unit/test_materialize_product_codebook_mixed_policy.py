@@ -122,11 +122,11 @@ def test_job_receipt_requires_exact_cache_and_policy_identity(tmp_path: Path) ->
             {
                 "status": "completed",
                 "blocks": [4],
-                "projections": ["gate", "up"],
+                "projections": ["mlp.gate_proj", "mlp.up_proj"],
                 "candidate": {"right_free_rows_by_projection": {"gate": 640, "up": 672}},
                 "fixed_outlier_columns": {"indices": [0, 768]},
                 "reconstruction_cache": {
-                    "directory": str(cache),
+                    "root": str(cache),
                     "keys_by_unit": {"4:gate": "gate-key", "4:up": "up-key"},
                 },
             }
