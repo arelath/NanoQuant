@@ -119,6 +119,49 @@ def _parse_projections(value: str) -> tuple[str, ...]:
     return result
 
 
+def _parse_projection_free_rows(
+    value: str,
+) -> tuple[tuple[str, int], ...]:
+    result: list[tuple[str, int]] = []
+    for item in value.split(","):
+        parts = item.strip().split(":", maxsplit=1)
+        if len(parts) != 2 or parts[0] not in PROJECTION_PATHS:
+            raise argparse.ArgumentTypeError(
+                "projection free rows must use known-projection:count entries"
+            )
+        try:
+            free_rows = int(parts[1])
+        except ValueError as error:
+            raise argparse.ArgumentTypeError(
+                "projection free-row counts must be integers"
+            ) from error
+        if free_rows < 0:
+            raise argparse.ArgumentTypeError(
+                "projection free-row counts must not be negative"
+            )
+        result.append((parts[0], free_rows))
+    if not result or len({projection for projection, _rows in result}) != len(result):
+        raise argparse.ArgumentTypeError(
+            "projection free-row entries must be nonempty and unique"
+        )
+    return tuple(result)
+
+
+def _resolve_projection_free_rows(
+    projections: tuple[str, ...],
+    default: int,
+    overrides: tuple[tuple[str, int], ...] | None,
+) -> dict[str, int]:
+    if overrides is None:
+        return {projection: default for projection in projections}
+    by_projection = dict(overrides)
+    if set(by_projection) != set(projections):
+        raise ValueError(
+            "projection free-row overrides must choose every requested projection"
+        )
+    return by_projection
+
+
 def _parse_block_policy(value: str) -> tuple[tuple[int, str], ...]:
     choices = {"base", "operator", "output", "input", "joint"}
     result = []
@@ -196,6 +239,7 @@ def _reconstruction_cache_identity(
     transposed: bool,
     factorization_shape: tuple[int, int],
     rank: int,
+    right_free_rows: int | None = None,
 ) -> dict[str, object]:
     return {
         "schema": "corrected-codebook-splice-reconstruction",
@@ -212,7 +256,11 @@ def _reconstruction_cache_identity(
         "factorization_shape": list(factorization_shape),
         "baseline_rank": args.baseline_rank,
         "candidate_rank": rank,
-        "right_free_rows": args.right_free_rows,
+        "right_free_rows": (
+            args.right_free_rows
+            if right_free_rows is None
+            else right_free_rows
+        ),
         "codebook_mode": args.codebook_mode,
         "index_width": args.index_width,
         "corrections_per_word": args.corrections_per_word,
@@ -1424,6 +1472,14 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--candidate-rank", type=int)
     parser.add_argument("--right-free-rows", type=int, default=0)
     parser.add_argument(
+        "--right-free-rows-by-projection",
+        type=_parse_projection_free_rows,
+        help=(
+            "comma-separated projection:count overrides for joint splices; "
+            "must cover every requested projection"
+        ),
+    )
+    parser.add_argument(
         "--fixed-outlier-indices",
         type=_parse_ints,
         default=(),
@@ -1530,11 +1586,7 @@ def run(args: argparse.Namespace) -> int:
         raise ValueError(
             "reconstruction export requires both destination and arm"
         )
-    if args.candidate_rank is not None and (
-        args.candidate_rank <= 0
-        or args.right_free_rows < 0
-        or args.right_free_rows >= args.candidate_rank
-    ):
+    if args.candidate_rank is not None and args.candidate_rank <= 0:
         raise ValueError("candidate rank/free-row configuration is invalid")
     if args.payload_search and not args.binary_search:
         raise ValueError("payload search requires the matched binary-search control")
@@ -1560,6 +1612,16 @@ def run(args: argparse.Namespace) -> int:
         if args.projections is None
         else args.projections
     )
+    right_free_rows_by_projection = _resolve_projection_free_rows(
+        projections,
+        args.right_free_rows,
+        args.right_free_rows_by_projection,
+    )
+    if args.candidate_rank is not None and any(
+        free_rows < 0 or free_rows >= args.candidate_rank
+        for free_rows in right_free_rows_by_projection.values()
+    ):
+        raise ValueError("candidate rank/free-row configuration is invalid")
     projection_paths = tuple(PROJECTION_PATHS[item] for item in projections)
     downstream_requested = (
         args.downstream_scale_refit
@@ -1863,6 +1925,9 @@ def run(args: argparse.Namespace) -> int:
                     if len(projections) == 1
                     else f"{block}:{projection}"
                 )
+                current_right_free_rows = right_free_rows_by_projection[
+                    projection
+                ]
                 target_bits = factor_bit_cost(
                     current_shape[0],
                     current_shape[1],
@@ -1904,6 +1969,7 @@ def run(args: argparse.Namespace) -> int:
                         transposed=transpose_current,
                         factorization_shape=current_shape,
                         rank=rank,
+                        right_free_rows=current_right_free_rows,
                     )
                     if reconstruction_cache is not None
                     else None
@@ -2132,7 +2198,7 @@ def run(args: argparse.Namespace) -> int:
                     ),
                     constrain_left=False,
                     right_flips_per_word=args.corrections_per_word,
-                    right_free_rows=args.right_free_rows,
+                    right_free_rows=current_right_free_rows,
                 )
                 candidate_fit = fit_scales(
                     weight,
@@ -2159,7 +2225,7 @@ def run(args: argparse.Namespace) -> int:
                             candidate_fit,
                             input_importance,
                             output_importance,
-                            right_free_rows=args.right_free_rows,
+                            right_free_rows=current_right_free_rows,
                         )
                     )
                     candidate_left = candidate_search.left_binary
@@ -2186,7 +2252,7 @@ def run(args: argparse.Namespace) -> int:
                             candidate_post,
                             input_importance,
                             output_importance,
-                            free_rows=args.right_free_rows,
+                            free_rows=current_right_free_rows,
                             codebook=candidate_factors.right_codebook,
                             right_indices=candidate_factors.right_indices,
                             right_flip_positions=(
@@ -2663,36 +2729,36 @@ def run(args: argparse.Namespace) -> int:
             selection_results[name] = selection_result
         del teacher
 
-    if args.codebook_mode == "product":
-        cost = mixed_right_product_codebook_bit_cost(
-            matrix_shape[0],
-            matrix_shape[1],
-            rank,
-            right_free_rows=args.right_free_rows,
-            right_index_width=args.index_width,
-            scale_width=16,
-        )
-    elif args.codebook_mode == "linear":
-        cost = mixed_right_linear_codebook_bit_cost(
-            matrix_shape[0],
-            matrix_shape[1],
-            rank,
-            right_free_rows=args.right_free_rows,
-            right_index_width=args.index_width,
-            scale_width=16,
-        )
-    elif args.right_free_rows:
-        cost = mixed_right_corrected_codebook_bit_cost(
-            matrix_shape[0],
-            matrix_shape[1],
-            rank,
-            right_free_rows=args.right_free_rows,
-            right_index_width=args.index_width,
-            right_flip_bits=args.correction_bits,
-            scale_width=16,
-        )
-    else:
-        cost = corrected_asymmetric_codebook_bit_cost(
+    def candidate_cost(free_rows: int) -> Any:
+        if args.codebook_mode == "product":
+            return mixed_right_product_codebook_bit_cost(
+                matrix_shape[0],
+                matrix_shape[1],
+                rank,
+                right_free_rows=free_rows,
+                right_index_width=args.index_width,
+                scale_width=16,
+            )
+        if args.codebook_mode == "linear":
+            return mixed_right_linear_codebook_bit_cost(
+                matrix_shape[0],
+                matrix_shape[1],
+                rank,
+                right_free_rows=free_rows,
+                right_index_width=args.index_width,
+                scale_width=16,
+            )
+        if free_rows:
+            return mixed_right_corrected_codebook_bit_cost(
+                matrix_shape[0],
+                matrix_shape[1],
+                rank,
+                right_free_rows=free_rows,
+                right_index_width=args.index_width,
+                right_flip_bits=args.correction_bits,
+                scale_width=16,
+            )
+        return corrected_asymmetric_codebook_bit_cost(
             matrix_shape[0],
             matrix_shape[1],
             rank,
@@ -2701,6 +2767,14 @@ def run(args: argparse.Namespace) -> int:
             right_flip_bits=args.correction_bits,
             scale_width=16,
         )
+
+    costs_by_projection = {
+        projection: candidate_cost(right_free_rows_by_projection[projection])
+        for projection in projections
+    }
+    uniform_free_rows = len(set(right_free_rows_by_projection.values())) == 1
+    represented_projection_count = 1 if uniform_free_rows else len(projections)
+    cost = next(iter(costs_by_projection.values()))
     fixed_factorization_axis = (
         0
         if transpose_by_projection
@@ -2725,13 +2799,32 @@ def run(args: argparse.Namespace) -> int:
         args.baseline_rank,
         scale_bits=16,
     )
-    candidate_bit_cost = asdict(cost)
+    candidate_bit_cost_by_projection = {
+        projection: asdict(projection_cost)
+        for projection, projection_cost in costs_by_projection.items()
+    }
+    candidate_bit_cost = asdict(cost) if uniform_free_rows else None
     baseline_bit_cost = asdict(baseline_cost)
-    for bit_cost in (candidate_bit_cost, baseline_bit_cost):
+    bit_costs = [*candidate_bit_cost_by_projection.values(), baseline_bit_cost]
+    if candidate_bit_cost is not None:
+        bit_costs.append(candidate_bit_cost)
+    for bit_cost in bit_costs:
         bit_cost["outlier_value_bits"] = outlier_cost.outlier_value_bits
         bit_cost["outlier_index_bits"] = outlier_cost.outlier_index_bits
-    candidate_total_bits = cost.total + outlier_cost.total
-    baseline_total_bits = baseline_cost.total + outlier_cost.total
+    candidate_total_bits = (
+        cost.total + outlier_cost.total
+        if uniform_free_rows
+        else sum(
+            projection_cost.total + outlier_cost.total
+            for projection_cost in costs_by_projection.values()
+        )
+    )
+    baseline_total_bits = represented_projection_count * (
+        baseline_cost.total + outlier_cost.total
+    )
+    represented_elements = (
+        represented_projection_count * matrix_shape[0] * matrix_shape[1]
+    )
     reconstruction_export = None
     if args.export_reconstruction_set is not None:
         if args.export_arm not in all_reconstruction_sets:
@@ -2745,7 +2838,7 @@ def run(args: argparse.Namespace) -> int:
         )
 
     output: dict[str, Any] = {
-        "schema_version": 17,
+        "schema_version": 18,
         "status": "completed",
         "role": "analysis-only sign-code splice gate",
         "reconstruction_export": reconstruction_export,
@@ -2797,8 +2890,7 @@ def run(args: argparse.Namespace) -> int:
             "rank": args.baseline_rank,
             "bit_cost": baseline_bit_cost,
             "total_bits": baseline_total_bits,
-            "actual_bpw": baseline_total_bits
-            / (matrix_shape[0] * matrix_shape[1]),
+            "actual_bpw": baseline_total_bits / represented_elements,
         },
         "candidate": {
             "codebook_mode": args.codebook_mode,
@@ -2806,15 +2898,20 @@ def run(args: argparse.Namespace) -> int:
             "corrections_per_word": args.corrections_per_word,
             "correction_bits": args.correction_bits,
             "rank": rank,
-            "right_free_rows": args.right_free_rows,
+            "right_free_rows": (
+                next(iter(right_free_rows_by_projection.values()))
+                if uniform_free_rows
+                else None
+            ),
+            "right_free_rows_by_projection": right_free_rows_by_projection,
             "linear_assignment_sweeps": args.linear_assignment_sweeps,
             "corrected_assignment_candidates": (
                 args.corrected_assignment_candidates
             ),
             "bit_cost": candidate_bit_cost,
+            "bit_cost_by_projection": candidate_bit_cost_by_projection,
             "total_bits": candidate_total_bits,
-            "actual_bpw": candidate_total_bits
-            / (matrix_shape[0] * matrix_shape[1]),
+            "actual_bpw": candidate_total_bits / represented_elements,
             "index_metrics_by_block": candidate_index_metrics,
         },
         "fixed_outlier_columns": {
@@ -2824,6 +2921,7 @@ def run(args: argparse.Namespace) -> int:
                 "row" if fixed_factorization_axis == 0 else "column"
             ),
             "bit_cost": asdict(outlier_cost),
+            "projection_count_charged": represented_projection_count,
             "applied_to": ["free_words", "corrected_codebook"],
         },
         "reconstruction_by_block": reconstruction_metrics,

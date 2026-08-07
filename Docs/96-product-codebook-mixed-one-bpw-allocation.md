@@ -2,8 +2,8 @@
 
 **Date:** 2026-08-07
 
-**Status:** reject the unconstrained weighted-energy policy; retain a
-per-matrix-regression-bounded policy for further functional validation
+**Status:** reject the unconstrained weighted-energy policy; retain the
+per-matrix-regression-bounded policy after its exact late-layer functional gate
 
 ## Question
 
@@ -72,14 +72,31 @@ The analysis allocator exposes this rule as
 `--maximum-matrix-error-regression-fraction`; its versioned receipt records the
 constraint explicitly.
 
+## Exact late-layer bounded gate
+
+The bounded policy selects gate free640 and up free672 at block 24. The splice
+probe supports projection-specific free-row counts so this combination is
+tested exactly, with independent reconstruction cache identities and an
+aggregate bit receipt. The pair costs 0.998719 BPW versus 1.028283 for the two
+matched free-factor controls.
+
+| WikiText-2 window | Free KL | Gate640/up672 KL | Relative change | Paired 95% interval |
+| --- | ---: | ---: | ---: | ---: |
+| sequences 0-47 | 0.038786 | 0.035733 | **-7.872%** | **[-0.004426, -0.001740]** |
+| sequences 48-95 | 0.031862 | 0.029989 | **-5.879%** | **[-0.003208, -0.000540]** |
+| combined 0-95 | 0.035324 | 0.032861 | **-6.973%** | **[-0.003420, -0.001483]** |
+
+The conservative uniform-free672 bracket also passes both windows and improves
+combined KL by 5.977%. The exact selected combination is therefore not relying
+on that more expensive proxy and passes the representative late-depth gate on
+its own terms.
+
 ## Decision
 
 Do not promote or integrate the unconstrained exact-1.0 policy. Retain the 1%
-bounded policy as the next candidate, but require exact mixed-row functional
-splices at representative early, middle, and late blocks before resident or
-packed-format work. In particular, block 24 selects gate free640 and up
-free672, which must be tested as that exact joint combination rather than
-inferred from a uniform-row proxy.
+bounded policy as the leading candidate. Its exact late-depth gate passes, but
+representative early- and middle-depth exact mixed-row splices remain required
+before resident or packed-format work.
 
 ## Evidence
 
@@ -87,3 +104,7 @@ inferred from a uniform-row proxy.
 - `evidence/m4/product-codebook-mixed-allocation-1bpw-max-regression-1pct.json`
 - `evidence/m4/product-codebook-mixed-allocation-functional-gates/block24-gate-up-free576-offset0-48.json`
 - `evidence/m4/product-codebook-mixed-allocation-functional-gates/block24-gate-up-free576-offset48-48.json`
+- `evidence/m4/product-codebook-mixed-allocation-functional-gates/block24-gate-up-free672-offset0-48.json`
+- `evidence/m4/product-codebook-mixed-allocation-functional-gates/block24-gate-up-free672-offset48-48.json`
+- `evidence/m4/product-codebook-mixed-allocation-functional-gates/block24-gate640-up672-offset0-48.json`
+- `evidence/m4/product-codebook-mixed-allocation-functional-gates/block24-gate640-up672-offset48-48.json`

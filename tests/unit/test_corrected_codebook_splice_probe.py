@@ -86,6 +86,19 @@ def test_splice_probe_accepts_multiple_projection_layers_per_block() -> None:
     assert probe._parse_projections("gate,up") == ("gate", "up")
 
 
+def test_splice_probe_resolves_projection_specific_free_rows() -> None:
+    probe = _probe_module()
+
+    parsed = probe._parse_projection_free_rows("gate:640,up:672")
+
+    assert parsed == (("gate", 640), ("up", 672))
+    assert probe._resolve_projection_free_rows(
+        ("gate", "up"), 0, parsed
+    ) == {"gate": 640, "up": 672}
+    with pytest.raises(ValueError, match="every requested projection"):
+        probe._resolve_projection_free_rows(("gate", "up"), 0, parsed[:1])
+
+
 def test_splice_probe_composes_gated_down_outputs() -> None:
     probe = _probe_module()
     inputs = torch.tensor([[1.0, -0.5], [0.25, 2.0]])
