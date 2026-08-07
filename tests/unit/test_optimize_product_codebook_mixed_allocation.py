@@ -6,6 +6,7 @@ from pathlib import Path
 from tools.optimize_product_codebook_mixed_allocation import (
     AllocationGroup,
     AllocationOption,
+    _limit_option_regression,
     _load_probe_options,
     _pareto_allocate,
 )
@@ -117,3 +118,38 @@ def test_probe_loader_retains_dominated_free_control_for_comparison(
     options = _load_probe_options(path)
 
     assert [item.name for item in options] == ["better", "free_words"]
+
+
+def test_option_regression_limit_retains_control_and_bounded_candidates() -> None:
+    groups = (
+        AllocationGroup(
+            "a",
+            "gate",
+            0,
+            (
+                _option("cheap_regression", 1, 10.2),
+                _option("bounded", 2, 10.1),
+                _option("free_words", 3, 10.0),
+            ),
+        ),
+    )
+
+    limited = _limit_option_regression(groups, 0.01)
+
+    assert [item.name for item in limited[0].options] == [
+        "bounded",
+        "free_words",
+    ]
+
+
+def test_option_regression_limit_is_optional() -> None:
+    groups = (
+        AllocationGroup(
+            "a",
+            "down",
+            0,
+            (_option("cheap", 1, 12.0), _option("free_words", 3, 10.0)),
+        ),
+    )
+
+    assert _limit_option_regression(groups, None) is groups

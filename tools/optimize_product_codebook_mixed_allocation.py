@@ -167,10 +167,50 @@ def _load_groups(down_dir: Path, mlp_dir: Path) -> tuple[AllocationGroup, ...]:
     return tuple(groups)
 
 
+def _limit_option_regression(
+    groups: tuple[AllocationGroup, ...],
+    maximum_regression_fraction: float | None,
+) -> tuple[AllocationGroup, ...]:
+    if maximum_regression_fraction is None:
+        return groups
+    limited: list[AllocationGroup] = []
+    for group in groups:
+        baseline = next(
+            option for option in group.options if option.name == "free_words"
+        )
+        maximum_error = baseline.weighted_error_energy * (
+            1 + maximum_regression_fraction
+        )
+        options = tuple(
+            option
+            for option in group.options
+            if option.weighted_error_energy <= maximum_error
+        )
+        if not options:
+            raise AssertionError(f"free control was removed from {group.key}")
+        limited.append(
+            AllocationGroup(
+                key=group.key,
+                projection=group.projection,
+                block=group.block,
+                options=options,
+            )
+        )
+    return tuple(limited)
+
+
 def run(args: argparse.Namespace) -> int:
     if not 0 < args.target_bpw <= 2:
         raise ValueError("target BPW must be in (0, 2]")
-    groups = _load_groups(args.down_dir, args.mlp_dir)
+    if (
+        args.maximum_matrix_error_regression_fraction is not None
+        and args.maximum_matrix_error_regression_fraction < 0
+    ):
+        raise ValueError("maximum matrix error regression must not be negative")
+    groups = _limit_option_regression(
+        _load_groups(args.down_dir, args.mlp_dir),
+        args.maximum_matrix_error_regression_fraction,
+    )
     total_elements = BLOCK_COUNT * ELEMENTS_PER_BLOCK
     budget_bits = math.floor(args.target_bpw * total_elements)
     attention_by_projection = _attention_control_bits()
@@ -219,7 +259,7 @@ def run(args: argparse.Namespace) -> int:
 
     total_bits = fixed_attention_bits + selected_bits
     result = {
-        "schema_version": 1,
+        "schema_version": 2,
         "status": "completed",
         "objective": "minimum summed calibration-weighted MLP error energy",
         "target_bpw": args.target_bpw,
@@ -229,6 +269,11 @@ def run(args: argparse.Namespace) -> int:
         "effective_bpw": total_bits / total_elements,
         "slack_bits": budget_bits - total_bits,
         "slack_bpw": (budget_bits - total_bits) / total_elements,
+        "constraints": {
+            "maximum_matrix_weighted_error_regression_fraction": (
+                args.maximum_matrix_error_regression_fraction
+            ),
+        },
         "fixed_attention": {
             "policy": "matched free-factor controls",
             "bits_per_block_by_projection": attention_by_projection,
@@ -277,6 +322,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mlp-dir", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--target-bpw", type=float, default=1.0)
+    parser.add_argument(
+        "--maximum-matrix-error-regression-fraction",
+        type=float,
+        help=(
+            "discard options whose weighted error energy exceeds their "
+            "matrix's free control by more than this fraction"
+        ),
+    )
     return parser
 
 
