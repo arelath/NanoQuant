@@ -200,18 +200,63 @@ the same combined tuned window, the frozen Experiment 056 baseline has KL
 173.934% worse in KL and 78.858% worse in NLL. Reusing tuning fitted to a
 different representation does not close that gap.
 
+## Candidate-specific zero-bit refit
+
+The accepted candidate was refitted in composed student context using only
+separable MLP scales: gate and up output scales plus down input and output
+scales. These transformations can be folded into the existing product-factor
+scale axes without adding indices, codebook entries, or scale elements. The
+current evidence is still a dense analysis overlay; a component-level replay
+must prove that zero-bit fold before runtime integration.
+
+The first forward coordinate pass fitted on test sequences 460-467 and
+accepted each block only when it improved the disjoint 468-475 selection
+window. It accepted 24 of 26 blocks and rolled back blocks 10 and 18. Selection
+NLL fell from 8.565156 to 6.105200. On the untouched evaluation inventory:
+
+| WikiText-2 window | Candidate KL | Pass-1 KL | Relative change | Paired 95% interval |
+| --- | ---: | ---: | ---: | ---: |
+| sequences 192-239 | 5.894639 | 3.583015 | **-39.216%** | **[-2.443849, -2.182226]** |
+| sequences 240-287 | 5.831860 | 3.683527 | **-36.838%** | **[-2.273619, -2.022244]** |
+| combined 192-287 | 5.863250 | 3.633271 | **-38.033%** | **[-2.321761, -2.138146]** |
+
+Combined NLL improves by 25.021%, from 8.542022 to 6.404749, with paired
+interval `[-2.226181, -2.046707]`.
+
+One bounded second pass was justified because the first pass changed nearly
+every downstream student context. It accepted 15 of 26 coordinates and moved
+selection NLL from 6.105200 to 6.010986. The independent comparison against
+pass 1 also passes both windows:
+
+| WikiText-2 window | Pass-1 KL | Pass-2 KL | Relative change | Paired 95% interval |
+| --- | ---: | ---: | ---: | ---: |
+| sequences 192-239 | 3.583015 | 3.514608 | **-1.909%** | **[-0.082485, -0.054718]** |
+| sequences 240-287 | 3.683527 | 3.582006 | **-2.756%** | **[-0.120081, -0.083807]** |
+| combined 192-287 | 3.633271 | 3.548307 | **-2.339%** | **[-0.096999, -0.073309]** |
+
+Combined pass-2 NLL improves by 1.593% over pass 1, from 6.404749 to
+6.302698, with interval `[-0.114390, -0.089985]`. Relative to the original v3
+candidate, the two passes improve combined KL by 39.482%, interval
+`[-2.407990, -2.222767]`, and NLL by 26.215%, interval
+`[-2.327442, -2.149619]`.
+
+The diminishing second-pass gain does not justify a third pass on the reused
+selection window. Absolute quality is still insufficient: pass 2 remains
+65.779% worse in KL and 31.970% worse in NLL than the frozen Experiment 056
+baseline on the same 96 sequences.
+
 ## Decision
 
 Do not promote or integrate the unconstrained policy or either rejected early
 payment. Promote v3 from allocation candidate to the codebook policy for a
-candidate-specific integrated/tuned prototype: the exact full-policy
-comparison passes independently on both raw and retained-tuning operating
-points. Do not promote it as a final Experiment 056 replacement or publishable
-1-BPW model. Its absolute quality is still far behind the frozen Experiment
-056 model. The next gate is fitting and evaluating tuning for this exact
-representation, followed by the full protocol-matched quality evaluation.
-Resident and packed-format integration is justified only as the minimum
-prototype needed to run that gate, not as a format promotion.
+candidate-specific integrated/tuned prototype: the exact full-policy and
+two-pass refit comparisons pass independently. Do not promote it as a final
+Experiment 056 replacement or publishable 1-BPW model. Its absolute quality is
+still far behind the frozen Experiment 056 model. The next gate is exporting
+and exactly replaying the accepted separable refits in the product-codebook
+components at unchanged bits, then running the full protocol-matched quality
+evaluation. Resident and packed-format integration is justified only as the
+minimum prototype needed to run that gate, not as a format promotion.
 
 ## Full-policy materialization protocol
 
@@ -266,3 +311,9 @@ not itself a quality result or a promotion gate.
 - `evidence/m4/product-codebook-mixed-policy-v3-composed-kl-offset240-48.json`
 - `evidence/m4/product-codebook-mixed-policy-v3-composed-kl-tuned-offset192-48.json`
 - `evidence/m4/product-codebook-mixed-policy-v3-composed-kl-tuned-offset240-48.json`
+- `evidence/m4/product-codebook-mixed-policy-v3-candidate-coordinate-refit.json`
+- `evidence/m4/product-codebook-mixed-policy-v3-coordinate-kl-tuned-offset192-48.json`
+- `evidence/m4/product-codebook-mixed-policy-v3-coordinate-kl-tuned-offset240-48.json`
+- `evidence/m4/product-codebook-mixed-policy-v3-candidate-coordinate-refit-pass2.json`
+- `evidence/m4/product-codebook-mixed-policy-v3-coordinate-pass2-kl-tuned-offset192-48.json`
+- `evidence/m4/product-codebook-mixed-policy-v3-coordinate-pass2-kl-tuned-offset240-48.json`
