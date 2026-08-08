@@ -245,6 +245,47 @@ selection window. Absolute quality is still insufficient: pass 2 remains
 65.779% worse in KL and 31.970% worse in NLL than the frozen Experiment 056
 baseline on the same 96 sequences.
 
+## Experiment 056-style KL-calibrated allocation
+
+The exact allocator was extended to use the same measured-effect principle as
+Experiment 056. Each MLP matrix receives its retained exact-unit KL anchor from
+the completed Experiment 054 profile used by Experiment 056, and each product
+option is scored as `unit KL * option weighted error / free-control weighted
+error`. The profile semantic key and provenance are validated before solving.
+This changes only the analysis allocator and materializer receipt schema; it
+does not change the resident numerical path.
+
+At the same 697,753,234 bits (0.999987735 BPW, 8,558 slack bits), the v4 solve
+changes eight matrix choices relative to v3. It moves rows toward block-3 gate
+and blocks 4, 5, 6, and 10 down, while taking rows from block-0, block-3, and
+block-4 up. The calibrated proxy improves by only 0.033% over v3, while summed
+calibration-weighted reconstruction error regresses. All 64 materialization
+jobs completed and published a 78-matrix corrected-codebook overlay with tensor
+hash `d2a75746216a85f29ff5ebc4cd10fd9459e9f94e3c6c538a0b0473a2a3288bd4`.
+
+The matched composed comparison reuses Experiment 056's global tuning and
+holds the bit budget, outliers, reconstruction protocol, and token inventory
+fixed:
+
+| WikiText-2 window | V3 KL | KL-calibrated v4 KL | Relative change |
+| --- | ---: | ---: | ---: |
+| sequences 192-239 | 5.894639 | 5.793564 | -1.715% |
+| sequences 240-287 | 5.831860 | 6.024979 | +3.311% |
+| combined 192-287 | 5.863250 | 5.909271 | +0.785% |
+
+Combined NLL also regresses by 0.207%, from 8.542022 to 8.559713. A paired
+10,000-resample sequence bootstrap gives KL delta `+0.046022`, interval
+`[-0.058187, +0.150409]`, and NLL delta `+0.017691`, interval
+`[-0.082881, +0.118115]`. The windows disagree and neither combined interval
+supports an improvement.
+
+This rejects direct transfer of Experiment 056's rank-sensitivity anchors as
+the product-code allocation objective. The anchors identify important units,
+but the assumed linear transfer from each option's local weighted-error ratio
+does not predict composed codebook interactions well enough. V3 remains the
+allocation baseline, and its candidate-specific two-pass refit remains the
+strongest tested 1-BPW product-code result.
+
 ## Decision
 
 Do not promote or integrate the unconstrained policy or either rejected early
@@ -317,3 +358,7 @@ not itself a quality result or a promotion gate.
 - `evidence/m4/product-codebook-mixed-policy-v3-candidate-coordinate-refit-pass2.json`
 - `evidence/m4/product-codebook-mixed-policy-v3-coordinate-pass2-kl-tuned-offset192-48.json`
 - `evidence/m4/product-codebook-mixed-policy-v3-coordinate-pass2-kl-tuned-offset240-48.json`
+- `evidence/m4/product-codebook-mixed-allocation-1bpw-functional-floors-v4-kl-calibrated.json`
+- `evidence/m4/product-codebook-mixed-policy-v4-kl-calibrated-materialization/manifest.json`
+- `evidence/m4/product-codebook-mixed-policy-v4-kl-composed-tuned-offset192-48.json`
+- `evidence/m4/product-codebook-mixed-policy-v4-kl-composed-tuned-offset240-48.json`
