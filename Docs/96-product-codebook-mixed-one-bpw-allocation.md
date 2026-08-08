@@ -159,15 +159,59 @@ changes from 0.510161 to 0.508828. Relative to the first functionally floored
 receipt it changes only block-3 gate free640 to free672 and block-4 up free704
 to free672, while protecting block-1 down at free704.
 
+## Composed full-policy gate
+
+The resumable v3 materialization completed all 64 jobs and published both
+78-matrix overlays. The free-row overlay tensor hash is
+`11896abcc46b028e7133e0c78587f5bb04727fcd41cfbb31e3583e2a9a6e289d`; the
+corrected-codebook overlay tensor hash is
+`3a0ed4a1bcac926797715dc4711cc05e9fb3f9a5774beb259c64c04396735358`.
+A fresh completed-driver replay revalidated every retained cache identity and
+overlay hash.
+
+The exact composed candidate passes two disjoint held-out windows against the
+same-budget free-row control. Without the retained Experiment 056 global
+tuning, the comparison is:
+
+| WikiText-2 window | Free KL | Candidate KL | Relative change | Paired 95% interval |
+| --- | ---: | ---: | ---: | ---: |
+| sequences 192-239 | 6.842462 | 6.000663 | **-12.303%** | **[-1.056979, -0.624185]** |
+| sequences 240-287 | 6.487112 | 5.921244 | **-8.723%** | **[-0.906057, -0.236634]** |
+| combined 192-287 | 6.664787 | 5.960954 | **-10.560%** | **[-0.913700, -0.504443]** |
+
+Combined NLL improves by 8.582%, from 9.468939 to 8.656331, with paired
+interval `[-1.024439, -0.610561]`.
+
+The relative result survives replay of Experiment 056's retained global-tuning
+artifact:
+
+| WikiText-2 window | Free KL | Candidate KL | Relative change | Paired 95% interval |
+| --- | ---: | ---: | ---: | ---: |
+| sequences 192-239 | 6.497903 | 5.894639 | **-9.284%** | **[-0.826930, -0.391740]** |
+| sequences 240-287 | 6.156348 | 5.831860 | **-5.271%** | **[-0.587304, -0.073409]** |
+| combined 192-287 | 6.327125 | 5.863250 | **-7.332%** | **[-0.640150, -0.295720]** |
+
+Combined tuned NLL improves by 5.943%, from 9.081706 to 8.542022, with paired
+interval `[-0.712904, -0.372808]`.
+
+This is a decisive representation result, not an absolute-quality result. On
+the same combined tuned window, the frozen Experiment 056 baseline has KL
+2.140387 and NLL 4.775861. The independently reconstructed candidate remains
+173.934% worse in KL and 78.858% worse in NLL. Reusing tuning fitted to a
+different representation does not close that gap.
+
 ## Decision
 
 Do not promote or integrate the unconstrained policy or either rejected early
-payment. V3 is the leading exact-1.0 candidate: its middle and late gates pass,
-and its tested early gates are neutral overall rather than adverse. However,
-the early gates do not prove a quality improvement, and the allocation remains
-an additive matrix proxy. The next promotion gate is a composed multi-block or
-full-policy KL comparison using the exact v3 selections. Resident and packed
-format integration should follow only if that composed test passes.
+payment. Promote v3 from allocation candidate to the codebook policy for a
+candidate-specific integrated/tuned prototype: the exact full-policy
+comparison passes independently on both raw and retained-tuning operating
+points. Do not promote it as a final Experiment 056 replacement or publishable
+1-BPW model. Its absolute quality is still far behind the frozen Experiment
+056 model. The next gate is fitting and evaluating tuning for this exact
+representation, followed by the full protocol-matched quality evaluation.
+Resident and packed-format integration is justified only as the minimum
+prototype needed to run that gate, not as a format promotion.
 
 ## Full-policy materialization protocol
 
@@ -217,3 +261,8 @@ not itself a quality result or a promotion gate.
 - `evidence/m4/product-codebook-mixed-allocation-functional-gates/block03-gate672-up704-offset48-48.json`
 - `evidence/m4/product-codebook-mixed-allocation-functional-gates/block03-gate672-up704-offset96-48.json`
 - `evidence/m4/product-codebook-mixed-allocation-functional-gates/block03-gate672-up704-offset144-48.json`
+- `evidence/m4/product-codebook-mixed-policy-v3-materialization/manifest.json`
+- `evidence/m4/product-codebook-mixed-policy-v3-composed-kl-offset192-48.json`
+- `evidence/m4/product-codebook-mixed-policy-v3-composed-kl-offset240-48.json`
+- `evidence/m4/product-codebook-mixed-policy-v3-composed-kl-tuned-offset192-48.json`
+- `evidence/m4/product-codebook-mixed-policy-v3-composed-kl-tuned-offset240-48.json`
