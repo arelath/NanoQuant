@@ -3,9 +3,19 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
+from nanoquant.application.kl_budget import (
+    KlBudgetArmResult,
+    KlBudgetProfile,
+    KlBudgetProvenance,
+    KlSequenceResult,
+)
+from nanoquant.config.codec import to_dict
 from tools.optimize_product_codebook_mixed_allocation import (
     AllocationGroup,
     AllocationOption,
+    _kl_objective_calibration,
     _limit_group_free_rows,
     _limit_option_regression,
     _load_probe_options,
@@ -44,8 +54,95 @@ def test_pareto_allocator_uses_budget_for_the_best_error_reduction() -> None:
 
     assert bits == 5
     assert selected.choices == ("large", "small")
-    assert selected.weighted_error_energy == 5.0
+    assert selected.objective_value == 5.0
     assert frontier[-1] == (5, 5.0)
+
+
+def test_pareto_allocator_can_prioritize_measured_kl_effect() -> None:
+    groups = (
+        AllocationGroup(
+            "a",
+            "gate",
+            0,
+            (_option("small", 2, 10.0), _option("large", 3, 5.0)),
+        ),
+        AllocationGroup(
+            "b",
+            "up",
+            0,
+            (_option("small", 2, 10.0), _option("large", 3, 2.0)),
+        ),
+    )
+
+    _bits, raw, _frontier = _pareto_allocate(groups, 5)
+    _bits, calibrated, _frontier = _pareto_allocate(
+        groups,
+        5,
+        objective_multipliers={"a": 10.0, "b": 1.0},
+    )
+
+    assert raw.choices == ("small", "large")
+    assert calibrated.choices == ("large", "small")
+
+
+def test_kl_calibration_uses_exact_unit_anchor_over_free_error(
+    tmp_path: Path,
+) -> None:
+    provenance = KlBudgetProvenance(
+        "model",
+        "revision",
+        "recipe",
+        "dataset",
+        "slice",
+        "run",
+    )
+    sequence = KlSequenceResult(2.0, 0.5, 10)
+    profile = KlBudgetProfile(
+        2,
+        provenance,
+        1.0,
+        (
+            KlBudgetArmResult(
+                "unit:0:mlp.gate_proj",
+                2.0,
+                0.5,
+                10,
+                0.25,
+                (sequence,),
+            ),
+        ),
+        True,
+    )
+    path = tmp_path / "profile.json"
+    path.write_text(json.dumps(to_dict(profile)), encoding="utf-8")
+    groups = (
+        AllocationGroup(
+            "block-00:gate",
+            "gate",
+            0,
+            (_option("candidate", 2, 5.0), _option("free_words", 3, 10.0)),
+        ),
+    )
+
+    anchors, multipliers, calibration = _kl_objective_calibration(
+        groups,
+        path,
+        model_source="model",
+        model_revision="revision",
+        expected_profile_key=profile.profile_key,
+    )
+
+    assert anchors == {"block-00:gate": 0.5}
+    assert multipliers == {"block-00:gate": 0.05}
+    assert calibration["profile_key"] == profile.profile_key
+    with pytest.raises(ValueError, match="profile key"):
+        _kl_objective_calibration(
+            groups,
+            path,
+            model_source="model",
+            model_revision="revision",
+            expected_profile_key="sha256:stale",
+        )
 
 
 def test_probe_loader_removes_rate_distortion_dominated_options(

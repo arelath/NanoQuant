@@ -3,12 +3,14 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 import torch
 
 from tools.materialize_product_codebook_mixed_policy import (
     MaterializationJob,
     MaterializationSettings,
     build_probe_command,
+    load_policy_jobs,
     validate_job_receipt,
     write_overlay_bundle,
 )
@@ -166,3 +168,23 @@ def test_overlay_bundle_publishes_both_arms_atomically(tmp_path: Path) -> None:
     for directory in ("free-words", "corrected-codebook"):
         assert (destination / directory / "manifest.json").is_file()
         assert (destination / directory / "weights.safetensors").is_file()
+
+
+def test_materializer_accepts_kl_calibrated_allocation_schema(
+    tmp_path: Path,
+) -> None:
+    receipt = tmp_path / "allocation.json"
+    receipt.write_text(
+        json.dumps(
+            {
+                "schema_version": 4,
+                "status": "completed",
+                "effective_bpw": 1.0,
+                "target_bpw": 1.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="input or selection inventory"):
+        load_policy_jobs(receipt)

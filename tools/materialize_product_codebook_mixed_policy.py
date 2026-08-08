@@ -148,8 +148,8 @@ def _load_source_protocol(
 
 def load_policy_jobs(allocation_path: Path) -> tuple[dict[str, Any], tuple[MaterializationJob, ...]]:
     allocation = _read_json(allocation_path)
-    if allocation.get("schema_version") != 3 or allocation.get("status") != "completed":
-        raise ValueError("mixed allocation receipt is not a completed schema-v3 result")
+    if allocation.get("schema_version") not in {3, 4} or allocation.get("status") != "completed":
+        raise ValueError("mixed allocation receipt is not a completed supported result")
     if float(allocation["effective_bpw"]) > float(allocation["target_bpw"]):
         raise ValueError("mixed allocation exceeds its target BPW")
     inputs = allocation.get("inputs")
