@@ -6,6 +6,10 @@ from pathlib import Path
 import pytest
 import torch
 
+from tools.materialize_product_codebook_component_replay import (
+    fit_row_multiplier,
+    fit_separable_multipliers,
+)
 from tools.materialize_product_codebook_mixed_policy import (
     MaterializationJob,
     MaterializationSettings,
@@ -71,6 +75,23 @@ def test_gate_up_command_preserves_projection_specific_rows_and_search() -> None
     assert "--binary-search" in command
     assert command[command.index("--fixed-outlier-indices") + 1] == "768,890"
     assert command[command.index("--wikitext-samples") + 1] == "1"
+
+    component_command = build_probe_command(
+        job,
+        python=Path("python.exe"),
+        probe=Path("probe.py"),
+        model=Path("model.safetensors"),
+        snapshot=Path("snapshot"),
+        calibration_state=Path("calibration"),
+        output=Path("output.json"),
+        reconstruction_cache=Path("cache"),
+        model_revision="revision",
+        device="cuda:0",
+        product_component_output=Path("components"),
+    )
+    assert component_command[component_command.index("--export-product-components") + 1] == (
+        "components"
+    )
 
 
 def test_down_command_keeps_source_orientation_and_exact_outliers() -> None:
@@ -188,3 +209,22 @@ def test_materializer_accepts_kl_calibrated_allocation_schema(
 
     with pytest.raises(ValueError, match="input or selection inventory"):
         load_policy_jobs(receipt)
+
+
+def test_component_replay_recovers_exact_separable_scale_axes() -> None:
+    base = torch.tensor(
+        [[1.0, 2.0, -1.0], [3.0, -2.0, 4.0]],
+        dtype=torch.float32,
+    )
+    expected_rows = torch.tensor([0.75, 1.25])
+    expected_columns = torch.tensor([1.5, 0.5, 2.0])
+    target = base * expected_rows[:, None] * expected_columns[None, :]
+
+    rows, columns = fit_separable_multipliers(base, target, iterations=24)
+    reconstructed = base * rows[:, None] * columns[None, :]
+
+    assert torch.allclose(reconstructed, target, atol=1e-6, rtol=1e-6)
+    assert torch.allclose(
+        fit_row_multiplier(base, base * expected_rows[:, None]),
+        expected_rows,
+    )

@@ -51,8 +51,10 @@ from nanoquant.domain.planning import factor_bit_cost, outlier_bit_cost
 from nanoquant.domain.scale_fit import MaterializedScaleFitResult, fit_scales, reconstruct
 from nanoquant.domain.sign_word_codebook import (
     FullSignCodebook,
+    ProductSignCodebook,
     codebook_index_metrics,
     corrected_asymmetric_codebook_bit_cost,
+    decode_product_codebook,
     factorize_sign_word_codebook_admm,
     maximum_corrected_asymmetric_rank_for_budget,
     mixed_right_corrected_codebook_bit_cost,
@@ -79,9 +81,15 @@ from nanoquant.infrastructure.probe_reconstruction_cache import (
 from nanoquant.infrastructure.safetensors_io import SAFETENSORS
 from nanoquant.kl_budget_workflow import _token_hash
 from nanoquant.quality_evaluation import _wikitext_tokens
+from nanoquant.runtime.packed import pack_sign_matrix
+from nanoquant.runtime.product_codebook import (
+    pack_product_codebook_indices,
+    pack_product_half_table,
+)
 
 MODEL_SOURCE = "google/gemma-3-1b-it"
 RECONSTRUCTION_CACHE_ALGORITHM_VERSION = 6
+PRODUCT_COMPONENT_SCHEMA_VERSION = 1
 
 
 def _parse_ints(value: str) -> tuple[int, ...]:
@@ -1365,6 +1373,52 @@ def _export_reconstruction_set(
     }
 
 
+def _export_product_components(
+    destination: Path,
+    components: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Persist exact product-code factors before dense reconstruction."""
+
+    if destination.exists():
+        raise FileExistsError(f"product component export already exists: {destination}")
+    if not components:
+        raise ValueError("product component export requires at least one layer")
+    with atomic_workspace(destination) as temporary:
+        tensors: dict[str, torch.Tensor] = {}
+        layers = []
+        for index, component in enumerate(components):
+            metadata = cast(dict[str, Any], component["metadata"])
+            values = cast(dict[str, torch.Tensor], component["tensors"])
+            inventory = {}
+            for role, value in sorted(values.items()):
+                key = f"layers.{index}.{role}"
+                copied = value.detach().cpu().contiguous()
+                tensors[key] = copied
+                inventory[role] = {
+                    "key": key,
+                    "shape": list(copied.shape),
+                    "dtype": str(copied.dtype).removeprefix("torch."),
+                }
+            layers.append({**metadata, "tensors": inventory})
+        tensor_path = temporary / "components.safetensors"
+        SAFETENSORS.save(tensors, tensor_path)
+        manifest = {
+            "schema_version": PRODUCT_COMPONENT_SCHEMA_VERSION,
+            "format": "product-codebook-factor-components",
+            "layer_count": len(layers),
+            "layers": layers,
+            "tensor_sha256": hash_file(tensor_path),
+            "tensor_bytes": tensor_path.stat().st_size,
+        }
+        atomic_write_json(temporary / "manifest.json", manifest)
+    return {
+        "directory": str(destination.resolve()),
+        "manifest": str((destination / "manifest.json").resolve()),
+        "tensor_sha256": manifest["tensor_sha256"],
+        "layer_count": manifest["layer_count"],
+    }
+
+
 def _reconstruction_set(
     values: list[tuple[LayerId, torch.Tensor, float]],
 ) -> SpliceReconstructionSet:
@@ -1460,6 +1514,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--export-reconstruction-set", type=Path)
     parser.add_argument("--export-arm")
+    parser.add_argument("--export-product-components", type=Path)
     parser.add_argument("--reconstruction-cache", type=Path)
     parser.add_argument("--model-revision", default=PINNED_MODEL_REVISION)
     parser.add_argument("--projection", choices=tuple(PROJECTION_PATHS), default="down")
@@ -1585,6 +1640,16 @@ def run(args: argparse.Namespace) -> int:
     if (args.export_reconstruction_set is None) != (args.export_arm is None):
         raise ValueError(
             "reconstruction export requires both destination and arm"
+        )
+    if args.export_product_components is not None and (
+        args.codebook_mode != "product"
+        or args.index_width != 16
+        or args.corrections_per_word != 0
+        or not args.binary_search
+        or args.payload_search
+    ):
+        raise ValueError(
+            "product component export requires k16 product mode with binary search and no payload search"
         )
     if args.candidate_rank is not None and args.candidate_rank <= 0:
         raise ValueError("candidate rank/free-row configuration is invalid")
@@ -1884,6 +1949,7 @@ def run(args: argparse.Namespace) -> int:
             str,
             dict[str, dict[str, float | int | bool]],
         ] = {}
+        product_components: list[dict[str, Any]] = []
         rank = 0
         matrix_shape = (0, 0)
         transpose_by_projection: dict[str, bool] = {}
@@ -1979,6 +2045,7 @@ def run(args: argparse.Namespace) -> int:
                     if (
                         reconstruction_cache is not None
                         and cache_identity is not None
+                        and args.export_product_components is None
                     )
                     else None
                 )
@@ -2276,6 +2343,75 @@ def run(args: argparse.Namespace) -> int:
                     candidate_post = candidate_payload.scale_post
                     unit_search_metrics["candidate_payload"] = (
                         candidate_payload_metrics
+                    )
+                if args.export_product_components is not None:
+                    codebook = candidate_factors.right_codebook
+                    indices = candidate_factors.right_indices
+                    if not isinstance(codebook, ProductSignCodebook) or indices is None:
+                        raise ValueError("product component export requires retained product assignments")
+                    decoded_tail = decode_product_codebook(
+                        indices,
+                        codebook,
+                        current_shape[1],
+                    )
+                    if not torch.equal(
+                        decoded_tail,
+                        candidate_right[current_right_free_rows :],
+                    ):
+                        raise ValueError("binary search changed a coded product row")
+                    physical_outlier_values = (
+                        outlier_values.mT.contiguous()
+                        if transpose_current
+                        else outlier_values.contiguous()
+                    )
+                    product_components.append(
+                        {
+                            "metadata": {
+                                "block": block,
+                                "projection": projection,
+                                "projection_path": projection_path,
+                                "tensor_name": tensor_name,
+                                "physical_shape": list(source_weight.shape),
+                                "factorization_shape": list(current_shape),
+                                "factorization_transposed": transpose_current,
+                                "rank": rank,
+                                "right_free_rows": current_right_free_rows,
+                                "fixed_outlier_indices": list(args.fixed_outlier_indices),
+                            },
+                            "tensors": {
+                                "factor_left_words": pack_sign_matrix(candidate_left),
+                                "factor_right_free_words": pack_sign_matrix(
+                                    candidate_right[:current_right_free_rows].contiguous()
+                                ),
+                                "factor_right_coded_payload": pack_product_codebook_indices(
+                                    indices.to(torch.int32).contiguous()
+                                ),
+                                "factor_right_first_half_words": pack_product_half_table(
+                                    codebook.first.contiguous()
+                                ),
+                                "factor_right_second_half_words": pack_product_half_table(
+                                    codebook.second.contiguous()
+                                ),
+                                "factor_scale_pre": candidate_pre.detach()
+                                .float()
+                                .cpu()
+                                .contiguous(),
+                                "factor_scale_mid": candidate_mid.detach()
+                                .float()
+                                .cpu()
+                                .contiguous(),
+                                "factor_scale_post": candidate_post.detach()
+                                .float()
+                                .cpu()
+                                .contiguous(),
+                                "outlier_indices": outlier_indices.detach()
+                                .to(device="cpu", dtype=torch.int32)
+                                .contiguous(),
+                                "outlier_values": physical_outlier_values.detach()
+                                .to(device="cpu", dtype=torch.bfloat16)
+                                .contiguous(),
+                            },
+                        }
                     )
                 candidate_reconstruction = reconstruct(
                     candidate_left,
@@ -2836,12 +2972,19 @@ def run(args: argparse.Namespace) -> int:
             args.export_arm,
             all_reconstruction_sets[args.export_arm],
         )
+    product_component_export = None
+    if args.export_product_components is not None:
+        product_component_export = _export_product_components(
+            args.export_product_components,
+            product_components,
+        )
 
     output: dict[str, Any] = {
         "schema_version": 18,
         "status": "completed",
         "role": "analysis-only sign-code splice gate",
         "reconstruction_export": reconstruction_export,
+        "product_component_export": product_component_export,
         "reconstruction_cache": {
             "enabled": reconstruction_cache is not None,
             "root": (

@@ -255,6 +255,7 @@ def build_probe_command(
     reconstruction_cache: Path,
     model_revision: str,
     device: str,
+    product_component_output: Path | None = None,
 ) -> list[str]:
     settings = job.settings
     command = [
@@ -347,6 +348,8 @@ def build_probe_command(
             command.append("--transpose-matrix")
     else:
         raise ValueError(f"unsupported materialization projection group: {job.projections}")
+    if product_component_output is not None:
+        command.extend(("--export-product-components", str(product_component_output)))
     return command
 
 

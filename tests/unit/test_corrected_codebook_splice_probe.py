@@ -254,6 +254,34 @@ def test_splice_probe_exports_hashed_reconstruction_set(tmp_path: Path) -> None:
         ).dtype == torch.bfloat16
 
 
+def test_splice_probe_exports_exact_product_components(tmp_path: Path) -> None:
+    probe = _probe_module()
+    destination = tmp_path / "components"
+    component = {
+        "metadata": {
+            "block": 2,
+            "projection": "gate",
+            "tensor_name": "model.layers.2.mlp.gate_proj.weight",
+        },
+        "tensors": {
+            "factor_left_words": torch.tensor([[1, 2]], dtype=torch.int32),
+            "factor_scale_mid": torch.tensor([0.5], dtype=torch.float32),
+        },
+    }
+
+    receipt = probe._export_product_components(destination, [component])
+    manifest = json.loads((destination / "manifest.json").read_text(encoding="utf-8"))
+
+    assert receipt["layer_count"] == 1
+    assert manifest["format"] == "product-codebook-factor-components"
+    assert manifest["tensor_sha256"] == hash_file(destination / "components.safetensors")
+    with safe_open(destination / "components.safetensors", framework="pt", device="cpu") as handle:
+        assert set(handle.keys()) == {
+            "layers.0.factor_left_words",
+            "layers.0.factor_scale_mid",
+        }
+
+
 def test_splice_probe_reconstruction_identity_tracks_numerical_settings() -> None:
     probe = _probe_module()
     args = probe._parser().parse_args(
