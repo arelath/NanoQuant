@@ -25,7 +25,12 @@ from nanoquant.infrastructure.memory_cleanup import release_memory
 from nanoquant.infrastructure.model_adapters import adapter_for_config
 from nanoquant.infrastructure.runtime_export import load_frozen_run_auxiliary
 from nanoquant.infrastructure.safetensors_source import SafetensorsModelSource
-from nanoquant.runtime import OpenPackedArtifact, open_packed_artifact
+from nanoquant.runtime import (
+    OpenPackedArtifact,
+    OpenProductCodebookArtifact,
+    open_packed_artifact,
+    open_product_codebook_artifact,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,6 +40,8 @@ class LoadedPackedModel:
     identity: CommitIdentity
     global_tuning: ArtifactRef | None
     packed_descriptor_sha256: str
+    product_codebook: OpenProductCodebookArtifact | None = None
+    product_codebook_descriptor_sha256: str | None = None
 
 
 def _dtype(config: dict[str, object]) -> torch.dtype:
@@ -70,12 +77,22 @@ def load_packed_model(
     device: str = "cuda",
     backend: str = "factorized",
     use_global_tuning: bool = True,
+    product_codebook_overlay: str | Path | None = None,
 ) -> LoadedPackedModel:
     """Install packed linears while retaining the parent's tuned non-linear state."""
 
     if backend not in {"dense", "factorized"}:
         raise ValueError(f"unsupported packed quality backend: {backend}")
     packed = open_packed_artifact(packed_root, verify_hashes=True)
+    product_codebook = (
+        None
+        if product_codebook_overlay is None
+        else open_product_codebook_artifact(
+            product_codebook_overlay,
+            packed,
+            verify_hashes=True,
+        )
+    )
     if packed.manifest.model.source != source_name or packed.manifest.model.revision != revision:
         raise ValueError("packed quality model identity differs from the requested source")
     block_count = len(packed.manifest.blocks)
@@ -100,7 +117,12 @@ def load_packed_model(
     for packed_block, block in zip(packed.manifest.blocks, blocks, strict=True):
         block_dtype = next(block.parameters()).dtype
         for entry in packed_block.layers:
-            state = packed.load_layer(entry.spec.name).to_logical()
+            packed_state = (
+                packed.load_layer(entry.spec.name)
+                if product_codebook is None
+                else product_codebook.load_packed_layer(entry.spec.name)
+            )
+            state = packed_state.to_logical()
             if backend == "dense":
                 weight = functional_dense_reconstruction(
                     state.left_binary.to(device),
@@ -172,6 +194,14 @@ def load_packed_model(
         auxiliary.identity,
         auxiliary.global_tuning,
         hash_file(packed.root / "nanoquant-packed-model.json"),
+        product_codebook,
+        (
+            None
+            if product_codebook is None
+            else hash_file(
+                product_codebook.root / "nanoquant-product-codebook-overlay.json"
+            )
+        ),
     )
 
 
