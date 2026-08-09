@@ -65,7 +65,7 @@ def _decoder_layers(model: nn.Module) -> tuple[nn.Module, ...]:
     return tuple(layers)
 
 
-@torch.inference_mode()
+@torch.no_grad()
 def load_packed_model(
     packed_root: str | Path,
     auxiliary_run: str | Path,

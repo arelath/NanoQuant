@@ -14,6 +14,7 @@ from torch import nn
 from nanoquant import quality_evaluation
 from nanoquant.application.evaluation import CausalEvaluationResult
 from nanoquant.config.schema import ReasoningMode
+from nanoquant.infrastructure.commits import CommitIdentity
 from nanoquant.infrastructure.hf_calibration_dataset import PreparedBehaviorEvaluation
 
 
@@ -250,6 +251,81 @@ def test_quality_evaluation_can_reuse_a_prevalidated_base_result(
     assert result["results"]["base"] == reused
     assert result["protocol"]["base_execution"] == "reused"
     assert "model_evaluation_reused" in progress
+
+
+def test_quality_evaluation_forwards_product_codebook_overlay_to_packed_loader(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    product_overlay = tmp_path / "product-overlay"
+    request = quality_evaluation.QualityEvaluationRequest(
+        tmp_path / "snapshot",
+        "fixture/model",
+        "revision",
+        tmp_path / "run",
+        device="cpu",
+        wikitext_samples=1,
+        wikitext_sequence_length=2,
+        task_names=("piqa",),
+        packed_artifact=tmp_path / "packed",
+        product_codebook_overlay=product_overlay,
+    )
+    prepared = quality_evaluation.PreparedQualityInputs(
+        torch.tensor(((1, 2),), dtype=torch.long),
+        "fixture-fingerprint",
+        1,
+        0,
+        "sha256:" + "a" * 64,
+        (),
+    )
+    reused = {
+        "label": "base",
+        "wikitext": {"perplexity": 2.0},
+        "tasks": [],
+        "elapsed_seconds": 1.0,
+        "peak_device_bytes": 0,
+        "peak_host_bytes": 0,
+    }
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(quality_evaluation, "acquire_device_lease", lambda _device: nullcontext())
+    monkeypatch.setattr(
+        quality_evaluation.AutoConfig,
+        "from_pretrained",
+        lambda *_args, **_kwargs: SimpleNamespace(model_type="qwen"),
+    )
+
+    def load(*_args: object, **kwargs: object) -> object:
+        captured.update(kwargs)
+        return quality_evaluation.LoadedPackedModel(
+            SimpleNamespace(),
+            None,  # type: ignore[arg-type]
+            CommitIdentity("config", "model", "plan"),
+            None,
+            "packed-sha256",
+            None,
+            "product-sha256",
+        )
+
+    monkeypatch.setattr(quality_evaluation, "load_packed_model", load)
+    monkeypatch.setattr(
+        quality_evaluation,
+        "_evaluate_model",
+        lambda *_args, **_kwargs: {
+            **reused,
+            "label": "frozen",
+        },
+    )
+    monkeypatch.setattr(quality_evaluation, "_release_device_memory", lambda: None)
+
+    result = quality_evaluation.execute_quality_evaluation(
+        request,
+        prepared=prepared,
+        base_result=reused,
+    )
+
+    assert captured["product_codebook_overlay"] == product_overlay
+    assert result["candidate"]["product_codebook_overlay"] == str(product_overlay.resolve())
+    assert result["candidate"]["product_codebook_descriptor_sha256"] == "product-sha256"
 
 
 def test_reasoning_comparison_rejects_hidden_thinking_regression() -> None:

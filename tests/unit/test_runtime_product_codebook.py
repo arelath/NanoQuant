@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 import torch
 
+from nanoquant.application.layers import FactorizedReferenceLinear
 from nanoquant.runtime import (
     PRODUCT_CODEBOOK_FORMAT_VERSION,
     LogicalLayerState,
@@ -21,6 +22,12 @@ from nanoquant.runtime import (
     unpack_product_codebook_indices,
     write_logical_artifact,
     write_product_codebook_artifact,
+)
+from tools.probe_global_foldable_mlp_multipliers import (
+    FoldableMultiplierLinear,
+    InstalledMultipliers,
+    fold_product_codebook_states,
+    product_codebook_discrete_payload_equal,
 )
 
 
@@ -151,3 +158,47 @@ def test_product_codebook_artifact_is_base_bound_and_executable(tmp_path: Path) 
     descriptor.write_text(json.dumps(payload), encoding="utf-8")
     with pytest.raises(ProductCodebookArtifactError, match="another base"):
         open_product_codebook_artifact(overlay.root, base, verify_hashes=False)
+
+
+@pytest.mark.parametrize("transposed", [False, True])
+def test_product_codebook_distillation_folds_only_physical_scale_axes(
+    tmp_path: Path,
+    transposed: bool,
+) -> None:
+    base = _base_artifact(tmp_path)
+    compact = _compact_state(transposed=transposed)
+    overlay = write_product_codebook_artifact(
+        tmp_path / "product",
+        base,
+        {0: (compact,)},
+        allocation_sha256="a" * 64,
+        allocation_total_bits=123456,
+        effective_bpw=0.999,
+        correction_source_sha256="b" * 64,
+        replay={"maximum_rmse": 0.0},
+    )
+    logical = compact.to_packed().to_logical()
+    module = FactorizedReferenceLinear(
+        logical.left_binary,
+        logical.right_binary,
+        logical.scale_pre,
+        logical.scale_mid,
+        logical.scale_post,
+    )
+    with torch.no_grad():
+        module.scale_pre.mul_(torch.linspace(0.8, 1.2, module.scale_pre.numel()))
+        module.scale_post.mul_(torch.linspace(1.1, 0.9, module.scale_post.numel()))
+    wrapper = FoldableMultiplierLinear(module, output_family="fixture")
+    installed = InstalledMultipliers(
+        {(0, "linear"): wrapper},
+        {"fixture": (wrapper.log_output_multiplier,)},
+    )
+
+    folded = fold_product_codebook_states(overlay, installed)[0][0]
+
+    assert product_codebook_discrete_payload_equal(compact, folded)
+    assert folded.compact_logical_bits() == compact.compact_logical_bits()
+    replay = folded.to_packed()
+    torch.testing.assert_close(replay.scale_pre, module.scale_pre)
+    torch.testing.assert_close(replay.scale_mid, module.scale_mid)
+    torch.testing.assert_close(replay.scale_post, module.scale_post)

@@ -341,18 +341,46 @@ class ScaleFitConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class ProductCodebookConfig:
+    enabled: bool = False
+    format: str = "product-codebook-free-k16-v1"
+    layer_patterns: tuple[str, ...] = ("mlp.*",)
+    index_bits: int = 16
+    free_row_multiple: int = 32
+    minimum_coded_rows: int = 32
+    codebook_update_interval: int = 10
+    codebook_freeze_fraction: float = 0.5
+    codebook_warmup_fraction: float = 0.0
+    assignment_batch_words: int = 65_536
+    measured_option_allocation: bool = True
+    allow_free_factor_fallback: bool = True
+    flips_per_word: int = 0
+
+
+@dataclass(frozen=True, slots=True)
 class FactorizationConfig:
     implementation: str = "nanoquant_admm"
     compute_dtype: DType = DType.BFLOAT16
     solve_dtype: DType = DType.FLOAT32
     admm: ADMMConfig = field(default_factory=ADMMConfig)
     scale_fit: ScaleFitConfig = field(default_factory=ScaleFitConfig)
+    product_codebook: ProductCodebookConfig = field(
+        default_factory=ProductCodebookConfig
+    )
 ```
 
 `transpose_wide` preserves an exact replay mode for the legacy source's wide-matrix solve. It is disabled by
 default because the native orientation is the policy validated by the full Gemma trajectory; changing it
 invalidates resident factorization commits. Diagnostic verbosity is intentionally absent. ADMM iteration events
 are controlled by observability settings, not by mathematical configuration.
+
+`product_codebook` describes the measured mixed right-factor encoding used by
+the k16 resident experiment. Each coded 32-sign word stores two 8-bit selectors
+into learned 256-by-16 half tables. The format has no flip/correction stream.
+Eligible owners expose aligned free-prefix/coded-suffix options while retaining
+the ordinary free-factor option; allocation scores those options from
+candidate-specific measurements under the run's existing global BPW target.
+Enabling the policy requires `implementation: nanoquant_admm_product_k16`.
 
 ## 7. Salient outliers
 

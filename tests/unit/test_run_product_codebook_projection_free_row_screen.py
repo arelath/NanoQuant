@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import torch
 from safetensors.torch import save_file
@@ -9,6 +11,7 @@ from tools.run_product_codebook_projection_free_row_screen import (
     PROJECTION_CONFIGS,
     _read_fixed_outliers,
     build_probe_command,
+    run,
 )
 
 
@@ -55,3 +58,37 @@ def test_attention_ladders_stay_below_shape_specific_rank() -> None:
     assert PROJECTION_CONFIGS["k"].free_row_counts == (32, 64, 96, 128)
     assert PROJECTION_CONFIGS["v"].free_row_counts == (32, 64, 96, 128)
     assert PROJECTION_CONFIGS["o"].transpose_matrix
+
+
+def test_completed_projection_receipt_is_resumed_without_relaunch(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    output_dir = tmp_path / "screen"
+    output_dir.mkdir()
+    receipt = output_dir / "block-00-q.json"
+    receipt.write_text("{}", encoding="utf-8")
+    (output_dir / "summary.json").write_text(
+        json.dumps({"results": {"0": {"q": {"retained": True}}}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "tools.run_product_codebook_projection_free_row_screen.subprocess.run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not launch")),
+    )
+    args = SimpleNamespace(
+        blocks=(0,),
+        projections=("q",),
+        outer_iterations=1200,
+        output_dir=output_dir,
+        seed=0,
+        model=tmp_path / "model",
+        calibration_state=tmp_path / "calibration",
+        logical_weights=tmp_path / "logical",
+        down_sweep_summary=tmp_path / "down.json",
+        device="cuda:0",
+    )
+
+    assert run(args) == 0
+    summary = json.loads((output_dir / "summary.json").read_text(encoding="utf-8"))
+    assert summary["completed_arms"] == ["0:q"]

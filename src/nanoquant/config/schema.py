@@ -400,6 +400,25 @@ class BinaryFactorSearchConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class ProductCodebookConfig:
+    """Measured mixed free/product encoding policy for right sign factors."""
+
+    enabled: bool = False
+    format: str = "product-codebook-free-k16-v1"
+    layer_patterns: tuple[str, ...] = ("mlp.*",)
+    index_bits: int = 16
+    free_row_multiple: int = 32
+    minimum_coded_rows: int = 32
+    codebook_update_interval: int = 10
+    codebook_freeze_fraction: float = 0.5
+    codebook_warmup_fraction: float = 0.0
+    assignment_batch_words: int = 65_536
+    measured_option_allocation: bool = True
+    allow_free_factor_fallback: bool = True
+    flips_per_word: int = 0
+
+
+@dataclass(frozen=True, slots=True)
 class BiasCorrectionConfig:
     enabled: bool = False
     storage_dtype: DType = DType.FLOAT16
@@ -446,6 +465,7 @@ class FactorizationConfig:
     admm: ADMMConfig = field(default_factory=ADMMConfig)
     scale_fit: ScaleFitConfig = field(default_factory=ScaleFitConfig)
     binary_search: BinaryFactorSearchConfig = field(default_factory=BinaryFactorSearchConfig)
+    product_codebook: ProductCodebookConfig = field(default_factory=ProductCodebookConfig)
     bias_correction: BiasCorrectionConfig = field(default_factory=BiasCorrectionConfig)
     low_rank_patch: LowRankPatchConfig = field(default_factory=LowRankPatchConfig)
     shared_input: SharedInputFactorizationConfig = field(default_factory=SharedInputFactorizationConfig)

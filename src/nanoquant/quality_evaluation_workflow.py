@@ -74,6 +74,11 @@ def resolve_quality_evaluation_experiment(
                 if request.component_overlay is None
                 else _resolve(request.component_overlay, repository_root)
             ),
+            product_codebook_overlay=(
+                None
+                if request.product_codebook_overlay is None
+                else _resolve(request.product_codebook_overlay, repository_root)
+            ),
         ),
         _resolve(experiment.result_path, repository_root),
         experiment.resolve_model_from_config,

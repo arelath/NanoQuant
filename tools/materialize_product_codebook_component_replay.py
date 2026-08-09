@@ -6,6 +6,7 @@ import argparse
 import json
 import subprocess
 import sys
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, cast
@@ -25,6 +26,7 @@ from nanoquant.infrastructure.io_utils import atomic_write_json, hash_file
 from nanoquant.runtime import (
     PRODUCT_CODEBOOK_FORMAT_VERSION,
     ProductCodebookLayerState,
+    QuantizedLinearSpec,
     open_packed_artifact,
     open_product_codebook_artifact,
     write_product_codebook_artifact,
@@ -222,6 +224,48 @@ def fold_component_correction(
     )
 
 
+def product_replacement_spec(
+    base_spec: QuantizedLinearSpec,
+    layer: dict[str, Any],
+) -> QuantizedLinearSpec:
+    """Retain physical metadata while adopting the product candidate rank."""
+
+    rank = int(layer["rank"])
+    physical_shape = tuple(int(value) for value in layer["physical_shape"])
+    if rank <= 0 or physical_shape != (base_spec.out_features, base_spec.in_features):
+        raise ValueError("product component physical shape or rank differs from its base")
+    return replace(base_spec, rank=rank)
+
+
+def expected_replacement_bits(
+    allocation: dict[str, Any],
+    jobs: tuple[MaterializationJob, ...],
+) -> int:
+    """Return bits for entries actually replaced by the compact overlay."""
+
+    replacement_keys = {
+        (job.block, projection)
+        for job in jobs
+        for projection in job.projections
+    }
+    selections = allocation.get("selections")
+    if not isinstance(selections, list):
+        raise ValueError("component replay allocation selections are absent")
+    selected: dict[tuple[int, str], int] = {}
+    for value in selections:
+        if not isinstance(value, dict):
+            raise ValueError("component replay allocation selection is invalid")
+        key = (value.get("block"), value.get("projection"))
+        bits = value.get("bits")
+        if key in replacement_keys:
+            if key in selected or not isinstance(bits, int) or bits <= 0:
+                raise ValueError("component replay replacement selection is invalid")
+            selected[key] = bits
+    if set(selected) != replacement_keys:
+        raise ValueError("component replay allocation omits a replacement selection")
+    return sum(selected.values())
+
+
 def _assemble(
     args: argparse.Namespace,
     allocation: dict[str, Any],
@@ -259,7 +303,7 @@ def _assemble(
                     separable = source.float() * rows.reshape(-1, 1) * columns.reshape(1, -1)
                 fit_metrics = _correction_metrics(separable.to(torch.bfloat16), target)
                 state = fold_component_correction(
-                    spec=specs[packed_name],
+                    spec=product_replacement_spec(specs[packed_name], layer_value),
                     layer=layer_value,
                     tensors=_load_component_layer(component_dir, layer_value),
                     row_multiplier=rows,
@@ -277,11 +321,12 @@ def _assemble(
                 )
                 replacements.setdefault(block, []).append(state)
                 del source, target, separable
-    expected_bits = sum(int(value["bits"]) for value in allocation["selections"])
+    expected_bits = expected_replacement_bits(allocation, jobs)
     observed_bits = sum(
         state.compact_logical_bits() for states in replacements.values() for state in states
     )
-    if sum(len(states) for states in replacements.values()) != 78 or observed_bits != expected_bits:
+    expected_layers = sum(len(job.projections) for job in jobs)
+    if sum(len(states) for states in replacements.values()) != expected_layers or observed_bits != expected_bits:
         raise ValueError(
             f"component replay inventory/bits differ: layers={sum(len(v) for v in replacements.values())} "
             f"bits={observed_bits} expected={expected_bits}"

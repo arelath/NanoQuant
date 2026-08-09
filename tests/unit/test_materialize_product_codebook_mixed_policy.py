@@ -6,9 +6,12 @@ from pathlib import Path
 import pytest
 import torch
 
+from nanoquant.runtime import QuantizedLinearSpec
 from tools.materialize_product_codebook_component_replay import (
+    expected_replacement_bits,
     fit_row_multiplier,
     fit_separable_multipliers,
+    product_replacement_spec,
 )
 from tools.materialize_product_codebook_mixed_policy import (
     MaterializationJob,
@@ -228,3 +231,46 @@ def test_component_replay_recovers_exact_separable_scale_axes() -> None:
         fit_row_multiplier(base, base * expected_rows[:, None]),
         expected_rows,
     )
+
+
+def test_component_replay_uses_candidate_rank_with_base_physical_spec() -> None:
+    base = QuantizedLinearSpec(
+        "blocks.8.mlp.gate_proj",
+        "nanoquant-v1",
+        1152,
+        6912,
+        928,
+        "bfloat16",
+        "bfloat16",
+        outlier_count=2,
+        outlier_value_dtype="bfloat16",
+    )
+
+    replacement = product_replacement_spec(
+        base,
+        {"rank": 1152, "physical_shape": [6912, 1152]},
+    )
+
+    assert replacement.rank == 1152
+    assert replacement.in_features == base.in_features
+    assert replacement.out_features == base.out_features
+    assert replacement.outlier_count == base.outlier_count
+
+
+def test_component_replay_charges_only_overlay_replacements() -> None:
+    job = MaterializationJob(
+        "block-00-gate",
+        0,
+        ("gate",),
+        (("gate", 704),),
+        (367, 768),
+        _settings(),
+    )
+    allocation = {
+        "selections": [
+            {"block": 0, "projection": "q", "option": "free_words", "bits": 10},
+            {"block": 0, "projection": "gate", "option": "product", "bits": 7},
+        ]
+    }
+
+    assert expected_replacement_bits(allocation, (job,)) == 7

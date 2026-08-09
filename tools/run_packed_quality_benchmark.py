@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +35,11 @@ def _parser() -> argparse.ArgumentParser:
         type=Path,
         help="optional factor-component overlay for an unpacked committed run",
     )
+    parser.add_argument(
+        "--product-codebook-overlay",
+        type=Path,
+        help="optional product-codebook overlay for a packed artifact",
+    )
     parser.add_argument("--run-output", type=Path, required=True)
     parser.add_argument("--snapshot", type=Path, required=True)
     parser.add_argument("--source", required=True)
@@ -58,7 +64,7 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _progress(event: str, fields: dict[str, object]) -> None:
+def _progress(event: str, fields: Mapping[str, object]) -> None:
     print(json.dumps({"event": event, **fields}, sort_keys=True), flush=True)
 
 
@@ -83,6 +89,7 @@ def run(args: argparse.Namespace) -> int:
         maximum_wddm_shared_bytes=args.maximum_wddm_shared_bytes,
         packed_artifact=args.packed_artifact,
         component_overlay=args.component_overlay,
+        product_codebook_overlay=args.product_codebook_overlay,
     )
     base_result = None
     if args.base_quality is not None:
@@ -93,9 +100,12 @@ def run(args: argparse.Namespace) -> int:
             or payload.get("protocol", {}).get("wikitext_samples") != args.wikitext_samples
             or payload.get("protocol", {}).get("wikitext_sequence_length")
             != args.wikitext_sequence_length
+            or payload.get("protocol", {}).get("wikitext_batch_size")
+            != args.wikitext_batch_size
             or payload.get("protocol", {}).get("task_names")
             != list(request.task_names)
             or payload.get("protocol", {}).get("task_limit") != args.task_limit
+            or payload.get("protocol", {}).get("task_batch_size") != args.task_batch_size
         ):
             raise ValueError("reused base quality report does not match the requested protocol")
         base_result = payload.get("results", {}).get("base")

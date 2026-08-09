@@ -38,6 +38,8 @@ def test_quality_evaluation_request_rejects_ambiguous_protocols(tmp_path: Path) 
             packed_artifact=tmp_path / "packed",
             component_overlay=tmp_path / "overlay",
         )
+    with pytest.raises(ValueError, match="requires a packed artifact"):
+        replace(request, product_codebook_overlay=tmp_path / "product-overlay")
     with pytest.raises(ValueError, match="reasoning dimensions"):
         replace(
             request,

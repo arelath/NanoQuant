@@ -250,12 +250,18 @@ def run(args: argparse.Namespace) -> int:
             block_results = results.setdefault(str(block), {})
             for projection in args.projections:
                 config = PROJECTION_CONFIGS[projection]
+                output = args.output_dir / f"block-{block:02d}-{projection}.json"
+                if projection in block_results and output.is_file():
+                    print(
+                        f"skipping completed block={block} projection={projection}",
+                        flush=True,
+                    )
+                    continue
                 fixed_outliers = _read_fixed_outliers(
                     args.logical_weights,
                     block,
                     config,
                 )
-                output = args.output_dir / f"block-{block:02d}-{projection}.json"
                 summary["current_block"] = block
                 summary["current_projection"] = projection
                 summary["current_output"] = str(output.resolve())
@@ -290,6 +296,8 @@ def run(args: argparse.Namespace) -> int:
                     f"{block_key}:{projection_key}"
                     for block_key, projections in results.items()
                     for projection_key in projections
+                    if int(block_key) in args.blocks
+                    and projection_key in args.projections
                 ]
                 summary["completed_arms"] = completed
                 summary["updated_at"] = _utc_now()
@@ -308,6 +316,13 @@ def run(args: argparse.Namespace) -> int:
         raise
 
     summary["status"] = "completed"
+    summary["completed_arms"] = [
+        f"{block}:{projection}"
+        for block in args.blocks
+        for projection in args.projections
+        if projection in results.get(str(block), {})
+        and (args.output_dir / f"block-{block:02d}-{projection}.json").is_file()
+    ]
     summary.pop("current_block", None)
     summary.pop("current_projection", None)
     summary.pop("current_output", None)

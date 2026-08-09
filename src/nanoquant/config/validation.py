@@ -618,6 +618,61 @@ def validate(config: RunConfig, phase: ValidationPhase = ValidationPhase.PRE_RES
         "factorization.binary_search.one_bit_fraction",
         "must be finite and in (0, 1]",
     )
+    product_codebook = config.factorization.product_codebook
+    require(
+        product_codebook.format == "product-codebook-free-k16-v1",
+        "CFG136",
+        "factorization.product_codebook.format",
+        "must be product-codebook-free-k16-v1",
+    )
+    require(
+        bool(product_codebook.layer_patterns)
+        and len(set(product_codebook.layer_patterns)) == len(product_codebook.layer_patterns)
+        and all(bool(pattern.strip()) for pattern in product_codebook.layer_patterns),
+        "CFG137",
+        "factorization.product_codebook.layer_patterns",
+        "must contain unique non-empty patterns",
+    )
+    require(
+        product_codebook.index_bits == 16
+        and product_codebook.free_row_multiple > 0
+        and product_codebook.minimum_coded_rows > 0
+        and product_codebook.minimum_coded_rows % product_codebook.free_row_multiple == 0
+        and product_codebook.codebook_update_interval > 0
+        and product_codebook.assignment_batch_words > 0,
+        "CFG138",
+        "factorization.product_codebook",
+        "k16 widths, aligned row bounds, and search batch sizes must be valid",
+    )
+    require(
+        0.0
+        <= product_codebook.codebook_warmup_fraction
+        <= product_codebook.codebook_freeze_fraction
+        <= 1.0
+        and product_codebook.codebook_warmup_fraction < 1.0,
+        "CFG139",
+        "factorization.product_codebook",
+        "warmup/freeze fractions must satisfy 0 <= warmup <= freeze <= 1 and warmup < 1",
+    )
+    require(
+        not product_codebook.enabled
+        or (
+            config.factorization.implementation == "nanoquant_admm_product_k16"
+            and product_codebook.measured_option_allocation
+            and product_codebook.allow_free_factor_fallback
+            and product_codebook.flips_per_word == 0
+        ),
+        "CFG140",
+        "factorization.product_codebook",
+        "enabled product coding requires the measured mixed k16/no-flip implementation with free fallback",
+    )
+    require(
+        product_codebook.enabled
+        or config.factorization.implementation != "nanoquant_admm_product_k16",
+        "CFG141",
+        "factorization.implementation",
+        "nanoquant_admm_product_k16 requires product_codebook.enabled=true",
+    )
     bias = config.factorization.bias_correction
     require(
         bias.storage_dtype in {DType.FLOAT16, DType.BFLOAT16},

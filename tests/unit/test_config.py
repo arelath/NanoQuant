@@ -415,6 +415,43 @@ def test_binary_factor_search_protocol_is_typed_and_bounded() -> None:
     }
 
 
+def test_product_codebook_policy_is_typed_and_requires_matched_k16_mode() -> None:
+    base = RunConfig(ModelConfig("x"))
+    enabled = replace(
+        base,
+        factorization=replace(
+            base.factorization,
+            implementation="nanoquant_admm_product_k16",
+            product_codebook=replace(base.factorization.product_codebook, enabled=True),
+        ),
+    )
+    invalid = replace(
+        enabled,
+        factorization=replace(
+            enabled.factorization,
+            implementation="nanoquant_admm",
+            product_codebook=replace(
+                enabled.factorization.product_codebook,
+                layer_patterns=("", ""),
+                minimum_coded_rows=31,
+                codebook_warmup_fraction=0.75,
+                codebook_freeze_fraction=0.5,
+                allow_free_factor_fallback=False,
+                flips_per_word=1,
+            ),
+        ),
+    )
+
+    assert validate(enabled) == ()
+    assert from_dict(RunConfig, to_dict(enabled)) == enabled
+    assert {issue.code for issue in validate(invalid)} == {
+        "CFG137",
+        "CFG138",
+        "CFG139",
+        "CFG140",
+    }
+
+
 def test_observability_levels_are_validated_without_changing_schema() -> None:
     invalid_name = RunConfig(ModelConfig("x"), observability=ObservabilityConfig(event_level="trace"))
     assert {issue.code for issue in validate(invalid_name)} == {"OBS001"}

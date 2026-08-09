@@ -31,6 +31,7 @@ def test_packed_quality_runner_preserves_complete_default_protocol(
     args = argparse.Namespace(
         packed_artifact=tmp_path / "packed",
         component_overlay=None,
+        product_codebook_overlay=tmp_path / "product-overlay",
         run_output=tmp_path / "run",
         snapshot=tmp_path / "snapshot",
         source="fixture/model",
@@ -60,6 +61,7 @@ def test_packed_quality_runner_preserves_complete_default_protocol(
     assert request.task_batch_size == 4
     assert request.packed_artifact == args.packed_artifact
     assert request.component_overlay is None
+    assert request.product_codebook_overlay == args.product_codebook_overlay
     assert json.loads(output.read_text(encoding="utf-8")) == {"passed": True}
 
 
@@ -81,8 +83,10 @@ def test_packed_quality_runner_reuses_only_a_protocol_matched_base(
                 "protocol": {
                     "wikitext_samples": 64,
                     "wikitext_sequence_length": 128,
+                    "wikitext_batch_size": 8,
                     "task_names": list(tool.DEFAULT_TASKS),
                     "task_limit": 200,
+                    "task_batch_size": 4,
                 },
                 "results": {"base": base_result},
             }
@@ -99,6 +103,7 @@ def test_packed_quality_runner_reuses_only_a_protocol_matched_base(
     args = argparse.Namespace(
         packed_artifact=tmp_path / "packed",
         component_overlay=None,
+        product_codebook_overlay=None,
         run_output=tmp_path / "run",
         snapshot=tmp_path / "snapshot",
         source="fixture/model",

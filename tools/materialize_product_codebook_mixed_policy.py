@@ -26,11 +26,17 @@ from nanoquant.infrastructure.probe_reconstruction_cache import (
 from nanoquant.infrastructure.safetensors_io import SAFETENSORS
 
 BLOCK_COUNT = 26
-MLP_PATHS = {
+LINEAR_PATHS = {
+    "q": "self_attn.q_proj",
+    "k": "self_attn.k_proj",
+    "v": "self_attn.v_proj",
+    "o": "self_attn.o_proj",
     "gate": "mlp.gate_proj",
     "up": "mlp.up_proj",
     "down": "mlp.down_proj",
 }
+MLP_PATHS = {key: LINEAR_PATHS[key] for key in ("gate", "up", "down")}
+TRANSPOSED_PROJECTIONS = frozenset(("o", "gate", "up"))
 OPTION_PATTERN = re.compile(r"^right_product_codebook_k16_free(?P<rows>\d+)_outliers(?P<outliers>\d+)$")
 
 
@@ -148,7 +154,18 @@ def _load_source_protocol(
 
 def load_policy_jobs(allocation_path: Path) -> tuple[dict[str, Any], tuple[MaterializationJob, ...]]:
     allocation = _read_json(allocation_path)
-    if allocation.get("schema_version") not in {3, 4} or allocation.get("status") != "completed":
+    global_policy = (
+        allocation.get("schema_version") == 2
+        and allocation.get("group_count") == BLOCK_COUNT * len(LINEAR_PATHS)
+        and allocation.get("objective")
+        == "minimum global measured-unit-KL-calibrated response error"
+        and allocation.get("packed_representation", {}).get("qkv_policy")
+        == "fixed_grouped_base"
+    )
+    if (
+        not global_policy
+        and allocation.get("schema_version") not in {3, 4}
+    ) or allocation.get("status") != "completed":
         raise ValueError("mixed allocation receipt is not a completed supported result")
     if float(allocation["effective_bpw"]) > float(allocation["target_bpw"]):
         raise ValueError("mixed allocation exceeds its target BPW")
@@ -158,6 +175,9 @@ def load_policy_jobs(allocation_path: Path) -> tuple[dict[str, Any], tuple[Mater
         raise ValueError("mixed allocation input or selection inventory is invalid")
     down_dir = Path(str(inputs["down_dir"]))
     mlp_dir = Path(str(inputs["mlp_dir"]))
+    attention_dir = (
+        Path(str(inputs["attention_dir"])) if global_policy else None
+    )
     selections: dict[tuple[int, str], dict[str, Any]] = {}
     for value in selections_value:
         if not isinstance(value, dict):
@@ -168,14 +188,25 @@ def load_policy_jobs(allocation_path: Path) -> tuple[dict[str, Any], tuple[Mater
         if (
             not isinstance(block, int)
             or not 0 <= block < BLOCK_COUNT
-            or projection not in MLP_PATHS
+            or projection not in (LINEAR_PATHS if global_policy else MLP_PATHS)
             or key in selections
         ):
             raise ValueError("mixed allocation selection inventory is invalid")
         selections[cast(tuple[int, str], key)] = value
-    expected = {(block, projection) for block in range(BLOCK_COUNT) for projection in MLP_PATHS}
+    projection_paths = LINEAR_PATHS if global_policy else MLP_PATHS
+    expected = {
+        (block, projection)
+        for block in range(BLOCK_COUNT)
+        for projection in projection_paths
+    }
     if set(selections) != expected:
-        raise ValueError("mixed allocation must choose all 78 MLP matrices exactly once")
+        raise ValueError("mixed allocation must choose every expected matrix exactly once")
+    if global_policy and any(
+        selections[(block, projection)].get("option") != "free_words"
+        for block in range(BLOCK_COUNT)
+        for projection in ("q", "k", "v")
+    ):
+        raise ValueError("grouped packed QKV members cannot be replaced independently")
 
     jobs: list[MaterializationJob] = []
     for block in range(BLOCK_COUNT):
@@ -183,15 +214,19 @@ def load_policy_jobs(allocation_path: Path) -> tuple[dict[str, Any], tuple[Mater
         settings: dict[str, MaterializationSettings] = {}
         outliers: dict[str, tuple[int, ...]] = {}
         rows: dict[str, int] = {}
-        for projection in MLP_PATHS:
+        for projection in projection_paths:
             selection = selections[(block, projection)]
+            if selection.get("option") == "free_words":
+                continue
             selected_rows, outlier_count = _selected_rows(selection)
             option = cast(str, selection["option"])
-            path = (
-                down_dir / f"block-{block:02d}.json"
-                if projection == "down"
-                else mlp_dir / f"block-{block:02d}-{projection}.json"
-            )
+            if projection == "down":
+                path = down_dir / f"block-{block:02d}.json"
+            elif projection in MLP_PATHS:
+                path = mlp_dir / f"block-{block:02d}-{projection}.json"
+            else:
+                assert attention_dir is not None
+                path = attention_dir / f"block-{block:02d}-{projection}.json"
             protocol, current_settings, current_outliers = _load_source_protocol(
                 path,
                 block=block,
@@ -207,7 +242,11 @@ def load_policy_jobs(allocation_path: Path) -> tuple[dict[str, Any], tuple[Mater
             settings[projection] = current_settings
             outliers[projection] = current_outliers
             rows[projection] = selected_rows
-        if settings["gate"] == settings["up"] and outliers["gate"] == outliers["up"]:
+        if (
+            {"gate", "up"} <= settings.keys()
+            and settings["gate"] == settings["up"]
+            and outliers["gate"] == outliers["up"]
+        ):
             jobs.append(
                 MaterializationJob(
                     job_id=f"block-{block:02d}-gate-up",
@@ -229,17 +268,26 @@ def load_policy_jobs(allocation_path: Path) -> tuple[dict[str, Any], tuple[Mater
                     settings=settings[projection],
                 )
                 for projection in ("gate", "up")
+                if projection in settings
             )
-        jobs.append(
+        jobs.extend(
             MaterializationJob(
-                job_id=f"block-{block:02d}-down",
+                job_id=f"block-{block:02d}-{projection}",
                 block=block,
-                projections=("down",),
-                right_free_rows=(("down", rows["down"]),),
-                fixed_outliers=outliers["down"],
-                settings=settings["down"],
+                projections=(projection,),
+                right_free_rows=((projection, rows[projection]),),
+                fixed_outliers=outliers[projection],
+                settings=settings[projection],
             )
+            for projection in ("q", "k", "v", "o", "down")
+            if projection in settings
         )
+    selected_product_count = sum(
+        selection.get("option") != "free_words"
+        for selection in selections.values()
+    )
+    if sum(len(job.projections) for job in jobs) != selected_product_count:
+        raise ValueError("materialization jobs do not cover every product selection")
     return allocation, tuple(jobs)
 
 
@@ -344,7 +392,7 @@ def build_probe_command(
                 str(job.right_free_rows[0][1]),
             )
         )
-        if projection in {"gate", "up"}:
+        if projection in TRANSPOSED_PROJECTIONS:
             command.append("--transpose-matrix")
     else:
         raise ValueError(f"unsupported materialization projection group: {job.projections}")
@@ -371,7 +419,7 @@ def validate_job_receipt(
     if (
         payload.get("status") != "completed"
         or payload.get("blocks") != [job.block]
-        or payload.get("projections") != [MLP_PATHS[projection] for projection in job.projections]
+        or payload.get("projections") != [LINEAR_PATHS[projection] for projection in job.projections]
         or not isinstance(candidate, dict)
         or candidate.get("right_free_rows_by_projection") != job.free_rows_by_projection
         or not isinstance(fixed_outliers, dict)
@@ -416,7 +464,7 @@ def _load_cached_reconstructions(
             if (
                 identity.get("block") != job.block
                 or identity.get("projection") != projection
-                or identity.get("projection_path") != MLP_PATHS[projection]
+                or identity.get("projection_path") != LINEAR_PATHS[projection]
                 or identity.get("right_free_rows") != expected_rows
                 or identity.get("fixed_outlier_indices") != list(job.fixed_outliers)
                 or cache.key(identity) != key
@@ -425,15 +473,19 @@ def _load_cached_reconstructions(
             entry = cache.load(identity)
             if entry is None:
                 raise ValueError(f"cache entry vanished: {manifest_path}")
-            tensor_name = f"model.layers.{job.block}.{MLP_PATHS[projection]}.weight"
+            tensor_name = f"model.layers.{job.block}.{LINEAR_PATHS[projection]}.weight"
             if tensor_name in baseline:
                 raise ValueError(f"materialization repeats a tensor: {tensor_name}")
             baseline[tensor_name] = entry.baseline
             candidate[tensor_name] = entry.candidate
             cache_keys[tensor_name] = key
-    expected_count = BLOCK_COUNT * len(MLP_PATHS)
-    if len(baseline) != expected_count or set(baseline) != set(candidate):
-        raise ValueError("materialization did not recover all 78 MLP matrices")
+    expected_names = {
+        f"model.layers.{job.block}.{LINEAR_PATHS[projection]}.weight"
+        for job in jobs
+        for projection in job.projections
+    }
+    if set(baseline) != expected_names or set(baseline) != set(candidate):
+        raise ValueError("materialization did not recover every product replacement")
     return baseline, candidate, cache_keys
 
 

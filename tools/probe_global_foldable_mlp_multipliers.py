@@ -9,7 +9,7 @@ import math
 import statistics
 import time
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -47,8 +47,14 @@ from nanoquant.infrastructure.hf_calibration_dataset import load_pinned_calibrat
 from nanoquant.infrastructure.hf_language_model import load_causal_language_model
 from nanoquant.infrastructure.io_utils import atomic_workspace, atomic_write_json, hash_file
 from nanoquant.infrastructure.model_adapters import adapter_for_config
+from nanoquant.infrastructure.packed_model_loader import load_packed_model
 from nanoquant.infrastructure.safetensors_io import SAFETENSORS
 from nanoquant.kl_budget_workflow import _token_hash
+from nanoquant.runtime import (
+    OpenProductCodebookArtifact,
+    ProductCodebookLayerState,
+    write_product_codebook_artifact,
+)
 
 MLP_PATHS = ("mlp.gate_proj", "mlp.up_proj", "mlp.down_proj")
 
@@ -321,6 +327,133 @@ def _export_component_overlay(
     return {"directory": str(destination), **manifest}
 
 
+def fold_product_codebook_states(
+    artifact: OpenProductCodebookArtifact,
+    installed: InstalledMultipliers,
+) -> dict[int, tuple[ProductCodebookLayerState, ...]]:
+    """Map folded physical MLP terms back into compact factorization orientation."""
+
+    replacements: dict[int, list[ProductCodebookLayerState]] = defaultdict(list)
+    for entry in artifact.manifest.layers:
+        prefix = f"blocks.{entry.block}."
+        if not entry.spec.name.startswith(prefix):
+            raise ValueError(f"product-codebook layer name differs from block: {entry.spec.name}")
+        path = entry.spec.name.removeprefix(prefix)
+        wrapper = installed.wrappers.get((entry.block, path))
+        if wrapper is None:
+            raise ValueError(f"product-codebook multiplier target is absent: {entry.spec.name}")
+        module = wrapper.base
+        state = artifact.load_compact_layer(entry.spec.name)
+        if state.factorization_transposed:
+            factor_scale_pre = module.scale_post
+            factor_scale_post = module.scale_pre
+        else:
+            factor_scale_pre = module.scale_pre
+            factor_scale_post = module.scale_post
+        if (state.outlier_values is None) != (module.outlier_values is None):
+            raise ValueError(f"product-codebook outlier terms differ: {entry.spec.name}")
+        replacements[entry.block].append(
+            replace(
+                state,
+                factor_scale_pre=factor_scale_pre.detach()
+                .to(dtype=state.factor_scale_pre.dtype, device="cpu")
+                .contiguous(),
+                factor_scale_mid=module.scale_mid.detach()
+                .to(dtype=state.factor_scale_mid.dtype, device="cpu")
+                .contiguous(),
+                factor_scale_post=factor_scale_post.detach()
+                .to(dtype=state.factor_scale_post.dtype, device="cpu")
+                .contiguous(),
+                outlier_values=(
+                    None
+                    if state.outlier_values is None
+                    else cast(torch.Tensor, module.outlier_values)
+                    .detach()
+                    .to(dtype=state.outlier_values.dtype, device="cpu")
+                    .contiguous()
+                ),
+            )
+        )
+    return {block: tuple(states) for block, states in replacements.items()}
+
+
+def product_codebook_discrete_payload_equal(
+    first: ProductCodebookLayerState,
+    second: ProductCodebookLayerState,
+) -> bool:
+    """Return whether every bit-defining, non-tunable product term is unchanged."""
+
+    return (
+        first.spec == second.spec
+        and first.factorization_transposed == second.factorization_transposed
+        and first.free_rows == second.free_rows
+        and torch.equal(first.factor_left_words, second.factor_left_words)
+        and torch.equal(first.factor_right_free_words, second.factor_right_free_words)
+        and torch.equal(first.factor_right_coded_payload, second.factor_right_coded_payload)
+        and torch.equal(first.first_half_words, second.first_half_words)
+        and torch.equal(first.second_half_words, second.second_half_words)
+        and (
+            (first.outlier_indices is None and second.outlier_indices is None)
+            or (
+                first.outlier_indices is not None
+                and second.outlier_indices is not None
+                and torch.equal(first.outlier_indices, second.outlier_indices)
+            )
+        )
+    )
+
+
+def _export_product_codebook_overlay(
+    destination: Path,
+    source: OpenProductCodebookArtifact,
+    replacements: dict[int, tuple[ProductCodebookLayerState, ...]],
+    *,
+    protocol: dict[str, object],
+) -> dict[str, object]:
+    by_name = {
+        state.spec.name: state for states in replacements.values() for state in states
+    }
+    if set(by_name) != source.replacement_names:
+        raise ValueError("distilled product-codebook layer inventory differs")
+    if any(
+        not product_codebook_discrete_payload_equal(
+            source.load_compact_layer(name), by_name[name]
+        )
+        for name in sorted(by_name)
+    ):
+        raise ValueError("distillation modified a discrete product-codebook payload")
+    replay = {key: json.loads(value) for key, value in source.manifest.replay}
+    replay["scale_axis_distillation"] = protocol
+    opened = write_product_codebook_artifact(
+        destination,
+        source.base,
+        replacements,
+        allocation_sha256=source.manifest.allocation_sha256,
+        allocation_total_bits=source.manifest.allocation_total_bits,
+        effective_bpw=source.manifest.effective_bpw,
+        correction_source_sha256=hash_file(source.root / "components.safetensors"),
+        replay=replay,
+    )
+    if (
+        opened.manifest.compact_mlp_bits != source.manifest.compact_mlp_bits
+        or opened.manifest.allocation_total_bits != source.manifest.allocation_total_bits
+        or opened.manifest.effective_bpw != source.manifest.effective_bpw
+    ):
+        raise ValueError("distillation changed the product-codebook bit budget")
+    return {
+        "directory": str(opened.root),
+        "descriptor_sha256": hash_file(
+            opened.root / "nanoquant-product-codebook-overlay.json"
+        ),
+        "tensor_sha256": opened.manifest.tensor_sha256,
+        "layer_count": opened.manifest.layer_count,
+        "compact_mlp_bits": opened.manifest.compact_mlp_bits,
+        "allocation_total_bits": opened.manifest.allocation_total_bits,
+        "effective_bpw": opened.manifest.effective_bpw,
+        "discrete_payload_unchanged": True,
+    }
+
+
 def _decoder_blocks_from_names(tensors: dict[str, torch.Tensor]) -> set[int]:
     return {int(name.split(".")[2]) for name in tensors}
 
@@ -505,8 +638,11 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-output", type=Path, required=True)
     parser.add_argument("--snapshot", type=Path, required=True)
-    parser.add_argument("--component-overlay", type=Path, required=True)
-    parser.add_argument("--output-component-overlay", type=Path, required=True)
+    parser.add_argument("--component-overlay", type=Path)
+    parser.add_argument("--output-component-overlay", type=Path)
+    parser.add_argument("--base-packed", type=Path)
+    parser.add_argument("--product-codebook-overlay", type=Path)
+    parser.add_argument("--output-product-codebook-overlay", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--model-revision", default=PINNED_MODEL_REVISION)
     parser.add_argument("--device", default="cuda:0")
@@ -529,6 +665,8 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def run(args: argparse.Namespace) -> int:
+    component_mode = args.component_overlay is not None
+    product_mode = args.product_codebook_overlay is not None
     if (
         args.epochs <= 0
         or args.learning_rate <= 0
@@ -541,6 +679,13 @@ def run(args: argparse.Namespace) -> int:
         or args.monitor_topk_tokens <= 0
         or (args.maximum_steps_per_epoch is not None and args.maximum_steps_per_epoch <= 0)
         or (args.monitor_every_steps is not None and args.monitor_every_steps <= 0)
+        or component_mode == product_mode
+        or component_mode != (args.output_component_overlay is not None)
+        or product_mode
+        != (
+            args.base_packed is not None
+            and args.output_product_codebook_overlay is not None
+        )
     ):
         raise ValueError("global foldable multiplier protocol is invalid")
     started = time.perf_counter()
@@ -587,18 +732,41 @@ def run(args: argparse.Namespace) -> int:
 
     training_tokens = _load_calibration(args.run_output)
     training_cache = _load_training_cache(args.run_output, epochs=args.epochs)
-    print("loading factorized student and six-block initialization", flush=True)
-    loaded = load_frozen_run(
-        args.run_output,
-        args.snapshot,
-        source_name=MODEL_SOURCE,
-        revision=args.model_revision,
-        device=device,
-        backend="factorized",
-        use_global_tuning=True,
-        component_overlay=args.component_overlay,
-    )
-    student = loaded.model
+    if product_mode:
+        print("loading packed product-codebook student", flush=True)
+        loaded_packed = load_packed_model(
+            args.base_packed,
+            args.run_output,
+            args.snapshot,
+            source_name=MODEL_SOURCE,
+            revision=args.model_revision,
+            device=device,
+            backend="factorized",
+            use_global_tuning=True,
+            product_codebook_overlay=args.product_codebook_overlay,
+        )
+        if loaded_packed.product_codebook is None:
+            raise ValueError("packed product-codebook student did not retain its overlay")
+        student = loaded_packed.model
+        loaded_identity = loaded_packed.identity
+        loaded_global_tuning = loaded_packed.global_tuning
+        product_artifact = loaded_packed.product_codebook
+    else:
+        print("loading factorized student and component initialization", flush=True)
+        loaded = load_frozen_run(
+            args.run_output,
+            args.snapshot,
+            source_name=MODEL_SOURCE,
+            revision=args.model_revision,
+            device=device,
+            backend="factorized",
+            use_global_tuning=True,
+            component_overlay=args.component_overlay,
+        )
+        student = loaded.model
+        loaded_identity = loaded.identity
+        loaded_global_tuning = loaded.global_tuning
+        product_artifact = None
     cast(Any, student).config.use_cache = False
     installed = install_global_mlp_multipliers(student)
     for parameter in student.parameters():
@@ -774,18 +942,44 @@ def run(args: argparse.Namespace) -> int:
         token_chunk_size=monitor_config.token_chunk_size,
     )
     frozen_identity = {
-        "model_hash": loaded.identity.model_hash,
-        "config_hash": loaded.identity.config_hash,
-        "plan_hash": loaded.identity.plan_hash,
+        "model_hash": loaded_identity.model_hash,
+        "config_hash": loaded_identity.config_hash,
+        "plan_hash": loaded_identity.plan_hash,
     }
-    overlay = _export_component_overlay(
-        args.output_component_overlay,
-        tensors,
-        frozen_identity=frozen_identity,
-        global_tuning=loaded.global_tuning,
-        source_overlay=args.component_overlay,
-        replaced_bytes=replaced_bytes,
-    )
+    distillation_protocol = {
+        "epochs": args.epochs,
+        "steps": step,
+        "selected_epoch": selected_checkpoint["epoch"],
+        "selected_steps": selected_checkpoint["steps"],
+        "learning_rate": args.learning_rate,
+        "identity_penalty": args.identity_penalty,
+        "gradient_clip": args.gradient_clip,
+        "multiplier_limit": args.multiplier_limit,
+        "teacher_objective": "top_k",
+        "top_k": 64,
+    }
+    if product_artifact is None:
+        assert args.output_component_overlay is not None
+        assert args.component_overlay is not None
+        overlay = _export_component_overlay(
+            args.output_component_overlay,
+            tensors,
+            frozen_identity=frozen_identity,
+            global_tuning=loaded_global_tuning,
+            source_overlay=args.component_overlay,
+            replaced_bytes=replaced_bytes,
+        )
+        overlay_kind = "component_overlay"
+    else:
+        assert args.output_product_codebook_overlay is not None
+        replacements = fold_product_codebook_states(product_artifact, installed)
+        overlay = _export_product_codebook_overlay(
+            args.output_product_codebook_overlay,
+            product_artifact,
+            replacements,
+            protocol=distillation_protocol,
+        )
+        overlay_kind = "product_codebook_overlay"
     report_checkpoints = [
         {key: value for key, value in checkpoint.items() if key != "state"} for checkpoint in checkpoints
     ]
@@ -794,8 +988,18 @@ def run(args: argparse.Namespace) -> int:
         "role": "analysis-only global foldable MLP multiplier tuning",
         "source": {
             "run_output": str(args.run_output),
-            "component_overlay": str(args.component_overlay),
-            "global_tuning": None if loaded.global_tuning is None else to_dict(loaded.global_tuning),
+            "component_overlay": (
+                None if args.component_overlay is None else str(args.component_overlay)
+            ),
+            "base_packed": None if args.base_packed is None else str(args.base_packed),
+            "product_codebook_overlay": (
+                None
+                if args.product_codebook_overlay is None
+                else str(args.product_codebook_overlay)
+            ),
+            "global_tuning": (
+                None if loaded_global_tuning is None else to_dict(loaded_global_tuning)
+            ),
             "frozen_identity": frozen_identity,
         },
         "protocol": {
@@ -836,7 +1040,7 @@ def run(args: argparse.Namespace) -> int:
             "unfolded_monitor": unfolded_monitor,
             "folded_monitor": folded_monitor,
         },
-        "component_overlay": overlay,
+        overlay_kind: overlay,
         "elapsed_seconds": time.perf_counter() - started,
     }
     atomic_write_json(args.output, report)
