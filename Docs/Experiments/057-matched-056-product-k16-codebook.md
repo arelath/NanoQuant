@@ -66,3 +66,46 @@ the unchanged 800-iteration schedule. CPU/tiny tests prove constraint gradients,
 plan allocation, exact bit accounting, and exact packed replay. The real CUDA
 launch remains pending the complete repository
 validation and single-worker/device safety check.
+
+## Follow-up: rate-matched INT8 outlier expansion
+
+The completed, globally distilled Experiment 057 state was screened without
+changing its committed factors or artifacts. The analysis replaced the seven
+BF16 outlier columns on every `mlp.down_proj` with symmetric per-column INT8
+values and BF16 scales. The original 129,115-bit sidecar per down projection
+funds thirteen INT8 columns (the seven existing columns plus six correction
+columns) in 120,185 bits, including 16 scale bits and the existing logical index
+width per column. Across all 26 down projections this reduces the compared
+sidecar from 3,356,990 to 3,124,810 bits.
+
+Selection is decisive. Choosing the six additions by raw final-weight residual
+reduced aggregate down-projection reconstruction error by 0.158%, but worsened
+held-out teacher KL by another 0.00510 nats/token after the INT8 conversion.
+Choosing them with the retained calibration-weighted error instead produced the
+opposite result on eight held-out WikiText validation sequences (4,088 predicted
+tokens):
+
+| Arm | NLL | Teacher KL (nats/token) |
+| --- | ---: | ---: |
+| 057 BF16, seven columns | 4.48514 | 1.89485 |
+| INT8, same seven columns | 4.49704 | 1.90876 |
+| INT8, thirteen calibration-weighted columns | 4.43529 | 1.83533 |
+
+The rate-matched weighted arm improved NLL by 0.04986 (1.11%) and KL by
+0.05951 (3.14%) relative to the BF16 057 state. Paired 95% bootstrap intervals
+were `[-0.06180, -0.03749]` for NLL and `[-0.06622, -0.05145]` for KL; every
+evaluated sequence improved. Against the same-seven INT8 control, the expanded
+arm improved KL by 0.07342 with interval `[-0.08101, -0.06605]`.
+
+This is promising screening evidence, not a promotion result. The corrections
+were applied as dense replay overlays after 057 distillation and selected from
+the retained corrected-CCE calibration profile. A resident experiment must
+make the selection before tuning/distillation, charge the INT8 scale tensors,
+persist the added columns, and extend the product-codebook packed format/runtime
+because its current v1 layout rejects outlier scales. It then needs the full
+unchanged 057 quality protocol. The retained evidence is:
+
+- `evidence/057/int8-outlier-down-screen-validation-offset32-samples8.json`
+  (raw-residual negative control);
+- `evidence/057/int8-outlier-down-screen-fisher-validation-offset32-samples8.json`
+  (calibration-weighted positive screen).
