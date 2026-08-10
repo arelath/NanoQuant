@@ -9,12 +9,15 @@ from nanoquant.domain.codebook_payload_search import (
     SignWordPayloadSearchConfig,
     SignWordPayloadSearchResult,
     _best_corrected_payload_candidates,
+    _best_product_payload_candidates,
     refine_sign_word_payloads,
 )
 from nanoquant.domain.scale_fit import reconstruct
 from nanoquant.domain.sign_word_codebook import (
     FullSignCodebook,
+    ProductSignCodebook,
     apply_word_flips,
+    decode_product_codebook,
     decode_sign_codebook,
 )
 
@@ -61,6 +64,39 @@ def test_corrected_payload_candidate_matches_brute_force() -> None:
         assert float(costs[row]) == pytest.approx(expected[0], abs=2e-5)
         assert int(indices[row]) == expected[1]
         assert tuple(sorted(positions[row].tolist())) == expected[2]
+
+
+def test_product_payload_candidate_matches_brute_force() -> None:
+    generator = torch.Generator().manual_seed(23)
+    linear = torch.randn((3, 32), generator=generator)
+    quadratic = torch.rand((3, 32), generator=generator) + 0.1
+    current = torch.randint(0, 2, (3, 32), generator=generator).float().mul_(2).sub_(1)
+    first = torch.randint(0, 2, (4, 16), generator=generator).float().mul_(2).sub_(1)
+    second = torch.randint(0, 2, (4, 16), generator=generator).float().mul_(2).sub_(1)
+    codebook = ProductSignCodebook(4, first, second)
+
+    costs, indices = _best_product_payload_candidates(
+        linear,
+        quadratic,
+        current,
+        codebook,
+        table_chunk_size=2,
+    )
+
+    for row in range(current.shape[0]):
+        brute: list[tuple[float, int]] = []
+        for second_index in range(second.shape[0]):
+            for first_index in range(first.shape[0]):
+                candidate = torch.cat((first[first_index], second[second_index]))
+                delta = candidate - current[row]
+                change = float(
+                    (-2 * linear[row] * delta + quadratic[row] * delta.square()).sum()
+                )
+                combined = first_index | (second_index << 2)
+                brute.append((change, combined))
+        expected = min(brute)
+        assert float(costs[row]) == pytest.approx(expected[0], abs=2e-5)
+        assert int(indices[row]) == expected[1]
 
 
 def test_free_word_payload_search_is_monotonic() -> None:
@@ -148,6 +184,47 @@ def test_corrected_payload_search_stays_decodable_and_improves() -> None:
         decode_sign_codebook(result.right_indices, codebook, 32),
         result.right_flip_positions,
     )
+    torch.testing.assert_close(decoded, result.right_binary)
+
+
+def test_product_payload_search_stays_decodable_and_improves() -> None:
+    alternating = torch.arange(16).remainder(2).float().mul(2).sub(1)
+    first = torch.stack((torch.ones(16), -torch.ones(16), alternating, -alternating))
+    second = torch.stack((alternating, -alternating, torch.ones(16), -torch.ones(16)))
+    codebook = ProductSignCodebook(4, first, second)
+    initial_indices = torch.tensor([[0], [5]], dtype=torch.int32)
+    desired_indices = torch.tensor([[10], [15]], dtype=torch.int32)
+    initial_right = decode_product_codebook(initial_indices, codebook, 32)
+    desired_right = decode_product_codebook(desired_indices, codebook, 32)
+    left = torch.tensor([[1.0, 1.0], [1.0, -1.0], [-1.0, 1.0]])
+    target = reconstruct(
+        left,
+        desired_right,
+        torch.ones(32),
+        torch.tensor([0.8, 1.2]),
+        torch.tensor([1.1, 0.9, 1.3]),
+    )
+
+    result = refine_sign_word_payloads(
+        target,
+        left,
+        initial_right,
+        torch.ones(32),
+        torch.ones(2),
+        torch.ones(3),
+        torch.ones(32),
+        torch.ones(3),
+        free_rows=0,
+        codebook=codebook,
+        right_indices=initial_indices,
+        right_flip_positions=None,
+        config=_config(),
+    )
+
+    assert result.after_error < result.before_error
+    assert result.right_indices is not None
+    assert result.right_flip_positions is None
+    decoded = decode_product_codebook(result.right_indices, codebook, 32)
     torch.testing.assert_close(decoded, result.right_binary)
 
 

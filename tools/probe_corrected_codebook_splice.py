@@ -388,7 +388,7 @@ def _payload_search_factors(
     output_importance: torch.Tensor,
     *,
     free_rows: int,
-    codebook: FullSignCodebook | None,
+    codebook: FullSignCodebook | ProductSignCodebook | None,
     right_indices: torch.Tensor | None,
     right_flip_positions: torch.Tensor | None,
     functional_fit_inputs: torch.Tensor | None,
@@ -1655,8 +1655,8 @@ def run(args: argparse.Namespace) -> int:
         raise ValueError("candidate rank/free-row configuration is invalid")
     if args.payload_search and not args.binary_search:
         raise ValueError("payload search requires the matched binary-search control")
-    if args.codebook_mode in {"product", "linear"} and args.payload_search:
-        raise ValueError("payload search does not support compact codebooks")
+    if args.codebook_mode == "linear" and args.payload_search:
+        raise ValueError("payload search does not support linear codebooks")
     if args.functional_payload_search and not args.payload_search:
         raise ValueError("functional payload search requires payload search")
     if (
@@ -2305,9 +2305,10 @@ def run(args: argparse.Namespace) -> int:
                     )
                 if args.payload_search:
                     if not isinstance(
-                        candidate_factors.right_codebook, FullSignCodebook
+                        candidate_factors.right_codebook,
+                        (FullSignCodebook, ProductSignCodebook),
                     ):
-                        raise ValueError("payload splice requires one full codebook")
+                        raise ValueError("payload splice requires a supported codebook")
                     candidate_payload, candidate_payload_metrics = (
                         _payload_search_factors(
                             args,

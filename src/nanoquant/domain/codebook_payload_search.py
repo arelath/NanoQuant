@@ -1,4 +1,4 @@
-"""Exact-objective coordinate search over free and corrected-code sign words."""
+"""Exact-objective coordinate search over free and codebook sign words."""
 
 from __future__ import annotations
 
@@ -10,7 +10,9 @@ import torch
 from .scale_fit import fit_scales, reconstruct
 from .sign_word_codebook import (
     FullSignCodebook,
+    ProductSignCodebook,
     apply_word_flips,
+    decode_product_codebook,
     decode_sign_codebook,
 )
 
@@ -174,27 +176,111 @@ def _best_corrected_payload_candidates(
     return best_cost, best_index, best_positions.to(torch.int8)
 
 
+def _best_product_payload_candidates(
+    linear: torch.Tensor,
+    quadratic: torch.Tensor,
+    current: torch.Tensor,
+    codebook: ProductSignCodebook,
+    *,
+    table_chunk_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return the exact best Cartesian-product codeword for each word.
+
+    The weighted coordinate objective is separable across columns.  The best
+    32-sign Cartesian product is therefore exactly the independently best
+    entry from each 16-sign half table; no 65,536-pair materialization is
+    needed for a k16 product code.
+    """
+
+    if linear.shape != quadratic.shape or linear.shape != current.shape:
+        raise ValueError("payload candidate tensors must share one shape")
+    if linear.ndim != 2 or linear.shape[1] != 32:
+        raise ValueError("payload candidates require batches of 32-sign words")
+    if table_chunk_size <= 0:
+        raise ValueError("payload search table settings are invalid")
+
+    def best_half(
+        half_linear: torch.Tensor,
+        half_quadratic: torch.Tensor,
+        half_current: torch.Tensor,
+        table: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        flip_cost = 4.0 * (
+            half_linear.float() * half_current.float() + half_quadratic.float()
+        )
+        weighted_current = half_current.float() * flip_cost
+        summed = flip_cost.sum(dim=1)
+        best_cost = torch.full(
+            (half_linear.shape[0],),
+            torch.inf,
+            dtype=torch.float32,
+            device=linear.device,
+        )
+        best_index = torch.zeros(
+            half_linear.shape[0], dtype=torch.int64, device=linear.device
+        )
+        for start in range(0, table.shape[0], table_chunk_size):
+            stop = min(table.shape[0], start + table_chunk_size)
+            costs = 0.5 * (
+                summed[:, None]
+                - weighted_current @ table[start:stop].float().mT
+            )
+            local_cost, local_index = costs.min(dim=1)
+            improved = local_cost < best_cost
+            best_cost[improved] = local_cost[improved]
+            best_index[improved] = local_index[improved] + start
+        return best_cost, best_index
+
+    first_cost, first_index = best_half(
+        linear[:, :16], quadratic[:, :16], current[:, :16], codebook.first
+    )
+    second_cost, second_index = best_half(
+        linear[:, 16:], quadratic[:, 16:], current[:, 16:], codebook.second
+    )
+    half_bits = codebook.index_bits // 2
+    indices = first_index.bitwise_or(second_index.bitwise_left_shift(half_bits))
+    return first_cost + second_cost, indices
+
+
 def _decode_candidate_word(
-    table: torch.Tensor,
+    codebook: FullSignCodebook | ProductSignCodebook,
     index: int,
-    positions: torch.Tensor,
+    positions: torch.Tensor | None,
 ) -> torch.Tensor:
-    candidate = table[index].clone()
+    if isinstance(codebook, ProductSignCodebook):
+        half_bits = codebook.index_bits // 2
+        mask = (1 << half_bits) - 1
+        return torch.cat(
+            (
+                codebook.first[index & mask],
+                codebook.second[index >> half_bits],
+            )
+        )
+    if positions is None:
+        raise ValueError("corrected-code candidate requires correction positions")
+    candidate = codebook.entries[index].clone()
     candidate[positions.to(torch.int64)] *= -1
     return candidate
 
 
 def _validate_payload(
     right: torch.Tensor,
-    codebook: FullSignCodebook,
+    codebook: FullSignCodebook | ProductSignCodebook,
     indices: torch.Tensor,
-    flip_positions: torch.Tensor,
+    flip_positions: torch.Tensor | None,
     free_rows: int,
 ) -> None:
     columns = right.shape[1]
     padded_columns = math.ceil(columns / 32) * 32
-    decoded = decode_sign_codebook(indices, codebook, padded_columns)[:, :columns]
-    decoded = apply_word_flips(decoded, flip_positions)
+    if isinstance(codebook, ProductSignCodebook):
+        if flip_positions is not None:
+            raise ValueError("product-code payload must not store correction positions")
+        decoded = decode_product_codebook(indices, codebook, padded_columns)[:, :columns]
+    else:
+        if flip_positions is None:
+            raise ValueError("corrected-code payload requires correction positions")
+        decoded = decode_sign_codebook(indices, codebook, padded_columns)[:, :columns]
+        decoded = apply_word_flips(decoded, flip_positions)
     if not torch.equal(decoded.to(right.dtype), right[free_rows:]):
         raise ValueError("codebook payload does not decode to the supplied factor")
 
@@ -210,7 +296,7 @@ def refine_sign_word_payloads(
     output_importance: torch.Tensor,
     *,
     free_rows: int,
-    codebook: FullSignCodebook | None,
+    codebook: FullSignCodebook | ProductSignCodebook | None,
     right_indices: torch.Tensor | None,
     right_flip_positions: torch.Tensor | None,
     config: SignWordPayloadSearchConfig,
@@ -220,8 +306,8 @@ def refine_sign_word_payloads(
     """Refine right-factor words without changing their stored representation.
 
     Free rows receive their exact best arbitrary 32-sign coordinate proposal.
-    Coded rows evaluate every table entry and the best fixed-count correction
-    positions. The highest-gain bounded proposals are rescored sequentially,
+    Coded rows evaluate every full-table entry plus fixed-count corrections,
+    or both halves of a Cartesian-product table. The highest-gain bounded proposals are rescored sequentially,
     followed by a common full scale refit and exact outer-pass rollback.
     """
 
@@ -274,7 +360,7 @@ def refine_sign_word_payloads(
         if free_rows != rank or right_indices is not None or right_flip_positions is not None:
             raise ValueError("free-word search must expose every row and omit payload metadata")
         corrections_per_word = 0
-    else:
+    elif isinstance(codebook, FullSignCodebook):
         if (
             free_rows >= rank
             or right_indices is None
@@ -290,6 +376,14 @@ def refine_sign_word_payloads(
         ) != (expected_rows, words):
             raise ValueError("corrected-code payload metadata has the wrong shape")
         corrections_per_word = right_flip_positions.shape[2]
+    else:
+        if free_rows >= rank or right_indices is None or right_flip_positions is not None:
+            raise ValueError("product-code search requires indices and no corrections")
+        words = math.ceil(target.shape[1] / 32)
+        expected_rows = rank - free_rows
+        if tuple(right_indices.shape) != (expected_rows, words):
+            raise ValueError("product-code payload metadata has the wrong shape")
+        corrections_per_word = 0
 
     target32 = target.detach().float()
     left = left_binary.detach().float()
@@ -304,7 +398,7 @@ def refine_sign_word_payloads(
         None if right_flip_positions is None else right_flip_positions.detach().clone()
     )
     if codebook is not None:
-        assert indices is not None and positions is not None
+        assert indices is not None
         _validate_payload(right, codebook, indices, positions, free_rows)
 
     prediction = reconstruct(left, right, pre, mid, post).float()
@@ -408,11 +502,12 @@ def refine_sign_word_payloads(
             coded_indices = torch.empty(
                 coded_words, dtype=torch.int64, device=target.device
             )
-            coded_positions = torch.empty(
-                (coded_words, corrections_per_word),
-                dtype=torch.int8,
-                device=target.device,
-            )
+            if isinstance(codebook, FullSignCodebook):
+                coded_positions = torch.empty(
+                    (coded_words, corrections_per_word),
+                    dtype=torch.int8,
+                    device=target.device,
+                )
             flat_linear = padded_linear[free_rows:].reshape(-1, 32)
             flat_quadratic = padded_quadratic[free_rows:].reshape(-1, 32)
             flat_right = padded_right[free_rows:].reshape(-1, 32)
@@ -421,8 +516,16 @@ def refine_sign_word_payloads(
             )
             for start in range(0, coded_words, config.candidate_batch_words):
                 stop = min(coded_words, start + config.candidate_batch_words)
-                batch_cost, batch_indices, batch_positions = (
-                    _best_corrected_payload_candidates(
+                if isinstance(codebook, ProductSignCodebook):
+                    batch_cost, batch_indices = _best_product_payload_candidates(
+                        flat_linear[start:stop],
+                        flat_quadratic[start:stop],
+                        flat_right[start:stop],
+                        codebook,
+                        table_chunk_size=config.table_chunk_size,
+                    )
+                else:
+                    batch_cost, batch_indices, batch_positions = _best_corrected_payload_candidates(
                         flat_linear[start:stop],
                         flat_quadratic[start:stop],
                         flat_right[start:stop],
@@ -430,12 +533,16 @@ def refine_sign_word_payloads(
                         corrections_per_word=corrections_per_word,
                         table_chunk_size=config.table_chunk_size,
                     )
-                )
+                    assert coded_positions is not None
+                    coded_positions[start:stop] = batch_positions
                 flat_costs[start:stop] = batch_cost
                 coded_indices[start:stop] = batch_indices
-                coded_positions[start:stop] = batch_positions
             costs[free_rows:] = flat_costs.reshape(coded_rows, words)
-            codebook_patterns_evaluated += coded_words * codebook.entry_count
+            codebook_patterns_evaluated += coded_words * (
+                codebook.first.shape[0] + codebook.second.shape[0]
+                if isinstance(codebook, ProductSignCodebook)
+                else codebook.entry_count
+            )
 
         candidate_words_evaluated += rank * words
         available = min(config.max_words_per_pass, costs.numel())
@@ -468,12 +575,12 @@ def refine_sign_word_payloads(
                     candidate[free_flip_mask[component, word]] *= -1
                 else:
                     assert codebook is not None
-                    assert coded_indices is not None and coded_positions is not None
+                    assert coded_indices is not None
                     coded_flat = (component - free_rows) * words + word
                     candidate = _decode_candidate_word(
-                        codebook.entries,
+                        codebook,
                         int(coded_indices[coded_flat]),
-                        coded_positions[coded_flat],
+                        None if coded_positions is None else coded_positions[coded_flat],
                     )
                 delta = candidate[: stop - start] - current
                 if not bool(delta.any()):
@@ -524,12 +631,12 @@ def refine_sign_word_payloads(
                 candidate[free_flip_mask[component, word]] *= -1
             else:
                 assert codebook is not None
-                assert coded_indices is not None and coded_positions is not None
+                assert coded_indices is not None
                 coded_flat = (component - free_rows) * words + word
                 candidate = _decode_candidate_word(
-                    codebook.entries,
+                    codebook,
                     int(coded_indices[coded_flat]),
-                    coded_positions[coded_flat],
+                    None if coded_positions is None else coded_positions[coded_flat],
                 )
             candidate = candidate[: stop - start]
             delta = candidate - current
@@ -596,11 +703,12 @@ def refine_sign_word_payloads(
                 fit_error = float(fit_residual.square().sum())
                 held_error = float(held_residual.square().sum())
             if component >= free_rows:
-                assert indices is not None and positions is not None
-                assert coded_indices is not None and coded_positions is not None
+                assert indices is not None and coded_indices is not None
                 coded_flat = (component - free_rows) * words + word
                 indices[component - free_rows, word] = coded_indices[coded_flat]
-                positions[component - free_rows, word] = coded_positions[coded_flat]
+                if positions is not None:
+                    assert coded_positions is not None
+                    positions[component - free_rows, word] = coded_positions[coded_flat]
             pass_accepted += 1
             pass_sign_updates += int((delta != 0).sum())
 
@@ -681,7 +789,7 @@ def refine_sign_word_payloads(
         accepted_outer_passes += 1
 
     if codebook is not None:
-        assert indices is not None and positions is not None
+        assert indices is not None
         _validate_payload(right, codebook, indices, positions, free_rows)
     return SignWordPayloadSearchResult(
         right.to(right_binary.dtype),
