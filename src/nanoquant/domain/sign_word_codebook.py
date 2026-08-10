@@ -2,9 +2,9 @@
 
 The production format stores one bit per sign.  This module supplies a bounded
 research implementation of fixed-width codebook alternatives without changing
-any persisted or runtime contract.  It includes Cartesian-product, full-table,
-and compact learned GF(2) linear codes with tractable assignment on a real
-Gemma matrix.
+any persisted or runtime contract.  It includes Cartesian-product,
+residual-product, full-table, and compact learned GF(2) linear codes with
+tractable assignment on a real Gemma matrix.
 """
 
 from __future__ import annotations
@@ -49,6 +49,33 @@ class ProductSignCodebook:
             raise ValueError(f"half-codebook shapes must both be {expected}")
         if self.first.device != self.second.device:
             raise ValueError("half-codebooks must share one device")
+        for table in (self.first, self.second):
+            if not torch.all((table == 1) | (table == -1)):
+                raise ValueError("codebook entries must be signs")
+
+    @property
+    def entry_count(self) -> int:
+        return 1 << self.index_bits
+
+
+@dataclass(frozen=True, slots=True)
+class ResidualProductSignCodebook:
+    """Two full-word tables combined by elementwise sign multiplication."""
+
+    index_bits: int
+    first: torch.Tensor
+    second: torch.Tensor
+
+    def __post_init__(self) -> None:
+        if self.index_bits <= 0 or self.index_bits % 2:
+            raise ValueError(
+                "residual-product index width must be positive and even"
+            )
+        expected = (1 << (self.index_bits // 2), 32)
+        if tuple(self.first.shape) != expected or tuple(self.second.shape) != expected:
+            raise ValueError(f"residual-product table shapes must both be {expected}")
+        if self.first.device != self.second.device:
+            raise ValueError("residual-product tables must share one device")
         for table in (self.first, self.second):
             if not torch.all((table == 1) | (table == -1)):
                 raise ValueError("codebook entries must be signs")
@@ -138,6 +165,7 @@ class BankedFullSignCodebook:
 
 SignCodebook = (
     ProductSignCodebook
+    | ResidualProductSignCodebook
     | LinearSignCodebook
     | FullSignCodebook
     | BankedFullSignCodebook
@@ -157,6 +185,9 @@ class SignWordCodebookADMMResult:
     right_flip_positions: torch.Tensor | None
     left_free_rows: int
     right_free_rows: int
+    right_free_row_permutation: torch.Tensor | None = None
+    right_free_row_scores: torch.Tensor | None = None
+    right_free_row_selection_changes: int = 0
 
 
 def sign_word_codebook_bit_cost(
@@ -541,6 +572,40 @@ def maximum_mixed_right_product_free_rows_for_budget(
     return accepted
 
 
+def mixed_right_residual_product_codebook_bit_cost(
+    out_features: int,
+    in_features: int,
+    rank: int,
+    *,
+    right_free_rows: int,
+    right_index_width: int,
+    scale_width: int = 16,
+    word_width: int = 32,
+    free_row_count_bits: int = 16,
+) -> SignWordCodebookCost:
+    """Charge mixed V encoded by two multiplicative full-word sign tables."""
+
+    base = mixed_right_product_codebook_bit_cost(
+        out_features,
+        in_features,
+        rank,
+        right_free_rows=right_free_rows,
+        right_index_width=right_index_width,
+        scale_width=scale_width,
+        word_width=word_width,
+        free_row_count_bits=free_row_count_bits,
+    )
+    entries = 1 << (right_index_width // 2)
+    return SignWordCodebookCost(
+        index_bits=base.index_bits,
+        scale_bits=base.scale_bits,
+        codebook_bits=(
+            2 * entries * word_width + free_row_count_bits
+        ),
+        word_count=base.word_count,
+    )
+
+
 def mixed_right_linear_codebook_bit_cost(
     out_features: int,
     in_features: int,
@@ -631,6 +696,28 @@ def decode_product_codebook(
     first = codebook.first[values.bitwise_and(mask)]
     second = codebook.second[values.bitwise_right_shift(half_bits)]
     decoded = torch.cat((first, second), dim=-1).reshape(indices.shape[0], expected_words * 32)
+    return decoded[:, :columns].contiguous()
+
+
+def decode_residual_product_codebook(
+    indices: torch.Tensor,
+    codebook: ResidualProductSignCodebook,
+    columns: int,
+) -> torch.Tensor:
+    """Decode multiplicative full-word product indices to a sign matrix."""
+
+    if indices.ndim != 2 or columns <= 0:
+        raise ValueError("codebook indices must be a matrix and columns positive")
+    expected_words = math.ceil(columns / 32)
+    if indices.shape[1] != expected_words:
+        raise ValueError("codebook index word count does not match columns")
+    half_bits = codebook.index_bits // 2
+    mask = (1 << half_bits) - 1
+    values = indices.to(dtype=torch.int64)
+    decoded = (
+        codebook.first[values.bitwise_and(mask)]
+        * codebook.second[values.bitwise_right_shift(half_bits)]
+    ).reshape(indices.shape[0], expected_words * 32)
     return decoded[:, :columns].contiguous()
 
 
@@ -767,6 +854,8 @@ def decode_sign_codebook(
 
     if isinstance(codebook, ProductSignCodebook):
         return decode_product_codebook(indices, codebook, columns)
+    if isinstance(codebook, ResidualProductSignCodebook):
+        return decode_residual_product_codebook(indices, codebook, columns)
     if isinstance(codebook, LinearSignCodebook):
         return decode_linear_codebook(indices, codebook, columns)
     if indices.ndim != 2 or columns <= 0:
@@ -910,16 +999,17 @@ def _random_codebook(
                 and _linear_minimum_distance(generator_signs) >= 4
             ):
                 return LinearSignCodebook(index_bits, generator_signs)
-    if mode != "product":
+    if mode not in {"product", "residual-product"}:
         raise ValueError(f"unsupported codebook mode: {mode}")
     half_entries = 1 << (index_bits // 2)
+    entry_width = 16 if mode == "product" else 32
 
     def table() -> torch.Tensor:
         return (
             torch.randint(
                 0,
                 2,
-                (half_entries, 16),
+                (half_entries, entry_width),
                 device=device,
                 generator=generator,
                 dtype=torch.int8,
@@ -929,7 +1019,18 @@ def _random_codebook(
             .sub_(1)
         )
 
-    return ProductSignCodebook(index_bits, table(), table())
+    first = table()
+    second = table()
+    if mode == "product":
+        return ProductSignCodebook(index_bits, first, second)
+    # Fix the multiplicative gauge so coordinate descent can start at the
+    # identity residual without changing the represented codeword set.
+    gauge = second[0].clone()
+    return ResidualProductSignCodebook(
+        index_bits,
+        first * gauge,
+        second * gauge,
+    )
 
 
 def _assign_half_words(
@@ -1025,6 +1126,152 @@ def _assign_product_words(
     )
     decoded = decode_product_codebook(indices, updated, padded_columns)[:, :columns]
     return decoded, indices, updated
+
+
+def _assign_residual_product_words(
+    weighted_value: torch.Tensor,
+    codebook: ResidualProductSignCodebook,
+    *,
+    update: bool,
+    batch_words: int,
+    sweeps: int,
+) -> tuple[torch.Tensor, torch.Tensor, ResidualProductSignCodebook]:
+    """Assign multiplicative products by alternating exact 256-way searches."""
+
+    if sweeps <= 0:
+        raise ValueError("residual-product assignment sweeps must be positive")
+    rows, columns = weighted_value.shape
+    words = math.ceil(columns / 32)
+    padded_columns = words * 32
+    if padded_columns != columns:
+        padded = torch.zeros(
+            (rows, padded_columns),
+            dtype=weighted_value.dtype,
+            device=weighted_value.device,
+        )
+        padded[:, :columns] = weighted_value
+    else:
+        padded = weighted_value
+    values = padded.reshape(-1, 32).contiguous()
+    first_table = codebook.first
+    second_table = codebook.second
+    second_indices = torch.zeros(
+        values.shape[0], dtype=torch.int64, device=values.device
+    )
+    first_indices = torch.zeros_like(second_indices)
+    for _ in range(sweeps):
+        first_values = values * second_table[second_indices]
+        first_indices, first_table = _assign_half_words(
+            first_values,
+            first_table,
+            update=update,
+            batch_words=batch_words,
+        )
+        second_values = values * first_table[first_indices]
+        second_indices, second_table = _assign_half_words(
+            second_values,
+            second_table,
+            update=update,
+            batch_words=batch_words,
+        )
+        # Multiplying both tables by the same sign word preserves every pair
+        # while making residual entry zero the identity for the next solve.
+        gauge = second_table[0].clone()
+        first_table = first_table * gauge
+        second_table = second_table * gauge
+    updated = ResidualProductSignCodebook(
+        codebook.index_bits,
+        first_table,
+        second_table,
+    )
+    half_bits = codebook.index_bits // 2
+    indices = (
+        first_indices.bitwise_or(second_indices.bitwise_left_shift(half_bits))
+        .reshape(rows, words)
+        .to(torch.int32)
+    )
+    decoded = decode_residual_product_codebook(
+        indices, updated, padded_columns
+    )[:, :columns]
+    return decoded, indices, updated
+
+
+def _select_product_free_row_permutation(
+    right_value: torch.Tensor,
+    left_projection: torch.Tensor,
+    codebook: ProductSignCodebook,
+    *,
+    free_rows: int,
+    refit_passes: int,
+    inner_iterations: int,
+    generator: torch.Generator,
+    epsilon: float,
+    assignment_batch_words: int,
+) -> tuple[ProductSignCodebook, torch.Tensor, torch.Tensor, int]:
+    """Select free components before the product constraint is activated."""
+
+    rank = right_value.shape[0]
+    if (
+        right_value.ndim != 2
+        or left_projection.ndim != 2
+        or left_projection.shape[1] != rank
+        or not 0 < free_rows < rank
+        or refit_passes <= 0
+    ):
+        raise ValueError("adaptive product free-row inputs are invalid")
+    row_magnitude, column_magnitude = _rank_one_magnitudes(
+        right_value,
+        inner_iterations,
+        generator,
+        epsilon,
+    )
+    magnitude = torch.outer(row_magnitude, column_magnitude)
+    desired = magnitude * _sign(right_value)
+    weighted = right_value.float() * magnitude.float()
+    component_weight = left_projection.float().square().sum(dim=0).clamp_min(
+        epsilon
+    )
+    normalized_component_weight = component_weight / component_weight.mean().clamp_min(
+        epsilon
+    )
+    table_weighted = weighted * normalized_component_weight[:, None]
+    _decoded, _indices, updated = _assign_product_words(
+        table_weighted,
+        codebook,
+        update=True,
+        batch_words=assignment_batch_words,
+    )
+    previous = torch.arange(free_rows, device=right_value.device)
+    selected = previous
+    scores = torch.zeros(rank, dtype=torch.float32, device=right_value.device)
+    changes = 0
+    for _ in range(refit_passes):
+        decoded, _indices, _ = _assign_product_words(
+            weighted,
+            updated,
+            update=False,
+            batch_words=assignment_batch_words,
+        )
+        coded_projection = magnitude * decoded
+        scores = component_weight * (
+            desired.float() - coded_projection.float()
+        ).square().sum(dim=1)
+        selected = scores.topk(free_rows).indices.sort().values
+        changes = int((~torch.isin(selected, previous)).sum())
+        previous = selected
+        coded_mask = torch.ones(rank, dtype=torch.bool, device=right_value.device)
+        coded_mask[selected] = False
+        _decoded, _indices, updated = _assign_product_words(
+            table_weighted[coded_mask],
+            updated,
+            update=True,
+            batch_words=assignment_batch_words,
+        )
+    coded_mask = torch.ones(rank, dtype=torch.bool, device=right_value.device)
+    coded_mask[selected] = False
+    coded = torch.arange(rank, device=right_value.device)[coded_mask]
+    permutation = torch.cat((selected, coded))
+    return updated, permutation, scores, changes
 
 
 def _assign_linear_flat_words(
@@ -1545,6 +1792,7 @@ def _project(
     epsilon: float,
     assignment_batch_words: int,
     linear_assignment_sweeps: int,
+    residual_product_assignment_sweeps: int,
     corrected_assignment_candidates: int,
     flips_per_word: int,
     free_rows: int,
@@ -1563,7 +1811,7 @@ def _project(
     )
     magnitude = torch.outer(row_magnitude, column_magnitude)
     if codebook is None:
-        if flips_per_word or free_rows:
+        if flips_per_word:
             raise ValueError("word corrections require a codebook")
         return magnitude * _sign(value), None, None, None
     if not 0 <= free_rows < value.shape[0]:
@@ -1585,6 +1833,17 @@ def _project(
                 decoded,
                 flips_per_word,
             )
+    elif isinstance(codebook, ResidualProductSignCodebook):
+        if flips_per_word:
+            raise ValueError("residual-product codebooks do not support corrections")
+        decoded, indices, residual_updated = _assign_residual_product_words(
+            coded_weighted,
+            codebook,
+            update=update_codebook,
+            batch_words=assignment_batch_words,
+            sweeps=residual_product_assignment_sweeps,
+        )
+        updated = residual_updated
     elif isinstance(codebook, LinearSignCodebook):
         if flips_per_word:
             raise ValueError("linear codebooks do not support word corrections")
@@ -1812,6 +2071,7 @@ def factorize_sign_word_codebook_admm(
     codebook_warmup_fraction: float = 0.0,
     assignment_batch_words: int = 65_536,
     linear_assignment_sweeps: int = 2,
+    residual_product_assignment_sweeps: int = 1,
     corrected_assignment_candidates: int = CORRECTED_ASSIGNMENT_CANDIDATES,
     codebook_mode: str = "product",
     constrain_left: bool = True,
@@ -1826,6 +2086,8 @@ def factorize_sign_word_codebook_admm(
     right_codebook_bank_axis: str = "word",
     left_corrected_codebook_banks: int | None = None,
     right_corrected_codebook_banks: int | None = None,
+    adaptive_right_free_rows: bool = False,
+    adaptive_free_row_refit_passes: int = 4,
     epsilon: float = 1e-12,
 ) -> SignWordCodebookADMMResult:
     """Jointly fit over-complete factors constrained to fixed-width codebooks."""
@@ -1834,9 +2096,13 @@ def factorize_sign_word_codebook_admm(
         raise ValueError("weight must be a matrix and rank positive")
     if input_importance.numel() != weight.shape[1] or output_importance.numel() != weight.shape[0]:
         raise ValueError("importance dimensions do not match weight")
-    if codebook_mode not in {"product", "linear", "full"}:
-        raise ValueError("codebook mode must be 'product', 'linear', or 'full'")
-    if index_bits <= 0 or (codebook_mode == "product" and index_bits % 2):
+    if codebook_mode not in {"product", "residual-product", "linear", "full"}:
+        raise ValueError(
+            "codebook mode must be 'product', 'residual-product', 'linear', or 'full'"
+        )
+    if index_bits <= 0 or (
+        codebook_mode in {"product", "residual-product"} and index_bits % 2
+    ):
         raise ValueError(
             "index bits must be positive and even for product codebooks"
         )
@@ -1849,10 +2115,12 @@ def factorize_sign_word_codebook_admm(
         left_codebook_banks != 1 or right_codebook_banks != 1
     ):
         raise ValueError("only full codebooks support word banks")
-    if codebook_mode == "linear" and (
+    if codebook_mode in {"linear", "residual-product"} and (
         left_flips_per_word or right_flips_per_word
     ):
-        raise ValueError("linear codebooks do not support correction streams")
+        raise ValueError(
+            "linear and residual-product codebooks do not support correction streams"
+        )
     if left_codebook_bank_axis not in {"word", "row"} or (
         right_codebook_bank_axis not in {"word", "row"}
     ):
@@ -1926,6 +2194,7 @@ def factorize_sign_word_codebook_admm(
         or convergence_check_interval <= 0
         or codebook_update_interval <= 0
         or linear_assignment_sweeps <= 0
+        or residual_product_assignment_sweeps <= 0
         or corrected_assignment_candidates <= 0
     ):
         raise ValueError("iteration settings must be positive")
@@ -1934,6 +2203,18 @@ def factorize_sign_word_codebook_admm(
         or codebook_warmup_fraction >= 1
     ):
         raise ValueError("codebook warmup/freeze fractions are invalid")
+    if adaptive_right_free_rows and (
+        codebook_mode != "product"
+        or not constrain_right
+        or constrain_left
+        or right_free_rows <= 0
+        or right_flips_per_word
+        or codebook_warmup_fraction <= 0
+        or adaptive_free_row_refit_passes <= 0
+    ):
+        raise ValueError(
+            "adaptive right free rows require warm product-right factorization"
+        )
     try:
         schedule = SCHEDULES[penalty_schedule]
     except KeyError as exc:
@@ -2002,6 +2283,7 @@ def factorize_sign_word_codebook_admm(
         epsilon=epsilon,
         assignment_batch_words=assignment_batch_words,
         linear_assignment_sweeps=linear_assignment_sweeps,
+        residual_product_assignment_sweeps=residual_product_assignment_sweeps,
         corrected_assignment_candidates=corrected_assignment_candidates,
         flips_per_word=left_flips_per_word,
         free_rows=left_free_rows,
@@ -2021,6 +2303,7 @@ def factorize_sign_word_codebook_admm(
         epsilon=epsilon,
         assignment_batch_words=assignment_batch_words,
         linear_assignment_sweeps=linear_assignment_sweeps,
+        residual_product_assignment_sweeps=residual_product_assignment_sweeps,
         corrected_assignment_candidates=corrected_assignment_candidates,
         flips_per_word=right_flips_per_word,
         free_rows=right_free_rows,
@@ -2033,6 +2316,9 @@ def factorize_sign_word_codebook_admm(
     left_dual = left - left_projected
     right_dual = right - right_projected
     trace: list[ADMMTracePoint] = []
+    right_free_row_permutation = None
+    right_free_row_scores = None
+    right_free_row_selection_changes = 0
     activation_iteration = max(
         1,
         math.floor(outer_iterations * codebook_warmup_fraction),
@@ -2068,6 +2354,34 @@ def factorize_sign_word_codebook_admm(
             and completed == activation_iteration
         )
         if activate:
+            if adaptive_right_free_rows:
+                if not isinstance(right_template, ProductSignCodebook):
+                    raise RuntimeError("adaptive free rows lost the product template")
+                (
+                    right_template,
+                    right_free_row_permutation,
+                    right_free_row_scores,
+                    right_free_row_selection_changes,
+                ) = _select_product_free_row_permutation(
+                    right + right_dual,
+                    left_projected,
+                    right_template,
+                    free_rows=right_free_rows,
+                    refit_passes=adaptive_free_row_refit_passes,
+                    inner_iterations=inner_iterations,
+                    generator=generator,
+                    epsilon=epsilon,
+                    assignment_batch_words=assignment_batch_words,
+                )
+                permutation = right_free_row_permutation.to(torch.int64)
+                left = left[:, permutation].contiguous()
+                left_projected = left_projected[:, permutation].contiguous()
+                left_dual = left_dual[:, permutation].contiguous()
+                previous_left = previous_left[:, permutation].contiguous()
+                right = right[permutation].contiguous()
+                right_projected = right_projected[permutation].contiguous()
+                right_dual = right_dual[permutation].contiguous()
+                previous_right = previous_right[permutation].contiguous()
             left_codebook = left_template
             right_codebook = right_template
         update = activate or (
@@ -2089,6 +2403,7 @@ def factorize_sign_word_codebook_admm(
             epsilon=epsilon,
             assignment_batch_words=assignment_batch_words,
             linear_assignment_sweeps=linear_assignment_sweeps,
+            residual_product_assignment_sweeps=residual_product_assignment_sweeps,
             corrected_assignment_candidates=corrected_assignment_candidates,
             flips_per_word=left_flips_per_word,
             free_rows=left_free_rows,
@@ -2108,6 +2423,7 @@ def factorize_sign_word_codebook_admm(
             epsilon=epsilon,
             assignment_batch_words=assignment_batch_words,
             linear_assignment_sweeps=linear_assignment_sweeps,
+            residual_product_assignment_sweeps=residual_product_assignment_sweeps,
             corrected_assignment_candidates=corrected_assignment_candidates,
             flips_per_word=right_flips_per_word,
             free_rows=right_free_rows,
@@ -2207,4 +2523,15 @@ def factorize_sign_word_codebook_admm(
         ),
         left_free_rows,
         right_free_rows,
+        (
+            right_free_row_permutation.contiguous()
+            if right_free_row_permutation is not None
+            else None
+        ),
+        (
+            right_free_row_scores.contiguous()
+            if right_free_row_scores is not None
+            else None
+        ),
+        right_free_row_selection_changes,
     )

@@ -8,6 +8,7 @@ from nanoquant.domain.sign_word_codebook import (
     FullSignCodebook,
     LinearSignCodebook,
     ProductSignCodebook,
+    ResidualProductSignCodebook,
     _assign_corrected_flat_words,
     _assign_linear_flat_words,
     apply_single_word_flip,
@@ -17,6 +18,7 @@ from nanoquant.domain.sign_word_codebook import (
     corrected_asymmetric_codebook_bit_cost,
     decode_linear_codebook,
     decode_product_codebook,
+    decode_residual_product_codebook,
     decode_sign_codebook,
     factorize_sign_word_codebook_admm,
     maximum_asymmetric_codebook_rank_for_budget,
@@ -28,6 +30,7 @@ from nanoquant.domain.sign_word_codebook import (
     mixed_right_corrected_codebook_bit_cost,
     mixed_right_linear_codebook_bit_cost,
     mixed_right_product_codebook_bit_cost,
+    mixed_right_residual_product_codebook_bit_cost,
     sign_word_codebook_bit_cost,
 )
 
@@ -137,6 +140,26 @@ def test_compact_product_code_charges_half_tables_and_funds_free_prefix() -> Non
     assert free_rows == 416
     assert cost.codebook_bits == 8_208
     assert cost.total + outlier_bits <= baseline
+
+
+def test_residual_product_code_charges_two_full_word_tables() -> None:
+    cost = mixed_right_residual_product_codebook_bit_cost(
+        1152,
+        2560,
+        1152,
+        right_free_rows=704,
+        right_index_width=16,
+    )
+    halfword = mixed_right_product_codebook_bit_cost(
+        1152,
+        2560,
+        1152,
+        right_free_rows=704,
+        right_index_width=16,
+    )
+
+    assert cost.codebook_bits == 16_400
+    assert cost.total - halfword.total == 8_192
 
 
 def test_compact_linear_code_charges_generator_and_funds_free_prefix() -> None:
@@ -332,6 +355,23 @@ def test_product_codebook_decodes_two_half_indices() -> None:
     assert decoded.shape == (1, 27)
     assert decoded[0, 3] == -1
     assert decoded[0, 16 + 5] == -1
+    assert int((decoded == -1).sum()) == 2
+
+
+def test_residual_product_codebook_multiplies_two_full_word_entries() -> None:
+    first = torch.ones((4, 32))
+    second = torch.ones((4, 32))
+    first[1, (3, 20)] = -1
+    second[2, (5, 20)] = -1
+    codebook = ResidualProductSignCodebook(4, first, second)
+    indices = torch.tensor([[1 | (2 << 2)]], dtype=torch.int32)
+
+    decoded = decode_residual_product_codebook(indices, codebook, 27)
+
+    assert decoded.shape == (1, 27)
+    assert decoded[0, 3] == -1
+    assert decoded[0, 5] == -1
+    assert decoded[0, 20] == 1
     assert int((decoded == -1).sum()) == 2
 
 
@@ -637,6 +677,85 @@ def test_product_codebook_exports_an_uncorrected_free_right_prefix() -> None:
         result.factors.right_binary.shape[1],
     )
     assert torch.equal(decoded, result.factors.right_binary[1:])
+
+
+def test_residual_product_codebook_round_trips_coded_right_suffix() -> None:
+    result = factorize_sign_word_codebook_admm(
+        torch.randn((4, 32), generator=torch.Generator().manual_seed(81)),
+        torch.ones(32),
+        torch.ones(4),
+        4,
+        torch.Generator().manual_seed(83),
+        index_bits=4,
+        outer_iterations=2,
+        inner_iterations=2,
+        codebook_update_interval=1,
+        residual_product_assignment_sweeps=2,
+        codebook_mode="residual-product",
+        constrain_left=False,
+        right_free_rows=1,
+        assignment_batch_words=4,
+    )
+
+    assert result.left_codebook is None
+    assert isinstance(result.right_codebook, ResidualProductSignCodebook)
+    assert result.right_indices is not None
+    assert result.right_flip_positions is None
+    decoded = decode_residual_product_codebook(
+        result.right_indices,
+        result.right_codebook,
+        result.factors.right_binary.shape[1],
+    )
+    assert torch.equal(decoded, result.factors.right_binary[1:])
+    reconstructed = (
+        result.factors.left_binary * result.factors.scale_post[:, None]
+    ) @ (
+        result.factors.right_binary
+        * result.factors.scale_mid[:, None]
+        * result.factors.scale_pre[None, :]
+    )
+    torch.testing.assert_close(reconstructed, result.factors.reconstruction)
+
+
+def test_adaptive_product_free_rows_select_before_constraint_and_round_trip() -> None:
+    result = factorize_sign_word_codebook_admm(
+        torch.randn((6, 32), generator=torch.Generator().manual_seed(73)),
+        torch.ones(32),
+        torch.ones(6),
+        6,
+        torch.Generator().manual_seed(79),
+        index_bits=4,
+        outer_iterations=4,
+        inner_iterations=2,
+        codebook_update_interval=1,
+        codebook_warmup_fraction=0.25,
+        codebook_mode="product",
+        constrain_left=False,
+        right_free_rows=2,
+        adaptive_right_free_rows=True,
+        adaptive_free_row_refit_passes=2,
+        assignment_batch_words=4,
+    )
+
+    assert result.right_free_row_permutation is not None
+    assert result.right_free_row_scores is not None
+    assert sorted(result.right_free_row_permutation.tolist()) == list(range(6))
+    assert result.right_free_row_scores.shape == (6,)
+    assert result.left_codebook is None
+    assert isinstance(result.right_codebook, ProductSignCodebook)
+    assert result.right_indices is not None
+    decoded = decode_product_codebook(
+        result.right_indices,
+        result.right_codebook,
+        result.factors.right_binary.shape[1],
+    )
+    assert torch.equal(decoded, result.factors.right_binary[2:])
+    reconstructed = (result.factors.left_binary * result.factors.scale_post[:, None]) @ (
+        result.factors.right_binary
+        * result.factors.scale_mid[:, None]
+        * result.factors.scale_pre[None, :]
+    )
+    torch.testing.assert_close(reconstructed, result.factors.reconstruction)
 
 
 def test_linear_codebook_learns_full_rank_uncorrected_right_factor() -> None:

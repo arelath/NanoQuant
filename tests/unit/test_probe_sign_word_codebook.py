@@ -87,6 +87,26 @@ def test_right_free_row_sweep_is_parsed_and_names_distinct_candidates() -> None:
     )
 
 
+def test_residual_product_mode_and_search_depth_are_parsed() -> None:
+    args = build_parser().parse_args(
+        [
+            "--model",
+            "model.safetensors",
+            "--calibration-state",
+            "calibration",
+            "--output",
+            "results.json",
+            "--codebook-mode",
+            "residual-product-right",
+            "--residual-product-assignment-sweeps",
+            "2",
+        ]
+    )
+
+    assert args.codebook_mode == "residual-product-right"
+    assert args.residual_product_assignment_sweeps == 2
+
+
 def test_fixed_outlier_indices_are_parsed_and_remove_exact_columns() -> None:
     args = build_parser().parse_args(
         [

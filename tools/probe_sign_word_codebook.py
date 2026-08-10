@@ -55,6 +55,7 @@ from nanoquant.domain.scale_fit import fit_scales, reconstruct
 from nanoquant.domain.sign_word_codebook import (
     CORRECTED_ASSIGNMENT_CANDIDATES,
     FullSignCodebook,
+    SignWordCodebookADMMResult,
     asymmetric_sign_word_codebook_bit_cost,
     codebook_index_metrics,
     corrected_asymmetric_codebook_bit_cost,
@@ -65,6 +66,7 @@ from nanoquant.domain.sign_word_codebook import (
     mixed_right_corrected_codebook_bit_cost,
     mixed_right_linear_codebook_bit_cost,
     mixed_right_product_codebook_bit_cost,
+    mixed_right_residual_product_codebook_bit_cost,
     sign_word_codebook_bit_cost,
 )
 from nanoquant.infrastructure.device_lease import acquire_device_lease
@@ -113,10 +115,13 @@ class SignWordCodebookProtocol:
     codebook_mode: str
     assignment_batch_words: int
     linear_assignment_sweeps: int
+    residual_product_assignment_sweeps: int
     corrected_assignment_candidates: int
     scale_fit_passes: int
     binary_search: BinaryFactorSearchConfig
     payload_search: SignWordPayloadSearchConfig
+    adaptive_free_rows: bool
+    adaptive_free_row_refit_passes: int
     calibration_shrinkage: float
     calibration_state: str
     seed: int
@@ -142,10 +147,12 @@ def _candidate_key(
     right_free_rows: int,
     *,
     include_free_rows: bool,
+    adaptive_free_rows: bool = False,
 ) -> str:
     free_suffix = f"_free{right_free_rows}" if include_free_rows else ""
+    adaptive_suffix = "_adaptive" if adaptive_free_rows else ""
     outlier_suffix = "" if outlier_count == 0 else f"_outliers{outlier_count}"
-    return f"{arm_prefix}_k{index_width}{free_suffix}{outlier_suffix}"
+    return f"{arm_prefix}_k{index_width}{free_suffix}{adaptive_suffix}{outlier_suffix}"
 
 
 def _protocol_hash(protocol: SignWordCodebookProtocol) -> str:
@@ -343,6 +350,47 @@ def _binary_search_result_metrics(result: BinaryFactorSearchResult) -> dict[str,
         "one_bit_updates": result.one_bit_updates,
         "variable_depth_updates": result.variable_depth_updates,
         "tabu_updates": result.tabu_updates,
+    }
+
+
+def _adaptive_free_row_metrics(
+    result: SignWordCodebookADMMResult,
+) -> dict[str, Any]:
+    permutation = result.right_free_row_permutation
+    coding_scores = result.right_free_row_scores
+    if permutation is None or coding_scores is None:
+        raise ValueError("adaptive free-row result is missing selection evidence")
+    scores = coding_scores.detach().float().cpu()
+    free_original_rows = permutation[: result.right_free_rows].detach().cpu()
+    prefix = torch.arange(result.right_free_rows)
+    quantiles = torch.quantile(
+        scores,
+        torch.tensor([0.0, 0.25, 0.5, 0.75, 0.9, 0.99, 1.0]),
+    )
+    return {
+        "enabled": True,
+        "free_original_rows": free_original_rows.tolist(),
+        "permutation_sha256": hashlib.sha256(
+            permutation.cpu().numpy().tobytes()
+        ).hexdigest(),
+        "prefix_free_score": float(scores[prefix].sum()),
+        "adaptive_free_score": float(scores[free_original_rows.long()].sum()),
+        "free_score_gain": (
+            float(scores[free_original_rows.long()].sum())
+            - float(scores[prefix].sum())
+        ),
+        "swapped_free_rows": int(
+            (free_original_rows >= result.right_free_rows).sum()
+        ),
+        "selection_changes_last_pass": result.right_free_row_selection_changes,
+        "coding_score_quantiles": {
+            key: float(value)
+            for key, value in zip(
+                ("minimum", "p25", "median", "p75", "p90", "p99", "maximum"),
+                quantiles,
+                strict=True,
+            )
+        },
     }
 
 
@@ -740,6 +788,7 @@ def _run_codebook(
     progressive = protocol.codebook_mode == "progressive"
     relational = protocol.codebook_mode == "relational"
     product_right = protocol.codebook_mode == "product-right"
+    residual_product_right = protocol.codebook_mode == "residual-product-right"
     linear_right = protocol.codebook_mode == "linear-right"
     corrections_per_word = {
         "full-right-flip1": 1,
@@ -750,6 +799,7 @@ def _run_codebook(
     right_only = (
         protocol.codebook_mode == "full-right"
         or product_right
+        or residual_product_right
         or linear_right
         or corrections_per_word > 0
     )
@@ -757,7 +807,7 @@ def _run_codebook(
     payload_codebook: FullSignCodebook | None = None
     payload_indices: torch.Tensor | None = None
     payload_positions: torch.Tensor | None = None
-    if product_right or linear_right:
+    if product_right or residual_product_right or linear_right:
         if protocol.candidate_rank is None:
             raise ValueError(
                 "compact mixed-right modes require an explicit candidate rank"
@@ -904,12 +954,17 @@ def _run_codebook(
             codebook_freeze_fraction=protocol.codebook_freeze_fraction,
             assignment_batch_words=protocol.assignment_batch_words,
             linear_assignment_sweeps=protocol.linear_assignment_sweeps,
+            residual_product_assignment_sweeps=(
+                protocol.residual_product_assignment_sweeps
+            ),
             corrected_assignment_candidates=(
                 protocol.corrected_assignment_candidates
             ),
             codebook_mode=(
                 "product"
                 if product_right
+                else "residual-product"
+                if residual_product_right
                 else "linear"
                 if linear_right
                 else "full" if right_only else protocol.codebook_mode
@@ -922,6 +977,10 @@ def _run_codebook(
             right_corrected_codebook_banks=(
                 protocol.right_corrected_codebook_banks
             ),
+            adaptive_right_free_rows=protocol.adaptive_free_rows,
+            adaptive_free_row_refit_passes=(
+                protocol.adaptive_free_row_refit_passes
+            ),
         )
         factors = codebook_result.factors
         if isinstance(codebook_result.right_codebook, FullSignCodebook):
@@ -931,6 +990,10 @@ def _run_codebook(
         representation_metrics = {
             "index_metrics": codebook_index_metrics(codebook_result)
         }
+        if protocol.adaptive_free_rows:
+            representation_metrics["adaptive_free_rows"] = (
+                _adaptive_free_row_metrics(codebook_result)
+            )
         if corrected and codebook_result.right_flip_positions is not None:
             counts = torch.bincount(
                 codebook_result.right_flip_positions.reshape(-1).to(torch.int64),
@@ -962,6 +1025,16 @@ def _run_codebook(
                 scale_width=protocol.scale_bits,
             )
             arm_name = f"right_product_codebook_k{index_width}"
+        elif residual_product_right:
+            bit_cost = mixed_right_residual_product_codebook_bit_cost(
+                weight.shape[0],
+                weight.shape[1],
+                rank,
+                right_free_rows=protocol.right_free_rows,
+                right_index_width=index_width,
+                scale_width=protocol.scale_bits,
+            )
+            arm_name = f"right_residual_product_codebook_k{index_width}"
         elif linear_right:
             bit_cost = mixed_right_linear_codebook_bit_cost(
                 weight.shape[0],
@@ -1244,6 +1317,8 @@ def run(args: argparse.Namespace) -> int:
         )
     if args.linear_assignment_sweeps <= 0:
         raise ValueError("linear assignment sweeps must be positive")
+    if args.residual_product_assignment_sweeps <= 0:
+        raise ValueError("residual-product assignment sweeps must be positive")
     if (
         args.binary_search_control_outer_passes <= 0
         or args.binary_search_tabu_outer_passes <= 0
@@ -1289,6 +1364,7 @@ def run(args: argparse.Namespace) -> int:
         or (
             not args.codebook_mode.startswith("full-right-flip")
             and args.codebook_mode != "product-right"
+            and args.codebook_mode != "residual-product-right"
             and args.codebook_mode != "linear-right"
         )
     ):
@@ -1300,6 +1376,7 @@ def run(args: argparse.Namespace) -> int:
         or (
             not args.codebook_mode.startswith("full-right-flip")
             and args.codebook_mode != "product-right"
+            and args.codebook_mode != "residual-product-right"
             and args.codebook_mode != "linear-right"
         )
     ):
@@ -1310,6 +1387,17 @@ def run(args: argparse.Namespace) -> int:
         raise ValueError("payload search requires the matched binary-search control")
     if args.codebook_mode == "linear-right" and args.payload_search:
         raise ValueError("payload search does not support linear codebooks")
+    if args.codebook_mode == "residual-product-right" and args.payload_search:
+        raise ValueError("payload search does not support residual-product codebooks")
+    if args.adaptive_free_rows and (
+        args.codebook_mode != "product-right"
+        or any(count <= 0 for count in right_free_row_counts)
+        or args.adaptive_free_row_refit_passes <= 0
+        or args.codebook_warmup_fraction <= 0
+    ):
+        raise ValueError(
+            "adaptive free rows require warm mixed product-right factorization"
+        )
     if (
         args.right_codebook_banks <= 0
         or args.right_codebook_banks & (args.right_codebook_banks - 1)
@@ -1335,7 +1423,7 @@ def run(args: argparse.Namespace) -> int:
             "partial corrected banks require a valid row-banked prefix"
         )
     protocol = SignWordCodebookProtocol(
-        29,
+        31,
         args.model_revision,
         args.block,
         args.projection,
@@ -1365,6 +1453,7 @@ def run(args: argparse.Namespace) -> int:
         args.codebook_mode,
         args.assignment_batch_words,
         args.linear_assignment_sweeps,
+        args.residual_product_assignment_sweeps,
         args.corrected_assignment_candidates,
         args.scale_fit_passes,
         BinaryFactorSearchConfig(
@@ -1380,6 +1469,8 @@ def run(args: argparse.Namespace) -> int:
             candidate_batch_words=args.payload_search_batch_words,
             table_chunk_size=args.payload_search_table_chunk,
         ),
+        args.adaptive_free_rows,
+        args.adaptive_free_row_refit_passes,
         args.calibration_shrinkage,
         str(args.calibration_state.resolve()),
         args.seed,
@@ -1446,6 +1537,7 @@ def run(args: argparse.Namespace) -> int:
             "relational": "relational",
             "full-right": "right_codebook",
             "product-right": "right_product_codebook",
+            "residual-product-right": "right_residual_product_codebook",
             "linear-right": "right_linear_codebook",
         }.get(
             protocol.codebook_mode,
@@ -1467,13 +1559,18 @@ def run(args: argparse.Namespace) -> int:
                         outlier_count,
                         right_free_rows,
                         include_free_rows=include_free_rows,
+                        adaptive_free_rows=protocol.adaptive_free_rows,
                     )
                     candidate_keys.append(key)
                     result = output["results"].get(key)
                     if result is not None:
                         print(f"reusing {key}", flush=True)
                         continue
-                    if arm_protocol.codebook_mode in {"product-right", "linear-right"}:
+                    if arm_protocol.codebook_mode in {
+                        "product-right",
+                        "residual-product-right",
+                        "linear-right",
+                    }:
                         if arm_protocol.candidate_rank is None:
                             raise ValueError(
                                 "compact mixed-right modes require an explicit candidate rank"
@@ -1644,6 +1741,7 @@ def build_parser() -> argparse.ArgumentParser:
             "full",
             "full-right",
             "product-right",
+            "residual-product-right",
             "linear-right",
             "full-right-flip1",
             "full-right-flip2",
@@ -1655,6 +1753,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--assignment-batch-words", type=int, default=65_536)
     parser.add_argument("--linear-assignment-sweeps", type=int, default=2)
+    parser.add_argument(
+        "--residual-product-assignment-sweeps",
+        type=int,
+        default=1,
+    )
     parser.add_argument(
         "--corrected-assignment-candidates",
         type=int,
@@ -1685,6 +1788,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--payload-search-scale-passes", type=int, default=64)
     parser.add_argument("--payload-search-batch-words", type=int, default=2_048)
     parser.add_argument("--payload-search-table-chunk", type=int, default=128)
+    parser.add_argument(
+        "--adaptive-free-rows",
+        action="store_true",
+        help=(
+            "select arbitrary product-code free components by weighted coding "
+            "distortion, then permute them into the stored prefix"
+        ),
+    )
+    parser.add_argument("--adaptive-free-row-refit-passes", type=int, default=4)
     parser.add_argument("--calibration-shrinkage", type=float, default=0.6)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="cuda:0")

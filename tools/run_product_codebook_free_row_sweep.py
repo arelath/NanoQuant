@@ -44,8 +44,17 @@ def _read_fixed_outliers(logical_weights: Path, block: int) -> tuple[int, ...]:
     return indices
 
 
-def _candidate_key(free_rows: int, outlier_count: int) -> str:
-    return f"right_product_codebook_k16_free{free_rows}_outliers{outlier_count}"
+def _candidate_key(
+    free_rows: int,
+    outlier_count: int,
+    *,
+    adaptive_free_rows: bool,
+) -> str:
+    adaptive = "_adaptive" if adaptive_free_rows else ""
+    return (
+        f"right_product_codebook_k16_free{free_rows}{adaptive}"
+        f"_outliers{outlier_count}"
+    )
 
 
 def build_probe_command(
@@ -63,8 +72,11 @@ def build_probe_command(
     outer_iterations: int,
     seed: int,
     device: str,
+    adaptive_free_rows: bool = False,
+    adaptive_free_row_refit_passes: int = 4,
+    codebook_warmup_fraction: float = 0.0,
 ) -> list[str]:
-    return [
+    command = [
         str(python),
         str(probe),
         "--model",
@@ -101,18 +113,35 @@ def build_probe_command(
         "--device",
         device,
     ]
+    if adaptive_free_rows:
+        command.extend(
+            (
+                "--adaptive-free-rows",
+                "--adaptive-free-row-refit-passes",
+                str(adaptive_free_row_refit_passes),
+                "--codebook-warmup-fraction",
+                str(codebook_warmup_fraction),
+            )
+        )
+    return command
 
 
 def _summarize_probe(
     output: Path,
     free_row_counts: tuple[int, ...],
     outlier_count: int,
+    *,
+    adaptive_free_rows: bool,
 ) -> dict[str, Any]:
     payload = json.loads(output.read_text(encoding="utf-8"))
     baseline = payload["results"]["free_words"]
     candidates: list[dict[str, Any]] = []
     for free_rows in free_row_counts:
-        key = _candidate_key(free_rows, outlier_count)
+        key = _candidate_key(
+            free_rows,
+            outlier_count,
+            adaptive_free_rows=adaptive_free_rows,
+        )
         result = payload["results"][key]
         candidates.append(
             {
@@ -126,6 +155,7 @@ def _summarize_probe(
                     "comparison_to_free_words"
                 ]["weighted_rmse_change_fraction"],
                 "wall_seconds": result["wall_seconds"],
+                "adaptive_free_rows": result.get("adaptive_free_rows"),
             }
         )
     best = min(candidates, key=lambda item: item["weighted_normalized_rmse"])
@@ -163,6 +193,8 @@ def run(args: argparse.Namespace) -> int:
         raise ValueError("ranks must be positive")
     if args.outer_iterations <= 0:
         raise ValueError("outer iterations must be positive")
+    if args.adaptive_free_rows and not 0 < args.codebook_warmup_fraction < 1:
+        raise ValueError("adaptive free rows require a positive warmup fraction")
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     summary_path = args.output_dir / "summary.json"
@@ -181,6 +213,11 @@ def run(args: argparse.Namespace) -> int:
         "candidate_rank": args.candidate_rank,
         "outer_iterations": args.outer_iterations,
         "seed": args.seed,
+        "adaptive_free_rows": args.adaptive_free_rows,
+        "adaptive_free_row_refit_passes": (
+            args.adaptive_free_row_refit_passes
+        ),
+        "codebook_warmup_fraction": args.codebook_warmup_fraction,
         "model": str(args.model.resolve()),
         "calibration_state": str(args.calibration_state.resolve()),
         "logical_weights": str(args.logical_weights.resolve()),
@@ -218,12 +255,18 @@ def run(args: argparse.Namespace) -> int:
                 outer_iterations=args.outer_iterations,
                 seed=args.seed,
                 device=args.device,
+                adaptive_free_rows=args.adaptive_free_rows,
+                adaptive_free_row_refit_passes=(
+                    args.adaptive_free_row_refit_passes
+                ),
+                codebook_warmup_fraction=args.codebook_warmup_fraction,
             )
             subprocess.run(command, cwd=repo_root, check=True)
             layer_results[str(block)] = _summarize_probe(
                 output,
                 free_row_counts,
                 len(fixed_outliers),
+                adaptive_free_rows=args.adaptive_free_rows,
             )
             summary["completed_blocks"] = sorted(
                 int(item) for item in layer_results
@@ -268,6 +311,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--outer-iterations", type=int, default=1200)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="cuda:0")
+    parser.add_argument("--adaptive-free-rows", action="store_true")
+    parser.add_argument("--adaptive-free-row-refit-passes", type=int, default=4)
+    parser.add_argument("--codebook-warmup-fraction", type=float, default=1 / 12)
     return parser
 
 

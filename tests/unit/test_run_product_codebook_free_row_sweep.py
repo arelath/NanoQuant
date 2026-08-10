@@ -37,9 +37,15 @@ def test_probe_command_carries_all_free_rows_and_exact_outliers() -> None:
         outer_iterations=1200,
         seed=0,
         device="cuda:0",
+        adaptive_free_rows=True,
+        adaptive_free_row_refit_passes=3,
+        codebook_warmup_fraction=0.125,
     )
 
     assert command[command.index("--right-free-row-counts") + 1] == "576,640,704"
     assert command[command.index("--fixed-outlier-indices") + 1] == "3,17"
     assert command[command.index("--candidate-outlier-columns") + 1] == "2"
     assert command[command.index("--outer-iterations") + 1] == "1200"
+    assert "--adaptive-free-rows" in command
+    assert command[command.index("--adaptive-free-row-refit-passes") + 1] == "3"
+    assert command[command.index("--codebook-warmup-fraction") + 1] == "0.125"
