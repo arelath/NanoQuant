@@ -235,7 +235,7 @@ from nanoquant.infrastructure.tuning_checkpoint import (
 from nanoquant.ports.event_sink import EventSink, LayerCommittedPayload, emit_layer_committed
 from nanoquant.ports.model_adapter import ModelAdapter
 
-RESIDENT_ALGORITHM_VERSION = 63
+RESIDENT_ALGORITHM_VERSION = 64
 COVARIANCE_REFINEMENT_MAX_INPUT_FEATURES = 2048
 _THROUGHPUT_PROBE_REPETITIONS = 5
 _THROUGHPUT_PROBE_WARMUP_WORKLOADS = 3
@@ -1875,9 +1875,29 @@ def _run_resident_factorization_attempts(
     outlier_stage: OutlierSelectionStage,
     scale_stage: ScaleFitStage,
     recorder: PhaseRecorder = NULL_RECORDER,
+    screening_evidence: _ProductCodebookOptionEvidence | None = None,
 ) -> tuple[AcceptedFactorization, OutlierSelectionResult, ScaleFitResult | None]:
     """Execute the complete legacy rank attempt: outliers, ADMM, scale fit, and full metric."""
     companions: list[tuple[OutlierSelectionResult, ScaleFitResult | None]] = []
+    reusable_screening_evidence = screening_evidence
+    if screening_evidence is not None:
+        reuse_reason = _product_codebook_screen_reuse_reason(
+            request,
+            layer_plan,
+            source_weight,
+            screening_evidence,
+        )
+        if reuse_reason is not None:
+            context.events.emit(
+                "resident-quantization",
+                "info",
+                "product_codebook_probe.production_reuse_skipped",
+                block=layer_plan.layer.block.index,
+                layer=layer_plan.layer.path,
+                factor_artifact=screening_evidence.factor_artifact.artifact_id,
+                reason=reuse_reason,
+            )
+            reusable_screening_evidence = None
 
     def product_free_rows(rank: int) -> int | None:
         planned = layer_plan.product_codebook_free_rows
@@ -1925,6 +1945,31 @@ def _run_resident_factorization_attempts(
         )
 
     def execute_attempt(rank: int, attempt: int, outlier_count: int) -> FactorizationResult:
+        if reusable_screening_evidence is not None and attempt == 0:
+            if rank != layer_plan.rank or outlier_count != layer_plan.outliers.count:
+                raise ValueError("screening receipt cannot satisfy a modified first attempt")
+            companions.append(
+                (
+                    reusable_screening_evidence.outliers,
+                    reusable_screening_evidence.scale_fit,
+                )
+            )
+            context.events.emit(
+                "resident-quantization",
+                "info",
+                "product_codebook_probe.production_receipt_consumed",
+                block=layer_plan.layer.block.index,
+                layer=layer_plan.layer.path,
+                factor_artifact=(
+                    reusable_screening_evidence.factor_artifact.artifact_id
+                ),
+                outer_iterations=reusable_screening_evidence.outer_iterations,
+            )
+            return replace(
+                reusable_screening_evidence.factorization,
+                wall_seconds=0.0,
+                peak_workspace_bytes=0,
+            )
         shape = "x".join(str(dimension) for dimension in layer_plan.source_weight.spec.shape)
         with recorder.phase(
             "attempt",
@@ -4720,6 +4765,7 @@ class LayerQuantizer:
     outlier_stage: OutlierSelectionStage
     scale_stage: ScaleFitStage
     recorder: PhaseRecorder = NULL_RECORDER
+    screening_evidence: dict[LayerId, _ProductCodebookOptionEvidence] | None = None
 
     def factorize(
         self,
@@ -4738,6 +4784,11 @@ class LayerQuantizer:
             self.outlier_stage,
             self.scale_stage,
             self.recorder,
+            (
+                None
+                if self.screening_evidence is None
+                else self.screening_evidence.get(layer_plan.layer)
+            ),
         )
 
 
@@ -5230,6 +5281,7 @@ class _ProductCodebookOptionEvidence:
     schema_version: int
     probe_plan: ArtifactRef
     candidate: _ProductCodebookProbeCandidate
+    source_identity_hash: str
     source_weight_hash: str
     estimated_cost: BitCost
     measured_weighted_error: float
@@ -5237,10 +5289,14 @@ class _ProductCodebookOptionEvidence:
     factor_artifact: ArtifactRef
     logical_seed: int
     outer_iterations: int
+    execution_hash: str
+    factorization: FactorizationResult
+    outliers: OutlierSelectionResult
+    scale_fit: ScaleFitResult | None
     wall_seconds: float
 
     def __post_init__(self) -> None:
-        if self.schema_version != 2:
+        if self.schema_version != 3:
             raise ValueError("unsupported product-codebook option evidence schema")
         if (
             not math.isfinite(self.measured_weighted_error)
@@ -5254,6 +5310,16 @@ class _ProductCodebookOptionEvidence:
             raise ValueError(
                 "product-codebook option metrics and iteration count must be valid"
             )
+        if (
+            self.factorization.layer != self.candidate.layer
+            or self.factorization.rank != self.candidate.rank
+            or self.outliers.layer != self.candidate.layer
+            or self.factor_artifact != self.factorization.factors.left_binary.artifact
+            or not self.execution_hash.startswith("sha256:")
+            or not self.source_identity_hash
+            or not self.source_weight_hash.startswith("sha256:")
+        ):
+            raise ValueError("product-codebook option evidence payload differs from its candidate")
 
     @property
     def receipt_key(self) -> str:
@@ -5265,6 +5331,26 @@ def _product_codebook_receipt_key(
     outer_iterations: int,
 ) -> str:
     return f"{candidate.key}:outer-{outer_iterations}"
+
+
+def _product_codebook_execution_hash(
+    request: ResidentQuantizationRequest,
+    admm: ADMMConfig,
+    layer: LayerPlan,
+    candidate: _ProductCodebookProbeCandidate,
+) -> str:
+    return semantic_hash(
+        {
+            "admm": admm,
+            "product_codebook": request.product_codebook,
+            "scale_fit": request.scale_fit,
+            "outlier_config": request.outliers,
+            "objective": layer.objective,
+            "outlier_plan": layer.outliers,
+            "rank": candidate.rank,
+            "free_rows": candidate.free_rows,
+        }
+    )
 
 
 def _select_product_codebook_frontier_candidates(
@@ -5412,6 +5498,31 @@ def _product_codebook_probe_journal_path(output: Path) -> Path:
     return output / "state" / "product-codebook-probe-journal.jsonl"
 
 
+def _read_product_codebook_option_evidence(
+    reference: ArtifactRef,
+    artifacts: LocalArtifactStore,
+) -> _ProductCodebookOptionEvidence:
+    if (
+        reference.artifact_type != ArtifactTypes.PRODUCT_CODEBOOK_OPTION_RESULT
+        or reference.schema_version != 3
+    ):
+        raise ValueError("product-codebook option reference has the wrong type or schema")
+    descriptor = artifacts.validate(reference.artifact_id)
+    if descriptor.artifact_type != ArtifactTypes.PRODUCT_CODEBOOK_OPTION_RESULT:
+        raise ValueError("product-codebook option artifact type differs")
+    payload = json.loads(
+        (
+            artifacts.path_for(reference.artifact_id)
+            / "product-codebook-option-result.json"
+        ).read_text(encoding="utf-8")
+    )
+    return from_dict(
+        _ProductCodebookOptionEvidence,
+        payload,
+        path="product_codebook_option_result",
+    )
+
+
 def _load_product_codebook_option_evidence(
     request: ResidentQuantizationRequest,
     probe_plan: ArtifactRef,
@@ -5431,22 +5542,9 @@ def _load_product_codebook_option_evidence(
             reference = ArtifactRef(
                 ArtifactTypes.PRODUCT_CODEBOOK_OPTION_RESULT,
                 str(record["artifact_id"]),
-                2,
+                3,
             )
-            descriptor = artifacts.validate(reference.artifact_id)
-            if descriptor.artifact_type != ArtifactTypes.PRODUCT_CODEBOOK_OPTION_RESULT:
-                raise ValueError("artifact type differs")
-            payload = json.loads(
-                (
-                    artifacts.path_for(reference.artifact_id)
-                    / "product-codebook-option-result.json"
-                ).read_text(encoding="utf-8")
-            )
-            evidence = from_dict(
-                _ProductCodebookOptionEvidence,
-                payload,
-                path="product_codebook_option_result",
-            )
+            evidence = _read_product_codebook_option_evidence(reference, artifacts)
             if (
                 evidence.probe_plan != probe_plan
                 or evidence.candidate.key != record["candidate_key"]
@@ -5476,7 +5574,7 @@ def _commit_product_codebook_option_evidence(
             encoding="utf-8",
         )
         descriptor = writer.commit()
-    reference = ArtifactRef(ArtifactTypes.PRODUCT_CODEBOOK_OPTION_RESULT, descriptor.artifact_id, 2)
+    reference = ArtifactRef(ArtifactTypes.PRODUCT_CODEBOOK_OPTION_RESULT, descriptor.artifact_id, 3)
     journal = _product_codebook_probe_journal_path(request.output)
     journal.parent.mkdir(parents=True, exist_ok=True)
     sequence = 1
@@ -5509,7 +5607,7 @@ def _persist_product_codebook_allocation_profile(
     artifacts: LocalArtifactStore,
 ) -> ArtifactRef:
     payload = {
-        "schema_version": 2,
+        "schema_version": 3,
         "resident_config_hash": _resident_config_hash(request),
         "probe_plan": to_dict(probe_plan),
         "options": [
@@ -5533,7 +5631,7 @@ def _persist_product_codebook_allocation_profile(
     return ArtifactRef(
         ArtifactTypes.PRODUCT_CODEBOOK_ALLOCATION_PROFILE,
         descriptor.artifact_id,
-        2,
+        3,
     )
 
 
@@ -5547,6 +5645,71 @@ def _product_codebook_objective_multipliers(
         decision = by_unit.get(f"{layer.block.index}:{layer.path}")
         multipliers[layer] = 1.0 if decision is None else max(decision.sensitivity, 1e-12)
     return multipliers
+
+
+def _load_selected_product_codebook_evidence(
+    plan: QuantizationPlan,
+    artifacts: LocalArtifactStore,
+) -> dict[LayerId, _ProductCodebookOptionEvidence]:
+    selected: dict[LayerId, _ProductCodebookOptionEvidence] = {}
+    for decision in plan.product_codebook_decisions:
+        evidence = _read_product_codebook_option_evidence(
+            decision.option_artifact,
+            artifacts,
+        )
+        if (
+            evidence.candidate.layer != decision.layer
+            or evidence.candidate.rank != decision.selected_rank
+            or evidence.candidate.free_rows != decision.selected_free_rows
+            or evidence.estimated_cost != decision.selected_cost
+            or evidence.measured_weighted_error != decision.measured_weighted_error
+        ):
+            raise ValueError("selected product-codebook receipt differs from allocation")
+        selected[decision.layer] = evidence
+    if len(selected) != len(plan.product_codebook_decisions):
+        raise ValueError("selected product-codebook receipts contain duplicate layers")
+    return selected
+
+
+def _product_codebook_screen_reuse_reason(
+    request: ResidentQuantizationRequest,
+    layer: LayerPlan,
+    source_weight: TensorRef,
+    evidence: _ProductCodebookOptionEvidence,
+) -> str | None:
+    candidate = _ProductCodebookProbeCandidate(
+        layer.layer,
+        layer.rank,
+        layer.product_codebook_free_rows,
+    )
+    if evidence.candidate != candidate or evidence.estimated_cost != layer.estimated_cost:
+        return "selected_option_differs"
+    if evidence.outer_iterations != request.admm.outer_iterations:
+        return "production_admm_duration_differs"
+    if evidence.source_weight_hash != source_weight.content_hash:
+        return "source_weight_changed"
+    if evidence.logical_seed != logical_seed(
+        request.seed,
+        "factorize-attempt",
+        layer.layer.block.index,
+        layer.layer.path,
+        0,
+    ):
+        return "logical_seed_differs"
+    if evidence.execution_hash != _product_codebook_execution_hash(
+        request,
+        request.admm,
+        layer,
+        candidate,
+    ):
+        return "execution_config_differs"
+    product_state = evidence.factorization.product_codebook
+    if candidate.free_rows is None:
+        if product_state is not None:
+            return "factor_encoding_differs"
+    elif product_state is None or product_state.right_free_rows != candidate.free_rows:
+        return "factor_encoding_differs"
+    return None
 
 
 def _run_product_codebook_option_allocation(
@@ -5628,10 +5791,17 @@ def _run_product_codebook_option_allocation(
             if prior is not None:
                 evidence = prior[1]
                 if (
-                    evidence.source_weight_hash != layer.source_weight.content_hash
+                    evidence.source_identity_hash != layer.source_weight.content_hash
                     or evidence.estimated_cost != option_cost
                     or evidence.logical_seed != seed
                     or evidence.outer_iterations != outer_iterations
+                    or evidence.execution_hash
+                    != _product_codebook_execution_hash(
+                        request,
+                        probe_admm,
+                        layer,
+                        candidate,
+                    )
                 ):
                     raise ValueError(
                         f"persisted product-codebook option differs: {receipt_key}"
@@ -5683,7 +5853,7 @@ def _run_product_codebook_option_allocation(
                 fidelity=fidelity,
                 outer_iterations=outer_iterations,
             ):
-                accepted, _outliers, _fitted = _run_resident_factorization_attempts(
+                accepted, outliers, fitted = _run_resident_factorization_attempts(
                     probe_layer,
                     source_ref,
                     request,
@@ -5696,10 +5866,11 @@ def _run_product_codebook_option_allocation(
                     recorder,
                 )
             evidence = _ProductCodebookOptionEvidence(
-                schema_version=2,
+                schema_version=3,
                 probe_plan=probe_plan,
                 candidate=candidate,
-                source_weight_hash=layer.source_weight.content_hash,
+                source_identity_hash=layer.source_weight.content_hash,
+                source_weight_hash=source_ref.content_hash,
                 estimated_cost=option_cost,
                 measured_weighted_error=(
                     accepted.result.metrics.export_weighted_normalized_error
@@ -5708,6 +5879,15 @@ def _run_product_codebook_option_allocation(
                 factor_artifact=accepted.result.factors.left_binary.artifact,
                 logical_seed=seed,
                 outer_iterations=outer_iterations,
+                execution_hash=_product_codebook_execution_hash(
+                    request,
+                    probe_admm,
+                    probe_layer,
+                    candidate,
+                ),
+                factorization=accepted.result,
+                outliers=outliers,
+                scale_fit=fitted,
                 wall_seconds=time.perf_counter() - started,
             )
             reference = _commit_product_codebook_option_evidence(
@@ -6390,11 +6570,19 @@ def _execute_resident_quantization_pipeline(
     else:
         calibration, objectives, persisted_plan = preprocessed
         plan = persisted_plan.plan
+    selected_product_codebook_evidence: dict[
+        LayerId,
+        _ProductCodebookOptionEvidence,
+    ] = {}
     if request.product_codebook.enabled:
         eligible_layers = _product_codebook_eligible_layers(plan, request.product_codebook)
         if not eligible_layers:
             raise ValueError("product-codebook policy does not match any ordinary quantization layer")
         validate_product_codebook_plan(plan, eligible_layers=eligible_layers)
+        selected_product_codebook_evidence = _load_selected_product_codebook_evidence(
+            plan,
+            artifacts,
+        )
     with recorder.phase("plan"):
         with recorder.phase("activate"):
             _write_active_preprocessing_state(
@@ -6570,6 +6758,7 @@ def _execute_resident_quantization_pipeline(
         outlier_stage,
         scale_stage,
         recorder,
+        selected_product_codebook_evidence,
     )
 
     for block_plan in block_quantizer.pending(plan.blocks, completed_block_indexes):

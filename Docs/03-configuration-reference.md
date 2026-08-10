@@ -400,6 +400,10 @@ allocator is fed exclusively from receipts measured at
 `probe_final_outer_iterations`. Both refinement durations must be supplied
 together and must increase strictly. They do not change the production ADMM
 schedule or binary sign-search configuration.
+Final receipts retain the complete typed attempt state. Production can reuse a
+selected final receipt only when its ADMM duration and every semantic input,
+including the actual source tensor content hash, match exactly; otherwise the
+receipt remains allocation evidence and factorization runs normally.
 
 ## 7. Salient outliers
 

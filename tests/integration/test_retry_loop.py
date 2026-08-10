@@ -1,6 +1,7 @@
 import json
 from dataclasses import replace
 from pathlib import Path
+from typing import cast
 
 import pytest
 import torch
@@ -28,12 +29,19 @@ from nanoquant.domain.models import (
 )
 from nanoquant.domain.planning import factor_bit_cost
 from nanoquant.domain.runs import BudgetState
+from nanoquant.domain.seeds import logical_seed
 from nanoquant.infrastructure.artifacts import LocalArtifactStore
 from nanoquant.infrastructure.events import JsonlEventSink
 from nanoquant.infrastructure.resident_executor import Cancellation, ResidentExecutor
 from nanoquant.infrastructure.tensor_store import LocalTensorStore
 from nanoquant.resident_quantization import (
     ResidentQuantizationRequest,
+    _commit_product_codebook_option_evidence,
+    _product_codebook_execution_hash,
+    _product_codebook_screen_reuse_reason,
+    _ProductCodebookOptionEvidence,
+    _ProductCodebookProbeCandidate,
+    _read_product_codebook_option_evidence,
     _run_resident_factorization_attempts,
 )
 
@@ -214,3 +222,115 @@ def test_full_rank_retry_adds_and_accounts_for_an_outlier_column(tmp_path: Path)
     assert accepted.actual_bit_cost.outlier_value_bits == outliers.bit_cost.outlier_value_bits
     assert accepted.actual_bit_cost.outlier_index_bits == outliers.bit_cost.outlier_index_bits
     assert accepted.extra_retry_bits == outliers.bit_cost.total
+
+
+def test_matching_final_screen_receipt_is_consumed_as_production_attempt_zero(
+    tmp_path: Path,
+) -> None:
+    plan, source, _residual, context = _fixture(tmp_path)
+    plan = replace(
+        plan,
+        retry=RetryPolicy(1, 0.0, None, None, plan.rank, 0),
+    )
+    request = ResidentQuantizationRequest(
+        tmp_path / "snapshot",
+        tmp_path / "run",
+        "fixture/model",
+        "revision",
+        ((1, 2),),
+        device="cpu",
+        admm=ADMMConfig(outer_iterations=2, inner_iterations=1),
+    )
+    factor_stage = FactorizationAttemptStage(request.admm)
+    outlier_stage = OutlierSelectionStage(
+        residual_probe_iterations=1,
+        residual_probe_inner_iterations=1,
+    )
+    scale_stage = ScaleFitStage(request.scale_fit)
+    screened, outliers, fitted = _run_resident_factorization_attempts(
+        plan,
+        source,
+        request,
+        BudgetState(plan.estimated_cost.total, 0, 0),
+        context,
+        "screen",
+        factor_stage,
+        outlier_stage,
+        scale_stage,
+    )
+    candidate = _ProductCodebookProbeCandidate(plan.layer, plan.rank, None)
+    evidence = _ProductCodebookOptionEvidence(
+        schema_version=3,
+        probe_plan=ArtifactRef(
+            "product-codebook-probe-plan",
+            "sha256-" + "1" * 64,
+            1,
+        ),
+        candidate=candidate,
+        source_identity_hash=plan.source_weight.content_hash,
+        source_weight_hash=source.content_hash,
+        estimated_cost=plan.estimated_cost,
+        measured_weighted_error=(
+            screened.result.metrics.export_weighted_normalized_error
+        ),
+        measured_raw_error=screened.result.metrics.raw_normalized_error,
+        factor_artifact=screened.result.factors.left_binary.artifact,
+        logical_seed=logical_seed(
+            request.seed,
+            "factorize-attempt",
+            plan.layer.block.index,
+            plan.layer.path,
+            0,
+        ),
+        outer_iterations=2,
+        execution_hash=_product_codebook_execution_hash(
+            request,
+            request.admm,
+            plan,
+            candidate,
+        ),
+        factorization=screened.result,
+        outliers=outliers,
+        scale_fit=fitted,
+        wall_seconds=screened.wall_seconds,
+    )
+    evidence_reference = _commit_product_codebook_option_evidence(
+        request,
+        evidence,
+        cast(LocalArtifactStore, context.artifact_store),
+    )
+    evidence = _read_product_codebook_option_evidence(
+        evidence_reference,
+        cast(LocalArtifactStore, context.artifact_store),
+    )
+
+    reused, reused_outliers, _reused_fit = _run_resident_factorization_attempts(
+        plan,
+        source,
+        request,
+        BudgetState(plan.estimated_cost.total, 0, 0),
+        context,
+        "production",
+        factor_stage,
+        outlier_stage,
+        scale_stage,
+        screening_evidence=evidence,
+    )
+
+    assert reused.result.factors.left_binary.artifact == evidence.factor_artifact
+    assert reused.wall_seconds == 0
+    assert reused_outliers == evidence.outliers
+    assert _product_codebook_screen_reuse_reason(
+        request,
+        plan,
+        replace(source, content_hash="changed"),
+        evidence,
+    ) == "source_weight_changed"
+    events = [
+        json.loads(line)
+        for line in (tmp_path / "events.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert any(
+        event["name"] == "product_codebook_probe.production_receipt_consumed"
+        for event in events
+    )

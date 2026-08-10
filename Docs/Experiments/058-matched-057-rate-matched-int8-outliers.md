@@ -22,10 +22,11 @@ quality protocol. Its configuration deltas are limited to:
   steps, and at most the lowest-rate and lowest-error endpoints per layer are
   measured at 1,200 steps. Only the 1,200-step receipts enter the exact-bit
   global allocator.
-- rank retry keeps its existing thresholds, attempt limit, rank growth, and
-  extra-bit budget, but gains a one-column INT8 outlier fallback. If an attempt
-  still misses its reconstruction threshold at the physical rank cap, the next
-  attempt holds rank fixed and selects one additional residual outlier column.
+- rank retry is enabled with the existing thresholds, attempt limit, rank
+  growth, and extra-bit budget, plus a two-column INT8 outlier fallback. If an
+  attempt still misses its reconstruction threshold at the physical rank cap,
+  the next attempt holds rank fixed and selects two additional residual outlier
+  columns.
   The fallback is not taken while rank can still grow and cannot exceed the
   layer input width or remaining retry-bit budget.
 
@@ -34,9 +35,9 @@ Nevertheless, scale and index tensors are included in reported logical bits.
 The fraction applies proportionally to other projection shapes because the
 current typed outlier policy is global; this is the smallest configuration-only
 057 derivative that preserves outliers on every layer. Production
-factorization remains at 800 ADMM iterations. The binary sign search remains
-the existing 8+8 search; Experiment 058 does not add the rejected 24+24 search
-or a 1,600-step fitting arm.
+factorization uses 1,200 ADMM iterations, matching the final screen. The binary
+sign search remains the existing 8+8 search; Experiment 058 does not add the
+rejected 24+24 search or a 1,600-step fitting arm.
 
 ## Motivation and gate
 
@@ -60,8 +61,14 @@ The resident layer retains a floating outlier master for tuning and requantizes
 it at every durable freeze. INT8 cost includes one 16-bit scale per column. The
 compact product-codebook overlay carries the same optional scale tensor as the
 base packed layout. Option receipts include their actual ADMM duration in both
-their immutable payload and resumable journal identity, preventing a coarse
-receipt from satisfying a final-stage allocation. These changes advance the
+their immutable payload and resumable journal identity, plus the complete typed
+factorization, outlier, and scale-fit references. This prevents a coarse
+receipt from satisfying a final-stage allocation and permits the selected
+1,200-step receipt to serve as production attempt zero when its source tensor
+content and all numerical inputs remain identical. The retained
+non-factorized tuning schedule normally changes the production source tensor;
+those layers explicitly record a reuse skip and run a fresh 1,200-step attempt
+instead. These changes advance the
 resident algorithm identity so older floating-sidecar or single-fidelity
 commits cannot be adopted by Experiment 058. Retry summaries retain the
 accepted attempt's actual outlier count, so packing and logical bit reporting

@@ -321,7 +321,9 @@ Ranks are derived outputs. They appear here, never as runtime mutations of confi
 
 An enabled mixed product-codebook run first persists a resumable probe plan and
 one measured option result per `(layer, rank, free_rows, outer_iterations)`
-receipt identity. A configured multi-fidelity run measures the complete grid at
+receipt identity. The final receipt retains the typed factorization, outlier,
+and scale-fit references as well as both source identity and tensor-content
+hashes. A configured multi-fidelity run measures the complete grid at
 the coarse duration, advances each layer's non-dominated cost/error frontier,
 and measures at most two final endpoints per layer at the final duration. The
 global exact-bit allocator consumes only those final-duration receipts, then
@@ -330,6 +332,10 @@ the selected rank, free-row count, complete layer cost, measured error, and
 option artifact into `ProductCodebookAllocationDecision`. Product execution is
 fail-closed: every eligible ordinary layer must have a decision matching its
 `LayerPlan`, so an enabled codec cannot silently execute the ordinary plan.
+When production uses the same numerical schedule, the selected receipt may be
+consumed as attempt zero only if its source tensor content, objective, outlier
+policy, seed, rank, free-row layout, and exact cost still match. Any
+pre-factorization tuning change to the source weight forces a fresh attempt.
 
 ## 7. Outlier-selection objects
 

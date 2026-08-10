@@ -53,7 +53,8 @@ CONFIG = replace(
         ),
         retry=replace(
             BASE_CONFIG.allocation.retry,
-            outlier_count_increment_at_rank_cap=1,
+            enabled=True,
+            outlier_count_increment_at_rank_cap=2,
         ),
         reconstruction=replace(
             BASE_CONFIG.allocation.reconstruction,
@@ -86,6 +87,10 @@ CONFIG = replace(
     factorization=replace(
         BASE_CONFIG.factorization,
         implementation="nanoquant_admm_product_k16",
+        admm=replace(
+            BASE_CONFIG.factorization.admm,
+            outer_iterations=1_200,
+        ),
         binary_search=BinaryFactorSearchConfig(enabled=True),
         product_codebook=ProductCodebookConfig(
             enabled=True,
@@ -131,7 +136,8 @@ _DEFINED_EXPERIMENT = define_compression_quality_experiment(
             "changing the global outlier fraction and storage so each down projection uses "
             "thirteen calibration-weighted INT8 columns at no greater sidecar rate than 057's "
             "seven BF16 columns, and selecting codebook options with a 100/400/1200-step "
-            "multi-fidelity screen; a failed full-rank retry adds one outlier column."
+            "multi-fidelity screen; production also uses 1200 ADMM steps and a failed "
+            "full-rank retry adds two outlier columns."
         ),
         hypothesis=(
             "Reinvesting BF16 outlier value bits into nearly twice as many residual-selected "
