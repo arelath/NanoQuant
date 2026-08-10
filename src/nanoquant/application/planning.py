@@ -135,7 +135,17 @@ def build_quantization_plan(request: PlanningRequest) -> QuantizationPlan:
             request.outliers.removed_column_importance,
         )
         bits = {"bfloat16": 16, "float16": 16, "int8": 8}[request.outliers.storage_dtype.value]
-        cost = outlier_bit_cost(layer.out_features, count, value_bits=bits) if count else BitCost()
+        cost = (
+            outlier_bit_cost(
+                layer.out_features,
+                count,
+                value_bits=bits,
+                index_bits=max(1, math.ceil(math.log2(max(2, layer.in_features)))),
+                scale_bits_per_column=16 if request.outliers.storage_dtype.value == "int8" else 0,
+            )
+            if count
+            else BitCost()
+        )
         outlier_plans[layer.layer] = plan
         outlier_costs[layer.layer] = cost
         side_costs[layer.layer] = _side_cost(
@@ -493,7 +503,17 @@ def _build_grouped_quantization_plan(request: PlanningRequest) -> QuantizationPl
             request.outliers.removed_column_importance,
         )
         value_bits = {"bfloat16": 16, "float16": 16, "int8": 8}[request.outliers.storage_dtype.value]
-        outlier_cost = outlier_bit_cost(unit.out_features, count, value_bits=value_bits) if count else BitCost()
+        outlier_cost = (
+            outlier_bit_cost(
+                unit.out_features,
+                count,
+                value_bits=value_bits,
+                index_bits=max(1, math.ceil(math.log2(max(2, unit.in_features)))),
+                scale_bits_per_column=16 if request.outliers.storage_dtype.value == "int8" else 0,
+            )
+            if count
+            else BitCost()
+        )
         outlier_plans[unit.key] = outlier_plan
         outlier_costs[unit.key] = outlier_cost
         side_costs[unit.key] = _side_cost(request, unit.name, unit.out_features, unit.in_features)

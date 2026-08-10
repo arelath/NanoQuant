@@ -5,9 +5,11 @@ from nanoquant.application.planning import PlanningRequest, build_quantization_p
 from nanoquant.config.schema import (
     AllocationStrategy,
     BiasCorrectionConfig,
+    DType,
     LayerRankBudgetConfig,
     LowRankPatchConfig,
     OutlierConfig,
+    OutlierSelector,
     RankAllocationConfig,
     RankBoundsConfig,
     RankRetryConfig,
@@ -113,6 +115,25 @@ def test_bias_and_patch_bits_are_funded_by_reducing_factor_rank() -> None:
         for sided_layer, baseline_layer in zip(sided_layers, baseline_layers, strict=True)
     )
     assert sided.planned_cost.total <= int(2.0 * 2 * 64 * 64)
+
+
+def test_int8_outlier_plan_charges_one_bf16_scale_per_column() -> None:
+    request = _request()
+    outliers = OutlierConfig(
+        selector=OutlierSelector.FISHER,
+        fraction=0.1,
+        storage_dtype=DType.INT8,
+        charge_to_bit_budget=False,
+    )
+
+    plan = build_quantization_plan(replace(request, outliers=outliers))
+    layers = [layer for block in plan.blocks for layer in block.layers]
+
+    assert all(layer.outliers.count == 7 for layer in layers)
+    assert all(
+        layer.estimated_cost.outlier_value_bits == 7 * (64 * 8 + 16)
+        for layer in layers
+    )
 
 
 def test_edge_boost_changes_utility_without_relaxing_rank_ceiling() -> None:

@@ -342,11 +342,21 @@ def factor_bit_cost(
     )
 
 
-def outlier_bit_cost(out_features: int, count: int, *, value_bits: int, index_bits: int | None = None) -> BitCost:
-    if min(out_features, count, value_bits) < 0:
+def outlier_bit_cost(
+    out_features: int,
+    count: int,
+    *,
+    value_bits: int,
+    index_bits: int | None = None,
+    scale_bits_per_column: int = 0,
+) -> BitCost:
+    if min(out_features, count, value_bits, scale_bits_per_column) < 0:
         raise ValueError("cost inputs must not be negative")
     index_width = index_bits if index_bits is not None else max(1, math.ceil(math.log2(max(2, out_features))))
-    return BitCost(outlier_value_bits=out_features * count * value_bits, outlier_index_bits=count * index_width)
+    return BitCost(
+        outlier_value_bits=count * (out_features * value_bits + scale_bits_per_column),
+        outlier_index_bits=count * index_width,
+    )
 
 
 def bias_bit_cost(out_features: int, *, value_bits: int = 16) -> BitCost:

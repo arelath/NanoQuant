@@ -604,7 +604,7 @@ def export_frozen_run_product_codebook_overlay(
             base = packed.load_layer(name)
             if base.spec.rank != frozen.rank:
                 raise ValueError(f"product-codebook packed rank differs: {name}")
-            if base.bias is not None or base.outlier_scales is not None or base.patch_left is not None:
+            if base.bias is not None or base.patch_left is not None:
                 raise ValueError(f"product-codebook v1 cannot carry packed side state: {name}")
             with (
                 resolved.tensors.read(product.right_indices, "cpu") as indices,
@@ -630,6 +630,9 @@ def export_frozen_run_product_codebook_overlay(
                     None
                     if base.outlier_values is None
                     else base.outlier_values.detach().clone().contiguous(),
+                    None
+                    if base.outlier_scales is None
+                    else base.outlier_scales.detach().clone().contiguous(),
                 )
             replayed = state.to_packed()
             for role in (
@@ -640,6 +643,7 @@ def export_frozen_run_product_codebook_overlay(
                 "scale_post",
                 "outlier_indices",
                 "outlier_values",
+                "outlier_scales",
             ):
                 expected = getattr(base, role)
                 actual = getattr(replayed, role)

@@ -101,9 +101,9 @@ This is promising screening evidence, not a promotion result. The corrections
 were applied as dense replay overlays after 057 distillation and selected from
 the retained corrected-CCE calibration profile. A resident experiment must
 make the selection before tuning/distillation, charge the INT8 scale tensors,
-persist the added columns, and extend the product-codebook packed format/runtime
-because its current v1 layout rejects outlier scales. It then needs the full
-unchanged 057 quality protocol. The retained evidence is:
+persist the added columns, and replay the scale sidecar through the compact
+product-codebook artifact. Experiment 058 implements those prerequisites and
+must now pass the full unchanged 057 quality protocol. The retained evidence is:
 
 - `evidence/057/int8-outlier-down-screen-validation-offset32-samples8.json`
   (raw-residual negative control);

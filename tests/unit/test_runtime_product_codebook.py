@@ -130,12 +130,17 @@ def test_product_codebook_state_predecodes_factorization_orientation(transposed:
     )
 
 
-def test_product_codebook_cost_matches_resident_rectangular_outlier_accounting() -> None:
+def test_product_codebook_carries_int8_outlier_scales_at_exact_cost(tmp_path: Path) -> None:
     base = _compact_state()
     scale_pre = base.factor_scale_pre.clone()
     scale_pre[4] = 0
     compact = ProductCodebookLayerState(
-        replace(base.spec, outlier_count=1, outlier_value_dtype="float32"),
+        replace(
+            base.spec,
+            outlier_count=1,
+            outlier_value_dtype="int8",
+            has_outlier_scales=True,
+        ),
         base.format,
         base.factorization_transposed,
         base.free_rows,
@@ -148,10 +153,37 @@ def test_product_codebook_cost_matches_resident_rectangular_outlier_accounting()
         base.factor_scale_mid,
         base.factor_scale_post,
         torch.tensor([4], dtype=torch.int32),
-        torch.ones((base.spec.out_features, 1)),
+        torch.ones((base.spec.out_features, 1), dtype=torch.int8),
+        torch.tensor([0.25]),
     )
 
-    assert compact.compact_logical_bits() - base.compact_logical_bits() == 3 * 16 + 2
+    replay = compact.to_packed()
+    assert replay.outlier_values is not None and replay.outlier_values.dtype is torch.int8
+    assert replay.outlier_scales is not None
+    assert compact.compact_logical_bits() - base.compact_logical_bits() == 3 * 8 + 16 + 6
+
+    # The optional scale sidecar survives the base-bound compact artifact.
+    assert torch.equal(replay.outlier_scales, compact.outlier_scales)
+    logical_artifact = write_logical_artifact(
+        tmp_path / "logical-int8",
+        RuntimeModelMetadata("fixture/model", "revision", "fixture", "config", "tokenizer"),
+        {0: (replay.to_logical(),)},
+    )
+    packed = convert_logical_to_packed(logical_artifact.root, tmp_path / "packed-int8")
+    overlay = write_product_codebook_artifact(
+        tmp_path / "product-int8",
+        packed,
+        {0: (compact,)},
+        allocation_sha256="a" * 64,
+        allocation_total_bits=compact.compact_logical_bits(),
+        effective_bpw=0.999,
+        correction_source_sha256="b" * 64,
+        replay={"maximum_rmse": 0.0},
+    )
+
+    restored = overlay.load_compact_layer(compact.spec.name)
+    assert torch.equal(restored.outlier_values, compact.outlier_values)
+    assert torch.equal(restored.outlier_scales, compact.outlier_scales)
 
 
 def _base_artifact(tmp_path: Path):  # type: ignore[no-untyped-def]

@@ -25,6 +25,7 @@ from nanoquant.domain.models import (
     SharedInputMemberSlice,
     TensorRef,
 )
+from nanoquant.domain.outliers import quantize_int8_columns
 from nanoquant.domain.sign_word_codebook import ProductSignCodebook, decode_product_codebook
 from nanoquant.ports.tensor_store import TensorStore
 
@@ -48,6 +49,7 @@ class TrainableFactorizedLinear(nn.Module):
     patch_right: nn.Parameter | None
     immutable_binary_factors: bool
     product_codebook_free_rows: int | None
+    outlier_storage_dtype: torch.dtype | None
 
     def __init__(
         self,
@@ -91,6 +93,7 @@ class TrainableFactorizedLinear(nn.Module):
         self.register_buffer("outlier_indices", None if outlier_indices is None else outlier_indices.detach().clone())
         if (outlier_indices is None) != (outlier_values is None):
             raise ValueError("outlier indices and values must be provided together")
+        self.outlier_storage_dtype = None if outlier_values is None else outlier_values.dtype
         if outlier_values is not None and not outlier_values.is_floating_point():
             if outlier_scales is None:
                 raise ValueError("quantized outlier values require scales")
@@ -404,9 +407,14 @@ class LayerFreezer:
             )
         if trainable.outlier_indices is not None and trainable.outlier_values is not None:
             values["outlier_indices"] = trainable.outlier_indices.detach()
-            values["outlier_values"] = trainable.outlier_values.detach()
-            if trainable.outlier_scales is not None:
-                values["outlier_scales"] = trainable.outlier_scales.detach()
+            outlier_values = trainable.outlier_values.detach()
+            outlier_scales = trainable.outlier_scales
+            if trainable.outlier_storage_dtype is torch.int8:
+                outlier_values, outlier_scales = quantize_int8_columns(outlier_values)
+                outlier_scales = outlier_scales.to(trainable.scale_pre.dtype)
+            values["outlier_values"] = outlier_values
+            if outlier_scales is not None:
+                values["outlier_scales"] = outlier_scales.detach()
         refs = tensors.put("frozen-layer", values)
         scales = ScaleState(refs["scale_pre"], refs["scale_mid"], refs["scale_post"])
         if "outlier_indices" in refs:
@@ -553,9 +561,14 @@ class SharedInputGroupFreezer:
             values["bias"] = trainable.bias.detach().to(bias_storage_dtype or trainable.bias.dtype)
         if trainable.outlier_indices is not None and trainable.outlier_values is not None:
             values["outlier_indices"] = trainable.outlier_indices.detach()
-            values["outlier_values"] = trainable.outlier_values.detach()
-            if trainable.outlier_scales is not None:
-                values["outlier_scales"] = trainable.outlier_scales.detach()
+            outlier_values = trainable.outlier_values.detach()
+            outlier_scales = trainable.outlier_scales
+            if trainable.outlier_storage_dtype is torch.int8:
+                outlier_values, outlier_scales = quantize_int8_columns(outlier_values)
+                outlier_scales = outlier_scales.to(trainable.scale_pre.dtype)
+            values["outlier_values"] = outlier_values
+            if outlier_scales is not None:
+                values["outlier_scales"] = outlier_scales.detach()
         refs = tensors.put("frozen-shared-input-group", values)
         outliers = (
             None

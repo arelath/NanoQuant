@@ -17,6 +17,7 @@ from nanoquant.application.layers import (
     restore_block_auxiliary_parameters,
 )
 from nanoquant.domain.models import BlockId, FrozenOutlierState, LayerId
+from nanoquant.domain.outliers import quantize_int8_columns
 from nanoquant.infrastructure.artifacts import LocalArtifactStore
 from nanoquant.infrastructure.tensor_store import LocalTensorStore
 
@@ -230,6 +231,52 @@ def test_freezer_zeroes_main_path_scale_for_outlier_columns(tmp_path: Path) -> N
         assert persisted[1] == 0
     expected = trainable.dense_weight().detach()
     assert torch.equal(frozen.module.dense_weight(), expected)
+
+
+def test_freezer_requantizes_int8_outlier_training_master(tmp_path: Path) -> None:
+    raw_values = torch.tensor([[4.0], [-2.0]], dtype=torch.bfloat16)
+    quantized, scales = quantize_int8_columns(raw_values)
+    trainable = TrainableFactorizedLinear(
+        torch.tensor([[0.2], [-0.3]], dtype=torch.bfloat16),
+        torch.tensor([[0.4, -0.5, 0.6]], dtype=torch.bfloat16),
+        torch.tensor([1.0, 7.0, 2.0], dtype=torch.bfloat16),
+        torch.tensor([0.5], dtype=torch.bfloat16),
+        torch.tensor([2.0, 3.0], dtype=torch.bfloat16),
+        outlier_indices=torch.tensor([1]),
+        outlier_values=quantized,
+        outlier_scales=scales,
+    )
+    assert trainable.outlier_values is not None
+    assert trainable.outlier_values.is_floating_point()
+    assert trainable.outlier_storage_dtype is torch.int8
+    trainable.outlier_values.data.add_(torch.tensor([[0.125], [-0.25]]))
+    expected = trainable.dense_weight().detach()
+    tensors = LocalTensorStore(LocalArtifactStore(tmp_path / "artifacts"))
+
+    frozen = LayerFreezer().freeze(
+        LayerId(BlockId(0), "mlp.up_proj"),
+        trainable,
+        tensors,
+        backend="factorized",
+    )
+
+    assert frozen.state.outliers is not None
+    with (
+        tensors.read(frozen.state.outliers.values) as stored_values,
+        tensors.read(frozen.state.outliers.scales) as stored_scales,
+    ):
+        assert stored_values.dtype is torch.int8
+        assert stored_scales.dtype is torch.bfloat16
+    assert frozen.module.outlier_values is not None
+    assert frozen.module.outlier_values.dtype is torch.int8
+    assert frozen.module.outlier_scales is not None
+    assert frozen.module.outlier_scales.dtype is torch.bfloat16
+    torch.testing.assert_close(
+        frozen.module.dense_weight().float(),
+        expected.float(),
+        atol=0.04,
+        rtol=0,
+    )
 
 
 def test_freezer_can_return_factorized_execution_backend(tmp_path: Path) -> None:

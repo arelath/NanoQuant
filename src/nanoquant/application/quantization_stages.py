@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass
 
@@ -164,7 +165,13 @@ class OutlierSelectionStage:
                     tensors["scales"] = scales
                 refs = context.tensor_store.put("outlier-selection", tensors)
         bits = {"bfloat16": 16, "float16": 16, "int8": 8}.get(request.plan.storage_dtype, 16)
-        cost = outlier_bit_cost(weight.shape[0], indices.numel(), value_bits=bits)
+        cost = outlier_bit_cost(
+            weight.shape[0],
+            indices.numel(),
+            value_bits=bits,
+            index_bits=max(1, math.ceil(math.log2(max(2, weight.shape[1])))),
+            scale_bits_per_column=16 if request.plan.storage_dtype == "int8" else 0,
+        )
         context.events.emit(
             self.name,
             "info",

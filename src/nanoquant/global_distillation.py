@@ -302,7 +302,11 @@ def _restore_storage_dtype(
             raise ValueError("global distillation source state is missing its mid scale")
         module.scale_mid.data = module.scale_mid.data.to(_storage_dtype(state.scales.mid.spec.dtype))
         module.scale_post.data = module.scale_post.data.to(_storage_dtype(state.scales.post.spec.dtype))
-        if module.outlier_values is not None and state.outliers is not None:
+        if (
+            module.outlier_values is not None
+            and state.outliers is not None
+            and state.outliers.values.spec.dtype != "int8"
+        ):
             module.outlier_values.data = module.outlier_values.data.to(_storage_dtype(state.outliers.values.spec.dtype))
         if module.bias is not None and state.bias is not None:
             module.bias.data = module.bias.data.to(_storage_dtype(state.bias.spec.dtype))

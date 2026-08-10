@@ -64,6 +64,8 @@ class ProductCodebookLayerEntry:
         required = set(_REQUIRED_ROLES)
         if self.spec.outlier_count:
             required.update(("outlier_indices", "outlier_values"))
+        if self.spec.has_outlier_scales:
+            required.add("outlier_scales")
         if set(by_role) != required:
             raise ValueError("product-codebook tensor inventory differs")
         prefix = f"{PRODUCT_CODEBOOK_TENSOR_NAMESPACE}.{self.spec.name}."
@@ -163,6 +165,7 @@ class OpenProductCodebookArtifact:
             required("factor_scale_post"),
             optional("outlier_indices"),
             optional("outlier_values"),
+            optional("outlier_scales"),
         )
 
     def load_packed_layer(
@@ -194,6 +197,8 @@ def _state_tensors(state: ProductCodebookLayerState) -> tuple[tuple[str, torch.T
                 ("outlier_values", state.outlier_values),
             )
         )
+    if state.outlier_scales is not None:
+        values.append(("outlier_scales", state.outlier_scales))
     return tuple(values)
 
 

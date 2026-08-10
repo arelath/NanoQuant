@@ -161,12 +161,13 @@ class ProductCodebookLayerState:
     factor_scale_post: torch.Tensor
     outlier_indices: torch.Tensor | None = None
     outlier_values: torch.Tensor | None = None
+    outlier_scales: torch.Tensor | None = None
 
     def __post_init__(self) -> None:
         if self.format != PRODUCT_CODEBOOK_FORMAT_VERSION:
             raise ValueError(f"unsupported product-codebook format: {self.format}")
-        if self.spec.has_bias or self.spec.has_outlier_scales or self.spec.patch_rank:
-            raise ValueError("product-codebook v1 does not carry optional bias, outlier scales, or patches")
+        if self.spec.has_bias or self.spec.patch_rank:
+            raise ValueError("product-codebook v1 does not carry optional bias or patches")
         factor_out = self.spec.in_features if self.factorization_transposed else self.spec.out_features
         factor_in = self.spec.out_features if self.factorization_transposed else self.spec.in_features
         if self.free_rows <= 0 or self.free_rows >= self.spec.rank:
@@ -264,11 +265,14 @@ class ProductCodebookLayerState:
             scale_post,
             outlier_indices=self.outlier_indices,
             outlier_values=self.outlier_values,
+            outlier_scales=self.outlier_scales,
         )
 
     def compact_logical_bits(self) -> int:
-        index_bits = math.ceil(math.log2(self.spec.out_features)) * self.spec.outlier_count
-        outlier_bits = self.spec.out_features * self.spec.outlier_count * 16
+        index_bits = math.ceil(math.log2(self.spec.in_features)) * self.spec.outlier_count
+        outlier_value_bits = 8 if self.spec.outlier_value_dtype == "int8" else 16
+        outlier_bits = self.spec.out_features * self.spec.outlier_count * outlier_value_bits
+        outlier_scale_bits = self.spec.outlier_count * 16 if self.spec.has_outlier_scales else 0
         return (
             self.factor_left_words.numel() * 32
             + self.factor_right_free_words.numel() * 32
@@ -283,6 +287,7 @@ class ProductCodebookLayerState:
             * 16
             + index_bits
             + outlier_bits
+            + outlier_scale_bits
         )
 
 
