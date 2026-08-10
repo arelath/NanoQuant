@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from nanoquant.application.layers import LayerFreezer, TrainableFactorizedLinear
 from nanoquant.application.quantization_stages import (
     BiasCorrectionStage,
     BiasCorrectionStageRequest,
@@ -17,7 +18,12 @@ from nanoquant.application.quantization_stages import (
     ScaleFitStage,
 )
 from nanoquant.application.stages import StageContext, execute_stage
-from nanoquant.config.schema import ADMMConfig, BiasCorrectionConfig, LowRankPatchConfig
+from nanoquant.config.schema import (
+    ADMMConfig,
+    BiasCorrectionConfig,
+    LowRankPatchConfig,
+    ProductCodebookConfig,
+)
 from nanoquant.domain.factorization import AdmmParameters
 from nanoquant.domain.models import (
     ArtifactRef,
@@ -122,6 +128,93 @@ def test_outlier_factorization_and_scale_fit_stages_commit_typed_results(tmp_pat
     scale = next(event for event in events if event["name"] == "scale_fit.completed")
     assert scale["fields"]["accepted"] == fitted.accepted
     assert scale["fields"]["after_weighted_error"] <= scale["fields"]["before_weighted_error"] + 1e-5
+
+
+def test_product_k16_factorization_persists_and_freezes_an_immutable_coded_suffix(
+    tmp_path: Path,
+) -> None:
+    context, tensors = _context(tmp_path)
+    generator = torch.Generator().manual_seed(23)
+    weight = torch.randn((6, 7), generator=generator)
+    refs = tensors.put(
+        "product-factor-fixture",
+        {
+            "weight": weight,
+            "input_importance": torch.ones(7),
+            "output_importance": torch.ones(6),
+        },
+    )
+    layer = LayerId(BlockId(0), "mlp.down_proj")
+    objective = ObjectiveSpec(
+        1,
+        layer,
+        "diagonal",
+        refs["input_importance"],
+        refs["output_importance"],
+        None,
+        0.01,
+        "target_weighted_norm_squared",
+        None,
+        ArtifactRef("calibration", "sha256-" + "1" * 64, 1),
+    )
+    factorized = execute_stage(
+        FactorizationAttemptStage(
+            ADMMConfig(outer_iterations=2, inner_iterations=1, convergence_check_interval=1),
+            product_codebook=ProductCodebookConfig(
+                enabled=True,
+                free_row_multiple=1,
+                minimum_coded_rows=1,
+                assignment_batch_words=32,
+            ),
+        ),
+        FactorizationRequest(
+            1,
+            layer,
+            refs["weight"],
+            refs["weight"],
+            objective,
+            4,
+            29,
+            "product-factor-config",
+            None,
+            2,
+        ),
+        context,
+    )
+    product = factorized.product_codebook
+    assert product is not None
+    assert product.right_free_rows == 2
+    with (
+        tensors.read(factorized.factors.left_binary) as left,
+        tensors.read(factorized.factors.right_binary) as right,
+        tensors.read(factorized.factors.scales.pre) as scale_pre,
+        tensors.read(factorized.factors.scales.mid) as scale_mid,
+        tensors.read(factorized.factors.scales.post) as scale_post,
+    ):
+        assert scale_mid is not None
+        trainable = TrainableFactorizedLinear(
+            left,
+            right,
+            scale_pre,
+            scale_mid,
+            scale_post,
+            product_codebook_free_rows=2,
+        )
+    fixed_suffix = trainable.effective_right_latent()[2:].detach().clone()
+    trainable.right_latent.data[2:].mul_(-1)
+    assert torch.equal(trainable.effective_right_latent()[2:], fixed_suffix)
+    loss = trainable(torch.randn(3, 7)).square().mean()
+    loss.backward()
+    assert trainable.right_latent.grad is not None
+    assert torch.count_nonzero(trainable.right_latent.grad[2:]) == 0
+
+    frozen = LayerFreezer().freeze(
+        layer,
+        trainable,
+        tensors,
+        product_codebook=product,
+    )
+    assert frozen.state.product_codebook == product
 
 
 def test_residual_probe_uses_configured_inner_iterations(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -413,6 +413,9 @@ class ProductCodebookConfig:
     codebook_freeze_fraction: float = 0.5
     codebook_warmup_fraction: float = 0.0
     assignment_batch_words: int = 65_536
+    probe_outer_iterations: int = 100
+    rank_span_fractions: tuple[float, ...] = (0.0, 0.5, 1.0)
+    free_row_fractions: tuple[float, ...] = (0.5, 0.5625, 0.625)
     measured_option_allocation: bool = True
     allow_free_factor_fallback: bool = True
     flips_per_word: int = 0

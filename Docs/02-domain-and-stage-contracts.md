@@ -292,6 +292,7 @@ class LayerPlan:
     outliers: OutlierPlan
     retry: RetryPolicy
     estimated_cost: BitCost
+    product_codebook_free_rows: Optional[int] = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -311,9 +312,19 @@ class QuantizationPlan:
     blocks: tuple[BlockPlan, ...]
     target_bpw: float
     planned_cost: BitCost
+    product_codebook_allocation_profile: Optional[ArtifactRef] = None
+    product_codebook_decisions: tuple[ProductCodebookAllocationDecision, ...] = ()
 ```
 
 Ranks are derived outputs. They appear here, never as runtime mutations of configuration.
+
+An enabled mixed product-codebook run first persists a resumable probe plan and
+one measured option result per candidate `(layer, rank, free_rows)` tuple. The
+global exact-bit allocator then persists its complete option profile and writes
+the selected rank, free-row count, complete layer cost, measured error, and
+option artifact into `ProductCodebookAllocationDecision`. Product execution is
+fail-closed: every eligible ordinary layer must have a decision matching its
+`LayerPlan`, so an enabled codec cannot silently execute the ordinary plan.
 
 ## 7. Outlier-selection objects
 
@@ -395,6 +406,16 @@ class FactorizationRequest:
     rank: int
     logical_seed: int
     factorizer_config_hash: str
+    product_codebook_right_free_rows: Optional[int] = None
+
+
+@dataclass(frozen=True, slots=True)
+class ProductCodebookFactorState:
+    format: str
+    right_free_rows: int
+    right_indices: TensorRef
+    first_table: TensorRef
+    second_table: TensorRef
 
 
 @dataclass(frozen=True, slots=True)
@@ -408,6 +429,7 @@ class FactorizationResult:
     convergence: ConvergenceMetrics
     wall_seconds: float
     peak_workspace_bytes: int
+    product_codebook: Optional[ProductCodebookFactorState] = None
 ```
 
 This is the direct concrete form of the outline's `FactorizationResult`. It separates factor tensors, scales, outlier state, reconstruction quality, convergence, and resources instead of returning a dictionary/namespace with optional keys inferred by callers.
@@ -502,6 +524,7 @@ class FrozenNanoQuantState:
     outliers: Optional[FrozenOutlierState]
     bias: Optional[TensorRef]
     logical_format: str
+    product_codebook: Optional[ProductCodebookFactorState] = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -521,7 +544,11 @@ class LayerResult:
     warnings: tuple[str, ...]
 ```
 
-`FrozenNanoQuantState` contains no optimizer flags, mutable module registrations, or runtime packed caches.
+`FrozenNanoQuantState` contains no optimizer flags, mutable module registrations,
+or runtime packed caches. For a product-coded owner it does retain the immutable
+table/assignment references required to prove and replay the coded suffix; the
+decoded `right_binary` is the logical reconstruction, not the physical bit-rate
+claim.
 
 ## 11. Block objects
 

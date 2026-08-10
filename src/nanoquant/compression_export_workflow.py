@@ -50,6 +50,7 @@ from nanoquant.infrastructure.model_adapters import (
 from nanoquant.infrastructure.resolved_model_config import load_snapshot_model_config
 from nanoquant.infrastructure.runtime_export import (
     export_frozen_run_logical,
+    export_frozen_run_product_codebook_overlay,
     validate_frozen_run_logical,
 )
 from nanoquant.infrastructure.safetensors_source import SafetensorsModelSource
@@ -66,6 +67,7 @@ from nanoquant.runtime import (
     convert_logical_to_packed,
     open_logical_artifact,
     open_packed_artifact,
+    open_product_codebook_artifact,
     validate_packed_conversion,
 )
 
@@ -140,6 +142,7 @@ class CompressionExportResult:
     gguf: GgufExportResult
     summary_output: Path
     huggingface: HuggingFaceUploadResult | None = None
+    product_codebook: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -346,6 +349,36 @@ def _ensure_packed_export(resolved: ResolvedCompressionExportRecipe) -> dict[str
     )
 
 
+def _ensure_product_codebook_export(
+    run_output: Path,
+    resolved: ResolvedCompressionExportRecipe,
+    block_count: int,
+    *,
+    use_global_tuning: bool,
+) -> dict[str, Any]:
+    output = resolved.packed_output.parent / f"{resolved.packed_output.name}.product-codebook"
+    if output.exists():
+        artifact = open_product_codebook_artifact(
+            output,
+            resolved.packed_output,
+            verify_hashes=True,
+        )
+    else:
+        artifact = export_frozen_run_product_codebook_overlay(
+            run_output,
+            resolved.packed_output,
+            output,
+            block_count,
+            use_global_tuning=use_global_tuning,
+            fresh_validation=True,
+        )
+    return {
+        "output": str(artifact.root),
+        "descriptor": str(artifact.root / "nanoquant-product-codebook-overlay.json"),
+        "manifest": to_dict(artifact.manifest),
+    }
+
+
 def _upload_huggingface_model(
     gguf: GgufExportResult,
     config: HuggingFaceUploadConfig | None,
@@ -405,6 +438,8 @@ def _upload_huggingface_model(
         if readme_sources
         else ((model_card, "README.md"), *supplemental)
     )
+
+
     artifacts = [ValidatedModelArtifact(gguf.output, gguf.bytes, gguf.sha256)]
     if gguf.mmproj is not None:
         artifacts.append(
@@ -533,6 +568,16 @@ def execute_compression_export(
         component_overlay=component_overlay,
     )
     packed = _ensure_packed_export(resolved)
+    product_codebook = (
+        _ensure_product_codebook_export(
+            run,
+            resolved,
+            block_count,
+            use_global_tuning=use_global_tuning,
+        )
+        if config.factorization.product_codebook.enabled
+        else None
+    )
     _adopt_legacy_gguf_export(config, resolved, root, source_snapshot)
     gguf = export_llamacpp_gguf(
         resolved.packed_output,
@@ -549,10 +594,11 @@ def execute_compression_export(
     atomic_write_json(
         summary_output,
         {
-            "schema_version": 5,
+            "schema_version": 6,
             "run_output": str(run),
             "logical": logical,
             "packed": packed,
+            "product_codebook": product_codebook,
             "gguf": {
                 "output": str(gguf.output),
                 "checkpoint": str(gguf.checkpoint),
@@ -583,7 +629,14 @@ def execute_compression_export(
             "huggingface": (None if huggingface is None else huggingface_upload_summary(huggingface)),
         },
     )
-    return CompressionExportResult(logical, packed, gguf, summary_output, huggingface)
+    return CompressionExportResult(
+        logical,
+        packed,
+        gguf,
+        summary_output,
+        huggingface,
+        product_codebook,
+    )
 
 
 def execute_complete_compression(

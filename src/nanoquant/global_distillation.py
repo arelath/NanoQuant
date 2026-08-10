@@ -224,6 +224,11 @@ def _thaw_frozen_layers(
                 patch_left=frozen.patch_left,
                 patch_right=frozen.patch_right,
                 immutable_binary_factors=True,
+                product_codebook_free_rows=(
+                    None
+                    if state.product_codebook is None
+                    else state.product_codebook.right_free_rows
+                ),
             )
             editor.install_trainable_layer(block, state.layer.path, module)
             trainable[(state.layer.block.index, state.layer.path)] = module
@@ -321,7 +326,15 @@ def _freeze_tuned_blocks(
         for state in block_result.frozen_state.quantized_layers:
             module = trainable[(state.layer.block.index, state.layer.path)].cpu()
             _restore_storage_dtype(module, state)
-            states.append(freezer.freeze(state.layer, module, tensors, outliers=state.outliers).state)
+            states.append(
+                freezer.freeze(
+                    state.layer,
+                    module,
+                    tensors,
+                    outliers=state.outliers,
+                    product_codebook=state.product_codebook,
+                ).state
+            )
         for group_state in block_result.frozen_state.shared_input_groups:
             module = trainable[(group_state.block.index, group_state.name)].cpu()
             _restore_storage_dtype(module, group_state)

@@ -9,7 +9,13 @@ import torch
 
 from nanoquant.application.low_rank_patch import fit_low_rank_patch_family
 from nanoquant.application.stages import StageContext
-from nanoquant.config.schema import ADMMConfig, BiasCorrectionConfig, LowRankPatchConfig, ScaleFitConfig
+from nanoquant.config.schema import (
+    ADMMConfig,
+    BiasCorrectionConfig,
+    LowRankPatchConfig,
+    ProductCodebookConfig,
+    ScaleFitConfig,
+)
 from nanoquant.domain.factorization import (
     AdmmParameters,
     ADMMTracePoint,
@@ -27,6 +33,7 @@ from nanoquant.domain.models import (
     LowRankPatchResult,
     OutlierSelectionRequest,
     OutlierSelectionResult,
+    ProductCodebookFactorState,
     ScaleFitRequest,
     ScaleFitResult,
     ScaleState,
@@ -45,6 +52,10 @@ from nanoquant.domain.planning import bias_bit_cost, outlier_bit_cost, patch_bit
 from nanoquant.domain.profiling import NULL_RECORDER, PhaseRecorder
 from nanoquant.domain.resources import peak_device_memory_bytes
 from nanoquant.domain.scale_fit import fit_scales, reconstruct
+from nanoquant.domain.sign_word_codebook import (
+    ProductSignCodebook,
+    factorize_sign_word_codebook_admm,
+)
 from nanoquant.domain.stages import HostInventory, ResourceEstimate, ValidationFinding, ValidationReport
 
 
@@ -196,6 +207,7 @@ class FactorizationAttemptStage:
         record_admm_steps: bool = False,
         admm_sample_every: int = 4,
         reset_peak_memory: bool = True,
+        product_codebook: ProductCodebookConfig | None = None,
     ) -> None:
         if admm_sample_every <= 0:
             raise ValueError("ADMM event sample cadence must be positive")
@@ -205,6 +217,11 @@ class FactorizationAttemptStage:
         self.record_admm_steps = record_admm_steps
         self.admm_sample_every = admm_sample_every
         self.reset_peak_memory = reset_peak_memory
+        self.product_codebook = product_codebook
+        if product_codebook is not None:
+            if not product_codebook.enabled:
+                raise ValueError("product-codebook factorization requires an enabled policy")
+            self.version = "5-product-k16"
 
     def _sampled_trace(self, trace: tuple[ADMMTracePoint, ...]) -> tuple[ADMMTracePoint, ...]:
         selected: list[ADMMTracePoint] = []
@@ -242,23 +259,74 @@ class FactorizationAttemptStage:
                 if request.generator_state is not None:
                     with context.tensor_store.read(request.generator_state, "cpu") as state:
                         generator.set_state(state)
-                result = factorize_admm_with_parameters(
-                    residual,
-                    input_importance,
-                    output_importance,
-                    request.rank,
-                    generator,
-                    AdmmParameters(
+                product_state = None
+                if request.product_codebook_right_free_rows is None:
+                    result = factorize_admm_with_parameters(
+                        residual,
+                        input_importance,
+                        output_importance,
+                        request.rank,
+                        generator,
+                        AdmmParameters(
+                            outer_iterations=self.admm.outer_iterations,
+                            inner_iterations=self.admm.inner_iterations,
+                            regularization=self.admm.regularization,
+                            penalty_schedule=self.admm.penalty_schedule,
+                            convergence_check_interval=self.admm.convergence_check_interval,
+                            early_stop_tolerance=self.admm.early_stop_tolerance,
+                            transpose_wide=self.admm.transpose_wide,
+                        ),
+                        recorder=self.recorder,
+                    )
+                else:
+                    policy = self.product_codebook
+                    if policy is None:
+                        raise ValueError("factorization request selects product coding without a policy")
+                    if self.admm.transpose_wide:
+                        raise ValueError("product-k16 resident factorization preserves native orientation")
+                    if self.admm.early_stop_tolerance is not None:
+                        raise ValueError("product-k16 resident factorization does not support early stopping")
+                    coded = factorize_sign_word_codebook_admm(
+                        residual,
+                        input_importance,
+                        output_importance,
+                        request.rank,
+                        generator,
+                        index_bits=policy.index_bits,
                         outer_iterations=self.admm.outer_iterations,
                         inner_iterations=self.admm.inner_iterations,
                         regularization=self.admm.regularization,
                         penalty_schedule=self.admm.penalty_schedule,
                         convergence_check_interval=self.admm.convergence_check_interval,
-                        early_stop_tolerance=self.admm.early_stop_tolerance,
-                        transpose_wide=self.admm.transpose_wide,
-                    ),
-                    recorder=self.recorder,
-                )
+                        codebook_update_interval=policy.codebook_update_interval,
+                        codebook_freeze_fraction=policy.codebook_freeze_fraction,
+                        codebook_warmup_fraction=policy.codebook_warmup_fraction,
+                        assignment_batch_words=policy.assignment_batch_words,
+                        codebook_mode="product",
+                        constrain_left=False,
+                        constrain_right=True,
+                        right_free_rows=request.product_codebook_right_free_rows,
+                    )
+                    result = coded.factors
+                    if not isinstance(coded.right_codebook, ProductSignCodebook):
+                        raise AssertionError("product factorizer omitted the right half-codebooks")
+                    if coded.right_indices is None or coded.right_flip_positions is not None:
+                        raise AssertionError("product factorizer emitted an invalid no-flip payload")
+                    product_refs = context.tensor_store.put(
+                        "factorization-product-codebook",
+                        {
+                            "right_indices": coded.right_indices,
+                            "first_table": coded.right_codebook.first.to(torch.int8),
+                            "second_table": coded.right_codebook.second.to(torch.int8),
+                        },
+                    )
+                    product_state = ProductCodebookFactorState(
+                        policy.format,
+                        coded.right_free_rows,
+                        product_refs["right_indices"],
+                        product_refs["first_table"],
+                        product_refs["second_table"],
+                    )
                 metrics = reconstruction_metrics(
                     residual,
                     result.reconstruction,
@@ -339,6 +407,7 @@ class FactorizationAttemptStage:
             convergence,
             wall_seconds,
             peak_workspace_bytes,
+            product_state,
         )
 
     def validate(self, result: FactorizationResult, context: StageContext) -> ValidationReport:

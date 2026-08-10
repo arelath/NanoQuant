@@ -18,6 +18,9 @@ class ArtifactType(str, Enum):
     RANK_PROBE_PLAN = "rank-probe-plan"
     RANK_PROBE_RESULT = "rank-probe-result"
     RECONSTRUCTION_RANK_PROFILE = "reconstruction-rank-profile"
+    PRODUCT_CODEBOOK_ALLOCATION_PROFILE = "product-codebook-allocation-profile"
+    PRODUCT_CODEBOOK_PROBE_PLAN = "product-codebook-probe-plan"
+    PRODUCT_CODEBOOK_OPTION_RESULT = "product-codebook-option-result"
     KL_BUDGET_PROFILE = "kl-budget-profile"
     KL_TEACHER_CACHE = "kl-teacher-cache"
     MEMORY_PLAN = "memory-plan"
@@ -341,6 +344,12 @@ class LayerPlan:
     outliers: OutlierPlan
     retry: RetryPolicy
     estimated_cost: BitCost
+    product_codebook_free_rows: int | None = None
+
+    def __post_init__(self) -> None:
+        free_rows = self.product_codebook_free_rows
+        if free_rows is not None and (free_rows < 0 or free_rows >= self.rank):
+            raise ValueError("layer product-codebook free rows must leave coded rows")
 
 
 @dataclass(frozen=True, slots=True)
@@ -415,6 +424,37 @@ class QuantizationPlan:
     planned_cost: BitCost
     reconstruction_profile: ArtifactRef | None = None
     reconstruction_decisions: tuple[ReconstructionRankDecision, ...] = ()
+    product_codebook_allocation_profile: ArtifactRef | None = None
+    product_codebook_decisions: tuple[ProductCodebookAllocationDecision, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class ProductCodebookAllocationDecision:
+    """The measured representation selected for one ordinary layer owner."""
+
+    layer: LayerId
+    baseline_rank: int
+    selected_rank: int
+    selected_free_rows: int | None
+    selected_cost: BitCost
+    measured_weighted_error: float
+    objective_value: float
+    option_artifact: ArtifactRef
+
+    def __post_init__(self) -> None:
+        if self.baseline_rank <= 0 or self.selected_rank <= 0:
+            raise ValueError("product-codebook allocation ranks must be positive")
+        if self.selected_free_rows is not None and not (
+            0 <= self.selected_free_rows < self.selected_rank
+        ):
+            raise ValueError("product-codebook allocation must leave coded rows")
+        if (
+            not math.isfinite(self.measured_weighted_error)
+            or self.measured_weighted_error < 0
+            or not math.isfinite(self.objective_value)
+            or self.objective_value < 0
+        ):
+            raise ValueError("product-codebook allocation errors must be finite and nonnegative")
 
 
 @dataclass(frozen=True, slots=True)
@@ -510,6 +550,24 @@ class FactorizationRequest:
     logical_seed: int
     factorizer_config_hash: str
     generator_state: TensorRef | None = None
+    product_codebook_right_free_rows: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ProductCodebookFactorState:
+    """Persisted discrete payload for a mixed right-factor product code."""
+
+    format: str
+    right_free_rows: int
+    right_indices: TensorRef
+    first_table: TensorRef
+    second_table: TensorRef
+
+    def __post_init__(self) -> None:
+        if self.format != "product-codebook-free-k16-v1":
+            raise ValueError("unsupported product-codebook factor format")
+        if self.right_free_rows < 0:
+            raise ValueError("product-codebook free-row count must not be negative")
 
 
 @dataclass(frozen=True, slots=True)
@@ -523,6 +581,7 @@ class FactorizationResult:
     convergence: ConvergenceMetrics
     wall_seconds: float
     peak_workspace_bytes: int
+    product_codebook: ProductCodebookFactorState | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -631,10 +690,13 @@ class FrozenNanoQuantState:
     logical_format: str
     patch_left: TensorRef | None = None
     patch_right: TensorRef | None = None
+    product_codebook: ProductCodebookFactorState | None = None
 
     def __post_init__(self) -> None:
         if (self.patch_left is None) != (self.patch_right is None):
             raise ValueError("frozen low-rank patch tensors must be paired")
+        if self.product_codebook is not None and self.product_codebook.right_free_rows >= self.rank:
+            raise ValueError("frozen product-codebook free rows must leave coded rows")
 
 
 @dataclass(frozen=True, slots=True)

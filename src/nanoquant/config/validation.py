@@ -645,6 +645,22 @@ def validate(config: RunConfig, phase: ValidationPhase = ValidationPhase.PRE_RES
         "k16 widths, aligned row bounds, and search batch sizes must be valid",
     )
     require(
+        product_codebook.probe_outer_iterations > 0
+        and bool(product_codebook.rank_span_fractions)
+        and tuple(sorted(set(product_codebook.rank_span_fractions)))
+        == product_codebook.rank_span_fractions
+        and product_codebook.rank_span_fractions[0] == 0.0
+        and product_codebook.rank_span_fractions[-1] == 1.0
+        and all(0 <= value <= 1 for value in product_codebook.rank_span_fractions)
+        and bool(product_codebook.free_row_fractions)
+        and tuple(sorted(set(product_codebook.free_row_fractions)))
+        == product_codebook.free_row_fractions
+        and all(0 <= value < 1 for value in product_codebook.free_row_fractions),
+        "CFG142",
+        "factorization.product_codebook",
+        "probe grids must be non-empty, ordered, unique, and within their normalized ranges",
+    )
+    require(
         0.0
         <= product_codebook.codebook_warmup_fraction
         <= product_codebook.codebook_freeze_fraction

@@ -20,10 +20,12 @@ from nanoquant.domain.models import (
     FrozenOutlierState,
     FrozenSharedInputGroupState,
     LayerId,
+    ProductCodebookFactorState,
     ScaleState,
     SharedInputMemberSlice,
     TensorRef,
 )
+from nanoquant.domain.sign_word_codebook import ProductSignCodebook, decode_product_codebook
 from nanoquant.ports.tensor_store import TensorStore
 
 
@@ -45,6 +47,7 @@ class TrainableFactorizedLinear(nn.Module):
     patch_left: nn.Parameter | None
     patch_right: nn.Parameter | None
     immutable_binary_factors: bool
+    product_codebook_free_rows: int | None
 
     def __init__(
         self,
@@ -61,12 +64,26 @@ class TrainableFactorizedLinear(nn.Module):
         patch_right: torch.Tensor | None = None,
         *,
         immutable_binary_factors: bool = False,
+        product_codebook_free_rows: int | None = None,
     ) -> None:
         super().__init__()
         if left_latent.shape[1] != right_latent.shape[0]:
             raise ValueError("factor ranks do not match")
         self.left_latent = nn.Parameter(left_latent.detach().clone())
         self.right_latent = nn.Parameter(right_latent.detach().clone())
+        if product_codebook_free_rows is not None and not (
+            0 <= product_codebook_free_rows < right_latent.shape[0]
+        ):
+            raise ValueError("product-codebook free rows must leave a coded suffix")
+        self.product_codebook_free_rows = product_codebook_free_rows
+        self.register_buffer(
+            "_fixed_right_suffix",
+            (
+                None
+                if product_codebook_free_rows is None
+                else right_latent.detach()[product_codebook_free_rows:].clone()
+            ),
+        )
         self.scale_pre = nn.Parameter(scale_pre.detach().clone().reshape(-1))
         self.scale_mid = nn.Parameter(scale_mid.detach().clone().reshape(-1))
         self.scale_post = nn.Parameter(scale_post.detach().clone().reshape(-1))
@@ -94,11 +111,24 @@ class TrainableFactorizedLinear(nn.Module):
         self.patch_right = None if patch_right is None else nn.Parameter(patch_right.detach().clone())
         self.immutable_binary_factors = immutable_binary_factors
 
+    def effective_right_latent(self) -> torch.Tensor:
+        """Return the trainable free prefix joined to the immutable coded suffix."""
+
+        free_rows = self.product_codebook_free_rows
+        if free_rows is None:
+            return self.right_latent
+        if self._fixed_right_suffix is None:
+            raise AssertionError("product-codebook module is missing its fixed suffix")
+        return torch.cat(
+            (self.right_latent[:free_rows], cast(torch.Tensor, self._fixed_right_suffix)),
+            dim=0,
+        )
+
     def dense_weight(self) -> torch.Tensor:
         apply_sign = cast(Any, _SignSTE).apply
         return functional_dense_reconstruction(
             cast(torch.Tensor, apply_sign(self.left_latent)),
-            cast(torch.Tensor, apply_sign(self.right_latent)),
+            cast(torch.Tensor, apply_sign(self.effective_right_latent())),
             self.scale_pre,
             self.scale_mid,
             self.scale_post,
@@ -112,9 +142,9 @@ class TrainableFactorizedLinear(nn.Module):
     def forward(self, value: torch.Tensor) -> torch.Tensor:
         apply_sign = cast(Any, _SignSTE).apply
         right = (
-            self.right_latent
+            self.effective_right_latent()
             if self.immutable_binary_factors and not self.right_latent.requires_grad
-            else cast(torch.Tensor, apply_sign(self.right_latent))
+            else cast(torch.Tensor, apply_sign(self.effective_right_latent()))
         ).to(device=value.device, dtype=value.dtype)
         left = (
             self.left_latent
@@ -337,9 +367,25 @@ class LayerFreezer:
         backend: str = "dense",
         bias_storage_dtype: torch.dtype | None = None,
         patch_storage_dtype: torch.dtype | None = None,
+        product_codebook: ProductCodebookFactorState | None = None,
     ) -> FrozenLayer:
         left = torch.where(trainable.left_latent.detach() >= 0, 1.0, -1.0)
-        right = torch.where(trainable.right_latent.detach() >= 0, 1.0, -1.0)
+        right = torch.where(trainable.effective_right_latent().detach() >= 0, 1.0, -1.0)
+        if product_codebook is not None:
+            if trainable.product_codebook_free_rows != product_codebook.right_free_rows:
+                raise ValueError("trainable and persisted product-codebook free rows differ")
+            with (
+                tensors.read(product_codebook.right_indices, str(right.device)) as right_indices,
+                tensors.read(product_codebook.first_table, str(right.device)) as first_table,
+                tensors.read(product_codebook.second_table, str(right.device)) as second_table,
+            ):
+                decoded = decode_product_codebook(
+                    right_indices,
+                    ProductSignCodebook(16, first_table, second_table),
+                    right.shape[1],
+                ).to(device=right.device, dtype=right.dtype)
+            if not torch.equal(right[product_codebook.right_free_rows :], decoded):
+                raise ValueError("frozen right-factor suffix differs from its product-codebook payload")
         values: dict[str, torch.Tensor] = {
             "left_binary": left,
             "right_binary": right,
@@ -380,6 +426,7 @@ class LayerFreezer:
             logical_format,
             refs.get("patch_left"),
             refs.get("patch_right"),
+            product_codebook,
         )
         return self.load(
             state,

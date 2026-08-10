@@ -140,3 +140,28 @@ def test_failed_accepted_layer_commit_does_not_mutate_budget(tmp_path: Path) -> 
             FactorizationAttemptStage(ADMMConfig(outer_iterations=2, inner_iterations=1)),
         )
     assert initial.retry_bits_spent == 0 and initial.accepted_bits == 0
+
+
+def test_custom_factor_cost_replaces_the_same_custom_baseline(tmp_path: Path) -> None:
+    plan, source, residual, context = _fixture(tmp_path)
+    custom = lambda rank: BitCost(binary_factor_bits=rank * 10)  # noqa: E731
+    plan = replace(
+        plan,
+        estimated_cost=custom(plan.rank) + BitCost(outlier_value_bits=13),
+    )
+
+    accepted = run_factorization_attempts(
+        plan,
+        source,
+        residual,
+        3,
+        "custom-cost",
+        BudgetState(1000, 0, 0),
+        context,
+        lambda _result, _attempts: None,
+        FactorizationAttemptStage(ADMMConfig(outer_iterations=2, inner_iterations=1)),
+        factor_cost=custom,
+    )
+
+    selected = next(attempt for attempt in accepted.attempts if attempt.accepted)
+    assert accepted.actual_bit_cost == selected.bit_cost + BitCost(outlier_value_bits=13)

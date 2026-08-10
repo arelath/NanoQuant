@@ -152,7 +152,7 @@ def test_complete_compression_export_runs_validated_stages_in_order(
     assert summary["gguf"]["token_embedding_type"] == "q8_0"
     assert summary["gguf"]["output_tensor_type"] == "q8_0"
     assert summary["gguf"]["output_tensor_present"] is False
-    assert summary["schema_version"] == 5
+    assert summary["schema_version"] == 6
     assert summary["mmproj"]["output"] == str(resolved.gguf_output.parent / "mmproj-BF16.gguf")
     assert summary["mmproj"]["sha256"] == "b" * 64
     assert summary["huggingface"] is None

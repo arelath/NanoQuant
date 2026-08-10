@@ -2,11 +2,25 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
 
 from nanoquant.application.layers import FactorizedReferenceLinear
+from nanoquant.domain.models import (
+    BitCost,
+    BlockId,
+    FrozenBlockState,
+    FrozenNanoQuantState,
+    LayerId,
+    ProductCodebookFactorState,
+    ScaleState,
+)
+from nanoquant.infrastructure.artifacts import LocalArtifactStore
+from nanoquant.infrastructure.commits import CommitIdentity
+from nanoquant.infrastructure.runtime_export import export_frozen_run_product_codebook_overlay
+from nanoquant.infrastructure.tensor_store import LocalTensorStore
 from nanoquant.runtime import (
     PRODUCT_CODEBOOK_FORMAT_VERSION,
     LogicalLayerState,
@@ -20,6 +34,7 @@ from nanoquant.runtime import (
     pack_product_half_table,
     pack_sign_matrix,
     unpack_product_codebook_indices,
+    unpack_product_half_table,
     write_logical_artifact,
     write_product_codebook_artifact,
 )
@@ -158,6 +173,92 @@ def test_product_codebook_artifact_is_base_bound_and_executable(tmp_path: Path) 
     descriptor.write_text(json.dumps(payload), encoding="utf-8")
     with pytest.raises(ProductCodebookArtifactError, match="another base"):
         open_product_codebook_artifact(overlay.root, base, verify_hashes=False)
+
+
+def test_frozen_run_product_export_replays_the_exact_packed_layer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    compact = _compact_state()
+    logical = compact.to_packed().to_logical()
+    logical_artifact = write_logical_artifact(
+        tmp_path / "logical-frozen",
+        RuntimeModelMetadata("fixture/model", "revision", "fixture", "config", "tokenizer"),
+        {0: (logical,)},
+    )
+    packed = convert_logical_to_packed(logical_artifact.root, tmp_path / "packed-frozen")
+    artifacts = LocalArtifactStore(tmp_path / "run" / "artifacts")
+    tensors = LocalTensorStore(artifacts)
+    coded_shape = (
+        compact.spec.rank - compact.free_rows,
+        compact.factor_right_free_words.shape[1],
+    )
+    refs = tensors.put(
+        "frozen-product",
+        {
+            "left": logical.left_binary,
+            "right": logical.right_binary,
+            "pre": logical.scale_pre,
+            "mid": logical.scale_mid,
+            "post": logical.scale_post,
+            "indices": unpack_product_codebook_indices(
+                compact.factor_right_coded_payload,
+                coded_shape,
+            ),
+            "first": unpack_product_half_table(compact.first_half_words).to(torch.int8),
+            "second": unpack_product_half_table(compact.second_half_words).to(torch.int8),
+        },
+    )
+    layer = LayerId(BlockId(0), "linear")
+    product = ProductCodebookFactorState(
+        PRODUCT_CODEBOOK_FORMAT_VERSION,
+        compact.free_rows,
+        refs["indices"],
+        refs["first"],
+        refs["second"],
+    )
+    frozen = FrozenNanoQuantState(
+        layer,
+        compact.spec.rank,
+        refs["left"],
+        refs["right"],
+        ScaleState(refs["pre"], refs["mid"], refs["post"]),
+        None,
+        None,
+        "nanoquant-v1",
+        product_codebook=product,
+    )
+    total_bits = compact.compact_logical_bits()
+    resolved = SimpleNamespace(
+        identity=CommitIdentity("config", "model", "sha256-" + "a" * 64),
+        global_tuning=None,
+        committed=(
+            SimpleNamespace(
+                layers=(SimpleNamespace(layer=layer, actual_bit_cost=BitCost(binary_factor_bits=total_bits)),),
+            ),
+        ),
+        blocks=(FrozenBlockState(BlockId(0), (frozen,), ()),),
+        tensors=tensors,
+    )
+    monkeypatch.setattr(
+        "nanoquant.infrastructure.runtime_export._resolve_frozen_run",
+        lambda *_args, **_kwargs: resolved,
+    )
+    monkeypatch.setattr(
+        "nanoquant.infrastructure.runtime_export.load_frozen_run_planning_reference",
+        lambda *_args, **_kwargs: SimpleNamespace(total_bits=total_bits),
+    )
+
+    overlay = export_frozen_run_product_codebook_overlay(
+        tmp_path / "run",
+        packed.root,
+        tmp_path / "frozen-product-overlay",
+        1,
+    )
+
+    restored = overlay.load_compact_layer(compact.spec.name)
+    assert torch.equal(restored.to_packed().right_words, packed.load_layer(compact.spec.name).right_words)
+    assert overlay.manifest.allocation_total_bits == total_bits
 
 
 @pytest.mark.parametrize("transposed", [False, True])

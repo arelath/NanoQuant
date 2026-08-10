@@ -33,6 +33,7 @@ class AcceptedFactorization:
 
 AcceptCommit = Callable[[FactorizationResult, tuple[AttemptSummary, ...]], None]
 AttemptExecutor = Callable[[int, int], FactorizationResult]
+FactorCost = Callable[[int], BitCost]
 
 
 def _replace_planned_factor_cost(
@@ -61,10 +62,17 @@ def run_factorization_attempts(
     legacy_seed_reset: bool = False,
     initial_generator_state: TensorRef | None = None,
     attempt_executor: AttemptExecutor | None = None,
+    factor_cost: FactorCost | None = None,
 ) -> AcceptedFactorization:
     rank = layer_plan.rank
-    base_factor_cost = factor_bit_cost(
-        layer_plan.source_weight.spec.shape[0], layer_plan.source_weight.spec.shape[1], layer_plan.rank
+    base_factor_cost = (
+        factor_bit_cost(
+            layer_plan.source_weight.spec.shape[0],
+            layer_plan.source_weight.spec.shape[1],
+            layer_plan.rank,
+        )
+        if factor_cost is None
+        else factor_cost(layer_plan.rank)
     )
     results: list[FactorizationResult] = []
     summaries: list[AttemptSummary] = []
@@ -100,7 +108,15 @@ def run_factorization_attempts(
         score = retry_score(
             weighted, raw, layer_plan.retry.weighted_error_threshold, layer_plan.retry.raw_error_threshold
         )
-        cost = factor_bit_cost(layer_plan.source_weight.spec.shape[0], layer_plan.source_weight.spec.shape[1], rank)
+        cost = (
+            factor_bit_cost(
+                layer_plan.source_weight.spec.shape[0],
+                layer_plan.source_weight.spec.shape[1],
+                rank,
+            )
+            if factor_cost is None
+            else factor_cost(rank)
+        )
         summaries.append(
             AttemptSummary(
                 attempt,

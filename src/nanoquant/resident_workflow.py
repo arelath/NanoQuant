@@ -179,9 +179,16 @@ def _validate_supported_recipe(config: RunConfig) -> None:
         "external utility profiles are not yet mapped",
     )
     _require(
-        config.factorization.implementation == "nanoquant_admm",
+        config.factorization.implementation
+        in {"nanoquant_admm", "nanoquant_admm_product_k16"},
         "factorization.implementation",
-        "only nanoquant_admm is implemented",
+        "only nanoquant_admm and nanoquant_admm_product_k16 are implemented",
+    )
+    _require(
+        (config.factorization.implementation == "nanoquant_admm_product_k16")
+        == config.factorization.product_codebook.enabled,
+        "factorization.product_codebook",
+        "the product-k16 implementation and enabled product policy must be selected together",
     )
     _require(
         config.factorization.compute_dtype is DType.BFLOAT16,
@@ -418,6 +425,7 @@ def resident_request_from_config(
         shared_input_groups=config.factorization.shared_input.groups,
         admm=config.factorization.admm,
         binary_factor_search=config.factorization.binary_search,
+        product_codebook=config.factorization.product_codebook,
         outliers=config.outliers,
         scale_fit=config.factorization.scale_fit,
         bias_correction=config.factorization.bias_correction,

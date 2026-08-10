@@ -225,6 +225,11 @@ def execute_compression_quality_experiment(
             if experiment.quality_backend is None
             else _repository_path(experiment.export.packed_output, repository_root)
         ),
+        product_codebook_overlay=(
+            None
+            if exports.product_codebook is None
+            else Path(str(exports.product_codebook["output"]))
+        ),
         stream_base_model=(
             experiment.large_model_guards
             or config.runtime.executor in {ExecutorKind.CPU_OFFLOAD, ExecutorKind.STREAMING}
@@ -347,6 +352,11 @@ def execute_compression_quality_experiment(
             "bf16_checkpoint_bytes": workflow.quantization.inventory.total_source_bytes,
             "packed_quantized_layer_bytes": exports.packed["packed_weight_bytes"],
             "gguf_bytes": exports.gguf.bytes,
+            **(
+                {}
+                if exports.product_codebook is None
+                else {"product_codebook_overlay": exports.product_codebook}
+            ),
         },
         "foldable_mlp_tuning": (
             None
@@ -446,6 +456,11 @@ def execute_compression_quality_experiment(
         "exports": {
             "logical": exports.logical,
             "packed": exports.packed,
+            **(
+                {}
+                if exports.product_codebook is None
+                else {"product_codebook": exports.product_codebook}
+            ),
             "gguf": {
                 "output": str(exports.gguf.output),
                 "checkpoint": str(exports.gguf.checkpoint),

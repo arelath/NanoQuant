@@ -28,8 +28,11 @@ The changed policy is `product-codebook-free-k16-v1` on eligible MLP right
 factors. A coded 32-sign word stores two 8-bit selectors into learned 256 by 16
 half-word tables. There is no correction or bit-flip stream. Each eligible
 owner retains the ordinary free-factor option and adds 32-row-aligned mixed
-free-prefix/coded-suffix options. Candidate-specific measured response, rather
-than Experiment 056's old rank anchors alone, drives the global option choice.
+free-prefix/coded-suffix options at the 056-selected rank, the midpoint to the
+unchanged physical cap, and that cap. Candidate-specific measured response,
+rather than Experiment 056's old rank anchors alone, drives the joint global
+rank/encoding choice. The 0.1% BF16 outlier sidecars remain outside the charged
+1.0-BPW ceiling exactly as they were in 056.
 
 ## Validity requirements
 
@@ -54,9 +57,12 @@ sidecar treatment, and protocol-matched quality that improves on Experiment
 
 ## Current status
 
-The numbered zero-argument definition and typed configuration boundary exist.
-Launch remains gated on the resident measured-option allocator, constrained
-tuning/search projection, compact commit/export path, and their CPU/tiny tests.
-The unsupported boundary is intentional: starting the launcher before those
-pieces land must fail rather than run ordinary ADMM under a misleading 057
-identity.
+The numbered zero-argument definition, resident measured-option allocator,
+immutable coded-suffix tuning/search path, persisted table/assignment state,
+exact-cost retry accounting, and packed product overlay export are implemented.
+The option screen is resumable and uses 100 outer ADMM iterations per candidate,
+matching the role of 056's measured rank screen; production factorization keeps
+the unchanged 800-iteration schedule. CPU/tiny tests prove constraint gradients,
+plan allocation, exact bit accounting, and exact packed replay. The real CUDA
+launch remains pending the complete repository
+validation and single-worker/device safety check.

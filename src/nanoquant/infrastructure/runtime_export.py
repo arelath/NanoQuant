@@ -30,11 +30,17 @@ from nanoquant.infrastructure.tensor_store import LocalTensorStore
 from nanoquant.runtime import (
     LOGICAL_FORMAT_VERSION,
     LogicalLayerState,
+    OpenProductCodebookArtifact,
+    ProductCodebookLayerState,
     QuantizedLinearSpec,
     RuntimeModelMetadata,
     canonical_torch_dtype,
     open_logical_artifact,
+    open_packed_artifact,
+    pack_product_codebook_indices,
+    pack_product_half_table,
     write_logical_artifact_stream,
+    write_product_codebook_artifact,
 )
 from nanoquant.runtime.backend import ProjectionMemberSpec
 
@@ -560,6 +566,120 @@ def load_frozen_run_rank_inventory(
         expected_blocks,
         fresh_validation=fresh_validation,
     ).ranks
+
+
+def export_frozen_run_product_codebook_overlay(
+    run_output: str | Path,
+    packed_output: str | Path,
+    output: str | Path,
+    expected_blocks: int,
+    *,
+    use_global_tuning: bool = True,
+    fresh_validation: bool = True,
+) -> OpenProductCodebookArtifact:
+    """Export persisted product tables/assignments against an exact packed base."""
+
+    if expected_blocks <= 0:
+        raise ValueError("expected block count must be positive")
+    run_root = Path(run_output)
+    resolved = _resolve_frozen_run(
+        run_root,
+        expected_blocks,
+        use_global_tuning=use_global_tuning,
+        fresh_validation=fresh_validation,
+    )
+    packed = open_packed_artifact(packed_output, verify_hashes=True)
+    committed_layers = {
+        result.layer: result
+        for block in resolved.committed
+        for result in block.layers
+    }
+    replacements: dict[int, list[ProductCodebookLayerState]] = {}
+    for block in resolved.blocks:
+        for frozen in block.quantized_layers:
+            product = frozen.product_codebook
+            if product is None:
+                continue
+            name = f"blocks.{frozen.layer.block.index}.{frozen.layer.path}"
+            base = packed.load_layer(name)
+            if base.spec.rank != frozen.rank:
+                raise ValueError(f"product-codebook packed rank differs: {name}")
+            if base.bias is not None or base.outlier_scales is not None or base.patch_left is not None:
+                raise ValueError(f"product-codebook v1 cannot carry packed side state: {name}")
+            with (
+                resolved.tensors.read(product.right_indices, "cpu") as indices,
+                resolved.tensors.read(product.first_table, "cpu") as first_table,
+                resolved.tensors.read(product.second_table, "cpu") as second_table,
+            ):
+                state = ProductCodebookLayerState(
+                    base.spec,
+                    product.format,
+                    False,
+                    product.right_free_rows,
+                    base.left_words.detach().clone().contiguous(),
+                    base.right_words[: product.right_free_rows].detach().clone().contiguous(),
+                    pack_product_codebook_indices(indices.contiguous()),
+                    pack_product_half_table(first_table.contiguous()),
+                    pack_product_half_table(second_table.contiguous()),
+                    base.scale_pre.detach().clone().contiguous(),
+                    base.scale_mid.detach().clone().contiguous(),
+                    base.scale_post.detach().clone().contiguous(),
+                    None
+                    if base.outlier_indices is None
+                    else base.outlier_indices.detach().clone().contiguous(),
+                    None
+                    if base.outlier_values is None
+                    else base.outlier_values.detach().clone().contiguous(),
+                )
+            replayed = state.to_packed()
+            for role in (
+                "left_words",
+                "right_words",
+                "scale_pre",
+                "scale_mid",
+                "scale_post",
+                "outlier_indices",
+                "outlier_values",
+            ):
+                expected = getattr(base, role)
+                actual = getattr(replayed, role)
+                if (expected is None) != (actual is None) or (
+                    expected is not None and actual is not None and not torch.equal(expected, actual)
+                ):
+                    raise ValueError(f"product-codebook packed replay differs: {name}:{role}")
+            committed = committed_layers.get(frozen.layer)
+            if committed is None or state.compact_logical_bits() != committed.actual_bit_cost.total:
+                raise ValueError(f"product-codebook committed bit cost differs: {name}")
+            replacements.setdefault(frozen.layer.block.index, []).append(state)
+    if not replacements:
+        raise ValueError("completed product-codebook run contains no coded layer replacements")
+    planning = load_frozen_run_planning_reference(
+        run_root,
+        expected_blocks,
+        fresh_validation=fresh_validation,
+    )
+    original_elements = sum(
+        layer.spec.out_features * layer.spec.in_features
+        for block in packed.manifest.blocks
+        for layer in block.layers
+    )
+    allocation_hash = resolved.identity.plan_hash.removeprefix("sha256-")
+    if len(allocation_hash) != 64:
+        raise ValueError("product-codebook plan identity is not content addressed")
+    return write_product_codebook_artifact(
+        output,
+        packed,
+        replacements,
+        allocation_sha256=allocation_hash,
+        allocation_total_bits=planning.total_bits,
+        effective_bpw=planning.total_bits / original_elements,
+        correction_source_sha256=allocation_hash,
+        replay={
+            "mode": "exact_frozen_product_codebook_state",
+            "exact_packed_replay": True,
+            "replacement_count": sum(len(states) for states in replacements.values()),
+        },
+    )
 
 
 def validate_frozen_run_logical(

@@ -114,7 +114,7 @@ _DEFINED_EXPERIMENT = define_compression_quality_experiment(
         ),
         hypothesis=(
             "A globally allocated mixed k16 product encoding can spend the same 1.0-BPW budget more "
-            "effectively than free sign words while preserving Experiment 056's ranks, outliers, "
+            "effectively than free sign words while preserving Experiment 056's rank cap, outliers, "
             "binary search, block tuning, post-block refit, and top-k KL distillation protocol."
         ),
         baseline=BaselineRef.experiment(BASELINE),
