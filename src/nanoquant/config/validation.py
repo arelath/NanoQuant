@@ -6,6 +6,7 @@ import math
 import re
 from dataclasses import dataclass
 from enum import Enum
+from typing import cast
 
 from nanoquant.ports.event_sink import Severity
 
@@ -253,6 +254,19 @@ def validate(config: RunConfig, phase: ValidationPhase = ValidationPhase.PRE_RES
         "CFG132",
         "allocation.bounds.overcomplete_rank_ceiling_fraction",
         "must be finite and at least one",
+    )
+    require(
+        config.allocation.retry.outlier_count_increment_at_rank_cap >= 0,
+        "CFG144",
+        "allocation.retry.outlier_count_increment_at_rank_cap",
+        "must be non-negative",
+    )
+    require(
+        config.allocation.retry.outlier_count_increment_at_rank_cap == 0
+        or config.outliers.selector is not OutlierSelector.NONE,
+        "CFG145",
+        "allocation.retry.outlier_count_increment_at_rank_cap",
+        "requires an enabled outlier selector",
     )
     reconstruction = config.allocation.reconstruction
     reconstruction_selected = config.allocation.strategy in {
@@ -659,6 +673,23 @@ def validate(config: RunConfig, phase: ValidationPhase = ValidationPhase.PRE_RES
         "CFG142",
         "factorization.product_codebook",
         "probe grids must be non-empty, ordered, unique, and within their normalized ranges",
+    )
+    refinement_iterations = (
+        product_codebook.probe_frontier_outer_iterations,
+        product_codebook.probe_final_outer_iterations,
+    )
+    require(
+        refinement_iterations == (None, None)
+        or (
+            all(value is not None for value in refinement_iterations)
+            and product_codebook.probe_outer_iterations
+            < cast(int, product_codebook.probe_frontier_outer_iterations)
+            < cast(int, product_codebook.probe_final_outer_iterations)
+            and 1 <= product_codebook.probe_final_options_per_layer <= 2
+        ),
+        "CFG143",
+        "factorization.product_codebook",
+        "probe refinement requires increasing coarse/frontier/final iterations and one or two final options per layer",
     )
     require(
         0.0

@@ -51,6 +51,10 @@ CONFIG = replace(
             ceiling_fraction_of_uniform=1.5,
             overcomplete_rank_ceiling_fraction=1.0,
         ),
+        retry=replace(
+            BASE_CONFIG.allocation.retry,
+            outlier_count_increment_at_rank_cap=1,
+        ),
         reconstruction=replace(
             BASE_CONFIG.allocation.reconstruction,
             objective_mode="calibration_weighted",
@@ -83,7 +87,13 @@ CONFIG = replace(
         BASE_CONFIG.factorization,
         implementation="nanoquant_admm_product_k16",
         binary_search=BinaryFactorSearchConfig(enabled=True),
-        product_codebook=ProductCodebookConfig(enabled=True),
+        product_codebook=ProductCodebookConfig(
+            enabled=True,
+            probe_outer_iterations=100,
+            probe_frontier_outer_iterations=400,
+            probe_final_outer_iterations=1_200,
+            probe_final_options_per_layer=2,
+        ),
         bias_correction=BiasCorrectionConfig(enabled=False),
         low_rank_patch=LowRankPatchConfig(enabled=False),
         shared_input=replace(
@@ -118,14 +128,16 @@ _DEFINED_EXPERIMENT = define_compression_quality_experiment(
         name="matched-057-rate-matched-int8-outliers-compress-and-benchmark-gemma-3-1b-it",
         purpose=(
             "Replay Experiment 057's complete product-k16 compression and quality protocol, "
-            "changing only the global outlier fraction and storage so each down projection "
-            "uses thirteen calibration-weighted INT8 columns at no greater sidecar rate than "
-            "057's seven BF16 columns."
+            "changing the global outlier fraction and storage so each down projection uses "
+            "thirteen calibration-weighted INT8 columns at no greater sidecar rate than 057's "
+            "seven BF16 columns, and selecting codebook options with a 100/400/1200-step "
+            "multi-fidelity screen; a failed full-rank retry adds one outlier column."
         ),
         hypothesis=(
             "Reinvesting BF16 outlier value bits into nearly twice as many residual-selected "
             "INT8 columns will preserve the 057 representation and improve full-model quality, "
-            "matching the positive held-out down-projection screen."
+            "matching the positive held-out down-projection screen, while final codebook "
+            "allocation uses converged 1200-step option receipts instead of coarse receipts."
         ),
         baseline=BaselineRef.experiment(BASELINE),
         tags=(

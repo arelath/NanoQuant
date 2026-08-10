@@ -5,7 +5,11 @@ from pathlib import Path
 import pytest
 import torch
 
-from nanoquant.application.quantization_stages import FactorizationAttemptStage
+from nanoquant.application.quantization_stages import (
+    FactorizationAttemptStage,
+    OutlierSelectionStage,
+    ScaleFitStage,
+)
 from nanoquant.application.retry_loop import run_factorization_attempts
 from nanoquant.application.stages import StageContext
 from nanoquant.config.schema import ADMMConfig
@@ -28,6 +32,10 @@ from nanoquant.infrastructure.artifacts import LocalArtifactStore
 from nanoquant.infrastructure.events import JsonlEventSink
 from nanoquant.infrastructure.resident_executor import Cancellation, ResidentExecutor
 from nanoquant.infrastructure.tensor_store import LocalTensorStore
+from nanoquant.resident_quantization import (
+    ResidentQuantizationRequest,
+    _run_resident_factorization_attempts,
+)
 
 
 def _fixture(tmp_path: Path) -> tuple[LayerPlan, object, object, StageContext]:
@@ -165,3 +173,44 @@ def test_custom_factor_cost_replaces_the_same_custom_baseline(tmp_path: Path) ->
 
     selected = next(attempt for attempt in accepted.attempts if attempt.accepted)
     assert accepted.actual_bit_cost == selected.bit_cost + BitCost(outlier_value_bits=13)
+
+
+def test_full_rank_retry_adds_and_accounts_for_an_outlier_column(tmp_path: Path) -> None:
+    plan, source, _residual, context = _fixture(tmp_path)
+    plan = replace(
+        plan,
+        outliers=OutlierPlan("residual", 0, "int8", False),
+        retry=RetryPolicy(2, 1.0, 0.0, None, 1, 1_000, 1),
+    )
+    request = ResidentQuantizationRequest(
+        tmp_path / "snapshot",
+        tmp_path / "run",
+        "fixture/model",
+        "revision",
+        ((1, 2),),
+        device="cpu",
+        admm=ADMMConfig(outer_iterations=2, inner_iterations=1),
+    )
+
+    accepted, outliers, _fitted = _run_resident_factorization_attempts(
+        plan,
+        source,
+        request,
+        BudgetState(1_000, 0, 0),
+        context,
+        "config",
+        FactorizationAttemptStage(request.admm),
+        OutlierSelectionStage(
+            residual_probe_iterations=1,
+            residual_probe_inner_iterations=1,
+        ),
+        ScaleFitStage(request.scale_fit),
+    )
+
+    assert [attempt.outlier_count for attempt in accepted.attempts] == [0, 1]
+    assert next(attempt for attempt in accepted.attempts if attempt.accepted).outlier_count == 1
+    assert outliers.bit_cost.outlier_value_bits == 2 * 8 + 16
+    assert outliers.bit_cost.outlier_index_bits == 1
+    assert accepted.actual_bit_cost.outlier_value_bits == outliers.bit_cost.outlier_value_bits
+    assert accepted.actual_bit_cost.outlier_index_bits == outliers.bit_cost.outlier_index_bits
+    assert accepted.extra_retry_bits == outliers.bit_cost.total

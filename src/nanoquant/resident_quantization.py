@@ -169,6 +169,7 @@ from nanoquant.domain.planning import (
     allocate_reconstruction_rank_budget,
     apply_reconstruction_rank_trust_region,
     factor_bit_cost,
+    outlier_bit_cost,
 )
 from nanoquant.domain.profiling import NULL_RECORDER, PhaseRecorder
 from nanoquant.domain.resources import (
@@ -234,7 +235,7 @@ from nanoquant.infrastructure.tuning_checkpoint import (
 from nanoquant.ports.event_sink import EventSink, LayerCommittedPayload, emit_layer_committed
 from nanoquant.ports.model_adapter import ModelAdapter
 
-RESIDENT_ALGORITHM_VERSION = 62
+RESIDENT_ALGORITHM_VERSION = 63
 COVARIANCE_REFINEMENT_MAX_INPUT_FEATURES = 2048
 _THROUGHPUT_PROBE_REPETITIONS = 5
 _THROUGHPUT_PROBE_WARMUP_WORKLOADS = 3
@@ -1907,12 +1908,38 @@ def _run_resident_factorization_attempts(
             scale_bits=compact.scale_bits,
         )
 
-    def execute_attempt(rank: int, attempt: int) -> FactorizationResult:
-        shape = "x".join(str(dimension) for dimension in layer_plan.source_weight.spec.shape)
-        with recorder.phase("attempt", rank=rank, attempt=attempt, shape=shape):
-            return execute_attempt_body(rank, attempt)
+    def selected_outlier_cost(count: int) -> BitCost:
+        return outlier_bit_cost(
+            layer_plan.source_weight.spec.shape[0],
+            count,
+            value_bits={"bfloat16": 16, "float16": 16, "int8": 8}[
+                layer_plan.outliers.storage_dtype
+            ],
+            index_bits=max(
+                1,
+                math.ceil(math.log2(max(2, layer_plan.source_weight.spec.shape[1]))),
+            ),
+            scale_bits_per_column=(
+                16 if layer_plan.outliers.storage_dtype == "int8" else 0
+            ),
+        )
 
-    def execute_attempt_body(rank: int, attempt: int) -> FactorizationResult:
+    def execute_attempt(rank: int, attempt: int, outlier_count: int) -> FactorizationResult:
+        shape = "x".join(str(dimension) for dimension in layer_plan.source_weight.spec.shape)
+        with recorder.phase(
+            "attempt",
+            rank=rank,
+            attempt=attempt,
+            outlier_count=outlier_count,
+            shape=shape,
+        ):
+            return execute_attempt_body(rank, attempt, outlier_count)
+
+    def execute_attempt_body(
+        rank: int,
+        attempt: int,
+        outlier_count: int,
+    ) -> FactorizationResult:
         started = time.perf_counter()
         attempt_window = PeakWindow(request.device).start()
         outlier_seed = (
@@ -1944,12 +1971,14 @@ def _run_resident_factorization_attempts(
                     layer_plan.layer,
                     source_weight,
                     layer_plan.objective,
-                    layer_plan.outliers,
+                    replace(layer_plan.outliers, count=outlier_count),
                     rank,
                     outlier_seed,
                 ),
                 context,
             )
+        if outliers.bit_cost != selected_outlier_cost(outlier_count):
+            raise ValueError("outlier retry selection count differs from its requested plan")
         probe_peak = peak_device_memory_bytes(request.device)
         context.events.emit(
             "resident-quantization",
@@ -2063,6 +2092,7 @@ def _run_resident_factorization_attempts(
         legacy_seed_reset=request.legacy_tuning_seed_reset,
         attempt_executor=execute_attempt,
         factor_cost=factor_cost,
+        outlier_cost=selected_outlier_cost,
     )
     accepted_index = next(index for index, item in enumerate(accepted.attempts) if item.accepted)
     outliers, fitted = companions[accepted_index]
@@ -5206,10 +5236,11 @@ class _ProductCodebookOptionEvidence:
     measured_raw_error: float
     factor_artifact: ArtifactRef
     logical_seed: int
+    outer_iterations: int
     wall_seconds: float
 
     def __post_init__(self) -> None:
-        if self.schema_version != 1:
+        if self.schema_version != 2:
             raise ValueError("unsupported product-codebook option evidence schema")
         if (
             not math.isfinite(self.measured_weighted_error)
@@ -5218,8 +5249,66 @@ class _ProductCodebookOptionEvidence:
             or self.measured_raw_error < 0
             or not math.isfinite(self.wall_seconds)
             or self.wall_seconds < 0
+            or self.outer_iterations <= 0
         ):
-            raise ValueError("product-codebook option metrics must be finite and nonnegative")
+            raise ValueError(
+                "product-codebook option metrics and iteration count must be valid"
+            )
+
+    @property
+    def receipt_key(self) -> str:
+        return f"{self.candidate.key}:outer-{self.outer_iterations}"
+
+
+def _product_codebook_receipt_key(
+    candidate: _ProductCodebookProbeCandidate,
+    outer_iterations: int,
+) -> str:
+    return f"{candidate.key}:outer-{outer_iterations}"
+
+
+def _select_product_codebook_frontier_candidates(
+    scored: tuple[tuple[_ProductCodebookProbeCandidate, int, float], ...],
+    *,
+    maximum_options: int | None = None,
+) -> tuple[_ProductCodebookProbeCandidate, ...]:
+    """Keep a deterministic per-layer cost/error frontier.
+
+    The optional two-point cap retains the lowest-rate and lowest-error ends of
+    the frontier.  Those endpoints let the exact global allocator trade rate
+    between layers after the final, higher-fidelity measurements.
+    """
+
+    if not scored:
+        raise ValueError("product-codebook refinement requires measured candidates")
+    layers = {candidate.layer for candidate, _bits, _error in scored}
+    if len(layers) != 1:
+        raise ValueError("product-codebook refinement candidates must belong to one layer")
+    if maximum_options is not None and maximum_options not in {1, 2}:
+        raise ValueError("product-codebook refinement supports one or two final options")
+    for _candidate, bits, error in scored:
+        if bits <= 0 or not math.isfinite(error) or error < 0:
+            raise ValueError("product-codebook refinement scores must be valid")
+
+    ordered = sorted(scored, key=lambda item: (item[1], item[2], item[0].key))
+    frontier = tuple(
+        item
+        for item in ordered
+        if not any(
+            (other[1] <= item[1] and other[2] <= item[2])
+            and (other[1] < item[1] or other[2] < item[2])
+            for other in ordered
+        )
+    )
+    if maximum_options is None or len(frontier) <= maximum_options:
+        return tuple(item[0] for item in frontier)
+    if maximum_options == 1:
+        return (min(frontier, key=lambda item: (item[2], item[1], item[0].key))[0],)
+    cheapest = min(frontier, key=lambda item: (item[1], item[2], item[0].key))
+    best = min(frontier, key=lambda item: (item[2], item[1], item[0].key))
+    if cheapest[0] == best[0]:
+        return (cheapest[0],)
+    return (cheapest[0], best[0])
 
 
 def _product_codebook_probe_candidates(
@@ -5342,7 +5431,7 @@ def _load_product_codebook_option_evidence(
             reference = ArtifactRef(
                 ArtifactTypes.PRODUCT_CODEBOOK_OPTION_RESULT,
                 str(record["artifact_id"]),
-                1,
+                2,
             )
             descriptor = artifacts.validate(reference.artifact_id)
             if descriptor.artifact_type != ArtifactTypes.PRODUCT_CODEBOOK_OPTION_RESULT:
@@ -5361,12 +5450,14 @@ def _load_product_codebook_option_evidence(
             if (
                 evidence.probe_plan != probe_plan
                 or evidence.candidate.key != record["candidate_key"]
+                or evidence.outer_iterations != int(record["outer_iterations"])
+                or evidence.receipt_key != record["receipt_key"]
             ):
                 raise ValueError("option evidence identity differs")
-            prior = loaded.get(evidence.candidate.key)
+            prior = loaded.get(evidence.receipt_key)
             if prior is not None and prior[0] != reference:
                 raise ValueError("duplicate product-codebook option results differ")
-            loaded[evidence.candidate.key] = (reference, evidence)
+            loaded[evidence.receipt_key] = (reference, evidence)
         except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
             raise ValueError(
                 f"product-codebook probe journal is invalid at sequence {sequence}"
@@ -5385,7 +5476,7 @@ def _commit_product_codebook_option_evidence(
             encoding="utf-8",
         )
         descriptor = writer.commit()
-    reference = ArtifactRef(ArtifactTypes.PRODUCT_CODEBOOK_OPTION_RESULT, descriptor.artifact_id, 1)
+    reference = ArtifactRef(ArtifactTypes.PRODUCT_CODEBOOK_OPTION_RESULT, descriptor.artifact_id, 2)
     journal = _product_codebook_probe_journal_path(request.output)
     journal.parent.mkdir(parents=True, exist_ok=True)
     sequence = 1
@@ -5398,6 +5489,8 @@ def _commit_product_codebook_option_evidence(
                     "sequence": sequence,
                     "probe_plan_artifact": evidence.probe_plan.artifact_id,
                     "candidate_key": evidence.candidate.key,
+                    "outer_iterations": evidence.outer_iterations,
+                    "receipt_key": evidence.receipt_key,
                     "artifact_id": reference.artifact_id,
                 },
                 sort_keys=True,
@@ -5416,7 +5509,7 @@ def _persist_product_codebook_allocation_profile(
     artifacts: LocalArtifactStore,
 ) -> ArtifactRef:
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "resident_config_hash": _resident_config_hash(request),
         "probe_plan": to_dict(probe_plan),
         "options": [
@@ -5426,6 +5519,7 @@ def _persist_product_codebook_allocation_profile(
                 "estimated_cost": to_dict(option.estimated_cost),
                 "measured_weighted_error": option.measured_weighted_error,
                 "measured_raw_error": option.measured_raw_error,
+                "outer_iterations": option.outer_iterations,
             }
             for reference, option in evidence
         ],
@@ -5439,7 +5533,7 @@ def _persist_product_codebook_allocation_profile(
     return ArtifactRef(
         ArtifactTypes.PRODUCT_CODEBOOK_ALLOCATION_PROFILE,
         descriptor.artifact_id,
-        1,
+        2,
     )
 
 
@@ -5476,25 +5570,6 @@ def _run_product_codebook_option_allocation(
     )
     persisted = _load_product_codebook_option_evidence(request, probe_plan, artifacts)
     layers = {layer.layer: layer for block in baseline_plan.blocks for layer in block.layers}
-    probe_admm = replace(
-        request.admm,
-        outer_iterations=request.product_codebook.probe_outer_iterations,
-        convergence_check_interval=min(
-            request.admm.convergence_check_interval,
-            request.product_codebook.probe_outer_iterations,
-        ),
-        early_stop_tolerance=None,
-        transpose_wide=False,
-    )
-    factor_stage = FactorizationAttemptStage(
-        probe_admm,
-        device=request.device,
-        recorder=recorder,
-        reset_peak_memory=False,
-        product_codebook=request.product_codebook,
-    )
-
-
     outlier_stage = OutlierSelectionStage(
         device=request.device,
         residual_probe_iterations=request.outliers.residual_probe.iterations,
@@ -5502,113 +5577,236 @@ def _run_product_codebook_option_allocation(
         transpose_wide=request.admm.transpose_wide,
     )
     scale_stage = ScaleFitStage(request.scale_fit, device=request.device)
-    config_hash = semantic_hash(
-        {
-            "probe_plan": probe_plan.artifact_id,
-            "admm": probe_admm,
-            "product_codebook": request.product_codebook,
-            "scale_fit": request.scale_fit,
-        }
-    )
     source_refs: dict[LayerId, TensorRef] = {}
-    for index, candidate in enumerate(candidates, start=1):
-        layer = layers[candidate.layer]
-        option_cost = _product_codebook_option_cost(layer, candidate, request.product_codebook)
-        seed = logical_seed(
-            request.seed,
-            "factorize-attempt",
-            candidate.layer.block.index,
-            candidate.layer.path,
-            0,
+
+    def measure_fidelity(
+        selected_candidates: tuple[_ProductCodebookProbeCandidate, ...],
+        outer_iterations: int,
+        fidelity: str,
+    ) -> None:
+        probe_admm = replace(
+            request.admm,
+            outer_iterations=outer_iterations,
+            convergence_check_interval=min(
+                request.admm.convergence_check_interval,
+                outer_iterations,
+            ),
+            early_stop_tolerance=None,
+            transpose_wide=False,
         )
-        prior = persisted.get(candidate.key)
-        if prior is not None:
-            evidence = prior[1]
-            if (
-                evidence.source_weight_hash != layer.source_weight.content_hash
-                or evidence.estimated_cost != option_cost
-                or evidence.logical_seed != seed
-            ):
-                raise ValueError(f"persisted product-codebook option differs: {candidate.key}")
+        factor_stage = FactorizationAttemptStage(
+            probe_admm,
+            device=request.device,
+            recorder=recorder,
+            reset_peak_memory=False,
+            product_codebook=request.product_codebook,
+        )
+        config_hash = semantic_hash(
+            {
+                "probe_plan": probe_plan.artifact_id,
+                "admm": probe_admm,
+                "product_codebook": request.product_codebook,
+                "scale_fit": request.scale_fit,
+            }
+        )
+        for index, candidate in enumerate(selected_candidates, start=1):
+            layer = layers[candidate.layer]
+            option_cost = _product_codebook_option_cost(
+                layer,
+                candidate,
+                request.product_codebook,
+            )
+            seed = logical_seed(
+                request.seed,
+                "factorize-attempt",
+                candidate.layer.block.index,
+                candidate.layer.path,
+                0,
+            )
+            receipt_key = _product_codebook_receipt_key(candidate, outer_iterations)
+            prior = persisted.get(receipt_key)
+            if prior is not None:
+                evidence = prior[1]
+                if (
+                    evidence.source_weight_hash != layer.source_weight.content_hash
+                    or evidence.estimated_cost != option_cost
+                    or evidence.logical_seed != seed
+                    or evidence.outer_iterations != outer_iterations
+                ):
+                    raise ValueError(
+                        f"persisted product-codebook option differs: {receipt_key}"
+                    )
+                cast(Any, events).emit(
+                    "resident-quantization",
+                    "info",
+                    "product_codebook_probe.option_reused",
+                    candidate_key=candidate.key,
+                    receipt_key=receipt_key,
+                    fidelity=fidelity,
+                    outer_iterations=outer_iterations,
+                    artifact_id=prior[0].artifact_id,
+                    completed=index,
+                    total=len(selected_candidates),
+                )
+                continue
+            source_ref = source_refs.get(candidate.layer)
+            if source_ref is None:
+                with source.read_tensor(layer.source_weight, device="cpu") as weight:
+                    source_ref = context.tensor_store.put(
+                        "product-codebook-probe-source",
+                        {"weight": weight.contiguous()},
+                    )["weight"]
+                source_refs[candidate.layer] = source_ref
+            probe_layer = replace(
+                layer,
+                rank=candidate.rank,
+                retry=RetryPolicy(1, 0.0, None, None, candidate.rank, 0),
+                estimated_cost=option_cost,
+                product_codebook_free_rows=candidate.free_rows,
+            )
             cast(Any, events).emit(
                 "resident-quantization",
                 "info",
-                "product_codebook_probe.option_reused",
+                "product_codebook_probe.option_started",
                 candidate_key=candidate.key,
-                artifact_id=prior[0].artifact_id,
-                completed=index,
-                total=len(candidates),
+                receipt_key=receipt_key,
+                fidelity=fidelity,
+                outer_iterations=outer_iterations,
+                completed=index - 1,
+                total=len(selected_candidates),
+                bits=option_cost.total,
             )
-            continue
-        source_ref = source_refs.get(candidate.layer)
-        if source_ref is None:
-            with source.read_tensor(layer.source_weight, device="cpu") as weight:
-                source_ref = context.tensor_store.put(
-                    "product-codebook-probe-source",
-                    {"weight": weight.contiguous()},
-                )["weight"]
-            source_refs[candidate.layer] = source_ref
-        probe_layer = replace(
-            layer,
-            rank=candidate.rank,
-            retry=RetryPolicy(1, 0.0, None, None, candidate.rank, 0),
-            estimated_cost=option_cost,
-            product_codebook_free_rows=candidate.free_rows,
-        )
-        cast(Any, events).emit(
-            "resident-quantization",
-            "info",
-            "product_codebook_probe.option_started",
-            candidate_key=candidate.key,
-            completed=index - 1,
-            total=len(candidates),
-            bits=option_cost.total,
-        )
-        started = time.perf_counter()
-        with recorder.phase("product_codebook_probe", candidate=candidate.key):
-            accepted, _outliers, _fitted = _run_resident_factorization_attempts(
-                probe_layer,
-                source_ref,
+            started = time.perf_counter()
+            with recorder.phase(
+                "product_codebook_probe",
+                candidate=candidate.key,
+                fidelity=fidelity,
+                outer_iterations=outer_iterations,
+            ):
+                accepted, _outliers, _fitted = _run_resident_factorization_attempts(
+                    probe_layer,
+                    source_ref,
+                    request,
+                    BudgetState(option_cost.total, 0, 0),
+                    context,
+                    config_hash,
+                    factor_stage,
+                    outlier_stage,
+                    scale_stage,
+                    recorder,
+                )
+            evidence = _ProductCodebookOptionEvidence(
+                schema_version=2,
+                probe_plan=probe_plan,
+                candidate=candidate,
+                source_weight_hash=layer.source_weight.content_hash,
+                estimated_cost=option_cost,
+                measured_weighted_error=(
+                    accepted.result.metrics.export_weighted_normalized_error
+                ),
+                measured_raw_error=accepted.result.metrics.raw_normalized_error,
+                factor_artifact=accepted.result.factors.left_binary.artifact,
+                logical_seed=seed,
+                outer_iterations=outer_iterations,
+                wall_seconds=time.perf_counter() - started,
+            )
+            reference = _commit_product_codebook_option_evidence(
                 request,
-                BudgetState(option_cost.total, 0, 0),
-                context,
-                config_hash,
-                factor_stage,
-                outlier_stage,
-                scale_stage,
-                recorder,
+                evidence,
+                artifacts,
             )
-        evidence = _ProductCodebookOptionEvidence(
-            1,
-            probe_plan,
-            candidate,
-            layer.source_weight.content_hash,
-            option_cost,
-            accepted.result.metrics.export_weighted_normalized_error,
-            accepted.result.metrics.raw_normalized_error,
-            accepted.result.factors.left_binary.artifact,
-            seed,
-            time.perf_counter() - started,
-        )
-        reference = _commit_product_codebook_option_evidence(request, evidence, artifacts)
-        persisted[candidate.key] = (reference, evidence)
+            persisted[receipt_key] = (reference, evidence)
+            cast(Any, events).emit(
+                "resident-quantization",
+                "info",
+                "product_codebook_probe.option_completed",
+                candidate_key=candidate.key,
+                receipt_key=receipt_key,
+                fidelity=fidelity,
+                outer_iterations=outer_iterations,
+                artifact_id=reference.artifact_id,
+                completed=index,
+                total=len(selected_candidates),
+                weighted_error=evidence.measured_weighted_error,
+                wall_seconds=evidence.wall_seconds,
+            )
+            if request.device.startswith("cuda"):
+                torch.cuda.empty_cache()
+
+    def select_frontier(
+        measured_candidates: tuple[_ProductCodebookProbeCandidate, ...],
+        outer_iterations: int,
+        *,
+        maximum_options: int | None = None,
+    ) -> tuple[_ProductCodebookProbeCandidate, ...]:
+        selected: list[_ProductCodebookProbeCandidate] = []
+        for layer_id in eligible:
+            layer_candidates = tuple(
+                candidate for candidate in measured_candidates if candidate.layer == layer_id
+            )
+            scored = tuple(
+                (
+                    candidate,
+                    persisted[
+                        _product_codebook_receipt_key(candidate, outer_iterations)
+                    ][1].estimated_cost.total,
+                    persisted[
+                        _product_codebook_receipt_key(candidate, outer_iterations)
+                    ][1].measured_weighted_error,
+                )
+                for candidate in layer_candidates
+            )
+            selected.extend(
+                _select_product_codebook_frontier_candidates(
+                    scored,
+                    maximum_options=maximum_options,
+                )
+            )
+        return tuple(selected)
+
+    coarse_iterations = request.product_codebook.probe_outer_iterations
+    measure_fidelity(candidates, coarse_iterations, "coarse")
+    final_candidates = candidates
+    final_iterations = coarse_iterations
+    frontier_iterations = request.product_codebook.probe_frontier_outer_iterations
+    refinement_iterations = request.product_codebook.probe_final_outer_iterations
+    if frontier_iterations is not None and refinement_iterations is not None:
+        frontier_candidates = select_frontier(candidates, coarse_iterations)
         cast(Any, events).emit(
             "resident-quantization",
             "info",
-            "product_codebook_probe.option_completed",
-            candidate_key=candidate.key,
-            artifact_id=reference.artifact_id,
-            completed=index,
-            total=len(candidates),
-            weighted_error=evidence.measured_weighted_error,
-            wall_seconds=evidence.wall_seconds,
+            "product_codebook_probe.frontier_selected",
+            source_outer_iterations=coarse_iterations,
+            target_outer_iterations=frontier_iterations,
+            candidate_count=len(frontier_candidates),
         )
-        if request.device.startswith("cuda"):
-            torch.cuda.empty_cache()
+        measure_fidelity(frontier_candidates, frontier_iterations, "frontier")
+        final_candidates = select_frontier(
+            frontier_candidates,
+            frontier_iterations,
+            maximum_options=request.product_codebook.probe_final_options_per_layer,
+        )
+        final_iterations = refinement_iterations
+        cast(Any, events).emit(
+            "resident-quantization",
+            "info",
+            "product_codebook_probe.finalists_selected",
+            source_outer_iterations=frontier_iterations,
+            target_outer_iterations=final_iterations,
+            candidate_count=len(final_candidates),
+        )
+        measure_fidelity(final_candidates, final_iterations, "final")
 
-    if set(persisted) != {candidate.key for candidate in candidates}:
-        raise ValueError("product-codebook option evidence is incomplete")
-    ordered_evidence = tuple(persisted[candidate.key] for candidate in candidates)
+    final_receipt_keys = {
+        _product_codebook_receipt_key(candidate, final_iterations)
+        for candidate in final_candidates
+    }
+    if not final_receipt_keys.issubset(persisted):
+        raise ValueError("final product-codebook option evidence is incomplete")
+    ordered_evidence = tuple(
+        persisted[_product_codebook_receipt_key(candidate, final_iterations)]
+        for candidate in final_candidates
+    )
     profile = _persist_product_codebook_allocation_profile(
         request,
         probe_plan,
@@ -5628,9 +5826,11 @@ def _run_product_codebook_option_allocation(
                 multipliers[layer_id],
                 reference,
             )
-            for candidate in candidates
+            for candidate in final_candidates
             if candidate.layer == layer_id
-            for reference, evidence in (persisted[candidate.key],)
+            for reference, evidence in (
+                persisted[_product_codebook_receipt_key(candidate, final_iterations)],
+            )
         )
         groups.append(
             ProductCodebookAllocationGroup(
@@ -5652,7 +5852,8 @@ def _run_product_codebook_option_allocation(
         probe_plan_artifact=probe_plan.artifact_id,
         profile_artifact=profile.artifact_id,
         eligible_layers=len(eligible),
-        candidate_count=len(candidates),
+        candidate_count=len(final_candidates),
+        receipt_outer_iterations=final_iterations,
         selected_bits=allocation.selected_bits,
         budget_bits=allocation.budget_bits,
         slack_bits=allocation.budget_bits - allocation.selected_bits,
@@ -6577,7 +6778,7 @@ def _execute_resident_quantization_pipeline(
                 if bias_correction is not None:
                     with tensors.read(bias_correction.bias, request.device) as value:
                         bias = value.clone()
-                if group_plan.outliers.count:
+                if outliers.bit_cost.total:
                     with (
                         tensors.read(outliers.indices, request.device) as indices,
                         tensors.read(outliers.values, request.device) as values,
@@ -7016,7 +7217,7 @@ def _execute_resident_quantization_pipeline(
                         ):
                             patch_left = left_value.clone()
                             patch_right = right_value.clone()
-                    if layer_plan.outliers.count:
+                    if outliers.bit_cost.total:
                         with (
                             tensors.read(outliers.indices, request.device) as indices,
                             tensors.read(outliers.values, request.device) as values,
@@ -7197,7 +7398,7 @@ def _execute_resident_quantization_pipeline(
                 with _profile_layer_phase(recorder, block_index, layer_plan.layer.path, "freeze"):
                     frozen_outliers = (
                         None
-                        if layer_plan.outliers.count == 0
+                        if outliers.bit_cost.total == 0
                         else FrozenOutlierState(outliers.indices, outliers.values, outliers.scales)
                     )
                     frozen = LayerFreezer().freeze(
@@ -7958,7 +8159,7 @@ def _run_resident_factorization_slice_impl(
         if bias_correction is not None:
             with tensors.read(bias_correction.bias, request.device) as value:
                 bias = value.clone()
-        if layer_plan.outliers.count:
+        if outliers.bit_cost.total:
             with (
                 tensors.read(outliers.indices, request.device) as indices,
                 tensors.read(outliers.values, request.device) as values,
@@ -8003,7 +8204,7 @@ def _run_resident_factorization_slice_impl(
         )
         frozen_outliers = (
             None
-            if layer_plan.outliers.count == 0
+            if outliers.bit_cost.total == 0
             else FrozenOutlierState(outliers.indices, outliers.values, outliers.scales)
         )
         frozen = LayerFreezer().freeze(

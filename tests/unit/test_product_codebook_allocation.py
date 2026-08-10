@@ -31,6 +31,7 @@ from nanoquant.domain.planning import factor_bit_cost
 from nanoquant.resident_quantization import (
     _product_codebook_option_cost,
     _product_codebook_probe_candidates,
+    _select_product_codebook_frontier_candidates,
 )
 
 
@@ -180,6 +181,67 @@ def test_probe_grid_jointly_varies_rank_and_free_rows_with_a_free_control() -> N
     )
     assert _product_codebook_option_cost(layer, first[0], config) == layer.estimated_cost
     assert _product_codebook_option_cost(layer, first[-1], config).total > 0
+
+
+def test_multi_fidelity_frontier_rejects_dominated_options_and_keeps_endpoints() -> None:
+    plan = _plan()
+    config = ProductCodebookConfig(
+        enabled=True,
+        free_row_multiple=1,
+        minimum_coded_rows=1,
+        rank_span_fractions=(0.0, 1.0),
+        free_row_fractions=(0.5,),
+    )
+    candidates = tuple(
+        candidate
+        for candidate in _product_codebook_probe_candidates(plan, config)
+        if candidate.layer.path == "mlp.up_proj"
+    )
+
+    frontier = _select_product_codebook_frontier_candidates(
+        (
+            (candidates[0], 80, 1.0),
+            (candidates[1], 60, 1.2),
+            (candidates[2], 100, 0.8),
+        )
+    )
+    finalists = _select_product_codebook_frontier_candidates(
+        (
+            (candidates[0], 80, 1.0),
+            (candidates[1], 60, 1.2),
+            (candidates[2], 100, 0.8),
+        ),
+        maximum_options=2,
+    )
+
+    assert frontier == (candidates[1], candidates[0], candidates[2])
+    assert finalists == (candidates[1], candidates[2])
+
+
+def test_multi_fidelity_frontier_removes_cost_and_error_dominated_option() -> None:
+    plan = _plan()
+    config = ProductCodebookConfig(
+        enabled=True,
+        free_row_multiple=1,
+        minimum_coded_rows=1,
+        rank_span_fractions=(0.0, 1.0),
+        free_row_fractions=(0.5,),
+    )
+    candidates = tuple(
+        candidate
+        for candidate in _product_codebook_probe_candidates(plan, config)
+        if candidate.layer.path == "mlp.up_proj"
+    )
+
+    frontier = _select_product_codebook_frontier_candidates(
+        (
+            (candidates[0], 80, 1.0),
+            (candidates[1], 60, 0.9),
+            (candidates[2], 100, 0.8),
+        )
+    )
+
+    assert frontier == (candidates[1], candidates[2])
 
 
 def test_global_budget_preserves_declared_uncharged_outlier_sidecars() -> None:

@@ -1,11 +1,12 @@
 import math
+from dataclasses import replace
 
 from nanoquant.config.schema import DType
 from nanoquant.domain.planning import outlier_bit_cost
 from tests.support.experiments import config_diff_paths, load_experiment
 
 
-def test_experiment058_changes_only_057_rate_matched_int8_outlier_policy() -> None:
+def test_experiment058_changes_only_outliers_and_codebook_probe_fidelity() -> None:
     baseline = load_experiment(57)
     candidate = load_experiment(58)
 
@@ -25,7 +26,15 @@ def test_experiment058_changes_only_057_rate_matched_int8_outlier_policy() -> No
     ).total
     assert int8_bits == 120_185 < bf16_bits == 129_115
     assert candidate.config.outliers.residual_probe == baseline.config.outliers.residual_probe
-    assert candidate.config.factorization == baseline.config.factorization
+    assert candidate.config.allocation.retry.outlier_count_increment_at_rank_cap == 1
+    assert candidate.config.factorization.product_codebook.probe_outer_iterations == 100
+    assert candidate.config.factorization.product_codebook.probe_frontier_outer_iterations == 400
+    assert candidate.config.factorization.product_codebook.probe_final_outer_iterations == 1_200
+    assert candidate.config.factorization.product_codebook.probe_final_options_per_layer == 2
+    assert replace(
+        candidate.config.factorization,
+        product_codebook=baseline.config.factorization.product_codebook,
+    ) == baseline.config.factorization
     assert candidate.config.block_tuning == baseline.config.block_tuning
     assert candidate.config.distillation == baseline.config.distillation
     assert candidate.workflow.task_limit == baseline.workflow.task_limit == 1000
@@ -39,4 +48,7 @@ def test_experiment058_changes_only_057_rate_matched_int8_outlier_policy() -> No
         "outliers.fraction",
         "outliers.storage_dtype",
         "output.run_root",
+        "factorization.product_codebook.probe_final_outer_iterations",
+        "factorization.product_codebook.probe_frontier_outer_iterations",
+        "allocation.retry.outlier_count_increment_at_rank_cap",
     }

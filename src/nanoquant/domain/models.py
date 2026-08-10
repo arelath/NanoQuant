@@ -330,6 +330,7 @@ class RetryPolicy:
     raw_error_threshold: float | None
     hard_rank_cap: int
     extra_bit_budget: int
+    outlier_count_increment_at_rank_cap: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -635,6 +636,7 @@ class AttemptSummary:
     retry_score: float
     accepted: bool
     decision_reason: str
+    outlier_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -651,6 +653,7 @@ class RetryDecision:
     next_rank: int | None
     projected_extra_bits: int
     reason: str
+    next_outlier_count: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

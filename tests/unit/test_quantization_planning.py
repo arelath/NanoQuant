@@ -193,12 +193,18 @@ def test_retry_plan_honors_enabled_and_above_allocator_cap_policy() -> None:
 
     above_cap = replace(
         request.allocation,
-        retry=RankRetryConfig(enabled=True, maximum_attempts=3, allow_above_allocator_cap=True),
+        retry=RankRetryConfig(
+            enabled=True,
+            maximum_attempts=3,
+            allow_above_allocator_cap=True,
+            outlier_count_increment_at_rank_cap=1,
+        ),
     )
     above_cap_layer = build_quantization_plan(replace(request, allocation=above_cap)).blocks[0].layers[0]
     assert above_cap_layer.retry.maximum_attempts == 3
     assert above_cap_layer.retry.hard_rank_cap == 64
     assert above_cap_layer.retry.hard_rank_cap >= above_cap_layer.allocator_cap
+    assert above_cap_layer.retry.outlier_count_increment_at_rank_cap == 1
 
 
 def test_additive_maximum_rank_pattern_overrides_rank_after_budget_allocation() -> None:

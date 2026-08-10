@@ -104,6 +104,43 @@ def test_retry_is_budgeted_and_attempt_limited() -> None:
     assert accepted.action == "accept_best"
 
 
+def test_retry_adds_outliers_only_after_rank_cap() -> None:
+    attempt = AttemptSummary(
+        0,
+        64,
+        ArtifactRef("attempt", "x", 1),
+        0.7,
+        0.1,
+        BitCost(),
+        2.0,
+        False,
+        "",
+        13,
+    )
+
+    retry = decide_retry(
+        (attempt,),
+        maximum_attempts=2,
+        rank_increase_fraction=0.25,
+        rank_multiple=8,
+        hard_rank_cap=64,
+        available_extra_bits=1_000,
+        cost_per_rank=10,
+        weighted_threshold=0.5,
+        raw_threshold=None,
+        current_outlier_count=13,
+        outlier_count_increment_at_rank_cap=1,
+        hard_outlier_cap=128,
+        cost_per_outlier=100,
+    )
+
+    assert retry.action == "retry"
+    assert retry.next_rank == 64
+    assert retry.next_outlier_count == 14
+    assert retry.projected_extra_bits == 100
+    assert retry.reason == "rank cap reached; increasing outlier columns"
+
+
 @given(st.integers(), st.text(max_size=20), st.integers(min_value=0, max_value=100))
 def test_logical_seeds_are_deterministic(seed: int, layer: str, attempt: int) -> None:
     value = logical_seed(seed, "factorize", 2, layer, attempt)

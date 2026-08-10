@@ -278,6 +278,7 @@ class RetryPolicy:
     raw_error_threshold: Optional[float]
     hard_rank_cap: int
     extra_bit_budget: int
+    outlier_count_increment_at_rank_cap: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -319,8 +320,12 @@ class QuantizationPlan:
 Ranks are derived outputs. They appear here, never as runtime mutations of configuration.
 
 An enabled mixed product-codebook run first persists a resumable probe plan and
-one measured option result per candidate `(layer, rank, free_rows)` tuple. The
-global exact-bit allocator then persists its complete option profile and writes
+one measured option result per `(layer, rank, free_rows, outer_iterations)`
+receipt identity. A configured multi-fidelity run measures the complete grid at
+the coarse duration, advances each layer's non-dominated cost/error frontier,
+and measures at most two final endpoints per layer at the final duration. The
+global exact-bit allocator consumes only those final-duration receipts, then
+persists its complete option profile and writes
 the selected rank, free-row count, complete layer cost, measured error, and
 option artifact into `ProductCodebookAllocationDecision`. Product execution is
 fail-closed: every eligible ordinary layer must have a decision matching its

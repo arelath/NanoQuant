@@ -294,6 +294,7 @@ class RankRetryConfig:
     maximum_attempts: int = 2
     extra_bit_budget_fraction: float = 0.02
     allow_above_allocator_cap: bool = False
+    outlier_count_increment_at_rank_cap: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -414,6 +415,9 @@ class ProductCodebookConfig:
     codebook_warmup_fraction: float = 0.0
     assignment_batch_words: int = 65_536
     probe_outer_iterations: int = 100
+    probe_frontier_outer_iterations: int | None = None
+    probe_final_outer_iterations: int | None = None
+    probe_final_options_per_layer: int = 2
     rank_span_fractions: tuple[float, ...] = (0.0, 0.5, 1.0)
     free_row_fractions: tuple[float, ...] = (0.5, 0.5625, 0.625)
     measured_option_allocation: bool = True

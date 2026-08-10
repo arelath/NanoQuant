@@ -32,8 +32,9 @@ class AcceptedFactorization:
 
 
 AcceptCommit = Callable[[FactorizationResult, tuple[AttemptSummary, ...]], None]
-AttemptExecutor = Callable[[int, int], FactorizationResult]
+AttemptExecutor = Callable[[int, int, int], FactorizationResult]
 FactorCost = Callable[[int], BitCost]
+OutlierCost = Callable[[int], BitCost]
 
 
 def _replace_planned_factor_cost(
@@ -63,8 +64,16 @@ def run_factorization_attempts(
     initial_generator_state: TensorRef | None = None,
     attempt_executor: AttemptExecutor | None = None,
     factor_cost: FactorCost | None = None,
+    outlier_cost: OutlierCost | None = None,
 ) -> AcceptedFactorization:
+    if layer_plan.retry.outlier_count_increment_at_rank_cap and (
+        attempt_executor is None or outlier_cost is None
+    ):
+        raise ValueError(
+            "outlier fallback requires outlier-aware execution and exact cost callbacks"
+        )
     rank = layer_plan.rank
+    outlier_count = layer_plan.outliers.count
     base_factor_cost = (
         factor_bit_cost(
             layer_plan.source_weight.spec.shape[0],
@@ -74,6 +83,7 @@ def run_factorization_attempts(
         if factor_cost is None
         else factor_cost(layer_plan.rank)
     )
+    base_outlier_cost = BitCost() if outlier_cost is None else outlier_cost(outlier_count)
     results: list[FactorizationResult] = []
     summaries: list[AttemptSummary] = []
     while True:
@@ -86,6 +96,8 @@ def run_factorization_attempts(
             )
         )
         if attempt_executor is None:
+            if outlier_count != layer_plan.outliers.count:
+                raise ValueError("outlier fallback requires an outlier-aware attempt executor")
             request = FactorizationRequest(
                 1,
                 layer_plan.layer,
@@ -99,7 +111,7 @@ def run_factorization_attempts(
             )
             result = execute_stage(factorization_stage or FactorizationAttemptStage(), request, context)
         else:
-            result = attempt_executor(rank, attempt)
+            result = attempt_executor(rank, attempt, outlier_count)
             if result.rank != rank or result.layer != layer_plan.layer:
                 raise ValueError("factorization attempt executor returned the wrong layer or rank")
         results.append(result)
@@ -128,9 +140,30 @@ def run_factorization_attempts(
                 score,
                 False,
                 "pending retry decision",
+                outlier_count,
             )
         )
-        available = max(0, layer_plan.retry.extra_bit_budget - budget.retry_bits_spent)
+        current_outlier_cost = (
+            base_outlier_cost if outlier_cost is None else outlier_cost(outlier_count)
+        )
+        current_extra_bits = max(
+            0,
+            cost.total
+            + current_outlier_cost.total
+            - base_factor_cost.total
+            - base_outlier_cost.total,
+        )
+        available = max(
+            0,
+            layer_plan.retry.extra_bit_budget
+            - budget.retry_bits_spent
+            - current_extra_bits,
+        )
+        next_outlier_cost = (
+            current_outlier_cost
+            if outlier_cost is None or outlier_count >= layer_plan.source_weight.spec.shape[1]
+            else outlier_cost(outlier_count + 1)
+        )
         decision = decide_retry(
             tuple(summaries),
             maximum_attempts=layer_plan.retry.maximum_attempts,
@@ -141,6 +174,15 @@ def run_factorization_attempts(
             cost_per_rank=sum(layer_plan.source_weight.spec.shape) + 16,
             weighted_threshold=layer_plan.retry.weighted_error_threshold,
             raw_threshold=layer_plan.retry.raw_error_threshold,
+            current_outlier_count=outlier_count,
+            outlier_count_increment_at_rank_cap=(
+                layer_plan.retry.outlier_count_increment_at_rank_cap
+            ),
+            hard_outlier_cap=layer_plan.source_weight.spec.shape[1],
+            cost_per_outlier=max(
+                0,
+                next_outlier_cost.total - current_outlier_cost.total,
+            ),
         )
         context.events.emit(
             "factorize-attempt",
@@ -150,6 +192,7 @@ def run_factorization_attempts(
             layer=layer_plan.layer.path,
             attempt=attempt,
             rank=rank,
+            outlier_count=outlier_count,
             weighted_error=weighted,
             raw_error=raw,
             weighted_threshold=layer_plan.retry.weighted_error_threshold,
@@ -161,12 +204,15 @@ def run_factorization_attempts(
             action=decision.action,
             accepted_attempt=decision.accepted_attempt,
             next_rank=decision.next_rank,
+            next_outlier_count=decision.next_outlier_count,
             reason=decision.reason,
         )
         if decision.action == "retry":
             if decision.next_rank is None:
                 raise AssertionError("retry decision omitted next rank")
             rank = decision.next_rank
+            if decision.next_outlier_count is not None:
+                outlier_count = decision.next_outlier_count
             continue
         if decision.accepted_attempt is None:
             raise AssertionError("accept decision omitted accepted attempt")
@@ -179,6 +225,15 @@ def run_factorization_attempts(
         actual_bit_cost = _replace_planned_factor_cost(
             layer_plan.estimated_cost, base_factor_cost, accepted_factor_cost
         )
+        if outlier_cost is not None:
+            accepted_outlier_cost = outlier_cost(
+                summaries[accepted_index].outlier_count
+            )
+            actual_bit_cost = replace(
+                actual_bit_cost,
+                outlier_value_bits=accepted_outlier_cost.outlier_value_bits,
+                outlier_index_bits=accepted_outlier_cost.outlier_index_bits,
+            )
         extra_bits = max(0, actual_bit_cost.total - layer_plan.estimated_cost.total)
         updated_budget = replace(
             budget,

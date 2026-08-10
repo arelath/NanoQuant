@@ -452,6 +452,77 @@ def test_product_codebook_policy_is_typed_and_requires_matched_k16_mode() -> Non
     }
 
 
+def test_product_codebook_multi_fidelity_schedule_is_strict_and_typed() -> None:
+    base = RunConfig(ModelConfig("x"))
+    enabled = replace(
+        base,
+        factorization=replace(
+            base.factorization,
+            implementation="nanoquant_admm_product_k16",
+            product_codebook=replace(
+                base.factorization.product_codebook,
+                enabled=True,
+                probe_frontier_outer_iterations=400,
+                probe_final_outer_iterations=1_200,
+                probe_final_options_per_layer=2,
+            ),
+        ),
+    )
+    incomplete = replace(
+        enabled,
+        factorization=replace(
+            enabled.factorization,
+            product_codebook=replace(
+                enabled.factorization.product_codebook,
+                probe_final_outer_iterations=None,
+            ),
+        ),
+    )
+    nonincreasing = replace(
+        enabled,
+        factorization=replace(
+            enabled.factorization,
+            product_codebook=replace(
+                enabled.factorization.product_codebook,
+                probe_frontier_outer_iterations=1_200,
+            ),
+        ),
+    )
+
+    assert validate(enabled) == ()
+    assert from_dict(RunConfig, to_dict(enabled)) == enabled
+    assert {issue.code for issue in validate(incomplete)} == {"CFG143"}
+    assert {issue.code for issue in validate(nonincreasing)} == {"CFG143"}
+
+
+def test_rank_retry_outlier_fallback_requires_nonnegative_count_and_selector() -> None:
+    base = RunConfig(ModelConfig("x"))
+    invalid = replace(
+        base,
+        allocation=replace(
+            base.allocation,
+            retry=replace(
+                base.allocation.retry,
+                outlier_count_increment_at_rank_cap=-1,
+            ),
+        ),
+    )
+
+    missing_selector = replace(
+        invalid,
+        allocation=replace(
+            invalid.allocation,
+            retry=replace(
+                invalid.allocation.retry,
+                outlier_count_increment_at_rank_cap=1,
+            ),
+        ),
+    )
+
+    assert {issue.code for issue in validate(invalid)} == {"CFG144", "CFG145"}
+    assert {issue.code for issue in validate(missing_selector)} == {"CFG145"}
+
+
 def test_observability_levels_are_validated_without_changing_schema() -> None:
     invalid_name = RunConfig(ModelConfig("x"), observability=ObservabilityConfig(event_level="trace"))
     assert {issue.code for issue in validate(invalid_name)} == {"OBS001"}

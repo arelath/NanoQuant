@@ -467,6 +467,10 @@ def decide_retry(
     cost_per_rank: int,
     weighted_threshold: float | None,
     raw_threshold: float | None,
+    current_outlier_count: int = 0,
+    outlier_count_increment_at_rank_cap: int = 0,
+    hard_outlier_cap: int = 0,
+    cost_per_outlier: int = 0,
 ) -> RetryDecision:
     if not attempts:
         raise ValueError("at least one attempt is required")
@@ -482,6 +486,28 @@ def decide_retry(
     proposed = math.ceil(current.rank * (1 + rank_increase_fraction) / rank_multiple) * rank_multiple
     proposed = min(proposed, hard_rank_cap)
     if proposed <= current.rank:
+        next_outlier_count = min(
+            current_outlier_count + outlier_count_increment_at_rank_cap,
+            hard_outlier_cap,
+        )
+        if next_outlier_count > current_outlier_count:
+            extra = (next_outlier_count - current_outlier_count) * cost_per_outlier
+            if extra > available_extra_bits:
+                return RetryDecision(
+                    "accept_best",
+                    best_index,
+                    None,
+                    0,
+                    "extra-bit budget exhausted",
+                )
+            return RetryDecision(
+                "retry",
+                None,
+                current.rank,
+                extra,
+                "rank cap reached; increasing outlier columns",
+                next_outlier_count,
+            )
         return RetryDecision("accept_best", best_index, None, 0, "rank cap reached")
     extra = (proposed - current.rank) * cost_per_rank
     if extra > available_extra_bits:

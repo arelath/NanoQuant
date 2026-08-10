@@ -372,6 +372,7 @@ def build_quantization_plan(request: PlanningRequest) -> QuantizationPlan:
                             else caps[layer.layer]
                         ),
                         extra_budget,
+                        request.allocation.retry.outlier_count_increment_at_rank_cap,
                     ),
                     cost,
                 )
@@ -693,6 +694,7 @@ def _build_grouped_quantization_plan(request: PlanningRequest) -> QuantizationPl
                 if request.allocation.retry.allow_above_allocator_cap
                 else caps[unit.key],
                 extra_budget,
+                request.allocation.retry.outlier_count_increment_at_rank_cap,
             )
             if unit.grouped:
                 group_plans.append(

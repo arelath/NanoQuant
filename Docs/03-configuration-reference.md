@@ -265,6 +265,7 @@ class RankRetryConfig:
     maximum_attempts: int = 2
     extra_bit_budget_fraction: float = 0.02
     allow_above_allocator_cap: bool = False
+    outlier_count_increment_at_rank_cap: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -286,6 +287,12 @@ class RankAllocationConfig:
 ```
 
 `None` means a retry threshold is disabled. The rewrite does not overload numeric zero with boolean semantics.
+`outlier_count_increment_at_rank_cap` is a bounded fallback within the same
+retry attempt and extra-bit budget. A positive value is used only when the
+reconstruction threshold is still missed and the current rank cannot increase;
+the next attempt keeps that full rank and adds up to the configured number of
+outlier columns. Zero preserves rank-only retry behavior. The accepted attempt
+records and charges its actual outlier count and exact value/index/scale cost.
 
 `overcomplete_rank_ceiling_fraction` controls the hard aligned rank ceiling relative to
 `min(in_features, out_features)`. Its default of `1.0` preserves the ordinary algebraic-dimension ceiling. Values
@@ -352,6 +359,10 @@ class ProductCodebookConfig:
     codebook_freeze_fraction: float = 0.5
     codebook_warmup_fraction: float = 0.0
     assignment_batch_words: int = 65_536
+    probe_outer_iterations: int = 100
+    probe_frontier_outer_iterations: Optional[int] = None
+    probe_final_outer_iterations: Optional[int] = None
+    probe_final_options_per_layer: int = 2
     measured_option_allocation: bool = True
     allow_free_factor_fallback: bool = True
     flips_per_word: int = 0
@@ -381,6 +392,14 @@ Eligible owners expose aligned free-prefix/coded-suffix options while retaining
 the ordinary free-factor option; allocation scores those options from
 candidate-specific measurements under the run's existing global BPW target.
 Enabling the policy requires `implementation: nanoquant_admm_product_k16`.
+The optional refinement fields enable a resumable multi-fidelity screen. All
+options are measured at `probe_outer_iterations`; only each layer's
+non-dominated measured cost/error frontier advances to the frontier duration.
+The final stage retains at most one or two endpoints per layer and the global
+allocator is fed exclusively from receipts measured at
+`probe_final_outer_iterations`. Both refinement durations must be supplied
+together and must increase strictly. They do not change the production ADMM
+schedule or binary sign-search configuration.
 
 ## 7. Salient outliers
 
@@ -1015,6 +1034,9 @@ NQ-CFG-041 allocation.layer_budget_multipliers patterns must not be empty
 NQ-CFG-042 allocation.layer_budget_multipliers patterns must be unique
 NQ-CFG-043 allocation.layer_budget_multipliers multipliers must be finite and greater than one
 NQ-CFG-132 allocation.bounds.overcomplete_rank_ceiling_fraction must be finite and at least one
+NQ-CFG-143 product-codebook refinement durations must increase and retain one or two finalists
+NQ-CFG-144 allocation.retry.outlier_count_increment_at_rank_cap must be non-negative
+NQ-CFG-145 allocation.retry.outlier_count_increment_at_rank_cap requires an enabled outlier selector
 NQ-CFG-009 outliers.fraction must be in [0, 1)
 NQ-CFG-044 int8 outlier training requires a supported trainable master policy
 NQ-CFG-050 post_block_refit.epochs must be > 0 when enabled=true
