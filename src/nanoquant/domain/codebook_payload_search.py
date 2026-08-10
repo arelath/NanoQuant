@@ -29,6 +29,8 @@ class SignWordPayloadSearchConfig:
     table_chunk_size: int = 128
     acceptance_tolerance: float = 1e-10
     functional_candidate_words_per_pass: int = 0
+    functional_table_bit_passes: int = 0
+    functional_table_bit_candidates_per_pass: int = 4
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +55,10 @@ class SignWordPayloadSearchResult:
     functional_fit_error_after: float | None = None
     functional_held_out_error_before: float | None = None
     functional_held_out_error_after: float | None = None
+    right_codebook: FullSignCodebook | ProductSignCodebook | None = None
+    table_bit_candidates_evaluated: int = 0
+    accepted_table_bit_flips: int = 0
+    table_bit_sign_updates: int = 0
 
 
 def _weighted_error(
@@ -285,6 +291,236 @@ def _validate_payload(
         raise ValueError("codebook payload does not decode to the supplied factor")
 
 
+def _functional_flip_changes(
+    inputs: torch.Tensor,
+    residual: torch.Tensor,
+    scaled_left: torch.Tensor,
+    right: torch.Tensor,
+    scale_pre: torch.Tensor,
+) -> torch.Tensor:
+    """Diagonal Gauss--Newton score for flipping each right-factor sign."""
+
+    projected_residual = residual.float() @ scaled_left.float()
+    cross = (inputs.float().mT @ projected_residual).mT
+    component_norm = scaled_left.float().square().sum(dim=0)
+    input_norm = inputs.float().square().sum(dim=0)
+    return 4.0 * (
+        right.float() * scale_pre.float()[None, :] * cross
+        + component_norm[:, None]
+        * input_norm[None, :]
+        * scale_pre.float().square()[None, :]
+    )
+
+
+def _product_table_bit_scores(
+    flip_changes: torch.Tensor,
+    indices: torch.Tensor,
+    *,
+    free_rows: int,
+    index_bits: int,
+) -> torch.Tensor:
+    """Aggregate per-sign flip scores for both shared half-word tables."""
+
+    coded_rows, words = indices.shape
+    if flip_changes.shape[0] - free_rows != coded_rows:
+        raise ValueError("table-bit score rows do not match product assignments")
+    half_bits = index_bits // 2
+    entry_count = 1 << half_bits
+    mask = entry_count - 1
+    values = indices.to(torch.int64)
+    table_indices = (
+        values.bitwise_and(mask),
+        values.bitwise_right_shift(half_bits),
+    )
+    scores = torch.zeros(
+        (2, entry_count, 16),
+        dtype=torch.float32,
+        device=flip_changes.device,
+    )
+    word_ids = torch.arange(words, device=flip_changes.device)
+    for side in range(2):
+        for bit in range(16):
+            columns = word_ids * 32 + side * 16 + bit
+            valid = columns < flip_changes.shape[1]
+            if not bool(valid.any()):
+                continue
+            selected = flip_changes[
+                free_rows:,
+                columns[valid],
+            ].reshape(-1)
+            entries = table_indices[side][:, valid].reshape(-1)
+            scores[side, :, bit].scatter_add_(0, entries, selected)
+    return scores
+
+
+def _refine_product_table_bits(
+    target: torch.Tensor,
+    left: torch.Tensor,
+    right: torch.Tensor,
+    pre: torch.Tensor,
+    mid: torch.Tensor,
+    post: torch.Tensor,
+    input_weight: torch.Tensor,
+    output_weight: torch.Tensor,
+    codebook: ProductSignCodebook,
+    indices: torch.Tensor,
+    *,
+    free_rows: int,
+    fit_inputs: torch.Tensor,
+    held_inputs: torch.Tensor,
+    config: SignWordPayloadSearchConfig,
+) -> tuple[
+    torch.Tensor,
+    ProductSignCodebook,
+    torch.Tensor,
+    float,
+    torch.Tensor,
+    float,
+    torch.Tensor,
+    float,
+    int,
+    int,
+    int,
+]:
+    """Flip shared table bits only when exact fit and validation losses improve."""
+
+    prediction = reconstruct(left, right, pre, mid, post).float()
+    best_error = _weighted_error(target, prediction, input_weight, output_weight)
+    fit_residual = _functional_residual(fit_inputs, target, prediction)
+    held_residual = _functional_residual(held_inputs, target, prediction)
+    fit_error = float(fit_residual.square().sum())
+    held_error = float(held_residual.square().sum())
+    candidates_evaluated = 0
+    accepted_flips = 0
+    sign_updates = 0
+    for _ in range(config.functional_table_bit_passes):
+        scaled_left = left * (post[:, None] * mid[None, :])
+        fit_scores = _product_table_bit_scores(
+            _functional_flip_changes(
+                fit_inputs,
+                fit_residual,
+                scaled_left,
+                right,
+                pre,
+            ),
+            indices,
+            free_rows=free_rows,
+            index_bits=codebook.index_bits,
+        )
+        held_scores = _product_table_bit_scores(
+            _functional_flip_changes(
+                held_inputs,
+                held_residual,
+                scaled_left,
+                right,
+                pre,
+            ),
+            indices,
+            free_rows=free_rows,
+            index_bits=codebook.index_bits,
+        )
+        viable = torch.nonzero(
+            (fit_scores < 0) & (held_scores < 0),
+            as_tuple=False,
+        )
+        if viable.numel() == 0:
+            break
+        order = held_scores[
+            viable[:, 0], viable[:, 1], viable[:, 2]
+        ].argsort()
+        accepted = False
+        for candidate_index in order[
+            : config.functional_table_bit_candidates_per_pass
+        ].tolist():
+            side, entry, bit = (
+                int(value) for value in viable[candidate_index].tolist()
+            )
+            half_bits = codebook.index_bits // 2
+            mask = (1 << half_bits) - 1
+            assigned = (
+                indices.to(torch.int64).bitwise_and(mask)
+                if side == 0
+                else indices.to(torch.int64).bitwise_right_shift(half_bits)
+            )
+            word_ids = torch.arange(indices.shape[1], device=indices.device)
+            columns = word_ids * 32 + side * 16 + bit
+            valid = columns < right.shape[1]
+            occurrences = torch.nonzero(
+                (assigned == entry) & valid.reshape(1, -1),
+                as_tuple=False,
+            )
+            if occurrences.numel() == 0:
+                continue
+            candidate_right = right.clone()
+            components = occurrences[:, 0] + free_rows
+            occurrence_columns = columns[occurrences[:, 1]]
+            candidate_right[components, occurrence_columns] *= -1
+            candidate_prediction = reconstruct(
+                left,
+                candidate_right,
+                pre,
+                mid,
+                post,
+            ).float()
+            candidate_fit_residual = _functional_residual(
+                fit_inputs,
+                target,
+                candidate_prediction,
+            )
+            candidate_held_residual = _functional_residual(
+                held_inputs,
+                target,
+                candidate_prediction,
+            )
+            candidate_fit_error = float(candidate_fit_residual.square().sum())
+            candidate_held_error = float(candidate_held_residual.square().sum())
+            candidates_evaluated += 1
+            fit_threshold = config.acceptance_tolerance * max(abs(fit_error), 1.0)
+            held_threshold = config.acceptance_tolerance * max(abs(held_error), 1.0)
+            if (
+                not math.isfinite(candidate_fit_error)
+                or not math.isfinite(candidate_held_error)
+                or candidate_fit_error >= fit_error - fit_threshold
+                or candidate_held_error >= held_error - held_threshold
+            ):
+                continue
+            first = codebook.first.clone()
+            second = codebook.second.clone()
+            (first if side == 0 else second)[entry, bit] *= -1
+            codebook = ProductSignCodebook(codebook.index_bits, first, second)
+            right = candidate_right
+            prediction = candidate_prediction
+            best_error = _weighted_error(
+                target,
+                prediction,
+                input_weight,
+                output_weight,
+            )
+            fit_residual = candidate_fit_residual
+            held_residual = candidate_held_residual
+            fit_error = candidate_fit_error
+            held_error = candidate_held_error
+            accepted_flips += 1
+            sign_updates += int(occurrences.shape[0])
+            accepted = True
+            break
+        if not accepted:
+            break
+    return (
+        right,
+        codebook,
+        prediction,
+        best_error,
+        fit_residual,
+        fit_error,
+        held_residual,
+        held_error,
+        candidates_evaluated,
+        accepted_flips,
+        sign_updates,
+    )
+
+
 def refine_sign_word_payloads(
     target: torch.Tensor,
     left_binary: torch.Tensor,
@@ -321,6 +557,8 @@ def refine_sign_word_payloads(
         or config.table_chunk_size <= 0
         or config.acceptance_tolerance < 0
         or config.functional_candidate_words_per_pass < 0
+        or config.functional_table_bit_passes < 0
+        or config.functional_table_bit_candidates_per_pass <= 0
     ):
         raise ValueError("sign-word payload search settings are invalid")
     if target.ndim != 2 or left_binary.ndim != 2 or right_binary.ndim != 2:
@@ -337,7 +575,10 @@ def refine_sign_word_payloads(
         or not 0 <= free_rows <= rank
     ):
         raise ValueError("sign-word payload search dimensions do not match")
-    functional_enabled = config.functional_candidate_words_per_pass > 0
+    functional_enabled = (
+        config.functional_candidate_words_per_pass > 0
+        or config.functional_table_bit_passes > 0
+    )
     if functional_enabled:
         if (
             functional_fit_inputs is None
@@ -384,6 +625,12 @@ def refine_sign_word_payloads(
         if tuple(right_indices.shape) != (expected_rows, words):
             raise ValueError("product-code payload metadata has the wrong shape")
         corrections_per_word = 0
+    if config.functional_table_bit_passes and not isinstance(
+        codebook, ProductSignCodebook
+    ):
+        raise ValueError(
+            "functional table-bit search requires a product codebook"
+        )
 
     target32 = target.detach().float()
     left = left_binary.detach().float()
@@ -397,6 +644,12 @@ def refine_sign_word_payloads(
     positions = (
         None if right_flip_positions is None else right_flip_positions.detach().clone()
     )
+    if isinstance(codebook, ProductSignCodebook):
+        codebook = ProductSignCodebook(
+            codebook.index_bits,
+            codebook.first.detach().clone(),
+            codebook.second.detach().clone(),
+        )
     if codebook is not None:
         assert indices is not None
         _validate_payload(right, codebook, indices, positions, free_rows)
@@ -442,6 +695,9 @@ def refine_sign_word_payloads(
     sign_updates = 0
     accepted_outer_passes = 0
     functional_candidates_ranked = 0
+    table_bit_candidates_evaluated = 0
+    accepted_table_bit_flips = 0
+    table_bit_sign_updates = 0
 
     for _ in range(config.outer_passes):
         previous = (
@@ -554,7 +810,7 @@ def refine_sign_word_payloads(
         selected = selected[useful]
         if selected.numel() == 0:
             break
-        if functional_enabled:
+        if config.functional_candidate_words_per_pass > 0:
             assert fit_inputs is not None and held_inputs is not None
             assert fit_residual is not None and held_residual is not None
             assert fit_error is not None and held_error is not None
@@ -660,7 +916,7 @@ def refine_sign_word_payloads(
                 continue
             fit_delta = None
             held_delta = None
-            if functional_enabled:
+            if config.functional_candidate_words_per_pass > 0:
                 assert fit_inputs is not None and held_inputs is not None
                 assert fit_residual is not None and held_residual is not None
                 assert fit_error is not None and held_error is not None
@@ -731,7 +987,7 @@ def refine_sign_word_payloads(
         fitted_fit_error = None
         fitted_held_error = None
         functional_pass_accepted = True
-        if functional_enabled:
+        if config.functional_candidate_words_per_pass > 0:
             assert fit_inputs is not None and held_inputs is not None
             previous_fit_error = previous[-2]
             previous_held_error = previous[-1]
@@ -779,7 +1035,7 @@ def refine_sign_word_payloads(
         post = fitted.scale_post
         prediction = fitted.reconstruction.float()
         best_error = fitted.after_error
-        if functional_enabled:
+        if config.functional_candidate_words_per_pass > 0:
             fit_residual = fitted_fit_residual
             held_residual = fitted_held_residual
             fit_error = fitted_fit_error
@@ -788,6 +1044,38 @@ def refine_sign_word_payloads(
         sign_updates += pass_sign_updates
         accepted_outer_passes += 1
 
+    if config.functional_table_bit_passes:
+        assert isinstance(codebook, ProductSignCodebook)
+        assert indices is not None
+        assert fit_inputs is not None and held_inputs is not None
+        (
+            right,
+            codebook,
+            prediction,
+            best_error,
+            fit_residual,
+            fit_error,
+            held_residual,
+            held_error,
+            table_bit_candidates_evaluated,
+            accepted_table_bit_flips,
+            table_bit_sign_updates,
+        ) = _refine_product_table_bits(
+            target32,
+            left,
+            right,
+            pre,
+            mid,
+            post,
+            input_weight,
+            output_weight,
+            codebook,
+            indices,
+            free_rows=free_rows,
+            fit_inputs=fit_inputs,
+            held_inputs=held_inputs,
+            config=config,
+        )
     if codebook is not None:
         assert indices is not None
         _validate_payload(right, codebook, indices, positions, free_rows)
@@ -812,4 +1100,8 @@ def refine_sign_word_payloads(
         fit_error,
         held_error_before,
         held_error,
+        codebook,
+        table_bit_candidates_evaluated,
+        accepted_table_bit_flips,
+        table_bit_sign_updates,
     )

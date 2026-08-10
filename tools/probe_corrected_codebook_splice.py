@@ -282,7 +282,12 @@ def _reconstruction_cache_identity(
             args.convergence_check_interval
         ),
         "codebook_update_interval": args.codebook_update_interval,
+        "codebook_warmup_fraction": args.codebook_warmup_fraction,
         "codebook_freeze_fraction": args.codebook_freeze_fraction,
+        "adaptive_free_rows": args.adaptive_free_rows,
+        "adaptive_free_row_refit_passes": (
+            args.adaptive_free_row_refit_passes
+        ),
         "assignment_batch_words": args.assignment_batch_words,
         "linear_assignment_sweeps": args.linear_assignment_sweeps,
         "corrected_assignment_candidates": (
@@ -307,6 +312,18 @@ def _reconstruction_cache_identity(
         ),
         "functional_payload_candidate_words": (
             args.functional_payload_candidate_words
+        ),
+        **(
+            {
+                "functional_table_bit_passes": (
+                    args.functional_table_bit_passes
+                ),
+                "functional_table_bit_candidates": (
+                    args.functional_table_bit_candidates
+                ),
+            }
+            if args.functional_table_bit_passes
+            else {}
         ),
         "calibration_shrinkage": args.calibration_shrinkage,
         "seed": args.seed,
@@ -406,6 +423,14 @@ def _payload_search_factors(
             if args.functional_payload_search
             else 0
         ),
+        functional_table_bit_passes=(
+            args.functional_table_bit_passes
+            if isinstance(codebook, ProductSignCodebook)
+            else 0
+        ),
+        functional_table_bit_candidates_per_pass=(
+            args.functional_table_bit_candidates
+        ),
     )
     result = refine_sign_word_payloads(
         weight,
@@ -443,6 +468,11 @@ def _payload_search_factors(
         "functional_held_out_error_after": (
             result.functional_held_out_error_after
         ),
+        "table_bit_candidates_evaluated": (
+            result.table_bit_candidates_evaluated
+        ),
+        "accepted_table_bit_flips": result.accepted_table_bit_flips,
+        "table_bit_sign_updates": result.table_bit_sign_updates,
     }
 
 
@@ -1557,9 +1587,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--penalty-schedule", default="cubic")
     parser.add_argument("--convergence-check-interval", type=int, default=100)
     parser.add_argument("--codebook-update-interval", type=int, default=10)
+    parser.add_argument("--codebook-warmup-fraction", type=float, default=0.0)
     parser.add_argument("--codebook-freeze-fraction", type=float, default=0.5)
     parser.add_argument("--assignment-batch-words", type=int, default=8192)
     parser.add_argument("--linear-assignment-sweeps", type=int, default=2)
+    parser.add_argument("--adaptive-free-rows", action="store_true")
+    parser.add_argument("--adaptive-free-row-refit-passes", type=int, default=4)
     parser.add_argument("--corrected-assignment-candidates", type=int, default=16)
     parser.add_argument("--scale-fit-passes", type=int, default=2)
     parser.add_argument("--binary-search", action="store_true")
@@ -1580,6 +1613,10 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--functional-payload-candidate-words", type=int, default=256
+    )
+    parser.add_argument("--functional-table-bit-passes", type=int, default=0)
+    parser.add_argument(
+        "--functional-table-bit-candidates", type=int, default=4
     )
     parser.add_argument("--calibration-shrinkage", type=float, default=0.6)
     parser.add_argument("--wikitext-samples", type=int, default=12)
@@ -1628,6 +1665,14 @@ def run(args: argparse.Namespace) -> int:
     if args.linear_assignment_sweeps <= 0:
         raise ValueError("linear assignment sweeps must be positive")
     if (
+        not 0
+        <= args.codebook_warmup_fraction
+        <= args.codebook_freeze_fraction
+        <= 1
+        or args.codebook_warmup_fraction >= 1
+    ):
+        raise ValueError("codebook warmup/freeze fractions are invalid")
+    if (
         args.codebook_mode == "corrected-full"
         and args.corrections_per_word not in {1, 2, 3}
     ) or (
@@ -1657,8 +1702,27 @@ def run(args: argparse.Namespace) -> int:
         raise ValueError("payload search requires the matched binary-search control")
     if args.codebook_mode == "linear" and args.payload_search:
         raise ValueError("payload search does not support linear codebooks")
+    if args.adaptive_free_rows and (
+        args.codebook_mode != "product"
+        or args.corrections_per_word != 0
+        or args.candidate_rank is None
+        or args.adaptive_free_row_refit_passes <= 0
+        or args.codebook_warmup_fraction <= 0
+    ):
+        raise ValueError(
+            "adaptive free rows require warm mixed product-code factorization"
+        )
     if args.functional_payload_search and not args.payload_search:
         raise ValueError("functional payload search requires payload search")
+    if args.functional_table_bit_passes and (
+        not args.functional_payload_search
+        or args.codebook_mode != "product"
+        or args.functional_table_bit_passes < 0
+        or args.functional_table_bit_candidates <= 0
+    ):
+        raise ValueError(
+            "functional table-bit search requires functional product payload search"
+        )
     if (
         args.wikitext_samples <= 0
         or args.wikitext_offset < 0
@@ -1687,6 +1751,13 @@ def run(args: argparse.Namespace) -> int:
         for free_rows in right_free_rows_by_projection.values()
     ):
         raise ValueError("candidate rank/free-row configuration is invalid")
+    if args.adaptive_free_rows and any(
+        free_rows <= 0
+        for free_rows in right_free_rows_by_projection.values()
+    ):
+        raise ValueError(
+            "adaptive free rows require warm mixed product-code factorization"
+        )
     projection_paths = tuple(PROJECTION_PATHS[item] for item in projections)
     downstream_requested = (
         args.downstream_scale_refit
@@ -2250,6 +2321,7 @@ def run(args: argparse.Namespace) -> int:
                     penalty_schedule=args.penalty_schedule,
                     convergence_check_interval=args.convergence_check_interval,
                     codebook_update_interval=args.codebook_update_interval,
+                    codebook_warmup_fraction=args.codebook_warmup_fraction,
                     codebook_freeze_fraction=args.codebook_freeze_fraction,
                     assignment_batch_words=args.assignment_batch_words,
                     linear_assignment_sweeps=args.linear_assignment_sweeps,
@@ -2266,6 +2338,10 @@ def run(args: argparse.Namespace) -> int:
                     constrain_left=False,
                     right_flips_per_word=args.corrections_per_word,
                     right_free_rows=current_right_free_rows,
+                    adaptive_right_free_rows=args.adaptive_free_rows,
+                    adaptive_free_row_refit_passes=(
+                        args.adaptive_free_row_refit_passes
+                    ),
                 )
                 candidate_fit = fit_scales(
                     weight,
@@ -3049,6 +3125,11 @@ def run(args: argparse.Namespace) -> int:
             ),
             "right_free_rows_by_projection": right_free_rows_by_projection,
             "linear_assignment_sweeps": args.linear_assignment_sweeps,
+            "codebook_warmup_fraction": args.codebook_warmup_fraction,
+            "adaptive_free_rows": args.adaptive_free_rows,
+            "adaptive_free_row_refit_passes": (
+                args.adaptive_free_row_refit_passes
+            ),
             "corrected_assignment_candidates": (
                 args.corrected_assignment_candidates
             ),
@@ -3077,6 +3158,10 @@ def run(args: argparse.Namespace) -> int:
             "validation_offset": args.functional_payload_validation_offset,
             "validation_samples": args.functional_payload_validation_samples,
             "candidate_words_per_pass": args.functional_payload_candidate_words,
+            "table_bit_passes": args.functional_table_bit_passes,
+            "table_bit_candidates_per_pass": (
+                args.functional_table_bit_candidates
+            ),
         },
         "selection_results": selection_results,
         "operator_scale_refit": {

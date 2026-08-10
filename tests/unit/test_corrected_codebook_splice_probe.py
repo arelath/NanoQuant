@@ -418,3 +418,38 @@ def test_splice_probe_parses_no_flip_linear_codebook_mode() -> None:
     assert args.codebook_mode == "linear"
     assert args.corrections_per_word == 0
     assert args.linear_assignment_sweeps == 3
+
+
+def test_splice_probe_parses_adaptive_product_free_rows() -> None:
+    probe = _probe_module()
+    args = probe._parser().parse_args(
+        [
+            "--model",
+            "model.safetensors",
+            "--snapshot",
+            "snapshot",
+            "--calibration-state",
+            "calibration",
+            "--output",
+            "result.json",
+            "--codebook-mode",
+            "product",
+            "--corrections-per-word",
+            "0",
+            "--codebook-warmup-fraction",
+            "0.08333333333333333",
+            "--adaptive-free-rows",
+            "--adaptive-free-row-refit-passes",
+            "4",
+            "--functional-table-bit-passes",
+            "3",
+            "--functional-table-bit-candidates",
+            "2",
+        ]
+    )
+
+    assert args.codebook_warmup_fraction == pytest.approx(1 / 12)
+    assert args.adaptive_free_rows
+    assert args.adaptive_free_row_refit_passes == 4
+    assert args.functional_table_bit_passes == 3
+    assert args.functional_table_bit_candidates == 2

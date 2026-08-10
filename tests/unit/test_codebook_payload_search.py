@@ -317,3 +317,55 @@ def test_functional_payload_gate_accepts_disjoint_improvement() -> None:
         result.functional_held_out_error_after
         < result.functional_held_out_error_before
     )
+
+
+def test_functional_product_table_bit_search_updates_shared_decode() -> None:
+    first = torch.ones((2, 16))
+    second = torch.ones((2, 16))
+    first[0, 0] = -1
+    codebook = ProductSignCodebook(2, first, second)
+    indices = torch.zeros((1, 1), dtype=torch.int32)
+    initial_right = decode_product_codebook(indices, codebook, 32)
+    target = torch.ones((1, 32))
+    functional_inputs = torch.zeros((1, 32))
+    functional_inputs[0, 0] = 1
+
+    result = refine_sign_word_payloads(
+        target,
+        torch.ones((1, 1)),
+        initial_right,
+        torch.ones(32),
+        torch.ones(1),
+        torch.ones(1),
+        torch.ones(32),
+        torch.ones(1),
+        free_rows=0,
+        codebook=codebook,
+        right_indices=indices,
+        right_flip_positions=None,
+        config=SignWordPayloadSearchConfig(
+            enabled=True,
+            outer_passes=0,
+            max_words_per_pass=0,
+            scale_passes=0,
+            candidate_batch_words=1,
+            table_chunk_size=1,
+            functional_table_bit_passes=1,
+            functional_table_bit_candidates_per_pass=2,
+        ),
+        functional_fit_inputs=functional_inputs,
+        functional_held_out_inputs=functional_inputs,
+    )
+
+    assert isinstance(result.right_codebook, ProductSignCodebook)
+    assert result.accepted_table_bit_flips == 1
+    assert result.table_bit_sign_updates == 1
+    assert result.after_error < result.before_error
+    decoded = decode_product_codebook(
+        indices,
+        result.right_codebook,
+        32,
+    )
+    torch.testing.assert_close(decoded, result.right_binary)
+    assert result.functional_fit_error_after == 0
+    assert result.functional_held_out_error_after == 0
