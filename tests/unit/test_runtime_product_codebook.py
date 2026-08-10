@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -127,6 +128,30 @@ def test_product_codebook_state_predecodes_factorization_orientation(transposed:
         + 16
         + (compact.factor_in_features + compact.spec.rank + compact.factor_out_features) * 16
     )
+
+
+def test_product_codebook_cost_matches_resident_rectangular_outlier_accounting() -> None:
+    base = _compact_state()
+    scale_pre = base.factor_scale_pre.clone()
+    scale_pre[4] = 0
+    compact = ProductCodebookLayerState(
+        replace(base.spec, outlier_count=1, outlier_value_dtype="float32"),
+        base.format,
+        base.factorization_transposed,
+        base.free_rows,
+        base.factor_left_words,
+        base.factor_right_free_words,
+        base.factor_right_coded_payload,
+        base.first_half_words,
+        base.second_half_words,
+        scale_pre,
+        base.factor_scale_mid,
+        base.factor_scale_post,
+        torch.tensor([4], dtype=torch.int32),
+        torch.ones((base.spec.out_features, 1)),
+    )
+
+    assert compact.compact_logical_bits() - base.compact_logical_bits() == 3 * 16 + 2
 
 
 def _base_artifact(tmp_path: Path):  # type: ignore[no-untyped-def]

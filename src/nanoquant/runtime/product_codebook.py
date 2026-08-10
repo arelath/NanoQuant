@@ -267,7 +267,7 @@ class ProductCodebookLayerState:
         )
 
     def compact_logical_bits(self) -> int:
-        index_bits = math.ceil(math.log2(self.spec.in_features)) * self.spec.outlier_count
+        index_bits = math.ceil(math.log2(self.spec.out_features)) * self.spec.outlier_count
         outlier_bits = self.spec.out_features * self.spec.outlier_count * 16
         return (
             self.factor_left_words.numel() * 32
