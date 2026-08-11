@@ -12,6 +12,7 @@ from collections.abc import Callable, Iterator
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
 from fnmatch import fnmatchcase
+from functools import partial
 from pathlib import Path
 from typing import Any, cast
 
@@ -235,7 +236,7 @@ from nanoquant.infrastructure.tuning_checkpoint import (
 from nanoquant.ports.event_sink import EventSink, LayerCommittedPayload, emit_layer_committed
 from nanoquant.ports.model_adapter import ModelAdapter
 
-RESIDENT_ALGORITHM_VERSION = 64
+RESIDENT_ALGORITHM_VERSION = 65
 COVARIANCE_REFINEMENT_MAX_INPUT_FEATURES = 2048
 _THROUGHPUT_PROBE_REPETITIONS = 5
 _THROUGHPUT_PROBE_WARMUP_WORKLOADS = 3
@@ -688,6 +689,9 @@ def _block_loss(
     metadata: dict[str, object],
     batch_size: int,
     recorder: PhaseRecorder = NULL_RECORDER,
+    *,
+    finite_output_attempts: int | None = None,
+    nonfinite_observer: Callable[[int, int, int, str], None] | None = None,
 ) -> float:
     block_device = next(iter(block.parameters()), None)
     device = inputs.device if block_device is None else block_device.device
@@ -710,13 +714,79 @@ def _block_loss(
             total += error.sum()
         return total
 
+    def run_finite(
+        input_batch: torch.Tensor,
+        target_batch: torch.Tensor,
+        source_input: torch.Tensor,
+        source_target: torch.Tensor,
+        batch_index: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if finite_output_attempts is None:
+            return cast(torch.Tensor, adapter.run_block(block, input_batch, **metadata)), target_batch
+        if finite_output_attempts <= 0:
+            raise ValueError("finite block forward attempts must be positive")
+        for attempt in range(1, finite_output_attempts + 1):
+            restage = False
+            for location, staged, source in (
+                ("input", input_batch, source_input),
+                ("target", target_batch, source_target),
+            ):
+                staged_finite = torch.isfinite(staged)
+                if bool(staged_finite.all()):
+                    continue
+                nonfinite = staged.numel() - int(staged_finite.sum())
+                source_finite = torch.isfinite(source)
+                if not bool(source_finite.all()):
+                    source_nonfinite = source.numel() - int(source_finite.sum())
+                    raise FloatingPointError(
+                        f"block loss {location} batch {batch_index} contains "
+                        f"{source_nonfinite} non-finite values"
+                    )
+                if attempt == finite_output_attempts:
+                    raise FloatingPointError(
+                        f"block loss staged {location} batch {batch_index} contains {nonfinite} "
+                        f"non-finite values after {finite_output_attempts} attempts"
+                    )
+                if nonfinite_observer is not None:
+                    nonfinite_observer(batch_index, attempt, nonfinite, location)
+                del staged_finite, source_finite
+                restage = True
+                break
+            if restage:
+                del input_batch, target_batch
+                _quarantine_cuda_forward_scratch(device)
+                input_batch = source_input.to(device, non_blocking=False, copy=True)
+                target_batch = source_target.to(device, non_blocking=False, copy=True)
+                if source_input.device.type == "cpu" and device.type == "cuda":
+                    recorder.add(
+                        "transfer.h2d_bytes",
+                        input_batch.numel() * input_batch.element_size()
+                        + target_batch.numel() * target_batch.element_size(),
+                    )
+                continue
+            prediction = cast(torch.Tensor, adapter.run_block(block, input_batch, **metadata))
+            prediction_finite = torch.isfinite(prediction)
+            if bool(prediction_finite.all()):
+                return prediction, target_batch
+            nonfinite = prediction.numel() - int(prediction_finite.sum())
+            del prediction, prediction_finite
+            if attempt == finite_output_attempts:
+                raise FloatingPointError(
+                    f"block loss output batch {batch_index} contains {nonfinite} non-finite values "
+                    f"after {finite_output_attempts} attempts"
+                )
+            if nonfinite_observer is not None:
+                nonfinite_observer(batch_index, attempt, nonfinite, "output")
+            _quarantine_cuda_forward_scratch(device)
+        raise AssertionError("finite block loss retry loop did not return or raise")
+
     with torch.no_grad():
         squared_error = torch.zeros((), device=device)
         elements = 0
         if recorder is not NULL_RECORDER:
             batches = iter(iter_device_batches((inputs, targets), batch_size, device))
             batch_count = (inputs.shape[0] + batch_size - 1) // batch_size
-            for _batch_index in range(batch_count):
+            for batch_index in range(batch_count):
                 with recorder.phase("batch_stage"):
                     input_batch, target = next(batches)
                     if inputs.device.type == "cpu" and device.type == "cuda":
@@ -725,7 +795,15 @@ def _block_loss(
                             input_batch.numel() * input_batch.element_size() + target.numel() * target.element_size(),
                         )
                 with recorder.phase("forward"):
-                    prediction = adapter.run_block(block, input_batch, **metadata)
+                    start = batch_index * batch_size
+                    end = min(start + batch_size, inputs.shape[0])
+                    prediction, target = run_finite(
+                        input_batch,
+                        target,
+                        inputs[start:end],
+                        targets[start:end],
+                        batch_index,
+                    )
                 with recorder.phase("loss"):
                     squared_error += accumulate(prediction, target)
                     elements += target.numel()
@@ -733,11 +811,86 @@ def _block_loss(
                 recorder.add("forward.elements", target.numel())
             with recorder.phase("synchronize"):
                 return float(squared_error / elements)
-        for input_batch, target in iter_device_batches((inputs, targets), batch_size, device):
-            prediction = adapter.run_block(block, input_batch, **metadata)
+        for batch_index, (input_batch, target) in enumerate(
+            iter_device_batches((inputs, targets), batch_size, device)
+        ):
+            start = batch_index * batch_size
+            end = min(start + batch_size, inputs.shape[0])
+            prediction, target = run_finite(
+                input_batch,
+                target,
+                inputs[start:end],
+                targets[start:end],
+                batch_index,
+            )
             squared_error += accumulate(prediction, target)
             elements += target.numel()
         return float(squared_error / elements)
+
+
+def _observe_nonfinite_forward(
+    events: EventSink,
+    recorder: PhaseRecorder,
+    operation: str,
+    block: int,
+    snapshot: str | None,
+    unit: str | None,
+    batch: int,
+    attempt: int,
+    nonfinite: int,
+    location: str,
+) -> None:
+    events.emit(
+        "resident-quantization",
+        "warning",
+        f"{operation}.nonfinite_retry",
+        block=block,
+        batch=batch,
+        attempt=attempt,
+        maximum_attempts=_FINITE_BLOCK_FORWARD_ATTEMPTS,
+        nonfinite_values=nonfinite,
+        location=location,
+        snapshot=snapshot,
+        unit=unit,
+    )
+    recorder.add("forward.nonfinite_retries", 1)
+
+
+def _measure_block_loss_with_retries(
+    adapter: Any,
+    block: nn.Module,
+    inputs: torch.Tensor,
+    targets: torch.Tensor,
+    output_importance: torch.Tensor,
+    metadata: dict[str, object],
+    batch_size: int,
+    events: EventSink,
+    recorder: PhaseRecorder,
+    block_index: int,
+    snapshot: str,
+    unit: str | None = None,
+) -> float:
+    observer = partial(
+        _observe_nonfinite_forward,
+        events,
+        recorder,
+        "block_loss_snapshot",
+        block_index,
+        snapshot,
+        unit,
+    )
+    return _block_loss(
+        adapter,
+        block,
+        inputs,
+        targets,
+        output_importance,
+        metadata,
+        batch_size,
+        recorder,
+        finite_output_attempts=_FINITE_BLOCK_FORWARD_ATTEMPTS,
+        nonfinite_observer=observer,
+    )
 
 
 @torch.no_grad()
@@ -5161,6 +5314,7 @@ def _process_resident_block(
             loss_recorder.record_source_reference(
                 _self_reference_weighted_mse(teacher_outputs, block_output_importance)
             )
+
             loss_recorder.record_block_entry(
                 0.0
                 if deferred_slice or identical_entry_inputs
@@ -5173,6 +5327,16 @@ def _process_resident_block(
                     metadata,
                     request.block_forward_batch_size,
                     micro_recorder,
+                    finite_output_attempts=_FINITE_BLOCK_FORWARD_ATTEMPTS,
+                    nonfinite_observer=partial(
+                        _observe_nonfinite_forward,
+                        events,
+                        micro_recorder,
+                        "block_entry_loss",
+                        block_index,
+                        None,
+                        None,
+                    ),
                 )
             )
     if request.device.startswith("cuda"):
@@ -6807,6 +6971,7 @@ def _execute_resident_quantization_pipeline(
         group_member_targets: dict[str, tuple[TensorRef, ...]] = {}
         tuning_recorder = micro_recorder
         del block_work
+
         # Admit caches only after the active source/working block and its
         # teacher forward have established the real per-block free-memory
         # envelope.  Checking before block materialization would overestimate
@@ -6834,6 +6999,19 @@ def _execute_resident_quantization_pipeline(
                 role="teacher_outputs",
                 required=request.activation_gpu_cache is ActivationGpuCacheMode.BOTH,
             )
+        measure_block_loss = partial(
+            _measure_block_loss_with_retries,
+            environment.adapter,
+            working_block,
+            compressed_inputs,
+            teacher_outputs,
+            block_output_importance,
+            metadata,
+            request.block_forward_batch_size,
+            events,
+            micro_recorder,
+            block_index,
+        )
 
         covariance_refinement_metrics = _capture_covariance_refinement_metrics(
             request,
@@ -6925,16 +7103,7 @@ def _execute_resident_quantization_pipeline(
                     if not deferred_slice:
                         loss_recorder.record_after_layer(
                             LayerId(block_plan.block, group_plan.name),
-                            _block_loss(
-                                adapter,
-                                working_block,
-                                compressed_inputs,
-                                teacher_outputs,
-                                block_output_importance,
-                                metadata,
-                                request.block_forward_batch_size,
-                                micro_recorder,
-                            ),
+                            measure_block_loss("after_layer", group_plan.name),
                         )
                     events.emit(
                         "resident-quantization",
@@ -7205,16 +7374,7 @@ def _execute_resident_quantization_pipeline(
                 if not deferred_slice:
                     loss_recorder.record_after_layer(
                         LayerId(block_plan.block, group_plan.name),
-                        _block_loss(
-                            adapter,
-                            working_block,
-                            compressed_inputs,
-                            teacher_outputs,
-                            block_output_importance,
-                            metadata,
-                            request.block_forward_batch_size,
-                            micro_recorder,
-                        ),
+                        measure_block_loss("after_layer", group_plan.name),
                     )
                 events.emit(
                     "resident-quantization",
@@ -7338,16 +7498,7 @@ def _execute_resident_quantization_pipeline(
                         with _profile_layer_phase(recorder, block_index, layer_plan.layer.path, "loss_snapshot"):
                             loss_recorder.record_after_layer(
                                 layer_plan.layer,
-                                _block_loss(
-                                    adapter,
-                                    working_block,
-                                    compressed_inputs,
-                                    teacher_outputs,
-                                    block_output_importance,
-                                    metadata,
-                                    request.block_forward_batch_size,
-                                    micro_recorder,
-                                ),
+                                measure_block_loss("after_layer", layer_plan.layer.path),
                             )
                     events.emit(
                         "resident-quantization",
@@ -7713,16 +7864,7 @@ def _execute_resident_quantization_pipeline(
                 with _profile_layer_phase(recorder, block_index, layer_plan.layer.path, "loss_snapshot"):
                     loss_recorder.record_after_layer(
                         layer_plan.layer,
-                        _block_loss(
-                            adapter,
-                            working_block,
-                            compressed_inputs,
-                            teacher_outputs,
-                            block_output_importance,
-                            metadata,
-                            request.block_forward_batch_size,
-                            micro_recorder,
-                        ),
+                        measure_block_loss("after_layer", layer_plan.layer.path),
                     )
                 events.emit(
                     "resident-quantization",
@@ -7912,16 +8054,7 @@ def _execute_resident_quantization_pipeline(
             frozen_group_states = refitted_group_states
             group_results = refitted_group_results
             loss_recorder.record_post_block_refit(
-                _block_loss(
-                    adapter,
-                    working_block,
-                    compressed_inputs,
-                    teacher_outputs,
-                    block_output_importance,
-                    metadata,
-                    request.block_forward_batch_size,
-                    micro_recorder,
-                )
+                measure_block_loss("post_block_refit")
             )
         with _logged_operation(
             events,
@@ -7941,6 +8074,16 @@ def _execute_resident_quantization_pipeline(
                         request.block_forward_batch_size,
                         "cpu",
                         recorder=micro_recorder,
+                        finite_output_attempts=_FINITE_BLOCK_FORWARD_ATTEMPTS,
+                        nonfinite_observer=partial(
+                            _observe_nonfinite_forward,
+                            events,
+                            micro_recorder,
+                            "block_propagation",
+                            block_index,
+                            None,
+                            None,
+                        ),
                     ).detach()
         with _profile_block_phase(recorder, block_index, "finalize"):
             loss_recorder.record_final_frozen_pre_kd(

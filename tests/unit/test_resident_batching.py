@@ -371,6 +371,79 @@ def test_block_loss_streamed_fp32_accumulation_matches_full_tensor_formula() -> 
     assert actual == pytest.approx(expected, rel=1e-6, abs=1e-7)
 
 
+def test_block_loss_retries_a_transient_nonfinite_forward() -> None:
+    inputs = torch.randn(2, 4, generator=torch.Generator().manual_seed(57))
+    targets = torch.randn(2, 3, generator=torch.Generator().manual_seed(58))
+    importance = torch.linspace(0.5, 1.5, 3)
+    block = nn.Linear(4, 3, bias=False)
+    adapter = _TransientNonfiniteBlockAdapter(failures=1)
+    retries: list[tuple[int, int, int, str]] = []
+    prediction = block(inputs).detach()
+    expected = float(((prediction.float() - targets.float()).square() * importance).sum() / targets.numel())
+
+    actual = _block_loss(
+        adapter,
+        block,
+        inputs,
+        targets,
+        importance,
+        {},
+        2,
+        finite_output_attempts=3,
+        nonfinite_observer=lambda batch, attempt, nonfinite, location: retries.append(
+            (batch, attempt, nonfinite, location)
+        ),
+    )
+
+    assert actual == pytest.approx(expected, rel=1e-6, abs=1e-7)
+    assert adapter.calls == 2
+    assert retries == [(0, 1, prediction.numel(), "output")]
+
+
+def test_block_loss_restages_a_transient_nonfinite_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inputs = torch.randn(2, 4, generator=torch.Generator().manual_seed(59))
+    targets = torch.randn(2, 3, generator=torch.Generator().manual_seed(60))
+    importance = torch.linspace(0.5, 1.5, 3)
+    block = nn.Linear(4, 3, bias=False)
+    retries: list[tuple[int, int, int, str]] = []
+
+    def corrupt_staged_target(
+        values: tuple[torch.Tensor, ...],
+        batch_size: int,
+        device: torch.device,
+    ) -> object:
+        del batch_size, device
+        corrupted_target = values[1].clone()
+        corrupted_target[0, 0] = float("nan")
+        yield (values[0].clone(), corrupted_target)
+
+    monkeypatch.setattr(
+        "nanoquant.resident_quantization.iter_device_batches",
+        corrupt_staged_target,
+    )
+    prediction = block(inputs).detach()
+    expected = float(((prediction.float() - targets.float()).square() * importance).sum() / targets.numel())
+
+    actual = _block_loss(
+        _BlockAdapter(),
+        block,
+        inputs,
+        targets,
+        importance,
+        {},
+        2,
+        finite_output_attempts=3,
+        nonfinite_observer=lambda batch, attempt, nonfinite, location: retries.append(
+            (batch, attempt, nonfinite, location)
+        ),
+    )
+
+    assert actual == pytest.approx(expected, rel=1e-6, abs=1e-7)
+    assert retries == [(0, 1, 1, "target")]
+
+
 @pytest.mark.cuda
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA resident transfer requires a GPU")
 def test_cuda_block_forward_produces_bitwise_equal_pageable_host_activations() -> None:

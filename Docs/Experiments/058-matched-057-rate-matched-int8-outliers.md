@@ -76,5 +76,21 @@ cannot fall back to the original thirteen-column plan after a capped retry.
 
 ## Status
 
-Not run. The zero-argument launcher and CPU contract coverage are implemented;
-a CUDA launch still requires the normal single-worker, lease, and device checks.
+The first full CUDA run committed and freshly validated blocks 0--2, then
+failed while measuring block 3 entry loss. Block 2 post-refit had first
+encountered a non-finite tuning epoch and rolled back. Its committed teacher
+and compressed activation generation was independently scanned in chunks and
+contains no non-finite values, but the subsequent block-entry diagnostic
+forward returned a non-finite output. This is the same process-local CUDA
+scratch failure class previously isolated by Experiments 054 and 056, not a
+corrupt durable artifact.
+
+Resident algorithm version 65 extends the existing bounded finite-forward
+quarantine to every block-loss snapshot and to compressed block propagation.
+Each path validates immutable source inputs (and loss targets), retries a
+transient staged tensor or output at most three times with a blocking restage
+after quarantine, emits a visible `nonfinite_retry` event, and still fails
+closed when the immutable source or all retries are non-finite. Block
+propagation now performs this check before an activation generation can be
+committed. CPU regressions cover transient non-finite loss output and target
+staging recovery.
