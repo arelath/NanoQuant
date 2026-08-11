@@ -5556,7 +5556,13 @@ def _load_product_codebook_option_evidence(
                 str(record["artifact_id"]),
                 3,
             )
-            evidence = _read_product_codebook_option_evidence(reference, artifacts)
+            try:
+                evidence = _read_product_codebook_option_evidence(reference, artifacts)
+            except ArtifactCorruptionError:
+                # Screening receipts are resumable cache entries.  If an
+                # object was removed after its journal record committed, let
+                # the multi-fidelity loop recompute only that receipt.
+                continue
             if (
                 evidence.probe_plan != probe_plan
                 or evidence.candidate.key != record["candidate_key"]

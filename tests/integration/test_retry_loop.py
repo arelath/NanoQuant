@@ -1,4 +1,5 @@
 import json
+import shutil
 from dataclasses import replace
 from pathlib import Path
 from typing import cast
@@ -37,6 +38,7 @@ from nanoquant.infrastructure.tensor_store import LocalTensorStore
 from nanoquant.resident_quantization import (
     ResidentQuantizationRequest,
     _commit_product_codebook_option_evidence,
+    _load_product_codebook_option_evidence,
     _product_codebook_execution_hash,
     _product_codebook_screen_reuse_reason,
     _ProductCodebookOptionEvidence,
@@ -299,9 +301,30 @@ def test_matching_final_screen_receipt_is_consumed_as_production_attempt_zero(
         evidence,
         cast(LocalArtifactStore, context.artifact_store),
     )
+    artifact_store = cast(LocalArtifactStore, context.artifact_store)
+    shutil.rmtree(artifact_store.path_for(evidence_reference.artifact_id))
+    assert _load_product_codebook_option_evidence(
+        request,
+        evidence.probe_plan,
+        artifact_store,
+    ) == {}
+    rebuilt_evidence = replace(evidence, wall_seconds=evidence.wall_seconds + 1.0)
+    rebuilt_reference = _commit_product_codebook_option_evidence(
+        request,
+        rebuilt_evidence,
+        artifact_store,
+    )
+    assert rebuilt_reference != evidence_reference
+    loaded = _load_product_codebook_option_evidence(
+        request,
+        evidence.probe_plan,
+        artifact_store,
+    )
+    assert loaded[evidence.receipt_key] == (rebuilt_reference, rebuilt_evidence)
+    evidence_reference = rebuilt_reference
     evidence = _read_product_codebook_option_evidence(
         evidence_reference,
-        cast(LocalArtifactStore, context.artifact_store),
+        artifact_store,
     )
 
     reused, reused_outliers, _reused_fit = _run_resident_factorization_attempts(
