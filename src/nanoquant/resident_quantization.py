@@ -182,7 +182,7 @@ from nanoquant.domain.runs import BudgetState, RunManifest, RunStatus
 from nanoquant.domain.scale_fit import reconstruct
 from nanoquant.domain.seeds import logical_seed
 from nanoquant.domain.sign_word_codebook import mixed_right_product_codebook_bit_cost
-from nanoquant.infrastructure.artifacts import LocalArtifactStore
+from nanoquant.infrastructure.artifacts import ArtifactCorruptionError, LocalArtifactStore
 from nanoquant.infrastructure.commits import (
     CommitIdentity,
     commit_block,
@@ -3232,7 +3232,13 @@ def _load_rank_probe_results(
                 str(record["artifact_id"]),
                 1,
             )
-            descriptor = artifacts.validate(reference.artifact_id)
+            try:
+                descriptor = artifacts.validate(reference.artifact_id)
+            except ArtifactCorruptionError:
+                # Rank probes are deterministic resumable cache entries.  A
+                # journal record can outlive an accidentally removed object;
+                # leave that unit absent so the probe loop rebuilds it.
+                continue
             if descriptor.artifact_type != ArtifactTypes.RANK_PROBE_RESULT:
                 raise ValueError("artifact type differs")
             payload = json.loads(
@@ -3288,9 +3294,15 @@ def _load_reusable_rank_probe_results(
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
             raise ValueError(f"donor rank-probe journal is invalid at sequence {sequence}") from exc
     selected_plan_id = str(records[-1]["probe_plan_artifact"])
-    selected = [record for record in records if record.get("probe_plan_artifact") == selected_plan_id]
-    if len({str(record.get("unit_id")) for record in selected}) != len(selected):
-        raise ValueError("donor rank-probe journal has duplicate units for its active plan")
+    selected_records = [record for record in records if record.get("probe_plan_artifact") == selected_plan_id]
+    selected_by_unit: dict[str, dict[str, Any]] = {}
+    for record in selected_records:
+        unit_id = str(record.get("unit_id"))
+        prior = selected_by_unit.get(unit_id)
+        if prior is not None and prior.get("artifact_id") != record.get("artifact_id"):
+            raise ValueError("donor rank-probe journal has conflicting duplicate units for its active plan")
+        selected_by_unit[unit_id] = record
+    selected = list(selected_by_unit.values())
 
     donor_artifacts = LocalArtifactStore(donor_output / "artifacts")
     plan_descriptor = donor_artifacts.validate(selected_plan_id)

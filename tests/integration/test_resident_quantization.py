@@ -708,8 +708,22 @@ def test_reconstruction_rank_probe_covers_every_physical_unit_before_fitting(
     monkeypatch.undo()
     probe_journal = (request.output / "state" / "rank-probe-journal.jsonl").read_text().splitlines()
     assert len(probe_journal) == 2
+    missing_record = json.loads(probe_journal[0])
+    interrupted_artifacts = LocalArtifactStore(request.output / "artifacts")
+    shutil.rmtree(interrupted_artifacts.path_for(missing_record["artifact_id"]))
 
     result = run_resident_quantization(request)
+
+    rebuilt_journal = [
+        json.loads(line)
+        for line in (request.output / "state" / "rank-probe-journal.jsonl").read_text().splitlines()
+    ]
+    rebuilt_records = [
+        record for record in rebuilt_journal if record["unit_id"] == missing_record["unit_id"]
+    ]
+    assert len(rebuilt_journal) == 6
+    assert len(rebuilt_records) == 2
+    assert rebuilt_records[0]["artifact_id"] == rebuilt_records[1]["artifact_id"]
 
     assert result.plan.reconstruction_profile is not None
     assert len(result.plan.reconstruction_decisions) == 5
@@ -722,8 +736,8 @@ def test_reconstruction_rank_probe_covers_every_physical_unit_before_fitting(
     }
     events = [json.loads(line) for line in (request.output / "events.jsonl").read_text().splitlines()]
     names = [event["name"] for event in events]
-    assert names.count("rank_probe.unit_completed") == 5
-    assert names.count("rank_probe.unit_reused") == 2
+    assert names.count("rank_probe.unit_completed") == 6
+    assert names.count("rank_probe.unit_reused") == 1
     assert names.index("rank_probe.profile_committed") < names.index("compression.progress_initialized")
     block_entry_started = next(event for event in events if event["name"] == "block_entry_loss.started")
     assert block_entry_started["fields"]["identical_inputs"] is True
