@@ -9,13 +9,13 @@ from pathlib import Path
 
 import _paths  # noqa: F401
 import torch
-from probe_composed_context_coordinate_sweep import _overlay_replacements
 from probe_composed_context_mlp_refit import _paired_metric_payload
 from probe_corrected_codebook_splice import _dtype, _paired_payload, _replace_weights
 from probe_mlp_policy_frozen_transfer import MODEL_SOURCE, PINNED_MODEL_REVISION
 from probe_non_wikitext_kd_quality import C4_REVISION, _load_c4_tokens
 
 from nanoquant.config.codec import to_dict
+from nanoquant.domain.models import BlockId, LayerId
 from nanoquant.infrastructure.device_lease import acquire_device_lease
 from nanoquant.infrastructure.frozen_model_loader import load_frozen_run
 from nanoquant.infrastructure.hf_language_model import load_causal_language_model
@@ -26,11 +26,12 @@ from nanoquant.infrastructure.safetensors_io import SAFETENSORS
 from nanoquant.kl_budget_workflow import _token_hash
 
 
-def _parse_overlay(value: str) -> tuple[str, Path]:
+def _parse_overlay(value: str) -> tuple[str, tuple[Path, ...]]:
     name, separator, path = value.partition("=")
-    if not separator or not name.strip() or not path.strip():
+    paths = tuple(Path(item) for item in path.split(",") if item.strip())
+    if not separator or not name.strip() or not paths:
         raise argparse.ArgumentTypeError("overlay must use name=path")
-    return name, Path(path)
+    return name, paths
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -80,6 +81,18 @@ def _load_partial_overlay(path: Path) -> tuple[dict[str, torch.Tensor], dict[str
     return tensors, manifest
 
 
+def _overlay_replacements(tensors: dict[str, torch.Tensor]) -> dict[LayerId, torch.Tensor]:
+    replacements = {}
+    prefix = "model.layers."
+    suffix = ".weight"
+    for name, weight in tensors.items():
+        if not name.startswith(prefix) or not name.endswith(suffix):
+            raise ValueError("partial overlay tensor name is invalid")
+        block_text, path = name.removeprefix(prefix).removesuffix(suffix).split(".", maxsplit=1)
+        replacements[LayerId(BlockId(int(block_text)), path)] = weight
+    return replacements
+
+
 def run(args: argparse.Namespace) -> int:
     if min(args.samples, args.sequence_length - 1) <= 0 or args.offset < 0:
         raise ValueError("C4 overlay protocol is invalid")
@@ -97,10 +110,21 @@ def run(args: argparse.Namespace) -> int:
     )
     loaded_overlays = {}
     manifests = {}
-    for name, path in args.overlay:
-        tensors, manifest = _load_partial_overlay(path)
-        loaded_overlays[name] = _overlay_replacements(tensors)
-        manifests[name] = {"directory": str(path.resolve()), **manifest}
+    for name, paths in args.overlay:
+        replacements = {}
+        arm_manifests = []
+        for path in paths:
+            tensors, manifest = _load_partial_overlay(path)
+            partial = _overlay_replacements(tensors)
+            overlap = replacements.keys() & partial.keys()
+            if overlap:
+                raise ValueError(
+                    f"overlay arm {name} repeats layers: {sorted(map(str, overlap))}"
+                )
+            replacements.update(partial)
+            arm_manifests.append({"directory": str(path.resolve()), **manifest})
+        loaded_overlays[name] = replacements
+        manifests[name] = arm_manifests
     with acquire_device_lease(args.device):
         loaded = load_frozen_run(
             args.run_output,
@@ -182,7 +206,7 @@ def run(args: argparse.Namespace) -> int:
             if name != "baseline"
         },
     }
-    names = [name for name, _path in args.overlay]
+    names = [name for name, _arm_paths in args.overlay]
     first = names[0]
     output["paired_overlay_minus_first"] = {
         name: {
