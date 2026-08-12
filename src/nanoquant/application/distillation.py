@@ -382,6 +382,221 @@ def topk_tail_distillation_loss(
     return loss if temperature == 1.0 else loss * temperature**2
 
 
+def adaptive_topk_tail_distillation_loss(
+    student_hidden_states: torch.Tensor,
+    teacher_top_values: torch.Tensor,
+    teacher_top_indices: torch.Tensor,
+    teacher_log_normalizers: torch.Tensor,
+    lm_head: nn.Module,
+    *,
+    temperature: float,
+    vocabulary_chunk_size: int,
+    token_chunk_size: int,
+    minimum_mass_weight: float = 0.25,
+    maximum_mass_weight: float = 1.0,
+) -> torch.Tensor:
+    """Tail-aware CE with a deterministic teacher-confidence mass weight.
+
+    Diffuse tokens receive the maximum mass-preservation coefficient. Tokens
+    whose teacher top-k set contains almost all probability use the minimum.
+    The mapping is fixed and does not inspect student or evaluation behavior.
+    """
+
+    if not 0 < minimum_mass_weight <= maximum_mass_weight:
+        raise ValueError("adaptive tail weights must be positive and ordered")
+    if teacher_log_normalizers.shape != (student_hidden_states.shape[0],):
+        raise ValueError("adaptive tail normalizers are not aligned")
+    teacher_top_mass = (
+        teacher_top_values.float() - teacher_log_normalizers.float().unsqueeze(-1)
+    ).exp().sum(dim=-1).clamp(0, 1)
+    # 90% selected mass maps to the midpoint; 80% or less receives the maximum.
+    diffuse = ((0.95 - teacher_top_mass) / 0.15).clamp(0, 1)
+    weights = minimum_mass_weight + (maximum_mass_weight - minimum_mass_weight) * diffuse
+    selected_logits = selected_lm_head_logits(
+        student_hidden_states,
+        lm_head,
+        teacher_top_indices,
+        token_chunk_size=token_chunk_size,
+        temperature=temperature,
+    ).float()
+    student_log_normalizers = vocabulary_logsumexp(
+        student_hidden_states,
+        lm_head,
+        vocabulary_chunk_size=vocabulary_chunk_size,
+        token_chunk_size=token_chunk_size,
+        temperature=temperature,
+    )
+    teacher_top_probabilities = (
+        teacher_top_values.float() - teacher_log_normalizers.float().unsqueeze(-1)
+    ).exp()
+    student_top_log_probabilities = selected_logits - student_log_normalizers.unsqueeze(-1)
+    student_top_log_mass = torch.logsumexp(student_top_log_probabilities, dim=-1).clamp(
+        max=math.log1p(-1e-7)
+    )
+    conditional = -(
+        teacher_top_probabilities.to(selected_logits.device)
+        * (student_top_log_probabilities - student_top_log_mass.unsqueeze(-1))
+    ).sum(dim=-1)
+    teacher_tail = (1 - teacher_top_mass).clamp_min(1e-12)
+    mass = -teacher_top_mass.to(selected_logits.device) * student_top_log_mass
+    mass -= teacher_tail.to(selected_logits.device) * torch.log1p(-student_top_log_mass.exp())
+    loss = (conditional + weights.to(selected_logits.device) * mass).mean()
+    return loss if temperature == 1.0 else loss * temperature**2
+
+
+def multiband_tail_distillation_loss(
+    student_hidden_states: torch.Tensor,
+    teacher_top_values: torch.Tensor,
+    teacher_top_indices: torch.Tensor,
+    teacher_log_normalizers: torch.Tensor,
+    lm_head: nn.Module,
+    *,
+    explicit_tokens: int,
+    temperature: float,
+    vocabulary_chunk_size: int,
+    token_chunk_size: int,
+) -> torch.Tensor:
+    """Cross entropy over explicit tokens plus middle- and residual-tail bands."""
+
+    if not 0 < explicit_tokens < teacher_top_values.shape[1]:
+        raise ValueError("multiband explicit token count must split the cached top-k")
+    student_selected = selected_lm_head_logits(
+        student_hidden_states,
+        lm_head,
+        teacher_top_indices,
+        token_chunk_size=token_chunk_size,
+        temperature=temperature,
+    ).float()
+    student_normalizer = vocabulary_logsumexp(
+        student_hidden_states,
+        lm_head,
+        vocabulary_chunk_size=vocabulary_chunk_size,
+        token_chunk_size=token_chunk_size,
+        temperature=temperature,
+    )
+    teacher_log_probs = teacher_top_values.float() - teacher_log_normalizers.float()[:, None]
+    student_log_probs = student_selected - student_normalizer[:, None]
+    teacher_explicit = teacher_log_probs[:, :explicit_tokens].exp()
+    loss = -(teacher_explicit.to(student_log_probs.device) * student_log_probs[:, :explicit_tokens]).sum(
+        dim=-1
+    )
+    teacher_middle = teacher_log_probs[:, explicit_tokens:].exp().sum(dim=-1).clamp_min(1e-12)
+    student_middle_log = torch.logsumexp(student_log_probs[:, explicit_tokens:], dim=-1)
+    loss -= teacher_middle.to(student_middle_log.device) * student_middle_log
+    teacher_residual = (1 - teacher_log_probs.exp().sum(dim=-1)).clamp_min(1e-12)
+    student_selected_mass = torch.logsumexp(student_log_probs, dim=-1).clamp(max=math.log1p(-1e-7)).exp()
+    loss -= teacher_residual.to(student_selected_mass.device) * torch.log1p(-student_selected_mass)
+    result = loss.mean()
+    return result if temperature == 1.0 else result * temperature**2
+
+
+def variable_top_p_tail_distillation_loss(
+    student_hidden_states: torch.Tensor,
+    teacher_top_values: torch.Tensor,
+    teacher_top_indices: torch.Tensor,
+    teacher_log_normalizers: torch.Tensor,
+    lm_head: nn.Module,
+    *,
+    probability: float,
+    temperature: float,
+    vocabulary_chunk_size: int,
+    token_chunk_size: int,
+) -> torch.Tensor:
+    """Per-token smallest cached prefix reaching the requested teacher mass."""
+
+    if not 0 < probability < 1:
+        raise ValueError("variable top-p probability must be in (0, 1)")
+    teacher_probabilities = (
+        teacher_top_values.float() - teacher_log_normalizers.float()[:, None]
+    ).exp()
+    cumulative = teacher_probabilities.cumsum(dim=-1)
+    counts = (cumulative < probability).sum(dim=-1).add(1).clamp(max=teacher_top_values.shape[1])
+    positions = torch.arange(teacher_top_values.shape[1], device=teacher_top_values.device)[None, :]
+    mask = positions < counts[:, None]
+    student_selected = selected_lm_head_logits(
+        student_hidden_states,
+        lm_head,
+        teacher_top_indices,
+        token_chunk_size=token_chunk_size,
+        temperature=temperature,
+    ).float()
+    student_normalizer = vocabulary_logsumexp(
+        student_hidden_states,
+        lm_head,
+        vocabulary_chunk_size=vocabulary_chunk_size,
+        token_chunk_size=token_chunk_size,
+        temperature=temperature,
+    )
+    student_log_probs = student_selected - student_normalizer[:, None]
+    explicit = -(teacher_probabilities.to(student_log_probs.device) * student_log_probs * mask).sum(dim=-1)
+    teacher_tail = (1 - (teacher_probabilities * mask).sum(dim=-1)).clamp_min(1e-12)
+    selected_student_log_mass = torch.logsumexp(
+        student_log_probs.masked_fill(~mask.to(student_log_probs.device), -torch.inf), dim=-1
+    ).clamp(max=math.log1p(-1e-7))
+    loss = explicit - teacher_tail.to(student_log_probs.device) * torch.log1p(
+        -selected_student_log_mass.exp()
+    )
+    result = loss.mean()
+    return result if temperature == 1.0 else result * temperature**2
+
+
+def topk_tail_with_hard_labels_loss(
+    student_hidden_states: torch.Tensor,
+    teacher_top_values: torch.Tensor,
+    teacher_top_indices: torch.Tensor,
+    teacher_log_normalizers: torch.Tensor,
+    hard_labels: torch.Tensor,
+    lm_head: nn.Module,
+    *,
+    hard_label_weight: float,
+    hard_label_mask: torch.Tensor | None = None,
+    temperature: float,
+    vocabulary_chunk_size: int,
+    token_chunk_size: int,
+    mass_loss_weight: float = 0.5,
+) -> torch.Tensor:
+    """Tail-aware teacher target plus a fixed true-next-token CE blend."""
+
+    if not 0 < hard_label_weight < 1 or hard_labels.shape != (student_hidden_states.shape[0],):
+        raise ValueError("hard-label blend inputs are invalid")
+    if hard_label_mask is not None and hard_label_mask.shape != hard_labels.shape:
+        raise ValueError("hard-label mask does not align with labels")
+    teacher_loss = topk_tail_distillation_loss(
+        student_hidden_states,
+        teacher_top_values,
+        teacher_top_indices,
+        teacher_log_normalizers,
+        lm_head,
+        temperature=temperature,
+        vocabulary_chunk_size=vocabulary_chunk_size,
+        token_chunk_size=token_chunk_size,
+        mass_loss_weight=mass_loss_weight,
+    )
+    label_logits = selected_lm_head_logits(
+        student_hidden_states,
+        lm_head,
+        hard_labels[:, None],
+        token_chunk_size=token_chunk_size,
+        temperature=1.0,
+    ).float().squeeze(-1)
+    student_normalizer = vocabulary_logsumexp(
+        student_hidden_states,
+        lm_head,
+        vocabulary_chunk_size=vocabulary_chunk_size,
+        token_chunk_size=token_chunk_size,
+        temperature=1.0,
+    )
+    hard_per_token = student_normalizer - label_logits
+    if hard_label_mask is None:
+        hard_loss = hard_per_token.mean()
+    else:
+        mask = hard_label_mask.to(device=hard_per_token.device, dtype=torch.bool)
+        if not bool(mask.any()):
+            raise ValueError("hard-label mask must select at least one token")
+        hard_loss = hard_per_token[mask].mean()
+    return (1 - hard_label_weight) * teacher_loss + hard_label_weight * hard_loss
+
+
 def topk_mass_floor_distillation_loss(
     student_hidden_states: torch.Tensor,
     teacher_top_values: torch.Tensor,

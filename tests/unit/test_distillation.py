@@ -8,18 +8,72 @@ from torch import nn
 from nanoquant.application.distillation import (
     DistillationResumeState,
     TopKDistillationConfig,
+    adaptive_topk_tail_distillation_loss,
     cache_topk_teacher_epoch,
     cache_topk_teacher_targets,
     distill_topk,
+    multiband_tail_distillation_loss,
     teacher_topk_logits,
     teacher_topk_logits_with_normalizers,
     topk_distillation_loss,
     topk_mass_floor_distillation_loss,
     topk_tail_distillation_loss,
+    topk_tail_with_hard_labels_loss,
+    variable_top_p_tail_distillation_loss,
     vocabulary_logsumexp,
 )
 from nanoquant.config.schema import ProfilingConfig, ProfilingLevel
 from nanoquant.infrastructure.profiling import Profiler
+
+
+def test_adaptive_tail_matches_ordered_confidence_policy() -> None:
+    head = nn.Linear(3, 6, bias=False)
+    hidden = torch.randn(2, 3, generator=torch.Generator().manual_seed(101), requires_grad=True)
+    logits = head(hidden.detach())
+    values, indices = torch.topk(logits, 3, dim=-1)
+    loss = adaptive_topk_tail_distillation_loss(
+        hidden, values, indices, torch.logsumexp(logits, dim=-1), head,
+        temperature=1.0, vocabulary_chunk_size=3, token_chunk_size=2,
+    )
+    loss.backward()
+    assert torch.isfinite(loss)
+    assert hidden.grad is not None and torch.isfinite(hidden.grad).all()
+
+
+def test_multiband_and_variable_top_p_match_teacher_minimum() -> None:
+    head = nn.Linear(4, 9, bias=False)
+    hidden = torch.randn(3, 4, generator=torch.Generator().manual_seed(102), requires_grad=True)
+    logits = head(hidden.detach())
+    values, indices = torch.topk(logits, 6, dim=-1)
+    normalizer = torch.logsumexp(logits, dim=-1)
+    multiband = multiband_tail_distillation_loss(
+        hidden, values, indices, normalizer, head, explicit_tokens=3,
+        temperature=1.0, vocabulary_chunk_size=4, token_chunk_size=2,
+    )
+    variable = variable_top_p_tail_distillation_loss(
+        hidden, values, indices, normalizer, head, probability=0.7,
+        temperature=1.0, vocabulary_chunk_size=4, token_chunk_size=2,
+    )
+    assert torch.isfinite(multiband)
+    assert torch.isfinite(variable)
+    (multiband + variable).backward()
+    assert hidden.grad is not None and torch.isfinite(hidden.grad).all()
+
+
+def test_hard_label_blend_uses_true_vocabulary_labels() -> None:
+    head = nn.Linear(3, 7, bias=False)
+    hidden = torch.randn(4, 3, generator=torch.Generator().manual_seed(103), requires_grad=True)
+    logits = head(hidden.detach())
+    values, indices = torch.topk(logits, 3, dim=-1)
+    loss = topk_tail_with_hard_labels_loss(
+        hidden, values, indices, torch.logsumexp(logits, dim=-1),
+        torch.tensor([1, 2, 3, 4]), head, hard_label_weight=0.1,
+        hard_label_mask=torch.tensor([True, True, False, True]),
+        temperature=1.0, vocabulary_chunk_size=3, token_chunk_size=2,
+    )
+    loss.backward()
+    assert torch.isfinite(loss)
+    assert hidden.grad is not None and torch.isfinite(hidden.grad).all()
 
 
 class ToyLanguageModel(nn.Module):
