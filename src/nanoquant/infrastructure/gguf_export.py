@@ -26,7 +26,7 @@ from nanoquant.runtime import (
     open_packed_artifact,
 )
 
-GGUF_EXPORT_SCHEMA_VERSION = 5
+GGUF_EXPORT_SCHEMA_VERSION = 6
 DEFAULT_TOKEN_EMBEDDING_TYPE = "q8_0"
 DEFAULT_OUTPUT_TENSOR_TYPE = "q8_0"
 
@@ -101,6 +101,50 @@ def _find_quantizer(reference: Path) -> Path:
             return candidate.resolve()
     searched = ", ".join(str(path) for path in candidates)
     raise FileNotFoundError(f"llama.cpp quantizer is missing; searched: {searched}")
+
+
+def _quantizer_tensor_policy(packed: Any) -> tuple[str, tuple[str, ...]]:
+    """Select a base type that lets llama.cpp preserve typed outlier weights."""
+
+    outlier_types = {
+        layer.spec.outlier_value_dtype
+        for block in packed.manifest.blocks
+        for layer in block.layers
+        if layer.spec.outlier_count > 0
+    }
+    if "int8" not in outlier_types:
+        return "F16", ()
+    if outlier_types != {"int8"}:
+        rendered = ", ".join(sorted(str(value) for value in outlier_types))
+        raise ValueError(
+            "GGUF export does not support mixed INT8 and floating NanoQuant outlier storage: "
+            f"{rendered}"
+        )
+    # llama-quantize applies --tensor-type only when the base type is itself
+    # quantized. With F16 it tries to dequantize I8 before preserving the tensor.
+    return "Q8_0", (r"\.nq_salient_weight=I8",)
+
+
+def _quantizer_command(
+    quantizer: Path,
+    converted: Path,
+    quantized: Path,
+    embedding_type: str,
+    output_type: str,
+    base_type: str,
+    tensor_overrides: tuple[str, ...],
+) -> tuple[str, ...]:
+    return (
+        str(quantizer),
+        "--output-tensor-type",
+        output_type.upper(),
+        "--token-embedding-type",
+        embedding_type.upper(),
+        *(item for override in tensor_overrides for item in ("--tensor-type", override)),
+        str(converted),
+        str(quantized),
+        base_type,
+    )
 
 
 def _inspect_gguf_tensor_contract(
@@ -249,6 +293,8 @@ def _reuse_existing(
     expected_scale_count: int,
     reference: Path,
     python_executable: str | Path,
+    quantizer_base_type: str,
+    quantizer_tensor_overrides: tuple[str, ...],
 ) -> GgufExportResult:
     receipt_path = _receipt_path(output)
     if not output.is_file() or not receipt_path.is_file():
@@ -292,7 +338,6 @@ def _reuse_existing(
         )
     _require_output_tensor_type(actual_output_type, output_tensor_type, source_output_tensors)
     expected = {
-        "schema_version": GGUF_EXPORT_SCHEMA_VERSION,
         "packed_descriptor_sha256": packed_descriptor_hash,
         "converter_sha256": hash_canonical_text_file(converter),
         "quantizer_sha256": hash_file(quantizer),
@@ -305,6 +350,20 @@ def _reuse_existing(
         "gguf_sha256": hash_file(output),
         "gguf_bytes": output.stat().st_size,
     }
+    if schema_version == GGUF_EXPORT_SCHEMA_VERSION:
+        expected.update(
+            {
+                "schema_version": GGUF_EXPORT_SCHEMA_VERSION,
+                "quantizer_base_type": quantizer_base_type.lower(),
+                "quantizer_tensor_overrides": list(quantizer_tensor_overrides),
+            }
+        )
+    elif schema_version == 5 and quantizer_base_type == "F16" and not quantizer_tensor_overrides:
+        # Schema 5 used this exact floating-sidecar policy but did not name it
+        # separately from quantizer_command. Preserve validated historical GGUFs.
+        expected["schema_version"] = 5
+    else:
+        raise ValueError("GGUF export receipt schema differs from the active tensor policy")
     for name, value in expected.items():
         if receipt.get(name) != value:
             raise ValueError(f"GGUF export receipt field differs: {name}")
@@ -347,6 +406,7 @@ def export_llamacpp_gguf(
     embedding_type = normalize_token_embedding_type(token_embedding_type)
     requested_output_type = normalize_output_tensor_type(output_tensor_type)
     packed = open_packed_artifact(packed_root, verify_hashes=True)
+    quantizer_base_type, quantizer_tensor_overrides = _quantizer_tensor_policy(packed)
     source = Path(source_model).resolve()
     if not source.is_dir():
         raise FileNotFoundError(f"GGUF source model snapshot is missing: {source}")
@@ -382,6 +442,8 @@ def export_llamacpp_gguf(
                 expected_scale_count,
                 reference,
                 python_executable,
+                quantizer_base_type,
+                quantizer_tensor_overrides,
             )
         except _StaleAuxiliaryTensorQuantizationError:
             print(
@@ -428,19 +490,17 @@ def export_llamacpp_gguf(
     )
     interop = LlamaCppInterop(reference)
     converter_environment = interop.converter_environment(converter)
-    # COPY disables llama.cpp's per-tensor overrides. F16 is intentional here:
-    # the converter's NanoQuant sidecars are already BF16/F16/I32/F32, so this base
-    # type leaves them alone while allowing token_embd.weight and an independent
-    # output.weight, when present, to be overridden.
-    quantizer_command = (
-        str(quantizer),
-        "--output-tensor-type",
-        requested_output_type.upper(),
-        "--token-embedding-type",
-        embedding_type.upper(),
-        str(converted),
-        str(quantized),
-        "F16",
+    # COPY disables llama.cpp's per-tensor overrides. Floating sidecars use F16;
+    # I8 salient weights require a quantized base before their exact preservation
+    # override is honored. Embedding/output overrides remain explicit in both cases.
+    quantizer_command = _quantizer_command(
+        quantizer,
+        converted,
+        quantized,
+        embedding_type,
+        requested_output_type,
+        quantizer_base_type,
+        quantizer_tensor_overrides,
     )
     try:
         with (
@@ -510,6 +570,8 @@ def export_llamacpp_gguf(
         "converter_sha256": converter_hash,
         "quantizer": str(quantizer),
         "quantizer_sha256": hash_file(quantizer),
+        "quantizer_base_type": quantizer_base_type.lower(),
+        "quantizer_tensor_overrides": list(quantizer_tensor_overrides),
         "source_model": str(source),
         "token_embedding_type": embedding_type,
         "token_embedding_tensor": "token_embd.weight",

@@ -68,8 +68,12 @@ Q4/Q5/Q6/Q8 llama.cpp variants accepted by the export contract are supported. Mo
 the separate `output.weight`; its absence is recorded and accepted. Source `lm_head.weight` and `output.weight`
 tensors are both treated as independent output projections and must map to canonical GGUF `output.weight`; Qwen3
 therefore follows the same quantization contract as Llama-family models. The second pass uses F16 as its base type
-because llama.cpp's `COPY` mode disables per-tensor overrides. On NanoQuant GGUFs, the F16 base leaves existing
-BF16/F16/I32/F32 sidecars alone and changes the token embedding plus the independent output tensor when present.
+for floating outlier sidecars because llama.cpp's `COPY` mode disables per-tensor overrides. On NanoQuant GGUFs,
+that base leaves existing BF16/F16/I32/F32 sidecars alone and changes the token embedding plus the independent
+output tensor when present. When salient weights use I8 storage, the pass instead uses a Q8_0 base plus an exact
+`.nq_salient_weight=I8` tensor override. llama.cpp only honors that preservation override for a quantized base; the
+explicit embedding and output policies still determine those two tensors. Export receipt schema 6 records the
+selected base and override list, while validated schema-5 floating-sidecar exports remain reusable.
 
 The mmproj remains independent of NanoQuant language-weight compression and is generated directly from the pinned
 Hugging Face vision stack. Text-only snapshots, including Gemma 3 1B, do not produce a placeholder mmproj.

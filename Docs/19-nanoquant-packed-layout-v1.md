@@ -148,10 +148,13 @@ Explicit factor shapes also work around a defect in the pinned reference convert
 when both factors are packed and `U_shape` is absent, its `U_packed` branch reads `scale_mid` before assigning that
 local. The bridge always supplies authoritative shapes, so the faulty inference branch is never entered. The
 converter serializes the three scale sidecars as BF16, preserving the frozen values without widening them to F32,
-and normalizes floating salient values to F16. On Gemma, the latter intentionally changed 512 source BF16 values
-with maximum absolute difference `2.9802322387695312e-08`; all converter and GGUF values were exact after those
-declared storage transforms. Export receipt schema 3 inspects the final post-quantizer GGUF and rejects missing or
-non-BF16 NanoQuant scale tensors.
+and normalizes floating salient values to F16. I8 salient values remain I8 through GGUF export: the auxiliary
+quantization pass uses a quantized base, which activates llama.cpp's per-tensor override machinery, and applies an
+exact preservation override to every `.nq_salient_weight` tensor. On Gemma, the floating conversion intentionally
+changed 512 source BF16 values with maximum absolute difference `2.9802322387695312e-08`; all converter and GGUF
+values were exact after those declared storage transforms. Export receipt schema 6 inspects the final post-quantizer
+GGUF, rejects missing or non-BF16 NanoQuant scale tensors, and records the quantizer base and typed-sidecar override
+policy.
 
 ## Native rewrite CUDA backend
 

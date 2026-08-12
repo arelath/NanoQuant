@@ -48,6 +48,40 @@ def _packed(tmp_path: Path) -> Path:
     return convert_logical_to_packed(logical.root, tmp_path / "packed").root
 
 
+def _packed_with_int8_outlier(tmp_path: Path) -> Path:
+    spec = QuantizedLinearSpec(
+        "blocks.0.self_attn.q_proj",
+        "nanoquant-v1",
+        32,
+        2,
+        32,
+        "float32",
+        "float32",
+        outlier_count=1,
+        outlier_value_dtype="int8",
+        has_outlier_scales=True,
+    )
+    scale_pre = torch.ones(32)
+    scale_pre[0] = 0
+    state = LogicalLayerState(
+        spec,
+        torch.ones((2, 32)),
+        torch.ones((32, 32)),
+        scale_pre,
+        torch.ones(32),
+        torch.ones(2),
+        outlier_indices=torch.tensor([0], dtype=torch.int32),
+        outlier_values=torch.ones((2, 1), dtype=torch.int8),
+        outlier_scales=torch.ones(1),
+    )
+    logical = write_logical_artifact(
+        tmp_path / "logical-int8",
+        RuntimeModelMetadata("fixture/model", "revision", "gemma3", "config", "tokenizer"),
+        {0: (state,)},
+    )
+    return convert_logical_to_packed(logical.root, tmp_path / "packed-int8").root
+
+
 def test_qwen_gguf_export_quantizes_lm_head_as_canonical_output_and_resumes(
     tmp_path: Path,
     monkeypatch,
@@ -214,7 +248,7 @@ Path(a.outfile).write_bytes(b'GGUF-fixture')
     assert second.mmproj is not None and second.mmproj.reused
     assert mmproj_calls == [output.parent / "mmproj-BF16.gguf"] * 4
     receipt = json.loads(output.with_suffix(".gguf.export.json").read_text(encoding="utf-8"))
-    assert receipt["schema_version"] == 5
+    assert receipt["schema_version"] == 6
     assert receipt["gguf_sha256"] == real_hash_file(output)
     assert receipt["converter_sha256"] == PACKED_REFERENCE_CONVERTER_SHA256
     assert receipt["token_embedding_type"] == "q8_0"
@@ -225,6 +259,8 @@ Path(a.outfile).write_bytes(b'GGUF-fixture')
     assert receipt["nanoquant_scale_type"] == "bf16"
     assert receipt["nanoquant_scale_tensor_count"] == 3
     assert receipt["quantizer_sha256"] == real_hash_file(quantizer)
+    assert receipt["quantizer_base_type"] == "f16"
+    assert receipt["quantizer_tensor_overrides"] == []
     assert len(commands) == 4
     converter_environment = command_environments[0]
     assert converter_environment is not None
@@ -255,6 +291,28 @@ def test_gguf_export_contract_rejects_widened_or_missing_scales() -> None:
         gguf_export._require_bfloat16_nanoquant_scales(3, ("f32",), 3)
     with pytest.raises(ValueError, match="tensor count differs"):
         gguf_export._require_bfloat16_nanoquant_scales(0, (), 3)
+
+
+def test_int8_outlier_export_uses_quantized_base_with_exact_preservation_override(
+    tmp_path: Path,
+) -> None:
+    packed = gguf_export.open_packed_artifact(_packed_with_int8_outlier(tmp_path), verify_hashes=True)
+
+    assert gguf_export._quantizer_tensor_policy(packed) == (
+        "Q8_0",
+        (r"\.nq_salient_weight=I8",),
+    )
+    command = gguf_export._quantizer_command(
+        Path("llama-quantize"),
+        Path("converted.gguf"),
+        Path("quantized.gguf"),
+        "q8_0",
+        "q8_0",
+        "Q8_0",
+        (r"\.nq_salient_weight=I8",),
+    )
+    assert command[5:7] == ("--tensor-type", r"\.nq_salient_weight=I8")
+    assert command[-1] == "Q8_0"
 
 
 def test_gguf_export_output_tensor_contract_is_optional_but_validated_when_present() -> None:
