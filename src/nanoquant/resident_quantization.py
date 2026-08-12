@@ -237,6 +237,7 @@ from nanoquant.ports.event_sink import EventSink, LayerCommittedPayload, emit_la
 from nanoquant.ports.model_adapter import ModelAdapter
 
 RESIDENT_ALGORITHM_VERSION = 65
+_CALIBRATION_ALGORITHM_VERSION = 1
 COVARIANCE_REFINEMENT_MAX_INPUT_FEATURES = 2048
 _THROUGHPUT_PROBE_REPETITIONS = 5
 _THROUGHPUT_PROBE_WARMUP_WORKLOADS = 3
@@ -293,6 +294,14 @@ class _ActivePreprocessingState:
     calibration: ArtifactRef
     objectives: ArtifactRef
     plan: ArtifactRef
+
+
+@dataclass(frozen=True, slots=True)
+class _ActiveCalibrationState:
+    schema_version: int
+    calibration_config_hash: str
+    calibration: ArtifactRef
+    objectives: ArtifactRef
 
 
 @contextmanager
@@ -2945,6 +2954,32 @@ def _manifest_tensor_identity(value: torch.Tensor | tuple[tuple[int, ...], ...] 
     }
 
 
+def _calibration_config_hash(request: ResidentQuantizationRequest) -> str:
+    """Identify calibration independently of downstream resident algorithms."""
+
+    payload: dict[str, object] = {
+        "calibration_algorithm_version": _CALIBRATION_ALGORITHM_VERSION,
+        "runtime": {
+            "torch": str(torch.__version__),
+            "transformers": transformers.__version__,
+            "cuda": torch.version.cuda,
+        },
+        "source": request.source,
+        "revision": request.revision,
+        "token_ids": _manifest_tensor_identity(request.token_ids),
+        "device": request.device,
+        "method": request.calibration_method,
+        "shrinkage": request.calibration_shrinkage,
+        "batch_size": request.calibration_batch_size,
+        "seed": request.seed,
+        "accumulation_dtype": "float32",
+        "objective": ObjectiveConfig(),
+    }
+    if request.calibration_method == "forward_only":
+        payload["block_forward_batch_size"] = request.block_forward_batch_size
+    return semantic_hash(payload)
+
+
 def _resident_manifest_config(request: ResidentQuantizationRequest, component: str) -> dict[str, object]:
     payload = cast(dict[str, object], to_dict(request))
     payload.pop("run_config")
@@ -4144,6 +4179,84 @@ def _active_preprocessing_path(output: Path) -> Path:
     return output / "state" / "preprocessing.json"
 
 
+def _active_calibration_path(output: Path) -> Path:
+    return output / "state" / "calibration.json"
+
+
+def _write_active_calibration_state(
+    request: ResidentQuantizationRequest,
+    calibration: ArtifactRef,
+    objectives: ArtifactRef,
+) -> None:
+    atomic_write_json(
+        _active_calibration_path(request.output),
+        to_dict(
+            _ActiveCalibrationState(
+                1,
+                _calibration_config_hash(request),
+                calibration,
+                objectives,
+            )
+        ),
+    )
+
+
+def _legacy_preprocessing_calibration_references(
+    request: ResidentQuantizationRequest,
+) -> tuple[ArtifactRef, ArtifactRef] | None:
+    """Recover calibration from this run's older all-or-nothing pointer."""
+
+    state_path = _active_preprocessing_path(request.output)
+    manifest_path = request.output / "manifest.json"
+    if not state_path.exists() or not manifest_path.exists():
+        return None
+    try:
+        state_payload = json.loads(state_path.read_text(encoding="utf-8"))
+        state = from_dict(_ActivePreprocessingState, state_payload, path="legacy_preprocessing")
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        stored = manifest["resolved_config"]
+    except (OSError, TypeError, ValueError, KeyError, json.JSONDecodeError):
+        return None
+    if state.schema_version != 1 or not isinstance(stored, dict):
+        return None
+    current = _resident_manifest_config(request, "resident-quantization")
+    protocol_fields: tuple[str, ...] = (
+        "source",
+        "revision",
+        "token_ids",
+        "device",
+        "calibration_method",
+        "calibration_shrinkage",
+        "calibration_batch_size",
+        "seed",
+    )
+    if request.calibration_method == "forward_only":
+        protocol_fields = (*protocol_fields, "block_forward_batch_size")
+    if any(stored.get(field) != current.get(field) for field in protocol_fields):
+        return None
+    return state.calibration, state.objectives
+
+
+def _resolve_calibration_references(
+    request: ResidentQuantizationRequest,
+) -> tuple[tuple[ArtifactRef, ArtifactRef] | None, str]:
+    path = _active_calibration_path(request.output)
+    if path.exists():
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            state = from_dict(_ActiveCalibrationState, payload, path="active_calibration")
+        except (OSError, TypeError, ValueError, KeyError, json.JSONDecodeError) as exc:
+            raise ValueError(f"active calibration state is invalid: {path}") from exc
+        if state.schema_version != 1:
+            raise ValueError(f"unsupported active calibration schema: {state.schema_version}")
+        if state.calibration_config_hash == _calibration_config_hash(request):
+            return (state.calibration, state.objectives), "active_calibration"
+    legacy = _legacy_preprocessing_calibration_references(request)
+    if legacy is not None:
+        return legacy, "legacy_preprocessing_calibration"
+    return None, "computed"
+
+
 def _read_active_preprocessing_state(
     request: ResidentQuantizationRequest,
 ) -> _ActivePreprocessingState | None:
@@ -4243,6 +4356,75 @@ def _write_active_preprocessing_state(
             )
         ),
     )
+
+
+def _load_precomputed_calibration_inputs(
+    request: ResidentQuantizationRequest,
+    artifacts: LocalArtifactStore,
+    inventory: ModelInventory,
+    dataset: DatasetIdentity,
+    total_tokens: int,
+    references: tuple[ArtifactRef, ArtifactRef] | None,
+) -> tuple[PersistedCalibration, PersistedObjectives] | None:
+    if references is None:
+        return None
+    calibration_ref, objectives_ref = references
+    calibration_descriptor = artifacts.validate(calibration_ref.artifact_id)
+    objectives_descriptor = artifacts.validate(objectives_ref.artifact_id)
+    if (
+        calibration_descriptor.artifact_type != "calibration-stats"
+        or calibration_descriptor.schema_version != calibration_ref.schema_version
+    ):
+        raise ValueError("active calibration reference has the wrong type or schema")
+    if (
+        objectives_descriptor.artifact_type != "objective-specs"
+        or objectives_descriptor.schema_version != objectives_ref.schema_version
+    ):
+        raise ValueError("active objectives reference has the wrong type or schema")
+    calibration_payload = json.loads(
+        (artifacts.path_for(calibration_ref.artifact_id) / "stats.json").read_text(encoding="utf-8")
+    )
+    calibration = PersistedCalibration(
+        calibration_ref,
+        from_dict(CalibrationStats, calibration_payload, path="active_calibration.stats"),
+    )
+    objective_payload = json.loads(
+        (artifacts.path_for(objectives_ref.artifact_id) / "objectives.json").read_text(encoding="utf-8")
+    )
+    objectives = PersistedObjectives(
+        objectives_ref,
+        tuple(
+            from_dict(ObjectiveSpec, item, path=f"active_calibration.objectives[{index}]")
+            for index, item in enumerate(objective_payload)
+        ),
+    )
+    if calibration.stats.model != inventory.model or calibration.stats.dataset != dataset:
+        raise ValueError("active calibration identity does not match the requested model/dataset")
+    if (
+        calibration.stats.method != request.calibration_method
+        or calibration.stats.accumulation_dtype != "float32"
+        or calibration.stats.total_tokens != total_tokens
+    ):
+        raise ValueError("active calibration protocol does not match the request")
+    if any(objective.source_calibration != calibration_ref for objective in objectives.objectives):
+        raise ValueError("active objectives do not reference the selected calibration")
+    expected_layers = {
+        layer.layer
+        for block in inventory.blocks
+        for layer in block.quantizable_layers
+    }
+    calibration_layers = {layer.layer for layer in calibration.stats.layers}
+    objective_layers = {objective.layer for objective in objectives.objectives}
+    if (
+        calibration_layers != expected_layers
+        or len(calibration_layers) != len(calibration.stats.layers)
+        or objective_layers != expected_layers
+        or len(objective_layers) != len(objectives.objectives)
+    ):
+        raise ValueError("active calibration/objective layer coverage is invalid")
+    for reference in _calibration_tensor_references(calibration.stats):
+        artifacts.validate(reference.artifact.artifact_id)
+    return calibration, objectives
 
 
 def _load_precomputed_preprocessing(
@@ -6395,19 +6577,29 @@ def _execute_resident_quantization_pipeline(
                     tokens.numel(),
                     preprocessing_references,
                 )
-                reused_preprocessing = (
-                    None
-                    if preprocessed is not None
-                    else _load_reusable_calibration(
+                calibration_references, calibration_source = _resolve_calibration_references(request)
+                reused_preprocessing = None
+                if preprocessed is None:
+                    reused_preprocessing = _load_precomputed_calibration_inputs(
                         request,
                         artifacts,
                         inventory,
                         dataset,
                         tokens.numel(),
+                        calibration_references,
                     )
-                )
-                if reused_preprocessing is not None:
-                    preprocessing_source = "reuse_run"
+                    if reused_preprocessing is not None:
+                        preprocessing_source = calibration_source
+                    else:
+                        reused_preprocessing = _load_reusable_calibration(
+                            request,
+                            artifacts,
+                            inventory,
+                            dataset,
+                            tokens.numel(),
+                        )
+                        if reused_preprocessing is not None:
+                            preprocessing_source = "reuse_run"
 
     calibration_values: list[tuple[LayerId, MaterializedLayerCalibration]] = []
     if preprocessed is not None or reused_preprocessing is not None:
@@ -6607,6 +6799,21 @@ def _execute_resident_quantization_pipeline(
                         objectives = build_objectives(calibration, ObjectiveConfig(), artifacts)
         else:
             calibration, objectives = reused_preprocessing
+        _write_active_calibration_state(
+            request,
+            calibration.reference,
+            objectives.reference,
+        )
+        events.emit(
+            "resident-quantization",
+            "info",
+            "calibration_checkpoint.selected",
+            reused=reused_preprocessing is not None,
+            source=preprocessing_source,
+            calibration_config_hash=_calibration_config_hash(request),
+            calibration_artifact=calibration.reference.artifact_id,
+            objectives_artifact=objectives.reference.artifact_id,
+        )
         resolved_groups = _resolve_shared_input_groups(adapter, inventory, request.shared_input_groups)
         with _logged_operation(
             events,

@@ -224,20 +224,29 @@ On resume:
 
 1. acquire the run lease;
 2. validate the manifest and requested recipe;
-3. load `state/preprocessing.json` when its resident semantic-config hash matches, then validate the referenced
+3. load `state/calibration.json` when its calibration-protocol hash matches, then validate the referenced calibration,
+   objectives, and transitive tensors before any calibration work;
+4. load `state/preprocessing.json` when its resident semantic-config hash matches, then validate the referenced
    calibration, objectives, and quantization plan transitively;
-4. for runs created before that pointer existed, recover the exact plan identity from the journal and its linked
+5. for runs created before the calibration pointer, recover compatible calibration/objective references from that
+   run's validated preprocessing pointer; for runs created before the preprocessing pointer, recover the exact plan
+   identity from the journal and its linked
    preprocessing selection instead of rerunning calibration;
-5. scan committed stage and loop-unit references, not arbitrary files;
-6. verify hashes, schema versions, and semantic cache keys;
-7. reconstruct executor state from the latest valid commit;
-8. restore deterministic random streams from logical seed derivation;
-9. resume the first incomplete unit;
-10. emit a `run_resumed` event describing reused and discarded work.
+6. scan committed stage and loop-unit references, not arbitrary files;
+7. verify hashes, schema versions, and semantic cache keys;
+8. reconstruct executor state from the latest valid commit;
+9. restore deterministic random streams from logical seed derivation;
+10. resume the first incomplete unit;
+11. emit a `run_resumed` event describing reused and discarded work.
 
-The active preprocessing pointer is published atomically only after all three content-addressed artifacts commit. A
-matching but corrupt pointer or referenced artifact fails closed. A semantic configuration change does not reuse the
-pointer and may produce a new plan identity; placement-only settings remain outside that identity.
+The active calibration pointer is published atomically as soon as calibration and objective artifacts commit, before
+rank or codebook probes begin. Its identity excludes downstream resident algorithm versions while including the
+calibration implementation version, runtime, model/revision, exact token tensor, method, shrinkage, batch policy,
+device, and objective configuration. The active preprocessing pointer is published atomically only after all three
+content-addressed preprocessing artifacts commit. A matching but corrupt pointer or referenced artifact fails closed.
+A downstream semantic configuration change may invalidate the plan and block identity without discarding compatible
+calibration; a calibration semantic change invalidates both pointers. Placement-only settings remain outside the
+resident identity where documented.
 
 Seeds are derived from stable identifiers:
 

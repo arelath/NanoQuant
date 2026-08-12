@@ -167,6 +167,14 @@ configuration hash. Resume validates that pointer before any calibration work. R
 plan hash from their authoritative journal and validate the linked preprocessing artifacts before publishing the
 pointer. A matching corrupt pointer fails closed rather than silently recalibrating and changing commit identity.
 
+Calibration and objective construction form an earlier durable boundary. As soon as both artifacts commit,
+`state/calibration.json` atomically records their typed references with a calibration-protocol hash that is independent
+of downstream factorization and resident block algorithm versions. An interruption during rank probing, codebook
+screening, or plan allocation therefore reuses calibration after validating both descriptors, complete layer
+coverage, objective back-references, and every transitive calibration tensor. Runs predating this pointer may migrate
+the same references from their own validated `state/preprocessing.json` when the manifest's model, tokens, method,
+shrinkage, batch policy, device, and seed still match. Arbitrary artifact-store scanning is not a recovery mechanism.
+
 At the final block, the teacher stream normally expires immediately after final metrics are committed. The final
 compressed stream may remain rooted through suffix execution/evaluation and then expire unless explicitly pinned.
 Frozen model loading never depends on either stream.

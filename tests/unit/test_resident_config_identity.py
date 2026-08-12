@@ -1,3 +1,4 @@
+import json
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import Mock
@@ -40,6 +41,95 @@ def test_resident_algorithm_version_invalidates_commit_identity(monkeypatch: pyt
     )
 
     assert resident._resident_config_hash(request) != original
+
+
+def test_resident_algorithm_version_does_not_invalidate_calibration_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = ResidentQuantizationRequest(
+        Path("snapshot"),
+        Path("output"),
+        "fixture/model",
+        "revision",
+        ((1, 2, 3),),
+        device="cpu",
+        calibration_method="online_fisher",
+        calibration_shrinkage=0.6,
+    )
+    original = resident._calibration_config_hash(request)
+
+    monkeypatch.setattr(
+        resident,
+        "RESIDENT_ALGORITHM_VERSION",
+        resident.RESIDENT_ALGORITHM_VERSION + 1,
+    )
+
+    assert resident._calibration_config_hash(request) == original
+    assert resident._calibration_config_hash(replace(request, calibration_shrinkage=0.5)) != original
+
+
+def test_legacy_preprocessing_pointer_recovers_only_matching_calibration_protocol(
+    tmp_path: Path,
+) -> None:
+    request = ResidentQuantizationRequest(
+        Path("snapshot"),
+        tmp_path / "run",
+        "fixture/model",
+        "revision",
+        ((1, 2, 3),),
+        device="cpu",
+        calibration_method="online_fisher",
+        calibration_shrinkage=0.6,
+    )
+    state = request.output / "state"
+    state.mkdir(parents=True)
+    (state / "preprocessing.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "resident_config_hash": "sha256:historical",
+                "calibration": {
+                    "artifact_type": "calibration-stats",
+                    "artifact_id": "sha256-calibration",
+                    "schema_version": 1,
+                },
+                "objectives": {
+                    "artifact_type": "objective-specs",
+                    "artifact_id": "sha256-objectives",
+                    "schema_version": 1,
+                },
+                "plan": {
+                    "artifact_type": "quantization-plan",
+                    "artifact_id": "sha256-plan",
+                    "schema_version": 1,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (request.output / "manifest.json").write_text(
+        json.dumps(
+            {
+                "resolved_config": resident._resident_manifest_config(
+                    request,
+                    "resident-quantization",
+                )
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    references, source = resident._resolve_calibration_references(request)
+
+    assert references is not None
+    assert tuple(reference.artifact_id for reference in references) == (
+        "sha256-calibration",
+        "sha256-objectives",
+    )
+    assert source == "legacy_preprocessing_calibration"
+    assert resident._resolve_calibration_references(
+        replace(request, calibration_shrinkage=0.5)
+    ) == (None, "computed")
 
 
 def test_torch_runtime_version_invalidates_commit_identity(monkeypatch: pytest.MonkeyPatch) -> None:

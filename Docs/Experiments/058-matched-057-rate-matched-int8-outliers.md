@@ -94,3 +94,15 @@ closed when the immutable source or all retries are non-finite. Block
 propagation now performs this check before an activation generation can be
 committed. CPU regressions cover transient non-finite loss output and target
 staging recovery.
+
+The version-65 restart also exposed an independent preprocessing resume gap:
+calibration completed, but an interruption during the multi-hour rank/codebook
+screen occurred before the all-or-nothing preprocessing pointer was published.
+The next launch recalibrated despite immutable calibration and objective
+artifacts already existing. Calibration/objective persistence is now its own
+atomic resume boundary in `state/calibration.json`, keyed by a dedicated
+calibration-protocol identity rather than the downstream resident algorithm
+version. Legacy runs can migrate those references from their validated full
+preprocessing pointer. This does not change calibration numerics or the
+resident algorithm version; it prevents repeated calibration while rebuilding
+an incompatible plan or resuming an incomplete probe screen.

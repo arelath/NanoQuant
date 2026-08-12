@@ -705,6 +705,9 @@ def test_reconstruction_rank_probe_covers_every_physical_unit_before_fitting(
     monkeypatch.setattr(resident, "_execute_binary_factor_search", reject_probe_search)
     with pytest.raises(InterruptedError, match="2 reconstruction rank probe commits"):
         run_resident_quantization(replace(request, interrupt_after_rank_probe_commits=2))
+    calibration_checkpoint = request.output / "state" / "calibration.json"
+    assert calibration_checkpoint.exists()
+    checkpoint_before_resume = calibration_checkpoint.read_bytes()
     monkeypatch.undo()
     probe_journal = (request.output / "state" / "rank-probe-journal.jsonl").read_text().splitlines()
     assert len(probe_journal) == 2
@@ -736,6 +739,15 @@ def test_reconstruction_rank_probe_covers_every_physical_unit_before_fitting(
     }
     events = [json.loads(line) for line in (request.output / "events.jsonl").read_text().splitlines()]
     names = [event["name"] for event in events]
+    assert names.count("calibration_persist.started") == 1
+    calibration_checkpoints = [
+        event for event in events if event["name"] == "calibration_checkpoint.selected"
+    ]
+    assert [event["fields"]["source"] for event in calibration_checkpoints] == [
+        "computed",
+        "active_calibration",
+    ]
+    assert calibration_checkpoint.read_bytes() == checkpoint_before_resume
     assert names.count("rank_probe.unit_completed") == 6
     assert names.count("rank_probe.unit_reused") == 1
     assert names.index("rank_probe.profile_committed") < names.index("compression.progress_initialized")
