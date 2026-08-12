@@ -12,12 +12,14 @@ from transformers.models.gemma3.configuration_gemma3 import Gemma3TextConfig
 from transformers.models.gemma3.modeling_gemma3 import Gemma3ForCausalLM
 
 import nanoquant.resident_quantization as resident
+from nanoquant.config.codec import semantic_hash
 from nanoquant.config.schema import (
     ADMMConfig,
     AllocationStrategy,
     BinaryFactorSearchConfig,
     ExecutorKind,
     HessianSamplingConfig,
+    ModelConfig,
     ObjectiveConfig,
     ObjectiveKind,
     PostRefitCovarianceRefinementConfig,
@@ -26,6 +28,7 @@ from nanoquant.config.schema import (
     RankResponseSource,
     RankRetryConfig,
     ReconstructionRankPlanningConfig,
+    RunConfig,
     SharedInputGroupConfig,
 )
 from nanoquant.infrastructure.artifacts import ArtifactCorruptionError, LocalArtifactStore
@@ -187,6 +190,7 @@ def test_resident_quantization_commits_complete_transformers_model(
         admm=ADMMConfig(outer_iterations=2, inner_iterations=1),
         profiling=ProfilingConfig(level=ProfilingLevel.OFF),
         registry_root=tmp_path / "runs",
+        run_config=RunConfig(ModelConfig("fixture/gemma3")),
     )
     result = run_resident_quantization(request)
 
@@ -218,6 +222,38 @@ def test_resident_quantization_commits_complete_transformers_model(
     with pytest.raises(ValueError, match="configuration differs"):
         load_completed_resident_quantization(
             replace(relocated_request, target_bpw=7.9),
+            allow_relocated_run=True,
+        )
+    historical_output = tmp_path / "historical-relocated-run"
+    shutil.copytree(output, historical_output)
+    historical_manifest_path = historical_output / "manifest.json"
+    historical_manifest = json.loads(historical_manifest_path.read_text(encoding="utf-8"))
+    historical_config = historical_manifest["resolved_config"]
+    historical_config["canonical_run_config"]["factorization"].pop("product_codebook")
+    historical_config.pop("product_codebook")
+    historical_config["interrupt_after_block_commits"] = 1
+    historical_config["maximum_wddm_shared_bytes"] = 123
+    historical_manifest["config_hash"] = semantic_hash(historical_config)
+    historical_manifest_path.write_text(
+        json.dumps(historical_manifest, sort_keys=True, indent=2),
+        encoding="utf-8",
+    )
+    historical_request = replace(request, output=historical_output)
+    with pytest.raises(ValueError, match="configuration differs"):
+        load_completed_resident_quantization(
+            historical_request,
+            allow_relocated_run=True,
+        )
+    historical_schema = load_completed_resident_quantization(
+        historical_request,
+        allow_historical_algorithm=True,
+        allow_relocated_run=True,
+    )
+    assert historical_schema.identity == result.identity
+    with pytest.raises(ValueError, match="configuration differs"):
+        load_completed_resident_quantization(
+            replace(historical_request, target_bpw=7.9),
+            allow_historical_algorithm=True,
             allow_relocated_run=True,
         )
     with monkeypatch.context() as historical_context:

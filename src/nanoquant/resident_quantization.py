@@ -8947,6 +8947,76 @@ def run_resident_quantization(request: ResidentQuantizationRequest) -> ResidentQ
         return _run_resident_quantization(request)
 
 
+_HISTORICAL_TERMINAL_OPERATIONAL_FIELDS = frozenset(
+    {
+        "interrupt_after_layer_commits",
+        "interrupt_after_rank_probe_commits",
+        "interrupt_after_block_commits",
+        "interrupt_after_factorized_tuning_epoch_commits",
+        "maximum_wddm_shared_bytes",
+    }
+)
+
+
+def _project_persisted_config_shape(persisted: object, current: object) -> object:
+    """Project a current config onto the fields known by an older manifest."""
+
+    if not isinstance(persisted, dict) or not isinstance(current, dict):
+        return current
+    return {
+        key: _project_persisted_config_shape(value, current[key])
+        for key, value in persisted.items()
+        if key in current
+    }
+
+
+def _historical_terminal_manifest_matches(
+    manifest_config: dict[str, object],
+    proposed_config: dict[str, object],
+    *,
+    allow_relocated_run: bool,
+) -> bool:
+    """Compare an old completed request after decoding its canonical recipe.
+
+    The canonical recipe is the semantic authority for schema fields introduced
+    after the run. The remaining comparison projects the current request onto
+    the older manifest's known shape, so persisted values still fail closed.
+    """
+
+    persisted_canonical = manifest_config.pop("canonical_run_config", None)
+    proposed_canonical = proposed_config.pop("canonical_run_config", None)
+    if not isinstance(persisted_canonical, dict) or not isinstance(proposed_canonical, dict):
+        return False
+    try:
+        persisted_run_config = from_dict(
+            RunConfig,
+            persisted_canonical,
+            path="manifest.resolved_config.canonical_run_config",
+        )
+        proposed_run_config = from_dict(
+            RunConfig,
+            proposed_canonical,
+            path="request.canonical_run_config",
+        )
+    except ValueError:
+        return False
+    if persisted_run_config != proposed_run_config:
+        return False
+
+    for field in _HISTORICAL_TERMINAL_OPERATIONAL_FIELDS:
+        manifest_config.pop(field, None)
+        proposed_config.pop(field, None)
+    if allow_relocated_run:
+        # A relocated run can point at the same material through a different
+        # output directory and artifact-registry path (for example a junction).
+        for field in ("output", "registry_root"):
+            manifest_config.pop(field, None)
+            proposed_config.pop(field, None)
+
+    projected = _project_persisted_config_shape(manifest_config, proposed_config)
+    return semantic_hash(manifest_config) == semantic_hash(projected)
+
+
 def load_completed_resident_quantization(
     request: ResidentQuantizationRequest,
     *,
@@ -8958,7 +9028,8 @@ def load_completed_resident_quantization(
     Historical algorithm identities are accepted only for terminal workflow
     consumption. Active/incomplete resume remains bound to the current resident
     algorithm identity. Relocated terminal runs require an explicit opt-in and
-    must match every persisted request field except the material output path.
+    must match the decoded canonical recipe and all persisted semantic request
+    fields; terminal controls and relocated material paths are not semantic.
     """
 
     _validate_resident_request(request)
@@ -8974,7 +9045,14 @@ def load_completed_resident_quantization(
         manifest_config.pop("output", None)
         proposed_config.pop("output", None)
         relocated_match = semantic_hash(manifest_config) == semantic_hash(proposed_config)
-    if manifest.config_hash != proposed.config_hash and not relocated_match:
+    historical_match = False
+    if allow_historical_algorithm and manifest.config_hash != proposed.config_hash and not relocated_match:
+        historical_match = _historical_terminal_manifest_matches(
+            dict(manifest.resolved_config),
+            dict(proposed.resolved_config),
+            allow_relocated_run=allow_relocated_run,
+        )
+    if manifest.config_hash != proposed.config_hash and not relocated_match and not historical_match:
         raise ValueError("completed resident run configuration differs from the current request")
 
     artifacts = LocalArtifactStore(
