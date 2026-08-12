@@ -15,6 +15,7 @@ from nanoquant.application.tuning import (
     _quarantine_cuda_after_nonfinite_rollback,
     _release_cuda_cache_under_pressure,
     post_block_refit,
+    tune,
     tune_factorized,
     tune_non_factorized,
 )
@@ -393,6 +394,55 @@ def test_tuning_epoch_observer_receives_full_evaluation_trajectory() -> None:
 
     assert [epoch for epoch, _loss in trajectory] == [0, 1, 2, 3]
     assert trajectory[0][1] == metrics.before.loss
+
+
+def test_tuning_restores_state_selected_on_disjoint_held_out_activations() -> None:
+    model = nn.Linear(1, 1, bias=False)
+    with torch.no_grad():
+        model.weight.fill_(-1.0)
+    entry = model.weight.detach().clone()
+    fit_inputs = torch.ones(8, 1)
+    fit_targets = torch.ones(8, 1)
+    selection_inputs = torch.ones(4, 1)
+    selection_targets = -torch.ones(4, 1)
+
+    metrics = tune(
+        model,
+        TuningRequest(
+            fit_inputs,
+            fit_targets,
+            3,
+            4,
+            0.1,
+            selection_inputs=selection_inputs,
+            selection_targets=selection_targets,
+        ),
+        lambda module, value: module(value),
+        lambda _name, _parameter: True,
+    )
+
+    assert metrics.best_epoch == -1
+    assert metrics.best.loss == 0.0
+    assert torch.equal(model.weight, entry)
+
+
+def test_tuning_rejects_an_incomplete_selection_pair() -> None:
+    model = nn.Linear(1, 1, bias=False)
+
+    with pytest.raises(ValueError, match="provided together"):
+        tune(
+            model,
+            TuningRequest(
+                torch.ones(2, 1),
+                torch.ones(2, 1),
+                1,
+                1,
+                0.1,
+                selection_inputs=torch.ones(1, 1),
+            ),
+            lambda module, value: module(value),
+            lambda _name, _parameter: True,
+        )
 
 
 def test_factorized_tuning_epoch_resume_is_bitwise_equivalent() -> None:

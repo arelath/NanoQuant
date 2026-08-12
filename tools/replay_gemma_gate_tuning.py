@@ -173,9 +173,7 @@ def _weighted_weight_metrics(
     return {
         "weighted_error": float(weighted_error.detach()),
         "target_weighted_norm": float(target_norm.detach()),
-        "weighted_normalized_error": float(
-            (weighted_error / target_norm.clamp_min(1e-12)).detach()
-        ),
+        "weighted_normalized_error": float((weighted_error / target_norm.clamp_min(1e-12)).detach()),
     }
 
 
@@ -231,6 +229,14 @@ def _parser() -> argparse.ArgumentParser:
         "--initializations",
         default="legacy,rewrite",
         help="comma-separated subset of legacy,rewrite",
+    )
+    parser.add_argument(
+        "--checkpoint-policies",
+        default="legacy_final",
+        help=(
+            "comma-separated subset of legacy_final,fit_best,heldout_best; "
+            "heldout_best selects and restores on the reserved sample suffix"
+        ),
     )
     parser.add_argument(
         "--ls-scale-fit-passes",
@@ -293,13 +299,21 @@ def main() -> None:
     if not binary_learning_rates or any(not math.isfinite(value) or value <= 0 for value in binary_learning_rates):
         raise ValueError("binary-learning-rates must contain positive finite values")
     initializations = tuple(value.strip() for value in args.initializations.split(",") if value.strip())
-    if not initializations or len(initializations) != len(set(initializations)) or any(
-        value not in {"legacy", "rewrite"} for value in initializations
+    if (
+        not initializations
+        or len(initializations) != len(set(initializations))
+        or any(value not in {"legacy", "rewrite"} for value in initializations)
     ):
         raise ValueError("initializations must be a unique subset of legacy,rewrite")
-    ls_scale_fit_passes = tuple(
-        int(value.strip()) for value in args.ls_scale_fit_passes.split(",") if value.strip()
-    )
+    checkpoint_policies = tuple(value.strip() for value in args.checkpoint_policies.split(",") if value.strip())
+    valid_checkpoint_policies = {"legacy_final", "fit_best", "heldout_best"}
+    if (
+        not checkpoint_policies
+        or len(checkpoint_policies) != len(set(checkpoint_policies))
+        or any(value not in valid_checkpoint_policies for value in checkpoint_policies)
+    ):
+        raise ValueError("checkpoint-policies must be a unique subset of legacy_final,fit_best,heldout_best")
+    ls_scale_fit_passes = tuple(int(value.strip()) for value in args.ls_scale_fit_passes.split(",") if value.strip())
     if not ls_scale_fit_passes or any(value < 0 for value in ls_scale_fit_passes):
         raise ValueError("ls-scale-fit-passes must contain non-negative integers")
     if "legacy" in initializations and args.legacy_initial is None:
@@ -319,6 +333,8 @@ def main() -> None:
     fit_samples = args.samples if args.fit_samples is None else args.fit_samples
     if fit_samples <= 0 or fit_samples > args.samples:
         raise ValueError("fit sample count is outside the requested sample range")
+    if "heldout_best" in checkpoint_policies and fit_samples == args.samples:
+        raise ValueError("heldout_best requires a non-empty reserved sample suffix")
     if args.kl_samples < 0 or args.kl_offset < 0 or args.kl_sequence_length <= 1:
         raise ValueError("KL splice protocol values are invalid")
     kl_stop = args.kl_offset + args.kl_samples
@@ -347,25 +363,13 @@ def main() -> None:
         raise AssertionError("importance source validation did not resolve a path")
     with safe_open(importance_path, framework="pt", device="cpu") as handle:
         if args.resident_calibration is None:
-            input_importance = handle.get_tensor(
-                f"i.model.layers.{args.block_index}.{layer_path}"
-            )
-            layer_output_importance = handle.get_tensor(
-                f"o.model.layers.{args.block_index}.{layer_path}"
-            )
-            block_output_importance = handle.get_tensor(
-                f"o.model.layers.{args.block_index}.mlp.down_proj"
-            )
+            input_importance = handle.get_tensor(f"i.model.layers.{args.block_index}.{layer_path}")
+            layer_output_importance = handle.get_tensor(f"o.model.layers.{args.block_index}.{layer_path}")
+            block_output_importance = handle.get_tensor(f"o.model.layers.{args.block_index}.mlp.down_proj")
         else:
-            input_importance = handle.get_tensor(
-                f"block_{args.block_index}.{layer_path}.input_importance"
-            )
-            layer_output_importance = handle.get_tensor(
-                f"block_{args.block_index}.{layer_path}.output_importance"
-            )
-            block_output_importance = handle.get_tensor(
-                f"block_{args.block_index}.mlp.down_proj.output_importance"
-            )
+            input_importance = handle.get_tensor(f"block_{args.block_index}.{layer_path}.input_importance")
+            layer_output_importance = handle.get_tensor(f"block_{args.block_index}.{layer_path}.output_importance")
+            block_output_importance = handle.get_tensor(f"block_{args.block_index}.mlp.down_proj.output_importance")
 
     payload: dict[str, object] = {
         "schema_version": 1,
@@ -380,7 +384,10 @@ def main() -> None:
         "epochs": list(epochs),
         "binary_learning_rates": list(binary_learning_rates),
         "initializations": list(initializations),
-        "epoch_loss_mode": "legacy_training",
+        "checkpoint_policies": list(checkpoint_policies),
+        "epoch_loss_mode": (
+            "legacy_training" if checkpoint_policies == ("legacy_final",) else "varies_by_checkpoint_policy"
+        ),
         "ls_scale_fit_passes": list(ls_scale_fit_passes),
         "protocol": {
             "snapshot": str(args.snapshot.resolve()),
@@ -410,9 +417,7 @@ def main() -> None:
             "gpu": torch.cuda.get_device_name(args.device) if args.device.startswith("cuda") else None,
         },
         "initial_state_comparison": (
-            None
-            if legacy is None or set(initializations) != {"legacy", "rewrite"}
-            else _comparison(legacy, rewrite)
+            None if legacy is None or set(initializations) != {"legacy", "rewrite"} else _comparison(legacy, rewrite)
         ),
         "runs": [],
     }
@@ -441,9 +446,7 @@ def main() -> None:
         )[0]
         metadata = capture.keyword
         if args.block_index == 0:
-            inputs = _run_prefix_batched(
-                adapter, model, tokens, args.block_forward_batch_size, "cpu"
-            ).detach()
+            inputs = _run_prefix_batched(adapter, model, tokens, args.block_forward_batch_size, "cpu").detach()
         else:
             captured_inputs: list[torch.Tensor] = []
             with torch.no_grad():
@@ -457,9 +460,7 @@ def main() -> None:
                             ),
                         ),
                     )[0]
-                    if not invocation.positional or not isinstance(
-                        invocation.positional[0], torch.Tensor
-                    ):
+                    if not invocation.positional or not isinstance(invocation.positional[0], torch.Tensor):
                         raise TypeError("captured block invocation has no tensor input")
                     captured_inputs.append(invocation.positional[0].to("cpu"))
             inputs = torch.cat(captured_inputs, dim=0).detach()
@@ -505,9 +506,7 @@ def main() -> None:
                     layer_output_importance.to(args.device),
                     pass_count,
                 )
-                block = adapter.load_block(
-                    source, inventory.blocks[args.block_index].block, args.device
-                )
+                block = adapter.load_block(source, inventory.blocks[args.block_index].block, args.device)
                 block.eval()
                 refitted_module = _module(refitted_state, args.device, inputs.dtype)
                 BlockEditor().install_trainable_layer(block, layer_path, refitted_module)
@@ -546,136 +545,141 @@ def main() -> None:
                 state = states[name]
                 for epoch_count in epochs:
                     for binary_learning_rate in binary_learning_rates:
-                        if args.device.startswith("cuda"):
-                            torch.cuda.reset_peak_memory_stats(args.device)
-                        block = adapter.load_block(
-                            source, inventory.blocks[args.block_index].block, args.device
-                        )
-                        block.eval()
-                        trainable = _module(state, args.device, inputs.dtype)
-                        initial_left = torch.where(trainable.left_latent.detach() >= 0, 1, -1)
-                        initial_right = torch.where(trainable.right_latent.detach() >= 0, 1, -1)
-                        BlockEditor().install_trainable_layer(block, layer_path, trainable)
-                        before_weight = _weighted_weight_metrics(
-                            source_weight,
-                            trainable,
-                            input_importance.to(args.device),
-                            layer_output_importance.to(args.device),
-                        )
-                        before_block = _block_loss(
-                            adapter,
-                            block,
-                            inputs[:fit_samples],
-                            targets[:fit_samples],
-                            block_output_importance,
-                            metadata,
-                            args.block_forward_batch_size,
-                        )
-                        before_held_out = (
-                            None
-                            if fit_samples == args.samples
-                            else _block_loss(
+                        for checkpoint_policy in checkpoint_policies:
+                            epoch_loss_mode = (
+                                "legacy_training" if checkpoint_policy == "legacy_final" else "full_evaluation"
+                            )
+                            restore_best_state = checkpoint_policy != "legacy_final"
+                            selection_inputs = inputs[fit_samples:] if checkpoint_policy == "heldout_best" else None
+                            selection_targets = targets[fit_samples:] if checkpoint_policy == "heldout_best" else None
+                            if args.device.startswith("cuda"):
+                                torch.cuda.reset_peak_memory_stats(args.device)
+                            block = adapter.load_block(source, inventory.blocks[args.block_index].block, args.device)
+                            block.eval()
+                            trainable = _module(state, args.device, inputs.dtype)
+                            initial_left = torch.where(trainable.left_latent.detach() >= 0, 1, -1)
+                            initial_right = torch.where(trainable.right_latent.detach() >= 0, 1, -1)
+                            BlockEditor().install_trainable_layer(block, layer_path, trainable)
+                            before_weight = _weighted_weight_metrics(
+                                source_weight,
+                                trainable,
+                                input_importance.to(args.device),
+                                layer_output_importance.to(args.device),
+                            )
+                            before_block = _block_loss(
                                 adapter,
                                 block,
-                                inputs[fit_samples:],
-                                targets[fit_samples:],
-                                block_output_importance,
-                                metadata,
-                                args.block_forward_batch_size,
-                            )
-                        )
-                        started = time.perf_counter()
-                        trajectory: list[dict[str, float | int]] = []
-
-                        def observe_epoch(
-                            epoch: int,
-                            loss: float,
-                            observed: list[dict[str, float | int]] = trajectory,
-                        ) -> None:
-                            observed.append({"epoch": epoch, "loss": loss})
-
-                        metrics = tune_factorized(
-                            block,
-                            layer_path,
-                            TuningRequest(
                                 inputs[:fit_samples],
                                 targets[:fit_samples],
-                                epoch_count,
-                                args.batch_size,
-                                1e-5,
-                                output_importance=block_output_importance,
-                                seed=0,
-                                microbatch_size=args.microbatch_size,
-                                restore_best_state=False,
-                                epoch_loss_mode="legacy_training",
-                                epoch_observer=observe_epoch,
-                            ),
-                            lambda module, value: adapter.run_block(module, value, **metadata),
-                            learning_rates=FactorizedTuningLearningRates(
-                                binary_learning_rate,
-                                1e-5,
-                                1e-5,
-                                1e-5,
-                            ),
-                        )
-                        after_weight = _weighted_weight_metrics(
-                            source_weight,
-                            trainable,
-                            input_importance.to(args.device),
-                            layer_output_importance.to(args.device),
-                        )
-                        after_held_out = (
-                            None
-                            if fit_samples == args.samples
-                            else _block_loss(
-                                adapter,
-                                block,
-                                inputs[fit_samples:],
-                                targets[fit_samples:],
                                 block_output_importance,
                                 metadata,
                                 args.block_forward_batch_size,
                             )
-                        )
-                        final_left = torch.where(trainable.left_latent.detach() >= 0, 1, -1)
-                        final_right = torch.where(trainable.right_latent.detach() >= 0, 1, -1)
-                        row = {
-                            "initialization": name,
-                            "epochs": epoch_count,
-                            "binary_learning_rate": binary_learning_rate,
-                            "before_block_loss": before_block,
-                            "before_held_out_block_loss": before_held_out,
-                            "tuning_before_loss": (
-                                None if metrics.before is None else metrics.before.loss
-                            ),
-                            "best_loss": metrics.best.loss,
-                            "final_loss": metrics.final.loss,
-                            "after_held_out_block_loss": after_held_out,
-                            "best_epoch": metrics.best_epoch,
-                            "trajectory": trajectory,
-                            "left_sign_changes": int((final_left != initial_left).sum()),
-                            "right_sign_changes": int((final_right != initial_right).sum()),
-                            "initial_weight": before_weight,
-                            "final_weight": after_weight,
-                            "wall_seconds": time.perf_counter() - started,
-                            "peak_cuda_allocated_bytes": int(torch.cuda.max_memory_allocated(args.device)),
-                            "peak_cuda_reserved_bytes": int(torch.cuda.max_memory_reserved(args.device)),
-                            "final_cuda_allocated_bytes": int(torch.cuda.memory_allocated(args.device)),
-                            "final_cuda_reserved_bytes": int(torch.cuda.memory_reserved(args.device)),
-                        }
-                        cast(list[object], payload["runs"]).append(row)
-                        if args.kl_samples:
-                            kl_reconstructions.append(
-                                trainable.dense_weight().detach().to(device="cpu").contiguous()
+                            before_held_out = (
+                                None
+                                if fit_samples == args.samples
+                                else _block_loss(
+                                    adapter,
+                                    block,
+                                    inputs[fit_samples:],
+                                    targets[fit_samples:],
+                                    block_output_importance,
+                                    metadata,
+                                    args.block_forward_batch_size,
+                                )
                             )
-                        args.output.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-                        print(json.dumps(row, indent=2, sort_keys=True))
-                        del block, trainable
-                        torch.cuda.empty_cache()
+                            started = time.perf_counter()
+                            trajectory: list[dict[str, float | int]] = []
+
+                            def observe_epoch(
+                                epoch: int,
+                                loss: float,
+                                observed: list[dict[str, float | int]] = trajectory,
+                            ) -> None:
+                                observed.append({"epoch": epoch, "loss": loss})
+
+                            metrics = tune_factorized(
+                                block,
+                                layer_path,
+                                TuningRequest(
+                                    inputs[:fit_samples],
+                                    targets[:fit_samples],
+                                    epoch_count,
+                                    args.batch_size,
+                                    1e-5,
+                                    output_importance=block_output_importance,
+                                    seed=0,
+                                    microbatch_size=args.microbatch_size,
+                                    restore_best_state=restore_best_state,
+                                    epoch_loss_mode=epoch_loss_mode,
+                                    epoch_observer=observe_epoch,
+                                    selection_inputs=selection_inputs,
+                                    selection_targets=selection_targets,
+                                ),
+                                lambda module, value: adapter.run_block(module, value, **metadata),
+                                learning_rates=FactorizedTuningLearningRates(
+                                    binary_learning_rate,
+                                    1e-5,
+                                    1e-5,
+                                    1e-5,
+                                ),
+                            )
+                            after_weight = _weighted_weight_metrics(
+                                source_weight,
+                                trainable,
+                                input_importance.to(args.device),
+                                layer_output_importance.to(args.device),
+                            )
+                            after_held_out = (
+                                None
+                                if fit_samples == args.samples
+                                else _block_loss(
+                                    adapter,
+                                    block,
+                                    inputs[fit_samples:],
+                                    targets[fit_samples:],
+                                    block_output_importance,
+                                    metadata,
+                                    args.block_forward_batch_size,
+                                )
+                            )
+                            final_left = torch.where(trainable.left_latent.detach() >= 0, 1, -1)
+                            final_right = torch.where(trainable.right_latent.detach() >= 0, 1, -1)
+                            row = {
+                                "checkpoint_policy": checkpoint_policy,
+                                "persisted_dtype": str(trainable.scale_pre.dtype).removeprefix("torch."),
+                                "initialization": name,
+                                "epochs": epoch_count,
+                                "binary_learning_rate": binary_learning_rate,
+                                "before_block_loss": before_block,
+                                "before_held_out_block_loss": before_held_out,
+                                "tuning_before_loss": (None if metrics.before is None else metrics.before.loss),
+                                "best_loss": metrics.best.loss,
+                                "final_loss": metrics.final.loss,
+                                "after_held_out_block_loss": after_held_out,
+                                "best_epoch": metrics.best_epoch,
+                                "trajectory": trajectory,
+                                "left_sign_changes": int((final_left != initial_left).sum()),
+                                "right_sign_changes": int((final_right != initial_right).sum()),
+                                "initial_weight": before_weight,
+                                "final_weight": after_weight,
+                                "wall_seconds": time.perf_counter() - started,
+                                "peak_cuda_allocated_bytes": int(torch.cuda.max_memory_allocated(args.device)),
+                                "peak_cuda_reserved_bytes": int(torch.cuda.max_memory_reserved(args.device)),
+                                "final_cuda_allocated_bytes": int(torch.cuda.memory_allocated(args.device)),
+                                "final_cuda_reserved_bytes": int(torch.cuda.memory_reserved(args.device)),
+                            }
+                            cast(list[object], payload["runs"]).append(row)
+                            if args.kl_samples:
+                                kl_reconstructions.append(
+                                    trainable.dense_weight().detach().to(device="cpu").contiguous()
+                                )
+                            args.output.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+                            print(json.dumps(row, indent=2, sort_keys=True))
+                            del block, trainable
+                            torch.cuda.empty_cache()
         if args.kl_samples:
-            kl_tokens = calibration.input_ids[
-                args.kl_offset : kl_stop, : args.kl_sequence_length
-            ].contiguous()
+            kl_tokens = calibration.input_ids[args.kl_offset : kl_stop, : args.kl_sequence_length].contiguous()
             layer = LayerId(BlockId(args.block_index), layer_path)
             splice_key = f"{args.block_index}:{layer_path}"
             teacher_state: tuple[float, tuple[torch.Tensor, ...]] | None = None

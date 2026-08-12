@@ -46,6 +46,8 @@ class TuningRequest:
     epoch_observer: Callable[[int, float], None] | None = None
     restore_best_state: bool = True
     epoch_loss_mode: EpochLossMode = "full_evaluation"
+    selection_inputs: torch.Tensor | None = None
+    selection_targets: torch.Tensor | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -296,13 +298,15 @@ def _evaluate_loss(
     forward: ForwardFunction,
     recorder: PhaseRecorder = NULL_RECORDER,
 ) -> float:
+    inputs = request.inputs if request.selection_inputs is None else request.selection_inputs
+    targets = request.targets if request.selection_targets is None else request.selection_targets
     parameter = next(iter(model.parameters()), None)
-    device = request.inputs.device if parameter is None else parameter.device
+    device = inputs.device if parameter is None else parameter.device
     importance = _resolve_output_importance(request.output_importance, device, torch.float32)
     total = torch.zeros((), device=device)
     with torch.no_grad():
         evaluation_batch_size = request.microbatch_size or request.batch_size
-        batches = iter(iter_device_batches((request.inputs, request.targets), evaluation_batch_size, device))
+        batches = iter(iter_device_batches((inputs, targets), evaluation_batch_size, device))
         while True:
             try:
                 if recorder is NULL_RECORDER:
@@ -310,7 +314,7 @@ def _evaluate_loss(
                 else:
                     with recorder.phase("batch_stage"):
                         input_batch, target = next(batches)
-                        _record_transfer(recorder, request.inputs.device, device, input_batch, target)
+                        _record_transfer(recorder, inputs.device, device, input_batch, target)
             except StopIteration:
                 break
             if recorder is NULL_RECORDER:
@@ -323,9 +327,9 @@ def _evaluate_loss(
                     total += _loss_sum(prediction, target, importance)
             del input_batch, prediction, target
     if recorder is NULL_RECORDER:
-        return float(total / request.targets.numel())
+        return float(total / targets.numel())
     with recorder.phase("synchronize"):
-        return float(total / request.targets.numel())
+        return float(total / targets.numel())
 
 
 def _loss(model: nn.Module, request: TuningRequest, forward: ForwardFunction) -> torch.Tensor:
@@ -411,6 +415,18 @@ def tune(
         raise ValueError("invalid tuning loop settings")
     if request.epoch_loss_mode not in ("full_evaluation", "legacy_training"):
         raise ValueError(f"unsupported tuning epoch loss mode: {request.epoch_loss_mode}")
+    if (request.selection_inputs is None) != (request.selection_targets is None):
+        raise ValueError("selection inputs and targets must be provided together")
+    if request.selection_inputs is not None:
+        selection_targets = request.selection_targets
+        if selection_targets is None:
+            raise AssertionError("selection pair validation did not resolve targets")
+        if request.epoch_loss_mode != "full_evaluation":
+            raise ValueError("held-out checkpoint selection requires full evaluation mode")
+        if request.selection_inputs.shape[0] <= 0:
+            raise ValueError("selection inputs must contain at least one sample")
+        if request.selection_inputs.shape[0] != selection_targets.shape[0]:
+            raise ValueError("selection inputs and targets must have the same sample count")
     if request.epoch_loss_mode == "legacy_training" and request.restore_best_state:
         raise ValueError("legacy training loss mode cannot restore a best evaluation state")
     selected = [(name, parameter) for name, parameter in model.named_parameters() if selector(name, parameter)]
@@ -764,7 +780,8 @@ def tune(
         for parameter in model.parameters():
             parameter.grad = None
             parameter.requires_grad_(original_requires_grad[id(parameter)])
-    elements = request.targets.numel()
+    metric_targets = request.targets if request.selection_targets is None else request.selection_targets
+    elements = metric_targets.numel()
     # Drop every failed-step allocation before quarantining the CUDA caching
     # allocator. Keeping the stager or optimizer alive here would retain the
     # exact buffers the quarantine is intended to discard.
