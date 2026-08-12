@@ -67,8 +67,11 @@ def main() -> int:
     environment = os.environ.copy()
     environment.update(
         {
-            "HF_HUB_OFFLINE": "1",
-            "HF_DATASETS_OFFLINE": "1",
+            # The pinned model remains local, but a fresh campaign may still
+            # need the Hub dataset builder metadata before cached shards can
+            # be resolved.
+            "HF_HUB_OFFLINE": "0",
+            "HF_DATASETS_OFFLINE": "0",
             "TRANSFORMERS_OFFLINE": "1",
         }
     )
