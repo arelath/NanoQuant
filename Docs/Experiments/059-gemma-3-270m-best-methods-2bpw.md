@@ -2,7 +2,10 @@
 
 ## Status
 
-Configured and awaiting the complete CUDA compression, export, and quality run.
+Completed successfully on 2026-08-12. The resident journal, transitive artifact
+graph, packed export, GGUF, and long quality benchmark are complete. Strict
+validation passed for all 18 blocks, 90 quantized layers, 108 active journal
+records, and 582 reachable artifacts under one commit identity.
 
 - Model: `unsloth/gemma-3-270m-it`
 - Revision: `23cf460f6bb16954176b3ddcc8d4f250501458a9`
@@ -60,3 +63,55 @@ finite results. Report the actual effective BPW, WikiText perplexity, each task
 score, task mean, wall time, memory, and artifact sizes. Compare quality with
 Experiment 021 and the same-run BF16 reference; do not promote the recipe from
 local reconstruction loss alone.
+
+## Results
+
+- Charged effective rate: `1.9751935 BPW` over 100,270,080 quantized
+  parameters, below the 2.0-BPW ceiling.
+- Charged payload: 137,134,080 binary-factor bits, 56,503,008 INT8 outlier
+  value bits, 65,772 outlier-index bits, and 4,349,952 scale bits.
+- Packed quantized-layer payload: 24,869,300 bytes.
+- Complete GGUF: 209,833,888 bytes (60.87% smaller than the 536,223,056-byte
+  BF16 checkpoint tensor payload).
+- Resident block wall time: 7,181.14 seconds. The uninterrupted final slice
+  spent 1,718.72 seconds in global distillation and 1,082.07 seconds in the
+  quality workflow.
+- Compression peak resource measurements: 4,490,002,432 GPU bytes and
+  17,901,568,000 host bytes. The PyTorch quality-reference backend peaked at
+  7,530,872,832 CUDA allocator bytes.
+- Global top-64 distillation completed 2,048 steps; the final epoch mean loss
+  was 1.836261.
+
+| Benchmark | BF16 | Experiment 059 | Delta | Retention |
+| --- | ---: | ---: | ---: | ---: |
+| WikiText-2 perplexity (lower is better) | 194.053752 | 218.326427 | +12.51% | 1.1251x |
+| PIQA acc_norm | 0.678 | 0.592 | -0.086 | 87.32% |
+| ARC Easy acc_norm | 0.514 | 0.364 | -0.150 | 70.82% |
+| ARC Challenge acc_norm | 0.265 | 0.203 | -0.062 | 76.60% |
+| HellaSwag acc_norm | 0.437 | 0.384 | -0.053 | 87.87% |
+| Winogrande acc | 0.524 | 0.500 | -0.024 | 95.42% |
+| BoolQ acc | 0.578 | 0.499 | -0.079 | 86.33% |
+| Six-task arithmetic mean | 0.4993 | 0.4237 | -0.0757 | 84.85% |
+
+Experiment 021's directly comparable WikiText perplexity was 1,141.159795, so
+Experiment 059 reduces that perplexity by 80.87%. Its six-task mean was 0.3983
+versus 0.4237 here, but that task comparison is directional only because
+Experiment 021 evaluated 200 rows per task while Experiment 059 evaluated
+1,000. The WikiText input hash and protocol are identical.
+
+## Disposition
+
+The experiment validates the combined recipe and shows a large improvement
+over the 1-BPW Experiment 021 baseline, but it does not establish BF16-quality
+parity: WikiText remains 12.51% worse, and the largest task loss is 0.150 on ARC
+Easy. Retain Experiment 059 as the current 2-BPW best-methods baseline and as a
+source of allocator/outlier evidence; do not promote it as a quality-parity
+production default without an explicit acceptance threshold that permits
+these losses.
+
+Published evidence:
+
+- `Results/059/059-best-methods-2bpw-compress-and-benchmark-gemma-3-270m-it-quality.md`
+- `Results/059/059-best-methods-2bpw-compress-and-benchmark-gemma-3-270m-it-summary.json`
+- `Results/059/gemma-3-270m-it-nanoquant.gguf`
+- `evidence/059/059-best-methods-2bpw-compress-and-benchmark-gemma-3-270m-it/validation-complete.json`
