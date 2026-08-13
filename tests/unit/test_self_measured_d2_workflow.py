@@ -82,3 +82,43 @@ def test_kl_profile_inherits_offline_dataset_setting(
     )
 
     assert observed[0].local_files_only is True
+
+
+def test_tuned_control_resumes_global_tuning_after_all_blocks_commit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    definition = load_experiment(54)
+    inputs = SimpleNamespace(output=tmp_path / "control", snapshot=tmp_path / "snapshot")
+    observed = []
+
+    monkeypatch.setattr(workflow, "_resolved_model_block_count", lambda _config: 26)
+    monkeypatch.setattr(workflow, "_journal_identity", lambda *_args: object())
+    monkeypatch.setattr(workflow, "_require_control_recipe", lambda *_args: None)
+    monkeypatch.setattr(workflow, "active_global_tuning", lambda *_args: None)
+    monkeypatch.setattr(
+        workflow,
+        "resolve_resident_experiment_inputs",
+        lambda *_args, **_kwargs: inputs,
+    )
+
+    result = SimpleNamespace(
+        quantization=SimpleNamespace(inventory=SimpleNamespace(blocks=tuple(range(26))))
+    )
+    monkeypatch.setattr(
+        workflow,
+        "execute_resident_workflow",
+        lambda *_args, **_kwargs: observed.append("resumed") or result,
+    )
+    monkeypatch.setattr(workflow, "release_memory", lambda *_args: None)
+    monkeypatch.setattr(workflow, "execute_kl_budget", lambda *_args: 0)
+
+    workflow._prepare_automatic_kl_inputs(
+        definition,
+        launcher_path=tmp_path / "experiments" / "054.py",
+        campaign_root=tmp_path,
+        control_config=definition.config,
+        profile_options=SelfMeasuredD2ProfileOptions(tuned_operating_point=True),
+    )
+
+    assert observed == ["resumed"]

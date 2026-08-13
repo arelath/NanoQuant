@@ -22,6 +22,7 @@ from nanoquant.config.schema import (
 )
 from nanoquant.config.validation import ValidationPhase, raise_for_issues, validate
 from nanoquant.infrastructure.commits import CommitIdentity, latest_complete_identity
+from nanoquant.infrastructure.global_tuning import active_global_tuning
 from nanoquant.infrastructure.memory_cleanup import release_memory
 from nanoquant.infrastructure.model_adapters import decoder_block_count_from_config
 from nanoquant.infrastructure.resolved_model_config import resolve_model_config
@@ -241,14 +242,19 @@ def _prepare_automatic_kl_inputs(
             print(f"Reusing completed {label} KL profile: {profile_file}", flush=True)
             return profile_path, control_run
 
-    control_complete = False
+    control_blocks_complete = False
     try:
         _journal_identity(control_run, block_count)
     except (FileNotFoundError, ValueError):
         pass
     else:
         _require_control_recipe(control_run, control_config)
-        control_complete = True
+        control_blocks_complete = True
+
+    control_complete = control_blocks_complete and (
+        not profile_options.tuned_operating_point
+        or active_global_tuning(control_run) is not None
+    )
 
     if control_complete:
         print(f"Reusing completed {label} uniform control: {control_run}", flush=True)
