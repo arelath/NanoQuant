@@ -35,6 +35,7 @@ evaluation = [
 ]
 visualization = [
   "reportlab>=4.0",
+  "matplotlib==3.10.3",
 ]
 
 [project.scripts]
