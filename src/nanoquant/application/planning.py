@@ -45,6 +45,7 @@ class PlanningRequest:
     reconstruction_decisions: tuple[ReconstructionRankDecision, ...] = ()
     bias_correction: BiasCorrectionConfig = BiasCorrectionConfig()
     low_rank_patch: LowRankPatchConfig = LowRankPatchConfig()
+    residual_stages: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,10 +91,23 @@ def _charged_side_bits(request: PlanningRequest, cost: BitCost) -> int:
     )
 
 
+def _factor_cost(request: PlanningRequest, out_features: int, in_features: int, rank: int) -> BitCost:
+    return factor_bit_cost(out_features, in_features, rank,
+                           residual_stages=request.residual_stages,
+                           rank_alignment=request.allocation.bounds.multiple if request.residual_stages else 1)
+
+
 def _maximum_factor_rank(out_features: int, in_features: int, allocation: RankAllocationConfig) -> int:
     """Return the aligned hard rank ceiling, including an explicit over-complete allowance."""
 
     physical_rank = min(out_features, in_features)
+    if allocation.bounds.overcomplete_rank_ceiling_fraction is None:
+        # A safe budget-derived search bound; exact staged costs decide funding.
+        return math.ceil(
+            out_features * in_features * allocation.target_bpw
+            * allocation.bounds.ceiling_fraction_of_uniform
+            / (out_features + in_features) / allocation.bounds.multiple
+        ) * allocation.bounds.multiple
     return (
         math.floor(
             physical_rank
@@ -166,7 +180,10 @@ def build_quantization_plan(request: PlanningRequest) -> QuantizationPlan:
         ) + _charged_side_bits(request, side_costs[layer.layer])
         base_rank = 0
         for candidate in range(multiple, maximum_ranks[layer.layer] + 1, multiple):
-            if factor_bit_cost(layer.out_features, layer.in_features, candidate).total + charged > layer_target_bits:
+            if (
+                _factor_cost(request, layer.out_features, layer.in_features, candidate).total + charged
+                > layer_target_bits
+            ):
                 break
             base_rank = candidate
         if base_rank == 0:
@@ -213,14 +230,14 @@ def build_quantization_plan(request: PlanningRequest) -> QuantizationPlan:
     def current_cost(layer: object, rank: int) -> BitCost:
         inventory = next(item for item in layers if item.layer == layer)
         return (
-            factor_bit_cost(inventory.out_features, inventory.in_features, rank)
+            _factor_cost(request, inventory.out_features, inventory.in_features, rank)
             + outlier_costs[layer]
             + side_costs[layer]
         )
 
     def budget_cost(layer: object, rank: int) -> int:
         inventory = next(item for item in layers if item.layer == layer)
-        factor = factor_bit_cost(inventory.out_features, inventory.in_features, rank).total
+        factor = _factor_cost(request, inventory.out_features, inventory.in_features, rank).total
         outliers = outlier_costs[layer].total if outlier_plans[layer].charge_to_budget else 0
         return factor + outliers + _charged_side_bits(request, side_costs[layer])
 
@@ -308,12 +325,12 @@ def build_quantization_plan(request: PlanningRequest) -> QuantizationPlan:
         rule = budget_matches[0]
         matched_budget_patterns.add(rule.pattern)
         maximum = maximum_ranks[layer.layer]
-        original_factor_bits = factor_bit_cost(layer.out_features, layer.in_features, ranks[layer.layer]).total
+        original_factor_bits = _factor_cost(request, layer.out_features, layer.in_features, ranks[layer.layer]).total
         promoted_budget = math.floor(original_factor_bits * rule.multiplier)
         promoted_rank = ranks[layer.layer]
         while promoted_rank + multiple <= maximum:
             candidate = promoted_rank + multiple
-            if factor_bit_cost(layer.out_features, layer.in_features, candidate).total > promoted_budget:
+            if _factor_cost(request, layer.out_features, layer.in_features, candidate).total > promoted_budget:
                 break
             promoted_rank = candidate
         ranks[layer.layer] = promoted_rank
@@ -527,7 +544,7 @@ def _build_grouped_quantization_plan(request: PlanningRequest) -> QuantizationPl
         )
         base_rank = 0
         for candidate_rank in range(multiple, maximum_ranks[unit.key] + 1, multiple):
-            if factor_bit_cost(unit.out_features, unit.in_features, candidate_rank).total + charged > funded_bits:
+            if _factor_cost(request, unit.out_features, unit.in_features, candidate_rank).total + charged > funded_bits:
                 break
             base_rank = candidate_rank
         if base_rank == 0:
@@ -591,7 +608,7 @@ def _build_grouped_quantization_plan(request: PlanningRequest) -> QuantizationPl
         utilities[unit.key] = utility
 
     def budget_cost(unit: _PlanningUnit, rank: int) -> int:
-        factor = factor_bit_cost(unit.out_features, unit.in_features, rank).total
+        factor = _factor_cost(request, unit.out_features, unit.in_features, rank).total
         outliers = outlier_costs[unit.key].total if outlier_plans[unit.key].charge_to_budget else 0
         return factor + outliers + _charged_side_bits(request, side_costs[unit.key])
 
@@ -643,11 +660,11 @@ def _build_grouped_quantization_plan(request: PlanningRequest) -> QuantizationPl
             rule = budget_matches[0]
             matched_budget_patterns.add(rule.pattern)
             promoted_budget = math.floor(
-                factor_bit_cost(unit.out_features, unit.in_features, ranks[unit.key]).total * rule.multiplier
+                _factor_cost(request, unit.out_features, unit.in_features, ranks[unit.key]).total * rule.multiplier
             )
             while ranks[unit.key] + multiple <= maximum_ranks[unit.key]:
                 candidate_rank = ranks[unit.key] + multiple
-                if factor_bit_cost(unit.out_features, unit.in_features, candidate_rank).total > promoted_budget:
+                if _factor_cost(request, unit.out_features, unit.in_features, candidate_rank).total > promoted_budget:
                     break
                 ranks[unit.key] = candidate_rank
             caps[unit.key] = max(caps[unit.key], ranks[unit.key])
@@ -680,7 +697,7 @@ def _build_grouped_quantization_plan(request: PlanningRequest) -> QuantizationPl
         group_plans: list[SharedInputGroupPlan] = []
         for unit in units_by_block[inventory_block.block.index]:
             cost = (
-                factor_bit_cost(unit.out_features, unit.in_features, ranks[unit.key])
+                _factor_cost(request, unit.out_features, unit.in_features, ranks[unit.key])
                 + outlier_costs[unit.key]
                 + side_costs[unit.key]
             )

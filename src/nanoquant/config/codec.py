@@ -131,6 +131,9 @@ def config_hash(config: RunConfig) -> str:
     payload = to_dict(config)
     if not isinstance(payload, dict):
         raise TypeError("run config did not encode as an object")
+    factorization = payload.get("factorization")
+    if isinstance(factorization, dict) and not config.factorization.residual_stages.enabled:
+        factorization.pop("residual_stages", None)
     distillation = payload.get("distillation")
     if isinstance(distillation, dict) and distillation.get("loss") == "top_k":
         if distillation.get("maximum_batches_per_epoch") is None:

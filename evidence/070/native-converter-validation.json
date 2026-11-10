@@ -1,0 +1,21 @@
+{
+  "architecture": "Gemma3ForCausalLM",
+  "block_count": 1,
+  "checkpoint": "D:\\dev\\research\\NanoQuantRewrite\\outputs\\070-native-canary-v2\\checkpoint",
+  "checkpoint_tensor_count": 15,
+  "gguf_tensor_count": 10,
+  "layer_count": 1,
+  "llama_root": "D:\\dev\\research\\llama.cpp",
+  "maximum_salient_normalization_error": 0.0,
+  "model": "D:\\dev\\research\\NanoQuantRewrite\\outputs\\070-native-canary-v2\\source",
+  "normalized_salient_element_count": 0,
+  "packed_artifact": "D:\\dev\\research\\NanoQuantRewrite\\outputs\\070-native-canary-v2\\packed",
+  "passed": true,
+  "reference_commit": "da52148384591f4b0d87d58c12862e30f43014f1",
+  "reference_converter_sha256": "31514ccfaba68fb9a8e4ae952de4c17a9933ac7540d2c0cf040f11695046d53d",
+  "reference_dirty_diff_git_object": "cf463b9266db4e1f162ad8970e8ddcc1abfb5fbd",
+  "salient_values_exact_after_f16_normalization": true,
+  "scale_values_exact_after_bf16_serialization": true,
+  "sidecar_group_count": 1,
+  "sign_words_exact": true
+}

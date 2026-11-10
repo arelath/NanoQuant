@@ -164,6 +164,8 @@ class ProductCodebookLayerState:
     outlier_scales: torch.Tensor | None = None
 
     def __post_init__(self) -> None:
+        if self.spec.residual_ranks:
+            raise ValueError("product coding does not support independent residual stages")
         if self.format != PRODUCT_CODEBOOK_FORMAT_VERSION:
             raise ValueError(f"unsupported product-codebook format: {self.format}")
         if self.spec.has_bias or self.spec.patch_rank:

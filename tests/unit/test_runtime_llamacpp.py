@@ -9,6 +9,7 @@ import torch
 from safetensors import safe_open
 
 from nanoquant.runtime import (
+    PACKED_REFERENCE_CONVERTER_SHA256,
     LogicalLayerState,
     ProjectionMemberSpec,
     QuantizedLinearSpec,
@@ -198,9 +199,7 @@ def test_llamacpp_checkpoint_export_is_block_sharded_and_source_bound(tmp_path: 
         "block-00001.safetensors",
     ]
     descriptor = json.loads((root / "nanoquant-llamacpp-checkpoint.json").read_text())
-    assert descriptor["reference"]["converter_sha256"] == (
-        "c2e1fd064bbd46f38e9e3c5f739865d198ca75bd0bb9db16f72530d378d11304"
-    )
+    assert descriptor["reference"]["converter_sha256"] == PACKED_REFERENCE_CONVERTER_SHA256
     with safe_open(root / manifest.shards[0].path, framework="pt", device="cpu") as handle:
         assert set(handle.keys()) == {
             "model.layers.0.self_attn.q_proj.V_packed",

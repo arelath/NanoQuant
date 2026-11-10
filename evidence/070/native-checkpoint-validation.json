@@ -1,0 +1,12 @@
+{
+  "block_count": 1,
+  "checkpoint": "D:\\dev\\research\\NanoQuantRewrite\\outputs\\070-native-canary-v2\\checkpoint",
+  "checkpoint_tensor_count": 15,
+  "converted_array_count": 10,
+  "converted_element_count": 2336,
+  "exact": true,
+  "layer_count": 1,
+  "packed_artifact": "D:\\dev\\research\\NanoQuantRewrite\\outputs\\070-native-canary-v2\\packed",
+  "reference_converter_sha256": "31514ccfaba68fb9a8e4ae952de4c17a9933ac7540d2c0cf040f11695046d53d",
+  "reference_root": "D:\\dev\\research\\llama.cpp"
+}

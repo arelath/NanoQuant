@@ -14,6 +14,7 @@ from typing import Any, cast
 import numpy as np
 import torch
 
+from nanoquant.infrastructure.io_utils import hash_canonical_text_file
 from nanoquant.runtime import (
     LLAMACPP_CHECKPOINT_FORMAT,
     LLAMACPP_CHECKPOINT_SCHEMA_VERSION,
@@ -33,7 +34,7 @@ def _hash_file(path: Path) -> str:
 
 def _load_converter(reference_root: Path, expected_sha256: str) -> ModuleType:
     converter_path = reference_root / "convert_nanoquant_to_gguf.py"
-    if _hash_file(converter_path) != expected_sha256:
+    if hash_canonical_text_file(converter_path) != expected_sha256:
         raise ValueError("modified llama.cpp converter hash differs from packed provenance")
     module_name = "nanoquant_pinned_llamacpp_converter"
     sys.path.insert(0, str(reference_root))
@@ -48,13 +49,9 @@ def _load_converter(reference_root: Path, expected_sha256: str) -> ModuleType:
 
 def _equal(name: str, expected: np.ndarray, actual: np.ndarray) -> int:
     if expected.dtype != actual.dtype:
-        raise ValueError(
-            f"modified llama.cpp sidecar dtype differs: {name}: {actual.dtype} != {expected.dtype}"
-        )
+        raise ValueError(f"modified llama.cpp sidecar dtype differs: {name}: {actual.dtype} != {expected.dtype}")
     if expected.shape != actual.shape:
-        raise ValueError(
-            f"modified llama.cpp sidecar shape differs: {name}: {actual.shape} != {expected.shape}"
-        )
+        raise ValueError(f"modified llama.cpp sidecar shape differs: {name}: {actual.shape} != {expected.shape}")
     if not np.array_equal(expected, actual):
         raise ValueError(f"modified llama.cpp sidecar value differs: {name}")
     return int(actual.size)
@@ -74,7 +71,7 @@ def main() -> None:
     packed = open_packed_artifact(args.packed_artifact, verify_hashes=True)
     descriptor_path = args.checkpoint / "nanoquant-llamacpp-checkpoint.json"
     descriptor = cast(dict[str, Any], json.loads(descriptor_path.read_text(encoding="utf-8")))
-    if descriptor.get("schema_version") != LLAMACPP_CHECKPOINT_SCHEMA_VERSION:
+    if descriptor.get("schema_version") not in {LLAMACPP_CHECKPOINT_SCHEMA_VERSION, 2}:
         raise ValueError("llama.cpp checkpoint schema differs")
     if descriptor.get("artifact_format") != LLAMACPP_CHECKPOINT_FORMAT:
         raise ValueError("llama.cpp checkpoint format differs")
@@ -124,6 +121,19 @@ def main() -> None:
                 ("scale_mid", _numpy(state.scale_mid.float()), sidecar.scale_mid),
                 ("scale_post", _numpy(state.scale_post.float()), sidecar.scale_post),
             ]
+            if len(sidecar.residual_stages) != len(state.residual_stages):
+                raise ValueError(f"residual checkpoint stage inventory differs: {prefix}")
+            for index, (term, converted) in enumerate(zip(state.residual_stages, sidecar.residual_stages, strict=True)):
+                comparisons.extend(
+                    (f"residual.{index}.{role}", _numpy(expected), actual)
+                    for role, expected, actual in (
+                        ("nq_v", term.right_words, converted.v_packed),
+                        ("nq_u", term.left_words, converted.u_packed),
+                        ("scale_pre", term.scale_pre.float(), converted.scale_pre),
+                        ("scale_mid", term.scale_mid.float(), converted.scale_mid),
+                        ("scale_post", term.scale_post.float(), converted.scale_post),
+                    )
+                )
             if state.outlier_indices is not None and state.outlier_values is not None:
                 expected_values = (
                     state.outlier_values
@@ -137,9 +147,7 @@ def main() -> None:
                     )
                 )
             if state.outlier_scales is not None:
-                comparisons.append(
-                    ("salient_scale", _numpy(state.outlier_scales.float()), sidecar.salient_scale)
-                )
+                comparisons.append(("salient_scale", _numpy(state.outlier_scales.float()), sidecar.salient_scale))
             for suffix, expected, actual in comparisons:
                 if actual is None:
                     raise ValueError(f"modified llama.cpp omitted sidecar tensor: {prefix}.{suffix}")

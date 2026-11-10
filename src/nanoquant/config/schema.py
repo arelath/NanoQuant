@@ -276,7 +276,7 @@ class RankBoundsConfig:
     multiple: int = 32
     floor_fraction_of_uniform: float = 0.80
     ceiling_fraction_of_uniform: float = 1.15
-    overcomplete_rank_ceiling_fraction: float = 1.0
+    overcomplete_rank_ceiling_fraction: float | None = 1.0
     edge_block_boost: float = 0.15
 
 
@@ -465,6 +465,11 @@ class SharedInputFactorizationConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class ResidualFactorizationConfig:
+    enabled: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class FactorizationConfig:
     implementation: str = "nanoquant_admm"
     compute_dtype: DType = DType.BFLOAT16
@@ -476,6 +481,7 @@ class FactorizationConfig:
     bias_correction: BiasCorrectionConfig = field(default_factory=BiasCorrectionConfig)
     low_rank_patch: LowRankPatchConfig = field(default_factory=LowRankPatchConfig)
     shared_input: SharedInputFactorizationConfig = field(default_factory=SharedInputFactorizationConfig)
+    residual_stages: ResidualFactorizationConfig = field(default_factory=ResidualFactorizationConfig)
 
 
 @dataclass(frozen=True, slots=True)

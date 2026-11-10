@@ -16,6 +16,14 @@ from nanoquant.runtime.backend import DeviceLike, ProjectionMemberSpec, Quantize
 from nanoquant.runtime.constants import RUNTIME_ARTIFACT_SCHEMA_VERSION
 from nanoquant.runtime.io_utils import atomic_output_directory
 from nanoquant.runtime.logical import LogicalLayerState, canonical_torch_dtype
+from nanoquant.runtime.residual import (
+    FACTOR_ROLES,
+    RESIDUAL_FORMAT,
+    RESIDUAL_MINIMUM_RUNTIME,
+    is_stage_role,
+    stage_role,
+    stage_spec,
+)
 from nanoquant.runtime.safetensors_io import SAFETENSORS
 
 DESCRIPTOR_SCHEMA_VERSION = RUNTIME_ARTIFACT_SCHEMA_VERSION
@@ -72,7 +80,7 @@ class LogicalTensorEntry:
     dtype: str
 
     def __post_init__(self) -> None:
-        if self.role not in _TENSOR_ROLES:
+        if self.role not in _TENSOR_ROLES and not is_stage_role(self.role, FACTOR_ROLES):
             raise ValueError(f"unsupported logical tensor role: {self.role}")
         if not self.key or self.key.startswith("/"):
             raise ValueError("logical tensor key must be non-empty and relative")
@@ -106,6 +114,8 @@ class LogicalLayerEntry:
             expected.add("outlier_scales")
         if self.spec.patch_rank:
             expected.update(("patch_left", "patch_right"))
+        expected.update(stage_role(index, role) for index in range(len(self.spec.residual_ranks))
+                        for role in FACTOR_ROLES)
         if set(roles) != expected:
             raise ValueError(f"logical layer tensor inventory differs from its specification: {self.spec.name}")
 
@@ -147,9 +157,9 @@ class LogicalModelManifest:
             raise ValueError(f"unsupported logical artifact schema: {self.schema_version}")
         if self.artifact_format != "nanoquant-logical-model":
             raise ValueError(f"unsupported logical artifact format: {self.artifact_format}")
-        if self.minimum_runtime_version != MINIMUM_RUNTIME_VERSION:
+        if self.minimum_runtime_version not in {MINIMUM_RUNTIME_VERSION, RESIDUAL_MINIMUM_RUNTIME}:
             raise ValueError(f"unsupported minimum runtime version: {self.minimum_runtime_version}")
-        if self.logical_format != LOGICAL_FORMAT_VERSION:
+        if self.logical_format not in {LOGICAL_FORMAT_VERSION, RESIDUAL_FORMAT}:
             raise ValueError(f"unsupported logical format: {self.logical_format}")
         if not self.blocks:
             raise ValueError("logical artifact must contain at least one block")
@@ -161,7 +171,11 @@ class LogicalModelManifest:
             raise ValueError("logical artifact layer count or uniqueness is inconsistent")
         if sum(block.bytes for block in self.blocks) != self.weight_bytes:
             raise ValueError("logical artifact weight byte count is inconsistent")
-        if any(layer.spec.logical_format != self.logical_format for block in self.blocks for layer in block.layers):
+        formats = {layer.spec.logical_format for block in self.blocks for layer in block.layers}
+        if (not formats <= {LOGICAL_FORMAT_VERSION, RESIDUAL_FORMAT}
+                or (RESIDUAL_FORMAT in formats) != (self.logical_format == RESIDUAL_FORMAT)
+                or (self.logical_format == RESIDUAL_FORMAT)
+                != (self.minimum_runtime_version == RESIDUAL_MINIMUM_RUNTIME)):
             raise ValueError("logical artifact contains a layer with a different format")
 
 
@@ -181,8 +195,12 @@ class OpenLogicalArtifact:
         with SAFETENSORS.open(self.root / block.path, device=device) as handle:
             for tensor in layer.tensors:
                 by_role[tensor.role] = handle.get_tensor(tensor.key)
-        return LogicalLayerState(
-            layer.spec,
+        return logical_state_from_tensors(layer.spec, by_role)
+
+
+def logical_state_from_tensors(spec: QuantizedLinearSpec, by_role: Mapping[str, torch.Tensor]) -> LogicalLayerState:
+    return LogicalLayerState(
+            spec,
             by_role["factor_left"],
             by_role["factor_right"],
             by_role["scale_pre"],
@@ -194,6 +212,9 @@ class OpenLogicalArtifact:
             by_role.get("outlier_scales"),
             by_role.get("patch_left"),
             by_role.get("patch_right"),
+            tuple(logical_state_from_tensors(stage_spec(spec, index), {
+                role: by_role[stage_role(index, role)] for role in FACTOR_ROLES
+            }) for index in range(len(spec.residual_ranks))),
         )
 
 
@@ -243,6 +264,8 @@ def _state_tensors(state: LogicalLayerState) -> tuple[tuple[str, torch.Tensor], 
         ("patch_right", state.patch_right),
     )
     values.extend((role, value) for role, value in optional if value is not None)
+    for index, stage in enumerate(state.residual_stages):
+        values.extend((stage_role(index, role), value) for role, value in _state_tensors(stage))
     return tuple(values)
 
 
@@ -332,11 +355,12 @@ def write_logical_artifact_stream(
         if not block_entries:
             raise ValueError("logical artifact must contain at least one block")
         block_tuple = tuple(block_entries)
+        has_residual = any(layer.spec.residual_ranks for block in block_tuple for layer in block.layers)
         manifest = LogicalModelManifest(
             DESCRIPTOR_SCHEMA_VERSION,
             "nanoquant-logical-model",
-            MINIMUM_RUNTIME_VERSION,
-            LOGICAL_FORMAT_VERSION,
+            RESIDUAL_MINIMUM_RUNTIME if has_residual else MINIMUM_RUNTIME_VERSION,
+            RESIDUAL_FORMAT if has_residual else LOGICAL_FORMAT_VERSION,
             model,
             block_tuple,
             len(names),
@@ -413,6 +437,8 @@ def _spec_from_payload(payload: object, path: str) -> QuantizedLinearSpec:
         _integer(value.get("patch_rank", 0), f"{path}.patch_rank"),
         _optional_string(value.get("patch_value_dtype"), f"{path}.patch_value_dtype"),
         _optional_string(value.get("bias_dtype"), f"{path}.bias_dtype"),
+        tuple(_integer(rank, f"{path}.residual_ranks")
+              for rank in _sequence(value.get("residual_ranks", []), f"{path}.residual_ranks")),
     )
 
 

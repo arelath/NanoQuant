@@ -46,6 +46,7 @@ class _CudaPackedPayload:
     outlier_scales: torch.Tensor | None
     patch_left: torch.Tensor | None
     patch_right: torch.Tensor | None
+    residual_stages: tuple[PreparedLayer, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,7 +68,7 @@ def prepare_cuda_projection_group(
 ) -> CudaProjectionGroup | None:
     """Prepack compatible CUDA payloads for grouped decode projection."""
 
-    if len(layers) not in (2, 3):
+    if len(layers) not in (2, 3) or any(layer.spec.residual_ranks for layer in layers):
         return None
     payloads = tuple(layer.payload for layer in layers)
     if not all(isinstance(payload, _CudaPackedPayload) for payload in payloads):
@@ -158,7 +159,7 @@ class CudaPackedBackend:
 
     def capabilities(self) -> BackendCapabilities:
         return BackendCapabilities(
-            logical_formats=("nanoquant-v1",),
+            logical_formats=("nanoquant-v1", "nanoquant-residual-v2"),
             device_types=("cuda",),
             input_dtypes=_FLOAT_DTYPES,
             factor_dtypes=_FLOAT_DTYPES,
@@ -237,6 +238,8 @@ class CudaPackedBackend:
             _copy_optional(state.outlier_scales, target),
             _copy_optional(state.patch_left, target),
             _copy_optional(state.patch_right, target),
+            tuple(self.prepare(stage, target) for stage in state.residual_stages)
+            if isinstance(state, PackedLayerState) else (),
         )
         return PreparedLayer(self.name, self.version, state.spec, payload)
 
@@ -275,4 +278,6 @@ class CudaPackedBackend:
         if payload.patch_left is not None and payload.patch_right is not None:
             patch_latent = F.linear(value, payload.patch_right.to(dtype=value.dtype))
             output = output + F.linear(patch_latent, payload.patch_left.to(dtype=value.dtype))
+        for stage in payload.residual_stages:
+            output = output + self.linear(value, stage)
         return output

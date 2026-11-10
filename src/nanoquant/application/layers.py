@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import weakref
+from contextlib import ExitStack
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -18,12 +19,14 @@ from nanoquant.domain.models import (
     BlockId,
     FrozenNanoQuantState,
     FrozenOutlierState,
+    FrozenResidualFactorState,
     FrozenSharedInputGroupState,
     LayerId,
     ProductCodebookFactorState,
     ScaleState,
     SharedInputMemberSlice,
     TensorRef,
+    TrainableFactors,
 )
 from nanoquant.domain.outliers import quantize_int8_columns
 from nanoquant.domain.sign_word_codebook import ProductSignCodebook, decode_product_codebook
@@ -41,6 +44,7 @@ class _SignSTE(torch.autograd.Function):
 
 
 class TrainableFactorizedLinear(nn.Module):
+    residual_stages: nn.ModuleList
     coupled_shared_input_scales = False
     outlier_indices: torch.Tensor | None
     outlier_values: nn.Parameter | None
@@ -67,6 +71,7 @@ class TrainableFactorizedLinear(nn.Module):
         *,
         immutable_binary_factors: bool = False,
         product_codebook_free_rows: int | None = None,
+        residual_stages: tuple[TrainableFactorizedLinear, ...] = (),
     ) -> None:
         super().__init__()
         if left_latent.shape[1] != right_latent.shape[0]:
@@ -113,6 +118,20 @@ class TrainableFactorizedLinear(nn.Module):
         self.patch_left = None if patch_left is None else nn.Parameter(patch_left.detach().clone())
         self.patch_right = None if patch_right is None else nn.Parameter(patch_right.detach().clone())
         self.immutable_binary_factors = immutable_binary_factors
+        if any(stage.residual_stages or stage.bias is not None or stage.outlier_indices is not None
+               or stage.patch_left is not None or stage.product_codebook_free_rows is not None
+               for stage in residual_stages):
+            raise ValueError("residual stages must contain only independent factor terms")
+        if any(stage.left_latent.shape[0] != left_latent.shape[0]
+               or stage.right_latent.shape[1] != right_latent.shape[1] for stage in residual_stages):
+            raise ValueError("residual stage dimensions differ from the owning linear")
+        self.residual_stages = nn.ModuleList(residual_stages)
+        for stage in self.residual_terms:
+            stage.coupled_shared_input_scales = self.coupled_shared_input_scales
+
+    @property
+    def residual_terms(self) -> tuple[TrainableFactorizedLinear, ...]:
+        return tuple(cast(TrainableFactorizedLinear, stage) for stage in self.residual_stages)
 
     def effective_right_latent(self) -> torch.Tensor:
         """Return the trainable free prefix joined to the immutable coded suffix."""
@@ -129,7 +148,7 @@ class TrainableFactorizedLinear(nn.Module):
 
     def dense_weight(self) -> torch.Tensor:
         apply_sign = cast(Any, _SignSTE).apply
-        return functional_dense_reconstruction(
+        weight = functional_dense_reconstruction(
             cast(torch.Tensor, apply_sign(self.left_latent)),
             cast(torch.Tensor, apply_sign(self.effective_right_latent())),
             self.scale_pre,
@@ -141,6 +160,9 @@ class TrainableFactorizedLinear(nn.Module):
             self.patch_left,
             self.patch_right,
         )
+        for stage in self.residual_terms:
+            weight = weight + stage.dense_weight()
+        return weight
 
     def forward(self, value: torch.Tensor) -> torch.Tensor:
         apply_sign = cast(Any, _SignSTE).apply
@@ -154,7 +176,7 @@ class TrainableFactorizedLinear(nn.Module):
             if self.immutable_binary_factors and not self.left_latent.requires_grad
             else cast(torch.Tensor, apply_sign(self.left_latent))
         ).to(device=value.device, dtype=value.dtype)
-        return functional_factorized_linear(
+        output = functional_factorized_linear(
             value,
             left,
             right,
@@ -168,6 +190,9 @@ class TrainableFactorizedLinear(nn.Module):
             self.patch_left,
             self.patch_right,
         )
+        for stage in self.residual_terms:
+            output = output + stage(value)
+        return output
 
 
 class TrainableSharedInputFactorGroup(TrainableFactorizedLinear):
@@ -205,6 +230,7 @@ class SharedInputProjectionView(nn.Module):
 
 
 class FrozenReferenceLinear(nn.Module):
+    residual_stages: nn.ModuleList
     left_binary: torch.Tensor
     right_binary: torch.Tensor
     scale_pre: torch.Tensor
@@ -233,6 +259,7 @@ class FrozenReferenceLinear(nn.Module):
         patch_right: torch.Tensor | None = None,
         *,
         cache_dense_weight: bool = True,
+        residual_stages: tuple[FrozenReferenceLinear, ...] = (),
     ) -> None:
         super().__init__()
         self.register_buffer("left_binary", left_binary.detach().clone())
@@ -252,14 +279,19 @@ class FrozenReferenceLinear(nn.Module):
             raise ValueError("outlier indices and values must be provided together")
         if outlier_scales is not None and outlier_values is None:
             raise ValueError("outlier scales require outlier values")
+        self.residual_stages = nn.ModuleList(residual_stages)
         self.register_buffer(
             "_cached_dense_weight",
             self._materialize_dense_weight() if cache_dense_weight else None,
             persistent=False,
         )
 
+    @property
+    def residual_terms(self) -> tuple[FrozenReferenceLinear, ...]:
+        return tuple(cast(FrozenReferenceLinear, stage) for stage in self.residual_stages)
+
     def _materialize_dense_weight(self) -> torch.Tensor:
-        return functional_dense_reconstruction(
+        weight = functional_dense_reconstruction(
             self.left_binary,
             self.right_binary,
             self.scale_pre,
@@ -271,6 +303,9 @@ class FrozenReferenceLinear(nn.Module):
             self.patch_left,
             self.patch_right,
         )
+        for stage in self.residual_terms:
+            weight = weight + stage.dense_weight()
+        return weight
 
     def dense_weight(self) -> torch.Tensor:
         return self._materialize_dense_weight() if self._cached_dense_weight is None else self._cached_dense_weight
@@ -312,6 +347,8 @@ class FactorizedReferenceLinear(FrozenReferenceLinear):
         outlier_scales: torch.Tensor | None = None,
         patch_left: torch.Tensor | None = None,
         patch_right: torch.Tensor | None = None,
+        *,
+        residual_stages: tuple[FrozenReferenceLinear, ...] = (),
     ) -> None:
         super().__init__(
             left_binary,
@@ -326,10 +363,11 @@ class FactorizedReferenceLinear(FrozenReferenceLinear):
             patch_left,
             patch_right,
             cache_dense_weight=False,
+            residual_stages=residual_stages,
         )
 
     def forward(self, value: torch.Tensor) -> torch.Tensor:
-        return functional_factorized_linear(
+        output = functional_factorized_linear(
             value,
             self.left_binary,
             self.right_binary,
@@ -344,6 +382,9 @@ class FactorizedReferenceLinear(FrozenReferenceLinear):
             self.patch_right,
             scale_left_before_linear=True,
         )
+        for stage in self.residual_terms:
+            output = output + stage(value)
+        return output
 
 
 @dataclass(frozen=True, slots=True)
@@ -357,6 +398,65 @@ class FrozenSharedInputGroup:
     state: FrozenSharedInputGroupState
     owner: FrozenReferenceLinear
     views: tuple[tuple[LayerId, SharedInputProjectionView], ...]
+
+
+def _freeze_residual_stages(
+    trainable: TrainableFactorizedLinear, tensors: TensorStore,
+) -> tuple[FrozenResidualFactorState, ...]:
+    stages = []
+    for stage in trainable.residual_terms:
+        refs = tensors.put("frozen-residual-stage", {
+            "left_binary": torch.where(stage.left_latent.detach() >= 0, 1.0, -1.0),
+            "right_binary": torch.where(stage.right_latent.detach() >= 0, 1.0, -1.0),
+            "scale_pre": stage.scale_pre.detach(),
+            "scale_mid": stage.scale_mid.detach(),
+            "scale_post": stage.scale_post.detach(),
+        })
+        stages.append(FrozenResidualFactorState(
+            stage.left_latent.shape[1], refs["left_binary"], refs["right_binary"],
+            ScaleState(refs["scale_pre"], refs["scale_mid"], refs["scale_post"]),
+        ))
+    return tuple(stages)
+
+
+def load_residual_stage(
+    state: FrozenResidualFactorState, tensors: TensorStore, *, device: str,
+    trainable: bool = False, backend: str = "factorized",
+) -> TrainableFactorizedLinear | FrozenReferenceLinear:
+    if state.scales.mid is None:
+        raise ValueError("residual stage is missing its component scales")
+    with ExitStack() as stack:
+        values = [stack.enter_context(tensors.read(ref, device)) for ref in (
+            state.left_binary, state.right_binary, state.scales.pre, state.scales.mid, state.scales.post,
+        )]
+        if trainable:
+            return TrainableFactorizedLinear(*values, immutable_binary_factors=True)
+        module_type = FrozenReferenceLinear if backend == "dense" else FactorizedReferenceLinear
+        return module_type(*values)
+
+
+def thaw_residual_stages(module: FrozenReferenceLinear) -> tuple[TrainableFactorizedLinear, ...]:
+    return tuple(TrainableFactorizedLinear(
+        stage.left_binary, stage.right_binary, stage.scale_pre, stage.scale_mid, stage.scale_post,
+        immutable_binary_factors=True,
+    ) for stage in module.residual_terms)
+
+
+def materialize_residual_modules(
+    factors: TrainableFactors, tensors: TensorStore, *, device: str, tune_binary: bool,
+) -> tuple[TrainableFactorizedLinear, ...]:
+    modules = []
+    for stage in factors.residual_stages:
+        if stage.scales.mid is None or stage.residual_stages:
+            raise ValueError("expected a flat inventory of independently scaled residual factors")
+        with ExitStack() as stack:
+            values = [stack.enter_context(tensors.read(ref, device)) for ref in (
+                stage.left_latent if tune_binary else stage.left_binary,
+                stage.right_latent if tune_binary else stage.right_binary,
+                stage.scales.pre, stage.scales.mid, stage.scales.post,
+            )]
+            modules.append(TrainableFactorizedLinear(*values))
+    return tuple(modules)
 
 
 class LayerFreezer:
@@ -431,10 +531,11 @@ class LayerFreezer:
             scales,
             outliers,
             refs.get("bias"),
-            logical_format,
+            "nanoquant-residual-v2" if trainable.residual_stages else logical_format,
             refs.get("patch_left"),
             refs.get("patch_right"),
             product_codebook,
+            _freeze_residual_stages(trainable, tensors),
         )
         return self.load(
             state,
@@ -460,6 +561,9 @@ class LayerFreezer:
             raise ValueError("compact dense storage requires the dense backend")
         if state.scales.mid is None:
             raise ValueError("frozen NanoQuant state is missing its mid scale")
+        residual_stages = tuple(cast(FrozenReferenceLinear, load_residual_stage(
+            stage, tensors, device=device, backend=backend,
+        )) for stage in state.residual_stages)
         with (
             tensors.read(state.left_binary, device) as left,
             tensors.read(state.right_binary, device) as right,
@@ -494,8 +598,7 @@ class LayerFreezer:
                         outlier_scales = scales.clone()
             module: FrozenReferenceLinear
             if compact_dense:
-                module = DenseWeightReferenceLinear(
-                    functional_dense_reconstruction(
+                weight = functional_dense_reconstruction(
                         left,
                         right,
                         scale_pre,
@@ -506,9 +609,10 @@ class LayerFreezer:
                         outlier_scales,
                         patch_left,
                         patch_right,
-                    ),
-                    bias,
-                )
+                    )
+                for stage in residual_stages:
+                    weight = weight + stage.dense_weight()
+                module = DenseWeightReferenceLinear(weight, bias)
             else:
                 module_type = FrozenReferenceLinear if backend == "dense" else FactorizedReferenceLinear
                 module = module_type(
@@ -523,6 +627,7 @@ class LayerFreezer:
                     outlier_scales,
                     patch_left,
                     patch_right,
+                    residual_stages=residual_stages,
                 )
         if dtype is not None:
             module = module.to(dtype=dtype)
@@ -590,7 +695,8 @@ class SharedInputGroupFreezer:
             ScaleState(refs["scale_pre"], refs["scale_mid"], refs["scale_post"]),
             outliers,
             refs.get("bias"),
-            logical_format,
+            "nanoquant-residual-v2" if trainable.residual_stages else logical_format,
+            _freeze_residual_stages(trainable, tensors),
         )
         return self.load(
             state,
@@ -636,7 +742,12 @@ class SharedInputGroupFreezer:
                     with tensors.read(state.outliers.scales, device) as value_scales:
                         scales = value_scales.clone()
             module_type = FrozenReferenceLinear if backend == "dense" else FactorizedReferenceLinear
-            owner = module_type(left, right, scale_pre, scale_mid, scale_post, bias, indices, values, scales)
+            owner = module_type(
+                left, right, scale_pre, scale_mid, scale_post, bias, indices, values, scales,
+                residual_stages=tuple(cast(FrozenReferenceLinear, load_residual_stage(
+                    stage, tensors, device=device, backend=backend,
+                )) for stage in state.residual_stages),
+            )
         if dtype is not None:
             owner = owner.to(dtype=dtype)
         views = tuple(

@@ -172,6 +172,7 @@ def run_factorization_attempts(
             hard_rank_cap=layer_plan.retry.hard_rank_cap,
             available_extra_bits=available,
             cost_per_rank=sum(layer_plan.source_weight.spec.shape) + 16,
+            rank_cost=None if factor_cost is None else lambda candidate: factor_cost(candidate).total,
             weighted_threshold=layer_plan.retry.weighted_error_threshold,
             raw_threshold=layer_plan.retry.raw_error_threshold,
             current_outlier_count=outlier_count,

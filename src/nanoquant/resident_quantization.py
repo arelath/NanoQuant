@@ -44,7 +44,9 @@ from nanoquant.application.layers import (
     TrainableFactorizedLinear,
     TrainableSharedInputFactorGroup,
     freeze_block_auxiliary_parameters,
+    materialize_residual_modules,
     restore_block_auxiliary_parameters,
+    thaw_residual_stages,
 )
 from nanoquant.application.loss_snapshots import BlockLossRecorder, normalized_activation_error
 from nanoquant.application.planning import PersistedPlan, PlanningRequest, build_quantization_plan, persist_plan
@@ -66,6 +68,7 @@ from nanoquant.application.quantization_stages import (
     ScaleFitStage,
 )
 from nanoquant.application.reconstruction_report import render_reconstruction_tables
+from nanoquant.application.residual_factorization import fit_residual_stages
 from nanoquant.application.retry_loop import AcceptedFactorization, run_factorization_attempts
 from nanoquant.application.stages import StageContext, execute_stage
 from nanoquant.application.telemetry import TelemetryContext
@@ -173,6 +176,7 @@ from nanoquant.domain.planning import (
     outlier_bit_cost,
 )
 from nanoquant.domain.profiling import NULL_RECORDER, PhaseRecorder
+from nanoquant.domain.residual_factorization import factorize_residual_admm
 from nanoquant.domain.resources import (
     ResolvedMemoryPlan,
     ResourceAdmissionError,
@@ -236,7 +240,7 @@ from nanoquant.infrastructure.tuning_checkpoint import (
 from nanoquant.ports.event_sink import EventSink, LayerCommittedPayload, emit_layer_committed
 from nanoquant.ports.model_adapter import ModelAdapter
 
-RESIDENT_ALGORITHM_VERSION = 65
+RESIDENT_ALGORITHM_VERSION = 66
 _CALIBRATION_ALGORITHM_VERSION = 1
 COVARIANCE_REFINEMENT_MAX_INPUT_FEATURES = 2048
 _THROUGHPUT_PROBE_REPETITIONS = 5
@@ -388,7 +392,7 @@ class ResidentQuantizationRequest:
     allocation_strategy: AllocationStrategy = AllocationStrategy.SENSITIVITY
     rank_floor_fraction: float = 0.5
     rank_ceiling_fraction: float = 4.5
-    overcomplete_rank_ceiling_fraction: float = 1.0
+    overcomplete_rank_ceiling_fraction: float | None = 1.0
     rank_sensitivity_alpha: float = 0.5
     rank_edge_boost: float = 0.0
     maximum_rank_layer_patterns: tuple[str, ...] = ()
@@ -405,6 +409,7 @@ class ResidentQuantizationRequest:
     product_codebook: ProductCodebookConfig = ProductCodebookConfig()
     outliers: OutlierConfig = OutlierConfig()
     scale_fit: ScaleFitConfig = ScaleFitConfig(enabled=False)
+    residual_stages: bool = False
     bias_correction: BiasCorrectionConfig = BiasCorrectionConfig()
     low_rank_patch: LowRankPatchConfig = LowRankPatchConfig()
     covariance_refinement: ObjectiveConfig | None = None
@@ -464,6 +469,18 @@ class ResidentQuantizationRequest:
     defer_run_completion: bool = False
     memory_plan: ResolvedMemoryPlan | None = None
     memory_plan_reference: ArtifactRef | None = None
+
+    def __post_init__(self) -> None:
+        if self.overcomplete_rank_ceiling_fraction is None and not self.residual_stages:
+            raise ValueError("uncapped total rank requires independent residual stages")
+        if self.residual_stages and (
+            self.outliers.fraction != 0 or self.product_codebook.enabled or self.binary_factor_search.enabled
+            or self.bias_correction.enabled or self.low_rank_patch.enabled
+            or self.covariance_refinement is not None or self.post_refit_covariance_refinement.enabled
+        ):
+            raise ValueError(
+                "independent residual stages do not support optional factor corrections or protected columns"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1910,6 +1927,7 @@ def _rehydrate_trainable_layer(
         patch_left=frozen.patch_left,
         patch_right=frozen.patch_right,
         immutable_binary_factors=True,
+        residual_stages=thaw_residual_stages(frozen),
         product_codebook_free_rows=(
             None if state.product_codebook is None else state.product_codebook.right_free_rows
         ),
@@ -1945,6 +1963,7 @@ def _rehydrate_trainable_group(
         outlier_values=frozen.outlier_values,
         outlier_scales=frozen.outlier_scales,
         immutable_binary_factors=True,
+        residual_stages=thaw_residual_stages(frozen),
     ).to(device=device, dtype=dtype)
 
 
@@ -2077,6 +2096,8 @@ def _run_resident_factorization_attempts(
                 layer_plan.source_weight.spec.shape[0],
                 layer_plan.source_weight.spec.shape[1],
                 rank,
+                residual_stages=request.residual_stages,
+                rank_alignment=request.rank_multiple if request.residual_stages else 1,
             )
         compact = mixed_right_product_codebook_bit_cost(
             layer_plan.source_weight.spec.shape[0],
@@ -2202,6 +2223,21 @@ def _run_resident_factorization_attempts(
             layer_plan.objective,
             input_importance=outliers.factor_input_importance,
         )
+        if request.residual_stages:
+            if outlier_count:
+                raise ValueError("independent residual stages require zero protected columns")
+            factorized = fit_residual_stages(
+                FactorizationRequest(
+                    1, layer_plan.layer, source_weight, outliers.residual_weight, objective,
+                    rank, factor_seed, config_hash, outliers.factor_generator_state,
+                ), context, factor_stage=factor_stage, scale_stage=scale_stage,
+                fit_scales=request.scale_fit.enabled, multiple=request.rank_multiple, device=request.device,
+            )
+            companions.append((outliers, None))
+            attempt_window.finish()
+            return replace(factorized, wall_seconds=time.perf_counter() - started,
+                           peak_workspace_bytes=max(factorized.peak_workspace_bytes,
+                                                    attempt_window.peak_allocated_bytes))
         with recorder.phase("admm"):
             factorized = execute_stage(
                 factor_stage,
@@ -2631,6 +2667,7 @@ def _resident_config_hash(request: ResidentQuantizationRequest) -> str:
         "rank_floor_fraction": request.rank_floor_fraction,
         "rank_ceiling_fraction": request.rank_ceiling_fraction,
         "overcomplete_rank_ceiling_fraction": request.overcomplete_rank_ceiling_fraction,
+        "residual_stages": request.residual_stages,
         "rank_sensitivity_alpha": request.rank_sensitivity_alpha,
         "rank_edge_boost": request.rank_edge_boost,
         "maximum_rank_layer_patterns": request.maximum_rank_layer_patterns,
@@ -3320,10 +3357,15 @@ def _overcomplete_rank_cap(
     shape: tuple[int, ...] | torch.Size,
     *,
     multiple: int,
-    ceiling_fraction: float,
+    ceiling_fraction: float | None,
+    target_bpw: float = 2.0,
+    budget_ceiling_fraction: float = 1.5,
 ) -> int:
     """Resolve the aligned hard ceiling for a possibly over-complete factorization."""
 
+    if ceiling_fraction is None:
+        return math.ceil(math.prod(shape) * target_bpw * budget_ceiling_fraction
+                         / sum(shape) / multiple) * multiple
     return math.floor(min(shape) * ceiling_fraction / multiple) * multiple
 
 
@@ -3729,6 +3771,19 @@ def _run_reconstruction_rank_probes(
                 probe_output: torch.Tensor = probe_output_importance,
             ) -> Any:
                 generator = torch.Generator(device=request.device).manual_seed(probe_seed)
+                if request.residual_stages:
+                    return factorize_residual_admm(
+                        probe_weight, probe_input, probe_output, rank, probe_seed,
+                        AdmmParameters(
+                            outer_iterations=probe_admm.outer_iterations,
+                            inner_iterations=probe_admm.inner_iterations,
+                            regularization=probe_admm.regularization,
+                            penalty_schedule=probe_admm.penalty_schedule,
+                            convergence_check_interval=probe_admm.convergence_check_interval,
+                            early_stop_tolerance=probe_admm.early_stop_tolerance,
+                            transpose_wide=probe_admm.transpose_wide,
+                        ), multiple=request.rank_multiple,
+                    )
                 # Rank planning is intentionally an ADMM-only approximation.
                 # Production-only sign search is too expensive to repeat at
                 # every lower/baseline/upper response point.
@@ -3806,6 +3861,8 @@ def _run_reconstruction_rank_probes(
                         stacked.shape,
                         multiple=request.rank_multiple,
                         ceiling_fraction=request.overcomplete_rank_ceiling_fraction,
+                        target_bpw=request.target_bpw,
+                        budget_ceiling_fraction=request.rank_ceiling_fraction,
                     ),
                     multiple=request.rank_multiple,
                     floor_fraction=request.rank_floor_fraction,
@@ -4023,7 +4080,11 @@ def _run_reconstruction_rank_probes(
                     (out_features, in_features),
                     multiple=request.rank_multiple,
                     ceiling_fraction=request.overcomplete_rank_ceiling_fraction,
+                    target_bpw=request.target_bpw,
+                    budget_ceiling_fraction=request.rank_ceiling_fraction,
                 ),
+                request.residual_stages,
+                request.rank_multiple,
             )
         )
     original_elements = sum(
@@ -6901,6 +6962,7 @@ def _execute_resident_quantization_pipeline(
                                 resolved_groups,
                                 bias_correction=request.bias_correction,
                                 low_rank_patch=request.low_rank_patch,
+                                residual_stages=request.residual_stages,
                             )
                         )
                         probe_plan = _persist_rank_probe_plan(
@@ -6943,6 +7005,7 @@ def _execute_resident_quantization_pipeline(
                             reconstruction_decisions,
                             request.bias_correction,
                             request.low_rank_patch,
+                            request.residual_stages,
                         )
                     )
                     if request.product_codebook.enabled:
@@ -7398,6 +7461,10 @@ def _execute_resident_quantization_pipeline(
                         outlier_indices=outlier_indices,
                         outlier_values=outlier_values,
                         outlier_scales=outlier_scales,
+                        residual_stages=materialize_residual_modules(
+                            factorized.factors, tensors, device=request.device,
+                            tune_binary=request.factorized_tuning_epochs > 0,
+                        ),
                     ).to(device=request.device, dtype=compressed_inputs.dtype)
                 member_ids = tuple(member.layer for member in group_plan.members)
                 member_widths = tuple(member.out_features for member in group_plan.members)
@@ -7822,6 +7889,10 @@ def _execute_resident_quantization_pipeline(
                             outlier_scales=outlier_scales,
                             patch_left=patch_left,
                             patch_right=patch_right,
+                            residual_stages=materialize_residual_modules(
+                                factorized.factors, tensors, device=request.device,
+                                tune_binary=request.factorized_tuning_epochs > 0,
+                            ),
                             product_codebook_free_rows=(
                                 None
                                 if factorized.product_codebook is None
@@ -8743,6 +8814,9 @@ def _run_resident_factorization_slice_impl(
                 outlier_indices=outlier_indices,
                 outlier_values=outlier_values,
                 outlier_scales=outlier_scales,
+                residual_stages=materialize_residual_modules(
+                    factorized.factors, tensors, device=request.device, tune_binary=False,
+                ),
                 product_codebook_free_rows=(
                     None
                     if factorized.product_codebook is None

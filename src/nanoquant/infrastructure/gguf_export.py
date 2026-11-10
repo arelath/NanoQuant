@@ -170,7 +170,9 @@ for tensor in reader.tensors:
         embedding_type = tensor.tensor_type.name.lower()
     if tensor.name == 'output.weight':
         output_type = tensor.tensor_type.name.lower()
-    if tensor.name.endswith(('.nq_scale_pre', '.nq_scale_mid', '.nq_scale_post')):
+    if (tensor.name.endswith(('.nq_scale_pre', '.nq_scale_mid', '.nq_scale_post'))
+            or (('.nq_residual_' in tensor.name or '.nq_stage0_' in tensor.name)
+                and tensor.name.endswith(('_scale_pre', '_scale_mid', '_scale_post')))):
         scale_types.append(tensor.tensor_type.name.lower())
 if embedding_type is None:
     raise SystemExit('token_embd.weight is missing')
@@ -427,7 +429,8 @@ def export_llamacpp_gguf(
     _checkpoint_for_packed(packed.root, checkpoint_path)
     destination = Path(output).resolve()
     packed_descriptor_hash = hash_file(packed.root / "nanoquant-packed-model.json")
-    expected_scale_count = packed.manifest.layer_count * 3
+    expected_scale_count = sum(3 * (1 + len(layer.spec.residual_ranks))
+                               for block in packed.manifest.blocks for layer in block.layers)
     if destination.exists() or _receipt_path(destination).exists():
         try:
             result = _reuse_existing(

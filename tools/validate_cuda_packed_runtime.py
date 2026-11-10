@@ -43,18 +43,20 @@ def _reference(value: torch.Tensor, state: PackedLayerState) -> torch.Tensor:
         )
     if logical.bias is not None:
         output += logical.bias.float()
+    for stage in state.residual_stages:
+        output += _reference(value, stage)
     return output
 
 
-def _shape_inventory(blocks: tuple[Any, ...]) -> list[dict[str, int]]:
+def _shape_inventory(blocks: tuple[Any, ...]) -> list[dict[str, Any]]:
     shapes = {
-        (entry.spec.in_features, entry.spec.out_features, entry.spec.rank)
+        (entry.spec.in_features, entry.spec.out_features, entry.spec.rank, entry.spec.residual_ranks)
         for block in blocks
         for entry in block.layers
     }
     return [
-        {"in_features": in_features, "out_features": out_features, "rank": rank}
-        for in_features, out_features, rank in sorted(shapes)
+        {"in_features": in_features, "out_features": out_features, "rank": rank, "residual_ranks": residual_ranks}
+        for in_features, out_features, rank, residual_ranks in sorted(shapes)
     ]
 
 

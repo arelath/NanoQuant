@@ -43,6 +43,7 @@ from nanoquant.runtime import (
     write_product_codebook_artifact,
 )
 from nanoquant.runtime.backend import ProjectionMemberSpec
+from nanoquant.runtime.residual import RESIDUAL_FORMAT, stage_role, stage_spec
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,7 +149,7 @@ def _runtime_state(
     component_overlay: FactorizedComponentOverlay | None = None,
     consumed_overlay_tensors: set[str] | None = None,
 ) -> LogicalLayerState:
-    if frozen.logical_format != LOGICAL_FORMAT_VERSION:
+    if frozen.logical_format not in {LOGICAL_FORMAT_VERSION, RESIDUAL_FORMAT}:
         raise ValueError(
             f"frozen layer uses unsupported logical format {frozen.logical_format!r}: "
             f"block {frozen.layer.block.index} {frozen.layer.path}"
@@ -172,6 +173,8 @@ def _runtime_state(
         if frozen.outliers.scales is not None:
             outlier_scales = stack.enter_context(tensors.read(frozen.outliers.scales))
     if component_overlay is not None:
+        if frozen.residual_stages:
+            raise ValueError("component overlays do not support independently scaled residual stages")
         prefix = f"model.layers.{frozen.layer.block.index}.{frozen.layer.path}."
         replacements = {
             name.removeprefix(prefix): value
@@ -240,6 +243,7 @@ def _runtime_state(
         bias_dtype=None if bias is None else canonical_torch_dtype(bias.dtype),
         patch_rank=0 if patch_left is None else int(patch_left.shape[1]),
         patch_value_dtype=None if patch_left is None else canonical_torch_dtype(patch_left.dtype),
+        residual_ranks=tuple(stage.rank for stage in frozen.residual_stages),
     )
     return LogicalLayerState(
         spec,
@@ -254,6 +258,7 @@ def _runtime_state(
         outlier_scales,
         patch_left,
         patch_right,
+        _runtime_residuals(frozen, spec, tensors, stack),
     )
 
 
@@ -296,6 +301,7 @@ def _runtime_group_state(
             ProjectionMemberSpec(prefix + member.layer.path, member.row_start, member.row_end)
             for member in frozen.members
         ),
+        residual_ranks=tuple(stage.rank for stage in frozen.residual_stages),
     )
     return LogicalLayerState(
         spec,
@@ -308,7 +314,23 @@ def _runtime_group_state(
         indices,
         values,
         outlier_scales,
+        residual_stages=_runtime_residuals(frozen, spec, tensors, stack),
     )
+
+
+def _runtime_residuals(
+    frozen: FrozenNanoQuantState | FrozenSharedInputGroupState,
+    spec: QuantizedLinearSpec, tensors: LocalTensorStore, stack: ExitStack,
+) -> tuple[LogicalLayerState, ...]:
+    result = []
+    for index, stage in enumerate(frozen.residual_stages):
+        if stage.scales.mid is None:
+            raise ValueError("frozen residual stage has no component scale")
+        values = [stack.enter_context(tensors.read(ref)) for ref in (
+            stage.left_binary, stage.right_binary, stage.scales.pre, stage.scales.mid, stage.scales.post,
+        )]
+        result.append(LogicalLayerState(stage_spec(spec, index), values[0], values[1], values[2], values[3], values[4]))
+    return tuple(result)
 
 
 def _stream_logical_blocks(
@@ -480,7 +502,7 @@ def export_frozen_run_logical(
 
 
 def _logical_values(state: LogicalLayerState) -> tuple[tuple[str, torch.Tensor | None], ...]:
-    return (
+    values = (
         ("factor_left", state.left_binary),
         ("factor_right", state.right_binary),
         ("scale_pre", state.scale_pre),
@@ -493,6 +515,8 @@ def _logical_values(state: LogicalLayerState) -> tuple[tuple[str, torch.Tensor |
         ("patch_left", state.patch_left),
         ("patch_right", state.patch_right),
     )
+    return values + tuple((stage_role(index, role), value) for index, stage in enumerate(state.residual_stages)
+                          for role, value in _logical_values(stage))
 
 
 def _rank_inventory(resolved: _ResolvedFrozenRun) -> tuple[FrozenRunRankEntry, ...]:
@@ -512,8 +536,8 @@ def _rank_inventory(resolved: _ResolvedFrozenRun) -> tuple[FrozenRunRankEntry, .
                 f"{block_index}:{name}",
                 block_index,
                 name,
-                state.rank,
-                left_shape[0] * left_shape[1] + right_shape[0] * right_shape[1],
+                state.total_rank,
+                (left_shape[0] + right_shape[1]) * state.total_rank,
             )
         )
 

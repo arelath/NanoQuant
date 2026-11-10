@@ -35,6 +35,13 @@ from nanoquant.runtime.packed import (
     packed_word_count,
 )
 from nanoquant.runtime.reference import FactorizedReferenceBackend, PackedReferenceBackend
+from nanoquant.runtime.residual import (
+    PACKED_FACTOR_ROLES,
+    RESIDUAL_MINIMUM_RUNTIME,
+    is_stage_role,
+    stage_role,
+    stage_spec,
+)
 from nanoquant.runtime.safetensors_io import SAFETENSORS, load_tensors
 
 PACKED_DESCRIPTOR_SCHEMA_VERSION = RUNTIME_ARTIFACT_SCHEMA_VERSION
@@ -67,7 +74,7 @@ class PackedTensorEntry:
     dtype: str
 
     def __post_init__(self) -> None:
-        if self.role not in _PACKED_TENSOR_ROLES:
+        if self.role not in _PACKED_TENSOR_ROLES and not is_stage_role(self.role, PACKED_FACTOR_ROLES):
             raise ValueError(f"unsupported packed tensor role: {self.role}")
         if not self.key or self.key.startswith("/"):
             raise ValueError("packed tensor key must be non-empty and relative")
@@ -110,6 +117,9 @@ def _expected_tensor_metadata(spec: QuantizedLinearSpec) -> dict[str, tuple[tupl
             (spec.patch_rank, spec.in_features),
             cast(str, spec.patch_value_dtype),
         )
+    for index in range(len(spec.residual_ranks)):
+        expected.update({stage_role(index, role): metadata
+                         for role, metadata in _expected_tensor_metadata(stage_spec(spec, index)).items()})
     return expected
 
 
@@ -172,7 +182,9 @@ class PackedModelManifest:
             raise ValueError(f"unsupported packed artifact schema: {self.schema_version}")
         if self.artifact_format != PACKED_ARTIFACT_FORMAT:
             raise ValueError(f"unsupported packed artifact format: {self.artifact_format}")
-        if self.minimum_runtime_version != MINIMUM_RUNTIME_VERSION:
+        has_residual = any(layer.spec.residual_ranks for block in self.blocks for layer in block.layers)
+        expected_runtime = RESIDUAL_MINIMUM_RUNTIME if has_residual else MINIMUM_RUNTIME_VERSION
+        if self.minimum_runtime_version != expected_runtime:
             raise ValueError(f"unsupported packed minimum runtime version: {self.minimum_runtime_version}")
         if len(self.logical_descriptor_sha256) != 64 or any(
             character not in "0123456789abcdef" for character in self.logical_descriptor_sha256
@@ -206,9 +218,15 @@ class OpenPackedArtifact:
             device=device,
         )
         by_role = {tensor.role: loaded[tensor.key] for tensor in layer.tensors}
-        return PackedLayerState(
-            layer.spec,
-            self.manifest.layout.version,
+        return packed_state_from_tensors(layer.spec, self.manifest.layout.version, by_role)
+
+
+def packed_state_from_tensors(
+    spec: QuantizedLinearSpec, layout: str, by_role: Mapping[str, torch.Tensor],
+) -> PackedLayerState:
+    return PackedLayerState(
+            spec,
+            layout,
             by_role["factor_left_words"],
             by_role["factor_right_words"],
             by_role["scale_pre"],
@@ -220,6 +238,9 @@ class OpenPackedArtifact:
             by_role.get("outlier_scales"),
             by_role.get("patch_left"),
             by_role.get("patch_right"),
+            tuple(packed_state_from_tensors(stage_spec(spec, index), layout, {
+                role: by_role[stage_role(index, role)] for role in PACKED_FACTOR_ROLES
+            }) for index in range(len(spec.residual_ranks))),
         )
 
 
@@ -264,6 +285,8 @@ def _state_tensors(state: PackedLayerState) -> tuple[tuple[str, torch.Tensor], .
         ("patch_right", state.patch_right),
     )
     values.extend((role, value) for role, value in optional if value is not None)
+    for index, stage in enumerate(state.residual_stages):
+        values.extend((stage_role(index, role), value) for role, value in _state_tensors(stage))
     return tuple(values)
 
 
@@ -338,7 +361,8 @@ def write_packed_artifact_stream(
         manifest = PackedModelManifest(
             PACKED_DESCRIPTOR_SCHEMA_VERSION,
             PACKED_ARTIFACT_FORMAT,
-            MINIMUM_RUNTIME_VERSION,
+            (RESIDUAL_MINIMUM_RUNTIME if any(layer.spec.residual_ranks
+             for block in block_tuple for layer in block.layers) else MINIMUM_RUNTIME_VERSION),
             PackedLayoutMetadata(),
             model,
             logical_descriptor_sha256,
@@ -443,7 +467,7 @@ def convert_logical_to_packed(
 
 
 def _logical_values(state: LogicalLayerState) -> tuple[torch.Tensor | None, ...]:
-    return (
+    values = (
         state.left_binary,
         state.right_binary,
         state.scale_pre,
@@ -456,6 +480,8 @@ def _logical_values(state: LogicalLayerState) -> tuple[torch.Tensor | None, ...]
         state.patch_left,
         state.patch_right,
     )
+
+    return values + tuple(value for stage in state.residual_stages for value in _logical_values(stage))
 
 
 def _validate_artifact_pair(

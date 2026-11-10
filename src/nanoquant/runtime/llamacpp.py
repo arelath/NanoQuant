@@ -107,7 +107,7 @@ def open_llamacpp_checkpoint(
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError("llama.cpp checkpoint descriptor fields are invalid") from exc
-    if manifest.schema_version != LLAMACPP_CHECKPOINT_SCHEMA_VERSION:
+    if manifest.schema_version not in {LLAMACPP_CHECKPOINT_SCHEMA_VERSION, 2}:
         raise ValueError("llama.cpp checkpoint schema version is unsupported")
     if manifest.artifact_format != LLAMACPP_CHECKPOINT_FORMAT:
         raise ValueError("llama.cpp checkpoint artifact format is unsupported")
@@ -178,6 +178,10 @@ def llamacpp_checkpoint_tensors(
     for suffix, value in optional:
         if value is not None:
             tensors[f"{checkpoint_prefix}.{suffix}"] = value.detach().cpu().contiguous()
+    if state.residual_stages:
+        tensors[f"{checkpoint_prefix}.residual_stage_count"] = torch.tensor(len(state.residual_stages))
+        for index, stage in enumerate(state.residual_stages):
+            tensors.update(llamacpp_checkpoint_tensors(stage, f"{checkpoint_prefix}.residual.{index}"))
     if state.spec.members:
         expected_suffixes = (
             "self_attn.q_proj",
@@ -238,7 +242,8 @@ def export_llamacpp_checkpoint(
             tensors.clear()
         source_descriptor = packed.root / "nanoquant-packed-model.json"
         manifest = LlamaCppCheckpointManifest(
-            LLAMACPP_CHECKPOINT_SCHEMA_VERSION,
+            (2 if any(layer.spec.residual_ranks for block in packed.manifest.blocks for layer in block.layers)
+             else LLAMACPP_CHECKPOINT_SCHEMA_VERSION),
             LLAMACPP_CHECKPOINT_FORMAT,
             packed.manifest.model,
             _hash_file(source_descriptor),

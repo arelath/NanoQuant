@@ -13,7 +13,7 @@ import nanoquant.global_distillation as global_distillation_module
 from nanoquant.application.distillation import TopKDistillationConfig
 from nanoquant.application.layers import TrainableFactorizedLinear
 from nanoquant.config.codec import semantic_hash, to_dict
-from nanoquant.config.schema import ADMMConfig, SharedInputGroupConfig
+from nanoquant.config.schema import ADMMConfig, AllocationStrategy, SharedInputGroupConfig
 from nanoquant.final_norm_calibration import calibrate_global_tuning_final_norm
 from nanoquant.global_distillation import GlobalDistillationRequest, run_global_topk_distillation
 from nanoquant.infrastructure.artifacts import LocalArtifactStore
@@ -52,9 +52,7 @@ def test_global_distillation_selects_budgeted_side_tensors_but_not_binary_latent
         model,
         {(0, "proj"): factorized},
     )
-    selected_names = {
-        name for name, parameter in model.named_parameters() if id(parameter) in selected
-    }
+    selected_names = {name for name, parameter in model.named_parameters() if id(parameter) in selected}
 
     assert selected_names == {
         "proj.scale_pre",
@@ -70,11 +68,20 @@ def test_global_distillation_selects_budgeted_side_tensors_but_not_binary_latent
     assert set(auxiliary) == {"norm.weight", "norm.bias"}
 
 
-@pytest.mark.parametrize("objective", ["top_k", "top_k_tail", "top_k_mass_floor"])
+@pytest.mark.parametrize(
+    "objective,residual_stages",
+    [
+        ("top_k", False),
+        ("top_k_tail", False),
+        ("top_k_mass_floor", False),
+        ("top_k", True),
+    ],
+)
 def test_complete_frozen_run_can_be_distilled_committed_and_reloaded(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     objective: str,
+    residual_stages: bool,
 ) -> None:
     snapshot = tmp_path / "snapshot"
     with torch.random.fork_rng():
@@ -106,7 +113,10 @@ def test_complete_frozen_run_can_be_distilled_committed_and_reloaded(
             "pinned-test-revision",
             tokens,
             device="cpu",
-            target_bpw=8.0,
+            target_bpw=12.0 if residual_stages else 8.0,
+            residual_stages=residual_stages,
+            overcomplete_rank_ceiling_fraction=None if residual_stages else 1.0,
+            allocation_strategy=AllocationStrategy.UNIFORM if residual_stages else AllocationStrategy.SENSITIVITY,
             rank_multiple=1,
             admm=ADMMConfig(outer_iterations=1, inner_iterations=1),
             shared_input_groups=(
@@ -177,9 +187,7 @@ def test_complete_frozen_run_can_be_distilled_committed_and_reloaded(
         protocol.pop("minimum_teacher_mass_ratio")
         protocol.pop("mass_floor_weight")
     else:
-        protocol["teacher_normalizer_version"] = (
-            global_distillation_module.TAIL_NORMALIZER_VERSION
-        )
+        protocol["teacher_normalizer_version"] = global_distillation_module.TAIL_NORMALIZER_VERSION
         if objective == "top_k_tail":
             protocol.pop("minimum_teacher_mass_ratio")
             protocol.pop("mass_floor_weight")
@@ -216,15 +224,10 @@ def test_complete_frozen_run_can_be_distilled_committed_and_reloaded(
     assert isinstance(first_epoch_reference, dict)
     first_epoch_manifest = json.loads(
         (
-            LocalArtifactStore(output / "artifacts").path_for(
-                str(first_epoch_reference["artifact_id"])
-            )
-            / "epoch.json"
+            LocalArtifactStore(output / "artifacts").path_for(str(first_epoch_reference["artifact_id"])) / "epoch.json"
         ).read_text(encoding="utf-8")
     )
-    assert first_epoch_manifest["schema_version"] == (
-        3 if objective in {"top_k_tail", "top_k_mass_floor"} else 1
-    )
+    assert first_epoch_manifest["schema_version"] == (3 if objective in {"top_k_tail", "top_k_mass_floor"} else 1)
     persisted = load_global_tuning(distilled.reference, LocalArtifactStore(output / "artifacts"))
     assert persisted.result == distilled.result
     assert distilled.metrics.steps_completed == 6
@@ -232,6 +235,9 @@ def test_complete_frozen_run_can_be_distilled_committed_and_reloaded(
     assert distilled.result.source_blocks == tuple(block.teacher_outputs.artifact for block in before.blocks)
     assert len(distilled.result.tuned_blocks) == 1
     assert len(distilled.result.tuned_blocks[0].shared_input_groups) == 1
+    if residual_stages:
+        assert distilled.result.tuned_blocks[0].shared_input_groups[0].residual_stages
+        assert any(state.residual_stages for state in distilled.result.tuned_blocks[0].quantized_layers)
     assert distilled.result.auxiliary_parameters
     assert distilled.result.schema_version == 2
     assert distilled.result.block_snapshot_protocol_hash is not None
@@ -281,10 +287,7 @@ def test_complete_frozen_run_can_be_distilled_committed_and_reloaded(
     )
     after_thaw = dict(loaded.model.named_parameters())
     assert parameter_values.keys() <= after_thaw.keys()
-    assert all(
-        torch.equal(after_thaw[name].detach().cpu(), value)
-        for name, value in parameter_values.items()
-    )
+    assert all(torch.equal(after_thaw[name].detach().cpu(), value) for name, value in parameter_values.items())
 
     pre_distillation = load_frozen_run(
         output,
@@ -339,13 +342,9 @@ def test_complete_frozen_run_can_be_distilled_committed_and_reloaded(
                     state_namespace="global-distillation-invalid-regime",
                 )
             )
-        control = run_global_topk_distillation(
-            replace(correction_request, run_output=control_output)
-        )
+        control = run_global_topk_distillation(replace(correction_request, run_output=control_output))
         with pytest.raises(InterruptedError, match="after 1 distillation epoch checkpoint"):
-            run_global_topk_distillation(
-                replace(correction_request, interrupt_after_epoch_commits=1)
-            )
+            run_global_topk_distillation(replace(correction_request, interrupt_after_epoch_commits=1))
         assert active_global_tuning(output) == distilled.reference
         assert (output / "global-distillation-cache.json").read_bytes() == primary_cache_pointer
         assert (output / "global-distillation-training.json").read_bytes() == primary_training_pointer
@@ -379,11 +378,14 @@ def test_complete_frozen_run_can_be_distilled_committed_and_reloaded(
                     atol=2e-3,
                     rtol=0,
                 )
-        assert calibrate_global_tuning_final_norm(
-            output,
-            resumed.reference,
-            1.015,
-        ).reference == calibrated.reference
+        assert (
+            calibrate_global_tuning_final_norm(
+                output,
+                resumed.reference,
+                1.015,
+            ).reference
+            == calibrated.reference
+        )
         assert active_global_tuning(output) == calibrated.reference
 
         primary_override = load_frozen_run(

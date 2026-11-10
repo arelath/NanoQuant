@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "cpu_regression": {
+    "passed": 1549,
+    "deselected": 53,
+    "seconds": 283.38
+  },
+  "residual_cuda_tests": {
+    "passed": 4,
+    "dtypes": [
+      "float32",
+      "bfloat16"
+    ],
+    "tokens": [
+      1,
+      7
+    ]
+  },
+  "ruff": "passed",
+  "mypy": {
+    "status": "passed",
+    "source_files": 220
+  },
+  "native_cpu_fixture": "native-validation.json",
+  "checkpoint_exact": "native-checkpoint-validation.json",
+  "converter_exact": "native-converter-validation.json",
+  "gguf_exact": "native-gguf-validation.json",
+  "real_model_quality_complete": false
+}

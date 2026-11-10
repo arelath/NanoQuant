@@ -32,6 +32,7 @@ from nanoquant.application.layers import (
     SharedInputGroupFreezer,
     TrainableFactorizedLinear,
     TrainableSharedInputFactorGroup,
+    thaw_residual_stages,
 )
 from nanoquant.config.codec import semantic_hash, to_dict
 from nanoquant.config.schema import ProfilingConfig, ProfilingLevel
@@ -224,6 +225,7 @@ def _thaw_frozen_layers(
                 patch_left=frozen.patch_left,
                 patch_right=frozen.patch_right,
                 immutable_binary_factors=True,
+                residual_stages=thaw_residual_stages(frozen),
                 product_codebook_free_rows=(
                     None
                     if state.product_codebook is None
@@ -252,6 +254,7 @@ def _thaw_frozen_layers(
                 outlier_values=owner.outlier_values,
                 outlier_scales=owner.outlier_scales,
                 immutable_binary_factors=True,
+                residual_stages=thaw_residual_stages(owner),
             )
             editor.install_trainable_group(
                 block,
@@ -271,7 +274,7 @@ def _selected_parameters(
     selected = set()
     for module in trainable.values():
         for name, parameter in module.named_parameters():
-            if name in {
+            if name.rsplit(".", 1)[-1] in {
                 "scale_pre",
                 "scale_mid",
                 "scale_post",
@@ -302,6 +305,14 @@ def _restore_storage_dtype(
             raise ValueError("global distillation source state is missing its mid scale")
         module.scale_mid.data = module.scale_mid.data.to(_storage_dtype(state.scales.mid.spec.dtype))
         module.scale_post.data = module.scale_post.data.to(_storage_dtype(state.scales.post.spec.dtype))
+        if len(module.residual_stages) != len(state.residual_stages):
+            raise ValueError("global distillation residual stage inventory changed")
+        for stage, stored in zip(module.residual_terms, state.residual_stages, strict=True):
+            if stored.scales.mid is None:
+                raise ValueError("global distillation residual stage is missing its mid scale")
+            stage.scale_pre.data = stage.scale_pre.data.to(_storage_dtype(stored.scales.pre.spec.dtype))
+            stage.scale_mid.data = stage.scale_mid.data.to(_storage_dtype(stored.scales.mid.spec.dtype))
+            stage.scale_post.data = stage.scale_post.data.to(_storage_dtype(stored.scales.post.spec.dtype))
         if (
             module.outlier_values is not None
             and state.outliers is not None

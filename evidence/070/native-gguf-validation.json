@@ -1,0 +1,19 @@
+{
+  "exact": true,
+  "gguf": "D:\\dev\\research\\NanoQuantRewrite\\outputs\\070-native-canary-v2\\tiny-residual.gguf",
+  "gguf_bytes": 40200672,
+  "gguf_sha256": "189c75f889bd07cb1e03388e739103b203ead85374d68611acb9178d6c6307a9",
+  "metadata": {
+    "quantization.nanoquant.bit_order": "lsb_first",
+    "quantization.nanoquant.positive_bit": "0",
+    "quantization.nanoquant.stage_format": "additive_binary_v1",
+    "quantization.nanoquant.tensor_count": 1,
+    "quantization.nanoquant.version": 3
+  },
+  "model_shell_tensor_count": 14,
+  "nanoquant_element_count": 2336,
+  "nanoquant_layer_count": 1,
+  "nanoquant_tensor_count": 10,
+  "packed_artifact": "D:\\dev\\research\\NanoQuantRewrite\\outputs\\070-native-canary-v2\\packed",
+  "total_tensor_count": 24
+}

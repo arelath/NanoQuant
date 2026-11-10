@@ -25,7 +25,7 @@ _FLOAT_DTYPES = ("float16", "bfloat16", "float32")
 
 def _reference_capabilities() -> BackendCapabilities:
     return BackendCapabilities(
-        logical_formats=("nanoquant-v1",),
+        logical_formats=("nanoquant-v1", "nanoquant-residual-v2"),
         device_types=("cpu", "cuda"),
         input_dtypes=_FLOAT_DTYPES,
         factor_dtypes=_FLOAT_DTYPES,
@@ -61,6 +61,7 @@ class _ReferencePayload:
     outlier_scales: torch.Tensor | None
     patch_left: torch.Tensor | None
     patch_right: torch.Tensor | None
+    residual_stages: tuple[_ReferencePayload, ...] = ()
 
 
 def _prepare_payload(state: RuntimeLayerState, device: DeviceLike) -> _ReferencePayload:
@@ -79,6 +80,7 @@ def _prepare_payload(state: RuntimeLayerState, device: DeviceLike) -> _Reference
         None if state.outlier_scales is None else state.outlier_scales.to(target),
         None if state.patch_left is None else state.patch_left.to(target),
         None if state.patch_right is None else state.patch_right.to(target),
+        tuple(_prepare_payload(stage, device) for stage in state.residual_stages),
     )
 
 
@@ -131,11 +133,14 @@ class DenseReferenceBackend:
             weight[:, payload.outlier_indices.long()] += outliers.to(weight.dtype)
         if payload.patch_left is not None and payload.patch_right is not None:
             weight = weight + payload.patch_left.float() @ payload.patch_right.float()
-        return torch.nn.functional.linear(
+        output = torch.nn.functional.linear(
             value,
             weight.to(device=value.device, dtype=value.dtype),
             None if payload.bias is None else payload.bias.to(device=value.device, dtype=value.dtype),
         )
+        for stage in payload.residual_stages:
+            output = output + self.linear(value, PreparedLayer(self.name, self.version, layer.spec, stage))
+        return output
 
 
 class FactorizedReferenceBackend:
@@ -178,6 +183,8 @@ class FactorizedReferenceBackend:
             )
         if payload.bias is not None:
             output = output + payload.bias.to(device=value.device, dtype=value.dtype)
+        for stage in payload.residual_stages:
+            output = output + self.linear(value, PreparedLayer(self.name, self.version, layer.spec, stage))
         return output
 
 
@@ -232,4 +239,6 @@ class PackedReferenceBackend:
             )
         if payload.bias is not None:
             output = output + payload.bias.to(device=value.device, dtype=value.dtype)
+        for stage in payload.residual_stages:
+            output = output + self.linear(value, PreparedLayer(self.name, self.version, layer.spec, stage))
         return output

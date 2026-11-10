@@ -2,12 +2,26 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import is_dataclass, replace
+from pathlib import Path
 from typing import Any, TypeVar, cast
 
+from nanoquant.config.codec import config_hash, from_dict
 from nanoquant.config.schema import ModelConfig, RunConfig
 
 T = TypeVar("T")
+
+
+def retained_config(path: Path, expected_hash: str) -> RunConfig:
+    """Load a frozen resolved configuration and verify its recorded semantic identity."""
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if payload.get("schema_version") != 1 or payload.get("resolved_config_hash") != expected_hash:
+        raise ValueError("retained configuration provenance mismatch")
+    config = from_dict(RunConfig, payload["resolved_config"])
+    if config_hash(config) != expected_hash:
+        raise ValueError("retained configuration hash mismatch")
+    return config
 
 
 def config_delta(parent: T, /, **changes: Any) -> T:

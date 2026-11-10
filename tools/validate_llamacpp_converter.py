@@ -13,6 +13,7 @@ from types import ModuleType
 import numpy as np
 import torch
 
+from nanoquant.infrastructure.io_utils import hash_canonical_text_file
 from nanoquant.runtime import open_packed_artifact
 from nanoquant.runtime.llamacpp import gemma_hf_checkpoint_prefix
 
@@ -27,11 +28,9 @@ def _sha256(path: Path) -> str:
 
 def _load_converter(llama_root: Path, expected_sha256: str) -> ModuleType:
     converter = llama_root / "convert_nanoquant_to_gguf.py"
-    actual = _sha256(converter)
+    actual = hash_canonical_text_file(converter)
     if actual != expected_sha256:
-        raise ValueError(
-            f"modified llama.cpp converter hash differs: {actual} != {expected_sha256}"
-        )
+        raise ValueError(f"modified llama.cpp converter hash differs: {actual} != {expected_sha256}")
     sys.path.insert(0, str(llama_root))
     spec = importlib.util.spec_from_file_location("nanoquant_pinned_llamacpp_converter", converter)
     if spec is None or spec.loader is None:
@@ -45,8 +44,7 @@ def _load_converter(llama_root: Path, expected_sha256: str) -> ModuleType:
 def _exact(label: str, actual: np.ndarray, expected: np.ndarray) -> None:
     if actual.dtype != expected.dtype or actual.shape != expected.shape:
         raise ValueError(
-            f"{label} dtype/shape differs: {actual.dtype} {actual.shape} != "
-            f"{expected.dtype} {expected.shape}"
+            f"{label} dtype/shape differs: {actual.dtype} {actual.shape} != {expected.dtype} {expected.shape}"
         )
     if not np.array_equal(actual, expected):
         raise ValueError(f"{label} values differ")
@@ -56,6 +54,10 @@ class _CaptureWriter:
     def __init__(self) -> None:
         self.tensors: dict[str, np.ndarray] = {}
         self.raw_dtypes: dict[str, object | None] = {}
+        self.metadata: dict[str, int] = {}
+
+    def add_uint32(self, name: str, value: int) -> None:
+        self.metadata[name] = value
 
     def add_tensor(
         self,
@@ -175,12 +177,25 @@ def main() -> None:
                 raise ValueError(f"modified llama.cpp GGUF mapper rejected layer: {prefix}")
             capture = _CaptureModel()
             converter.write_sidecar(capture, mapped_base, f"{prefix}.weight", sidecar)
+            primary_prefix = "nq_stage0" if sidecar.residual_stages else "nq"
+            terms = [(primary_prefix, sidecar)] + [
+                (f"nq_residual_{index}", stage) for index, stage in enumerate(sidecar.residual_stages)
+            ]
+            if len(sidecar.residual_stages) != len(state.residual_stages):
+                raise ValueError(f"converter residual inventory differs: {prefix}")
+            if state.residual_stages and capture.gguf_writer.metadata.get(
+                f"quantization.nanoquant.{mapped_base}.residual_stage_count"
+            ) != len(state.residual_stages):
+                raise ValueError(f"converter residual count differs: {prefix}")
+            for term, converted in zip(state.residual_stages, sidecar.residual_stages, strict=True):
+                _exact(prefix + ".residual_v", converted.v_packed, term.right_words.numpy())
+                _exact(prefix + ".residual_u", converted.u_packed, term.left_words.numpy())
+                for role in ("scale_pre", "scale_mid", "scale_post"):
+                    _exact(prefix + ".residual_" + role, getattr(converted, role), getattr(term, role).float().numpy())
             expected_names = {
-                f"{mapped_base}.nq_v",
-                f"{mapped_base}.nq_u",
-                f"{mapped_base}.nq_scale_pre",
-                f"{mapped_base}.nq_scale_mid",
-                f"{mapped_base}.nq_scale_post",
+                f"{mapped_base}.{term_prefix}_{role}"
+                for term_prefix, _term in terms
+                for role in ("v", "u", "scale_pre", "scale_mid", "scale_post")
             }
             if sidecar.salient_idx is not None:
                 expected_names.update(
@@ -193,22 +208,23 @@ def main() -> None:
                 expected_names.add(f"{mapped_base}.nq_salient_scale")
             if set(capture.gguf_writer.tensors) != expected_names:
                 raise ValueError(f"modified llama.cpp GGUF tensor names differ: {prefix}")
-            for role, expected in (
-                ("nq_scale_pre", sidecar.scale_pre),
-                ("nq_scale_mid", sidecar.scale_mid),
-                ("nq_scale_post", sidecar.scale_post),
-            ):
-                name = f"{mapped_base}.{role}"
-                if capture.gguf_writer.raw_dtypes[name] != converter.gguf.GGMLQuantizationType.BF16:
-                    raise ValueError(f"modified llama.cpp converter did not emit BF16: {name}")
-                encoded = capture.gguf_writer.tensors[name]
-                if encoded.dtype != np.uint8 or encoded.nbytes != expected.size * 2:
-                    raise ValueError(f"modified llama.cpp converter emitted invalid BF16 storage: {name}")
-                decoded = converter.gguf.dequantize(
-                    encoded,
-                    converter.gguf.GGMLQuantizationType.BF16,
-                )
-                _exact(name, decoded, expected)
+            for term_prefix, converted in terms:
+                for role, expected in (
+                    (term_prefix + "_scale_pre", converted.scale_pre),
+                    (term_prefix + "_scale_mid", converted.scale_mid),
+                    (term_prefix + "_scale_post", converted.scale_post),
+                ):
+                    name = f"{mapped_base}.{role}"
+                    if capture.gguf_writer.raw_dtypes[name] != converter.gguf.GGMLQuantizationType.BF16:
+                        raise ValueError(f"modified llama.cpp converter did not emit BF16: {name}")
+                    encoded = capture.gguf_writer.tensors[name]
+                    if encoded.dtype != np.uint8 or encoded.nbytes != expected.size * 2:
+                        raise ValueError(f"modified llama.cpp converter emitted invalid BF16 storage: {name}")
+                    decoded = converter.gguf.dequantize(
+                        encoded,
+                        converter.gguf.GGMLQuantizationType.BF16,
+                    )
+                    _exact(name, decoded, expected)
             gguf_tensor_count += len(expected_names)
 
     if set(sidecars) != expected_prefixes:

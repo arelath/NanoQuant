@@ -135,7 +135,7 @@ def render_live_weight_error_report(
         state = "block final" if block_index in block_map else "layer commit"
         metrics = layer.final_reconstruction
         lines.append(
-            f"| {block_index + 1} | `{path}` | {state} | {layer.frozen_state.rank} | "
+            f"| {block_index + 1} | `{path}` | {state} | {layer.frozen_state.total_rank} | "
             f"{_number(metrics.export_weighted_normalized_error, 6)} | "
             f"{_number(metrics.raw_normalized_error, 6)} | {layer.actual_bit_cost.total} |"
         )
@@ -143,7 +143,7 @@ def render_live_weight_error_report(
         state = "block final" if block_index in block_map else "group commit"
         metrics = group.final_reconstruction
         lines.append(
-            f"| {block_index + 1} | `{name}` | {state} | {group.frozen_state.rank} | "
+            f"| {block_index + 1} | `{name}` | {state} | {group.frozen_state.total_rank} | "
             f"{_number(metrics.export_weighted_normalized_error, 6)} | "
             f"{_number(metrics.raw_normalized_error, 6)} | {group.actual_bit_cost.total} |"
         )
@@ -189,20 +189,20 @@ def render_reconstruction_tables(
         for group in block.shared_input_groups:
             metrics = group.final_reconstruction
             lines.append(
-                f"| {block.block.index} | `{group.name}` | {group.frozen_state.rank} | "
+                f"| {block.block.index} | `{group.name}` | {group.frozen_state.total_rank} | "
                 f"{_number(metrics.export_weighted_normalized_error, 6)} | "
                 f"{_number(metrics.raw_normalized_error, 6)} | {group.actual_bit_cost.total} |"
             )
             for member, member_metrics in group.member_reconstruction:
                 lines.append(
-                    f"| {block.block.index} | `↳ {member.path}` | {group.frozen_state.rank} | "
+                    f"| {block.block.index} | `↳ {member.path}` | {group.frozen_state.total_rank} | "
                     f"{_number(member_metrics.export_weighted_normalized_error, 6)} | "
                     f"{_number(member_metrics.raw_normalized_error, 6)} | — |"
                 )
         for layer in block.layers:
             metrics = layer.final_reconstruction
             lines.append(
-                f"| {block.block.index} | `{layer.layer.path}` | {layer.frozen_state.rank} | "
+                f"| {block.block.index} | `{layer.layer.path}` | {layer.frozen_state.total_rank} | "
                 f"{_number(metrics.export_weighted_normalized_error, 6)} | "
                 f"{_number(metrics.raw_normalized_error, 6)} | {layer.actual_bit_cost.total} |"
             )

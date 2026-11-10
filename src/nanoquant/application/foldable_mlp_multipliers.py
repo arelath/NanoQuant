@@ -59,6 +59,8 @@ class FoldableMultiplierLinear(nn.Module):
         output_family: str | None = None,
     ) -> None:
         super().__init__()
+        if base.residual_stages:
+            raise ValueError("foldable multiplier overlays do not support independent residual stages")
         if input_family is None and output_family is None:
             raise ValueError("foldable multiplier wrapper needs at least one axis")
         self.base = base

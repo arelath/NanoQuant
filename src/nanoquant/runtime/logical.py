@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import torch
 
 from nanoquant.runtime.backend import QuantizedLinearSpec
+from nanoquant.runtime.residual import validate_stage_spec
 
 _TORCH_DTYPES = {
     "float16": torch.float16,
@@ -51,9 +52,14 @@ class LogicalLayerState:
     outlier_scales: torch.Tensor | None = None
     patch_left: torch.Tensor | None = None
     patch_right: torch.Tensor | None = None
+    residual_stages: tuple[LogicalLayerState, ...] = ()
 
     def __post_init__(self) -> None:
         spec = self.spec
+        if len(self.residual_stages) != len(spec.residual_ranks):
+            raise ValueError("logical residual stage inventory differs from its specification")
+        for index, stage in enumerate(self.residual_stages):
+            validate_stage_spec(spec, stage.spec, index)
         expected_shapes = {
             "left_binary": (spec.out_features, spec.rank),
             "right_binary": (spec.rank, spec.in_features),

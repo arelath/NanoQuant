@@ -428,6 +428,7 @@ def resident_request_from_config(
         product_codebook=config.factorization.product_codebook,
         outliers=config.outliers,
         scale_fit=config.factorization.scale_fit,
+        residual_stages=config.factorization.residual_stages.enabled,
         bias_correction=config.factorization.bias_correction,
         low_rank_patch=config.factorization.low_rank_patch,
         covariance_refinement=(

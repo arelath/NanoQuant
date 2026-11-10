@@ -48,6 +48,7 @@ class NanoQuantSidecar:
     salient_weight: np.ndarray | None = None
     salient_scale: np.ndarray | None = None
     member_rows: tuple[int, int, int] | None = None
+    residual_stages: tuple[NanoQuantSidecar, ...] = ()
 
 
 @dataclass
@@ -355,6 +356,30 @@ def build_sidecars(state: dict[str, torch.Tensor]) -> dict[str, NanoQuantSidecar
             member_rows=member_rows,
         )
 
+    for prefix in tuple(sidecars):
+        count_t = state.get(prefix + ".residual_stage_count")
+        if count_t is None:
+            continue
+        if count_t.numel() != 1 or count_t.dtype not in (torch.int32, torch.int64):
+            raise ValueError(f"{prefix}: residual_stage_count must be one integer")
+        count = int(count_t.item())
+        if count <= 0:
+            raise ValueError(f"{prefix}: residual stage count must be positive")
+        parent = sidecars[prefix]
+        stages = []
+        for index in range(count):
+            stage_prefix = f"{prefix}.residual.{index}"
+            if stage_prefix not in sidecars:
+                raise ValueError(f"{stage_prefix}: missing residual factor group")
+            stage = sidecars.pop(stage_prefix)
+            if (stage.scale_pre.size != parent.scale_pre.size or stage.scale_post.size != parent.scale_post.size
+                    or stage.salient_idx is not None):
+                raise ValueError(f"{stage_prefix}: residual dimensions or side paths differ")
+            stage.member_rows = parent.member_rows
+            stages.append(stage)
+        parent.residual_stages = tuple(stages)
+    if any(".residual." in prefix for prefix in sidecars):
+        raise ValueError("orphan or uncharged residual factor groups in checkpoint")
     if not sidecars:
         raise ValueError("No NanoQuant sidecars found in checkpoint")
     return sidecars
@@ -463,15 +488,26 @@ def maybe_permute_output_rows(model: Any, hf_weight_name: str, sidecar: NanoQuan
     )
 
 
-def write_sidecar(model: Any, base_name: str, hf_weight_name: str, sidecar: NanoQuantSidecar) -> None:
+def write_sidecar(
+    model: Any, base_name: str, hf_weight_name: str, sidecar: NanoQuantSidecar, term_suffix: str = "nq",
+) -> None:
+    residual_stages = sidecar.residual_stages
+    if residual_stages and term_suffix == "nq":
+        # Older native loaders must fail on the absent primary .nq_v contract,
+        # even when their optional partial-load mode ignores unknown tensors.
+        term_suffix = "nq_stage0"
     sidecar = maybe_permute_output_rows(model, hf_weight_name, sidecar)
     writer = model.gguf_writer
 
-    writer.add_tensor(base_name + ".nq_v", sidecar.v_packed)
-    writer.add_tensor(base_name + ".nq_u", sidecar.u_packed)
-    add_bfloat16_tensor(writer, base_name + ".nq_scale_pre", sidecar.scale_pre)
-    add_bfloat16_tensor(writer, base_name + ".nq_scale_mid", sidecar.scale_mid)
-    add_bfloat16_tensor(writer, base_name + ".nq_scale_post", sidecar.scale_post)
+    writer.add_tensor(base_name + f".{term_suffix}_v", sidecar.v_packed)
+    writer.add_tensor(base_name + f".{term_suffix}_u", sidecar.u_packed)
+    add_bfloat16_tensor(writer, base_name + f".{term_suffix}_scale_pre", sidecar.scale_pre)
+    add_bfloat16_tensor(writer, base_name + f".{term_suffix}_scale_mid", sidecar.scale_mid)
+    add_bfloat16_tensor(writer, base_name + f".{term_suffix}_scale_post", sidecar.scale_post)
+    if residual_stages:
+        writer.add_uint32(f"quantization.nanoquant.{base_name}.residual_stage_count", len(residual_stages))
+        for index, stage in enumerate(residual_stages):
+            write_sidecar(model, base_name, hf_weight_name, stage, f"nq_residual_{index}")
 
     outliers = 0
     if sidecar.salient_idx is not None and sidecar.salient_weight is not None:
@@ -583,7 +619,10 @@ def install_nanoquant_hooks(
     def prepare_metadata(vocab_only: bool):
         original_prepare_metadata(vocab_only)
         has_outliers = any(sidecar.salient_idx is not None for sidecar in sidecars.values())
-        model.gguf_writer.add_uint32("quantization.nanoquant.version", 2 if has_outliers else 1)
+        has_residual = any(sidecar.residual_stages for sidecar in sidecars.values())
+        model.gguf_writer.add_uint32("quantization.nanoquant.version", 3 if has_residual else 2 if has_outliers else 1)
+        if has_residual:
+            model.gguf_writer.add_string("quantization.nanoquant.stage_format", "additive_binary_v1")
         model.gguf_writer.add_string("quantization.nanoquant.bit_order", "lsb_first")
         model.gguf_writer.add_string("quantization.nanoquant.positive_bit", "0")
         model.gguf_writer.add_uint32("quantization.nanoquant.tensor_count", len(written))

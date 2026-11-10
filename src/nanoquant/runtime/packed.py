@@ -9,6 +9,7 @@ import torch
 from nanoquant.runtime.backend import QuantizedLinearSpec
 from nanoquant.runtime.constants import PackedLayout
 from nanoquant.runtime.logical import LogicalLayerState, canonical_torch_dtype, parse_torch_dtype
+from nanoquant.runtime.residual import validate_stage_spec
 
 PACKED_LAYOUT_VERSION = PackedLayout.LLAMA_CPP_I32_LSB_V1.value
 PACKED_WORD_BITS = 32
@@ -21,7 +22,7 @@ PACKED_REFERENCE_CUDA_SHA256 = (
     "5c87336c2b6b8fb33805c6ee6a8752d4bd364beed63fd4cca03c2b36be966619"
 )
 PACKED_REFERENCE_CONVERTER_SHA256 = (
-    "c2e1fd064bbd46f38e9e3c5f739865d198ca75bd0bb9db16f72530d378d11304"
+    "31514ccfaba68fb9a8e4ae952de4c17a9933ac7540d2c0cf040f11695046d53d"
 )
 PACKED_REFERENCE_DOCUMENTATION_SHA256 = (
     "12c46863a480a04b1ba449bb7bcb2f637419b677678b60f93522c531bd3f9ac8"
@@ -77,8 +78,9 @@ class PackedReferenceProvenance:
             PACKED_REFERENCE_MODEL_LOADER_SHA256,
             PACKED_REFERENCE_CPU_SHA256,
         )
-        if actual != expected:
-            raise ValueError("packed layout reference provenance differs from schema 1")
+        legacy = (*expected[:4], "c2e1fd064bbd46f38e9e3c5f739865d198ca75bd0bb9db16f72530d378d11304", *expected[5:])
+        if actual not in (expected, legacy):
+            raise ValueError("packed layout reference provenance differs from the supported references")
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,8 +134,6 @@ class PackedLayoutMetadata:
             raise ValueError("packed GGUF sidecar names differ from the reference format")
         if self.bias_storage != "separate-additive-tensor":
             raise ValueError("packed bias storage differs from the runtime")
-        if self.reference != PackedReferenceProvenance():
-            raise ValueError("packed layout reference provenance differs from the runtime")
 
 
 def packed_word_count(columns: int) -> int:
@@ -242,8 +242,13 @@ class PackedLayerState:
     outlier_scales: torch.Tensor | None = None
     patch_left: torch.Tensor | None = None
     patch_right: torch.Tensor | None = None
+    residual_stages: tuple[PackedLayerState, ...] = ()
 
     def __post_init__(self) -> None:
+        if len(self.residual_stages) != len(self.spec.residual_ranks):
+            raise ValueError("packed residual stage inventory differs from its specification")
+        for index, stage in enumerate(self.residual_stages):
+            validate_stage_spec(self.spec, stage.spec, index)
         if self.layout != PACKED_LAYOUT_VERSION:
             raise ValueError(f"unsupported packed layer layout: {self.layout}")
         _validate_packed_matrix(
@@ -379,6 +384,7 @@ class PackedLayerState:
             self.outlier_scales,
             self.patch_left,
             self.patch_right,
+            tuple(stage.to_logical() for stage in self.residual_stages),
         )
 
 
@@ -408,4 +414,5 @@ def pack_logical_layer(state: LogicalLayerState) -> PackedLayerState:
         _owned(state.outlier_scales),
         _owned(state.patch_left),
         _owned(state.patch_right),
+        tuple(pack_logical_layer(stage) for stage in state.residual_stages),
     )

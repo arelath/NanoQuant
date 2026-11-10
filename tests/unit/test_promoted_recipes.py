@@ -67,6 +67,15 @@ def test_numbered_launchers_own_their_concrete_definitions() -> None:
         51: Path("Docs/Experiments/051-four-by-four-exhaustive-sign-coverage.md"),
         52: Path("Docs/Experiments/052-bounded-direct-binary-factor-search.md"),
         53: Path("Docs/Experiments/053-direct-binary-search-held-out-gate.md"),
+        61: Path("Docs/114-experiment070-residual-rank-replacement.md"),
+        62: Path("Docs/114-experiment070-residual-rank-replacement.md"),
+        63: Path("Docs/114-experiment070-residual-rank-replacement.md"),
+        64: Path("Docs/114-experiment070-residual-rank-replacement.md"),
+        65: Path("Docs/Experiments/065-late-structured-sidecar-refit.md"),
+        66: Path("Docs/101-hour-binary-factor-fit.md"),
+        67: Path("Docs/102-hour-basin-search.md"),
+        68: Path("Docs/104-admm-perturbation-results.md"),
+        69: Path("Docs/107-downloaded-gemma-iq2-quality-profile.md"),
     }
 
     assert launcher_numbers == sorted(set(launcher_numbers))

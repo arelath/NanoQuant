@@ -515,6 +515,7 @@ class TrainableFactors:
     left_binary: TensorRef
     right_binary: TensorRef
     scales: ScaleState
+    residual_stages: tuple[TrainableFactors, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -583,6 +584,8 @@ class FactorizationResult:
     wall_seconds: float
     peak_workspace_bytes: int
     product_codebook: ProductCodebookFactorState | None = None
+    stage_factorizations: tuple[FactorizationResult, ...] = ()
+    stage_scale_fits: tuple[ScaleFitResult | None, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -682,6 +685,23 @@ class FrozenOutlierState:
 
 
 @dataclass(frozen=True, slots=True)
+class FrozenResidualFactorState:
+    rank: int
+    left_binary: TensorRef
+    right_binary: TensorRef
+    scales: ScaleState
+
+    def __post_init__(self) -> None:
+        left, right = self.left_binary.spec.shape, self.right_binary.spec.shape
+        if self.rank <= 0 or len(left) != 2 or len(right) != 2 or left[1] != self.rank or right[0] != self.rank:
+            raise ValueError("residual factor rank differs from its factor shapes")
+        if self.scales.mid is None or self.scales.mid.spec.shape != (self.rank,):
+            raise ValueError("residual factor requires a matching component-scale vector")
+        if self.scales.pre.spec.shape != (right[1],) or self.scales.post.spec.shape != (left[0],):
+            raise ValueError("residual factor outer scales differ from its matrix dimensions")
+
+
+@dataclass(frozen=True, slots=True)
 class FrozenNanoQuantState:
     layer: LayerId
     rank: int
@@ -694,12 +714,23 @@ class FrozenNanoQuantState:
     patch_left: TensorRef | None = None
     patch_right: TensorRef | None = None
     product_codebook: ProductCodebookFactorState | None = None
+    residual_stages: tuple[FrozenResidualFactorState, ...] = ()
+
+    @property
+    def total_rank(self) -> int:
+        return self.rank + sum(stage.rank for stage in self.residual_stages)
 
     def __post_init__(self) -> None:
+        if bool(self.residual_stages) != (self.logical_format == "nanoquant-residual-v2"):
+            raise ValueError("frozen residual stages require their explicit logical format")
         if (self.patch_left is None) != (self.patch_right is None):
             raise ValueError("frozen low-rank patch tensors must be paired")
         if self.product_codebook is not None and self.product_codebook.right_free_rows >= self.rank:
             raise ValueError("frozen product-codebook free rows must leave coded rows")
+        if any(stage.left_binary.spec.shape[0] != self.left_binary.spec.shape[0]
+               or stage.right_binary.spec.shape[1] != self.right_binary.spec.shape[1]
+               for stage in self.residual_stages):
+            raise ValueError("frozen residual stage dimensions differ from the owning layer")
 
 
 @dataclass(frozen=True, slots=True)
@@ -725,10 +756,21 @@ class FrozenSharedInputGroupState:
     outliers: FrozenOutlierState | None
     bias: TensorRef | None
     logical_format: str
+    residual_stages: tuple[FrozenResidualFactorState, ...] = ()
+
+    @property
+    def total_rank(self) -> int:
+        return self.rank + sum(stage.rank for stage in self.residual_stages)
 
     def __post_init__(self) -> None:
+        if bool(self.residual_stages) != (self.logical_format == "nanoquant-residual-v2"):
+            raise ValueError("frozen shared residual stages require their explicit logical format")
         if len(self.members) < 2 or any(member.layer.block != self.block for member in self.members):
             raise ValueError("frozen shared-input group has invalid members")
+        if any(stage.left_binary.spec.shape[0] != self.left_binary.spec.shape[0]
+               or stage.right_binary.spec.shape[1] != self.right_binary.spec.shape[1]
+               for stage in self.residual_stages):
+            raise ValueError("frozen residual stage dimensions differ from the shared owner")
         cursor = 0
         for member in self.members:
             if member.row_start != cursor:

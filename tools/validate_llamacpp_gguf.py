@@ -12,6 +12,7 @@ from typing import Any, cast
 import numpy as np
 import torch
 
+from nanoquant.infrastructure.io_utils import hash_canonical_text_file
 from nanoquant.runtime import gemma_gguf_tensor_prefix, open_packed_artifact
 
 
@@ -46,7 +47,7 @@ def main() -> None:
 
     packed = open_packed_artifact(args.packed_artifact, verify_hashes=True)
     converter = args.reference_root / "convert_nanoquant_to_gguf.py"
-    if _hash_file(converter) != packed.manifest.layout.reference.converter_sha256:
+    if hash_canonical_text_file(converter) != packed.manifest.layout.reference.converter_sha256:
         raise ValueError("modified llama.cpp converter hash differs from packed provenance")
     sys.path.insert(0, str(args.reference_root / "gguf-py"))
     import gguf  # type: ignore[import-not-found]  # noqa: PLC0415
@@ -56,23 +57,19 @@ def main() -> None:
     if len(tensors) != len(reader.tensors):
         raise ValueError("GGUF tensor names are duplicated")
 
-    metadata = {
-        key: reader.fields[key].contents()
-        for key in (
-            "quantization.nanoquant.version",
-            "quantization.nanoquant.bit_order",
-            "quantization.nanoquant.positive_bit",
-            "quantization.nanoquant.tensor_count",
-            "quantization.nanoquant.outlier_format",
-        )
-    }
+    has_residual = any(layer.spec.residual_ranks for block in packed.manifest.blocks for layer in block.layers)
+    has_outliers = any(layer.spec.outlier_count for block in packed.manifest.blocks for layer in block.layers)
     expected_metadata = {
-        "quantization.nanoquant.version": 2,
+        "quantization.nanoquant.version": 3 if has_residual else 2 if has_outliers else 1,
         "quantization.nanoquant.bit_order": "lsb_first",
         "quantization.nanoquant.positive_bit": "0",
         "quantization.nanoquant.tensor_count": packed.manifest.layer_count,
-        "quantization.nanoquant.outlier_format": "column_side_path",
     }
+    if has_outliers:
+        expected_metadata["quantization.nanoquant.outlier_format"] = "column_side_path"
+    if has_residual:
+        expected_metadata["quantization.nanoquant.stage_format"] = "additive_binary_v1"
+    metadata = {key: reader.fields[key].contents() for key in expected_metadata}
     if metadata != expected_metadata:
         raise ValueError(f"GGUF NanoQuant metadata differs: {metadata}")
 
@@ -83,13 +80,24 @@ def main() -> None:
         for layer in block.layers:
             state = packed.load_layer(layer.spec.name)
             prefix = gemma_gguf_tensor_prefix(layer.spec.name)
-            comparisons: list[tuple[str, np.ndarray]] = [
-                ("nq_v", _numpy(state.right_words)),
-                ("nq_u", _numpy(state.left_words)),
-                ("nq_scale_pre", _numpy(state.scale_pre.float())),
-                ("nq_scale_mid", _numpy(state.scale_mid.float())),
-                ("nq_scale_post", _numpy(state.scale_post.float())),
+            terms = [("nq_stage0" if state.residual_stages else "nq", state)] + [
+                (f"nq_residual_{index}", stage) for index, stage in enumerate(state.residual_stages)
             ]
+            comparisons: list[tuple[str, np.ndarray]] = []
+            for term_prefix, term in terms:
+                comparisons.extend(
+                    [
+                        (term_prefix + "_v", _numpy(term.right_words)),
+                        (term_prefix + "_u", _numpy(term.left_words)),
+                        (term_prefix + "_scale_pre", _numpy(term.scale_pre.to(torch.bfloat16).float())),
+                        (term_prefix + "_scale_mid", _numpy(term.scale_mid.to(torch.bfloat16).float())),
+                        (term_prefix + "_scale_post", _numpy(term.scale_post.to(torch.bfloat16).float())),
+                    ]
+                )
+            if state.residual_stages:
+                key = f"quantization.nanoquant.{prefix}.residual_stage_count"
+                if reader.fields[key].contents() != len(state.residual_stages):
+                    raise ValueError(f"GGUF residual stage count differs: {prefix}")
             if state.outlier_indices is not None and state.outlier_values is not None:
                 expected_values = (
                     state.outlier_values
@@ -103,14 +111,15 @@ def main() -> None:
                     )
                 )
             if state.outlier_scales is not None:
-                comparisons.append(
-                    ("nq_salient_scale", _numpy(state.outlier_scales.float()))
-                )
+                comparisons.append(("nq_salient_scale", _numpy(state.outlier_scales.float())))
             for suffix, expected in comparisons:
                 name = f"{prefix}.{suffix}"
                 expected_names.add(name)
                 try:
-                    actual = cast(Any, tensors[name]).data
+                    tensor = cast(Any, tensors[name])
+                    actual = tensor.data
+                    if tensor.tensor_type == gguf.GGMLQuantizationType.BF16:
+                        actual = gguf.dequantize(actual, tensor.tensor_type)
                 except KeyError as error:
                     raise ValueError(f"GGUF omitted NanoQuant tensor: {name}") from error
                 element_count += _equal(name, expected, actual)

@@ -1,0 +1,6 @@
+cmake_minimum_required(VERSION 3.20)
+project(nanoquant_residual_probe LANGUAGES CXX)
+add_executable(nanoquant-residual-probe probe.cpp)
+target_compile_features(nanoquant-residual-probe PRIVATE cxx_std_17)
+target_include_directories(nanoquant-residual-probe PRIVATE "${LLAMA_ROOT}/include" "${LLAMA_ROOT}/ggml/include")
+target_link_libraries(nanoquant-residual-probe PRIVATE "${LLAMA_BUILD}/src/Release/llama.lib")

@@ -135,7 +135,13 @@ def load_packed_model(
                     None if state.outlier_scales is None else state.outlier_scales.to(device),
                     None if state.patch_left is None else state.patch_left.to(device),
                     None if state.patch_right is None else state.patch_right.to(device),
-                ).to(block_dtype)
+                )
+                for stage in state.residual_stages:
+                    weight = weight + functional_dense_reconstruction(
+                        stage.left_binary.to(device), stage.right_binary.to(device), stage.scale_pre.to(device),
+                        stage.scale_mid.to(device), stage.scale_post.to(device),
+                    )
+                weight = weight.to(block_dtype)
                 bias = None if state.bias is None else state.bias.to(device=device, dtype=block_dtype)
                 module: FrozenReferenceLinear = DenseWeightReferenceLinear(weight, bias)
             else:
@@ -151,6 +157,13 @@ def load_packed_model(
                     None if state.outlier_scales is None else state.outlier_scales.to(device),
                     None if state.patch_left is None else state.patch_left.to(device=device, dtype=block_dtype),
                     None if state.patch_right is None else state.patch_right.to(device=device, dtype=block_dtype),
+                    residual_stages=tuple(FactorizedReferenceLinear(
+                        stage.left_binary.to(device=device, dtype=block_dtype),
+                        stage.right_binary.to(device=device, dtype=block_dtype),
+                        stage.scale_pre.to(device=device, dtype=block_dtype),
+                        stage.scale_mid.to(device=device, dtype=block_dtype),
+                        stage.scale_post.to(device=device, dtype=block_dtype),
+                    ) for stage in state.residual_stages),
                 )
             prefix = f"blocks.{packed_block.index}."
             relative_name = entry.spec.name.split(prefix, 1)[1]

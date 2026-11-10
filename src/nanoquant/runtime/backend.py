@@ -43,12 +43,19 @@ class QuantizedLinearSpec:
     patch_rank: int = 0
     patch_value_dtype: str | None = None
     bias_dtype: str | None = None
+    residual_ranks: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.name or self.name.startswith("/") or ".." in self.name.split("."):
             raise ValueError("runtime layer name must be a canonical dotted path")
         if self.in_features <= 0 or self.out_features <= 0 or self.rank <= 0:
             raise ValueError("runtime linear dimensions and rank must be positive")
+        if any(rank <= 0 for rank in self.residual_ranks):
+            raise ValueError("runtime residual ranks must be positive")
+        if bool(self.residual_ranks) != (self.logical_format == "nanoquant-residual-v2"):
+            raise ValueError("runtime residual stages require the explicit v2 format")
+        if self.residual_ranks and (self.outlier_count or self.patch_rank):
+            raise ValueError("runtime residual stages cannot include outlier columns or floating patches")
         if self.outlier_count < 0 or self.outlier_count > self.in_features:
             raise ValueError("runtime outlier count is outside the input dimension")
         if (self.outlier_count == 0) != (self.outlier_value_dtype is None):

@@ -249,11 +249,31 @@ def validate(config: RunConfig, phase: ValidationPhase = ValidationPhase.PRE_RES
         "floor must not exceed ceiling",
     )
     require(
-        math.isfinite(config.allocation.bounds.overcomplete_rank_ceiling_fraction)
-        and config.allocation.bounds.overcomplete_rank_ceiling_fraction >= 1,
+        config.allocation.bounds.overcomplete_rank_ceiling_fraction is None
+        or (math.isfinite(config.allocation.bounds.overcomplete_rank_ceiling_fraction)
+            and config.allocation.bounds.overcomplete_rank_ceiling_fraction >= 1),
         "CFG132",
         "allocation.bounds.overcomplete_rank_ceiling_fraction",
-        "must be finite and at least one",
+        "must be null or finite and at least one",
+    )
+    require(
+        config.allocation.bounds.overcomplete_rank_ceiling_fraction is not None
+        or config.factorization.residual_stages.enabled,
+        "CFG180", "allocation.bounds.overcomplete_rank_ceiling_fraction",
+        "an uncapped total rank requires independent residual stages",
+    )
+    require(
+        not config.factorization.residual_stages.enabled or (
+            config.outliers.fraction == 0
+            and not config.factorization.product_codebook.enabled
+            and not config.factorization.binary_search.enabled
+            and not config.factorization.bias_correction.enabled
+            and not config.factorization.low_rank_patch.enabled
+            and config.calibration.objective.kind is not ObjectiveKind.DENSE_HESSIAN
+            and not config.block_tuning.post_refit_covariance_refinement.enabled
+        ),
+        "CFG181", "factorization.residual_stages",
+        "independent residual stages require zero outlier columns and disabled optional factor corrections",
     )
     require(
         config.allocation.retry.outlier_count_increment_at_rank_cap >= 0,

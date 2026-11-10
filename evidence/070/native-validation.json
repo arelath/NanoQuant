@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "native_base_commit": "2927569f318311aded148d76be6b1109664066f5",
+  "native_branch": "nanoquants",
+  "patch_sha256": "12e25582ca4d956e75e14958a1371100afc4eac33a6cc05dfc6534d6b395156b",
+  "source_hashes": {
+    "convert_nanoquant_to_gguf.py": "7b3919b3f8a8b7f04308599252a083702d518b95212d155ed282991267a5ed68",
+    "src/llama-model.h": "3599a166574a31a04d2e209c8be38035b32ce86fe4149180501d3473537256d1",
+    "src/llama-model.cpp": "3b80f39534fbf80f04adfc82ee34f82fcaceeaa9b9b7fc16f9c10d44ea4602b6",
+    "src/llama-model-loader.cpp": "d2d515e7a7bef9165b8b1218199ccce13bf880c54c9dddcc759da8b239452bab",
+    "src/llama-graph.cpp": "a3c1a5fbc80e65b36bc94200b930d50d0723ba3726c65245aa610cc7c01b8cb5"
+  },
+  "cpu_library_sha256": "45ea6f170c65ec40c6193d13bd569ade199e371ef2069368aab49464486fbe86",
+  "old_loader_rejected_v3": true,
+  "cpu_canary": {
+    "schema_version": 1,
+    "fixture": "synthetic-one-block-gemma3",
+    "gguf_sha256": "189c75f889bd07cb1e03388e739103b203ead85374d68611acb9178d6c6307a9",
+    "native_library_sha256": "45ea6f170c65ec40c6193d13bd569ade199e371ef2069368aab49464486fbe86",
+    "residual_ranks": [
+      64,
+      32
+    ],
+    "native_vs_torch_rmse": 0.0011580511927604675,
+    "native_vs_omitted_residual_rmse": 0.06357598304748535,
+    "maximum_absolute_error": 0.005749881267547607,
+    "passed": true
+  },
+  "native_commit_created": false
+}

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from .models import AttemptSummary, BitCost, RetryDecision
+from .residual_factorization import residual_stage_ranks
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,6 +30,8 @@ class ReconstructionAllocationUnit:
     segments: tuple[RankResponseSegment, ...]
     fixed_bits: int = 0
     maximum_rank: int | None = None
+    residual_stages: bool = False
+    stage_rank_alignment: int = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,6 +92,11 @@ def predicted_squared_error(unit: ReconstructionAllocationUnit, rank: int) -> fl
     return unit.baseline_squared_error * math.exp(-2.0 * integral)
 
 
+def _unit_factor_cost(unit: ReconstructionAllocationUnit, rank: int) -> BitCost:
+    return factor_bit_cost(unit.out_features, unit.in_features, rank,
+                           residual_stages=unit.residual_stages, rank_alignment=unit.stage_rank_alignment)
+
+
 def allocate_reconstruction_rank_budget(
     units: tuple[ReconstructionAllocationUnit, ...],
     target_bits: int,
@@ -106,7 +115,7 @@ def allocate_reconstruction_rank_budget(
     if not 0 <= sensitivity_strength <= 1:
         raise ValueError("sensitivity strength must be in [0, 1]")
     baseline_weights = [
-        factor_bit_cost(unit.out_features, unit.in_features, unit.baseline_rank).total for unit in units
+        _unit_factor_cost(unit, unit.baseline_rank).total for unit in units
     ]
     if any(unit.baseline_squared_error <= 0 or unit.sensitivity <= 0 for unit in units):
         raise ValueError("reconstruction evidence must contain positive errors and sensitivities")
@@ -137,7 +146,7 @@ def allocate_reconstruction_rank_budget(
         ranks[unit.unit_id] = floor_rank
 
     def cost(unit: ReconstructionAllocationUnit, rank: int) -> int:
-        return factor_bit_cost(unit.out_features, unit.in_features, rank).total + unit.fixed_bits
+        return _unit_factor_cost(unit, rank).total + unit.fixed_bits
 
     spent = sum(cost(unit, ranks[unit.unit_id]) for unit in units)
     if spent > target_bits:
@@ -227,7 +236,7 @@ def apply_reconstruction_rank_trust_region(
         raise ValueError("rank trust inventories must exactly cover allocation units")
 
     baseline_weights = [
-        factor_bit_cost(unit.out_features, unit.in_features, unit.baseline_rank).total
+        _unit_factor_cost(unit, unit.baseline_rank).total
         for unit in units
     ]
     log_mean = sum(
@@ -272,7 +281,7 @@ def apply_reconstruction_rank_trust_region(
         ranks[unit.unit_id] = min(cap_rank, max(floors[unit.unit_id], rank))
 
     def cost(unit: ReconstructionAllocationUnit, rank: int) -> int:
-        return factor_bit_cost(unit.out_features, unit.in_features, rank).total + unit.fixed_bits
+        return _unit_factor_cost(unit, rank).total + unit.fixed_bits
 
     spent = sum(cost(unit, ranks[unit.unit_id]) for unit in units)
     while spent > target_bits:
@@ -328,10 +337,17 @@ def apply_reconstruction_rank_trust_region(
 
 
 def factor_bit_cost(
-    out_features: int, in_features: int, rank: int, *, scale_bits: int = 16, rank_alignment: int = 1
+    out_features: int, in_features: int, rank: int, *, scale_bits: int = 16, rank_alignment: int = 1,
+    residual_stages: bool = False,
 ) -> BitCost:
     if min(out_features, in_features, rank) < 0 or rank_alignment <= 0:
         raise ValueError("dimensions/rank must be non-negative and alignment positive")
+    if residual_stages and rank:
+        cost = BitCost()
+        for stage_rank in residual_stage_ranks(out_features, in_features, rank, multiple=rank_alignment):
+            cost += factor_bit_cost(out_features, in_features, stage_rank,
+                                    scale_bits=scale_bits, rank_alignment=rank_alignment)
+        return cost
     padded_rank = math.ceil(rank / rank_alignment) * rank_alignment
     logical_binary = rank * (out_features + in_features)
     stored_binary = padded_rank * (out_features + in_features)
@@ -471,6 +487,7 @@ def decide_retry(
     outlier_count_increment_at_rank_cap: int = 0,
     hard_outlier_cap: int = 0,
     cost_per_outlier: int = 0,
+    rank_cost: Callable[[int], int] | None = None,
 ) -> RetryDecision:
     if not attempts:
         raise ValueError("at least one attempt is required")
@@ -509,7 +526,8 @@ def decide_retry(
                 next_outlier_count,
             )
         return RetryDecision("accept_best", best_index, None, 0, "rank cap reached")
-    extra = (proposed - current.rank) * cost_per_rank
+    extra = ((proposed - current.rank) * cost_per_rank if rank_cost is None
+             else rank_cost(proposed) - rank_cost(current.rank))
     if extra > available_extra_bits:
         return RetryDecision("accept_best", best_index, None, 0, "extra-bit budget exhausted")
     return RetryDecision("retry", None, proposed, extra, "reconstruction threshold exceeded")

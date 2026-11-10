@@ -187,6 +187,8 @@ class MixedVLayerState:
     patch_right: torch.Tensor | None = None
 
     def __post_init__(self) -> None:
+        if self.spec.residual_ranks:
+            raise ValueError("mixed-V coding does not support independent residual stages")
         if self.format != MIXED_V_FORMAT_VERSION:
             raise ValueError(f"unsupported mixed-V format: {self.format}")
         if self.free_rows <= 0 or self.free_rows >= self.spec.rank:
