@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "started_at": "2026-11-10T13:42:03-08:00",
+  "controller_launcher_pid": 107320,
+  "controller_python_pid": 22736,
+  "command": ".venv\\Scripts\\python.exe tools\\run_experiment070_campaign.py --maximum-slices 64",
+  "source_commits": [
+    "64f13c2",
+    "1c8e4f5"
+  ],
+  "initial_control_blocks": 1,
+  "initial_candidate_blocks": 0,
+  "resume_observed_block": 1,
+  "canary_audit": "control-block0-validation.json",
+  "canary_stage_audit": "control-block0-stage-audit.json",
+  "quality_complete": false
+}

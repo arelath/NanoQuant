@@ -28,7 +28,7 @@ Charge the exact sum of all stage factor costs, including all scale vectors and 
 - [x] Compose native residual outputs using existing NanoQuant operations and addition; preserve single-stage fast paths.
 - [x] Add 070 launcher, matched D2 control/profile campaign and exact recipe-difference tests.
 - [x] Pass focused numerical, accounting, persistence, architecture, runtime/export and resume tests; run the full test/lint/type gates.
-- [ ] Run a real block-bounded CUDA canary with fresh run-owned calibration and validate its commits.
+- [x] Run a real block-bounded CUDA canary with fresh run-owned calibration and validate its commits.
 - [ ] Complete the full compression through `execute_complete_compression`, fresh artifact validation, GGUF export and the matched quality protocol.
 - [ ] Compare effective/stored BPW, per-task results, WikiText perplexity, memory and time against retained 060, documenting any execution-protocol differences.
 
@@ -48,7 +48,7 @@ Runtime 0.2.0 uses an explicit `nanoquant-residual-v2` logical specification wit
 
 Four real CUDA kernel checks pass for FP32/BF16 inputs at one and seven tokens. A synthetic one-block Gemma GGUF containing independent ranks 64 and 32 passes native CPU execution: full Python/native logit RMSE 0.00115805, maximum absolute difference 0.00574988, versus RMSE 0.06357598 when the residual term is omitted. Checkpoint, converter and GGUF tensor inventories and values validate exactly. These are correctness fixtures, not model-quality evidence. Compact receipts and a reproducible native source patch are in `evidence/070`; the actual native base is `2927569f318311aded148d76be6b1109664066f5`, separate from the historical per-term word-layout reference. No native-repository commit was made.
 
-The first real control process started on 2026-11-10 with fresh run-owned calibration and will interrupt after one durable block. Its logs are `evidence/070/canary-control-block.*.log`. Validate that block before continuing with `tools/run_experiment070_campaign.py`. The full campaign has no quality result yet; the retained 060 values above remain the comparison baseline.
+The first real control process completed its one-block canary on 2026-11-10 using fresh run-owned calibration. Its logs are `evidence/070/canary-control-block.*.log`. After the fresh hash and bit-accounting audits passed, `tools/run_experiment070_campaign.py` resumed the full campaign at 13:42 Pacific. Resume was observed training block 1 using the retained calibration and block-0 checkpoint. Controller logs are `evidence/070/campaign.*.log`; each process has separate `campaign-slice-NNN.*.log` files. The full campaign has no quality result yet; the retained 060 values above remain the comparison baseline.
 
 The final pre-run CPU suite passed 1,549 tests (53 CUDA/opt-in tests deselected); the four residual CUDA tests were run separately and passed. Ruff and mypy passed (220 checked source files). The broader cold native CUDA rebuild was stopped after the native CPU and Python packed-CUDA correctness gates passed, keeping resources on the requested real-model campaign; native GPU model execution is not claimed by this canary.
 
