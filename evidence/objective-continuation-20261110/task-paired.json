@@ -1,0 +1,49 @@
+{
+  "paired": {
+    "full_kl_hidden_minus_top_k": {
+      "confidence": 0.95,
+      "lower_delta_pp": -1.5,
+      "method": "paired correctness bootstrap within each task; equal task weighting",
+      "point_delta_pp": -0.25,
+      "resamples": 10000,
+      "task_count": 6,
+      "upper_delta_pp": 1.0
+    },
+    "full_kl_hidden_minus_untreated060": {
+      "confidence": 0.95,
+      "lower_delta_pp": -1.5833333333333335,
+      "method": "paired correctness bootstrap within each task; equal task weighting",
+      "point_delta_pp": -0.16666666666666677,
+      "resamples": 10000,
+      "task_count": 6,
+      "upper_delta_pp": 1.25
+    },
+    "full_kl_minus_top_k": {
+      "confidence": 0.95,
+      "lower_delta_pp": -1.5,
+      "method": "paired correctness bootstrap within each task; equal task weighting",
+      "point_delta_pp": -0.25,
+      "resamples": 10000,
+      "task_count": 6,
+      "upper_delta_pp": 1.0
+    },
+    "full_kl_minus_untreated060": {
+      "confidence": 0.95,
+      "lower_delta_pp": -1.5833333333333335,
+      "method": "paired correctness bootstrap within each task; equal task weighting",
+      "point_delta_pp": -0.16666666666666669,
+      "resamples": 10000,
+      "task_count": 6,
+      "upper_delta_pp": 1.1666666666666667
+    },
+    "top_k_minus_untreated060": {
+      "confidence": 0.95,
+      "lower_delta_pp": -1.0,
+      "method": "paired correctness bootstrap within each task; equal task weighting",
+      "point_delta_pp": 0.08333333333333331,
+      "resamples": 10000,
+      "task_count": 6,
+      "upper_delta_pp": 1.1666666666666667
+    }
+  }
+}

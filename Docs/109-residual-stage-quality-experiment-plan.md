@@ -31,8 +31,8 @@ No packed-runtime changes are needed for the dense screen. Separate stages with 
 
 ### 2. Controlled distillation comparison
 
-- [ ] Verify and preserve the common pre-distillation checkpoint.
-- [ ] Compare the current objective, full-distribution KL, and full KL plus normalized hidden-state anchoring at matched tokens, trainable parameters, and optimization settings.
+- [x] Verify and preserve a common checkpoint; explicitly document matched continuation when the historical pre-distillation state is unavailable.
+- [x] Compare the current objective, full-distribution KL, and full KL plus normalized hidden-state anchoring at matched tokens, trainable parameters, and optimization settings.
 - [ ] Extend only promising short-run arms to longer training.
 
 Keep the untreated checkpoint as a control. Evaluate held-out KL/NLL, out-of-domain perplexity, and downstream tasks. Introduce sign updates and checkpoint averaging as later ablations, rather than changing all variables together. Measure memory before choosing teacher/student co-residency; full KL does not itself guarantee stable long training.
@@ -107,3 +107,13 @@ The [multi-block gate](111-residual-stage-multiblock-gate.md) completed fresh on
 The residual-factor composition passed the 48-sequence selection gate and then the independent 96-sequence confirmation gate without retraining. Confirmation KL improved 2.47% versus unchanged 060, difference -0.016969 with 95% interval [-0.024707, -0.010551]. NLL improved by 0.012317 nats/token, interval [-0.023061, -0.002957]. It also beat the matched tuned INT8 and sign controls on confirmation KL and NLL. The untuned residual composition improved incumbent KL by 1.81%, so the result is not entirely a scale-tuning gain.
 
 This completes the initial equal-cap dense functional gate, with three changed projections and 279,240 additional diagnostic payload bytes versus their 060 sidecars. It does not complete the whole-model, downstream-task or runtime/export gates. Continue with the controlled distillation comparison; the missing historical pre-distillation state must be recovered or replaced by an explicitly defined common continuation checkpoint. Production format changes remain conditional on the broader winning-recipe gates.
+
+### Controlled objective continuation result
+
+The [objective continuation study](112-distillation-objective-continuation.md) preserved the 060 GGUF through a hard link and compared production top-64, full KL and full KL plus a 0.1 normalized hidden anchor. Each arm trained the same 901,056 fixed-sign factor scales for 256 updates on 64 fresh C4 sequences, with matched optimizer, schedule and BF16 scale persistence. Norms, outliers and embeddings remained frozen; this is a new post-060 scale-only continuation, not a historical rerun.
+
+The preselected anchored checkpoint improved independent C4 confirmation KL by 18.66% and PTB perplexity by 8.87% versus the untreated reconstruction. Plain KL performed similarly; the anchor's incremental C4 benefit did not confirm. However, both variants scored 50.75% task mean versus untreated 50.92%, and their paired intervals failed the one-point noninferiority guard. WikiText perplexity worsened from 115.47 to about 121.2. Keep 060; no longer C4-only extension or production promotion is justified.
+
+Before any longer-training extension, repeat the objective comparison using the original-style mixed calibration distribution and stronger held-out task coverage. The present screen demonstrates a likelihood benefit from full KL, not a capability improvement. Keep the residual candidate frozen and compare it against equally re-distilled 060 when the training objective and data mixture pass the broader gates. The plain-language explanation of partial sign planes and residual ranks is [Doc 113](113-partial-sign-planes-and-residual-ranks-eli5.md).
+
+The retained 060 configuration confirms that its mixture is 50% UltraChat `train_sft` and 50% WikiText-2 `train`, with Gemma chat plus raw-text formatting; it is not the C4-only distribution used in this continuation screen. Generate new run-owned tokens from those pinned sources for the follow-up.

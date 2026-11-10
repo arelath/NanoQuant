@@ -1,0 +1,16 @@
+{
+  "after": {
+    "kl_nats_per_token": 1.2153694690323622,
+    "negative_log_likelihood": 5.461066363609,
+    "teacher_top1_agreement": 0.5459882616996765,
+    "token_count": 511
+  },
+  "before": {
+    "kl_nats_per_token": 1.2140796422491802,
+    "negative_log_likelihood": 5.461617635887429,
+    "teacher_top1_agreement": 0.5479452013969421,
+    "token_count": 511
+  },
+  "kl_delta": 0.0012898267831820132,
+  "nll_delta": -0.0005512722784288826
+}

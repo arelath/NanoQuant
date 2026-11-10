@@ -1,0 +1,20 @@
+{
+  "top_k": {
+    "sha256": "ec9179c87367ebd3eb983cc5cc536d2fedecc80fa84fbea9fe658b775e888119",
+    "steps": 256,
+    "bytes": 1835592,
+    "trainable_count": 901056
+  },
+  "full_kl": {
+    "sha256": "8ba058792209d9200fd090d460b40e4aa11e87d694f633e1657a43668bb4e3fc",
+    "steps": 256,
+    "bytes": 1835592,
+    "trainable_count": 901056
+  },
+  "full_kl_hidden": {
+    "sha256": "d7140d59da9a4fa2f89f5e94b0f23a5841456167cfea9b22722a6abd5b7bbc17",
+    "steps": 256,
+    "bytes": 1835592,
+    "trainable_count": 901056
+  }
+}

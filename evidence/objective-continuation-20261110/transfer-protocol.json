@@ -1,0 +1,74 @@
+{
+  "frozen_scales": {
+    "full_kl": "8ba058792209d9200fd090d460b40e4aa11e87d694f633e1657a43668bb4e3fc",
+    "full_kl_hidden": "d7140d59da9a4fa2f89f5e94b0f23a5841456167cfea9b22722a6abd5b7bbc17",
+    "top_k": "ec9179c87367ebd3eb983cc5cc536d2fedecc80fa84fbea9fe658b775e888119"
+  },
+  "gate": "PTB paired NLL 95% upper <= +0.01; task comparison is standard 200-example replay",
+  "quality_request": {
+    "backend": "dense",
+    "component_overlay": null,
+    "device": "cuda:0",
+    "local_files_only": true,
+    "maximum_thinking_degradation_ratio": 1.1,
+    "maximum_wddm_shared_bytes": null,
+    "packed_artifact": null,
+    "product_codebook_overlay": null,
+    "reasoning_batch_size": 1,
+    "reasoning_behavior_slices": [],
+    "reasoning_modes": [],
+    "reasoning_partition": "quick",
+    "reasoning_samples_per_mode": 8,
+    "reasoning_sequence_length": 512,
+    "revision": "dcc83ea841ab6100d6b47a070329e1ba4cf78752",
+    "run_output": "outputs/objective-continuation-20261110/run/transfer",
+    "snapshot": "C:/Users/pdykstra/.cache/huggingface/hub/models--google--gemma-3-1b-it/snapshots/dcc83ea841ab6100d6b47a070329e1ba4cf78752",
+    "source": "google/gemma-3-1b-it",
+    "stream_base_model": false,
+    "task_batch_size": 1,
+    "task_limit": 200,
+    "task_names": [
+      "piqa",
+      "arc_easy",
+      "arc_challenge",
+      "hellaswag",
+      "winogrande",
+      "boolq"
+    ],
+    "use_global_tuning": false,
+    "wikitext_batch_size": 1,
+    "wikitext_samples": 64,
+    "wikitext_sequence_length": 128
+  },
+  "tokens": {
+    "context_policy": "contiguous 512-token windows; first token is context",
+    "entry": {
+      "consumer": "objective-continuation-transfer",
+      "dataset": "ptb:wojzaremba-word-level",
+      "evidence": "outputs\\objective-continuation-20261110\\ptb-transfer-v2",
+      "id": "objective-continuation-ptb-test000-96x512",
+      "offset": 0,
+      "retirement": {
+        "action": "permanently-retired-before-evaluation",
+        "role": "transfer"
+      },
+      "samples": 96,
+      "sequence_length": 512,
+      "split": "test",
+      "status": "retired",
+      "token_end": 49152,
+      "token_hash": "sha256:79c083761f33ec582b798520d740ba9b7faf61021e4b991dbbbbc4aecdaa8cc7",
+      "token_start": 0
+    },
+    "file_sha256": "cf4c5c083027b8cfba7598d225b3fa4e4e388f05c10ca36f607270401731c622",
+    "registry": "D:\\dev\\research\\NanoQuantRewrite\\Docs\\evaluation-slice-registry.json",
+    "retired_before_evaluation": true,
+    "source_bytes": 449945,
+    "source_commit": "76870253cfca069477f06b7056af87f98490b6eb",
+    "source_sha256": "dd65dff31e70846b2a6030a87482edcd5d199130cdcfa1f3dccbb033728deee0",
+    "source_tokens": 97812,
+    "source_url": "https://raw.githubusercontent.com/wojzaremba/lstm/76870253cfca069477f06b7056af87f98490b6eb/data/ptb.test.txt"
+  },
+  "tool_sha256": "0580043a501101a6c7c1ef999835a03a267f900624149b49cc063bb8e4fcf53a",
+  "training_protocol_sha256": "6f1a1ce4fe7b0d8a8fc055125af8c84217dbb71ab9a95669932d3a982da9c57b"
+}

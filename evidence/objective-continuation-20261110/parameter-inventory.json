@@ -1,0 +1,6 @@
+{
+  "scale_storage_bytes": 1802112,
+  "trainable": "factor pre/mid/post scales only; shared QKV parameters counted once",
+  "trainable_count": 901056,
+  "units": 130
+}

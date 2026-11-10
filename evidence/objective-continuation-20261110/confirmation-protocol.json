@@ -1,0 +1,93 @@
+{
+  "frozen_scales": {
+    "full_kl": "8ba058792209d9200fd090d460b40e4aa11e87d694f633e1657a43668bb4e3fc",
+    "full_kl_hidden": "d7140d59da9a4fa2f89f5e94b0f23a5841456167cfea9b22722a6abd5b7bbc17",
+    "top_k": "ec9179c87367ebd3eb983cc5cc536d2fedecc80fa84fbea9fe658b775e888119"
+  },
+  "role": "confirmation",
+  "tokens": {
+    "bos_token_id": 2,
+    "c4_file": "C:\\Users\\pdykstra\\.cache\\huggingface\\hub\\datasets--allenai--c4\\snapshots\\f998d2cd8b92435980789e3ecb2f89b4c68bfe1e\\en\\c4-validation.00000-of-00008.json.gz",
+    "c4_file_sha256": "bc35d7c1b1d14b90cd3a394cccbcbe191935edd04bf42ee965379c6e2987a5f0",
+    "dataset_fingerprint": "4b1edd65c39b6ec5",
+    "entry": {
+      "consumer": "residual-stage-confirmation",
+      "dataset": "allenai/c4",
+      "evidence": "outputs\\objective-continuation-20261110\\c4-confirmation",
+      "id": "objective-continuation-c4-confirmation792-96x512",
+      "offset": 792,
+      "retirement": {
+        "action": "permanently-retired-before-evaluation",
+        "role": "confirmation"
+      },
+      "samples": 96,
+      "sequence_length": 512,
+      "split": "validation",
+      "status": "retired",
+      "token_end": 454656,
+      "token_hash": "sha256:3b3b97f7061040e5ebfcb76f164389528a24e160e2dac82dd8803d370dd5a2c9",
+      "token_start": 405504
+    },
+    "file_sha256": "dbdd507629d7c65068321f2a2050a6cc2e31674c91d18aaf47a2d8caf6945a75",
+    "registry": "D:\\dev\\research\\NanoQuantRewrite\\Docs\\evaluation-slice-registry.json",
+    "registry_after_sha256": "0780af181136f2a1600e5b6308d40258f6bf893a81415422f812e309e88d2840",
+    "retired_before_evaluation": true
+  },
+  "training": {
+    "arms": [
+      "top_k",
+      "full_kl",
+      "full_kl_hidden"
+    ],
+    "chunk": 32,
+    "common_gguf_sha256": "5e445cab6c93f03492ca0c9cea4ce7977fc780b9dbd75ad60578aef609dad02c",
+    "fit_tokens": {
+      "bos_token_id": 2,
+      "c4_file": "C:\\Users\\pdykstra\\.cache\\huggingface\\hub\\datasets--allenai--c4\\snapshots\\f998d2cd8b92435980789e3ecb2f89b4c68bfe1e\\en\\c4-validation.00000-of-00008.json.gz",
+      "c4_file_sha256": "bc35d7c1b1d14b90cd3a394cccbcbe191935edd04bf42ee965379c6e2987a5f0",
+      "dataset_fingerprint": "4b1edd65c39b6ec5",
+      "entry": {
+        "consumer": "residual-stage-fit",
+        "dataset": "allenai/c4",
+        "evidence": "outputs\\objective-continuation-20261110\\c4-fit",
+        "id": "objective-continuation-c4-fit680-64x512",
+        "offset": 680,
+        "retirement": {
+          "action": "permanently-retired-before-evaluation",
+          "role": "fit"
+        },
+        "samples": 64,
+        "sequence_length": 512,
+        "split": "validation",
+        "status": "retired",
+        "token_end": 380928,
+        "token_hash": "sha256:603d4302af4e57fc0828addf90293a624827198712d5d537d3d23a16643252b1",
+        "token_start": 348160
+      },
+      "file_sha256": "477cac950e63e2b8a9ce5c7a73ad266ecfc2cf40146d20f346ff79012b31bb70",
+      "registry": "D:\\dev\\research\\NanoQuantRewrite\\Docs\\evaluation-slice-registry.json",
+      "registry_after_sha256": "517461733bc3cc4250619a2c085f28df31990008849273a3630242be6c3ec69d",
+      "retired_before_evaluation": true
+    },
+    "gate": "paired KL 95% upper <0 and NLL 95% upper <=+0.01; fresh confirmation before extending",
+    "gradient_clip": 1,
+    "hidden_anchor": "0.1 * mean block MSE / teacher block mean square; excludes embedding state",
+    "learning_rate": 1e-05,
+    "optimizer": "ParityAdamW defaults, weight_decay=0",
+    "parameters": "all 130 units' factor scales only; signs/outliers/norms/embedding frozen",
+    "revision": "dcc83ea841ab6100d6b47a070329e1ba4cf78752",
+    "scheduler": "cosine to zero over declared steps",
+    "scope": "matched post-060 scale-only objective continuation; not original pre-distillation rerun",
+    "source_sha256": "3d4ef8d71c14db7e448a09ebe891cfb6bf32c57a9b44499ae0d1c098e48516b6",
+    "steps": 256,
+    "storage": "BF16 scales, FP32 masters and BF16 straight-through QAT, BF16 dense weights",
+    "temperature": 1,
+    "tokens": "every causal next-token target, sequential cycles through fit slice, batch 1",
+    "tool_hashes": {
+      "objective_ablation_common.py": "74cb7c0ff02f662863681ed347448bcbf5a209ce4a1456bcc82cb7ba31a5a2b0",
+      "probe_distillation_objectives.py": "7cf1a49c011e8cbccf42989050eac3a824b8946ca2ccab8c0fcb1e92583b4989"
+    },
+    "top_k": 64,
+    "torch_version": "2.12.1+cu130"
+  }
+}
