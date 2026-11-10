@@ -50,9 +50,14 @@ class _LayerPlanMetrics:
 @dataclass(frozen=True, slots=True)
 class _FrozenLayerMetrics:
     rank: int
+    residual_ranks: tuple[int, ...] = ()
+
+    @property
+    def total_rank(self) -> int:
+        return self.rank + sum(self.residual_ranks)
 
     def __post_init__(self) -> None:
-        if self.rank <= 0:
+        if self.rank <= 0 or any(rank <= 0 for rank in self.residual_ranks):
             raise ValueError("frozen rank must be positive")
 
 
@@ -189,7 +194,8 @@ def _project_layer_metrics(value: object) -> dict[str, Any]:
         raise ConfigDecodeError("block.layers.plan.source_weight.spec", "expected an object")
     return {
         "actual_bit_cost": value["actual_bit_cost"],
-        "frozen_state": {"rank": frozen["rank"]},
+        "frozen_state": {"rank": frozen["rank"],
+                         "residual_ranks": [stage["rank"] for stage in frozen.get("residual_stages", ())]},
         "layer": value["layer"],
         "plan": {"source_weight": {"spec": {"shape": spec["shape"]}}},
     }
@@ -220,7 +226,8 @@ def _project_group_metrics(value: object) -> dict[str, Any]:
         )
     return {
         "actual_bit_cost": value["actual_bit_cost"],
-        "frozen_state": {"rank": frozen["rank"]},
+        "frozen_state": {"rank": frozen["rank"],
+                         "residual_ranks": [stage["rank"] for stage in frozen.get("residual_stages", ())]},
         "block": value["block"],
         "name": value["name"],
         "plan": {
@@ -354,7 +361,7 @@ def _committed_metrics(
             if layer_block != block or key in seen_layers:
                 raise ValueError(f"committed layer metrics are invalid: {record['artifact_id']}")
             seen_layers.add(key)
-            ranks += layer_metrics.frozen_state.rank
+            ranks += layer_metrics.frozen_state.total_rank
             parameters += math.prod(layer_metrics.plan.source_weight.spec.shape)
             bit_costs.update(layer_metrics.actual_bit_cost)
         for group_metrics in metrics.shared_input_groups:
@@ -362,7 +369,7 @@ def _committed_metrics(
             if group_metrics.block.index != block or key in seen_layers:
                 raise ValueError(f"committed group metrics are invalid: {record['artifact_id']}")
             seen_layers.add(key)
-            ranks += group_metrics.frozen_state.rank
+            ranks += group_metrics.frozen_state.total_rank
             parameters += group_metrics.plan.in_features * group_metrics.plan.out_features
             bit_costs.update(group_metrics.actual_bit_cost)
         losses.append(metrics.losses.final_frozen_pre_kd)

@@ -7384,7 +7384,7 @@ def _execute_resident_quantization_pipeline(
                         status="reused",
                         artifact_id=prior_record.artifact_id,
                         journal_sequence=prior_record.sequence,
-                        rank=prior_group.frozen_state.rank,
+                        rank=prior_group.frozen_state.total_rank,
                         accepted_bits=budget.accepted_bits,
                         retry_bits_spent=budget.retry_bits_spent,
                         wall_seconds=time.perf_counter() - group_started,
@@ -7597,7 +7597,7 @@ def _execute_resident_quantization_pipeline(
                     "shared_input_group_commit",
                     block=block_index,
                     group=group_plan.name,
-                    rank=group_result.frozen_state.rank,
+                    rank=group_result.frozen_state.total_rank,
                 ):
                     with _profile_layer_phase(recorder, block_index, group_plan.name, "commit"):
                         committed_group = commit_shared_input_group(
@@ -7621,7 +7621,7 @@ def _execute_resident_quantization_pipeline(
                             group=group_plan.name,
                             artifact_id=committed_group.reference.artifact_id,
                             journal_sequence=group_journal_record.sequence,
-                            rank=group_result.frozen_state.rank,
+                            rank=group_result.frozen_state.total_rank,
                             accepted_attempt=group_result.accepted_attempt,
                             actual_bits=group_result.actual_bit_cost.total,
                             extra_retry_bits=group_result.extra_retry_bits,
@@ -7656,7 +7656,7 @@ def _execute_resident_quantization_pipeline(
                     "shared_input_group.completed",
                     block=block_index,
                     group=group_plan.name,
-                    rank=frozen_group.state.rank,
+                    rank=frozen_group.state.total_rank,
                     actual_bits=group_result.actual_bit_cost.total,
                     weighted_error=group_result.final_reconstruction.export_weighted_normalized_error,
                     raw_error=group_result.final_reconstruction.raw_normalized_error,
@@ -7761,7 +7761,7 @@ def _execute_resident_quantization_pipeline(
                         layer=layer_plan.layer.path,
                         artifact_id=prior_record.artifact_id,
                         journal_sequence=prior_record.sequence,
-                        rank=prior.frozen_state.rank,
+                        rank=prior.frozen_state.total_rank,
                     )
                     budget = replace(
                         budget,
@@ -7781,7 +7781,7 @@ def _execute_resident_quantization_pipeline(
                         block=block_index,
                         layer=layer_plan.layer.path,
                         status="reused",
-                        rank=prior.frozen_state.rank,
+                        rank=prior.frozen_state.total_rank,
                         accepted_bits=budget.accepted_bits,
                         retry_bits_spent=budget.retry_bits_spent,
                         wall_seconds=time.perf_counter() - layer_started,
@@ -8093,7 +8093,7 @@ def _execute_resident_quantization_pipeline(
                     "layer_commit",
                     block=block_index,
                     layer=layer_plan.layer.path,
-                    rank=layer_result.frozen_state.rank,
+                    rank=layer_result.frozen_state.total_rank,
                 ):
                     with _profile_layer_phase(recorder, block_index, layer_plan.layer.path, "commit"):
                         committed_layer = commit_layer(layer_result, artifacts, identity)
@@ -8112,7 +8112,7 @@ def _execute_resident_quantization_pipeline(
                                 layer=layer_plan.layer.path,
                                 artifact_id=committed_layer.reference.artifact_id,
                                 journal_sequence=layer_journal_record.sequence,
-                                rank=layer_result.frozen_state.rank,
+                                rank=layer_result.frozen_state.total_rank,
                                 accepted_attempt=layer_result.accepted_attempt,
                                 actual_bits=layer_result.actual_bit_cost.total,
                                 extra_retry_bits=layer_result.extra_retry_bits,
@@ -8151,7 +8151,7 @@ def _execute_resident_quantization_pipeline(
                     block=block_index,
                     layer=layer_plan.layer.path,
                     status="committed",
-                    rank=layer_result.frozen_state.rank,
+                    rank=layer_result.frozen_state.total_rank,
                     accepted_attempt=layer_result.accepted_attempt,
                     attempts=len(layer_result.attempts),
                     accepted_bits=budget.accepted_bits,
@@ -8890,7 +8890,7 @@ def _run_resident_factorization_slice_impl(
                 layer=layer_plan.layer.path,
                 artifact_id=committed.reference.artifact_id,
                 journal_sequence=journal_record.sequence,
-                rank=layer_result.frozen_state.rank,
+                rank=layer_result.frozen_state.total_rank,
                 accepted_attempt=layer_result.accepted_attempt,
                 actual_bits=layer_result.actual_bit_cost.total,
                 extra_retry_bits=layer_result.extra_retry_bits,

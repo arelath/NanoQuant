@@ -35,3 +35,7 @@ def test_experiment070_changes_only_the_requested_representation_and_runtime_pro
         ),
     )
     assert any(issue.code == "CFG180" for issue in validate(invalid, ValidationPhase.RESOLVED))
+    folded = replace(candidate, distillation=replace(candidate.distillation, foldable_mlp_multipliers=replace(
+        candidate.distillation.foldable_mlp_multipliers, enabled=True,
+    )))
+    assert any(issue.code == "CFG181" for issue in validate(folded, ValidationPhase.RESOLVED))

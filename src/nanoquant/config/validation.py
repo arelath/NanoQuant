@@ -271,6 +271,7 @@ def validate(config: RunConfig, phase: ValidationPhase = ValidationPhase.PRE_RES
             and not config.factorization.low_rank_patch.enabled
             and config.calibration.objective.kind is not ObjectiveKind.DENSE_HESSIAN
             and not config.block_tuning.post_refit_covariance_refinement.enabled
+            and not config.distillation.foldable_mlp_multipliers.enabled
         ),
         "CFG181", "factorization.residual_stages",
         "independent residual stages require zero outlier columns and disabled optional factor corrections",

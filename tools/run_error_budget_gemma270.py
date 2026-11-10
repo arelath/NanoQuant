@@ -300,7 +300,7 @@ def main(arguments: list[str] | None = None) -> int:
                     "unit_id": f"{block.block.index}:{layer.layer.path}",
                     "block": block.block.index,
                     "name": layer.layer.path,
-                    "rank": layer.frozen_state.rank,
+                    "rank": layer.frozen_state.total_rank,
                     "factor_bits": layer.actual_bit_cost.binary_factor_bits,
                 }
                 for block in result.blocks
@@ -311,7 +311,7 @@ def main(arguments: list[str] | None = None) -> int:
                     "unit_id": f"{block.block.index}:{group.name}",
                     "block": block.block.index,
                     "name": group.name,
-                    "rank": group.frozen_state.rank,
+                    "rank": group.frozen_state.total_rank,
                     "factor_bits": group.actual_bit_cost.binary_factor_bits,
                 }
                 for block in result.blocks

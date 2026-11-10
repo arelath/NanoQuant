@@ -32,7 +32,10 @@ def _write_journal(output: Path, records: list[dict[str, object]]) -> None:
     )
 
 
-def test_validate_resident_run_follows_artifact_graph_and_allows_retired_activations(tmp_path: Path) -> None:
+@pytest.mark.parametrize("residual_ranks", [(), (2, 3)])
+def test_validate_resident_run_follows_artifact_graph_and_allows_retired_activations(
+    tmp_path: Path, residual_ranks: tuple[int, ...],
+) -> None:
     output = tmp_path / "run"
     store = LocalArtifactStore(output / "artifacts")
     frozen = _artifact(store, "frozen-layer", "state.json", {"value": 1})
@@ -73,7 +76,7 @@ def test_validate_resident_run_follows_artifact_graph_and_allows_retired_activat
             "layers": [
                 {
                     "actual_bit_cost": {"binary_factor_bits": 10, "scale_bits": 2},
-                    "frozen_state": {"rank": 2},
+                    "frozen_state": {"rank": 2, "residual_stages": [{"rank": rank} for rank in residual_ranks]},
                     "layer": {"block": {"index": 0}, "path": "mlp.gate_proj"},
                     "plan": {"source_weight": {"spec": {"shape": [2, 3]}}},
                 }
@@ -81,7 +84,7 @@ def test_validate_resident_run_follows_artifact_graph_and_allows_retired_activat
             "shared_input_groups": [
                 {
                     "actual_bit_cost": {"binary_factor_bits": 12, "scale_bits": 3},
-                    "frozen_state": {"rank": 4},
+                    "frozen_state": {"rank": 4, "residual_stages": [{"rank": rank} for rank in residual_ranks]},
                     "block": {"index": 0},
                     "name": "self_attn.attn_qkv",
                     "plan": {
@@ -184,7 +187,7 @@ def test_validate_resident_run_follows_artifact_graph_and_allows_retired_activat
     }
     assert result.retired_activation_generations == (old_activation,)
     assert result.committed_layer_count == 3
-    assert result.rank_sum == 9
+    assert result.rank_sum == 9 + 2 * sum(residual_ranks)
     assert result.quantized_parameters == 33
     assert result.bit_cost_by_category == {"binary_factor_bits": 42, "scale_bits": 9}
     assert result.effective_bpw == pytest.approx(51 / 33)

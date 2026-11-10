@@ -1,0 +1,99 @@
+{
+  "schema_version": 1,
+  "block": 0,
+  "complete_model": false,
+  "artifact_id": "sha256-4d1c8caac04b8e2dabf5f0a0948a423e0ff5b5c922fe3fd78ac661f0642d1b1f",
+  "units": [
+    {
+      "unit": "mlp.gate_proj",
+      "shape": [
+        6912,
+        1152
+      ],
+      "stage_ranks": [
+        1152,
+        768
+      ],
+      "total_rank": 1920,
+      "bits": 15771648,
+      "bpw": 1.9807098765432098,
+      "scale_dtypes": [
+        "bfloat16",
+        "bfloat16"
+      ]
+    },
+    {
+      "unit": "mlp.up_proj",
+      "shape": [
+        6912,
+        1152
+      ],
+      "stage_ranks": [
+        1152,
+        768
+      ],
+      "total_rank": 1920,
+      "bits": 15771648,
+      "bpw": 1.9807098765432098,
+      "scale_dtypes": [
+        "bfloat16",
+        "bfloat16"
+      ]
+    },
+    {
+      "unit": "mlp.down_proj",
+      "shape": [
+        1152,
+        6912
+      ],
+      "stage_ranks": [
+        1152,
+        768
+      ],
+      "total_rank": 1920,
+      "bits": 15771648,
+      "bpw": 1.9807098765432098,
+      "scale_dtypes": [
+        "bfloat16",
+        "bfloat16"
+      ]
+    },
+    {
+      "unit": "self_attn.o_proj",
+      "shape": [
+        1152,
+        1024
+      ],
+      "stage_ranks": [
+        1024
+      ],
+      "total_rank": 1024,
+      "bits": 2279424,
+      "bpw": 1.9322916666666667,
+      "scale_dtypes": [
+        "bfloat16"
+      ]
+    },
+    {
+      "unit": "self_attn.attn_qkv",
+      "shape": [
+        1536,
+        1152
+      ],
+      "stage_ranks": [
+        1152,
+        96
+      ],
+      "total_rank": 1248,
+      "bits": 3460608,
+      "bpw": 1.9557291666666667,
+      "scale_dtypes": [
+        "bfloat16",
+        "bfloat16"
+      ]
+    }
+  ],
+  "total_rank": 8032,
+  "exact_stage_bit_accounting": true,
+  "run_validation": "control-block0-validation.json"
+}

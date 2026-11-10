@@ -1,3 +1,4 @@
+import json
 from dataclasses import replace
 from pathlib import Path
 
@@ -234,6 +235,12 @@ def test_resident_staged_rank_tuning_resume_and_export_accounting(tmp_path: Path
         run_resident_quantization(replace(request, interrupt_after_block_commits=1))
     result = run_resident_quantization(request)
     block = result.blocks[0]
+    events = [json.loads(line) for line in (request.output / "events.jsonl").read_text().splitlines()]
+    for item in block.layers:
+        committed = [event["fields"] for event in events if event["name"] == "layer.completed"
+                     and event["fields"].get("layer") == item.layer.path
+                     and event["fields"].get("status") == "committed"]
+        assert committed[-1]["rank"] == item.frozen_state.total_rank
     assert any(layer.frozen_state.residual_stages for layer in block.layers)
     assert block.shared_input_groups[0].frozen_state.residual_stages
     for item in (*block.layers, *block.shared_input_groups):
