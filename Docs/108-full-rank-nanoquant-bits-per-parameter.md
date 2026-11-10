@@ -1,6 +1,6 @@
 # Full rank NanoQuant bits per parameter
 
-Full-rank NanoQuant factorization requires approximately **1.28–1.40 bits per original parameter** for the transformer projection matrices in Gemma 3 1B, 4B, 12B, 27B, and Llama 3.3 70B, including FP32 scales. These are calculated packed-storage estimates, not measured compression or quality results.
+Full-rank NanoQuant factorization requires approximately **1.25–1.40 bits per original parameter** for the transformer projection matrices in Gemma 3 1B, 4B, 12B, 27B, and Llama 3.3 70B, including 16-bit scales. These are calculated packed-storage estimates, not measured compression or quality results.
 
 ## Scope and definition
 
@@ -20,7 +20,7 @@ Embeddings, output heads, vision components, normalization weights, outlier corr
 | Gemma 3 27B | 25,598,361,600 | 1.311587 | 1.317123 | **1.322659** |
 | Llama 3.3 70B | 68,451,041,280 | 1.394608 | 1.398438 | **1.402267** |
 
-The FP16 column matches NanoQuant's default planning scale-bit assumption. The FP32 column reflects the scale precision observed in existing GGUF exports, while still excluding the additional payloads and container overhead listed above. Neither column is a whole-model file-size estimate.
+The FP16 column matches NanoQuant's default planning scale-bit assumption; BF16 scales have the same storage cost. A direct tensor audit of Experiment 060 on 2026-11-10 confirms that its factor pre/mid/post scales are BF16. Its norms and INT8 salient-column scales are F32. The earlier statement that 060 exported factor scales at FP32 was incorrect. The FP32 column instead describes storing the fitted scale vectors without reducing their FP32 precision. Neither column is a whole-model file-size estimate, and 060's shared QKV grouping differs from this table's separate-projection assumption.
 
 ## Calculation
 

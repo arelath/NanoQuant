@@ -218,6 +218,24 @@
       "token_end": 225280,
       "token_hash": "sha256:6c62bd172303e33b6a6a0847dbaaf587df25852fa9f0bc56269bfd7d3f5e6f1d",
       "token_start": 200704
+    },
+    {
+      "consumer": "residual-stage-functional-selection",
+      "dataset": "allenai/c4",
+      "evidence": "outputs\\residual-stage-gate-20261110\\c4-selection",
+      "id": "residual-stage-c4-validation472-48x512",
+      "offset": 472,
+      "retirement": {
+        "action": "permanently-retired-before-evaluation",
+        "role": "selection"
+      },
+      "samples": 48,
+      "sequence_length": 512,
+      "split": "validation",
+      "status": "retired",
+      "token_end": 266240,
+      "token_hash": "sha256:a0f51fb416497af542c0a04f3ee1c4cec761a0acc75ad54a693cad85de97f4c8",
+      "token_start": 241664
     }
   ]
 }

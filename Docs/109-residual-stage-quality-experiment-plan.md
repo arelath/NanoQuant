@@ -15,7 +15,8 @@ This plan follows [the second opinion](ImprovementSuggestions/11-10-26-SecondOpi
 - [x] Audit retained inputs and baseline availability; freeze identities and storage accounting for the initial pilot.
 - [x] Reproduce the block-12 reconstruction screen at an exact affordable rank with complete payload accounting, retaining candidate tensors.
 - [ ] Extend to blocks 0, 12, and 25 with several fitting seeds.
-- [ ] Evaluate candidates on fresh paired model-logit KL and NLL sequences.
+- [x] Evaluate initial block-12 candidates on fresh paired model-logit KL and NLL sequences.
+- [ ] Extend the functional comparison to the new multi-block fits.
 - [ ] Compose promising replacements in the compressed model and confirm on an independent slice.
 
 Compare the current factor plus INT8-column correction, a full-rank factor plus an independently scaled residual factor, and a factor plus a partial sign-plane correction. Use the same original target, importance weights, protected columns, and common first-stage initialization where applicable. Distinguish a controlled reconstruction screen from a direct comparison to the deployed Experiment 060 state; the retained Experiment 067 single-matrix optimum is not that state.
@@ -92,3 +93,9 @@ Raw results and round-tripped candidate payloads: `outputs/residual-stage-gate-2
 Next implementation milestone: recover the full 060 compressed-model reconstruction set from GGUF, collect fresh fitting objectives for blocks 0 and 25, and adapt the paired dense-splice driver. The current overlay runner requires a resumable run directory and therefore cannot directly load 060. No functional evaluation slices have been consumed by this pilot.
 
 Validation: six focused payload/reconstruction tests passed; the full suite passed with 1,522 tests and 49 deselected. Repository Ruff and mypy checks passed (217 source files checked by mypy). The pilot completed successfully; no experiment worker remains running.
+
+### First functional selection result
+
+The [block-12 functional gate](110-residual-stage-block12-functional-gate.md) completed on a fresh C4 48-by-512 selection slice. The residual factor improves paired KL by 0.53% versus the equal-budget INT8 pilot, with a 95% interval excluding zero, and improves NLL. It nevertheless regresses KL by 0.88% versus unchanged 060, also with an interval excluding zero. Keep the incumbent; this is a controlled representation gain, not an accepted 060 improvement. The sign-plane fallback did not improve KL significantly versus the INT8 pilot. Multi-block fits, matched tuning, and independent confirmation remain open. No production format changes are justified by this result.
+
+The full GGUF audit also corrected the scale-storage assumption: 060's factor scales are BF16, whereas its norms and salient-column scales are F32. The initial pilot deliberately charged FP32 factor scales for every arm; its equal-cap comparisons remain valid as a conservative diagnostic format.
