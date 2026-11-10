@@ -1,0 +1,178 @@
+{
+  "candidates": {
+    "0": {
+      "int8": {
+        "bpw": 1.9990033436213992,
+        "bytes": 1989664,
+        "path": "D:\\dev\\research\\NanoQuantRewrite\\outputs\\residual-multiblock-gate-20261110\\fits\\block0\\seed2\\pilot\\int8.bin",
+        "seconds": 0.005037299997638911,
+        "seed": 2,
+        "sha256": "7d0a3571065f9a156e00e1af1ea9dad1d2f5ad5385793328602045ecf3374692",
+        "slack_bytes": 992,
+        "weighted_nmse": 0.0627879425391703
+      },
+      "residual_factor": {
+        "bpw": 1.9884580761316872,
+        "bytes": 1979168,
+        "path": "D:\\dev\\research\\NanoQuantRewrite\\outputs\\residual-multiblock-gate-20261110\\fits\\block0\\seed2\\pilot\\residual_factor.bin",
+        "seconds": 6.578417200013064,
+        "seed": 2,
+        "sha256": "b3c3aeefbd5b4642839c9c4fa4c22e2a204f60456873e32770232f7f2fe1472f",
+        "slack_bytes": 11488,
+        "weighted_nmse": 0.03789431328399556
+      },
+      "sign": {
+        "bpw": 1.999903549382716,
+        "bytes": 1990560,
+        "path": "D:\\dev\\research\\NanoQuantRewrite\\outputs\\residual-multiblock-gate-20261110\\fits\\block0\\seed1\\pilot\\sign.bin",
+        "seconds": 0.0487554999999702,
+        "seed": 1,
+        "sha256": "be2384bf9b1a3138df8ae4fa0f89d5d2fa9d06ec62a13ce0df68f2456ba74deb",
+        "slack_bytes": 96,
+        "weighted_nmse": 0.03699126641584295
+      }
+    },
+    "12": {
+      "int8": {
+        "bpw": 1.9990033436213992,
+        "bytes": 1989664,
+        "path": "D:\\dev\\research\\NanoQuantRewrite\\outputs\\residual-multiblock-gate-20261110\\fits\\block12\\seed2\\pilot\\int8.bin",
+        "seconds": 0.012846599973272532,
+        "seed": 2,
+        "sha256": "f20268a57b227507bfa5ff530cc5fdd824549ba97136396d6e17d9b8ccfa883f",
+        "slack_bytes": 992,
+        "weighted_nmse": 0.14917466482940284
+      },
+      "residual_factor": {
+        "bpw": 1.9884580761316872,
+        "bytes": 1979168,
+        "path": "D:\\dev\\research\\NanoQuantRewrite\\outputs\\residual-multiblock-gate-20261110\\fits\\block12\\seed1\\pilot\\residual_factor.bin",
+        "seconds": 7.4464730999898165,
+        "seed": 1,
+        "sha256": "b43cf77004dd78e752d1460b0e39ee4a0dd25951ca4ced31b431c9f40df8c617",
+        "slack_bytes": 11488,
+        "weighted_nmse": 0.08428952129379581
+      },
+      "sign": {
+        "bpw": 1.999903549382716,
+        "bytes": 1990560,
+        "path": "D:\\dev\\research\\NanoQuantRewrite\\outputs\\residual-multiblock-gate-20261110\\fits\\block12\\seed1\\pilot\\sign.bin",
+        "seconds": 0.15094890003092587,
+        "seed": 1,
+        "sha256": "bd3eae4ea0f2838aa5242179fba91d22225d5a1b201ea6e8d2142dd8a513e471",
+        "slack_bytes": 96,
+        "weighted_nmse": 0.0877019930087425
+      }
+    },
+    "25": {
+      "int8": {
+        "bpw": 1.9990033436213992,
+        "bytes": 1989664,
+        "path": "D:\\dev\\research\\NanoQuantRewrite\\outputs\\residual-multiblock-gate-20261110\\fits\\block25\\seed2\\pilot\\int8.bin",
+        "seconds": 0.014200299978256226,
+        "seed": 2,
+        "sha256": "0a321f2f1f7e657a7b359a7d1c3f609b673c809bf00480386ccaa5e3a629f4aa",
+        "slack_bytes": 992,
+        "weighted_nmse": 0.06655562060815386
+      },
+      "residual_factor": {
+        "bpw": 1.9884580761316872,
+        "bytes": 1979168,
+        "path": "D:\\dev\\research\\NanoQuantRewrite\\outputs\\residual-multiblock-gate-20261110\\fits\\block25\\seed2\\pilot\\residual_factor.bin",
+        "seconds": 7.543946699996013,
+        "seed": 2,
+        "sha256": "98ac7f3c52a11176edac72eca451add5929669e44457981a5bff073f7b3a3c63",
+        "slack_bytes": 11488,
+        "weighted_nmse": 0.03850902627809681
+      },
+      "sign": {
+        "bpw": 1.999903549382716,
+        "bytes": 1990560,
+        "path": "D:\\dev\\research\\NanoQuantRewrite\\outputs\\residual-multiblock-gate-20261110\\fits\\block25\\seed0\\pilot\\sign.bin",
+        "seconds": 0.1634168999735266,
+        "seed": 0,
+        "sha256": "99acbc0ab3a59b7618d09827d293f4b5e6fc764f922484b219aa2b09c6a68969",
+        "slack_bytes": 96,
+        "weighted_nmse": 0.04032061601790928
+      }
+    }
+  },
+  "endpoint": "fixed final step; no selection-data early stopping",
+  "evaluation_tokens": {
+    "bos_token_id": 2,
+    "c4_file": "C:\\Users\\pdykstra\\.cache\\huggingface\\hub\\datasets--allenai--c4\\snapshots\\f998d2cd8b92435980789e3ecb2f89b4c68bfe1e\\en\\c4-validation.00000-of-00008.json.gz",
+    "c4_file_sha256": "bc35d7c1b1d14b90cd3a394cccbcbe191935edd04bf42ee965379c6e2987a5f0",
+    "dataset_fingerprint": "4b1edd65c39b6ec5",
+    "entry": {
+      "consumer": "residual-stage-confirmation",
+      "dataset": "allenai/c4",
+      "evidence": "outputs\\residual-multiblock-gate-20261110\\c4-confirmation",
+      "id": "residual-multiblock-c4-confirmation584-96x512",
+      "offset": 584,
+      "retirement": {
+        "action": "permanently-retired-before-evaluation",
+        "role": "confirmation"
+      },
+      "samples": 96,
+      "sequence_length": 512,
+      "split": "validation",
+      "status": "retired",
+      "token_end": 348160,
+      "token_hash": "sha256:31c30087cc8390f34c4e57e7e73b11bef34e02151db9802d74747ebb61e5a1cb",
+      "token_start": 299008
+    },
+    "file_sha256": "1f03dd64a13876fe06d0aca4d2bd472782811eda62996d9a21a08bc3b54721b8",
+    "registry": "D:\\dev\\research\\NanoQuantRewrite\\Docs\\evaluation-slice-registry.json",
+    "registry_after_sha256": "af481d9d9fe011f9a878423354ab8616e875b0fb851c9bea6e1faf17cf83d142",
+    "retired_before_evaluation": true
+  },
+  "fit_tokens": {
+    "bos_token_id": 2,
+    "c4_file": "C:\\Users\\pdykstra\\.cache\\huggingface\\hub\\datasets--allenai--c4\\snapshots\\f998d2cd8b92435980789e3ecb2f89b4c68bfe1e\\en\\c4-validation.00000-of-00008.json.gz",
+    "c4_file_sha256": "bc35d7c1b1d14b90cd3a394cccbcbe191935edd04bf42ee965379c6e2987a5f0",
+    "dataset_fingerprint": "4b1edd65c39b6ec5",
+    "entry": {
+      "consumer": "residual-stage-fit",
+      "dataset": "allenai/c4",
+      "evidence": "outputs\\residual-multiblock-gate-20261110\\c4-fit",
+      "id": "residual-multiblock-c4-fit520-16x512",
+      "offset": 520,
+      "retirement": {
+        "action": "permanently-retired-before-evaluation",
+        "role": "fit"
+      },
+      "samples": 16,
+      "sequence_length": 512,
+      "split": "validation",
+      "status": "retired",
+      "token_end": 274432,
+      "token_hash": "sha256:1449374870ab4a3fb68b641806dc92068ec8b5d1482c23ef6bfc7263e09c80ad",
+      "token_start": 266240
+    },
+    "file_sha256": "ff860e9483ccbad63a6925527e66882d6747ded3dadec5584075d277ec143a5f",
+    "registry": "D:\\dev\\research\\NanoQuantRewrite\\Docs\\evaluation-slice-registry.json",
+    "registry_after_sha256": "0b2b14e7ae3075659e3f1dc982172041d91d0c811806661f7b2b0295faaf9890",
+    "retired_before_evaluation": true
+  },
+  "frozen_training_receipts": {
+    "int8": "b3516008f9f3a6ff494fd3dd11392082169192320600aaf54fad37526fd1898f",
+    "residual_factor": "9c427beaca87a01bdf07c91cccf2a1dabc0afd67f73c727a063c6f543c5e3bd2",
+    "sign": "61274aa1a2954776b7f9ce07deef9c6c342975ea9f2d3db1a05b22502d84e9de"
+  },
+  "gate": "KL paired 95% upper delta < 0; NLL paired 95% upper delta <= +0.01",
+  "gguf_sha256": "5e445cab6c93f03492ca0c9cea4ce7977fc780b9dbd75ad60578aef609dad02c",
+  "gradient_norm_cap": 1,
+  "learning_rate": 0.0001,
+  "log_scale_delta_bound": 0.1,
+  "model_revision": "dcc83ea841ab6100d6b47a070329e1ba4cf78752",
+  "objective": "full-distribution teacher KL at temperature 1, every next-token target",
+  "optimizer": "Adam",
+  "primary": "tuned_residual_factor minus unchanged060",
+  "role": "confirmation",
+  "source_sha256": "3d4ef8d71c14db7e448a09ebe891cfb6bf32c57a9b44499ae0d1c098e48516b6",
+  "steps": 32,
+  "tool_sha256": "2c7855944b16a75f92faad0caa6867b59419c1fd355b5cea3fde8a2978c779d3",
+  "torch_version": "2.12.1+cu130",
+  "trainable": "first-stage pre/mid/post log-scale multipliers only, same roles/count in every arm",
+  "weight_decay": 0
+}

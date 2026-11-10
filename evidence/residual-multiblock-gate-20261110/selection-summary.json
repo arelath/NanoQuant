@@ -1,0 +1,2614 @@
+{
+  "paired": {
+    "tuned_int8_minus_unchanged060": {
+      "kl": {
+        "confidence": 0.95,
+        "improved_with_confidence": false,
+        "lower_delta": -0.003996759672531991,
+        "point_delta": 0.004547453012173963,
+        "relative_delta": 0.006167244323543424,
+        "resamples": 10000,
+        "upper_delta": 0.01340745615943617
+      },
+      "nll": {
+        "confidence": 0.95,
+        "improved_with_confidence": false,
+        "lower_delta": -0.003851810780056475,
+        "point_delta": 0.009259374951973598,
+        "relative_delta": 0.0021463898808776116,
+        "resamples": 10000,
+        "upper_delta": 0.021940809873219003
+      }
+    },
+    "tuned_int8_minus_untuned_int8": {
+      "kl": {
+        "confidence": 0.95,
+        "improved_with_confidence": true,
+        "lower_delta": -0.005096474466802836,
+        "point_delta": -0.0035967091602666645,
+        "relative_delta": -0.004824560193482643,
+        "resamples": 10000,
+        "upper_delta": -0.001456380434776583
+      },
+      "nll": {
+        "confidence": 0.95,
+        "improved_with_confidence": false,
+        "lower_delta": -0.0025179422687102715,
+        "point_delta": -0.00015579269979060228,
+        "relative_delta": -3.60352241812216e-05,
+        "resamples": 10000,
+        "upper_delta": 0.0027170759824386437
+      }
+    },
+    "tuned_residual_factor_minus_tuned_int8": {
+      "kl": {
+        "confidence": 0.95,
+        "improved_with_confidence": true,
+        "lower_delta": -0.022770493289495874,
+        "point_delta": -0.015904710425789337,
+        "relative_delta": -0.021437716591656948,
+        "resamples": 10000,
+        "upper_delta": -0.00986333050451016
+      },
+      "nll": {
+        "confidence": 0.95,
+        "improved_with_confidence": true,
+        "lower_delta": -0.032381542974722066,
+        "point_delta": -0.021972905399747944,
+        "relative_delta": -0.005082568738613781,
+        "resamples": 10000,
+        "upper_delta": -0.011930883747257148
+      }
+    },
+    "tuned_residual_factor_minus_tuned_sign": {
+      "kl": {
+        "confidence": 0.95,
+        "improved_with_confidence": false,
+        "lower_delta": -0.008329389243831975,
+        "point_delta": -0.00389795354278899,
+        "relative_delta": -0.005340420011645904,
+        "resamples": 10000,
+        "upper_delta": 0.0007163563819780894
+      },
+      "nll": {
+        "confidence": 0.95,
+        "improved_with_confidence": true,
+        "lower_delta": -0.020015479222823984,
+        "point_delta": -0.01261561140855516,
+        "relative_delta": -0.002924456072781554,
+        "resamples": 10000,
+        "upper_delta": -0.004728112901960735
+      }
+    },
+    "tuned_residual_factor_minus_unchanged060": {
+      "kl": {
+        "confidence": 0.95,
+        "improved_with_confidence": true,
+        "lower_delta": -0.018456118641845265,
+        "point_delta": -0.011357257413615374,
+        "relative_delta": -0.015402683904073153,
+        "resamples": 10000,
+        "upper_delta": -0.004024446691007877
+      },
+      "nll": {
+        "confidence": 0.95,
+        "improved_with_confidence": true,
+        "lower_delta": -0.024974819265466408,
+        "point_delta": -0.012713530447774346,
+        "relative_delta": -0.002947088031845595,
+        "resamples": 10000,
+        "upper_delta": -0.000893264522913384
+      }
+    },
+    "tuned_residual_factor_minus_untuned_residual_factor": {
+      "kl": {
+        "confidence": 0.95,
+        "improved_with_confidence": true,
+        "lower_delta": -0.004570584960490787,
+        "point_delta": -0.00372129194657167,
+        "relative_delta": -0.005099617782041056,
+        "resamples": 10000,
+        "upper_delta": -0.002696007917849519
+      },
+      "nll": {
+        "confidence": 0.95,
+        "improved_with_confidence": true,
+        "lower_delta": -0.003713253970559549,
+        "point_delta": -0.002261533273721028,
+        "relative_delta": -0.0005255129583767519,
+        "resamples": 10000,
+        "upper_delta": -0.0008831143145924258
+      }
+    },
+    "tuned_sign_minus_unchanged060": {
+      "kl": {
+        "confidence": 0.95,
+        "improved_with_confidence": true,
+        "lower_delta": -0.015005201898364517,
+        "point_delta": -0.007459303870826384,
+        "relative_delta": -0.010116289125315682,
+        "resamples": 10000,
+        "upper_delta": -0.0005663910179610765
+      },
+      "nll": {
+        "confidence": 0.95,
+        "improved_with_confidence": false,
+        "lower_delta": -0.011448410314745416,
+        "point_delta": -9.791903921918532e-05,
+        "relative_delta": -2.2698339360425186e-05,
+        "resamples": 10000,
+        "upper_delta": 0.010665991845973721
+      }
+    },
+    "tuned_sign_minus_untuned_sign": {
+      "kl": {
+        "confidence": 0.95,
+        "improved_with_confidence": true,
+        "lower_delta": -0.005165422382653384,
+        "point_delta": -0.004538098271190116,
+        "relative_delta": -0.006179037134533622,
+        "resamples": 10000,
+        "upper_delta": -0.003928118217092491
+      },
+      "nll": {
+        "confidence": 0.95,
+        "improved_with_confidence": true,
+        "lower_delta": -0.005847447616790902,
+        "point_delta": -0.00301033526717287,
+        "relative_delta": -0.0006973466296799601,
+        "resamples": 10000,
+        "upper_delta": -0.0008422291053324926
+      }
+    },
+    "untuned_int8_minus_unchanged060": {
+      "kl": {
+        "confidence": 0.95,
+        "improved_with_confidence": false,
+        "lower_delta": -6.876501940622504e-05,
+        "point_delta": 0.008144162172440628,
+        "relative_delta": 0.011045092229329033,
+        "resamples": 10000,
+        "upper_delta": 0.016712716803081062
+      },
+      "nll": {
+        "confidence": 0.95,
+        "improved_with_confidence": false,
+        "lower_delta": -0.003264044906606145,
+        "point_delta": 0.0094151676517642,
+        "relative_delta": 0.0021825037520708155,
+        "resamples": 10000,
+        "upper_delta": 0.021773916090227274
+      }
+    },
+    "untuned_residual_factor_minus_unchanged060": {
+      "kl": {
+        "confidence": 0.95,
+        "improved_with_confidence": true,
+        "lower_delta": -0.014594370838247439,
+        "point_delta": -0.007635965467043704,
+        "relative_delta": -0.010355877137229748,
+        "resamples": 10000,
+        "upper_delta": -0.0002992108065710264
+      },
+      "nll": {
+        "confidence": 0.95,
+        "improved_with_confidence": false,
+        "lower_delta": -0.022520371690266217,
+        "point_delta": -0.010451997174053318,
+        "relative_delta": -0.0024228483116527978,
+        "resamples": 10000,
+        "upper_delta": 0.0012406199412335894
+      }
+    },
+    "untuned_sign_minus_unchanged060": {
+      "kl": {
+        "confidence": 0.95,
+        "improved_with_confidence": false,
+        "lower_delta": -0.010447392102868047,
+        "point_delta": -0.0029212055996362674,
+        "relative_delta": -0.0039617316779370915,
+        "resamples": 10000,
+        "upper_delta": 0.003983051576259777
+      },
+      "nll": {
+        "confidence": 0.95,
+        "improved_with_confidence": false,
+        "lower_delta": -0.008463824565163591,
+        "point_delta": 0.0029124162279536847,
+        "relative_delta": 0.0006751190823362347,
+        "resamples": 10000,
+        "upper_delta": 0.013925922049157435
+      }
+    }
+  },
+  "peak_cuda_allocated_bytes": 5822808576,
+  "primary_gate_passed": true,
+  "results": {
+    "teacher": {
+      "arm": "teacher",
+      "kl_nats_per_token": 0.0,
+      "negative_log_likelihood": 4.026001661179972,
+      "sequences": [
+        {
+          "kl_nats_per_token": 0.0,
+          "negative_log_likelihood": 4.198506872248043,
+          "teacher_top1_agreement": 1.0,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.0,
+          "negative_log_likelihood": 3.9157250361433236,
+          "teacher_top1_agreement": 1.0,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.0,
+          "negative_log_likelihood": 4.448791309812064,
+          "teacher_top1_agreement": 1.0,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.0,
+          "negative_log_likelihood": 3.8156863845257845,
+          "teacher_top1_agreement": 1.0,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.0,
+          "negative_log_likelihood": 4.3561497817067485,
+          "teacher_top1_agreement": 1.0,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.0,
+          "negative_log_likelihood": 3.677888276758959,
+          "teacher_top1_agreement": 1.0,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.0,
+          "negative_log_likelihood": 4.067942445758738,
+          "teacher_top1_agreement": 1.0,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.0,
+          "negative_log_likelihood": 3.6252516505769554,
+          "teacher_top1_agreement": 1.0,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.0,
+          "negative_log_likelihood": 4.777448486208683,
+          "teacher_top1_agreement": 1.0,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.0,
+          "negative_log_likelihood": 3.9307155123895394,
+          "teacher_top1_agreement": 1.0,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.0,
+          "negative_log_likelihood": 4.885248143145716,
+          "teacher_top1_agreement": 1.0,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.0,
+          "negative_log_likelihood": 4.348470251154293,
+          "teacher_top1_agreement": 1.0,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.0,
+          "negative_log_likelihood": 3.835790615492371,
+          "teacher_top1_agreement": 1.0,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.0,
+          "negative_log_likelihood": 3.8323430697745304,
+          "teacher_top1_agreement": 1.0,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.0,
+          "negative_log_likelihood": 4.611874380690244,
+          "teacher_top1_agreement": 1.0,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.0,
+          "negative_log_likelihood": 4.190375632269276,
+          "teacher_top1_agreement": 1.0,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.0,
+          "negative_log_likelihood": 4.3149983057070616,
+          "teacher_top1_agreement": 1.0,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.0,
+          "negative_log_likelihood": 3.9481716865196153,
+          "teacher_top1_agreement": 1.0,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.0,
+          "negative_log_likelihood": 3.298986431203943,
+          "teacher_top1_agreement": 1.0,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.0,
+          "negative_log_likelihood": 4.371519980831855,
+          "teacher_top1_agreement": 1.0,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.0,
+          "negative_log_likelihood": 4.2925442062945285,
+          "teacher_top1_agreement": 1.0,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.0,
+          "negative_log_likelihood": 3.8772344869176933,
+          "teacher_top1_agreement": 1.0,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.0,
+          "negative_log_likelihood": 4.775023667546401,
+          "teacher_top1_agreement": 1.0,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.0,
+          "negative_log_likelihood": 3.41936524273598,
+          "teacher_top1_agreement": 1.0,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.0,
+          "negative_log_likelihood": 4.833924817945626,
+          "teacher_top1_agreement": 1.0,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.0,
+          "negative_log_likelihood": 4.028945937781884,
+          "teacher_top1_agreement": 1.0,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.0,
+          "negative_log_likelihood": 3.6234218948274677,
+          "teacher_top1_agreement": 1.0,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.0,
+          "negative_log_likelihood": 3.9688551691880196,
+          "teacher_top1_agreement": 1.0,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.0,
+          "negative_log_likelihood": 4.159987134242944,
+          "teacher_top1_agreement": 1.0,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.0,
+          "negative_log_likelihood": 3.6733481897999862,
+          "teacher_top1_agreement": 1.0,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.0,
+          "negative_log_likelihood": 4.19420926864833,
+          "teacher_top1_agreement": 1.0,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.0,
+          "negative_log_likelihood": 4.597280841984161,
+          "teacher_top1_agreement": 1.0,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.0,
+          "negative_log_likelihood": 4.1010564068758795,
+          "teacher_top1_agreement": 1.0,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.0,
+          "negative_log_likelihood": 3.7116162772281296,
+          "teacher_top1_agreement": 1.0,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.0,
+          "negative_log_likelihood": 3.205944770469591,
+          "teacher_top1_agreement": 1.0,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.0,
+          "negative_log_likelihood": 3.095340445083648,
+          "teacher_top1_agreement": 1.0,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.0,
+          "negative_log_likelihood": 4.351914556992264,
+          "teacher_top1_agreement": 1.0,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.0,
+          "negative_log_likelihood": 3.896282576768132,
+          "teacher_top1_agreement": 1.0,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.0,
+          "negative_log_likelihood": 3.370071067735407,
+          "teacher_top1_agreement": 1.0,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.0,
+          "negative_log_likelihood": 4.394836186896098,
+          "teacher_top1_agreement": 1.0,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.0,
+          "negative_log_likelihood": 4.1632303137135365,
+          "teacher_top1_agreement": 1.0,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.0,
+          "negative_log_likelihood": 3.7616665237337177,
+          "teacher_top1_agreement": 1.0,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.0,
+          "negative_log_likelihood": 3.8987317318552392,
+          "teacher_top1_agreement": 1.0,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.0,
+          "negative_log_likelihood": 4.159958273930559,
+          "teacher_top1_agreement": 1.0,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.0,
+          "negative_log_likelihood": 4.012656314498991,
+          "teacher_top1_agreement": 1.0,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.0,
+          "negative_log_likelihood": 3.6820198850389096,
+          "teacher_top1_agreement": 1.0,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.0,
+          "negative_log_likelihood": 3.4399254606661263,
+          "teacher_top1_agreement": 1.0,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.0,
+          "negative_log_likelihood": 4.10680383432168,
+          "teacher_top1_agreement": 1.0,
+          "token_count": 511
+        }
+      ],
+      "teacher_top1_agreement": null,
+      "token_count": 24528,
+      "weighted_normalized_squared_error": null
+    },
+    "tuned_int8": {
+      "arm": "tuned_int8",
+      "kl_nats_per_token": 0.741903194670419,
+      "negative_log_likelihood": 4.323189026999924,
+      "sequences": [
+        {
+          "kl_nats_per_token": 0.6009907563838474,
+          "negative_log_likelihood": 4.359180517625902,
+          "teacher_top1_agreement": 0.6497064828872681,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6164611006436282,
+          "negative_log_likelihood": 4.2155475355174445,
+          "teacher_top1_agreement": 0.6555773019790649,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 1.0619965868686743,
+          "negative_log_likelihood": 4.509306368295927,
+          "teacher_top1_agreement": 0.5166340470314026,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6968246878009953,
+          "negative_log_likelihood": 3.9013785942659918,
+          "teacher_top1_agreement": 0.5929549932479858,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6378736216028142,
+          "negative_log_likelihood": 4.537370357028192,
+          "teacher_top1_agreement": 0.6340508460998535,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6218998250196125,
+          "negative_log_likelihood": 3.9391158639568173,
+          "teacher_top1_agreement": 0.6497064828872681,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6428128165974776,
+          "negative_log_likelihood": 4.363637935392077,
+          "teacher_top1_agreement": 0.5772994160652161,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6150452227508485,
+          "negative_log_likelihood": 3.988342329947216,
+          "teacher_top1_agreement": 0.6086105704307556,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7776645037059448,
+          "negative_log_likelihood": 4.763997251506887,
+          "teacher_top1_agreement": 0.5459882616996765,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.753710054371455,
+          "negative_log_likelihood": 4.176395214700419,
+          "teacher_top1_agreement": 0.5772994160652161,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6910937658261413,
+          "negative_log_likelihood": 5.0793624848069046,
+          "teacher_top1_agreement": 0.6340508460998535,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.5179486974578081,
+          "negative_log_likelihood": 4.4692845652481346,
+          "teacher_top1_agreement": 0.6673189997673035,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.5468954022849842,
+          "negative_log_likelihood": 4.150142303884846,
+          "teacher_top1_agreement": 0.6125244498252869,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6555988140068876,
+          "negative_log_likelihood": 4.179324036241744,
+          "teacher_top1_agreement": 0.6007827520370483,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.8165196457954302,
+          "negative_log_likelihood": 5.026467235587581,
+          "teacher_top1_agreement": 0.602739691734314,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.633661824429805,
+          "negative_log_likelihood": 4.504893913194391,
+          "teacher_top1_agreement": 0.6086105704307556,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.5345088339131873,
+          "negative_log_likelihood": 4.349353782818042,
+          "teacher_top1_agreement": 0.6536203622817993,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6633384894951448,
+          "negative_log_likelihood": 4.216440189607923,
+          "teacher_top1_agreement": 0.5949119329452515,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.9490957913333422,
+          "negative_log_likelihood": 3.8772550758317026,
+          "teacher_top1_agreement": 0.5792563557624817,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6613907450099281,
+          "negative_log_likelihood": 4.646112266585319,
+          "teacher_top1_agreement": 0.6086105704307556,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7072609100789706,
+          "negative_log_likelihood": 4.492635603753555,
+          "teacher_top1_agreement": 0.5831702351570129,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 1.0394591426662736,
+          "negative_log_likelihood": 4.447060138978603,
+          "teacher_top1_agreement": 0.5401173830032349,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7441581531980033,
+          "negative_log_likelihood": 4.877108131602785,
+          "teacher_top1_agreement": 0.645792543888092,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7600926550400467,
+          "negative_log_likelihood": 3.891411633874106,
+          "teacher_top1_agreement": 0.587084174156189,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.8665171266768543,
+          "negative_log_likelihood": 4.9649449477223735,
+          "teacher_top1_agreement": 0.5518590807914734,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7342007911368592,
+          "negative_log_likelihood": 4.1962003166661574,
+          "teacher_top1_agreement": 0.5988258123397827,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7088943152978229,
+          "negative_log_likelihood": 4.002806586995283,
+          "teacher_top1_agreement": 0.6301369667053223,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6576161001993018,
+          "negative_log_likelihood": 4.370234689133975,
+          "teacher_top1_agreement": 0.6653620004653931,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.602832182046252,
+          "negative_log_likelihood": 4.351971516170614,
+          "teacher_top1_agreement": 0.6575342416763306,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6639414430831043,
+          "negative_log_likelihood": 4.110602033581519,
+          "teacher_top1_agreement": 0.6046966910362244,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.8248499722863364,
+          "negative_log_likelihood": 4.516433865123532,
+          "teacher_top1_agreement": 0.5733855366706848,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7670483654492521,
+          "negative_log_likelihood": 4.822350996581076,
+          "teacher_top1_agreement": 0.5107632279396057,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.5117864440798526,
+          "negative_log_likelihood": 4.385424231363136,
+          "teacher_top1_agreement": 0.602739691734314,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6542547677594388,
+          "negative_log_likelihood": 3.7399485937070005,
+          "teacher_top1_agreement": 0.6242661476135254,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7587905592647783,
+          "negative_log_likelihood": 3.5875531400019876,
+          "teacher_top1_agreement": 0.6007827520370483,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 1.9614708297639911,
+          "negative_log_likelihood": 4.437764550375145,
+          "teacher_top1_agreement": 0.44031310081481934,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 1.0373528474930915,
+          "negative_log_likelihood": 4.69800785609654,
+          "teacher_top1_agreement": 0.5616438388824463,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.676422186327074,
+          "negative_log_likelihood": 4.196212783485009,
+          "teacher_top1_agreement": 0.626223087310791,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6640985063377425,
+          "negative_log_likelihood": 3.761459544680123,
+          "teacher_top1_agreement": 0.5968688726425171,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7611081520871873,
+          "negative_log_likelihood": 4.809453811197598,
+          "teacher_top1_agreement": 0.5812132954597473,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7325191591117247,
+          "negative_log_likelihood": 4.441626785785951,
+          "teacher_top1_agreement": 0.5381604433059692,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7758913693362719,
+          "negative_log_likelihood": 3.9682429961262384,
+          "teacher_top1_agreement": 0.5675146579742432,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7428965465896517,
+          "negative_log_likelihood": 4.291930331176041,
+          "teacher_top1_agreement": 0.5401173830032349,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7908605941354412,
+          "negative_log_likelihood": 4.4602839251553705,
+          "teacher_top1_agreement": 0.534246563911438,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7250785379727059,
+          "negative_log_likelihood": 4.397247329383447,
+          "teacher_top1_agreement": 0.514677107334137,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6000599254600689,
+          "negative_log_likelihood": 4.018888126380756,
+          "teacher_top1_agreement": 0.6105675101280212,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6616115532742555,
+          "negative_log_likelihood": 3.6580538068498885,
+          "teacher_top1_agreement": 0.6164383292198181,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7849490227298027,
+          "negative_log_likelihood": 4.364307202005106,
+          "teacher_top1_agreement": 0.5518590807914734,
+          "token_count": 511
+        }
+      ],
+      "teacher_top1_agreement": null,
+      "token_count": 24528,
+      "weighted_normalized_squared_error": null
+    },
+    "tuned_residual_factor": {
+      "arm": "tuned_residual_factor",
+      "kl_nats_per_token": 0.7259984842446296,
+      "negative_log_likelihood": 4.301216121600176,
+      "sequences": [
+        {
+          "kl_nats_per_token": 0.6050867297178145,
+          "negative_log_likelihood": 4.342727616341847,
+          "teacher_top1_agreement": 0.6477494835853577,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.591763513195538,
+          "negative_log_likelihood": 4.162385974144982,
+          "teacher_top1_agreement": 0.6634050607681274,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 1.0282437796695358,
+          "negative_log_likelihood": 4.496156203536838,
+          "teacher_top1_agreement": 0.5420743823051453,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6953985919691112,
+          "negative_log_likelihood": 3.933200649552616,
+          "teacher_top1_agreement": 0.5812132954597473,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6279891325769592,
+          "negative_log_likelihood": 4.511094334074196,
+          "teacher_top1_agreement": 0.6418786644935608,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6219701878945189,
+          "negative_log_likelihood": 3.900390729512254,
+          "teacher_top1_agreement": 0.6379647850990295,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6265690051412862,
+          "negative_log_likelihood": 4.352217269270388,
+          "teacher_top1_agreement": 0.5772994160652161,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6241161342702967,
+          "negative_log_likelihood": 4.038568978206985,
+          "teacher_top1_agreement": 0.6007827520370483,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7931425968028328,
+          "negative_log_likelihood": 4.745467736529744,
+          "teacher_top1_agreement": 0.5753424763679504,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7656218720975454,
+          "negative_log_likelihood": 4.236863391973268,
+          "teacher_top1_agreement": 0.5694715976715088,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.701948078177913,
+          "negative_log_likelihood": 5.105790647741866,
+          "teacher_top1_agreement": 0.6340508460998535,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.5190288801249227,
+          "negative_log_likelihood": 4.461068214968926,
+          "teacher_top1_agreement": 0.6575342416763306,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.5241746715836796,
+          "negative_log_likelihood": 4.065137904217565,
+          "teacher_top1_agreement": 0.5968688726425171,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6558830220172084,
+          "negative_log_likelihood": 4.216209366830128,
+          "teacher_top1_agreement": 0.5890411138534546,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.8021996007273575,
+          "negative_log_likelihood": 4.989555343956397,
+          "teacher_top1_agreement": 0.5929549932479858,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6207892722113025,
+          "negative_log_likelihood": 4.483833619059882,
+          "teacher_top1_agreement": 0.6203522682189941,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.5358353631603742,
+          "negative_log_likelihood": 4.317804967353955,
+          "teacher_top1_agreement": 0.645792543888092,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6644417152479437,
+          "negative_log_likelihood": 4.193985015212206,
+          "teacher_top1_agreement": 0.6086105704307556,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.9197651028866404,
+          "negative_log_likelihood": 3.836046804887208,
+          "teacher_top1_agreement": 0.5929549932479858,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.648034984118318,
+          "negative_log_likelihood": 4.637015967919635,
+          "teacher_top1_agreement": 0.6320939064025879,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6838886070624723,
+          "negative_log_likelihood": 4.461163664517337,
+          "teacher_top1_agreement": 0.6105675101280212,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 1.0180007426939366,
+          "negative_log_likelihood": 4.454948081895563,
+          "teacher_top1_agreement": 0.5714285373687744,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7286411498157479,
+          "negative_log_likelihood": 4.798338679184885,
+          "teacher_top1_agreement": 0.6418786644935608,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7389435254897624,
+          "negative_log_likelihood": 3.8602224749361698,
+          "teacher_top1_agreement": 0.6046966910362244,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.849271938525534,
+          "negative_log_likelihood": 4.924474324265572,
+          "teacher_top1_agreement": 0.5479452013969421,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7294018067959004,
+          "negative_log_likelihood": 4.191990787035798,
+          "teacher_top1_agreement": 0.6046966910362244,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6762974845453251,
+          "negative_log_likelihood": 3.966184925893048,
+          "teacher_top1_agreement": 0.6497064828872681,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.5985180944379295,
+          "negative_log_likelihood": 4.2880534341890515,
+          "teacher_top1_agreement": 0.6790606379508972,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.61990352712732,
+          "negative_log_likelihood": 4.341022021149936,
+          "teacher_top1_agreement": 0.6614481210708618,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6547862722915679,
+          "negative_log_likelihood": 4.09547504940145,
+          "teacher_top1_agreement": 0.6203522682189941,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7886719414399328,
+          "negative_log_likelihood": 4.472197963766856,
+          "teacher_top1_agreement": 0.5851271748542786,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7438380228330012,
+          "negative_log_likelihood": 4.773703468755733,
+          "teacher_top1_agreement": 0.5499021410942078,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.506768346066111,
+          "negative_log_likelihood": 4.381238724620841,
+          "teacher_top1_agreement": 0.6105675101280212,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6259769544209519,
+          "negative_log_likelihood": 3.7448727482685604,
+          "teacher_top1_agreement": 0.626223087310791,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7303891079299837,
+          "negative_log_likelihood": 3.5656172422047,
+          "teacher_top1_agreement": 0.6242661476135254,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 1.8419661923164024,
+          "negative_log_likelihood": 4.303583835668993,
+          "teacher_top1_agreement": 0.4305283725261688,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 1.005084084438018,
+          "negative_log_likelihood": 4.675415964742463,
+          "teacher_top1_agreement": 0.5655577182769775,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6535789635316733,
+          "negative_log_likelihood": 4.168883053057348,
+          "teacher_top1_agreement": 0.6242661476135254,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6776459072434039,
+          "negative_log_likelihood": 3.7425557265309672,
+          "teacher_top1_agreement": 0.5753424763679504,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7645395693247099,
+          "negative_log_likelihood": 4.805500082773705,
+          "teacher_top1_agreement": 0.5636007785797119,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7148945205598894,
+          "negative_log_likelihood": 4.44546874581951,
+          "teacher_top1_agreement": 0.5362035036087036,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7442749064495885,
+          "negative_log_likelihood": 3.9433265880129342,
+          "teacher_top1_agreement": 0.5831702351570129,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.693752693803343,
+          "negative_log_likelihood": 4.1921305199192,
+          "teacher_top1_agreement": 0.5499021410942078,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.76817316178473,
+          "negative_log_likelihood": 4.449729516314901,
+          "teacher_top1_agreement": 0.5322896242141724,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7121027855023946,
+          "negative_log_likelihood": 4.364252766051171,
+          "teacher_top1_agreement": 0.5322896242141724,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6016804794042777,
+          "negative_log_likelihood": 4.0249239329955815,
+          "teacher_top1_agreement": 0.6086105704307556,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6459139676476645,
+          "negative_log_likelihood": 3.639787394006658,
+          "teacher_top1_agreement": 0.6242661476135254,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.759020256669554,
+          "negative_log_likelihood": 4.357791385538658,
+          "teacher_top1_agreement": 0.5675146579742432,
+          "token_count": 511
+        }
+      ],
+      "teacher_top1_agreement": null,
+      "token_count": 24528,
+      "weighted_normalized_squared_error": null
+    },
+    "tuned_sign": {
+      "arm": "tuned_sign",
+      "kl_nats_per_token": 0.7298964377874186,
+      "negative_log_likelihood": 4.3138317330087315,
+      "sequences": [
+        {
+          "kl_nats_per_token": 0.6090385227987211,
+          "negative_log_likelihood": 4.3634498133351425,
+          "teacher_top1_agreement": 0.6340508460998535,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.5923133894888623,
+          "negative_log_likelihood": 4.169661908233702,
+          "teacher_top1_agreement": 0.6536203622817993,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 1.039776445601551,
+          "negative_log_likelihood": 4.500508377463384,
+          "teacher_top1_agreement": 0.5283757448196411,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6889780048288244,
+          "negative_log_likelihood": 3.896066251332979,
+          "teacher_top1_agreement": 0.60665363073349,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6360050899408568,
+          "negative_log_likelihood": 4.52568040761929,
+          "teacher_top1_agreement": 0.6281800270080566,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6028829768679147,
+          "negative_log_likelihood": 3.9147756468293253,
+          "teacher_top1_agreement": 0.6536203622817993,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6294264000222641,
+          "negative_log_likelihood": 4.378575453786234,
+          "teacher_top1_agreement": 0.587084174156189,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6148615312669609,
+          "negative_log_likelihood": 4.051047442710563,
+          "teacher_top1_agreement": 0.6203522682189941,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.792932030739383,
+          "negative_log_likelihood": 4.7466364821342575,
+          "teacher_top1_agreement": 0.5714285373687744,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7641132339806006,
+          "negative_log_likelihood": 4.211652333955708,
+          "teacher_top1_agreement": 0.5714285373687744,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.721402787882288,
+          "negative_log_likelihood": 5.076041294403972,
+          "teacher_top1_agreement": 0.6281800270080566,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.5114050228768365,
+          "negative_log_likelihood": 4.438376783158215,
+          "teacher_top1_agreement": 0.6516634225845337,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.5464109954535378,
+          "negative_log_likelihood": 4.114228145950228,
+          "teacher_top1_agreement": 0.6105675101280212,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6431162436647658,
+          "negative_log_likelihood": 4.192588194009143,
+          "teacher_top1_agreement": 0.602739691734314,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7968049655921772,
+          "negative_log_likelihood": 4.988935884897489,
+          "teacher_top1_agreement": 0.6125244498252869,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6236854523362012,
+          "negative_log_likelihood": 4.4877161111850326,
+          "teacher_top1_agreement": 0.626223087310791,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.5359412079454635,
+          "negative_log_likelihood": 4.371250413868525,
+          "teacher_top1_agreement": 0.6516634225845337,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6836852915366335,
+          "negative_log_likelihood": 4.248854814443569,
+          "teacher_top1_agreement": 0.5909980535507202,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.9415997786997815,
+          "negative_log_likelihood": 3.8747624212515097,
+          "teacher_top1_agreement": 0.5851271748542786,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6514980480395651,
+          "negative_log_likelihood": 4.667131114146014,
+          "teacher_top1_agreement": 0.6340508460998535,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6852755723867398,
+          "negative_log_likelihood": 4.460127619614573,
+          "teacher_top1_agreement": 0.6086105704307556,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 1.000200126035806,
+          "negative_log_likelihood": 4.462376977132958,
+          "teacher_top1_agreement": 0.5655577182769775,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7312210254706515,
+          "negative_log_likelihood": 4.823586211979039,
+          "teacher_top1_agreement": 0.6223092079162598,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7499730358385059,
+          "negative_log_likelihood": 3.875139225252454,
+          "teacher_top1_agreement": 0.5812132954597473,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.8641213754851758,
+          "negative_log_likelihood": 4.969512058564129,
+          "teacher_top1_agreement": 0.5459882616996765,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7389247132840688,
+          "negative_log_likelihood": 4.198186482468697,
+          "teacher_top1_agreement": 0.6125244498252869,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6716234688656204,
+          "negative_log_likelihood": 3.9313849133754664,
+          "teacher_top1_agreement": 0.6614481210708618,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6274724165287503,
+          "negative_log_likelihood": 4.322316806143744,
+          "teacher_top1_agreement": 0.6829745769500732,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6034048924007528,
+          "negative_log_likelihood": 4.358461294155531,
+          "teacher_top1_agreement": 0.6927592754364014,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6681567078233932,
+          "negative_log_likelihood": 4.113850304291907,
+          "teacher_top1_agreement": 0.60665363073349,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7943344377491572,
+          "negative_log_likelihood": 4.519125070590563,
+          "teacher_top1_agreement": 0.5772994160652161,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7758968002408918,
+          "negative_log_likelihood": 4.774292395306193,
+          "teacher_top1_agreement": 0.5362035036087036,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.5118548044253235,
+          "negative_log_likelihood": 4.384223266123792,
+          "teacher_top1_agreement": 0.5753424763679504,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6221538271222796,
+          "negative_log_likelihood": 3.734042038889547,
+          "teacher_top1_agreement": 0.6340508460998535,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6985868222559501,
+          "negative_log_likelihood": 3.5493899231554242,
+          "teacher_top1_agreement": 0.6223092079162598,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 1.8735400011394823,
+          "negative_log_likelihood": 4.36257855439606,
+          "teacher_top1_agreement": 0.44031310081481934,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 1.0189905166625977,
+          "negative_log_likelihood": 4.6966755338844255,
+          "teacher_top1_agreement": 0.553816020488739,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6748269579415219,
+          "negative_log_likelihood": 4.176018418164636,
+          "teacher_top1_agreement": 0.5988258123397827,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6589067313535806,
+          "negative_log_likelihood": 3.773203362690726,
+          "teacher_top1_agreement": 0.5890411138534546,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7194839317038101,
+          "negative_log_likelihood": 4.736042985710846,
+          "teacher_top1_agreement": 0.5929549932479858,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7155053349623708,
+          "negative_log_likelihood": 4.4689540825711305,
+          "teacher_top1_agreement": 0.5440313220024109,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7590244875495448,
+          "negative_log_likelihood": 3.96243765396148,
+          "teacher_top1_agreement": 0.5772994160652161,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7118332428008376,
+          "negative_log_likelihood": 4.249155182661142,
+          "teacher_top1_agreement": 0.5225048661231995,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7902761821410894,
+          "negative_log_likelihood": 4.475239404726868,
+          "teacher_top1_agreement": 0.5283757448196411,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7240858861844833,
+          "negative_log_likelihood": 4.37527265753998,
+          "teacher_top1_agreement": 0.5225048661231995,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6053751238171602,
+          "negative_log_likelihood": 4.025064875235063,
+          "teacher_top1_agreement": 0.5988258123397827,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6280933723524359,
+          "negative_log_likelihood": 3.6674598201147033,
+          "teacher_top1_agreement": 0.6183953285217285,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7860097997109251,
+          "negative_log_likelihood": 4.401866771003738,
+          "teacher_top1_agreement": 0.5733855366706848,
+          "token_count": 511
+        }
+      ],
+      "teacher_top1_agreement": null,
+      "token_count": 24528,
+      "weighted_normalized_squared_error": null
+    },
+    "unchanged060": {
+      "arm": "unchanged060",
+      "kl_nats_per_token": 0.737355741658245,
+      "negative_log_likelihood": 4.313929652047951,
+      "sequences": [
+        {
+          "kl_nats_per_token": 0.6129202460122901,
+          "negative_log_likelihood": 4.3698934118341795,
+          "teacher_top1_agreement": 0.6692759394645691,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.5884980782137458,
+          "negative_log_likelihood": 4.159246620133431,
+          "teacher_top1_agreement": 0.6829745769500732,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 1.076780106456779,
+          "negative_log_likelihood": 4.551085231355492,
+          "teacher_top1_agreement": 0.5518590807914734,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6948227835727998,
+          "negative_log_likelihood": 3.8891072879798725,
+          "teacher_top1_agreement": 0.6125244498252869,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6725816987965205,
+          "negative_log_likelihood": 4.500422080202346,
+          "teacher_top1_agreement": 0.6242661476135254,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.5960206052328509,
+          "negative_log_likelihood": 3.8929950841019063,
+          "teacher_top1_agreement": 0.6692759394645691,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6520274492625854,
+          "negative_log_likelihood": 4.450062626728573,
+          "teacher_top1_agreement": 0.5968688726425171,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6182209078346447,
+          "negative_log_likelihood": 4.071524931726624,
+          "teacher_top1_agreement": 0.6242661476135254,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7979757641159625,
+          "negative_log_likelihood": 4.714403096477113,
+          "teacher_top1_agreement": 0.5714285373687744,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.786217295726918,
+          "negative_log_likelihood": 4.240390635749832,
+          "teacher_top1_agreement": 0.5694715976715088,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7340934141274768,
+          "negative_log_likelihood": 5.081699602757881,
+          "teacher_top1_agreement": 0.6360078454017639,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.5094833280708925,
+          "negative_log_likelihood": 4.406864457401044,
+          "teacher_top1_agreement": 0.6555773019790649,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.5516330995205098,
+          "negative_log_likelihood": 4.104800349345646,
+          "teacher_top1_agreement": 0.6320939064025879,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.66041796921284,
+          "negative_log_likelihood": 4.201909492627049,
+          "teacher_top1_agreement": 0.6379647850990295,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.8181787703601815,
+          "negative_log_likelihood": 5.001230751231692,
+          "teacher_top1_agreement": 0.6301369667053223,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6545482232379354,
+          "negative_log_likelihood": 4.516229812413046,
+          "teacher_top1_agreement": 0.6320939064025879,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.5594616197559932,
+          "negative_log_likelihood": 4.370358177827063,
+          "teacher_top1_agreement": 0.6731898188591003,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6483558330050653,
+          "negative_log_likelihood": 4.202725628817385,
+          "teacher_top1_agreement": 0.6399217247962952,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.9481467024920738,
+          "negative_log_likelihood": 3.880656195713349,
+          "teacher_top1_agreement": 0.6007827520370483,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6687957591973173,
+          "negative_log_likelihood": 4.6503766950095935,
+          "teacher_top1_agreement": 0.6594911813735962,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7105577155335309,
+          "negative_log_likelihood": 4.4656339970120245,
+          "teacher_top1_agreement": 0.60665363073349,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.994724322205187,
+          "negative_log_likelihood": 4.409427844381613,
+          "teacher_top1_agreement": 0.5890411138534546,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.787981996330963,
+          "negative_log_likelihood": 4.916965880272673,
+          "teacher_top1_agreement": 0.6438356041908264,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7399736486535716,
+          "negative_log_likelihood": 3.89310171646148,
+          "teacher_top1_agreement": 0.60665363073349,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.8669322344188354,
+          "negative_log_likelihood": 4.932464002396496,
+          "teacher_top1_agreement": 0.5753424763679504,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7278999881035194,
+          "negative_log_likelihood": 4.17673540208671,
+          "teacher_top1_agreement": 0.6046966910362244,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6585624847860019,
+          "negative_log_likelihood": 3.914765680839404,
+          "teacher_top1_agreement": 0.6418786644935608,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6225469611628881,
+          "negative_log_likelihood": 4.268465180219736,
+          "teacher_top1_agreement": 0.6908023357391357,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6565603622018474,
+          "negative_log_likelihood": 4.4417344483377414,
+          "teacher_top1_agreement": 0.6771036982536316,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6439921757946275,
+          "negative_log_likelihood": 4.070578618058953,
+          "teacher_top1_agreement": 0.6497064828872681,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.8140998735819778,
+          "negative_log_likelihood": 4.502928955914223,
+          "teacher_top1_agreement": 0.5851271748542786,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7770484356964171,
+          "negative_log_likelihood": 4.83752456336572,
+          "teacher_top1_agreement": 0.5596868991851807,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.5039984484708006,
+          "negative_log_likelihood": 4.334886898033306,
+          "teacher_top1_agreement": 0.626223087310791,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6249863480868405,
+          "negative_log_likelihood": 3.706732419605591,
+          "teacher_top1_agreement": 0.6438356041908264,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6563051787374538,
+          "negative_log_likelihood": 3.502965132084378,
+          "teacher_top1_agreement": 0.6281800270080566,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 1.9019157835182146,
+          "negative_log_likelihood": 4.368860248483557,
+          "teacher_top1_agreement": 0.4540117383003235,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 1.0178958459842928,
+          "negative_log_likelihood": 4.689320857277588,
+          "teacher_top1_agreement": 0.5812132954597473,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6718045512757422,
+          "negative_log_likelihood": 4.188991807911494,
+          "teacher_top1_agreement": 0.6360078454017639,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6571551731654576,
+          "negative_log_likelihood": 3.781037765473069,
+          "teacher_top1_agreement": 0.5949119329452515,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.8235269833917487,
+          "negative_log_likelihood": 4.834247327830694,
+          "teacher_top1_agreement": 0.5890411138534546,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7146446914822154,
+          "negative_log_likelihood": 4.446844306244076,
+          "teacher_top1_agreement": 0.5655577182769775,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7417046851141346,
+          "negative_log_likelihood": 4.03209317500344,
+          "teacher_top1_agreement": 0.5968688726425171,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6748894394727136,
+          "negative_log_likelihood": 4.215961553345921,
+          "teacher_top1_agreement": 0.553816020488739,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.764500429485642,
+          "negative_log_likelihood": 4.444847778798083,
+          "teacher_top1_agreement": 0.5499021410942078,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.733958044630674,
+          "negative_log_likelihood": 4.393530127120345,
+          "teacher_top1_agreement": 0.5381604433059692,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.584749275924175,
+          "negative_log_likelihood": 3.96572102585884,
+          "teacher_top1_agreement": 0.6242661476135254,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6604473838134288,
+          "negative_log_likelihood": 3.6563235318357465,
+          "teacher_top1_agreement": 0.626223087310791,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.8105334843674751,
+          "negative_log_likelihood": 4.419950884615605,
+          "teacher_top1_agreement": 0.5675146579742432,
+          "token_count": 511
+        }
+      ],
+      "teacher_top1_agreement": null,
+      "token_count": 24528,
+      "weighted_normalized_squared_error": null
+    },
+    "untuned_int8": {
+      "arm": "untuned_int8",
+      "kl_nats_per_token": 0.7454999038306857,
+      "negative_log_likelihood": 4.323344819699715,
+      "sequences": [
+        {
+          "kl_nats_per_token": 0.6064871397970241,
+          "negative_log_likelihood": 4.359289389533773,
+          "teacher_top1_agreement": 0.6516634225845337,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.620872665524716,
+          "negative_log_likelihood": 4.217366631017039,
+          "teacher_top1_agreement": 0.6555773019790649,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 1.0663464428627327,
+          "negative_log_likelihood": 4.513357681304274,
+          "teacher_top1_agreement": 0.5185909867286682,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7027612301701436,
+          "negative_log_likelihood": 3.9052262427522244,
+          "teacher_top1_agreement": 0.5949119329452515,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6443592489582218,
+          "negative_log_likelihood": 4.541219528407266,
+          "teacher_top1_agreement": 0.6301369667053223,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6233762248388242,
+          "negative_log_likelihood": 3.9332106827289857,
+          "teacher_top1_agreement": 0.645792543888092,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6470999428437414,
+          "negative_log_likelihood": 4.362380503675009,
+          "teacher_top1_agreement": 0.5655577182769775,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6174320512088545,
+          "negative_log_likelihood": 3.9872369038382156,
+          "teacher_top1_agreement": 0.6086105704307556,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7819179116863094,
+          "negative_log_likelihood": 4.761410438851135,
+          "teacher_top1_agreement": 0.5557730197906494,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.759479981812479,
+          "negative_log_likelihood": 4.160349224411578,
+          "teacher_top1_agreement": 0.5753424763679504,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7038417599672441,
+          "negative_log_likelihood": 5.103682501208759,
+          "teacher_top1_agreement": 0.626223087310791,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.5215890141615895,
+          "negative_log_likelihood": 4.470351739872225,
+          "teacher_top1_agreement": 0.6653620004653931,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.5501019632746329,
+          "negative_log_likelihood": 4.149849475479873,
+          "teacher_top1_agreement": 0.6125244498252869,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6589939673586135,
+          "negative_log_likelihood": 4.178098958532404,
+          "teacher_top1_agreement": 0.60665363073349,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.8241742986988881,
+          "negative_log_likelihood": 5.020144647348184,
+          "teacher_top1_agreement": 0.5968688726425171,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6400176531647983,
+          "negative_log_likelihood": 4.505054567191466,
+          "teacher_top1_agreement": 0.602739691734314,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.5395960406547889,
+          "negative_log_likelihood": 4.352186856204516,
+          "teacher_top1_agreement": 0.6555773019790649,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6675945196133071,
+          "negative_log_likelihood": 4.216839008368624,
+          "teacher_top1_agreement": 0.5949119329452515,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.9572157551864355,
+          "negative_log_likelihood": 3.8806339420684397,
+          "teacher_top1_agreement": 0.5753424763679504,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6660368559178541,
+          "negative_log_likelihood": 4.646607609877615,
+          "teacher_top1_agreement": 0.6007827520370483,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7153100015599201,
+          "negative_log_likelihood": 4.492909694604444,
+          "teacher_top1_agreement": 0.587084174156189,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 1.0448427928170578,
+          "negative_log_likelihood": 4.447855566812355,
+          "teacher_top1_agreement": 0.5420743823051453,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.755317135566368,
+          "negative_log_likelihood": 4.887352153979635,
+          "teacher_top1_agreement": 0.645792543888092,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7658881581226207,
+          "negative_log_likelihood": 3.896026536676515,
+          "teacher_top1_agreement": 0.587084174156189,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.8705038473797404,
+          "negative_log_likelihood": 4.965041352811392,
+          "teacher_top1_agreement": 0.5479452013969421,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7374430729218425,
+          "negative_log_likelihood": 4.199021669749878,
+          "teacher_top1_agreement": 0.5968688726425171,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7105794932744275,
+          "negative_log_likelihood": 3.9974313276854514,
+          "teacher_top1_agreement": 0.6164383292198181,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6589860766834476,
+          "negative_log_likelihood": 4.367027850067079,
+          "teacher_top1_agreement": 0.6673189997673035,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.601999139132565,
+          "negative_log_likelihood": 4.361389264668504,
+          "teacher_top1_agreement": 0.6555773019790649,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6689934310614479,
+          "negative_log_likelihood": 4.11333805987513,
+          "teacher_top1_agreement": 0.6046966910362244,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.829100188910378,
+          "negative_log_likelihood": 4.518290376010007,
+          "teacher_top1_agreement": 0.5772994160652161,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7711748544950541,
+          "negative_log_likelihood": 4.823890850268698,
+          "teacher_top1_agreement": 0.5107632279396057,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.5146070058565084,
+          "negative_log_likelihood": 4.383356038371645,
+          "teacher_top1_agreement": 0.5949119329452515,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6565562488981422,
+          "negative_log_likelihood": 3.736570563568294,
+          "teacher_top1_agreement": 0.6301369667053223,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.764422621978939,
+          "negative_log_likelihood": 3.5949911875267553,
+          "teacher_top1_agreement": 0.5949119329452515,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 1.9257259294244875,
+          "negative_log_likelihood": 4.39035679169597,
+          "teacher_top1_agreement": 0.43248531222343445,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 1.0443117623226517,
+          "negative_log_likelihood": 4.698553902762277,
+          "teacher_top1_agreement": 0.557729959487915,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6810525793385366,
+          "negative_log_likelihood": 4.195080691820954,
+          "teacher_top1_agreement": 0.6242661476135254,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6662648792602778,
+          "negative_log_likelihood": 3.770737799179764,
+          "teacher_top1_agreement": 0.5929549932479858,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7627385992359975,
+          "negative_log_likelihood": 4.804132121883026,
+          "teacher_top1_agreement": 0.587084174156189,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7374415257672274,
+          "negative_log_likelihood": 4.441008685386344,
+          "teacher_top1_agreement": 0.5401173830032349,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7769946790721318,
+          "negative_log_likelihood": 3.9679961083219943,
+          "teacher_top1_agreement": 0.5772994160652161,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7530714061162244,
+          "negative_log_likelihood": 4.302952163606707,
+          "teacher_top1_agreement": 0.5283757448196411,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7836466246155144,
+          "negative_log_likelihood": 4.448610264727748,
+          "teacher_top1_agreement": 0.5322896242141724,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7283424146021416,
+          "negative_log_likelihood": 4.400452720209111,
+          "teacher_top1_agreement": 0.5127201676368713,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6060955977019965,
+          "negative_log_likelihood": 4.023282239581741,
+          "teacher_top1_agreement": 0.6105675101280212,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6648360829064057,
+          "negative_log_likelihood": 3.6602006229169213,
+          "teacher_top1_agreement": 0.6203522682189941,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7884545671496606,
+          "negative_log_likelihood": 4.3681982081463655,
+          "teacher_top1_agreement": 0.553816020488739,
+          "token_count": 511
+        }
+      ],
+      "teacher_top1_agreement": null,
+      "token_count": 24528,
+      "weighted_normalized_squared_error": null
+    },
+    "untuned_residual_factor": {
+      "arm": "untuned_residual_factor",
+      "kl_nats_per_token": 0.7297197761912013,
+      "negative_log_likelihood": 4.303477654873897,
+      "sequences": [
+        {
+          "kl_nats_per_token": 0.6088645416229905,
+          "negative_log_likelihood": 4.343459202118816,
+          "teacher_top1_agreement": 0.6497064828872681,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.5949394950194835,
+          "negative_log_likelihood": 4.159103707091449,
+          "teacher_top1_agreement": 0.6673189997673035,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 1.0330522167705976,
+          "negative_log_likelihood": 4.498439019906778,
+          "teacher_top1_agreement": 0.5381604433059692,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7023001295713063,
+          "negative_log_likelihood": 3.934029581028888,
+          "teacher_top1_agreement": 0.587084174156189,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6332113168944118,
+          "negative_log_likelihood": 4.508697673999166,
+          "teacher_top1_agreement": 0.6360078454017639,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6282165549739233,
+          "negative_log_likelihood": 3.9101188346131206,
+          "teacher_top1_agreement": 0.6340508460998535,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6303220569737503,
+          "negative_log_likelihood": 4.35098632394451,
+          "teacher_top1_agreement": 0.5792563557624817,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6278811266277634,
+          "negative_log_likelihood": 4.040624435633829,
+          "teacher_top1_agreement": 0.6105675101280212,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7946591143972019,
+          "negative_log_likelihood": 4.753012132737968,
+          "teacher_top1_agreement": 0.5733855366706848,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.770312583609803,
+          "negative_log_likelihood": 4.2305011487986945,
+          "teacher_top1_agreement": 0.5694715976715088,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7095086084653254,
+          "negative_log_likelihood": 5.112722796236699,
+          "teacher_top1_agreement": 0.6340508460998535,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.5224066788436382,
+          "negative_log_likelihood": 4.456697766328278,
+          "teacher_top1_agreement": 0.6536203622817993,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.5280576788049388,
+          "negative_log_likelihood": 4.07491148707918,
+          "teacher_top1_agreement": 0.5890411138534546,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.661255758102626,
+          "negative_log_likelihood": 4.223645652576902,
+          "teacher_top1_agreement": 0.5968688726425171,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.8110751135241961,
+          "negative_log_likelihood": 4.995232150979238,
+          "teacher_top1_agreement": 0.5890411138534546,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6272848786206628,
+          "negative_log_likelihood": 4.489024029785873,
+          "teacher_top1_agreement": 0.6144813895225525,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.5415197435890392,
+          "negative_log_likelihood": 4.321911238877507,
+          "teacher_top1_agreement": 0.645792543888092,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6682042105090594,
+          "negative_log_likelihood": 4.195587247785057,
+          "teacher_top1_agreement": 0.6086105704307556,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.9251313741426412,
+          "negative_log_likelihood": 3.8377733025298895,
+          "teacher_top1_agreement": 0.5890411138534546,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6483319631528015,
+          "negative_log_likelihood": 4.63470451519214,
+          "teacher_top1_agreement": 0.6399217247962952,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6907943270211118,
+          "negative_log_likelihood": 4.467132329474223,
+          "teacher_top1_agreement": 0.6125244498252869,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 1.024170306330791,
+          "negative_log_likelihood": 4.45425916697881,
+          "teacher_top1_agreement": 0.5753424763679504,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7358915063966277,
+          "negative_log_likelihood": 4.802570022015655,
+          "teacher_top1_agreement": 0.6399217247962952,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7445645155038852,
+          "negative_log_likelihood": 3.8626874113736087,
+          "teacher_top1_agreement": 0.5968688726425171,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.8545515150006736,
+          "negative_log_likelihood": 4.925304883146939,
+          "teacher_top1_agreement": 0.557729959487915,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7325938499137147,
+          "negative_log_likelihood": 4.193492165283681,
+          "teacher_top1_agreement": 0.6086105704307556,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6787795609923958,
+          "negative_log_likelihood": 3.9716032741121117,
+          "teacher_top1_agreement": 0.6438356041908264,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.5995384764997926,
+          "negative_log_likelihood": 4.280829562133072,
+          "teacher_top1_agreement": 0.6790606379508972,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6150657146177646,
+          "negative_log_likelihood": 4.3581304680811215,
+          "teacher_top1_agreement": 0.6731898188591003,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6575433615369106,
+          "negative_log_likelihood": 4.094817085042158,
+          "teacher_top1_agreement": 0.6183953285217285,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7948263694628811,
+          "negative_log_likelihood": 4.470434304552769,
+          "teacher_top1_agreement": 0.5909980535507202,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7461298645825769,
+          "negative_log_likelihood": 4.772974630158008,
+          "teacher_top1_agreement": 0.5440313220024109,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.5105354324012353,
+          "negative_log_likelihood": 4.381759404669536,
+          "teacher_top1_agreement": 0.60665363073349,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.628942500821765,
+          "negative_log_likelihood": 3.743115031322621,
+          "teacher_top1_agreement": 0.6301369667053223,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7369332397520659,
+          "negative_log_likelihood": 3.568546004024737,
+          "teacher_top1_agreement": 0.6223092079162598,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 1.8483893437394892,
+          "negative_log_likelihood": 4.3119422628921535,
+          "teacher_top1_agreement": 0.4285714328289032,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 1.0088192964020073,
+          "negative_log_likelihood": 4.675419533089416,
+          "teacher_top1_agreement": 0.5714285373687744,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6566416298106692,
+          "negative_log_likelihood": 4.1728148786988974,
+          "teacher_top1_agreement": 0.6223092079162598,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6652652830060447,
+          "negative_log_likelihood": 3.759925812424512,
+          "teacher_top1_agreement": 0.5890411138534546,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7662528163066349,
+          "negative_log_likelihood": 4.800964474911326,
+          "teacher_top1_agreement": 0.5733855366706848,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7193470673085193,
+          "negative_log_likelihood": 4.449895675868204,
+          "teacher_top1_agreement": 0.5381604433059692,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7467730273939159,
+          "negative_log_likelihood": 3.9428342755759997,
+          "teacher_top1_agreement": 0.5753424763679504,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6958526529211354,
+          "negative_log_likelihood": 4.191575231384158,
+          "teacher_top1_agreement": 0.5459882616996765,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7733623407591579,
+          "negative_log_likelihood": 4.457056810711228,
+          "teacher_top1_agreement": 0.5264188051223755,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7140493336955629,
+          "negative_log_likelihood": 4.364893187282137,
+          "teacher_top1_agreement": 0.5362035036087036,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6031772423163786,
+          "negative_log_likelihood": 4.021475610900998,
+          "teacher_top1_agreement": 0.6105675101280212,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6502741778200153,
+          "negative_log_likelihood": 3.64035392507415,
+          "teacher_top1_agreement": 0.6223092079162598,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7609493606477801,
+          "negative_log_likelihood": 4.358937765520846,
+          "teacher_top1_agreement": 0.5694715976715088,
+          "token_count": 511
+        }
+      ],
+      "teacher_top1_agreement": null,
+      "token_count": 24528,
+      "weighted_normalized_squared_error": null
+    },
+    "untuned_sign": {
+      "arm": "untuned_sign",
+      "kl_nats_per_token": 0.7344345360586088,
+      "negative_log_likelihood": 4.316842068275904,
+      "sequences": [
+        {
+          "kl_nats_per_token": 0.6132382357423786,
+          "negative_log_likelihood": 4.364046100534338,
+          "teacher_top1_agreement": 0.6360078454017639,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.5954138593431089,
+          "negative_log_likelihood": 4.167808876112249,
+          "teacher_top1_agreement": 0.6516634225845337,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 1.0436376993436869,
+          "negative_log_likelihood": 4.502687398234926,
+          "teacher_top1_agreement": 0.5303326845169067,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6931846398430095,
+          "negative_log_likelihood": 3.8971064319349313,
+          "teacher_top1_agreement": 0.6046966910362244,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6421640119907207,
+          "negative_log_likelihood": 4.527581291422686,
+          "teacher_top1_agreement": 0.6242661476135254,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6058483030464784,
+          "negative_log_likelihood": 3.9193197201842667,
+          "teacher_top1_agreement": 0.6575342416763306,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6343998041171617,
+          "negative_log_likelihood": 4.379972021173824,
+          "teacher_top1_agreement": 0.587084174156189,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6186331638851278,
+          "negative_log_likelihood": 4.043128952354834,
+          "teacher_top1_agreement": 0.626223087310791,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7986082984043428,
+          "negative_log_likelihood": 4.747408976993449,
+          "teacher_top1_agreement": 0.5675146579742432,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7724415355465883,
+          "negative_log_likelihood": 4.265997063623716,
+          "teacher_top1_agreement": 0.5557730197906494,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7244290372396869,
+          "negative_log_likelihood": 5.072313566263874,
+          "teacher_top1_agreement": 0.626223087310791,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.5149442015795325,
+          "negative_log_likelihood": 4.438214251673152,
+          "teacher_top1_agreement": 0.6575342416763306,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.5507434613550712,
+          "negative_log_likelihood": 4.117139409432906,
+          "teacher_top1_agreement": 0.6203522682189941,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6460180282592773,
+          "negative_log_likelihood": 4.193459199132751,
+          "teacher_top1_agreement": 0.6007827520370483,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.8037480430826982,
+          "negative_log_likelihood": 4.990915123030631,
+          "teacher_top1_agreement": 0.6164383292198181,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6293406962415243,
+          "negative_log_likelihood": 4.490598316528559,
+          "teacher_top1_agreement": 0.626223087310791,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.5428351553452225,
+          "negative_log_likelihood": 4.382753779043656,
+          "teacher_top1_agreement": 0.6536203622817993,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6912486548526413,
+          "negative_log_likelihood": 4.253211990027978,
+          "teacher_top1_agreement": 0.5909980535507202,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.9453566862878967,
+          "negative_log_likelihood": 3.8758173156857723,
+          "teacher_top1_agreement": 0.587084174156189,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.656402074660807,
+          "negative_log_likelihood": 4.662091174937507,
+          "teacher_top1_agreement": 0.6320939064025879,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6914804779620086,
+          "negative_log_likelihood": 4.456333033492654,
+          "teacher_top1_agreement": 0.5988258123397827,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 1.0073931520465769,
+          "negative_log_likelihood": 4.466363029703936,
+          "teacher_top1_agreement": 0.5675146579742432,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7390654110395278,
+          "negative_log_likelihood": 4.829210374686583,
+          "teacher_top1_agreement": 0.6183953285217285,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7547114721249695,
+          "negative_log_likelihood": 3.877866517307707,
+          "teacher_top1_agreement": 0.5890411138534546,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.8703910245354162,
+          "negative_log_likelihood": 4.966924663625818,
+          "teacher_top1_agreement": 0.5440313220024109,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7428572985057494,
+          "negative_log_likelihood": 4.199602414483893,
+          "teacher_top1_agreement": 0.6164383292198181,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6782956449952844,
+          "negative_log_likelihood": 3.942375989342856,
+          "teacher_top1_agreement": 0.6536203622817993,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6333242759779242,
+          "negative_log_likelihood": 4.327689094319502,
+          "teacher_top1_agreement": 0.6771036982536316,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6066669904555827,
+          "negative_log_likelihood": 4.356771375801698,
+          "teacher_top1_agreement": 0.6908023357391357,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6722931124692794,
+          "negative_log_likelihood": 4.11581371628375,
+          "teacher_top1_agreement": 0.5968688726425171,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.8025819364125948,
+          "negative_log_likelihood": 4.5372597681332945,
+          "teacher_top1_agreement": 0.5812132954597473,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7842550968237353,
+          "negative_log_likelihood": 4.778648331673878,
+          "teacher_top1_agreement": 0.534246563911438,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.5134083809451347,
+          "negative_log_likelihood": 4.395048182537877,
+          "teacher_top1_agreement": 0.5792563557624817,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6227753036409441,
+          "negative_log_likelihood": 3.731993867459829,
+          "teacher_top1_agreement": 0.6301369667053223,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7023686877435434,
+          "negative_log_likelihood": 3.5525736799445404,
+          "teacher_top1_agreement": 0.6183953285217285,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 1.876491565293762,
+          "negative_log_likelihood": 4.365246334187905,
+          "teacher_top1_agreement": 0.44031310081481934,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 1.0259499036635904,
+          "negative_log_likelihood": 4.697918886307868,
+          "teacher_top1_agreement": 0.5557730197906494,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6828571028438799,
+          "negative_log_likelihood": 4.180544216805475,
+          "teacher_top1_agreement": 0.5949119329452515,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6574456985682657,
+          "negative_log_likelihood": 3.7620403939263927,
+          "teacher_top1_agreement": 0.5792563557624817,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7221347655802091,
+          "negative_log_likelihood": 4.737426250181553,
+          "teacher_top1_agreement": 0.5851271748542786,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7188606560813471,
+          "negative_log_likelihood": 4.463819947961259,
+          "teacher_top1_agreement": 0.5440313220024109,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7616738899813239,
+          "negative_log_likelihood": 3.9641139857223124,
+          "teacher_top1_agreement": 0.5753424763679504,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7135421487916472,
+          "negative_log_likelihood": 4.2461069633349515,
+          "teacher_top1_agreement": 0.5244618654251099,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7947768269219744,
+          "negative_log_likelihood": 4.4805121823066365,
+          "teacher_top1_agreement": 0.5322896242141724,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7267360463301029,
+          "negative_log_likelihood": 4.384069229991935,
+          "teacher_top1_agreement": 0.5283757448196411,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6097723126644724,
+          "negative_log_likelihood": 4.027033273954448,
+          "teacher_top1_agreement": 0.5949119329452515,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.6299686431884766,
+          "negative_log_likelihood": 3.672233282936529,
+          "teacher_top1_agreement": 0.6144813895225525,
+          "token_count": 511
+        },
+        {
+          "kl_nats_per_token": 0.7881443150589378,
+          "negative_log_likelihood": 4.401309332502332,
+          "teacher_top1_agreement": 0.5675146579742432,
+          "token_count": 511
+        }
+      ],
+      "teacher_top1_agreement": null,
+      "token_count": 24528,
+      "weighted_normalized_squared_error": null
+    }
+  },
+  "role": "selection",
+  "status": "completed"
+}

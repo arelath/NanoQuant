@@ -26,9 +26,9 @@ def run(args: argparse.Namespace) -> None:
     entry = dict(id=args.slice_id, dataset="allenai/c4", split="validation", offset=args.offset,
                  samples=args.samples, sequence_length=512, token_start=args.offset * 512,
                  token_end=(args.offset + args.samples) * 512, token_hash=_token_hash(tokens),
-                 status="retired", consumer="residual-stage-functional-selection",
+                 status="retired", consumer="residual-stage-" + args.role,
                  evidence=str(args.output), retirement=dict(action="permanently-retired-before-evaluation",
-                                                           role="selection"))
+                                                           role=args.role))
     with _exclusive_registry_lock(args.registry):
         before = json.loads(args.registry.read_text())
         validate_registry(before)
@@ -55,6 +55,7 @@ def main() -> None:
     parser.add_argument("--slice-id", default="residual-stage-c4-validation472-48x512")
     parser.add_argument("--offset", type=int, default=472)
     parser.add_argument("--samples", type=int, default=48)
+    parser.add_argument("--role", choices=("fit", "selection", "confirmation"), default="selection")
     run(parser.parse_args())
 
 

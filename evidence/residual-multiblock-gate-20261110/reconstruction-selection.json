@@ -1,0 +1,101 @@
+{
+  "blocks": {
+    "0": {
+      "int8": {
+        "bpw": 1.9990033436213992,
+        "bytes": 1989664,
+        "path": "D:\\dev\\research\\NanoQuantRewrite\\outputs\\residual-multiblock-gate-20261110\\fits\\block0\\seed2\\pilot\\int8.bin",
+        "seconds": 0.005037299997638911,
+        "seed": 2,
+        "sha256": "7d0a3571065f9a156e00e1af1ea9dad1d2f5ad5385793328602045ecf3374692",
+        "slack_bytes": 992,
+        "weighted_nmse": 0.0627879425391703
+      },
+      "residual_factor": {
+        "bpw": 1.9884580761316872,
+        "bytes": 1979168,
+        "path": "D:\\dev\\research\\NanoQuantRewrite\\outputs\\residual-multiblock-gate-20261110\\fits\\block0\\seed2\\pilot\\residual_factor.bin",
+        "seconds": 6.578417200013064,
+        "seed": 2,
+        "sha256": "b3c3aeefbd5b4642839c9c4fa4c22e2a204f60456873e32770232f7f2fe1472f",
+        "slack_bytes": 11488,
+        "weighted_nmse": 0.03789431328399556
+      },
+      "sign": {
+        "bpw": 1.999903549382716,
+        "bytes": 1990560,
+        "path": "D:\\dev\\research\\NanoQuantRewrite\\outputs\\residual-multiblock-gate-20261110\\fits\\block0\\seed1\\pilot\\sign.bin",
+        "seconds": 0.0487554999999702,
+        "seed": 1,
+        "sha256": "be2384bf9b1a3138df8ae4fa0f89d5d2fa9d06ec62a13ce0df68f2456ba74deb",
+        "slack_bytes": 96,
+        "weighted_nmse": 0.03699126641584295
+      }
+    },
+    "12": {
+      "int8": {
+        "bpw": 1.9990033436213992,
+        "bytes": 1989664,
+        "path": "D:\\dev\\research\\NanoQuantRewrite\\outputs\\residual-multiblock-gate-20261110\\fits\\block12\\seed2\\pilot\\int8.bin",
+        "seconds": 0.012846599973272532,
+        "seed": 2,
+        "sha256": "f20268a57b227507bfa5ff530cc5fdd824549ba97136396d6e17d9b8ccfa883f",
+        "slack_bytes": 992,
+        "weighted_nmse": 0.14917466482940284
+      },
+      "residual_factor": {
+        "bpw": 1.9884580761316872,
+        "bytes": 1979168,
+        "path": "D:\\dev\\research\\NanoQuantRewrite\\outputs\\residual-multiblock-gate-20261110\\fits\\block12\\seed1\\pilot\\residual_factor.bin",
+        "seconds": 7.4464730999898165,
+        "seed": 1,
+        "sha256": "b43cf77004dd78e752d1460b0e39ee4a0dd25951ca4ced31b431c9f40df8c617",
+        "slack_bytes": 11488,
+        "weighted_nmse": 0.08428952129379581
+      },
+      "sign": {
+        "bpw": 1.999903549382716,
+        "bytes": 1990560,
+        "path": "D:\\dev\\research\\NanoQuantRewrite\\outputs\\residual-multiblock-gate-20261110\\fits\\block12\\seed1\\pilot\\sign.bin",
+        "seconds": 0.15094890003092587,
+        "seed": 1,
+        "sha256": "bd3eae4ea0f2838aa5242179fba91d22225d5a1b201ea6e8d2142dd8a513e471",
+        "slack_bytes": 96,
+        "weighted_nmse": 0.0877019930087425
+      }
+    },
+    "25": {
+      "int8": {
+        "bpw": 1.9990033436213992,
+        "bytes": 1989664,
+        "path": "D:\\dev\\research\\NanoQuantRewrite\\outputs\\residual-multiblock-gate-20261110\\fits\\block25\\seed2\\pilot\\int8.bin",
+        "seconds": 0.014200299978256226,
+        "seed": 2,
+        "sha256": "0a321f2f1f7e657a7b359a7d1c3f609b673c809bf00480386ccaa5e3a629f4aa",
+        "slack_bytes": 992,
+        "weighted_nmse": 0.06655562060815386
+      },
+      "residual_factor": {
+        "bpw": 1.9884580761316872,
+        "bytes": 1979168,
+        "path": "D:\\dev\\research\\NanoQuantRewrite\\outputs\\residual-multiblock-gate-20261110\\fits\\block25\\seed2\\pilot\\residual_factor.bin",
+        "seconds": 7.543946699996013,
+        "seed": 2,
+        "sha256": "98ac7f3c52a11176edac72eca451add5929669e44457981a5bff073f7b3a3c63",
+        "slack_bytes": 11488,
+        "weighted_nmse": 0.03850902627809681
+      },
+      "sign": {
+        "bpw": 1.999903549382716,
+        "bytes": 1990560,
+        "path": "D:\\dev\\research\\NanoQuantRewrite\\outputs\\residual-multiblock-gate-20261110\\fits\\block25\\seed0\\pilot\\sign.bin",
+        "seconds": 0.1634168999735266,
+        "seed": 0,
+        "sha256": "99acbc0ab3a59b7618d09827d293f4b5e6fc764f922484b219aa2b09c6a68969",
+        "slack_bytes": 96,
+        "weighted_nmse": 0.04032061601790928
+      }
+    }
+  },
+  "status": "complete_reconstruction_only"
+}

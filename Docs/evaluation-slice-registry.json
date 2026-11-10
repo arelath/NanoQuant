@@ -236,6 +236,60 @@
       "token_end": 266240,
       "token_hash": "sha256:a0f51fb416497af542c0a04f3ee1c4cec761a0acc75ad54a693cad85de97f4c8",
       "token_start": 241664
+    },
+    {
+      "consumer": "residual-stage-fit",
+      "dataset": "allenai/c4",
+      "evidence": "outputs\\residual-multiblock-gate-20261110\\c4-fit",
+      "id": "residual-multiblock-c4-fit520-16x512",
+      "offset": 520,
+      "retirement": {
+        "action": "permanently-retired-before-evaluation",
+        "role": "fit"
+      },
+      "samples": 16,
+      "sequence_length": 512,
+      "split": "validation",
+      "status": "retired",
+      "token_end": 274432,
+      "token_hash": "sha256:1449374870ab4a3fb68b641806dc92068ec8b5d1482c23ef6bfc7263e09c80ad",
+      "token_start": 266240
+    },
+    {
+      "consumer": "residual-stage-selection",
+      "dataset": "allenai/c4",
+      "evidence": "outputs\\residual-multiblock-gate-20261110\\c4-selection",
+      "id": "residual-multiblock-c4-selection536-48x512",
+      "offset": 536,
+      "retirement": {
+        "action": "permanently-retired-before-evaluation",
+        "role": "selection"
+      },
+      "samples": 48,
+      "sequence_length": 512,
+      "split": "validation",
+      "status": "retired",
+      "token_end": 299008,
+      "token_hash": "sha256:99b9855097fd62f330b0b8ecc5c5c27f22523f7b3226baf6f24d50b8c642b010",
+      "token_start": 274432
+    },
+    {
+      "consumer": "residual-stage-confirmation",
+      "dataset": "allenai/c4",
+      "evidence": "outputs\\residual-multiblock-gate-20261110\\c4-confirmation",
+      "id": "residual-multiblock-c4-confirmation584-96x512",
+      "offset": 584,
+      "retirement": {
+        "action": "permanently-retired-before-evaluation",
+        "role": "confirmation"
+      },
+      "samples": 96,
+      "sequence_length": 512,
+      "split": "validation",
+      "status": "retired",
+      "token_end": 348160,
+      "token_hash": "sha256:31c30087cc8390f34c4e57e7e73b11bef34e02151db9802d74747ebb61e5a1cb",
+      "token_start": 299008
     }
   ]
 }

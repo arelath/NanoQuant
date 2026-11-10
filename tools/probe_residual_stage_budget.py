@@ -195,17 +195,19 @@ def run(args: argparse.Namespace) -> None:
         summary[kind + "_columns"] = count
         save(kind, state, time.perf_counter() - start)
     start = time.perf_counter()
+    device = getattr(args, "device", "cpu")
     fit = factorize_admm_with_parameters(
-        residual.float(), v.float(), u.float(), rank, torch.Generator(device="cpu").manual_seed(args.seed),
+        residual.float().to(device), v.float().to(device), u.float().to(device), rank,
+        torch.Generator(device=device).manual_seed(args.seed),
         AdmmParameters(outer_iterations=args.iterations, transpose_wide=False),
     )
-    scales = fit_scales(residual.float(), fit.left_binary, fit.right_binary, fit.scale_pre, fit.scale_mid,
-                        fit.scale_post, v.float(), u.float(), alternating_passes=2)
+    scales = fit_scales(residual.float().to(device), fit.left_binary, fit.right_binary, fit.scale_pre, fit.scale_mid,
+                        fit.scale_post, v.float().to(device), u.float().to(device), alternating_passes=2)
     state = dict(base)
     for name in ("left_binary", "right_binary"):
-        state["second." + name] = getattr(fit, name).to(torch.int8)
+        state["second." + name] = getattr(fit, name).to(device="cpu", dtype=torch.int8)
     for name in ("scale_pre", "scale_mid", "scale_post"):
-        state["second." + name] = getattr(scales, name).float()
+        state["second." + name] = getattr(scales, name).float().cpu()
     save("residual_factor", state, time.perf_counter() - start)
     summary["status"] = "complete_reconstruction_only"
     atomic_write_json(args.output / "summary.json", summary)

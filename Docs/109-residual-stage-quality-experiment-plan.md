@@ -14,10 +14,10 @@ This plan follows [the second opinion](ImprovementSuggestions/11-10-26-SecondOpi
 
 - [x] Audit retained inputs and baseline availability; freeze identities and storage accounting for the initial pilot.
 - [x] Reproduce the block-12 reconstruction screen at an exact affordable rank with complete payload accounting, retaining candidate tensors.
-- [ ] Extend to blocks 0, 12, and 25 with several fitting seeds.
+- [x] Extend to blocks 0, 12, and 25 with several fitting seeds.
 - [x] Evaluate initial block-12 candidates on fresh paired model-logit KL and NLL sequences.
-- [ ] Extend the functional comparison to the new multi-block fits.
-- [ ] Compose promising replacements in the compressed model and confirm on an independent slice.
+- [x] Extend the functional comparison to the new multi-block fits.
+- [x] Compose promising replacements in the compressed model and confirm on an independent slice.
 
 Compare the current factor plus INT8-column correction, a full-rank factor plus an independently scaled residual factor, and a factor plus a partial sign-plane correction. Use the same original target, importance weights, protected columns, and common first-stage initialization where applicable. Distinguish a controlled reconstruction screen from a direct comparison to the deployed Experiment 060 state; the retained Experiment 067 single-matrix optimum is not that state.
 
@@ -99,3 +99,11 @@ Validation: six focused payload/reconstruction tests passed; the full suite pass
 The [block-12 functional gate](110-residual-stage-block12-functional-gate.md) completed on a fresh C4 48-by-512 selection slice. The residual factor improves paired KL by 0.53% versus the equal-budget INT8 pilot, with a 95% interval excluding zero, and improves NLL. It nevertheless regresses KL by 0.88% versus unchanged 060, also with an interval excluding zero. Keep the incumbent; this is a controlled representation gain, not an accepted 060 improvement. The sign-plane fallback did not improve KL significantly versus the INT8 pilot. Multi-block fits, matched tuning, and independent confirmation remain open. No production format changes are justified by this result.
 
 The full GGUF audit also corrected the scale-storage assumption: 060's factor scales are BF16, whereas its norms and salient-column scales are F32. The initial pilot deliberately charged FP32 factor scales for every arm; its equal-cap comparisons remain valid as a conservative diagnostic format.
+
+### Fresh multi-block confirmation result
+
+The [multi-block gate](111-residual-stage-multiblock-gate.md) completed fresh online Fisher calibration and 800-step first/residual fits for blocks 0, 12, and 25 at seeds 0, 1, and 2. Representatives were fixed by reconstruction error before selection. All representations then received matched full-model KL scale tuning: 32 updates, identical fit tokens and optimizer, and 27,648 common first-stage scale parameters each.
+
+The residual-factor composition passed the 48-sequence selection gate and then the independent 96-sequence confirmation gate without retraining. Confirmation KL improved 2.47% versus unchanged 060, difference -0.016969 with 95% interval [-0.024707, -0.010551]. NLL improved by 0.012317 nats/token, interval [-0.023061, -0.002957]. It also beat the matched tuned INT8 and sign controls on confirmation KL and NLL. The untuned residual composition improved incumbent KL by 1.81%, so the result is not entirely a scale-tuning gain.
+
+This completes the initial equal-cap dense functional gate, with three changed projections and 279,240 additional diagnostic payload bytes versus their 060 sidecars. It does not complete the whole-model, downstream-task or runtime/export gates. Continue with the controlled distillation comparison; the missing historical pre-distillation state must be recovered or replaced by an explicitly defined common continuation checkpoint. Production format changes remain conditional on the broader winning-recipe gates.
