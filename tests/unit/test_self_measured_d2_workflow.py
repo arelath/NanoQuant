@@ -55,9 +55,11 @@ def test_uniform_control_propagates_block_bounded_execution(
     assert observed[0].interrupt_after_block_commits == 1
 
 
+@pytest.mark.parametrize("teacher_dataset", [None, Path("Datasets/test-teacher")])
 def test_kl_profile_inherits_offline_dataset_setting(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    teacher_dataset: Path | None,
 ) -> None:
     definition = load_experiment(54)
     inputs = SimpleNamespace(output=tmp_path / "control", snapshot=tmp_path / "snapshot")
@@ -79,9 +81,12 @@ def test_kl_profile_inherits_offline_dataset_setting(
         campaign_root=tmp_path,
         control_config=definition.config,
         profile_options=SelfMeasuredD2ProfileOptions(),
+        teacher_dataset=teacher_dataset,
     )
 
     assert observed[0].local_files_only is True
+    assert observed[0].teacher_dataset == teacher_dataset
+    assert (observed[0].teacher_cache_root is None) == (teacher_dataset is not None)
 
 
 def test_tuned_control_resumes_global_tuning_after_all_blocks_commit(

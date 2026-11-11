@@ -111,6 +111,7 @@ def test_experiment021_no_argument_run_prepares_and_consumes_fresh_inputs(
         campaign_root: Path,
         control_config: object,
         profile_options: object,
+        teacher_dataset: Path | None = None,
     ) -> tuple[Path, Path]:
         prepared.update(
             definition=definition,

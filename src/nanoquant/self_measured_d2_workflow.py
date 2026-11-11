@@ -22,7 +22,9 @@ from nanoquant.config.schema import (
 )
 from nanoquant.config.validation import ValidationPhase, raise_for_issues, validate
 from nanoquant.infrastructure.commits import CommitIdentity, latest_complete_identity
+from nanoquant.infrastructure.device_lease import canonical_device_name
 from nanoquant.infrastructure.global_tuning import active_global_tuning
+from nanoquant.infrastructure.kl_teacher_dataset import load_kl_teacher_dataset
 from nanoquant.infrastructure.memory_cleanup import release_memory
 from nanoquant.infrastructure.model_adapters import decoder_block_count_from_config
 from nanoquant.infrastructure.resolved_model_config import resolve_model_config
@@ -222,6 +224,7 @@ def _prepare_automatic_kl_inputs(
     campaign_root: Path,
     control_config: RunConfig,
     profile_options: SelfMeasuredD2ProfileOptions,
+    teacher_dataset: Path | None = None,
 ) -> tuple[Path, Path]:
     """Create or resume the uniform control and its exact-unit KL profile."""
 
@@ -295,7 +298,8 @@ def _prepare_automatic_kl_inputs(
             token_chunk_size=128,
             arm=[],
             teacher_cache_mode="cpu",
-            teacher_cache_root=campaign_root / _TEACHER_CACHE_NAME,
+            teacher_cache_root=campaign_root / _TEACHER_CACHE_NAME if teacher_dataset is None else None,
+            teacher_dataset=teacher_dataset,
             use_global_tuning=profile_options.tuned_operating_point,
             local_files_only=experiment.workflow.local_files_only,
         )
@@ -314,6 +318,10 @@ def run_self_measured_d2_experiment(
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
+        "--kl-teacher-dataset", type=Path,
+        help="reuse full-vocabulary teacher targets built by tools/build_kl_teacher_dataset.py",
+    )
+    parser.add_argument(
         "--kl-profile",
         type=Path,
         help="override the automatic fresh evaluator-v3 profile",
@@ -326,6 +334,21 @@ def run_self_measured_d2_experiment(
     parsed = parser.parse_args(arguments)
     if (parsed.kl_profile is None) != (parsed.kl_control_run is None):
         parser.error("--kl-profile and --kl-control-run must be supplied together")
+    teacher_protocol = None
+    if parsed.kl_teacher_dataset is not None:
+        dataset = load_kl_teacher_dataset(parsed.kl_teacher_dataset)
+        teacher_protocol = dataset.protocol
+        del dataset
+        if (
+            teacher_protocol.source != experiment.config.model.source
+            or teacher_protocol.revision != str(experiment.config.model.revision)
+            or teacher_protocol.samples != profile_options.wikitext_samples
+            or teacher_protocol.sequence_length != profile_options.sequence_length
+            or teacher_protocol.batch_size != 1
+            or canonical_device_name(teacher_protocol.device)
+            != canonical_device_name(experiment.config.runtime.compute_device)
+        ):
+            raise ValueError("KL teacher dataset does not match the experiment model or profiling protocol")
 
     repository = Path(launcher_path).resolve().parent.parent
     number = _experiment_number(experiment.config)
@@ -343,6 +366,7 @@ def run_self_measured_d2_experiment(
             campaign_root=campaign_root,
             control_config=control_config,
             profile_options=profile_options,
+            teacher_dataset=parsed.kl_teacher_dataset,
         )
     else:
         profile_path = parsed.kl_profile.resolve()
@@ -356,6 +380,11 @@ def run_self_measured_d2_experiment(
     )
     if not profile.complete:
         raise ValueError(f"{label} requires a complete KL profile")
+    if teacher_protocol is not None and (
+        profile.provenance.dataset_slice_hash != teacher_protocol.token_hash
+        or profile.provenance.dataset_fingerprint != teacher_protocol.dataset_fingerprint
+    ):
+        raise ValueError("completed KL profile uses different inputs from the requested teacher dataset")
     runtime_config = replace(
         experiment.config,
         allocation=replace(

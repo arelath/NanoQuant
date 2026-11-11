@@ -23,6 +23,7 @@ from nanoquant.config.codec import to_dict
 from nanoquant.infrastructure.artifacts import LocalArtifactStore
 from nanoquant.infrastructure.device_lease import acquire_device_lease
 from nanoquant.infrastructure.hf_language_model import load_causal_language_model
+from nanoquant.infrastructure.hf_task_evaluation import hash_hf_tokenizer_snapshot
 from nanoquant.infrastructure.io_utils import atomic_write_json
 from nanoquant.infrastructure.kl_splice import (
     DenseKlSpliceEvaluator,
@@ -32,6 +33,16 @@ from nanoquant.infrastructure.kl_splice import (
 from nanoquant.infrastructure.kl_teacher_cache import (
     commit_active_kl_teacher_cache,
     load_active_kl_teacher_cache,
+)
+from nanoquant.infrastructure.kl_teacher_dataset import (
+    load_kl_teacher_dataset,
+    require_compatible_teacher_dataset,
+)
+from nanoquant.infrastructure.kl_teacher_dataset import (
+    teacher_cache_key as _teacher_cache_key,
+)
+from nanoquant.infrastructure.kl_teacher_dataset import (
+    token_hash as _token_hash,
 )
 from nanoquant.infrastructure.model_adapters import adapter_for_config
 from nanoquant.quality_evaluation import _wikitext_tokens
@@ -46,11 +57,6 @@ def _dtype(config: dict[str, object]) -> torch.dtype:
         "float16": torch.float16,
         "float32": torch.float32,
     }.get(value, torch.float32)
-
-
-def _token_hash(tokens: torch.Tensor) -> str:
-    payload = tokens.contiguous().view(torch.uint8).numpy().tobytes()
-    return "sha256:" + hashlib.sha256(payload).hexdigest()
 
 
 def _expected_blocks(config: dict[str, object]) -> int:
@@ -69,36 +75,6 @@ def _profile_recipe_hash(base_recipe_hash: str, global_tuning: str | None) -> st
     payload = f"{base_recipe_hash}|kl-budget-evaluator-v{KL_BUDGET_EVALUATOR_VERSION}"
     if global_tuning is not None:
         payload += f"|{global_tuning}"
-    return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
-
-
-def _teacher_cache_key(
-    *,
-    source: str,
-    revision: str,
-    model_hash: str,
-    token_hash: str,
-    model_dtype: torch.dtype,
-    attention_implementation: str | None,
-    device: str,
-    batch_size: int,
-) -> str:
-    payload = json.dumps(
-        {
-            "schema_version": 1,
-            "source": source,
-            "revision": revision,
-            "model_hash": model_hash,
-            "token_hash": token_hash,
-            "model_dtype": str(model_dtype),
-            "teacher_cache_dtype": str(torch.float16),
-            "attention_implementation": attention_implementation,
-            "device": device,
-            "batch_size": batch_size,
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-    )
     return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -130,6 +106,7 @@ def add_kl_budget_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--arm", action="append", default=[])
     parser.add_argument("--teacher-cache-mode", choices=("cpu", "on_the_fly"), default="cpu")
     parser.add_argument("--teacher-cache-root", type=Path)
+    parser.add_argument("--teacher-dataset", type=Path, help="reuse a dataset built by build_kl_teacher_dataset.py")
     parser.add_argument("--use-global-tuning", action="store_true")
     parser.add_argument("--local-files-only", action="store_true")
 
@@ -147,17 +124,33 @@ def execute_kl_budget(args: argparse.Namespace) -> int:
         raise ValueError("model config must be a JSON object")
     config = {str(key): value for key, value in config_payload.items()}
     adapter = adapter_for_config(config)
-    tokens, dataset_fingerprint, _bos = _wikitext_tokens(
-        args.snapshot,
-        samples=args.wikitext_samples,
-        sequence_length=args.sequence_length,
-        local_files_only=args.local_files_only,
-        progress=lambda event, fields: print(
-            f"[kl-budget] {event}"
-            + (" " + " ".join(f"{key}={value}" for key, value in sorted(fields.items())) if fields else ""),
-            flush=True,
-        ),
-    )
+    dataset_path = getattr(args, "teacher_dataset", None)
+    teacher_dataset = None
+    if dataset_path is not None:
+        if args.teacher_cache_mode != "cpu" or args.teacher_cache_root is not None:
+            raise ValueError("--teacher-dataset requires cpu cache mode and no --teacher-cache-root")
+        teacher_dataset = load_kl_teacher_dataset(dataset_path)
+        require_compatible_teacher_dataset(
+            teacher_dataset, source=args.source, revision=args.revision,
+            model_hash=_model_config_hash(config), tokenizer_hash=hash_hf_tokenizer_snapshot(args.snapshot),
+            model_dtype=_dtype(config), attention_implementation=adapter.attention_implementation,
+            device=args.device, batch_size=args.batch_size, samples=args.wikitext_samples,
+            sequence_length=args.sequence_length, vocabulary_size=int(config["vocab_size"]),
+        )
+        tokens = teacher_dataset.tokens
+        dataset_fingerprint = teacher_dataset.protocol.dataset_fingerprint
+    else:
+        tokens, dataset_fingerprint, _bos = _wikitext_tokens(
+            args.snapshot,
+            samples=args.wikitext_samples,
+            sequence_length=args.sequence_length,
+            local_files_only=args.local_files_only,
+            progress=lambda event, fields: print(
+                f"[kl-budget] {event}"
+                + (" " + " ".join(f"{key}={value}" for key, value in sorted(fields.items())) if fields else ""),
+                flush=True,
+            ),
+        )
     token_hash = _token_hash(tokens)
     with acquire_device_lease(args.device):
         print("[kl-budget] loading tuned splice reconstructions", flush=True)
@@ -202,7 +195,14 @@ def execute_kl_budget(args: argparse.Namespace) -> int:
         )
         teacher_cache = None
         teacher_cache_reused = False
-        if args.teacher_cache_root is not None:
+        if teacher_dataset is not None:
+            teacher_cache = teacher_dataset.cache
+            evaluator.install_teacher_cache(
+                teacher_cache.baseline_negative_log_likelihood, teacher_cache.batches,
+            )
+            teacher_cache_reused = True
+            print(f"[kl-budget] reusing teacher dataset {dataset_path}", flush=True)
+        elif args.teacher_cache_root is not None:
             if args.teacher_cache_mode != "cpu":
                 raise ValueError("persistent KL teacher cache requires --teacher-cache-mode cpu")
             cache_key = _teacher_cache_key(
@@ -278,6 +278,10 @@ def execute_kl_budget(args: argparse.Namespace) -> int:
                 "teacher_cache_key": None if teacher_cache is None else teacher_cache.cache_key,
                 "teacher_cache_reused": teacher_cache_reused,
                 "teacher_cache_bytes": 0 if teacher_cache is None else teacher_cache.tensor_bytes,
+                "teacher_dataset": None if teacher_dataset is None else {
+                    "path": str(dataset_path),
+                    "artifact": to_dict(teacher_dataset.reference),
+                },
                 "global_tuning": None if global_tuning is None else to_dict(global_tuning),
             },
         )

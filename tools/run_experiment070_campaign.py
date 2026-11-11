@@ -52,6 +52,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--maximum-slices", type=int, default=64)
     parser.add_argument("--process-cooldown-seconds", type=float, default=5.0)
+    parser.add_argument("--kl-teacher-dataset", type=Path)
     return parser
 
 
@@ -64,6 +65,9 @@ def main() -> int:
     repository = Path(__file__).resolve().parent.parent
     campaign_root = repository / "evidence" / "070"
     launcher = repository / "experiments" / f"{_RUN_NAME}.py"
+    command = [sys.executable, str(launcher)]
+    if args.kl_teacher_dataset is not None:
+        command.extend(["--kl-teacher-dataset", str(args.kl_teacher_dataset.resolve())])
     environment = os.environ.copy()
     environment.update(
         {
@@ -89,7 +93,7 @@ def main() -> int:
             "w", encoding="utf-8"
         ) as stderr:
             completed = subprocess.run(
-                [sys.executable, str(launcher)],
+                command,
                 cwd=repository / "experiments",
                 env=environment,
                 stdout=stdout,

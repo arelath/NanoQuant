@@ -90,6 +90,7 @@ def test_experiment022_no_argument_run_owns_its_control_and_profile_campaign(
         campaign_root: Path,
         control_config: object,
         profile_options: object,
+        teacher_dataset: Path | None = None,
     ) -> tuple[Path, Path]:
         prepared.update(
             definition=definition,
