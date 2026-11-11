@@ -222,9 +222,14 @@ URL, local Transformers directory, or local GGUF path.
 The benchmark scores the first 200 examples each of PIQA, ARC Easy, ARC Challenge,
 HellaSwag, WinoGrande, and BoolQ, plus 64 WikiText-2 windows of 128 tokens. It
 prints the scores and saves per-example results and input identities to
-`outputs/hf-quality/<run>/quality.json`. Use `--output` to set the report path,
-`--device cpu` for CPU execution, and `--revision` to select a Hub commit, tag,
+`outputs/hf-quality/<run>/quality.json`, with a summary in `quality.md` alongside
+it. Use `--output` to set the JSON path. The Markdown report uses the same name
+with a `.md` extension. Use `--device cpu` for CPU execution and
+`--revision` to select a Hub commit, tag,
 or branch. A supplied GGUF URL already specifies its revision.
+
+To generate Markdown from a saved JSON report, run
+`tools/render_quality_evaluation_markdown.py --input <report.json>`.
 
 Transformers checkpoints use the installed Transformers backend. GGUF files use
 the NanoQuant llama.cpp quality runner, built with

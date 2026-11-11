@@ -143,8 +143,89 @@ def _deployment_storage_markdown(payload: dict[str, Any]) -> tuple[str, ...]:
     )
 
 
+def _render_standalone_quality_markdown(payload: dict[str, Any]) -> str:
+    model = payload["benchmark_model"]
+    protocol = payload["protocol"]
+    backend = model["backend"]
+    gguf = payload.get("gguf")
+    identity = payload["identity"] if gguf is not None else {}
+    result = payload["results"]["gguf" if gguf is not None else "base"]
+    wikitext = result["wikitext"]
+    wikitext_batch = f", batch {protocol['wikitext_batch_size']}" if gguf is None else ""
+    task_batch = (
+        f", batch {protocol['task_batch_size']}"
+        if gguf is None
+        else f", up to {identity['parallel']} sequences in parallel"
+    )
+    lines = [
+        f"# {_markdown_cell(model['source'])} quality benchmark",
+        "",
+        f"- **Status** `{'completed' if payload.get('passed') else 'invalid'}`",
+        f"- **Model** `{_markdown_cell(model['source'])}`",
+        f"- **Revision** `{_markdown_cell(model['revision'])}`",
+        f"- **Model path** `{_markdown_cell(model['path'])}`",
+        f"- **Backend** `{_markdown_cell(backend)}`",
+        f"- **Wall time** {_number(payload['wall_seconds'], 'wall_seconds'):.2f} seconds",
+        "",
+        "## Protocol",
+        "",
+        f"- WikiText-2 uses {protocol['wikitext_samples']} windows of {protocol['wikitext_sequence_length']} tokens"
+        f"{wikitext_batch}.",
+        f"- The first {protocol['task_limit']} examples per task{task_batch}.",
+        f"- **WikiText token hash** `{_markdown_cell(protocol['wikitext_token_hash'])}`",
+        f"- **Tokenizer hash** `{_markdown_cell(protocol['tokenizer_hash'])}`",
+        "",
+        "## Quality results",
+        "",
+        "| Benchmark | Metric | Score | Samples |",
+        "| --- | --- | ---: | ---: |",
+        f"| WikiText-2 | perplexity ↓ | {_number(wikitext['perplexity'], 'perplexity'):.6f} | "
+        f"{wikitext['sample_count']} |",
+    ]
+    for task in result["tasks"]:
+        score = task["result"]
+        lines.append(
+            f"| {_markdown_cell(task['task']['task_name'])} | {_markdown_cell(score['primary_metric'])} ↑ | "
+            f"{_number(score['primary_value'], 'task score'):.4f} | {score['sample_count']} |"
+        )
+
+    if gguf is not None:
+        shards = identity.get("gguf_shards", ())
+        total_bytes = gguf["bytes"] + sum(shard["bytes"] for shard in shards)
+        representation = f"GGUF ({1 + len(shards)} files)" if shards else "GGUF"
+        lines.extend((
+            "", "## Deployment storage", "",
+            "| Deployable representation | Bytes |",
+            "| --- | ---: |",
+            f"| {representation} | {total_bytes:,} |",
+        ))
+
+    device_metric = "Peak dedicated GPU bytes" if gguf is not None else "Peak CUDA allocator bytes"
+    lines.extend((
+        "", "## Quality execution", "",
+        f"| Runtime | Elapsed seconds | {device_metric} | Peak host bytes |",
+        "| --- | ---: | ---: | ---: |",
+        f"| {_markdown_cell(backend)} | {_number(result['elapsed_seconds'], 'elapsed_seconds'):.2f} | "
+        f"{_optional_integer_cell(result.get('peak_device_bytes'), 'peak device')} | "
+        f"{_optional_integer_cell(result.get('peak_host_bytes'), 'peak host')} |",
+        "", "## Provenance", "",
+        f"- **Tokenizer source** `{_markdown_cell(payload['model']['source'])}`",
+        f"- **Tokenizer revision** `{_markdown_cell(payload['model']['revision'])}`",
+    ))
+    if gguf is not None:
+        lines.extend((
+            f"- **llama.cpp commit** `{_markdown_cell(identity['llama_cpp_commit'])}`",
+            f"- **GGUF SHA-256** `{_markdown_cell(gguf['sha256'])}`",
+            *(f"- **Shard SHA-256** `{_markdown_cell(shard['name'])}` "
+              f"`{_markdown_cell(shard['sha256'])}`" for shard in shards),
+        ))
+    return "\n".join((*lines, ""))
+
+
 def render_quality_evaluation_markdown(payload: dict[str, Any]) -> str:
-    """Render a compact deterministic BF16-versus-NanoQuant benchmark report."""
+    """Render a standalone or paired quality benchmark as Markdown."""
+    if "benchmark_model" in payload:
+        return _render_standalone_quality_markdown(payload)
 
     experiment = cast(dict[str, Any], payload["experiment"])
     config = cast(dict[str, Any], experiment["resolved_config"])

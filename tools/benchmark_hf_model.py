@@ -19,7 +19,7 @@ from huggingface_hub.hf_api import ModelInfo
 from transformers.models.auto.configuration_auto import AutoConfig
 
 from nanoquant.infrastructure.hf_task_evaluation import TOKENIZER_BEHAVIOR_FILES
-from nanoquant.infrastructure.io_utils import atomic_write_json
+from nanoquant.infrastructure.io_utils import atomic_write_json, atomic_write_text
 from nanoquant.llamacpp_quality import LlamaCppQualityRequest, execute_llamacpp_quality_evaluation
 from nanoquant.quality_evaluation import (
     DEFAULT_QUALITY_TASKS,
@@ -28,6 +28,7 @@ from nanoquant.quality_evaluation import (
     execute_quality_evaluation,
     prepare_quality_inputs,
 )
+from nanoquant.quality_evaluation_workflow import render_quality_evaluation_markdown
 
 ROOT = Path(__file__).resolve().parents[1]
 TOKENIZER_FILES = (*TOKENIZER_BEHAVIOR_FILES, "config.json", "vocab.*", "merges.txt", "*.model", "*.tiktoken")
@@ -183,7 +184,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--tokenizer-revision", help="Tokenizer branch, tag, or commit")
     parser.add_argument("--device", choices=("cpu", "cuda", "cuda:0"), help="Scoring device (default: auto)")
     parser.add_argument(
-        "--output", type=Path, help="Report JSON path (default: outputs/hf-quality/<time>/quality.json)",
+        "--output", type=Path,
+        help="JSON path with a Markdown companion (default: outputs/hf-quality/<time>/quality.json)",
     )
     parser.add_argument(
         "--llama-cpp-root", type=Path,
@@ -278,11 +280,14 @@ def main(argv: list[str] | None = None) -> int:
             "backend": "llama.cpp" if gguf else "transformers",
         }
         atomic_write_json(output, report)
+        markdown = output.with_suffix(".md")
+        atomic_write_text(markdown, render_quality_evaluation_markdown(report))
         scores = report["results"]["gguf" if gguf else "base"]
         print(f"WikiText-2 perplexity: {scores['wikitext']['perplexity']:.6f}")
         for task in scores["tasks"]:
             print(f"{task['task']['task_name']}: {task['result']['primary_value']:.2%}")
-        print(f"Report: {output}")
+        print(f"JSON report: {output}")
+        print(f"Markdown report: {markdown}")
         return 0 if report["passed"] else 1
     except KeyboardInterrupt:
         print("\nBenchmark cancelled.", file=sys.stderr)
