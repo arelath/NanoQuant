@@ -503,6 +503,7 @@ class BlockTuningConfig:
     epoch_loss_mode: TuningEpochLossMode = (
         TuningEpochLossMode.FULL_EVALUATION
     )
+    compile_forward: bool = False
 
 
 @dataclass(frozen=True, slots=True)

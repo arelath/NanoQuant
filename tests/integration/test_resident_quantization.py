@@ -900,7 +900,17 @@ def test_reconstruction_rank_probe_covers_every_physical_unit_before_fitting(
     validate_resident_run(dataset_request.output, expected_blocks=1, require_complete=True)
 
 
-def test_resident_tuning_recipe_refits_blocks_and_resumes_exactly(tmp_path: Path) -> None:
+@pytest.mark.parametrize("compile_forward", [False, True])
+def test_resident_tuning_recipe_refits_blocks_and_resumes_exactly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, compile_forward: bool,
+) -> None:
+    compiled = []
+
+    def record_compile(forward: Any, *, options: dict[str, Any]) -> Any:
+        compiled.append(options)
+        return forward
+
+    monkeypatch.setattr(torch, "compile", record_compile)
     snapshot = tmp_path / "snapshot"
     config = Gemma3TextConfig(
         vocab_size=24,
@@ -928,9 +938,11 @@ def test_resident_tuning_recipe_refits_blocks_and_resumes_exactly(tmp_path: Path
         factorized_tuning_batch_size=1,
         post_block_refit_epochs=1,
         post_block_refit_batch_size=1,
+        compile_tuning_forward=compile_forward,
     )
 
     control = run_resident_quantization(base)
+    assert compiled == ([{"emulate_precision_casts": True, "triton.cudagraphs": False}] if compile_forward else [])
     assert control.blocks[0].losses.after_post_block_refit is not None
     assert all(layer.tuning is not None for layer in control.blocks[0].layers)
     assert control.blocks[0].frozen_state.auxiliary_parameters

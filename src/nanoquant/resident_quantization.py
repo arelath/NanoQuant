@@ -242,7 +242,7 @@ from nanoquant.infrastructure.tuning_checkpoint import (
 from nanoquant.ports.event_sink import EventSink, LayerCommittedPayload, emit_layer_committed
 from nanoquant.ports.model_adapter import ModelAdapter
 
-RESIDENT_ALGORITHM_VERSION = 67
+RESIDENT_ALGORITHM_VERSION = 68
 _CALIBRATION_ALGORITHM_VERSION = 1
 COVARIANCE_REFINEMENT_MAX_INPUT_FEATURES = 2048
 _THROUGHPUT_PROBE_REPETITIONS = 5
@@ -471,6 +471,7 @@ class ResidentQuantizationRequest:
     defer_run_completion: bool = False
     memory_plan: ResolvedMemoryPlan | None = None
     memory_plan_reference: ArtifactRef | None = None
+    compile_tuning_forward: bool = False
 
     def __post_init__(self) -> None:
         if self.overcomplete_rank_ceiling_fraction is None and not self.residual_stages:
@@ -2713,6 +2714,7 @@ def _resident_config_hash(request: ResidentQuantizationRequest) -> str:
         "legacy_tuning_seed_reset": request.legacy_tuning_seed_reset,
         "restore_best_tuning_state": request.restore_best_tuning_state,
         "tuning_epoch_loss_mode": request.tuning_epoch_loss_mode,
+        "compile_tuning_forward": request.compile_tuning_forward,
         "activation_retention": request.activation_retention,
         "calibration_method": request.calibration_method,
         "calibration_shrinkage": request.calibration_shrinkage,
@@ -7367,6 +7369,11 @@ def _execute_resident_quantization_pipeline(
         block_index = block_work.index
         metadata = block_work.metadata
         tuning_forward = block_work.tuning_forward
+        if request.compile_tuning_forward:
+            tuning_forward = torch.compile(
+                tuning_forward,
+                options={"emulate_precision_casts": True, "triton.cudagraphs": False},
+            )
         working_block = block_work.working_block
         teacher_outputs = block_work.teacher_outputs
         block_output_importance = block_work.output_importance

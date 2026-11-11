@@ -132,6 +132,8 @@ def config_hash(config: RunConfig) -> str:
     if not isinstance(payload, dict):
         raise TypeError("run config did not encode as an object")
     reconstruction = payload["allocation"]["reconstruction"]
+    if not config.block_tuning.compile_forward:
+        payload["block_tuning"].pop("compile_forward", None)
     for name in ("allocation_dataset", "allocation_dataset_key"):
         if reconstruction.get(name) is None:
             reconstruction.pop(name, None)

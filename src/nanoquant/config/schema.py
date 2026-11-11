@@ -578,6 +578,7 @@ class BlockTuningConfig:
     reset_seed_each_stage: bool = False
     restore_best_state: bool = True
     epoch_loss_mode: TuningEpochLossMode = TuningEpochLossMode.FULL_EVALUATION
+    compile_forward: bool = False
 
 
 @dataclass(frozen=True, slots=True)

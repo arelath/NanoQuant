@@ -466,6 +466,7 @@ def resident_request_from_config(
         legacy_tuning_seed_reset=config.block_tuning.reset_seed_each_stage,
         restore_best_tuning_state=config.block_tuning.restore_best_state,
         tuning_epoch_loss_mode=config.block_tuning.epoch_loss_mode.value,
+        compile_tuning_forward=config.block_tuning.compile_forward,
         activation_retention=config.runtime.checkpoints.activation_retention.value,
         activation_gpu_cache=effective_cache,
         activation_gpu_reserve_bytes=int(config.runtime.activations.gpu_reserve_gib * 2**30),
