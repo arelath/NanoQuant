@@ -254,12 +254,17 @@ up to 128 tokens. Each model uses the same inputs and causal scoring targets.
     --baseline-revision dcc83ea841ab6100d6b47a070329e1ba4cf78752 `
     --gguf nanoquant-070 Results/070/gemma-3-1b-it-nanoquant.gguf `
     --gguf unsloth-q2-k 'https://huggingface.co/unsloth/gemma-3-1b-it-GGUF/resolve/main/gemma-3-1b-it-Q2_K.gguf' `
+    --materialize-nanoquant nanoquant-070 `
     --llama-cpp-runner D:/dev/research/llama.cpp/build-local-cuda-ninja/bin/nanoquant-llamacpp-quality.exe `
     --output outputs/hf-quality/070-full-comparison
 ```
 
 Use `--llama-cpp-runner` to select a compatible build for residual-stage
-NanoQuant GGUFs. The output directory contains raw scores for each model and
+NanoQuant GGUFs. The optional `--materialize-nanoquant LABEL` scores FP32
+projections reconstructed from the named packed GGUF. The script checks
+sampled token likelihoods against the packed runtime first. The report uses
+the original packed size and identifies the reconstruction used for scoring.
+The output directory contains raw scores for each model and
 `comparison.md` and `comparison.json`. Rerunning with the same inputs reuses
 verified completed scores.
 

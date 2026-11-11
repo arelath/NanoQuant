@@ -220,28 +220,30 @@ def unpack_sign_words(words: np.ndarray, rows: int, columns: int) -> np.ndarray:
     return np.float32(1.0) - np.float32(2.0) * bits.astype(np.float32)
 
 
-def reconstruct_nanoquant_weight(tensors: dict[str, Any], base: str, gguf: Any) -> np.ndarray:
+def reconstruct_nanoquant_weight(
+    tensors: dict[str, Any], base: str, gguf: Any, *, term: str = "nq",
+) -> np.ndarray:
     """Materialize one effective dense weight from a GGUF NanoQuant sidecar group."""
 
     def required(suffix: str) -> Any:
-        name = f"{base}.{suffix}"
+        name = f"{base}.{term}_{suffix}"
         try:
             return tensors[name]
         except KeyError as error:
             raise ValueError(f"NanoQuant GGUF is missing tensor {name}") from error
 
-    scale_pre = _float_tensor(required("nq_scale_pre"), gguf).reshape(-1).copy()
-    scale_mid = _float_tensor(required("nq_scale_mid"), gguf).reshape(-1)
-    scale_post = _float_tensor(required("nq_scale_post"), gguf).reshape(-1)
+    scale_pre = _float_tensor(required("scale_pre"), gguf).reshape(-1).copy()
+    scale_mid = _float_tensor(required("scale_mid"), gguf).reshape(-1)
+    scale_post = _float_tensor(required("scale_post"), gguf).reshape(-1)
     in_features = int(scale_pre.size)
     rank = int(scale_mid.size)
     out_features = int(scale_post.size)
     if min(in_features, rank, out_features) <= 0:
         raise ValueError(f"NanoQuant tensor {base} has an empty dimension")
 
-    index_tensor = tensors.get(f"{base}.nq_salient_idx")
-    value_tensor = tensors.get(f"{base}.nq_salient_weight")
-    scale_tensor = tensors.get(f"{base}.nq_salient_scale")
+    index_tensor = tensors.get(f"{base}.{term}_salient_idx")
+    value_tensor = tensors.get(f"{base}.{term}_salient_weight")
+    scale_tensor = tensors.get(f"{base}.{term}_salient_scale")
     if (index_tensor is None) != (value_tensor is None):
         raise ValueError(f"NanoQuant tensor {base} has an incomplete salient side path")
     indices: np.ndarray | None = None
@@ -267,8 +269,8 @@ def reconstruct_nanoquant_weight(tensors: dict[str, Any], base: str, gguf: Any) 
     elif scale_tensor is not None:
         raise ValueError(f"NanoQuant tensor {base} has salient scales without salient values")
 
-    right_words = np.asarray(required("nq_v").data)
-    left_words = np.asarray(required("nq_u").data)
+    right_words = np.asarray(required("v").data)
+    left_words = np.asarray(required("u").data)
     right = unpack_sign_words(right_words, rank, in_features)
     left = unpack_sign_words(left_words, out_features, rank)
     right *= scale_mid.reshape(-1, 1)
