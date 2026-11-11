@@ -222,7 +222,14 @@ def _quality_sequences(
 ) -> tuple[tuple[_Sequence, ...], tuple[tuple[_TaskCandidate, ...], ...], tuple[int, ...]]:
     sequences = [
         _Sequence(tuple(int(token) for token in row.tolist()), 1)
-        for row in prepared.wikitext_tokens
+        for row in (
+            prepared.wikitext_tokens
+            if prepared.wikitext_attention_mask is None
+            else (
+                tokens[mask]
+                for tokens, mask in zip(prepared.wikitext_tokens, prepared.wikitext_attention_mask, strict=True)
+            )
+        )
     ]
     task_candidates: list[tuple[_TaskCandidate, ...]] = []
     task_truncated: list[int] = []
@@ -286,7 +293,7 @@ def _task_result(
     candidates: tuple[_TaskCandidate, ...],
     scores: tuple[_Score, ...],
     truncated: int,
-    maximum_samples: int,
+    maximum_samples: int | None,
 ) -> MultipleChoiceEvaluationResult:
     examples = prepared.examples[:maximum_samples]
     raw_scores = [[0.0] * len(example.contexts) for example in examples]

@@ -113,6 +113,39 @@ def test_wikitext_uses_first_raw_token_as_context_without_bos(
     assert bos_token_id is None
 
 
+@pytest.mark.parametrize(("bos", "tail"), [(2, [2, 16, 0, 0]), (None, [13, 14, 15, 16])])
+def test_full_wikitext_keeps_tail_without_scoring_padding(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, bos: int | None, tail: list[int],
+) -> None:
+    from nanoquant.llamacpp_quality import _quality_sequences
+
+    monkeypatch.setattr(quality_evaluation, "load_pinned_dataset_split", lambda *_, **__: {"text": ["test"]})
+
+    class Tokenizer:
+        bos_token_id = bos
+
+        def __call__(self, _text: str, **kwargs: object) -> SimpleNamespace:
+            assert kwargs["truncation"] is False
+            return SimpleNamespace(input_ids=torch.tensor([[10, 11, 12, 13, 14, 15, 16]]))
+
+    monkeypatch.setattr(quality_evaluation.AutoTokenizer, "from_pretrained", lambda *_, **__: Tokenizer())
+    tokens, fingerprint, bos_id, mask = quality_evaluation._prepare_wikitext_windows(
+        tmp_path, samples=None, sequence_length=4, local_files_only=True,
+    )
+    assert tokens[-1].tolist() == tail
+    assert mask is not None
+    assert int(mask[-1].sum()) == (2 if bos is not None else 4)
+    prepared = quality_evaluation.PreparedQualityInputs(
+        tokens, fingerprint, bos_id, 0, "tokenizer", (), wikitext_attention_mask=mask,
+    )
+    request = quality_evaluation.QualityEvaluationRequest(
+        tmp_path, "fixture/model", "rev", tmp_path, wikitext_samples=None, task_limit=None,
+    )
+    sequences, _, _ = _quality_sequences(request, prepared)
+    assert sequences[-1].tokens == tuple(tail[:int(mask[-1].sum())])
+    assert sequences[-1].score_start == 1
+
+
 def test_base_only_quality_does_not_load_a_pytorch_candidate(
     monkeypatch: Any,
     tmp_path: Path,

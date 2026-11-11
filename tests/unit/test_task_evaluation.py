@@ -129,6 +129,13 @@ def test_task_renderers_match_retained_lm_eval_prompt_arguments() -> None:
     assert arc.normalization_lengths == (3, 3)
     assert hella.contexts == ("Roof removal: A man is on a roof. He",) * 2
     assert hella.continuations == (" pulls tiles.", "  falls down.")
+    hella_without_ctx_b = render_pinned_task_document(
+        _task("hellaswag"),
+        {"activity_label": "Roof removal", "ctx_a": "A man is on a roof.", "ctx_b": "",
+         "endings": ["He pulls tiles.", "He falls down."], "label": "0"},
+        sample_id="hella-1",
+    )
+    assert hella_without_ctx_b.contexts == ("Roof removal: A man is on a roof.",) * 2
     assert wino.contexts == (
         "Sarah was better than Maria so Sarah",
         "Sarah was better than Maria so Maria",

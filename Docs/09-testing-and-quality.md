@@ -240,6 +240,29 @@ the matching tokenizer with `--tokenizer` and optionally `--tokenizer-revision`.
 The script prompts for a tokenizer when it cannot infer one. Hub downloads use
 the Hugging Face cache and the account's existing credentials for gated models.
 
+### Compare models on the full benchmark
+
+Pass one Transformers checkpoint and repeat `--gguf LABEL MODEL` for each
+candidate. The comparison uses the baseline tokenizer and verifies the scored
+token IDs against each GGUF vocabulary. It scores every row of the six pinned
+task splits and the complete WikiText-2 test stream in independent windows of
+up to 128 tokens. Each model uses the same inputs and causal scoring targets.
+
+```powershell
+.\.venv\Scripts\python.exe tools\compare_hf_models.py `
+    --baseline google/gemma-3-1b-it `
+    --baseline-revision dcc83ea841ab6100d6b47a070329e1ba4cf78752 `
+    --gguf nanoquant-070 Results/070/gemma-3-1b-it-nanoquant.gguf `
+    --gguf unsloth-q2-k 'https://huggingface.co/unsloth/gemma-3-1b-it-GGUF/resolve/main/gemma-3-1b-it-Q2_K.gguf' `
+    --llama-cpp-runner D:/dev/research/llama.cpp/build-local-cuda-ninja/bin/nanoquant-llamacpp-quality.exe `
+    --output outputs/hf-quality/070-full-comparison
+```
+
+Use `--llama-cpp-runner` to select a compatible build for residual-stage
+NanoQuant GGUFs. The output directory contains raw scores for each model and
+`comparison.md` and `comparison.json`. Rerunning with the same inputs reuses
+verified completed scores.
+
 ## 10. Golden tests
 
 Golden fixtures are used sparingly for stable, high-value outputs:

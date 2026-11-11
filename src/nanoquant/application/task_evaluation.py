@@ -292,9 +292,9 @@ def pinned_legacy_multiple_choice_tasks() -> tuple[MultipleChoiceTaskSpec, ...]:
     )
 
 
-def _text(document: Mapping[str, object], key: str) -> str:
+def _text(document: Mapping[str, object], key: str, *, allow_empty: bool = False) -> str:
     value = document.get(key)
-    if not isinstance(value, str) or not value:
+    if not isinstance(value, str) or (not value and not allow_empty):
         raise ValueError(f"task document requires non-empty text field: {key}")
     return value
 
@@ -365,7 +365,7 @@ def render_pinned_task_document(
         ending_values = tuple(value for value in endings if isinstance(value, str))
         context = _hellaswag_text(
             f"{_text(document, 'activity_label')}: {_text(document, 'ctx_a')} "
-            f"{_text(document, 'ctx_b').capitalize()}"
+            f"{_text(document, 'ctx_b', allow_empty=True).capitalize()}"
         )
         result = _common_context(
             context,

@@ -81,11 +81,11 @@ class QualityEvaluationRequest:
     device: str = "cuda:0"
     backend: str = BackendType.FACTORIZED.value
     use_global_tuning: bool = True
-    wikitext_samples: int = 16
+    wikitext_samples: int | None = 16
     wikitext_sequence_length: int = 128
     wikitext_batch_size: int = DEFAULT_QUALITY_WIKITEXT_BATCH_SIZE
     task_names: tuple[str, ...] = ("piqa", "arc_easy", "boolq")
-    task_limit: int = 25
+    task_limit: int | None = 25
     task_batch_size: int = DEFAULT_QUALITY_TASK_BATCH_SIZE
     local_files_only: bool = False
     maximum_wddm_shared_bytes: int | None = None
@@ -109,9 +109,12 @@ class QualityEvaluationRequest:
             BackendType.DENSE.value,
         }:
             raise ValueError("quality evaluation backend is unsupported")
-        if self.wikitext_samples <= 0 or self.wikitext_sequence_length < 2:
+        if (self.wikitext_samples is not None and self.wikitext_samples <= 0) or self.wikitext_sequence_length < 2:
             raise ValueError("quality evaluation WikiText dimensions are invalid")
-        if self.wikitext_batch_size <= 0 or self.task_limit <= 0 or self.task_batch_size <= 0:
+        if (
+            self.wikitext_batch_size <= 0 or self.task_batch_size <= 0
+            or (self.task_limit is not None and self.task_limit <= 0)
+        ):
             raise ValueError("quality evaluation batch sizes and task limit must be positive")
         if self.maximum_wddm_shared_bytes is not None and self.maximum_wddm_shared_bytes < 0:
             raise ValueError("quality evaluation shared-memory limit must be non-negative")
@@ -157,6 +160,7 @@ class PreparedQualityInputs:
     tokenizer_hash: str
     tasks: tuple[PreparedMultipleChoiceInputs, ...]
     reasoning: tuple[PreparedBehaviorEvaluation, ...] = ()
+    wikitext_attention_mask: torch.Tensor | None = None
 
 
 def _wikitext_context_policy(bos_token_id: int | None) -> str:
@@ -202,6 +206,21 @@ def _wikitext_tokens(
     local_files_only: bool,
     progress: QualityProgressCallback | None = None,
 ) -> tuple[torch.Tensor, str, int | None]:
+    tokens, fingerprint, bos_id, _ = _prepare_wikitext_windows(
+        snapshot, samples=samples, sequence_length=sequence_length, local_files_only=local_files_only,
+        progress=progress,
+    )
+    return tokens, fingerprint, bos_id
+
+
+def _prepare_wikitext_windows(
+    snapshot: Path,
+    *,
+    samples: int | None,
+    sequence_length: int,
+    local_files_only: bool,
+    progress: QualityProgressCallback | None = None,
+) -> tuple[torch.Tensor, str, int | None, torch.Tensor | None]:
     _emit_progress(progress, "wikitext_input_dataset_started", dataset=WIKITEXT_DATASET)
     dataset = load_pinned_dataset_split(
         WIKITEXT_DATASET,
@@ -224,19 +243,19 @@ def _wikitext_tokens(
         raise ValueError("quality evaluation tokenizer BOS token ID is invalid")
     context_policy = _wikitext_context_policy(bos_id)
     payload = sequence_length - 1 if bos_id is not None else sequence_length
-    required = samples * payload
+    required = None if samples is None else samples * payload
     # The protocol evaluates independent, bounded windows.  Ask the tokenizer
     # for exactly the prefix those windows consume instead of materializing the
     # entire WikiText test split as one apparent model input.  Explicit
     # truncation both preserves the historical token prefix and prevents
     # Transformers from warning that the full corpus exceeds model context.
     _emit_progress(progress, "wikitext_input_tokenization_started")
-    encoded = tokenizer(
-        "\n\n".join(dataset["text"]),
-        return_tensors="pt",
-        truncation=True,
-        max_length=required,
-    ).input_ids
+    text = "\n\n".join(dataset["text"])
+    encoded = (
+        tokenizer(text, return_tensors="pt", truncation=False, verbose=False).input_ids
+        if required is None
+        else tokenizer(text, return_tensors="pt", truncation=True, max_length=required).input_ids
+    )
     _emit_progress(
         progress,
         "wikitext_input_tokenization_completed",
@@ -244,26 +263,28 @@ def _wikitext_tokens(
         bos_token_id=bos_id,
         context_policy=context_policy,
     )
-    if encoded.shape[1] < required:
+    if required is not None and encoded.shape[1] < required:
         raise ValueError(f"WikiText token stream has {encoded.shape[1]} tokens; protocol requires {required}")
-    rows = (
-        tuple(
-            torch.cat(
-                (
-                    torch.tensor([[bos_id]], dtype=encoded.dtype),
-                    encoded[:, index * payload : (index + 1) * payload],
-                ),
-                dim=1,
-            )
-            for index in range(samples)
-        )
-        if bos_id is not None
-        else tuple(
-            encoded[:, index * payload : (index + 1) * payload]
-            for index in range(samples)
-        )
-    )
-    return torch.cat(rows, dim=0), str(getattr(dataset, "_fingerprint", "unknown")), bos_id
+    count = encoded.shape[1] if required is None else required
+    full_count, remainder = divmod(count, payload)
+    windows = encoded[:, :full_count * payload].reshape(full_count, payload)
+    if bos_id is not None:
+        windows = torch.cat((encoded.new_full((full_count, 1), bos_id), windows), dim=1)
+    mask = None
+    if remainder:
+        tail = encoded[:, full_count * payload:count]
+        if bos_id is not None:
+            tail = torch.cat((encoded.new_full((1, 1), bos_id), tail), dim=1)
+        elif full_count:
+            # A preceding token supplies context for all remaining targets.
+            tail = encoded[:, full_count * payload - 1:count]
+        if tail.shape[1] >= 2:
+            mask = torch.ones((full_count + 1, sequence_length), dtype=torch.bool)
+            mask[-1, tail.shape[1]:] = False
+            windows = torch.cat((windows, torch.nn.functional.pad(tail, (0, sequence_length - tail.shape[1]))))
+    if not windows.shape[0]:
+        raise ValueError("WikiText token stream contains no causal evaluation targets")
+    return windows, str(getattr(dataset, "_fingerprint", "unknown")), bos_id, mask
 
 
 def prepare_quality_inputs(
@@ -272,7 +293,7 @@ def prepare_quality_inputs(
 ) -> PreparedQualityInputs:
     """Materialize the exact shared input partitions before claiming the GPU lease."""
 
-    tokens, fingerprint, bos_id = _wikitext_tokens(
+    tokens, fingerprint, bos_id, wikitext_mask = _prepare_wikitext_windows(
         request.snapshot,
         samples=request.wikitext_samples,
         sequence_length=request.wikitext_sequence_length,
@@ -342,6 +363,7 @@ def prepare_quality_inputs(
         tokenizer_hash,
         tuple(tasks),
         tuple(reasoning),
+        wikitext_mask,
     )
 
 
@@ -376,6 +398,9 @@ def _evaluate_model(
     causal = evaluate_causal_nll(
         CausalEvaluationRequest(
             inputs.wikitext_tokens.to(request.device),
+            attention_mask=(
+                None if inputs.wikitext_attention_mask is None else inputs.wikitext_attention_mask.to(request.device)
+            ),
             max_length=request.wikitext_sequence_length,
             stride=request.wikitext_sequence_length,
             batch_size=request.wikitext_batch_size,
@@ -588,13 +613,16 @@ def describe_quality_protocol(
     base_execution: str | None = None,
 ) -> dict[str, Any]:
     """Record the shared token and task protocol independently of the scorer."""
-    token_hash = "sha256:" + hashlib.sha256(
-        inputs.wikitext_tokens.contiguous().view(torch.uint8).numpy().tobytes()
-    ).hexdigest()
+    token_digest = hashlib.sha256(inputs.wikitext_tokens.contiguous().view(torch.uint8).numpy().tobytes())
+    if inputs.wikitext_attention_mask is not None:
+        token_digest.update(inputs.wikitext_attention_mask.contiguous().numpy().tobytes())
+    token_hash = "sha256:" + token_digest.hexdigest()
     return {
         "wikitext_dataset": f"{WIKITEXT_DATASET}:{WIKITEXT_CONFIG}:test@{WIKITEXT_REVISION}",
         "wikitext_fingerprint": inputs.wikitext_fingerprint,
-        "wikitext_samples": request.wikitext_samples,
+        "wikitext_samples": (
+            inputs.wikitext_tokens.shape[0] if request.wikitext_samples is None else request.wikitext_samples
+        ),
         "wikitext_sequence_length": request.wikitext_sequence_length,
         "wikitext_batch_size": request.wikitext_batch_size,
         "wikitext_token_hash": token_hash,
@@ -606,6 +634,7 @@ def describe_quality_protocol(
         "task_limit": request.task_limit,
         "task_batch_size": request.task_batch_size,
         "tokenizer_hash": inputs.tokenizer_hash,
+        **({"wikitext_full_split": True} if request.wikitext_samples is None else {}),
         **({} if base_execution is None else {"base_execution": base_execution}),
         **(
             {}
