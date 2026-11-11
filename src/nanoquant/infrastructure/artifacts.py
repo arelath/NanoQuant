@@ -8,6 +8,7 @@ import os
 import shutil
 import tempfile
 import time
+from collections.abc import Iterable
 from dataclasses import asdict
 from pathlib import Path
 
@@ -40,6 +41,29 @@ class LocalArtifactWriter:
             json.dumps({"pid": os.getpid(), "created_at": time.time()}), encoding="utf-8"
         )
         self._committed = False
+        self._written_members: dict[str, tuple[ArtifactFile, os.stat_result]] = {}
+
+    def write_hashed_member(self, name: str, chunks: Iterable[bytes | memoryview]) -> None:
+        """Write and hash a staged member from the same buffers before publication."""
+        if (
+            self._committed
+            or Path(name).name != name
+            or name in {"", ".", "..", ".lease.json", "descriptor.json"}
+            or any(character in name for character in "/\\:")
+        ):
+            raise ValueError("expected a new staged member filename")
+        digest = hashlib.sha256()
+        path = self.path / name
+        with self.store.recorder.phase("write"), path.open("xb", buffering=0) as stream:
+            for chunk in chunks:
+                if stream.write(chunk) != len(chunk):
+                    raise OSError(f"short write for artifact member {name}")
+                with self.store.recorder.phase("hash"):
+                    digest.update(chunk)
+            with self.store.recorder.phase("sync"):
+                os.fsync(stream.fileno())
+        stat = path.stat()
+        self._written_members[name] = (ArtifactFile(name, stat.st_size, digest.hexdigest()), stat)
 
     def commit(self) -> ArtifactDescriptor:
         if self._committed:
@@ -54,7 +78,14 @@ class LocalArtifactWriter:
                 relative = path.relative_to(self.path).as_posix()
                 if relative.startswith("../") or Path(relative).is_absolute():
                     raise ValueError("artifact path traversal is not allowed")
-                files.append(ArtifactFile(relative, path.stat().st_size, hash_file(path)))
+                stat = path.stat()
+                written = self._written_members.get(relative)
+                # A caller can still access the staging directory directly. If it
+                # changed this member after streaming it, hash the staged file.
+                if written is not None and written[1] == stat and written[1].st_mtime_ns == stat.st_mtime_ns:
+                    files.append(written[0])
+                else:
+                    files.append(ArtifactFile(relative, stat.st_size, hash_file(path)))
             identity_payload = json.dumps(
                 {
                     "type": self.artifact_type,

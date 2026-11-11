@@ -1,7 +1,9 @@
-"""Small, consistent safetensors read helpers for research infrastructure."""
+"""Safetensors I/O helpers for research infrastructure."""
 
 from __future__ import annotations
 
+import json
+import sys
 from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
@@ -10,6 +12,30 @@ from typing import Any
 import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
+
+_ACTIVATION_DTYPES = {torch.bfloat16: "BF16", torch.float16: "F16", torch.float32: "F32"}
+
+
+def activation_tensor_chunks(name: str, tensor: torch.Tensor) -> Iterable[bytes | memoryview] | None:
+    """Return a byte-identical single-tensor safetensors stream for common activations."""
+    dtype = _ACTIVATION_DTYPES.get(tensor.dtype)
+    if dtype is None or sys.byteorder != "little" or tensor.is_neg():
+        return None
+    payload = tensor.reshape(-1).view(torch.uint8).numpy().data
+    header = json.dumps(
+        {name: {"dtype": dtype, "shape": list(tensor.shape), "data_offsets": [0, len(payload)]}},
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    header += b" " * (-len(header) % 8)
+
+    def chunks() -> Iterator[bytes | memoryview]:
+        yield len(header).to_bytes(8, "little") + header
+        chunk_bytes = 16 * 1024 * 1024
+        for start in range(0, len(payload), chunk_bytes):
+            yield payload[start : start + chunk_bytes]
+
+    return chunks()
 
 
 class SafetensorsManager:

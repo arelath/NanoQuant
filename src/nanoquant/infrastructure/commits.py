@@ -21,7 +21,7 @@ from nanoquant.domain.models import (
     LayerResult,
     SharedInputGroupResult,
 )
-from nanoquant.infrastructure.safetensors_io import SAFETENSORS
+from nanoquant.infrastructure.safetensors_io import SAFETENSORS, activation_tensor_chunks
 
 from .artifacts import LocalArtifactStore
 
@@ -279,15 +279,20 @@ def commit_block(
         }
         encoded_activation_core = json.dumps(activation_core, sort_keys=True, indent=2)
     with artifacts.begin_write(ArtifactTypes.ACTIVATION_GENERATION) as writer:
+        for name, tensor, filename in (
+            ("teacher_outputs", teacher_outputs, "teacher-activations.safetensors"),
+            ("compressed_outputs", compressed_outputs, "compressed-activations.safetensors"),
+        ):
+            with artifacts.recorder.phase("activation_prepare", tensor=name):
+                cpu_tensor = tensor.detach().cpu().contiguous()
+                chunks = activation_tensor_chunks(name, cpu_tensor)
+            if chunks is None:
+                with artifacts.recorder.phase("write"):
+                    SAFETENSORS.save({name: cpu_tensor}, writer.path / filename)
+            else:
+                writer.write_hashed_member(filename, chunks)
+            del chunks, cpu_tensor
         with artifacts.recorder.phase("write"):
-            SAFETENSORS.save(
-                {"teacher_outputs": teacher_outputs.detach().cpu().contiguous()},
-                writer.path / "teacher-activations.safetensors",
-            )
-            SAFETENSORS.save(
-                {"compressed_outputs": compressed_outputs.detach().cpu().contiguous()},
-                writer.path / "compressed-activations.safetensors",
-            )
             (writer.path / "activation-generation.json").write_text(encoded_activation_core, encoding="utf-8")
         activation_descriptor = writer.commit()
     artifacts.recorder.add(

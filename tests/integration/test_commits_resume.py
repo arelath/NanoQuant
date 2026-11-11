@@ -31,6 +31,7 @@ from nanoquant.domain.models import (
     TensorSpec,
 )
 from nanoquant.domain.runs import BudgetState
+from nanoquant.infrastructure import commits
 from nanoquant.infrastructure.artifacts import ArtifactCorruptionError, LocalArtifactStore
 from nanoquant.infrastructure.commits import (
     CommitIdentity,
@@ -245,7 +246,12 @@ def test_post_commit_failure_artifacts_equal_uninterrupted_controls(tmp_path: Pa
     assert failure_block_id == control_block.reference.artifact_id
 
 
-def test_commit_io_profile_preserves_layer_block_and_activation_artifact_identities(tmp_path: Path) -> None:
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+def test_commit_io_profile_preserves_layer_block_and_activation_artifact_identities(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    dtype: torch.dtype,
+) -> None:
     layer_result, _plan, frozen_block, losses = _objects()
     identity = CommitIdentity("config", "model", "plan")
     control_store = LocalArtifactStore(tmp_path / "control")
@@ -254,14 +260,16 @@ def test_commit_io_profile_preserves_layer_block_and_activation_artifact_identit
         run_id="commit-io-micro",
     )
     profiled_store = LocalArtifactStore(tmp_path / "profiled", recorder=profiler)
-    teacher = torch.arange(12, dtype=torch.float32).reshape(2, 3, 2)
+    teacher = torch.arange(12, dtype=dtype).reshape(2, 2, 3).transpose(1, 2)
     compressed = teacher + 1
 
     control_layer = commit_layer(layer_result, control_store, identity)
     profiled_layer = commit_layer(layer_result, profiled_store, identity)
-    control_block = commit_block(
-        BlockId(0), (layer_result,), frozen_block, losses, teacher, compressed, 0, control_store, identity
-    )
+    with monkeypatch.context() as patch:
+        patch.setattr(commits, "activation_tensor_chunks", lambda *_args: None)
+        control_block = commit_block(
+            BlockId(0), (layer_result,), frozen_block, losses, teacher, compressed, 0, control_store, identity
+        )
     profiled_block = commit_block(
         BlockId(0), (layer_result,), frozen_block, losses, teacher, compressed, 0, profiled_store, identity
     )
@@ -272,6 +280,10 @@ def test_commit_io_profile_preserves_layer_block_and_activation_artifact_identit
         profiled_block.result.teacher_outputs.artifact.artifact_id
         == control_block.result.teacher_outputs.artifact.artifact_id
     )
+    fresh_store = LocalArtifactStore(profiled_store.root, use_persistent_validation_cache=False)
+    loaded_teacher, loaded_compressed = load_block_activations(profiled_block.reference, fresh_store)
+    assert torch.equal(loaded_teacher, teacher)
+    assert torch.equal(loaded_compressed, compressed)
     payload = profiler.snapshot()
     phase_paths = {str(phase["path"]) for phase in payload["phases"]}  # type: ignore[index]
     assert {"serialize", "hash", "write"} <= phase_paths
