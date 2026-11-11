@@ -403,6 +403,15 @@ def validate(config: RunConfig, phase: ValidationPhase = ValidationPhase.PRE_RES
         "allocation.reconstruction.importance.protected_edge_block_count",
         "must not be negative",
     )
+    dataset_selected = reconstruction.response_source is RankResponseSource.DATASET
+    require(
+        (dataset_selected and reconstruction.enabled and bool(reconstruction.allocation_dataset)
+         and bool(reconstruction.allocation_dataset_key))
+        or (not dataset_selected and reconstruction.allocation_dataset is None
+            and reconstruction.allocation_dataset_key is None),
+        "CFG201", "allocation.reconstruction.allocation_dataset",
+        "dataset responses require an enabled planner, dataset path and pinned dataset key",
+    )
     curve_patterns = tuple(curve.unit_pattern for curve in reconstruction.response_curves)
     require(
         len(curve_patterns) == len(set(curve_patterns)) and all(bool(pattern.strip()) for pattern in curve_patterns),
@@ -449,7 +458,7 @@ def validate(config: RunConfig, phase: ValidationPhase = ValidationPhase.PRE_RES
             "must be unit_frobenius or calibration_weighted",
         )
         require(
-            reconstruction.probe_admm is not None,
+            reconstruction.probe_admm is not None or reconstruction.response_source is RankResponseSource.DATASET,
             "CFG060",
             "allocation.reconstruction.probe_admm",
             "an explicit full probe protocol is required",
@@ -496,11 +505,11 @@ def validate(config: RunConfig, phase: ValidationPhase = ValidationPhase.PRE_RES
                 "measured_unit_kl requires KL allocation with complete exact physical-unit arms",
             )
             require(
-                reconstruction.response_source is RankResponseSource.MEASURED
+                reconstruction.response_source in {RankResponseSource.MEASURED, RankResponseSource.DATASET}
                 and reconstruction.sensitivity_strength == 1,
                 "CFG095",
                 "allocation.reconstruction",
-                "measured_unit_kl requires same-run measured responses and untempered sensitivity",
+                "measured_unit_kl requires measured or dataset responses and untempered sensitivity",
             )
             require(
                 reconstruction.rank_trust_reference_run is None

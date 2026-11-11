@@ -92,6 +92,57 @@ def predicted_squared_error(unit: ReconstructionAllocationUnit, rank: int) -> fl
     return unit.baseline_squared_error * math.exp(-2.0 * integral)
 
 
+def rebase_rank_response(
+    source_baseline: int,
+    target_baseline: int,
+    segments: tuple[RankResponseSegment, ...],
+    *,
+    floor_fraction: float,
+    ceiling_fraction: float,
+) -> tuple[float, tuple[RankResponseSegment, ...]]:
+    """Move an approximate curve's anchor, extending its endpoint slopes as needed."""
+    if (
+        min(source_baseline, target_baseline) <= 0
+        or not segments
+        or not 0 < floor_fraction <= 1 <= ceiling_fraction
+        or any(not math.isfinite(s.beta_per_rank) or s.beta_per_rank < 0 for s in segments)
+        or any(not math.isfinite(s.maximum_rank_fraction) or s.maximum_rank_fraction <= 0 for s in segments)
+        or any(
+            left.maximum_rank_fraction >= right.maximum_rank_fraction
+            for left, right in zip(segments, segments[1:], strict=False)
+        )
+    ):
+        raise ValueError("invalid approximate rank response")
+    extended = (
+        *segments[:-1],
+        RankResponseSegment(
+            max(segments[-1].maximum_rank_fraction, target_baseline / source_baseline, 1.0),
+            segments[-1].beta_per_rank,
+        ),
+    )
+    integral = integrated_rank_response(source_baseline, target_baseline, 0.0, extended)
+    error_ratio = math.exp(-2.0 * integral)
+    lower = floor_fraction * target_baseline
+    upper = ceiling_fraction * target_baseline
+    rebased = []
+    for index, segment in enumerate(segments):
+        boundary = (
+            upper
+            if index == len(segments) - 1
+            else min(
+                upper,
+                segment.maximum_rank_fraction * source_baseline,
+            )
+        )
+        if boundary > lower:
+            rebased.append(RankResponseSegment(boundary / target_baseline, segment.beta_per_rank))
+        if boundary >= upper:
+            if not rebased:
+                rebased.append(RankResponseSegment(ceiling_fraction, segment.beta_per_rank))
+            break
+    return error_ratio, tuple(rebased)
+
+
 def _unit_factor_cost(unit: ReconstructionAllocationUnit, rank: int) -> BitCost:
     return factor_bit_cost(unit.out_features, unit.in_features, rank,
                            residual_stages=unit.residual_stages, rank_alignment=unit.stage_rank_alignment)

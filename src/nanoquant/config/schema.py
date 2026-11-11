@@ -89,6 +89,7 @@ class KlSensitivityGranularity(StringEnum):
 class RankResponseSource(StringEnum):
     CONFIGURED = "configured"
     MEASURED = "measured"
+    DATASET = "dataset"
 
 
 class KlAllocationObjective(StringEnum):
@@ -333,6 +334,8 @@ class ReconstructionRankPlanningConfig:
     response_source: RankResponseSource = RankResponseSource.CONFIGURED
     response_curves: tuple[RankResponseCurveConfig, ...] = ()
     response_profile_provenance: str = ""
+    allocation_dataset: str | None = None
+    allocation_dataset_key: str | None = None
     kl_objective: KlAllocationObjective = KlAllocationObjective.SENSITIVITY_PROXY
     importance: ReconstructionImportanceConfig = field(default_factory=ReconstructionImportanceConfig)
     sensitivity_strength: float = 0.75

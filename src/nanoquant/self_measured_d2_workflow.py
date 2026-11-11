@@ -8,12 +8,13 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Protocol
 
+from nanoquant.allocation_profile_dataset_workflow import config_with_allocation_dataset
 from nanoquant.application.kl_budget import KlBudgetProfile, load_kl_budget_profile
 from nanoquant.compression_quality_workflow import (
     CompressionQualityExperiment,
     run_compression_quality_experiment,
 )
-from nanoquant.config.codec import to_dict
+from nanoquant.config.codec import from_dict, to_dict
 from nanoquant.config.schema import (
     AllocationStrategy,
     KlSensitivityGranularity,
@@ -178,7 +179,7 @@ def _require_control_recipe(run_output: Path, expected: RunConfig) -> None:
         raise ValueError("self-measured D2 control manifest is invalid")
     resolved = payload.get("resolved_config")
     canonical = None if not isinstance(resolved, dict) else resolved.get("canonical_run_config")
-    if canonical != to_dict(expected):
+    if canonical is None or to_dict(from_dict(RunConfig, canonical)) != to_dict(expected):
         raise ValueError(
             "self-measured D2 KL control does not match the current fresh uniform-control recipe"
         )
@@ -318,6 +319,10 @@ def run_self_measured_d2_experiment(
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
+        "--allocation-profile-dataset", type=Path,
+        help="reuse approximate rank responses and KL sensitivities from a dataset",
+    )
+    parser.add_argument(
         "--kl-teacher-dataset", type=Path,
         help="reuse full-vocabulary teacher targets built by tools/build_kl_teacher_dataset.py",
     )
@@ -332,6 +337,12 @@ def run_self_measured_d2_experiment(
         help="override the automatic matched uniform control run",
     )
     parsed = parser.parse_args(arguments)
+    if parsed.allocation_profile_dataset is not None:
+        if parsed.kl_teacher_dataset is not None or parsed.kl_profile is not None or parsed.kl_control_run is not None:
+            parser.error("--allocation-profile-dataset already supplies the allocation inputs; omit the KL input flags")
+        runtime_config = config_with_allocation_dataset(experiment.config, parsed.allocation_profile_dataset)
+        print(f"Using approximate allocation dataset {parsed.allocation_profile_dataset}", flush=True)
+        return run_compression_quality_experiment(runtime_config, experiment.workflow, launcher_path=launcher_path)
     if (parsed.kl_profile is None) != (parsed.kl_control_run is None):
         parser.error("--kl-profile and --kl-control-run must be supplied together")
     teacher_protocol = None

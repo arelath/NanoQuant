@@ -7,6 +7,13 @@
 
 **Companion design:** [Stacked Shared-Input Factorization](31-stacked-shared-input-factorization.md)
 
+The optional dataset response mode now supports approximate reuse across calibration, seed, fitting-recipe and
+bit-budget changes for the same pinned model and physical units. `tools/build_allocation_profile_dataset.py`
+extracts the measured curves and optional KL sensitivities. Selecting `--allocation-profile-dataset` in a D2
+launcher skips new control/probe measurement and computes a fresh budgeted plan from the saved estimates.
+Dataset identities and extrapolation are recorded explicitly. This is an additional planning mode alongside the
+exact current-run and exact donor-probe contracts described below. See [planning datasets](../Datasets/README.md).
+
 **Scope:** Resolve the selected independent-layer/shared-input-group topology, add a resumable full-model
 reconstruction-probe pass before fitting, then use measured per-unit errors and calibrated rank-response models to
 produce one immutable, fixed-budget rank plan. The initial target is pinned `google/gemma-3-1b-it`.

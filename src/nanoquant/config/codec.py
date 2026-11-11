@@ -131,6 +131,10 @@ def config_hash(config: RunConfig) -> str:
     payload = to_dict(config)
     if not isinstance(payload, dict):
         raise TypeError("run config did not encode as an object")
+    reconstruction = payload["allocation"]["reconstruction"]
+    for name in ("allocation_dataset", "allocation_dataset_key"):
+        if reconstruction.get(name) is None:
+            reconstruction.pop(name, None)
     factorization = payload.get("factorization")
     if isinstance(factorization, dict) and not config.factorization.residual_stages.enabled:
         factorization.pop("residual_stages", None)

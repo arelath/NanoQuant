@@ -857,6 +857,48 @@ def test_reconstruction_rank_probe_covers_every_physical_unit_before_fitting(
     assert reused_preprocessing["fields"]["source"] == "reuse_run"
     assert reused_preprocessing["fields"]["calibration_artifact"] == result.plan.calibration.artifact_id
 
+    from nanoquant.allocation_profile_dataset_workflow import build_allocation_profile_dataset
+
+    dataset_root = tmp_path / "Datasets" / "allocation"
+    dataset = build_allocation_profile_dataset(request.output, dataset_root)
+    assert len(dataset.payload["units"]) == 5
+    assert build_allocation_profile_dataset(request.output, dataset_root).reference == dataset.reference
+
+    def reject_live_probes(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("dataset allocation must bypass live rank probes")
+
+    monkeypatch.setattr(resident, "_load_rank_probe_results", reject_live_probes)
+    dataset_request = replace(
+        request, output=tmp_path / "dataset-run", seed=request.seed + 9,
+        token_ids=((2, 3, 4, 5),), target_bpw=7.5,
+        reconstruction_rank_planning=replace(
+            request.reconstruction_rank_planning, response_source=RankResponseSource.DATASET,
+            probe_admm=None, allocation_dataset=str(dataset_root), allocation_dataset_key=dataset.reference.artifact_id,
+        ),
+    )
+    with pytest.raises(InterruptedError, match="1 new block commits"):
+        run_resident_quantization(replace(dataset_request, interrupt_after_block_commits=1))
+    saved_plan = (dataset_request.output / "state/preprocessing.json").read_bytes()
+    dataset_result = run_resident_quantization(dataset_request)
+    assert dataset_result.plan.reconstruction_profile is not None
+    dataset_store = LocalArtifactStore(dataset_request.output / "artifacts")
+    dataset_report = json.loads((
+        dataset_store.path_for(dataset_result.plan.reconstruction_profile.artifact_id)
+        / "reconstruction-rank-profile.json"
+    ).read_text())
+    assert dataset_report["allocation_dataset"]["approximate"] is True
+    assert dataset_report["unit_results"] == []
+    assert len(dataset_report["decisions"]) == 5
+    weight_count = sum(
+        rows * columns for entry in dataset.payload["units"] for rows, columns in entry["member_shapes"]
+    )
+    assert dataset_report["allocation"]["spent_bits"] <= weight_count * dataset_request.target_bpw
+    assert not (dataset_request.output / "state/rank-probe-journal.jsonl").exists()
+    assert (dataset_request.output / "state/preprocessing.json").read_bytes() == saved_plan
+    from validate_resident_run import validate_resident_run
+
+    validate_resident_run(dataset_request.output, expected_blocks=1, require_complete=True)
+
 
 def test_resident_tuning_recipe_refits_blocks_and_resumes_exactly(tmp_path: Path) -> None:
     snapshot = tmp_path / "snapshot"

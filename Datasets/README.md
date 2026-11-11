@@ -1,4 +1,56 @@
-# Reusable KL teacher datasets
+# Reusable planning datasets
+
+## Allocation profiles
+
+`tools/build_allocation_profile_dataset.py` extracts an existing run's measured rank responses and optional KL
+sensitivity weights into a compact JSON dataset. It validates the source artifacts and copies the scalar evidence,
+so the dataset can be reused after the source run is retired.
+
+The prepared Experiment 070 dataset is `Datasets/gemma-3-1b-it-allocation-070`. It covers all 130 physical units,
+including shared QKV groups, with three measured ranks per unit and the complete KL sensitivity profile.
+
+```powershell
+.\.venv\Scripts\python.exe tools\build_allocation_profile_dataset.py `
+  --run-output evidence\070\070-independent-residual-rank-2bpw-compress-and-benchmark-gemma-3-1b-it `
+  --output Datasets\gemma-3-1b-it-allocation-070
+```
+
+The builder takes KL sensitivities from the source recipe. Use `--kl-profile PATH` to select a complete compatible
+profile explicitly. A run's rank-probe profile must be complete before extraction; compression can still be in
+progress. Repeating extraction reuses an identical dataset and rejects replacement with different evidence.
+
+Self-measured D2 launchers and the 070 campaign runner accept the following option.
+
+```powershell
+--allocation-profile-dataset Datasets\gemma-3-1b-it-allocation-070
+```
+
+This selects approximate allocation guidance and bypasses the uniform control, KL sensitivity measurement and
+rank-probe fits. The consumer creates a fresh rank plan under its own bit budget, rank alignment, residual-stage
+accounting and charged sidecars. Calibration, production factorization, tuning and quality evaluation continue.
+Use this option by itself for allocation inputs. The dataset already contains the KL measurements it consumes.
+
+Dataset reuse requires the same pinned model, original projection tensors, matrix shapes and physical grouping.
+It permits different calibration tokens, seeds, fitting/tuning settings and bit budgets. For a changed baseline
+rank, the existing piecewise exponential curve is re-anchored in absolute rank units. Endpoint slopes extend beyond
+the measured interval. Reports mark the input as approximate and list units whose allowed aligned rank range
+extends beyond the donor's measurements. New recipes still need quality evaluation to establish whether these
+estimates allocate capacity well.
+
+The dataset's content identity participates in the run configuration hash. The resident planner imports the compact
+artifact into its own store and records its identity, source recipe, predicted baseline error ratios and rank
+decisions. It creates no new measured rank-probe records for dataset predictions. The strict exact-probe reuse path
+remains available independently.
+
+YAML/Python callers can select `allocation.reconstruction.response_source: dataset` with `allocation_dataset` and
+`allocation_dataset_key`. D2 launchers resolve those fields and the packaged `kl_profile_artifact`/`kl_profile_key`
+automatically. The numerical planner version is 67 for this execution path.
+
+Validation replayed Experiment 070's saved allocation inputs in 6–12 seconds on CPU and reproduced all 130
+planned ranks and the original 1,395,505,664-bit allocation. A separate tiny-model integration test changes the
+calibration inputs, seed and bit budget, completes compression through the dataset path, and checks resume behavior.
+
+## KL teacher targets
 
 `tools/build_kl_teacher_dataset.py` prepares the original model's full-vocabulary log probabilities for KL allocation
 profiling. Each dataset contains the exact WikiText input tokens, FP16 log probabilities, baseline negative log

@@ -53,6 +53,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--maximum-slices", type=int, default=64)
     parser.add_argument("--process-cooldown-seconds", type=float, default=5.0)
     parser.add_argument("--kl-teacher-dataset", type=Path)
+    parser.add_argument("--allocation-profile-dataset", type=Path)
     return parser
 
 
@@ -68,6 +69,8 @@ def main() -> int:
     command = [sys.executable, str(launcher)]
     if args.kl_teacher_dataset is not None:
         command.extend(["--kl-teacher-dataset", str(args.kl_teacher_dataset.resolve())])
+    if args.allocation_profile_dataset is not None:
+        command.extend(["--allocation-profile-dataset", str(args.allocation_profile_dataset.resolve())])
     environment = os.environ.copy()
     environment.update(
         {
