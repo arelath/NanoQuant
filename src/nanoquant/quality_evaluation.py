@@ -57,6 +57,7 @@ WIKITEXT_DATASET = "Salesforce/wikitext"
 WIKITEXT_CONFIG = "wikitext-2-raw-v1"
 DEFAULT_QUALITY_WIKITEXT_BATCH_SIZE = 8
 DEFAULT_QUALITY_TASK_BATCH_SIZE = 4
+DEFAULT_QUALITY_TASKS = ("piqa", "arc_easy", "arc_challenge", "hellaswag", "winogrande", "boolq")
 WIKITEXT_REVISION = "b08601e04326c79dfdd32d625aee71d232d685c3"
 
 QualityProgressCallback = Callable[[str, Mapping[str, object]], None]
@@ -580,6 +581,47 @@ def compare_quality_results(
     return comparison
 
 
+def describe_quality_protocol(
+    request: QualityEvaluationRequest,
+    inputs: PreparedQualityInputs,
+    *,
+    base_execution: str | None = None,
+) -> dict[str, Any]:
+    """Record the shared token and task protocol independently of the scorer."""
+    token_hash = "sha256:" + hashlib.sha256(
+        inputs.wikitext_tokens.contiguous().view(torch.uint8).numpy().tobytes()
+    ).hexdigest()
+    return {
+        "wikitext_dataset": f"{WIKITEXT_DATASET}:{WIKITEXT_CONFIG}:test@{WIKITEXT_REVISION}",
+        "wikitext_fingerprint": inputs.wikitext_fingerprint,
+        "wikitext_samples": request.wikitext_samples,
+        "wikitext_sequence_length": request.wikitext_sequence_length,
+        "wikitext_batch_size": request.wikitext_batch_size,
+        "wikitext_token_hash": token_hash,
+        "bos_token_id": inputs.bos_token_id,
+        "wikitext_context_policy": _wikitext_context_policy(inputs.bos_token_id),
+        "pad_token_id": inputs.pad_token_id,
+        "padding_policy": "tokenizer-pad-else-eos",
+        "task_names": request.task_names,
+        "task_limit": request.task_limit,
+        "task_batch_size": request.task_batch_size,
+        "tokenizer_hash": inputs.tokenizer_hash,
+        **({} if base_execution is None else {"base_execution": base_execution}),
+        **(
+            {}
+            if not request.reasoning_modes
+            else {
+                "reasoning_modes": tuple(mode.value for mode in request.reasoning_modes),
+                "reasoning_samples_per_mode": request.reasoning_samples_per_mode,
+                "reasoning_sequence_length": request.reasoning_sequence_length,
+                "reasoning_batch_size": request.reasoning_batch_size,
+                "reasoning_partition": request.reasoning_partition,
+                "reasoning_input_identities": tuple(item.identity for item in inputs.reasoning),
+            }
+        ),
+    }
+
+
 def execute_quality_evaluation(
     request: QualityEvaluationRequest,
     *,
@@ -587,6 +629,7 @@ def execute_quality_evaluation(
     progress: QualityProgressCallback | None = None,
     evaluate_candidate: bool = True,
     base_result: dict[str, Any] | None = None,
+    attention_implementation: str | None = None,
 ) -> dict[str, Any]:
     """Evaluate the base model and, when requested, the frozen candidate."""
 
@@ -605,7 +648,7 @@ def execute_quality_evaluation(
         with monitor_context as monitor:
             model_config = AutoConfig.from_pretrained(request.snapshot, local_files_only=False)
             model_type = str(getattr(model_config, "model_type", "")).lower()
-            attention_implementation = "eager" if model_type.startswith("gemma") else "sdpa"
+            attention = attention_implementation or ("eager" if model_type.startswith("gemma") else "sdpa")
             base_execution = "reused"
             if base_result is None:
                 base_execution = "block_streamed" if request.stream_base_model else "resident"
@@ -614,7 +657,7 @@ def execute_quality_evaluation(
                 source_model = load_causal_language_model(
                     request.snapshot,
                     torch_dtype=_checkpoint_dtype(request.snapshot),
-                    attention_implementation=attention_implementation,
+                    attention_implementation=attention,
                 ).to("cpu" if request.stream_base_model else request.device)
                 base = (
                     BlockStreamedCausalLM(
@@ -715,9 +758,6 @@ def execute_quality_evaluation(
                     if loaded is not None:
                         del loaded
                     _release_device_memory()
-    token_hash = "sha256:" + hashlib.sha256(
-        inputs.wikitext_tokens.contiguous().view(torch.uint8).numpy().tobytes()
-    ).hexdigest()
     candidate = (
         None
         if not evaluate_candidate
@@ -775,35 +815,7 @@ def execute_quality_evaluation(
             "snapshot": str(request.snapshot.resolve()),
         },
         "candidate": candidate,
-        "protocol": {
-            "wikitext_dataset": f"{WIKITEXT_DATASET}:{WIKITEXT_CONFIG}:test@{WIKITEXT_REVISION}",
-            "wikitext_fingerprint": inputs.wikitext_fingerprint,
-            "wikitext_samples": request.wikitext_samples,
-            "wikitext_sequence_length": request.wikitext_sequence_length,
-            "wikitext_batch_size": request.wikitext_batch_size,
-            "wikitext_token_hash": token_hash,
-            "bos_token_id": inputs.bos_token_id,
-            "wikitext_context_policy": _wikitext_context_policy(inputs.bos_token_id),
-            "pad_token_id": inputs.pad_token_id,
-            "padding_policy": "tokenizer-pad-else-eos",
-            "task_names": request.task_names,
-            "task_limit": request.task_limit,
-            "task_batch_size": request.task_batch_size,
-            "tokenizer_hash": inputs.tokenizer_hash,
-            "base_execution": base_execution,
-            **(
-                {}
-                if not request.reasoning_modes
-                else {
-                    "reasoning_modes": tuple(mode.value for mode in request.reasoning_modes),
-                    "reasoning_samples_per_mode": request.reasoning_samples_per_mode,
-                    "reasoning_sequence_length": request.reasoning_sequence_length,
-                    "reasoning_batch_size": request.reasoning_batch_size,
-                    "reasoning_partition": request.reasoning_partition,
-                    "reasoning_input_identities": tuple(item.identity for item in inputs.reasoning),
-                }
-            ),
-        },
+        "protocol": describe_quality_protocol(request, inputs, base_execution=base_execution),
         "results": results,
         "comparison": comparison,
         "wall_seconds": time.perf_counter() - wall_started,
@@ -818,11 +830,13 @@ def execute_quality_evaluation(
 
 __all__ = [
     "DEFAULT_QUALITY_TASK_BATCH_SIZE",
+    "DEFAULT_QUALITY_TASKS",
     "DEFAULT_QUALITY_WIKITEXT_BATCH_SIZE",
     "PreparedQualityInputs",
     "QualityProgressCallback",
     "QualityEvaluationRequest",
     "compare_quality_results",
+    "describe_quality_protocol",
     "execute_quality_evaluation",
     "prepare_quality_inputs",
 ]

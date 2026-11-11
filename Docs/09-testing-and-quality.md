@@ -209,6 +209,32 @@ Evaluators are tested with synthetic logits and labels where the expected metric
 - incomplete task results;
 - baseline comparability checks.
 
+### Run the 200-example benchmark on a published model
+
+Launch the interactive benchmark and paste a Hugging Face model ID, GGUF file
+URL, local Transformers directory, or local GGUF path.
+
+```powershell
+.\.venv\Scripts\python.exe tools\benchmark_hf_model.py
+.\.venv\Scripts\python.exe tools\benchmark_hf_model.py 'https://huggingface.co/unsloth/gemma-3-1b-it-GGUF/resolve/main/gemma-3-1b-it-Q2_K.gguf?download=true'
+```
+
+The benchmark scores the first 200 examples each of PIQA, ARC Easy, ARC Challenge,
+HellaSwag, WinoGrande, and BoolQ, plus 64 WikiText-2 windows of 128 tokens. It
+prints the scores and saves per-example results and input identities to
+`outputs/hf-quality/<run>/quality.json`. Use `--output` to set the report path,
+`--device cpu` for CPU execution, and `--revision` to select a Hub commit, tag,
+or branch. A supplied GGUF URL already specifies its revision.
+
+Transformers checkpoints use the installed Transformers backend. GGUF files use
+the NanoQuant llama.cpp quality runner, built with
+`tools/build_llamacpp_quality.py`. Set `--llama-cpp-root` if the checkout is
+elsewhere. GGUF scoring uses the published tokenizer or the base model named by
+the model card. For a local GGUF or a repack with a different vocabulary, provide
+the matching tokenizer with `--tokenizer` and optionally `--tokenizer-revision`.
+The script prompts for a tokenizer when it cannot infer one. Hub downloads use
+the Hugging Face cache and the account's existing credentials for gated models.
+
 ## 10. Golden tests
 
 Golden fixtures are used sparingly for stable, high-value outputs:

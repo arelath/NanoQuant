@@ -44,6 +44,7 @@ from nanoquant.ports.event_sink import (
 )
 from nanoquant.quality_evaluation import (
     DEFAULT_QUALITY_TASK_BATCH_SIZE,
+    DEFAULT_QUALITY_TASKS,
     DEFAULT_QUALITY_WIKITEXT_BATCH_SIZE,
     QualityEvaluationRequest,
     execute_quality_evaluation,
@@ -66,14 +67,7 @@ class CompressionQualityExperiment:
     wikitext_samples: int = 64
     wikitext_sequence_length: int = 128
     wikitext_batch_size: int = DEFAULT_QUALITY_WIKITEXT_BATCH_SIZE
-    task_names: tuple[str, ...] = (
-        "piqa",
-        "arc_easy",
-        "arc_challenge",
-        "hellaswag",
-        "winogrande",
-        "boolq",
-    )
+    task_names: tuple[str, ...] = DEFAULT_QUALITY_TASKS
     task_limit: int = 200
     task_batch_size: int = DEFAULT_QUALITY_TASK_BATCH_SIZE
     local_files_only: bool = False

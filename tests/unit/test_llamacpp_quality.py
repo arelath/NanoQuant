@@ -50,9 +50,11 @@ def test_llamacpp_quality_uses_first_raw_token_as_context_without_bos(
     assert task_truncated == ()
 
 
+@pytest.mark.parametrize("compare_baseline", [True, False])
 def test_llamacpp_quality_is_protocol_matched_and_identity_resumable(
     tmp_path: Path,
     monkeypatch,
+    compare_baseline: bool,
 ) -> None:  # type: ignore[no-untyped-def]
     root = tmp_path / "llama.cpp"
     (root / ".git").mkdir(parents=True)
@@ -152,11 +154,12 @@ def test_llamacpp_quality_is_protocol_matched_and_identity_resumable(
         parallel=2,
     )
 
+    baseline = base_result if compare_baseline else None
     result = execute_llamacpp_quality_evaluation(
         request,
         quality_request,
         prepared,
-        base_result,
+        baseline,
         {"wikitext_token_hash": "sha256:tokens", "task_names": ()},
     )
 
@@ -170,7 +173,11 @@ def test_llamacpp_quality_is_protocol_matched_and_identity_resumable(
     assert result["results"]["gguf"]["peak_device_shared_bytes"] == 50
     assert result["results"]["gguf"]["peak_host_bytes"] == 800
     assert result["results"]["gguf"]["memory_measurement"] == "fixture-child-process"
-    assert result["comparison"]["wikitext"]["ratio"] == pytest.approx(math.exp(0.5))
+    if compare_baseline:
+        assert result["comparison"]["wikitext"]["ratio"] == pytest.approx(math.exp(0.5))
+    else:
+        assert result["comparison"] is None
+        assert set(result["results"]) == {"gguf"}
     assert result["identity"]["llama_cpp_commit"] == "1" * 40
     assert result["runtime"]["git"]["repository"] == (
         "https://github.com/arelath/llama.cpp.git"
@@ -182,7 +189,7 @@ def test_llamacpp_quality_is_protocol_matched_and_identity_resumable(
         request,
         quality_request,
         prepared,
-        base_result,
+        baseline,
         {"wikitext_token_hash": "sha256:tokens", "task_names": ()},
     )
     assert reused["reused"] is True

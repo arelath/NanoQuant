@@ -53,6 +53,7 @@ class LlamaCppQualityRequest:
     parallel: int = 4
     threads: int = 0
     batch_threads: int = 0
+    gguf_shards: tuple[Path, ...] = ()
 
     def __post_init__(self) -> None:
         if self.parallel <= 0:
@@ -353,7 +354,7 @@ def _run(
     command = (
         str(runner),
         "--model",
-        str(request.gguf.resolve()),
+        str(request.gguf.absolute()),
         "--input",
         str(input_path),
         "--output",
@@ -368,13 +369,17 @@ def _run(
         str(request.batch_threads),
     )
     interop = LlamaCppInterop(request.llama_cpp_root)
+    environment = interop.runtime_environment(runner)
+    if request.device == "cpu":
+        # Older builds may offload host operations even with zero model layers on CUDA.
+        environment["CUDA_VISIBLE_DEVICES"] = "-1"
     print(
         "llama.cpp GGUF quality started: "
         f"model={request.gguf} parallel={request.parallel} gpu_layers={request.gpu_layers}",
         flush=True,
     )
     child = interop.start_streaming(
-        interop.request(command, environment=interop.runtime_environment(runner)),
+        interop.request(command, environment=environment),
         on_stderr=lambda line: print(line, flush=True),
     )
     gpu_monitor = None
@@ -402,11 +407,17 @@ def _run(
                 gpu.peak_shared_bytes,
             )
 
-    while child.poll() is None:
+    try:
+        while child.poll() is None:
+            sample_resources()
+            time.sleep(0.05)
         sample_resources()
-        time.sleep(0.05)
-    sample_resources()
-    completed = child.wait()
+        completed = child.wait()
+    except BaseException:
+        if child.poll() is None:
+            child.process.kill()
+        child.wait()
+        raise
     if completed.returncode != 0:
         detail = "\n".join(completed.stderr.splitlines()[-20:])
         raise RuntimeError(
@@ -424,12 +435,13 @@ def execute_llamacpp_quality_evaluation(
     request: LlamaCppQualityRequest,
     quality: QualityEvaluationRequest,
     prepared: PreparedQualityInputs,
-    base_result: dict[str, Any],
+    base_result: dict[str, Any] | None,
     protocol: dict[str, Any],
 ) -> dict[str, Any]:
-    """Evaluate an exported GGUF on the same token-level protocol as PyTorch."""
+    """Evaluate a GGUF on the shared protocol, optionally comparing to a baseline."""
 
-    gguf = request.gguf.resolve()
+    # Keep the filename when a Hub snapshot symlinks GGUF shards to hashed blobs.
+    gguf = request.gguf.absolute()
     root = request.llama_cpp_root.resolve()
     if not gguf.is_file():
         raise FileNotFoundError(f"llama.cpp quality GGUF is missing: {gguf}")
@@ -508,10 +520,15 @@ def execute_llamacpp_quality_evaluation(
         base_result_sha256 = hashlib.sha256(
             canonical_json(base_result).encode("utf-8")
         ).hexdigest()
+        shard_records = [
+            {"name": shard.name, "bytes": shard.stat().st_size, "sha256": hash_file(shard)}
+            for shard in request.gguf_shards
+        ]
         identity = {
             "schema_version": LLAMACPP_QUALITY_SCHEMA_VERSION,
             "gguf_sha256": hash_file(gguf),
             "gguf_bytes": gguf.stat().st_size,
+            **({"gguf_shards": shard_records} if shard_records else {}),
             "input_sha256": input_sha256,
             "runner_sha256": hash_file(runner),
             "llama_cpp_commit": git["commit"],
@@ -615,6 +632,11 @@ def execute_llamacpp_quality_evaluation(
             "memory_measurement": measured.measurement,
             "execution": "llama.cpp",
         }
+        comparison = (
+            None
+            if base_result is None
+            else compare_quality_results(base_result, candidate_result, quality.maximum_thinking_degradation_ratio)
+        )
         payload = {
             "schema_version": LLAMACPP_QUALITY_SCHEMA_VERSION,
             "passed": True,
@@ -631,18 +653,16 @@ def execute_llamacpp_quality_evaluation(
             },
             "runtime": runtime,
             "protocol": protocol,
-            "results": {"base": base_result, "gguf": candidate_result},
-            "comparison": compare_quality_results(
-                base_result,
-                candidate_result,
-                quality.maximum_thinking_degradation_ratio,
-            ),
+            "results": {"gguf": candidate_result} if base_result is None else {
+                "base": base_result,
+                "gguf": candidate_result,
+            },
+            "comparison": comparison,
             "wall_seconds": elapsed,
             "reused": False,
         }
-        comparison_result = cast(dict[str, Any], payload["comparison"])
-        if "reasoning_cross_mode" in comparison_result:
-            cross_mode = cast(dict[str, object], comparison_result["reasoning_cross_mode"])
+        if comparison is not None and "reasoning_cross_mode" in comparison:
+            cross_mode = cast(dict[str, object], comparison["reasoning_cross_mode"])
             payload["passed"] = bool(cross_mode["passed"])
         atomic_write_json(request.output, payload)
         print(

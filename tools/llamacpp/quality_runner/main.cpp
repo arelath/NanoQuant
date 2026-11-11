@@ -261,6 +261,10 @@ int main(int argc, char ** argv) {
         backend_initialized = true;
         llama_model_params model_params = llama_model_default_params();
         model_params.n_gpu_layers = options.gpu_layers;
+        ggml_backend_dev_t no_accelerators[] = { nullptr };
+        if (options.gpu_layers == 0) {
+            model_params.devices = no_accelerators;
+        }
         model = llama_model_load_from_file(options.model.c_str(), model_params);
         if (model == nullptr) {
             throw std::runtime_error("llama.cpp failed to load the GGUF model");
@@ -280,6 +284,10 @@ int main(int argc, char ** argv) {
         context_params.n_seq_max = static_cast<std::uint32_t>(parallel);
         context_params.n_outputs_max = static_cast<std::uint32_t>(maximum_scored * parallel);
         context_params.no_perf = false;
+        if (options.gpu_layers == 0) {
+            context_params.offload_kqv = false;
+            context_params.op_offload = false;
+        }
         context = llama_init_from_model(model, context_params);
         if (context == nullptr) {
             throw std::runtime_error("llama.cpp failed to create the quality context");
