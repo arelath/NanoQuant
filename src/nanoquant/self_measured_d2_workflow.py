@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Protocol
@@ -314,16 +315,18 @@ def run_self_measured_d2_experiment(
     launcher_path: str | Path,
     arguments: list[str] | None = None,
     profile_options: SelfMeasuredD2ProfileOptions = _DEFAULT_PROFILE_OPTIONS,
+    allocation_profile_dataset: Path | None = None,
+    kl_teacher_dataset: Path | None = None,
 ) -> int:
     """Prepare, verify, and consume same-campaign KL inputs before compression."""
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--allocation-profile-dataset", type=Path,
+        "--allocation-profile-dataset", type=Path, default=allocation_profile_dataset,
         help="reuse approximate rank responses and KL sensitivities from a dataset",
     )
     parser.add_argument(
-        "--kl-teacher-dataset", type=Path,
+        "--kl-teacher-dataset", type=Path, default=kl_teacher_dataset,
         help="reuse full-vocabulary teacher targets built by tools/build_kl_teacher_dataset.py",
     )
     parser.add_argument(
@@ -336,19 +339,27 @@ def run_self_measured_d2_experiment(
         type=Path,
         help="override the automatic matched uniform control run",
     )
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="validate dataset-backed inputs and print the resolved recipe without compression or evaluation",
+    )
     parsed = parser.parse_args(arguments)
-    if parsed.allocation_profile_dataset is not None:
-        if parsed.kl_teacher_dataset is not None or parsed.kl_profile is not None or parsed.kl_control_run is not None:
-            parser.error("--allocation-profile-dataset already supplies the allocation inputs; omit the KL input flags")
-        runtime_config = config_with_allocation_dataset(experiment.config, parsed.allocation_profile_dataset)
-        print(f"Using approximate allocation dataset {parsed.allocation_profile_dataset}", flush=True)
-        return run_compression_quality_experiment(runtime_config, experiment.workflow, launcher_path=launcher_path)
+    if parsed.dry_run and parsed.allocation_profile_dataset is None:
+        parser.error("--dry-run requires --allocation-profile-dataset; automatic preparation will not be started")
+    if parsed.allocation_profile_dataset is not None and (
+        parsed.kl_profile is not None or parsed.kl_control_run is not None
+    ):
+        parser.error("--allocation-profile-dataset already supplies the profile; omit --kl-profile/--kl-control-run")
     if (parsed.kl_profile is None) != (parsed.kl_control_run is None):
         parser.error("--kl-profile and --kl-control-run must be supplied together")
     teacher_protocol = None
+    teacher_reference = None
+    teacher_baseline = None
     if parsed.kl_teacher_dataset is not None:
         dataset = load_kl_teacher_dataset(parsed.kl_teacher_dataset)
         teacher_protocol = dataset.protocol
+        teacher_reference = dataset.reference
+        teacher_baseline = dataset.cache.baseline_negative_log_likelihood
         del dataset
         if (
             teacher_protocol.source != experiment.config.model.source
@@ -360,6 +371,36 @@ def run_self_measured_d2_experiment(
             != canonical_device_name(experiment.config.runtime.compute_device)
         ):
             raise ValueError("KL teacher dataset does not match the experiment model or profiling protocol")
+
+    if parsed.allocation_profile_dataset is not None:
+        runtime_config = config_with_allocation_dataset(experiment.config, parsed.allocation_profile_dataset)
+        if teacher_protocol is not None:
+            assert runtime_config.allocation.kl_profile_artifact is not None
+            profile = load_kl_budget_profile(
+                Path(runtime_config.allocation.kl_profile_artifact) / "kl-budget-profile.json"
+            )
+            if (
+                profile.provenance.dataset_slice_hash != teacher_protocol.token_hash
+                or profile.provenance.dataset_fingerprint != teacher_protocol.dataset_fingerprint
+                or teacher_baseline is None
+                or not math.isclose(profile.baseline_negative_log_likelihood, teacher_baseline, rel_tol=1e-12)
+            ):
+                raise ValueError("allocation profile and KL teacher datasets use different teacher inputs or baseline")
+            print(
+                f"Validated KL teacher dataset {teacher_reference}; the allocation dataset already contains "
+                "its measured sensitivities, so teacher inference and KL profiling are skipped.", flush=True,
+            )
+        raise_for_issues(validate(runtime_config, ValidationPhase.RESOLVED))
+        if parsed.dry_run:
+            print(json.dumps({
+                "dry_run": True, "config": to_dict(runtime_config), "workflow": to_dict(experiment.workflow),
+                "kl_teacher_dataset": None if parsed.kl_teacher_dataset is None else str(parsed.kl_teacher_dataset),
+                "kl_teacher_reference": None if teacher_reference is None else to_dict(teacher_reference),
+                "allocation_profile_dataset": str(parsed.allocation_profile_dataset),
+            }, indent=2))
+            return 0
+        print(f"Using approximate allocation dataset {parsed.allocation_profile_dataset}", flush=True)
+        return run_compression_quality_experiment(runtime_config, experiment.workflow, launcher_path=launcher_path)
 
     repository = Path(launcher_path).resolve().parent.parent
     number = _experiment_number(experiment.config)

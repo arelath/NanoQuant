@@ -28,7 +28,14 @@ Self-measured D2 launchers and the 070 campaign runner accept the following opti
 This selects approximate allocation guidance and bypasses the uniform control, KL sensitivity measurement and
 rank-probe fits. The consumer creates a fresh rank plan under its own bit budget, rank alignment, residual-stage
 accounting and charged sidecars. Calibration, production factorization, tuning and quality evaluation continue.
-Use this option by itself for allocation inputs. The dataset already contains the KL measurements it consumes.
+The dataset already contains the KL measurements it consumes. It can also be combined with
+`--kl-teacher-dataset`: the workflow validates the teacher artifacts, model/protocol, token hash, dataset fingerprint
+and baseline NLL against the packaged KL profile. Teacher inference and KL profiling are still skipped; the teacher
+dataset serves as verified source provenance in this mode, rather than supplying global-distillation targets.
+`--kl-profile` and `--kl-control-run` remain incompatible with the allocation dataset.
+
+Dataset-backed launchers accept `--dry-run` to validate inputs and print the resolved recipe without compression,
+tuning, export or evaluation. Experiment 071 selects both prepared datasets by default.
 
 Dataset reuse requires the same pinned model, original projection tensors, matrix shapes and physical grouping.
 It permits different calibration tokens, seeds, fitting/tuning settings and bit budgets. For a changed baseline

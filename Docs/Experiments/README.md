@@ -61,6 +61,7 @@ task-evaluation protocol, and Experiments 028 and 030 added Qwen-specific deploy
 | [056](056-physical-cap-rank-redistribution-d2.md) | Completed | Gemma 3 1B IT | The wider allocation range redistributed saturated physical-rank capacity under the retained 1-BPW protocol. |
 | [057](057-matched-056-product-k16-codebook.md) | Completed | Gemma 3 1B IT | The matched product-k16 run established the frozen baseline for rate-matched outlier screening. |
 | [058](058-matched-057-rate-matched-int8-outliers.md) | Not run | Gemma 3 1B IT | Test thirteen calibration-weighted INT8 down-projection outliers at no greater sidecar rate than seven BF16 columns. |
+| [071](071-two-full-rank-stages.md) | Prepared; not run | Gemma 3 1B IT | Two full-rank independent stages, 600x2 fitting, compiled tuning and reusable planning datasets. |
 
 The original launchers were under `experiments/`. Retained measurements remain under `Results/` and `evidence/`;
 architecture and decision records remain elsewhere in `Docs/`.
