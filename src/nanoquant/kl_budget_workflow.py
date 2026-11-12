@@ -44,7 +44,11 @@ from nanoquant.infrastructure.kl_teacher_dataset import (
 from nanoquant.infrastructure.kl_teacher_dataset import (
     token_hash as _token_hash,
 )
-from nanoquant.infrastructure.model_adapters import adapter_for_config
+from nanoquant.infrastructure.model_adapters import (
+    adapter_for_config,
+    decoder_block_count_from_config,
+    vocabulary_size_from_config,
+)
 from nanoquant.quality_evaluation import _wikitext_tokens
 
 
@@ -60,10 +64,7 @@ def _dtype(config: dict[str, object]) -> torch.dtype:
 
 
 def _expected_blocks(config: dict[str, object]) -> int:
-    value = config.get("num_hidden_layers")
-    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
-        raise ValueError("model config must contain a positive integer num_hidden_layers")
-    return value
+    return decoder_block_count_from_config(config)
 
 
 def _model_config_hash(config: dict[str, object]) -> str:
@@ -135,7 +136,7 @@ def execute_kl_budget(args: argparse.Namespace) -> int:
             model_hash=_model_config_hash(config), tokenizer_hash=hash_hf_tokenizer_snapshot(args.snapshot),
             model_dtype=_dtype(config), attention_implementation=adapter.attention_implementation,
             device=args.device, batch_size=args.batch_size, samples=args.wikitext_samples,
-            sequence_length=args.sequence_length, vocabulary_size=int(config["vocab_size"]),
+            sequence_length=args.sequence_length, vocabulary_size=vocabulary_size_from_config(config),
         )
         tokens = teacher_dataset.tokens
         dataset_fingerprint = teacher_dataset.protocol.dataset_fingerprint

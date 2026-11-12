@@ -48,21 +48,22 @@ def _next_slice_index(campaign_root: Path) -> int:
     return max(indexes, default=0) + 1
 
 
-def _parser(number: int = 70) -> argparse.ArgumentParser:
+def _parser(number: int = 70, maximum_slices: int = 64) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=f"Run Experiment {number:03d} in one-block process slices.")
-    parser.add_argument("--maximum-slices", type=int, default=64)
+    parser.add_argument("--maximum-slices", type=int, default=maximum_slices)
     parser.add_argument("--process-cooldown-seconds", type=float, default=5.0)
     parser.add_argument("--kl-teacher-dataset", type=Path)
     parser.add_argument("--allocation-profile-dataset", type=Path)
     parser.add_argument("--dry-run", action="store_true", help="validate launcher inputs without starting a campaign")
+    parser.add_argument("--plan-only", action="store_true", help="show setup before datasets exist; do not execute")
     return parser
 
 
 def main(
     *, number: int = 70, run_name: str = _RUN_NAME, control_name: str = _CONTROL_NAME,
-    arguments: list[str] | None = None,
+    maximum_slices: int = 64, arguments: list[str] | None = None,
 ) -> int:
-    args = _parser(number).parse_args(arguments)
+    args = _parser(number, maximum_slices).parse_args(arguments)
     if args.maximum_slices <= 0:
         raise ValueError("maximum slices must be positive")
     if args.process_cooldown_seconds < 0:
@@ -84,9 +85,12 @@ def main(
             "TRANSFORMERS_OFFLINE": "1",
         }
     )
-    if args.dry_run:
+    if args.plan_only and args.dry_run:
+        raise ValueError("choose --plan-only or --dry-run")
+    if args.dry_run or args.plan_only:
         return subprocess.run(
-            [*command, "--dry-run"], cwd=repository / "experiments", env=environment, check=False,
+            [*command, "--plan-only" if args.plan_only else "--dry-run"],
+            cwd=repository / "experiments", env=environment, check=False,
         ).returncode
     campaign_root.mkdir(parents=True, exist_ok=True)
     first_slice = _next_slice_index(campaign_root)

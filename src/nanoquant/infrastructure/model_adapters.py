@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Callable
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -474,3 +475,15 @@ def decoder_block_count_from_config(config: dict[str, object]) -> int:
     """Resolve decoder depth without loading or inventorying model weights."""
 
     return adapter_for_config(config).decoder_block_count_from_config(config)
+
+
+def vocabulary_size_from_config(config: dict[str, object]) -> int:
+    """Resolve text vocabulary, including defaults inside multimodal wrappers, without weights."""
+
+    # Transformers config factories can mutate their input; preserve the raw
+    # checkpoint mapping because teacher/cache provenance hashes it verbatim.
+    resolved = adapter_for_config(config).definition.config_factory(deepcopy(config))
+    value = getattr(resolved, "vocab_size", None)
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise UnsupportedModelVariant(f"SRC001 invalid text vocab_size: {value!r}")
+    return value

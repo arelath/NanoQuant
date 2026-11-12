@@ -36,6 +36,10 @@ dataset serves as verified source provenance in this mode, rather than supplying
 
 Dataset-backed launchers accept `--dry-run` to validate inputs and print the resolved recipe without compression,
 tuning, export or evaluation. Experiment 071 selects both prepared datasets by default.
+Launchers also accept `--plan-only` to inspect configuration before datasets exist; this does not validate dataset
+contents. [Experiment 072](../Docs/Experiments/072-two-full-rank-stages-gemma-3-4b.md) configures the separate
+`gemma-3-4b-it-kl-48x512` teacher dataset and starts with fresh 4B allocation measurements. Its teacher dataset
+has not been generated during setup; the document includes the preparation command.
 
 Dataset reuse requires the same pinned model, original projection tensors, matrix shapes and physical grouping.
 It permits different calibration tokens, seeds, fitting/tuning settings and bit budgets. For a changed baseline

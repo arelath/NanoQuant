@@ -28,7 +28,7 @@ from nanoquant.infrastructure.kl_teacher_dataset import (
     token_hash,
 )
 from nanoquant.infrastructure.memory_cleanup import release_memory
-from nanoquant.infrastructure.model_adapters import adapter_for_config
+from nanoquant.infrastructure.model_adapters import adapter_for_config, vocabulary_size_from_config
 from nanoquant.infrastructure.runs import RunLease
 from nanoquant.kl_budget_workflow import _dtype, _model_config_hash
 from nanoquant.quality_evaluation import _wikitext_tokens
@@ -50,6 +50,7 @@ def build_kl_teacher_dataset(
     if samples <= 0 or sequence_length < 2 or batch_size <= 0:
         raise ValueError("KL teacher dataset dimensions must be positive, with at least two tokens")
     config = json.loads((snapshot / "config.json").read_text(encoding="utf-8"))
+    vocabulary_size = vocabulary_size_from_config(config)
     model_dtype = _dtype(config)
     attention = adapter_for_config(config).attention_implementation
     tokenizer_hash = hash_hf_tokenizer_snapshot(snapshot)
@@ -69,7 +70,7 @@ def build_kl_teacher_dataset(
                 batch_size=batch_size,
                 samples=samples,
                 sequence_length=sequence_length,
-                vocabulary_size=int(config["vocab_size"]),
+                vocabulary_size=vocabulary_size,
             )
             print(f"Reusing completed KL teacher dataset {output}", flush=True)
             return dataset
@@ -92,7 +93,7 @@ def build_kl_teacher_dataset(
             batch_size=batch_size,
             samples=samples,
             sequence_length=sequence_length,
-            vocabulary_size=int(config["vocab_size"]),
+            vocabulary_size=vocabulary_size,
             dataset_fingerprint=fingerprint,
             bos_token_id=bos,
             token_hash=token_hash(tokens),
@@ -117,7 +118,7 @@ def build_kl_teacher_dataset(
                 },
             )
         if cache is None:
-            expected_bytes = samples * sequence_length * int(config["vocab_size"]) * 2
+            expected_bytes = samples * sequence_length * vocabulary_size * 2
             print(f"Computing teacher targets ({expected_bytes / 2**30:.2f} GiB of FP16 log probabilities)", flush=True)
             with acquire_device_lease(device):
                 teacher = load_causal_language_model(

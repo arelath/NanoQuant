@@ -43,9 +43,10 @@ def test_071_preserves_070_except_requested_settings_and_identity():
 
 
 @pytest.mark.parametrize("make_request", [_request, _planning_request])
-def test_maximum_policy_gives_two_full_stages_for_ordinary_and_shared_owners(make_request):
+@pytest.mark.parametrize("number", [71, 72])
+def test_maximum_policy_gives_two_full_stages_for_ordinary_and_shared_owners(make_request, number):
     request = make_request()
-    config = load_experiment(71).config
+    config = load_experiment(number).config
     allocation = replace(
         request.allocation, maximum_rank_layer_patterns=config.allocation.maximum_rank_layer_patterns,
         bounds=replace(request.allocation.bounds,

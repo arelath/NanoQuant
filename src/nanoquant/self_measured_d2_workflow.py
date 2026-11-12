@@ -343,7 +343,26 @@ def run_self_measured_d2_experiment(
         "--dry-run", action="store_true",
         help="validate dataset-backed inputs and print the resolved recipe without compression or evaluation",
     )
+    parser.add_argument(
+        "--plan-only", action="store_true",
+        help="validate configuration and show preparation inputs without loading datasets or running any stage",
+    )
     parsed = parser.parse_args(arguments)
+    if parsed.plan_only and parsed.dry_run:
+        parser.error("choose --plan-only or --dry-run")
+    if parsed.plan_only:
+        raise_for_issues(validate(experiment.config, ValidationPhase.RESOLVED))
+        print(json.dumps({
+            "plan_only": True, "dataset_contents_validated": False,
+            "config": to_dict(experiment.config), "workflow": to_dict(experiment.workflow),
+            "profile_options": to_dict(profile_options),
+            "kl_teacher_dataset": None if parsed.kl_teacher_dataset is None else str(parsed.kl_teacher_dataset),
+            "allocation_profile_dataset": (
+                None if parsed.allocation_profile_dataset is None else str(parsed.allocation_profile_dataset)
+            ),
+            "automatic_control_and_profile": parsed.allocation_profile_dataset is None and parsed.kl_profile is None,
+        }, indent=2))
+        return 0
     if parsed.dry_run and parsed.allocation_profile_dataset is None:
         parser.error("--dry-run requires --allocation-profile-dataset; automatic preparation will not be started")
     if parsed.allocation_profile_dataset is not None and (

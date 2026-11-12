@@ -26,11 +26,16 @@ from tests.support.experiments import load_experiment
 from tests.unit.test_kl_budget import _ToyCausalModel
 
 
-@pytest.fixture
-def teacher_inputs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
+@pytest.fixture(params=["llama", "gemma3"])
+def teacher_inputs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest,
+) -> dict[str, object]:
     snapshot = tmp_path / "snapshot"
     snapshot.mkdir()
-    (snapshot / "config.json").write_text(json.dumps({"vocab_size": 11, "num_hidden_layers": 1}))
+    text_config = {"vocab_size": 11, "num_hidden_layers": 1}
+    config = ({"model_type": "gemma3", "text_config": text_config}
+              if request.param == "gemma3" else {"model_type": "llama", **text_config})
+    (snapshot / "config.json").write_text(json.dumps(config))
     tokens = torch.tensor([[1, 2, 3, 4], [4, 3, 2, 1], [2, 3, 4, 5]])
     torch.manual_seed(17)
     model = _ToyCausalModel(11, 5)
