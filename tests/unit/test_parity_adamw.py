@@ -101,3 +101,18 @@ def test_foreach_update_is_bitwise_equal_to_legacy_loop(dtype: torch.dtype, weig
 
     for actual, reference in zip(parameters, expected, strict=True):
         assert torch.equal(actual, reference)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("transpose", [False, True])
+def test_direct_denominator_sqrt_matches_copy_then_foreach(dtype, transpose):
+    source = torch.rand(17, 13, generator=torch.Generator().manual_seed(32)).to(dtype)
+    if transpose:
+        source = source.T
+    expected = source.clone()
+    torch._foreach_sqrt_([expected])
+    actual = torch.empty_like(source)
+    pointer = actual.data_ptr()
+    torch.sqrt(source, out=actual)
+    assert torch.equal(actual, expected)
+    assert actual.data_ptr() == pointer

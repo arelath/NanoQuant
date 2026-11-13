@@ -46,15 +46,21 @@ def _foreach_update(
     epsilon: float,
     weight_decay: float,
 ) -> None:
-    """Apply the legacy elementwise recurrence with one launch per operation."""
+    """Apply the legacy elementwise recurrence using reusable scratch buffers."""
 
     if weight_decay:
         torch._foreach_mul_(parameters, 1.0 - learning_rate * weight_decay)
     torch._foreach_lerp_(exp_avgs, gradients, weight=1.0 - beta1)
     torch._foreach_mul_(exp_avg_sqs, beta2)
     torch._foreach_addcmul_(exp_avg_sqs, gradients, gradients, value=1.0 - beta2)
-    torch._foreach_copy_(denominators, exp_avg_sqs)
-    torch._foreach_sqrt_(denominators)
+    # Large factors benefit from removing a full second-moment copy. Small
+    # scale groups benefit more from foreach's lower kernel-launch overhead.
+    if all(value.numel() >= 262_144 for value in exp_avg_sqs):
+        for average_squared, denominator in zip(exp_avg_sqs, denominators, strict=True):
+            torch.sqrt(average_squared, out=denominator)
+    else:
+        torch._foreach_copy_(denominators, exp_avg_sqs)
+        torch._foreach_sqrt_(denominators)
     torch._foreach_add_(denominators, epsilon)
     if compensations is not None:
         torch._foreach_addcdiv_(compensations, exp_avgs, denominators, value=-learning_rate)

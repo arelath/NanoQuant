@@ -92,3 +92,68 @@ remain to be measured when the campaign resumes.
   Repository-wide Ruff and mypy's 224-file source check passed.
 
 Full-model memory use, compiled execution, compression quality and export/runtime acceptance remain unmeasured.
+
+
+## Block tuning profile, 2026-11-13
+
+The profiling tool now reads the saved recipe's batch sizes, microbatch size, epoch count and
+learning rates. It loads the source model on CPU and moves only block zero to CUDA. It supports
+selecting factorized or nonfactorized tuning independently. The representative 4B replay uses the
+retained gate projection's two full-rank stages, source BF16 remaining projections, saved output
+importance and all 256 calibration sequences of length 2,048. Eight epochs at batch/microbatch one
+produce 2,048 optimizer steps. The retained gate is already fitted and tuned, so this diagnostic
+replays further tuning from a reproducible saved state rather than reproducing the original entry state.
+Epoch checkpoint serialization is excluded from the isolated timing.
+
+The synchronized phase profile took 71.28 seconds including initial compilation. The first epoch
+took 20.73 seconds and subsequent epochs approximately 7.2 seconds. Median sampled CUDA spans were
+8.61 ms for forward, 8.41 ms for backward and 10.44 ms for optimizer updates. Host batch staging
+accounted for 37.36 seconds, including waits for queued CUDA work. These overlapped timings cannot
+be added together or interpreted as 37 seconds of pure transfer overhead. The trainable gate uses
+factorized matrix products in its forward path.
+
+The accepted optimization computes AdamW's square root directly into its reusable denominator
+buffer for optimizer groups whose tensors each contain at least 262,144 elements. Smaller or mixed
+groups retain the batched copy/square-root path to avoid additional launch overhead. This removes
+a full-size second-moment copy while preserving the elementwise recurrence,
+BF16 rounding and Kahan compensation. A GPU test on the 4B gate's factor shapes matched all six
+parameter/gradient/state buffer sets exactly across ten updates. Sixty-update timings were
+0.648/0.609 seconds for the original and 0.568/0.565 seconds for the optimized update.
+A compiled fused update was also tried and rejected because its BF16 buffers differed immediately.
+
+The first uninstrumented compiled eight-epoch comparison took 57.994 seconds before and 56.390
+seconds after warmup, a 2.77% reduction. All 22 parameter tensors, containing 133,734,912 values,
+matched bit-for-bit, and both final losses were 1.2732211351394653. Repeated timings were 58.072
+seconds before and 56.798 seconds after, a 2.19% reduction. The size probe found six-vector groups
+of 2,560/10,240 elements slower with direct square roots, while 262,144/1,048,576-element groups
+were faster; this motivated the conservative group-size threshold. The final guarded implementation
+took 57.023 seconds, a 1.67% reduction versus the first baseline. All repeat and final outputs matched
+the original 133,734,912 parameter values bit-for-bit and retained the identical final loss.
+This measures one representative
+gate-tuning replay, not complete campaign time or downstream language-model quality.
+
+Evidence is under `evidence/072/tuning-profile-before`, `tuning-benchmark-before`,
+`tuning-benchmark-after`, `tuning-benchmark-before-repeat`, `tuning-benchmark-after-repeat`,
+`tuning-benchmark-final`, `optimizer-sqrt-probe.log`, `optimizer-size-probe.log` and
+`tuning-optimizer-comparison.json`.
+The numerical recipe and resume identity are preserved because the removed operation only copied
+scratch data before the same square-root computation. The optimization applies when a new process
+loads the updated optimizer module.
+
+Reproduce the isolated factorized benchmark with the pinned local snapshot.
+
+```powershell
+.\.venv\Scripts\python.exe tools/profile_gemma_block_tuning.py `
+  --run-output evidence/072/072-d2-uniform-control-gemma-3-4b-it `
+  --snapshot C:/Users/pdykstra/.cache/huggingface/hub/models--google--gemma-3-4b-it/snapshots/093f9f388b31de276ce2de164bdc2081324b9767 `
+  --output evidence/072/tuning-benchmark-local --mode compiled --stage factorized
+```
+
+Use `--mode micro` to collect phase counters. The tool takes the CUDA lease for the complete run.
+
+
+Validation of the final optimization passed Ruff and mypy. The full default suite recorded 1,628
+passes, 53 deselections and one Windows `WinError 32` failure in the unchanged concurrent run-registry
+lock test. The registry, optimizer and tuning tests then passed together (43 passed, 2 deselected),
+and the registry suite passed again independently (4 passed). The full-suite result is therefore
+recorded with that intermittent failure rather than reported as an entirely passing run.

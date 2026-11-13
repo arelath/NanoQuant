@@ -1,12 +1,10 @@
-"""Profile Gemma block zero with a retained Experiment 070 gate projection.
+"""Profile block-zero tuning using the saved run's batches, epochs and calibration.
 
-The block's other projections start from BF16 weights. The retained gate's frozen
-binary factors and independent residual stages initialize the tuning module.
-Both stages run independently from the same state with 256x2048 calibration
-tokens, eight epochs, batch size eight, seed zero and the recorded output weights.
-Compiled mode measures the first invocation, resets all model state, and measures
-a warmed invocation with a fresh optimizer. Profile mode includes trace overhead.
-The initialization is a post-fit replay of the first projection in the block.
+Loads source weights on CPU and moves one decoder block to CUDA. The retained
+frozen gate factors initialize independent residual stages; remaining projections
+use BF16 source weights. This is a post-fit replay, not the original tuning entry
+state. Compiled mode resets weights after a full cold invocation before timing a
+warm invocation. Micro mode includes synchronized per-phase profiling overhead.
 """
 
 import argparse
@@ -20,7 +18,6 @@ from pathlib import Path
 import _paths  # noqa: F401
 import torch
 from safetensors.torch import save_file
-from transformers import AutoModelForCausalLM
 
 from nanoquant.application.layers import LayerFreezer, TrainableFactorizedLinear, thaw_residual_stages
 from nanoquant.application.prefix_capture import capture_prefix_invocations
@@ -37,10 +34,16 @@ from nanoquant.domain.profiling import NULL_RECORDER
 from nanoquant.infrastructure.artifacts import LocalArtifactStore
 from nanoquant.infrastructure.device_lease import acquire_device_lease
 from nanoquant.infrastructure.hf_calibration_dataset import load_pinned_calibration
+from nanoquant.infrastructure.hf_language_model import load_causal_language_model
 from nanoquant.infrastructure.model_adapters import adapter_for_config
 from nanoquant.infrastructure.profiling import Profiler
 from nanoquant.infrastructure.tensor_store import LocalTensorStore
-from nanoquant.resident_quantization import _legacy_cuda_numerics, _run_block_batched, _run_prefix_batched
+from nanoquant.resident_quantization import (
+    _forward_metadata_to_device,
+    _legacy_cuda_numerics,
+    _run_block_batched,
+    _run_prefix_batched,
+)
 
 
 def main() -> None:
@@ -49,19 +52,14 @@ def main() -> None:
     parser.add_argument("--snapshot", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--mode", choices=("eager", "compiled", "profile", "micro"), default="eager")
+    parser.add_argument("--stage", choices=("factorized", "nonfactorized", "both"), default="both")
     args = parser.parse_args()
     run, snapshot, out = args.run_output, args.snapshot, args.output
     out.mkdir(parents=True, exist_ok=True)
     recipe = json.loads((run / "manifest.json").read_text())["resolved_config"]["canonical_run_config"]
     tuning = recipe["block_tuning"]
-    if (
-        tuning["factorized"]["loop"]["epochs"] != 8
-        or tuning["factorized"]["loop"]["batch_size"] != 8
-        or tuning["microbatch_size"] != 8
-        or tuning["epoch_loss_mode"] != "legacy_training"
-        or tuning["restore_best_state"]
-    ):
-        raise ValueError("This diagnostic implements the Experiment 070 eight-epoch tuning protocol")
+    if tuning["epoch_loss_mode"] != "legacy_training" or tuning["restore_best_state"]:
+        raise ValueError("This diagnostic requires legacy training loss without best-state restoration")
 
     with acquire_device_lease("cuda"), _legacy_cuda_numerics():
         tokens = load_pinned_calibration(
@@ -73,23 +71,21 @@ def main() -> None:
             ),
         ).input_ids
         print("tokens loaded", flush=True)
-        model = (
-            AutoModelForCausalLM.from_pretrained(
-                snapshot, local_files_only=True, torch_dtype=torch.bfloat16, attn_implementation="sdpa"
-            )
-            .cuda()
-            .eval()
-        )
+        model = load_causal_language_model(
+            snapshot, local_files_only=True, torch_dtype=torch.bfloat16, attention_implementation="eager",
+        ).eval()
         adapter = adapter_for_config(model.config.to_dict())
         block = model.model.layers[0]
         metadata = capture_prefix_invocations(
-            block, (lambda model=model: model.model(input_ids=tokens[:1].cuda(), use_cache=False),)
+            block, (lambda model=model: adapter.run_decoder_forward(model, tokens[:1]),)
         )[0].keyword
-        inputs = _run_prefix_batched(adapter, model, tokens.cuda(), 8, "cpu").detach()
-        targets = _run_block_batched(adapter, block, inputs, metadata, 8, "cpu").detach()
-        block = copy.deepcopy(block).cpu()
+        inputs = _run_prefix_batched(adapter, model, tokens, 1, "cpu").detach()
+        block = copy.deepcopy(block).cuda()
+        metadata = _forward_metadata_to_device(metadata, "cuda")
         del model
         gc.collect()
+        targets = _run_block_batched(adapter, block, inputs, metadata, 1, "cpu").detach()
+        block = block.cpu()
         torch.cuda.empty_cache()
         store = LocalArtifactStore(run / "artifacts", use_persistent_validation_cache=False)
         records = [json.loads(line) for line in (run / "state/journal.jsonl").read_text().splitlines()]
@@ -131,8 +127,7 @@ def main() -> None:
                     "block_artifact": record["artifact_id"],
                     "calibration_artifact": calibration_ref,
                     "input_shape": list(inputs.shape),
-                    "batch_size": 8,
-                    "epochs": 8,
+                    "tuning_config": tuning,
                     "seed": 0,
                     "initialization": "retained frozen gate factors with BF16 remaining block projections",
                     "torch": str(torch.__version__),
@@ -141,10 +136,10 @@ def main() -> None:
                 indent=2,
             )
         )
-        if args.mode == "compiled":
+        if tuning["compile_forward"] and args.mode != "eager":
             forward = torch.compile(forward, options={"emulate_precision_casts": True, "triton.cudagraphs": False})
         results = []
-        for kind in ("factorized", "nonfactorized"):
+        for kind in (args.stage,) if args.stage != "both" else ("factorized", "nonfactorized"):
             working = copy.deepcopy(block).cuda()
             recorder = (
                 Profiler(
@@ -161,15 +156,24 @@ def main() -> None:
                 else NULL_RECORDER
             )
             cold_seconds = None
+            stage_config = tuning["factorized" if kind == "factorized" else "non_factorized"]
+            epochs = (
+                stage_config["loop"]["epochs"] if kind == "factorized"
+                else stage_config["epochs_by_layer_position"][0]
+            )
+            learning_rate = (
+                stage_config["learning_rates"]["scale"] if kind == "factorized"
+                else stage_config["optimizer"]["learning_rate"]
+            )
             request = TuningRequest(
                 inputs,
                 targets,
-                8,
-                8,
-                3e-5 if kind == "factorized" else 1e-4,
+                epochs,
+                stage_config["loop"]["batch_size"],
+                learning_rate,
                 seed=0,
                 output_importance=importance,
-                microbatch_size=8,
+                microbatch_size=tuning["microbatch_size"],
                 restore_best_state=False,
                 epoch_loss_mode="legacy_training",
             )
@@ -182,7 +186,12 @@ def main() -> None:
                         request,
                         forward,
                         recorder,
-                        learning_rates=FactorizedTuningLearningRates(3e-5, 1e-5, 1e-5, 1e-5),
+                        learning_rates=FactorizedTuningLearningRates(
+                            tuning["factorized"]["learning_rates"]["binary"],
+                            tuning["factorized"]["learning_rates"]["scale"],
+                            tuning["factorized"]["learning_rates"]["outlier"] or request.learning_rate,
+                            tuning["factorized"]["learning_rates"]["bias"],
+                        ),
                     )
                 return tune_non_factorized(working, request, forward, recorder)
 
