@@ -1,6 +1,6 @@
 # Experiment 072: two full-rank stages on Gemma 3 4B IT
 
-Prepared 2026-11-12. **Not run.** The teacher dataset is configured but has not been generated.
+Prepared 2026-11-12. The uniform control reached 12 of 34 committed blocks before a CUDA OOM on resume on 2026-11-13.
 
 ## Recipe
 
@@ -81,6 +81,11 @@ The runner permits 80 process slices by default, enough for two 34-block passes 
 one-new-block interruptions and durable resume; `--maximum-slices` can raise the ceiling after additional restarts.
 `--kl-teacher-dataset` can override the teacher location. A later compatible 4B allocation dataset can be passed with
 `--allocation-profile-dataset` to skip preparation. Missing or incompatible teacher targets fail before control fitting.
+
+Both passes resume from the latest committed activation checkpoint with `restore_completed_blocks=False`.
+This keeps previously fitted weights on disk during compression and preserves the existing commit identity.
+The control OOM occurred while reloading the frozen prefix onto the 12 GiB GPU. Rerun the same campaign command
+to continue from the saved checkpoint. The export and final quality workflows load the completed artifacts separately.
 
 Once the measured rank-probe profile is complete, extract it for future reuse:
 

@@ -1035,7 +1035,10 @@ def test_resident_tuning_recipe_refits_blocks_and_resumes_exactly(
     assert not (epoch_request.output / "state" / "tuning-checkpoint").exists()
 
 
-def test_rolling_retention_keeps_only_latest_resume_generation(tmp_path: Path) -> None:
+@pytest.mark.parametrize("restore_completed_blocks", [True, False])
+def test_rolling_retention_keeps_only_latest_resume_generation(
+    tmp_path: Path, restore_completed_blocks: bool,
+) -> None:
     snapshot = tmp_path / "snapshot"
     config = Gemma3TextConfig(
         vocab_size=32,
@@ -1058,12 +1061,25 @@ def test_rolling_retention_keeps_only_latest_resume_generation(tmp_path: Path) -
         target_bpw=8.0,
         rank_multiple=1,
         admm=ADMMConfig(outer_iterations=1, inner_iterations=1),
+        evaluate_inline_quality=False,
         interrupt_after_block_commits=1,
     )
     with pytest.raises(InterruptedError, match="after 1"):
         run_resident_quantization(request)
 
-    result = run_resident_quantization(replace(request, interrupt_after_block_commits=None))
+    journal = output / "state" / "journal.jsonl"
+    committed_prefix = journal.read_bytes()
+    result = run_resident_quantization(replace(
+        request, interrupt_after_block_commits=None, restore_completed_blocks=restore_completed_blocks,
+    ))
+    assert journal.read_bytes().startswith(committed_prefix)
+    assert result.reused_commit_count == 8
+    events = [json.loads(line) for line in (output / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    restored_on_resume = any(
+        event["name"] == "resume_model_restore.started" and event["fields"]["blocks"] == 1
+        for event in events
+    )
+    assert restored_on_resume == restore_completed_blocks
     artifacts = LocalArtifactStore(output / "artifacts")
     generations = list(artifacts.root.glob("??/sha256-*/activation-generation.json"))
 

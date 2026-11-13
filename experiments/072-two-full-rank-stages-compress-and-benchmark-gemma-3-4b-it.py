@@ -66,6 +66,8 @@ EXPERIMENT = define_compression_quality_experiment(
     ),
     CONFIG,
     maximum_wddm_shared_gib=0.75,
+    # Resume from the committed activation boundary. Final evaluation loads the exported weights separately.
+    restore_completed_blocks=False,
     interrupt_after_block_commits=1,
     quality_backend="dense",
     task_limit=1000,

@@ -37,6 +37,8 @@ def test_072_retains_071_recipe_with_explicit_4b_adaptations():
     assert config.allocation.reconstruction.allocation_dataset is None
     assert namespace["KL_TEACHER_DATASET"].name == "gemma-3-4b-it-kl-48x512"
     experiment = namespace["EXPERIMENT"]
+    assert not experiment.workflow.restore_completed_blocks
+    assert not config.evaluation.inline_quality
     assert experiment.workflow.task_limit == 1000
     assert experiment.workflow.interrupt_after_block_commits == 1
     assert experiment.workflow.quality_backend == "dense"
