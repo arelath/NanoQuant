@@ -65,23 +65,23 @@ calibration inputs, seed and bit budget, completes compression through the datas
 
 ### Gemma 3 1B IT weight sensitivity
 
-Run the following from the repository root to measure how much each decoder block changes
-the output distribution when its projection weights receive random error.
+Run the following from the repository root to measure how much each projection changes
+the output distribution when its weights receive random error.
 
 ```powershell
 .\.venv\Scripts\python.exe tools\measure_block_kl_sensitivity.py
 ```
 
-The default sweep uses the pinned Gemma 3 1B IT checkpoint loaded in FP16, all 26 blocks,
-10% relative Frobenius weight error, and three noise seeds per block. It samples 16 disjoint
+The default sweep uses the pinned Gemma 3 1B IT checkpoint loaded in FP16. It tests
+each of the seven projections in each of the 26 blocks individually, for 182 targets
+and 546 trials at 10% relative Frobenius weight error with three noise seeds. It samples 16 disjoint
 256-token windows from the `content` column of the pinned
 [imatrix calibration Parquet](https://huggingface.co/datasets/eaddario/imatrix-calibration/blob/e87ed55dcba9d9c3a3e41539f3e728e981b1daa4/combined_all_small.parquet).
-Each block trial scales independent Gaussian noise to the same relative error in each of its
-seven quantizable projection matrices, then restores the original weights. Norms, biases,
-embeddings, the output head, and the other decoder blocks stay at their original FP16 values.
+Each trial scales Gaussian noise to the requested relative error in one projection matrix,
+then restores its original weights. The rest of the model stays at its original FP16 values.
 The results measure sensitivity to this noise distribution. NanoQuant fitting errors can
 have a different structure and therefore produce a different KL response at the same norm.
-Use `--granularity projection` to perturb one matrix at a time. Use `--blocks 0 12 25`
+Use `--granularity block` to perturb all seven projections in a block together. Use `--blocks 0 12 25`
 to select a subset, and `--error-levels 0.01 0.05 0.10` to measure the response at several
 noise levels. The same seed scales the same noise direction across levels for a given matrix.
 

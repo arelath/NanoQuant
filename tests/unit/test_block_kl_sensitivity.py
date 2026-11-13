@@ -37,39 +37,50 @@ def test_perturbation_scales_and_restores_fp16_weights_even_when_scoring_fails()
 
 
 class TinyModel(nn.Module):
-    def __init__(self) -> None:
+    def __init__(self, granularity: str) -> None:
         super().__init__()
-        self.blocks = nn.ModuleList([nn.Linear(4, 4, bias=False, dtype=torch.float16) for _ in range(2)])
+        self.blocks = nn.ModuleList([
+            nn.Sequential(*(nn.Linear(4, 4, bias=False, dtype=torch.float16) for _ in range(2)))
+            for _ in range(2)
+        ])
         self.model = SimpleNamespace(layers=self.blocks)
+        self.original = torch.eye(4, dtype=torch.float16)
         with torch.no_grad():
-            for block in self.blocks:
-                block.weight.copy_(torch.eye(4))
-        self.calls = 0
+            for weight in self.parameters():
+                weight.copy_(self.original)
+        self.changed_counts: list[int] = []
+        self.granularity = granularity
 
     def forward(self, input_ids: torch.Tensor, *, use_cache: bool) -> SimpleNamespace:
         assert not use_cache
-        self.calls += 1
+        changed_per_block = [sum(not torch.equal(weight, self.original) for weight in block.parameters())
+                             for block in self.blocks]
+        changed = sum(changed_per_block)
+        assert changed == 0 or changed == (1 if self.granularity == "projection" else 2)
+        assert sum(count > 0 for count in changed_per_block) <= 1
+        self.changed_counts.append(changed)
         logits = nn.functional.one_hot(input_ids, 4).to(torch.float16)
         for block in self.blocks:
             logits = block(logits)
         return SimpleNamespace(logits=logits)
 
 
-def test_sweep_scores_cached_teacher_and_resumes_completed_trials(tmp_path, monkeypatch) -> None:
-    model = TinyModel().eval()
+@pytest.mark.parametrize("granularity", ["projection", "block"])
+def test_sweep_scores_cached_teacher_and_resumes_completed_trials(tmp_path, monkeypatch, granularity) -> None:
+    model = TinyModel(granularity).eval()
     tokens = torch.tensor([[0, 1, 2, 3]])
     root = tmp_path / "teacher"
     adapter = SimpleNamespace(
         attention_implementation="eager",
         get_decoder_layers=lambda model: model.blocks,
-        quantizable_layers=lambda _block, _index: [SimpleNamespace(path="")],
+        quantizable_layers=lambda _block, _index: [SimpleNamespace(path="0"), SimpleNamespace(path="1")],
     )
     monkeypatch.setattr(sensitivity, "adapter_for_config", lambda _: adapter)
     monkeypatch.setattr(sensitivity, "vocabulary_size_from_config", lambda _: 4)
     monkeypatch.setattr(sensitivity, "hash_hf_tokenizer_snapshot", lambda _: "test-tokenizer")
     monkeypatch.setattr(sensitivity, "_load_tokens", lambda *_: (tokens, 0))
     args = SimpleNamespace(
-        output=tmp_path / "reports", blocks=None, granularity="block",
+        output=tmp_path / "reports", blocks=None, granularity=granularity,
         teacher_dataset=root, device="cpu", token_chunk_size=2, error_levels=[0.10], seeds=[0, 1],
         text_column="content", calibration_seed=0, samples=1, sequence_length=4,
     )
@@ -81,11 +92,18 @@ def test_sweep_scores_cached_teacher_and_resumes_completed_trials(tmp_path, monk
     sensitivity._sweep(args, {}, model, dataset)
     report = json.loads((args.output / "results.json").read_text(encoding="utf-8"))
     assert report["clean_baseline"]["kl_nats_per_token"] == pytest.approx(0, abs=1e-7)
-    assert report["expected_trials"] == len(report["trials"]) == 4
-    assert {row["target"] for row in report["summary"]} == {"block 0", "block 1"}
+    if granularity == "projection":
+        targets = {"0:0", "0:1", "1:0", "1:1"}
+        changed_per_trial = 1
+    else:
+        targets = {"block 0", "block 1"}
+        changed_per_trial = 2
+    trials = len(targets) * 2
+    assert report["expected_trials"] == len(report["trials"]) == trials
+    assert {row["target"] for row in report["summary"]} == targets
     assert all(row["kl_nats_per_token"] > 0 for row in report["trials"])
     assert all(row["token_count"] == 3 for row in report["trials"])
-    assert all(torch.equal(block.weight, torch.eye(4, dtype=torch.float16)) for block in model.blocks)
-    assert "Measured 4 of 4 trials." in (args.output / "results.md").read_text(encoding="utf-8")
+    assert all(torch.equal(weight, model.original) for weight in model.parameters())
+    assert f"Measured {trials} of {trials} trials." in (args.output / "results.md").read_text(encoding="utf-8")
     sensitivity._sweep(args, {}, model, dataset)
-    assert model.calls == 6  # One teacher pass, one clean control and four perturbations.
+    assert model.changed_counts == [0, 0] + [changed_per_trial] * trials

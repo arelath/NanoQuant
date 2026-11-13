@@ -320,7 +320,10 @@ def main(arguments: list[str] | None = None) -> int:
     )
     parser.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2])
     parser.add_argument("--blocks", type=int, nargs="+", help="zero-based block indices; defaults to all")
-    parser.add_argument("--granularity", choices=("block", "projection"), default="block")
+    parser.add_argument(
+        "--granularity", choices=("projection", "block"), default="projection",
+        help="perturb one projection in one block (default), or all projections in one block",
+    )
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--token-chunk-size", type=int, default=32)
     parser.add_argument("--teacher-dataset", type=Path, help="reusable teacher dataset directory")
