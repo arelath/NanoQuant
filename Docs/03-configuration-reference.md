@@ -1264,5 +1264,95 @@ transaction supports recovery if the process stops between metadata replacements
 The new recipe binds both the optimizer policy and source-journal digest, so old
 orphan commits cannot be adopted as newly optimized results. Algorithm version 69
 identifies this optional path; the unchanged default retains its version-68
-identity only for this compatibility release. A subsequent algorithm version
-invalidates both paths normally.
+identity. The imatrix compatibility release below preserves these identities
+when the new option is absent; future numerical changes invalidate them normally.
+
+
+## llama.cpp imatrix input importance (2026-11-13)
+
+New interactive compression runs accept a llama.cpp importance file:
+
+```powershell
+.\.venv\Scripts\python.exe tools/compress_model.py --imatrix D:/models/gemma-imatrix.gguf
+```
+
+Both GGUF imatrices and little-endian legacy `.dat` files are supported. This is
+an importance file produced by llama-imatrix, not a quantized model GGUF. The
+launcher validates the file, pins its absolute path and SHA-256 in the saved
+recipe, and uses those settings on subsequent resumes. Continue a saved run
+without `--imatrix`; the flag cannot override existing settings.
+
+Python callers can construct the same canonical setting:
+
+```python
+from dataclasses import replace
+from nanoquant.infrastructure.imatrix import imatrix_config
+
+config = replace(config, calibration=replace(
+    config.calibration,
+    imatrix=imatrix_config("D:/models/gemma-imatrix.dat"),
+))
+```
+
+`python tools/inspect_imatrix.py PATH` validates a file and prints the pinned
+`calibration.imatrix` JSON object plus tensor dimensions without running a model.
+Numbered experiment launchers should use an `ImatrixConfig` literal from this
+output, avoiding infrastructure imports in thin recipe files.
+The schema is `ImatrixConfig(path, sha256, tensor_map=())`. `sha256` is the bare
+64-character lowercase digest. In YAML/JSON, copy the object printed by the
+inspection tool. Paths in hand-authored recipes are relative to the working
+directory unless absolute. The file must remain available for resume.
+
+### Fitting semantics
+
+For a weight matrix W with output rows i and input columns j, diagonal fitting
+minimizes `sum(output_importance[i] * imatrix_input[j] * (W[i,j]-fit[i,j])**2)`.
+Legacy values are divided by ncall; GGUF `.in_sum2` values are divided by their
+`.counts`, matching llama.cpp's quantizer. These are mean squared activations;
+do not take a square root before importing. NanoQuant's solver takes the square
+root when preconditioning the fit. Imported values receive no additional
+shrinkage or per-layer normalization. Existing output/Fisher importance and
+input means still come from NanoQuant calibration. With forward-only calibration,
+output weights remain ones. This feature does not eliminate calibration or KD.
+
+Imported inputs are persisted in calibration tensors before objectives and plans
+are built. ADMM, scale fitting, independent residual stages, weighted selection,
+rank probes and weighted error reporting therefore consume the same weights.
+Block tuning still uses its existing activation loss; explicit full-covariance
+refinement still uses its existing Hessian objective. An imatrix does not itself
+provide that covariance, output Fisher weights, or a KL teacher.
+
+### Mapping, validation and recovery
+
+Default mapping supports dense attention q/k/v/o and MLP gate/up/down projections
+using `blk.N.attn_q.weight`, `attn_k`, `attn_v`, `attn_output`, `ffn_gate`, `ffn_up`,
+and `ffn_down` (also accepting the form without `.weight`). Exact Hugging Face
+source tensor names are accepted. Every quantized layer must have exactly one
+matching vector of its input width. Extra entries such as embeddings/heads are
+reported and unused. The file must come from the intended model; matching shapes
+alone cannot prove model provenance because imatrices need not contain a model ID.
+
+For nonstandard names, set `tensor_map` entries such as
+`{"layer": "0:self_attn.q_proj", "tensor": "custom.tensor.name"}`. Explicit mappings
+must resolve to a unique existing tensor and known layer. Missing/ambiguous
+entries, wrong dimensions, nonfinite/negative/all-zero weights, missing GGUF
+sum/count pairs and nonpositive/nonintegral observation counts are errors.
+Dense projections require a single count group; multi-expert tensors are not
+silently averaged. Shared-input group members must have matching input vectors.
+
+`imatrix.json` records the source hash, format, resolved mappings and unused
+entries in each run directory. The pinned policy participates in calibration,
+manifest and commit identities. Imported/precomputed objective tensors are
+checked against the file; a changed file fails before opening a run session.
+Opting in changes the numerical objective and requires a new run directory.
+Unconfigured runs retain their previous hashes, including Experiment 072's
+already migrated fused-optimizer continuation. No imatrix is enabled for 072.
+
+Validation covers both formats, normalization, malformed files, mapping, config
+identity, a tiny Gemma fit with shared QKV and standalone projections, interrupted
+checkpoint/resume, and rejection of stale precomputed objectives. This establishes
+feature correctness; full-model quality improvement remains unmeasured.
+
+Format reference: llama.cpp `common/imatrix-loader.cpp` and
+`tools/quantize/quantize.cpp` in the local reference checkout, also published at
+https://github.com/ggml-org/llama.cpp/blob/master/common/imatrix-loader.cpp .

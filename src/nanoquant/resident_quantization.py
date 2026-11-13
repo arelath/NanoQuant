@@ -91,6 +91,7 @@ from nanoquant.config.schema import (
     BinaryFactorSearchConfig,
     ExecutorKind,
     FactorizedOptimizerConfig,
+    ImatrixConfig,
     KlAllocationObjective,
     KlSensitivityGranularity,
     LayerRankBudgetConfig,
@@ -212,6 +213,7 @@ from nanoquant.infrastructure.device_memory import (
 )
 from nanoquant.infrastructure.environment import capture_environment
 from nanoquant.infrastructure.hf_language_model import load_causal_language_model
+from nanoquant.infrastructure.imatrix import file_sha256, resolve_imatrix
 from nanoquant.infrastructure.io_utils import atomic_write_json
 from nanoquant.infrastructure.live_reconstruction import update_live_weight_error_report
 from nanoquant.infrastructure.model_adapters import TransformersModelAdapter, adapter_for_config
@@ -244,9 +246,9 @@ from nanoquant.infrastructure.tuning_checkpoint import (
 from nanoquant.ports.event_sink import EventSink, LayerCommittedPayload, emit_layer_committed
 from nanoquant.ports.model_adapter import ModelAdapter
 
-RESIDENT_ALGORITHM_VERSION = 69
-# Only version 69 adds an opt-in path without changing the default. A subsequent
-# algorithm version invalidates both paths normally.
+RESIDENT_ALGORITHM_VERSION = 70
+# Version 70 adds only opt-in imatrix weighting. Preserve both version 69
+# optimizer identities when imatrix is absent; future versions invalidate normally.
 _PARITY_RESIDENT_ALGORITHM_VERSION = 68
 _CALIBRATION_ALGORITHM_VERSION = 1
 COVARIANCE_REFINEMENT_MAX_INPUT_FEATURES = 2048
@@ -423,6 +425,7 @@ class ResidentQuantizationRequest:
     post_refit_covariance_refinement: PostRefitCovarianceRefinementConfig = (
         PostRefitCovarianceRefinementConfig()
     )
+    imatrix: ImatrixConfig | None = None
     factorized_tuning_optimizer: FactorizedOptimizerConfig = FactorizedOptimizerConfig()
     factorized_tuning_epochs: int = 0
     factorized_tuning_batch_size: int = 8
@@ -2677,7 +2680,9 @@ def _resident_config_hash(request: ResidentQuantizationRequest) -> str:
     semantic_config = {
         "resident_algorithm_version": (
             _PARITY_RESIDENT_ALGORITHM_VERSION
-            if RESIDENT_ALGORITHM_VERSION == 69 and request.factorized_tuning_optimizer == FactorizedOptimizerConfig()
+            if RESIDENT_ALGORITHM_VERSION == 70 and request.imatrix is None
+            and request.factorized_tuning_optimizer == FactorizedOptimizerConfig()
+            else 69 if RESIDENT_ALGORITHM_VERSION == 70 and request.imatrix is None
             else RESIDENT_ALGORITHM_VERSION
         ),
         "runtime": {
@@ -2746,6 +2751,8 @@ def _resident_config_hash(request: ResidentQuantizationRequest) -> str:
         ),
         "seed": request.seed,
     }
+    if request.imatrix is not None:
+        semantic_config["imatrix"] = request.imatrix
     if request.factorized_tuning_optimizer != FactorizedOptimizerConfig():
         semantic_config["factorized_tuning_optimizer"] = request.factorized_tuning_optimizer
     # Preserve commit identity for the previously hard-coded parity policy.
@@ -3039,6 +3046,8 @@ def _calibration_config_hash(request: ResidentQuantizationRequest) -> str:
         "accumulation_dtype": "float32",
         "objective": ObjectiveConfig(),
     }
+    if request.imatrix is not None:
+        payload["imatrix"] = request.imatrix
     if request.calibration_method == "forward_only":
         payload["block_forward_batch_size"] = request.block_forward_batch_size
     return semantic_hash(payload)
@@ -3053,6 +3062,8 @@ def _resident_manifest_config(request: ResidentQuantizationRequest, component: s
     payload.pop("interrupt_after_preprocessing")
     payload.pop("preprocessing_reuse_run")
     payload.pop("rank_probe_reuse_run")
+    if request.imatrix is None:
+        payload.pop("imatrix")
     if request.factorized_tuning_optimizer == FactorizedOptimizerConfig():
         payload.pop("factorized_tuning_optimizer")
     payload["token_ids"] = _manifest_tensor_identity(request.token_ids)
@@ -3060,6 +3071,8 @@ def _resident_manifest_config(request: ResidentQuantizationRequest, component: s
     payload["component"] = component
     if request.run_config is not None:
         canonical = to_dict(request.run_config)
+        if request.run_config.calibration.imatrix is None:
+            canonical["calibration"].pop("imatrix")
         if request.run_config.block_tuning.factorized.optimizer == FactorizedOptimizerConfig():
             canonical["block_tuning"]["factorized"].pop("optimizer")
         payload["canonical_run_config"] = canonical
@@ -4446,6 +4459,7 @@ def _legacy_preprocessing_calibration_references(
         return None
     current = _resident_manifest_config(request, "resident-quantization")
     protocol_fields: tuple[str, ...] = (
+        "imatrix",
         "source",
         "revision",
         "token_ids",
@@ -4583,6 +4597,34 @@ def _write_active_preprocessing_state(
     )
 
 
+def _validate_imatrix_objectives(
+    request: ResidentQuantizationRequest, artifacts: LocalArtifactStore, inventory: ModelInventory,
+    calibration: PersistedCalibration, objectives: PersistedObjectives, plan: QuantizationPlan | None = None,
+) -> None:
+    if request.imatrix is None:
+        return
+    expected, _report = resolve_imatrix(request.imatrix, inventory, request.shared_input_groups)
+    tensors = LocalTensorStore(artifacts)
+    by_layer = {item.layer: item for item in calibration.stats.layers}
+    objectives_by_layer = {item.layer: item for item in objectives.objectives}
+    if set(by_layer) != set(expected) or set(objectives_by_layer) != set(expected):
+        raise ValueError("cached imatrix calibration/objective coverage differs")
+    for layer, value in expected.items():
+        reference = by_layer[layer].input_importance
+        if objectives_by_layer[layer].input_importance != reference:
+            raise ValueError("cached imatrix objective differs from calibration")
+        with tensors.read(reference, "cpu") as stored:
+            if not torch.equal(stored, value):
+                raise ValueError(f"cached input importance differs from pinned imatrix: {layer}")
+    if plan is not None:
+        planned = [item.objective for block in plan.blocks for item in block.layers]
+        planned.extend(
+            item for block in plan.blocks for group in block.shared_input_groups for item in group.objectives
+        )
+        if len(planned) != len(expected) or any(item != objectives_by_layer.get(item.layer) for item in planned):
+            raise ValueError("cached plan objectives differ from pinned imatrix objectives")
+
+
 def _load_precomputed_calibration_inputs(
     request: ResidentQuantizationRequest,
     artifacts: LocalArtifactStore,
@@ -4649,6 +4691,7 @@ def _load_precomputed_calibration_inputs(
         raise ValueError("active calibration/objective layer coverage is invalid")
     for reference in _calibration_tensor_references(calibration.stats):
         artifacts.validate(reference.artifact.artifact_id)
+    _validate_imatrix_objectives(request, artifacts, inventory, calibration, objectives)
     return calibration, objectives
 
 
@@ -4731,6 +4774,7 @@ def _load_precomputed_preprocessing(
         raise ValueError("precomputed plan identity does not match the selected model/calibration")
     if persisted_plan.plan.target_bpw != request.target_bpw:
         raise ValueError("precomputed plan target BPW does not match the request")
+    _validate_imatrix_objectives(request, artifacts, inventory, calibration, objectives, persisted_plan.plan)
     return calibration, objectives, persisted_plan
 
 
@@ -4787,6 +4831,7 @@ def _load_reusable_calibration(
         raise ValueError("preprocessing donor resolved config is invalid")
     current_config = _resident_manifest_config(request, "resident-quantization")
     calibration_protocol_fields: tuple[str, ...] = (
+        "imatrix",
         "calibration_method",
         "calibration_shrinkage",
         "calibration_batch_size",
@@ -4912,6 +4957,7 @@ def _prepare_optimizer_continuation(request: ResidentQuantizationRequest, propos
 
 
 def _run_resident_quantization(request: ResidentQuantizationRequest) -> ResidentQuantizationResult:
+    _validate_imatrix_source(request)
     proposed = _resident_manifest(request, "resident-quantization")
     _prepare_optimizer_continuation(request, proposed)
     with open_run_session(
@@ -5076,6 +5122,15 @@ def _run_resident_quantization(request: ResidentQuantizationRequest) -> Resident
             manifest = transition(manifest, RunStatus.COMPLETED, artifacts=(result.report.artifact_id,))
         _write_resident_manifest(request.output, manifest)
         return result
+
+
+def _validate_imatrix_source(request: ResidentQuantizationRequest) -> None:
+    if request.imatrix is not None:
+        config = request.imatrix
+        if len(config.sha256) != 64 or any(c not in "0123456789abcdef" for c in config.sha256):
+            raise ValueError("imatrix requires a pinned lowercase SHA-256")
+        if file_sha256(Path(config.path)) != config.sha256:
+            raise ValueError("imatrix SHA-256 mismatch; the pinned source has changed")
 
 
 def _validate_resident_request(request: ResidentQuantizationRequest) -> None:
@@ -5253,6 +5308,7 @@ class _ResidentEnvironment:
     quality_tokens: torch.Tensor
     model: nn.Module
     decoder_layers: nn.ModuleList
+    imatrix_inputs: dict[LayerId, torch.Tensor] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -5438,6 +5494,10 @@ def _setup_resident_environment(
                 )
             )
         inventory = replace(inventory, blocks=tuple(reordered_blocks))
+    imatrix_inputs = None
+    if request.imatrix is not None:
+        imatrix_inputs, imatrix_report = resolve_imatrix(request.imatrix, inventory, request.shared_input_groups)
+        atomic_write_json(request.output / "imatrix.json", imatrix_report)
     model_device = _model_placement_device(request)
     with recorder.phase("setup"), recorder.phase("inputs"):
         tokens = _token_tensor(request.token_ids, model_device)
@@ -5490,6 +5550,7 @@ def _setup_resident_environment(
         quality_tokens,
         model,
         adapter.get_decoder_layers(model),
+        imatrix_inputs=imatrix_inputs,
     )
 
 
@@ -7046,6 +7107,11 @@ def _execute_resident_quantization_pipeline(
                 layers=len(calibration_values),
                 input_elements=int(tokens.numel()),
             ), recorder.phase("calibrate"), recorder.phase("persist"):
+                if environment.imatrix_inputs is not None:
+                    calibration_values = [
+                        (layer, replace(stats, input_importance=environment.imatrix_inputs[layer]))
+                        for layer, stats in calibration_values
+                    ]
                 calibration = persist_calibration(
                     tuple(calibration_values),
                     inventory.model,
@@ -9317,6 +9383,7 @@ def load_completed_resident_quantization(
     fields; terminal controls and relocated material paths are not semantic.
     """
 
+    _validate_imatrix_source(request)
     _validate_resident_request(request)
     directory = RunDirectory(request.output.parent, request.output.name)
     manifest = from_dict(RunManifest, directory.read_manifest(), path="manifest")

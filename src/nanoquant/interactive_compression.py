@@ -286,7 +286,10 @@ class InteractiveRunRecord:
 
 
 def _settings_body(settings: InteractiveSettings) -> dict[str, Any]:
-    return cast(dict[str, Any], to_dict(settings))
+    payload = cast(dict[str, Any], to_dict(settings))
+    if settings.run_config.calibration.imatrix is None:
+        payload["run_config"]["calibration"].pop("imatrix", None)
+    return payload
 
 
 def settings_hash(settings: InteractiveSettings) -> str:
@@ -440,6 +443,7 @@ def create_interactive_settings(
     llama_cpp_root: str | Path,
     now: datetime | None = None,
     run_name: str | None = None,
+    imatrix_path: str | Path | None = None,
 ) -> InteractiveSettings:
     """Materialize one immutable non-numbered run from a promoted model profile."""
 
@@ -473,6 +477,10 @@ def create_interactive_settings(
         allocation=replace(model.template.allocation, target_bpw=target_bpw),
         output=replace(model.template.output, run_root=run_root.as_posix()),
     )
+    if imatrix_path is not None:
+        from nanoquant.infrastructure.imatrix import imatrix_config
+
+        config = replace(config, calibration=replace(config.calibration, imatrix=imatrix_config(imatrix_path)))
     raise_for_issues(validate(config, ValidationPhase.RESOLVED))
     paths = InteractivePaths(
         run_output=run_output,
@@ -1181,6 +1189,7 @@ def run_interactive_launcher(
     launcher_path: str | Path,
     catalog: Iterable[RecommendedModel],
     *,
+    imatrix_path: str | Path | None = None,
     input_fn: InputFn = input,
     write: WriteFn = print,
     execute: ExecuteFn = execute_interactive_run,
@@ -1204,6 +1213,8 @@ def run_interactive_launcher(
     if action is None:
         return 0
     if isinstance(action, InteractiveRunRecord):
+        if imatrix_path is not None:
+            raise ValueError("--imatrix is for new runs; continue without it to use the saved recipe")
         return execute(action.settings_path, launcher)
     previous = records[0] if records else None
     model = _choose_model(console, promoted, previous, custom_resolver)
@@ -1231,8 +1242,11 @@ def run_interactive_launcher(
         quality_requested=quality_requested,
         huggingface=huggingface,
         llama_cpp_root=llama_cpp_root,
+        imatrix_path=imatrix_path,
     )
     console.write("Ready to create run")
+    if settings.run_config.calibration.imatrix is not None:
+        console.write(f"  Importance matrix:   {settings.run_config.calibration.imatrix.path}")
     console.write(f"  Model:               {settings.selection.model_input}")
     console.write(f"  Revision:            {settings.resolved_source.revision}")
     console.write(f"  Recommended profile: {settings.profile.id}")

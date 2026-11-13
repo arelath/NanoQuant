@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 
 import _paths  # noqa: F401
@@ -11,12 +12,16 @@ from nanoquant.interactive_compression import run_interactive_launcher
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--imatrix", type=Path, help="llama.cpp .dat or GGUF importance file for a new run")
+    args = parser.parse_args()
     repository_root = Path(__file__).resolve().parent.parent
     try:
         return run_interactive_launcher(
             repository_root,
             __file__,
             INTERACTIVE_RECOMMENDED_MODELS,
+            imatrix_path=args.imatrix,
         )
     except KeyboardInterrupt:
         print("\nInteractive compression interrupted. Run the script again to continue.", flush=True)

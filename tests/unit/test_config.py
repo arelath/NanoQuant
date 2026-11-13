@@ -621,6 +621,7 @@ def test_tail_distillation_batch_cap_and_mass_weight_validate() -> None:
 def test_noop_tail_fields_preserve_legacy_config_hash() -> None:
     legacy = RunConfig(ModelConfig("x"))
     legacy_payload = to_dict(legacy)
+    legacy_payload["calibration"].pop("imatrix")
     legacy_payload["distillation"].pop("maximum_batches_per_epoch")
     legacy_payload["distillation"].pop("tail_mass_weight")
     legacy_payload["factorization"].pop("residual_stages")

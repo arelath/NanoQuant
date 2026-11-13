@@ -262,6 +262,19 @@ class CalibrationFallbackConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class ImatrixTensorMapping:
+    layer: str
+    tensor: str
+
+
+@dataclass(frozen=True, slots=True)
+class ImatrixConfig:
+    path: str
+    sha256: str
+    tensor_map: tuple[ImatrixTensorMapping, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class CalibrationConfig:
     method: CalibrationMethod = CalibrationMethod.ONLINE_FISHER
     sample_count: int = 128
@@ -270,6 +283,7 @@ class CalibrationConfig:
     accumulation_dtype: DType = DType.FLOAT32
     objective: ObjectiveConfig = field(default_factory=ObjectiveConfig)
     fallback: CalibrationFallbackConfig = field(default_factory=CalibrationFallbackConfig)
+    imatrix: ImatrixConfig | None = None
 
 
 @dataclass(frozen=True, slots=True)

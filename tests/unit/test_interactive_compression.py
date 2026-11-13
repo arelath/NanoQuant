@@ -388,3 +388,27 @@ def test_completed_interactive_run_is_not_dispatched_again(
     )
 
     assert execute_interactive_run(settings_path, launcher) == 0
+
+def test_imatrix_new_settings_pin_input_and_resume_rejects_override(tmp_path: Path) -> None:
+    import struct
+
+    path = tmp_path / 'importance.dat'
+    name = b'blk.0.attn_q.weight'
+    path.write_bytes(struct.pack('<ii', 1, len(name)) + name + struct.pack('<ii3f', 2, 3, 2, 8, 18))
+    settings = create_interactive_settings(
+        _model(), target_bpw=1., quality_requested=False, huggingface=None,
+        llama_cpp_root=tmp_path / 'llama.cpp', run_name='imatrix-run', imatrix_path=path,
+    )
+    policy = settings.run_config.calibration.imatrix
+    assert policy is not None
+    assert policy.path == str(path.resolve())
+    assert policy.sha256 == hashlib.sha256(path.read_bytes()).hexdigest()
+    settings_path = _persist(tmp_path, settings)
+    loaded, _digest = load_interactive_settings(settings_path)
+    assert loaded.run_config.calibration.imatrix == policy
+    with pytest.raises(ValueError, match='for new runs'):
+        run_interactive_launcher(
+            tmp_path, _launcher(tmp_path), INTERACTIVE_RECOMMENDED_MODELS,
+            imatrix_path=path, input_fn=_inputs(['']), write=lambda _line: None,
+            execute=lambda *_args: pytest.fail('must not execute with changed resume settings'),
+        )

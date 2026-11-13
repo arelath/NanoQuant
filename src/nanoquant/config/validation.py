@@ -48,6 +48,14 @@ def validate(config: RunConfig, phase: ValidationPhase = ValidationPhase.PRE_RES
     require(config.model.sequence_length > 0, "CFG003", "model.sequence_length", "must be positive")
     require(config.calibration.sample_count >= 0, "CFG004", "calibration.sample_count", "must not be negative")
     require(config.calibration.batch_size > 0, "CFG017", "calibration.batch_size", "must be positive")
+    imatrix = config.calibration.imatrix
+    if imatrix is not None:
+        require(bool(imatrix.path.strip()), "CFG253", "calibration.imatrix.path", "must not be empty")
+        require(bool(re.fullmatch(r"[0-9a-f]{64}", imatrix.sha256)), "CFG254",
+                "calibration.imatrix.sha256", "must pin the lowercase SHA-256 of the file")
+        require(len({item.layer for item in imatrix.tensor_map}) == len(imatrix.tensor_map)
+                and all(item.layer.strip() and item.tensor.strip() for item in imatrix.tensor_map),
+                "CFG255", "calibration.imatrix.tensor_map", "requires unique nonempty layer/tensor mappings")
     require(0 <= config.calibration.shrinkage <= 1, "CFG005", "calibration.shrinkage", "must be in [0, 1]")
     behavior_slices = config.dataset.behavior_slices
     behavior_names = tuple(item.name for item in behavior_slices)

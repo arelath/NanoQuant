@@ -479,6 +479,7 @@ def resident_request_from_config(
         interrupt_after_block_commits=options.interrupt_after_block_commits,
         interrupt_after_factorized_tuning_epoch_commits=(options.interrupt_after_factorized_tuning_epoch_commits),
         block_forward_batch_size=effective_forward_batch,
+        imatrix=config.calibration.imatrix,
         calibration_method=config.calibration.method.value,
         calibration_shrinkage=config.calibration.shrinkage,
         calibration_batch_size=effective_calibration_batch,

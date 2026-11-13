@@ -132,6 +132,8 @@ def config_hash(config: RunConfig) -> str:
     if not isinstance(payload, dict):
         raise TypeError("run config did not encode as an object")
     reconstruction = payload["allocation"]["reconstruction"]
+    if config.calibration.imatrix is None:
+        payload["calibration"].pop("imatrix", None)
     if not config.block_tuning.compile_forward:
         payload["block_tuning"].pop("compile_forward", None)
     if config.block_tuning.factorized.optimizer == FactorizedOptimizerConfig():
