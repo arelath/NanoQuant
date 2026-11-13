@@ -78,5 +78,6 @@ experiment_callable_main(
     __name__,
     lambda: run_self_measured_d2_experiment(
         EXPERIMENT, launcher_path=__file__, profile_options=PROFILE_OPTIONS, kl_teacher_dataset=KL_TEACHER_DATASET,
+        reuse_maximum_rank_control=True,
     ),
 )

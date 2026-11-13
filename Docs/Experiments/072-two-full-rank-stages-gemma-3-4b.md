@@ -32,72 +32,54 @@ These are planned ranks derived from the pinned text configuration, not complete
 is not quantized by this experiment. The standard complete export workflow also exports the separate validated
 BF16 `mmproj-BF16.gguf` required by the multimodal source.
 
-## Teacher and allocation preparation
+## Single-pass completion update, 2026-11-13
 
-072 selects `Datasets/gemma-3-4b-it-kl-48x512` by default. It holds full-vocabulary FP16 teacher log probabilities
-for 48 WikiText sequences of length 512, batch size 1, on CUDA. The targets alone occupy approximately 12 GiB.
-The source BF16 4B model is the teacher; no separately trained teacher is needed.
+The campaign now finishes the existing uniform-control run and uses it as the final model.
+Every quantization owner is forced to maximum rank after allocation, so KL sensitivity measurements
+cannot change its ranks. The control retains the same calibration, 600�2 fitting, tuning batches,
+epochs, seeds and global distillation. Foldable MLP multipliers are disabled in both recipes.
+The original control configuration, artifact identities and journals remain the source of resume state.
+The complete export and quality workflow publishes the GGUF, statistics and reports under `Results/072`.
+Reports retain the control run's actual provenance.
 
-The 1B teacher and allocation datasets are incompatible. No 4B allocation dataset exists yet, so the first campaign
-uses the established self-measured D2 sequence: a matched tuned control, KL sensitivity measurement using saved
-teacher targets, measured rank-response probes, and final compression/export/quality evaluation. Both compression
-passes use the two-full-rank policy. This is more preparation than 071's dataset-backed run. The allocation curves
-cannot change the final promoted ranks; retaining this preparation produces reusable 4B allocation evidence without
-introducing a new allocation bypass. The inherited rank-response probes remain 400×5; production fits are 600×2.
+This removes the second 34-block compression pass, allocation KL profiling and candidate rank-response
+probing from this campaign. The explicit reuse option requires maximum rank for all projections and
+matching distillation. Allocation-profile overrides are rejected for this mode.
+The KL teacher dataset remains available for future allocation experiments. This path does not consume it.
+Global distillation retains its separate teacher protocol.
 
-The 48×512 KL dataset does not replace global distillation's separate teacher protocol. That stage remains inherited.
-The KL builder and consumer now resolve vocabulary defaults and decoder depth through the model adapter, including
-Gemma 3's nested text configuration. Dataset identity still hashes the original source config.
-
-## Commands (run later)
-
-Inspect setup only, including before the teacher dataset exists:
-
-```powershell
-.\.venv\Scripts\python.exe tools\run_experiment072_campaign.py --plan-only
-```
-
-This validates configuration and prints paths; it does not load or validate dataset contents, load model weights,
-generate targets, or start a campaign. The existing `--dry-run` is stricter and requires a prepared allocation dataset.
-
-Build the separate teacher dataset when ready, from the repository root:
-
-```powershell
-.\.venv\Scripts\python.exe tools\build_kl_teacher_dataset.py `
-  --source google/gemma-3-4b-it `
-  --revision 093f9f388b31de276ce2de164bdc2081324b9767 `
-  --output Datasets/gemma-3-4b-it-kl-48x512 `
-  --wikitext-samples 48 --sequence-length 512 --batch-size 1 `
-  --device cuda --local-files-only
-```
-
-Then start the campaign:
+Resume from the repository root with the existing command.
 
 ```powershell
 .\.venv\Scripts\python.exe tools\run_experiment072_campaign.py
 ```
 
-The runner permits 80 process slices by default, enough for two 34-block passes plus finalization. It preserves
-one-new-block interruptions and durable resume; `--maximum-slices` can raise the ceiling after additional restarts.
-`--kl-teacher-dataset` can override the teacher location. A later compatible 4B allocation dataset can be passed with
-`--allocation-profile-dataset` to skip preparation. Missing or incompatible teacher targets fail before control fitting.
+`--plan-only` shows the selected mode. `--dry-run` prints the exact control configuration and publication
+settings without loading weights or requiring an allocation dataset. The runner retains its 80-slice
+ceiling and one-block process boundaries. Previously completed blocks resume from the saved CPU activation
+boundary with `restore_completed_blocks=False`.
 
-Both passes resume from the latest committed activation checkpoint with `restore_completed_blocks=False`.
-This keeps previously fitted weights on disk during compression and preserves the existing commit identity.
-The control OOM occurred while reloading the frozen prefix onto the 12 GiB GPU. Rerun the same campaign command
-to continue from the saved checkpoint. The export and final quality workflows load the completed artifacts separately.
+Slice 022 recorded block index 17 taking 1,262.7 seconds. Its logged factorized tuning spans totaled
+506.0 seconds, ordinary tuning 153.2 seconds, post-block refitting 86.1 seconds and checkpoint commit
+74.9 seconds. Fitting and scale/outlier stages totaled 276.4 seconds. Shared QKV processing includes
+additional tuning and overlaps these categories, so these figures are not a complete additive breakdown.
+Startup inventory and model loading together took 16.8 seconds.
 
-Once the measured rank-probe profile is complete, extract it for future reuse:
+At that block's rate, removing a second 34-block compression pass avoids approximately 11.9 hours.
+That is an extrapolation from one block, excluding additional profiling and distillation savings.
+It is not a measured end-to-end speedup. Eighteen blocks were committed when this investigation began,
+and the following block had partial progress before a user interruption.
 
-```powershell
-.\.venv\Scripts\python.exe tools\build_allocation_profile_dataset.py `
-  --run-output evidence/072/072-two-full-rank-stages-compress-and-benchmark-gemma-3-4b-it `
-  --output Datasets/gemma-3-4b-it-allocation-072
-```
+A CPU-only 2.5-GiB write/hash experiment compared serial and concurrent hashing twice each.
+Serial runs took 24.20 and 23.48 seconds, concurrent runs 27.62 and 24.04 seconds.
+Hashes matched, but concurrency gave no improvement and the proposed writer change was discarded.
 
-Future artifacts belong under `evidence/072`, `outputs/072`, and `Results/072`. The experiment links the older 4B
-Experiment 018 as historical context; use 072's own protocol-matched BF16 quality result for quantization loss.
-018 has different settings and is not a controlled one-variable comparison. No quality or speedup is claimed yet.
+The new path has CPU regression coverage for preserving the control configuration, skipping allocation
+preparation, rejecting variable-rank reuse, and publishing an unnumbered control under numbered results.
+The real campaign dry run exactly matched the stored control manifest. The full default suite passed
+1,622 tests with 53 deselected; the final publication/control-focused check passed 15 tests. Ruff and
+mypy passed. Full-model completion, exported quality and the final wall-time saving
+remain to be measured when the campaign resumes.
 
 ## Setup validation
 

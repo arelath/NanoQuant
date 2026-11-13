@@ -13,6 +13,8 @@ from nanoquant.allocation_profile_dataset_workflow import config_with_allocation
 from nanoquant.application.kl_budget import KlBudgetProfile, load_kl_budget_profile
 from nanoquant.compression_quality_workflow import (
     CompressionQualityExperiment,
+    execute_compression_quality_experiment,
+    resolve_compression_quality_experiment,
     run_compression_quality_experiment,
 )
 from nanoquant.config.codec import from_dict, to_dict
@@ -317,6 +319,7 @@ def run_self_measured_d2_experiment(
     profile_options: SelfMeasuredD2ProfileOptions = _DEFAULT_PROFILE_OPTIONS,
     allocation_profile_dataset: Path | None = None,
     kl_teacher_dataset: Path | None = None,
+    reuse_maximum_rank_control: bool = False,
 ) -> int:
     """Prepare, verify, and consume same-campaign KL inputs before compression."""
 
@@ -350,6 +353,15 @@ def run_self_measured_d2_experiment(
     parsed = parser.parse_args(arguments)
     if parsed.plan_only and parsed.dry_run:
         parser.error("choose --plan-only or --dry-run")
+    if reuse_maximum_rank_control:
+        if experiment.config.allocation.maximum_rank_layer_patterns != ("*",):
+            raise ValueError("control reuse requires maximum rank for every projection")
+        if not profile_options.tuned_operating_point or experiment.config.distillation.foldable_mlp_multipliers.enabled:
+            raise ValueError("control reuse requires matching global distillation settings")
+        if any(value is not None for value in (
+            parsed.allocation_profile_dataset, parsed.kl_profile, parsed.kl_control_run,
+        )):
+            raise ValueError("maximum-rank control reuse does not consume allocation profile overrides")
     if parsed.plan_only:
         raise_for_issues(validate(experiment.config, ValidationPhase.RESOLVED))
         print(json.dumps({
@@ -360,8 +372,36 @@ def run_self_measured_d2_experiment(
             "allocation_profile_dataset": (
                 None if parsed.allocation_profile_dataset is None else str(parsed.allocation_profile_dataset)
             ),
-            "automatic_control_and_profile": parsed.allocation_profile_dataset is None and parsed.kl_profile is None,
+            "automatic_control_and_profile": (
+                not reuse_maximum_rank_control
+                and parsed.allocation_profile_dataset is None and parsed.kl_profile is None
+            ),
+            "reuse_maximum_rank_control": reuse_maximum_rank_control,
         }, indent=2))
+        return 0
+    if reuse_maximum_rank_control:
+        repository = Path(launcher_path).resolve().parent.parent
+        number = _experiment_number(experiment.config)
+        campaign_root = (repository / "evidence" / f"{number:03d}").resolve()
+        control = _uniform_control_config(experiment.config, campaign_root, tuned_operating_point=True)
+        if control.distillation != experiment.config.distillation:
+            raise ValueError("control reuse requires identical distillation configuration")
+        publication = replace(
+            experiment.workflow,
+            export=replace(experiment.workflow.export, publication_experiment_number=number),
+        )
+        if parsed.dry_run:
+            print(json.dumps({"dry_run": True, "config": to_dict(control), "workflow": to_dict(publication)}, indent=2))
+            return 0
+        print(
+            f"Resuming Experiment {number:03d} maximum-rank control as the final model; "
+            "all ranks are fixed, so allocation profiling and a second compression pass are unnecessary.",
+            flush=True,
+        )
+        # Preserve the control's original identity and journal. Publication owns
+        # the numbered output paths, while compression resumes the existing run.
+        resolved = resolve_compression_quality_experiment(control, publication, launcher_path=launcher_path)
+        execute_compression_quality_experiment(control, publication, resolved)
         return 0
     if parsed.dry_run and parsed.allocation_profile_dataset is None:
         parser.error("--dry-run requires --allocation-profile-dataset; automatic preparation will not be started")

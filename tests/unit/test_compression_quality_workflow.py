@@ -44,9 +44,11 @@ def test_block_bounded_execution_limit_must_be_positive() -> None:
         replace(_EXPERIMENT, interrupt_after_block_commits=0)
 
 
+@pytest.mark.parametrize("publish_control", [False, True])
 def test_compression_quality_runs_quality_before_huggingface_upload_and_publication(
     tmp_path: Path,
     monkeypatch,
+    publish_control,
 ) -> None:  # type: ignore[no-untyped-def]
     launcher = tmp_path / "repo" / "experiments" / "003.py"
     launcher.parent.mkdir(parents=True)
@@ -236,8 +238,12 @@ def test_compression_quality_runs_quality_before_huggingface_upload_and_publicat
         lambda root, number, artifacts: published.append((root, number, tuple(artifacts))),
     )
 
+    config = _CONFIG
+    if publish_control:
+        config = replace(config, intent=replace(config.intent, experiment_number=None, name="uniform-control"))
+        experiment = replace(experiment, export=replace(experiment.export, publication_experiment_number=3))
     payload = execute_compression_quality_experiment(
-        _CONFIG,
+        config,
         experiment,
         resolved,
     )

@@ -100,3 +100,55 @@ def test_vocabulary_resolution_preserves_raw_config_identity(config):
     before = json.dumps(config, sort_keys=True)
     vocabulary_size_from_config(config)
     assert json.dumps(config, sort_keys=True) == before
+
+
+def test_072_reuses_control_identity_and_publishes_numbered_results(tmp_path, monkeypatch):
+    experiment = load_experiment(72)
+    launcher = tmp_path / "experiments/072.py"
+    options = workflow.SelfMeasuredD2ProfileOptions(48, 512, True)
+    expected = workflow._uniform_control_config(
+        experiment.config, tmp_path / "evidence/072", tuned_operating_point=True,
+    )
+    calls = []
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("fixed ranks must skip KL data loading, profiling and candidate compression")
+
+    monkeypatch.setattr(workflow, "load_kl_teacher_dataset", forbidden)
+    monkeypatch.setattr(workflow, "_prepare_automatic_kl_inputs", forbidden)
+    monkeypatch.setattr(workflow, "run_compression_quality_experiment", forbidden)
+    sentinel = object()
+    monkeypatch.setattr(workflow, "resolve_compression_quality_experiment",
+                        lambda config, publication, **kwargs: sentinel)
+    monkeypatch.setattr(workflow, "execute_compression_quality_experiment",
+                        lambda config, publication, resolved: calls.append((config, publication, resolved)))
+    assert workflow.run_self_measured_d2_experiment(
+        experiment, launcher_path=launcher, arguments=[], profile_options=options,
+        reuse_maximum_rank_control=True, kl_teacher_dataset=tmp_path / "teacher",
+    ) == 0
+    config, publication, resolved = calls[0]
+    assert config == expected
+    assert config.distillation == experiment.config.distillation
+    assert publication.export.publication_experiment_number == 72
+    assert publication.export.gguf_output == experiment.workflow.export.gguf_output
+    assert resolved is sentinel
+
+
+def test_072_control_reuse_dry_run_needs_no_allocation_dataset(tmp_path, capsys):
+    assert workflow.run_self_measured_d2_experiment(
+        load_experiment(72), launcher_path=tmp_path / "experiments/072.py", arguments=["--dry-run"],
+        profile_options=workflow.SelfMeasuredD2ProfileOptions(48, 512, True), reuse_maximum_rank_control=True,
+    ) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["config"]["allocation"]["strategy"] == "uniform"
+    assert report["config"]["allocation"]["maximum_rank_layer_patterns"] == ["*"]
+    assert report["workflow"]["export"]["publication_experiment_number"] == 72
+    assert not tuple(tmp_path.iterdir())
+
+
+def test_control_reuse_rejects_variable_ranks(tmp_path):
+    with pytest.raises(ValueError, match="maximum rank"):
+        workflow.run_self_measured_d2_experiment(
+            load_experiment(70), launcher_path=tmp_path / "experiments/070.py", arguments=["--plan-only"],
+            profile_options=workflow.SelfMeasuredD2ProfileOptions(48, 512, True), reuse_maximum_rank_control=True,
+        )

@@ -193,7 +193,11 @@ def execute_compression_quality_experiment(
     foldable_mlp_tuning = complete.foldable_mlp_tuning
     compression_seconds = time.perf_counter() - compression_started
     block_count = len(workflow.quantization.inventory.blocks)
-    experiment_number = config.intent.experiment_number
+    experiment_number = (
+        config.intent.experiment_number
+        if experiment.export.publication_experiment_number is None
+        else experiment.export.publication_experiment_number
+    )
     if resolved.inputs.launcher_path is None:
         raise ValueError("compression-quality experiment requires launcher provenance")
     repository_root = resolved.inputs.launcher_path.resolve().parent.parent
