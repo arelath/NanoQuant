@@ -157,3 +157,73 @@ passes, 53 deselections and one Windows `WinError 32` failure in the unchanged c
 lock test. The registry, optimizer and tuning tests then passed together (43 passed, 2 deselected),
 and the registry suite passed again independently (4 passed). The full-suite result is therefore
 recorded with that intermittent failure rather than reported as an entirely passing run.
+
+
+## Faster optimizer comparison, 2026-11-13
+
+The profiler now offers experimental optimizer selection and reports post-training weighted and
+unweighted MSE, gate reconstruction error, the epoch-loss trajectory and initial evaluated loss.
+The legacy training-average metric alone can rank candidates differently from evaluation of the
+final parameters. Each timed run follows a cold invocation and a reset to the identical starting
+weights, with a fresh optimizer. All comparisons below use seed zero and 256×2,048 tokens,
+eight epochs, factorized batch/microbatch one and the saved per-parameter learning rates.
+
+The corrected comparison initializes both stages from saved continuous ADMM latents and fitted
+scales. Production tuning uses continuous latents. The earlier frozen-sign replay is a different
+starting point and its optimizer-ranking results are preliminary. The diagnostic reconstructs the
+uniquely ordered factorization/scale-fit pairs between the primary factorization and layer commit,
+validates their artifacts, and rejects ambiguous histories. Protocol JSON records all four artifact IDs.
+The remaining block-zero projections use source BF16 weights. This remains an isolated gate-tuning
+replay rather than the complete original block state after nonfactorized tuning.
+
+| Optimizer | Warm seconds | Post-tuning weighted MSE | Unweighted MSE | Gate relative Frobenius error |
+| --- | ---: | ---: | ---: | ---: |
+| parity | 58.793 | 0.532435417 | 0.145310551 | 0.249616146 |
+| torch-fused-scales-fp32 | 45.698 | 0.527085960 | 0.145346284 | 0.249524161 |
+| torch-fused-fp32 | 52.771 | 0.528063416 | 0.145157367 | 0.249658123 |
+
+The scale-only FP32 variant reduces warm tuning time by 22.27%. Its weighted MSE decreases by
+1.00%, unweighted MSE increases by 0.025%, and gate relative Frobenius error decreases by 0.037%.
+The full FP32-master variant reduces time by 10.24%, weighted MSE by 0.82%, and unweighted MSE by
+0.105%, while gate relative Frobenius error increases by 0.017%. These are one-block, one-seed,
+in-sample measurements. Other projections, held-out quality, full-model perplexity and task quality
+have not been validated for these optimizer variants.
+
+The best speed candidate uses native `torch.optim.AdamW(fused=True)` with betas `(0.9, 0.99)`,
+epsilon `1e-6`, BF16 binary-factor master parameters and FP32 scale master parameters. Factor and
+scale computations still cast to BF16 activations through the existing trainable forward path.
+The diagnostic computes the weight-error metric after casting a temporary gate copy to BF16,
+so the compared reconstruction uses BF16 storage precision.
+
+The exploratory frozen-sign screen rejected plain fused AdamW with all-BF16 parameters. It ran
+22% faster but gave post-training weighted MSE 5.13097 versus 1.27199 for the parity optimizer.
+A compiled parity-update experiment initially hit coefficient specialization/recompilation limits.
+Dynamic CPU scalar coefficients plus the Visual C++ developer environment allowed it to complete,
+but its final weighted MSE was 392.46 on that same screen. It is unsuitable for adoption.
+The native fused alternatives completed from the normal repository shell.
+
+The production optimizer remains ParityAdamW. Experimental substitution is scoped to the profiler
+and restored on exit, including errors. Native fused AdamW has different optimizer state, lacks
+ParityAdamW's BF16 Kahan buffers, and FP32 scale masters need explicit persistence/storage handling.
+A production option needs its own configuration identity and resume tests before use in the active
+campaign. Existing 072 checkpoints were not modified by these diagnostic runs.
+
+Reproduce the leading candidate with the local pinned snapshot.
+
+```powershell
+.\.venv\Scripts\python.exe tools/profile_gemma_block_tuning.py `
+  --run-output evidence/072/072-d2-uniform-control-gemma-3-4b-it `
+  --snapshot C:/Users/pdykstra/.cache/huggingface/hub/models--google--gemma-3-4b-it/snapshots/093f9f388b31de276ce2de164bdc2081324b9767 `
+  --output evidence/072/optimizer-local --mode compiled --stage factorized `
+  --optimizer torch-fused-scales-fp32 --initialization admm --seed 0
+```
+
+Use `--optimizer parity` for the control or `--optimizer torch-fused-fp32` for FP32 master factors
+and scales. `compiled-parity` is retained as a rejected research comparison and requires a Visual
+C++ developer environment on this Windows installation. Timing and error evidence is in
+`evidence/072/optimizer-admm-comparison.json` and the `optimizer-admm-*` directories. Frozen-sign
+screening evidence is in the other `optimizer-*` directories and must be compared within that protocol.
+
+Validation passed: 45 focused tests (2 deselected), the full default suite (1,635 passed,
+53 deselected), Ruff and mypy. These software checks do not establish full-model quality
+for the experimental optimizers.
