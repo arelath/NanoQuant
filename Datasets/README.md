@@ -142,3 +142,15 @@ evaluate the spliced compressed projections.
 
 The final `dataset.json` pointer is published after its referenced inputs and targets are committed. Keep the
 complete dataset directory together when moving it between workspaces.
+
+## External llama.cpp importance data
+
+Experiment 073 uses `Datasets/gemma-3-1b-it-imatrix-unsloth/imatrix_unsloth.dat`,
+downloaded from `unsloth/gemma-3-1b-it-GGUF` at revision
+`f0b45be0aac41bd6a100a4b5734cad5f67255bfb`. Its SHA-256 is
+`86a81192de49a6480f8dc19c5a7fd3f4377af59172fd4c7b8d93d296a0a18515`.
+The neighboring `source.json` records the exact URL, revision, size and hash.
+All 182 input-importance vectors match the pinned 1B model's projection inventory.
+This is an external activation-importance input, separate from allocation profiles
+and KL teacher targets. See [Experiment 073](../Docs/Experiments/073-imatrix-two-full-rank-stages-gemma-3-1b.md)
+for the prepared recipe and launch command.
