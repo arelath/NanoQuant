@@ -48,6 +48,7 @@ CALIBRATION_REVISION = "e87ed55dcba9d9c3a3e41539f3e728e981b1daa4"
 CALIBRATION_FILE = "combined_all_small.parquet"
 CALIBRATION_SHA256 = "5c99d3d04bf3ec239b3a2a774cb61b9d1dc868680a50697d0418808d0b8eb091"
 DTYPE = torch.float16
+DEFAULT_ERROR_LEVELS = (0.05, 0.10, 0.20, 0.35)
 
 
 def calibration_windows(
@@ -239,6 +240,18 @@ def write_reports(output: Path, report: dict) -> None:
     atomic_write_text(output / "results.md", "\n".join(lines))
 
 
+def _load_sweep_report(path: Path, identity: dict) -> dict | None:
+    if not path.exists():
+        return None
+    report = json.loads(path.read_text(encoding="utf-8"))
+    protocol = {key: value for key, value in report["protocol"].items() if key != "teacher_directory"}
+    if report["schema_version"] != 1 or protocol != identity:
+        raise ValueError(f"{path} contains a different sweep protocol; choose a different --output")
+    report.pop("summary", None)
+    report["protocol"] = protocol
+    return report
+
+
 def _sweep(args: argparse.Namespace, config: dict[str, object], model: nn.Module, dataset: KlTeacherDataset) -> None:
     adapter = adapter_for_config(config)
     layers = adapter.get_decoder_layers(model)
@@ -259,7 +272,6 @@ def _sweep(args: argparse.Namespace, config: dict[str, object], model: nn.Module
     identity = {
         "teacher_artifact": dataset.reference.artifact_id,
         "teacher": to_dict(dataset.protocol),
-        "teacher_directory": str(args.teacher_dataset.resolve()),
         "model_weights_sha256": MODEL_WEIGHTS_SHA256,
         "noise": "per-projection isotropic Gaussian with fixed relative Frobenius norm",
         "torch_version": str(torch.__version__),
@@ -269,21 +281,38 @@ def _sweep(args: argparse.Namespace, config: dict[str, object], model: nn.Module
         "levels": args.error_levels,
         "seeds": args.seeds,
     }
-    path = args.output / "results.json"
-    if path.exists():
-        report = json.loads(path.read_text(encoding="utf-8"))
-        if report["schema_version"] != 1 or report["protocol"] != identity:
-            raise ValueError("results directory already contains a different sweep; choose a new --output")
-    else:
-        report = {
-            "schema_version": 1,
-            "protocol": identity,
-            "expected_trials": len(targets) * len(args.error_levels) * len(args.seeds),
-            "clean_baseline": score_model(model, dataset, device=args.device, token_chunk_size=args.token_chunk_size),
-            "trials": [],
-        }
+    sweep_id = hashlib.sha256(json.dumps(identity, sort_keys=True).encode("utf-8")).hexdigest()
+    checkpoint = args.teacher_dataset / "measurements" / sweep_id / "results.json"
+    with RunLease(checkpoint.parent / ".measurement-lease.json"):
+        exported = _load_sweep_report(args.output / "results.json", identity)
+        report = _load_sweep_report(checkpoint, identity) or exported
+        if report is None:
+            report = {
+                "schema_version": 1,
+                "protocol": identity,
+                "expected_trials": len(targets) * len(args.error_levels) * len(args.seeds),
+                "clean_baseline": score_model(
+                    model, dataset, device=args.device, token_chunk_size=args.token_chunk_size,
+                ),
+                "trials": [],
+            }
+        if not checkpoint.exists():
+            atomic_write_json(checkpoint, report, indent=None, sort_keys=False)
+        print(f"Saving sweep measurements to {checkpoint}", flush=True)
+        try:
+            _run_trials(args, model, dataset, targets, report, checkpoint)
+        finally:
+            # Read the committed version so the exported reports reflect durable trials.
+            committed = json.loads(checkpoint.read_text(encoding="utf-8"))
+            committed["protocol"] = {**identity, "teacher_directory": str(args.teacher_dataset.resolve())}
+            write_reports(args.output, committed)
+
+
+def _run_trials(
+    args: argparse.Namespace, model: nn.Module, dataset: KlTeacherDataset,
+    targets: dict[str, dict[str, torch.Tensor]], report: dict, checkpoint: Path,
+) -> None:
     done = {(row["target"], row["requested_error"], row["seed"]) for row in report["trials"]}
-    write_reports(args.output, report)
     for target, weights in targets.items():
         for level in args.error_levels:
             for seed in args.seeds:
@@ -304,7 +333,7 @@ def _sweep(args: argparse.Namespace, config: dict[str, object], model: nn.Module
                     "kl_above_control": score["kl_nats_per_token"] - baseline_kl,
                     "projections": metrics, **score,
                 })
-                write_reports(args.output, report)
+                atomic_write_json(checkpoint, report, indent=None, sort_keys=False)
 
 
 def main(arguments: list[str] | None = None) -> int:
@@ -316,7 +345,8 @@ def main(arguments: list[str] | None = None) -> int:
     parser.add_argument("--samples", type=int, default=16)
     parser.add_argument("--sequence-length", type=int, default=256)
     parser.add_argument(
-        "--error-levels", type=float, nargs="+", default=[0.10], help="relative errors (0.10 means 10%%)",
+        "--error-levels", type=float, nargs="+", default=list(DEFAULT_ERROR_LEVELS),
+        help="relative Frobenius errors (default 0.05 0.10 0.20 0.35)",
     )
     parser.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2])
     parser.add_argument("--blocks", type=int, nargs="+", help="zero-based block indices; defaults to all")

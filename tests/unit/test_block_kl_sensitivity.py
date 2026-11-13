@@ -81,7 +81,8 @@ def test_sweep_scores_cached_teacher_and_resumes_completed_trials(tmp_path, monk
     monkeypatch.setattr(sensitivity, "_load_tokens", lambda *_: (tokens, 0))
     args = SimpleNamespace(
         output=tmp_path / "reports", blocks=None, granularity=granularity,
-        teacher_dataset=root, device="cpu", token_chunk_size=2, error_levels=[0.10], seeds=[0, 1],
+        teacher_dataset=root, device="cpu", token_chunk_size=2,
+        error_levels=list(sensitivity.DEFAULT_ERROR_LEVELS), seeds=[0, 1],
         text_column="content", calibration_seed=0, samples=1, sequence_length=4,
     )
     dataset = sensitivity._teacher_dataset(args, tmp_path, model, {}, root, "test-data")
@@ -89,6 +90,21 @@ def test_sweep_scores_cached_teacher_and_resumes_completed_trials(tmp_path, monk
     assert dataset.reference == reused.reference
     with pytest.raises(ValueError, match="different calibration input"):
         sensitivity._teacher_dataset(args, tmp_path, model, {}, root, "another-source")
+    score_model = sensitivity.score_model
+
+    def interrupt_after_first_trial(*args, **kwargs):
+        if len(model.changed_counts) == 3:  # Teacher, control, first trial.
+            raise KeyboardInterrupt
+        return score_model(*args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(sensitivity, "score_model", interrupt_after_first_trial)
+        with pytest.raises(KeyboardInterrupt):
+            sensitivity._sweep(args, {}, model, dataset)
+    checkpoint, = root.glob("measurements/*/results.json")
+    partial = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert len(partial["trials"]) == 1
+    assert all(torch.equal(weight, model.original) for weight in model.parameters())
     sensitivity._sweep(args, {}, model, dataset)
     report = json.loads((args.output / "results.json").read_text(encoding="utf-8"))
     assert report["clean_baseline"]["kl_nats_per_token"] == pytest.approx(0, abs=1e-7)
@@ -98,12 +114,18 @@ def test_sweep_scores_cached_teacher_and_resumes_completed_trials(tmp_path, monk
     else:
         targets = {"block 0", "block 1"}
         changed_per_trial = 2
-    trials = len(targets) * 2
+    trials = len(targets) * 4 * 2
     assert report["expected_trials"] == len(report["trials"]) == trials
     assert {row["target"] for row in report["summary"]} == targets
+    assert {row["requested_error"] for row in report["trials"]} == {0.05, 0.10, 0.20, 0.35}
     assert all(row["kl_nats_per_token"] > 0 for row in report["trials"])
     assert all(row["token_count"] == 3 for row in report["trials"])
     assert all(torch.equal(weight, model.original) for weight in model.parameters())
     assert f"Measured {trials} of {trials} trials." in (args.output / "results.md").read_text(encoding="utf-8")
+    stored = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert stored["trials"] == report["trials"]
+    assert stored["protocol"]["teacher_artifact"] == dataset.reference.artifact_id
+    args.output = tmp_path / "replacement-reports"
     sensitivity._sweep(args, {}, model, dataset)
     assert model.changed_counts == [0, 0] + [changed_per_trial] * trials
+    assert json.loads((args.output / "results.json").read_text(encoding="utf-8")) == report

@@ -74,7 +74,8 @@ the output distribution when its weights receive random error.
 
 The default sweep uses the pinned Gemma 3 1B IT checkpoint loaded in FP16. It tests
 each of the seven projections in each of the 26 blocks individually, for 182 targets
-and 546 trials at 10% relative Frobenius weight error with three noise seeds. It samples 16 disjoint
+and 2,184 trials with three noise seeds at each of four relative Frobenius errors
+(5%, 10%, 20%, and 35%). It samples 16 disjoint
 256-token windows from the `content` column of the pinned
 [imatrix calibration Parquet](https://huggingface.co/datasets/eaddario/imatrix-calibration/blob/e87ed55dcba9d9c3a3e41539f3e728e981b1daa4/combined_all_small.parquet).
 Each trial scales Gaussian noise to the requested relative error in one projection matrix,
@@ -92,13 +93,17 @@ point to the same dataset from other sweeps. Reading either the default Parquet 
 `--calibration-parquet PATH --text-column COLUMN` requires PyArrow from the `evaluation` extra.
 Choose a separate teacher directory when changing the corpus or sampling protocol.
 
-The sweep writes `results.json` and `results.md` under
-`Results/gemma-3-1b-it-weight-sensitivity`. It reports actual weight error after FP16
-rounding and full-vocabulary KL in nats per next-token position. The unchanged model
-establishes the KL floor from the stored teacher. The JSON retains each trial and
-each window's scores. The Markdown ranks targets by mean KL at each noise level.
-Rerun the same command to resume from the last saved trial. Pass a different
-`--output` directory when changing the sweep settings.
+The sweep checkpoints each trial to `measurements/<sweep-id>/results.json` inside the
+teacher dataset directory. The sweep ID identifies the teacher artifact and measurement
+settings, so multiple sweeps can share the same teacher. For later fitting, use each
+trial's measured weight error after FP16 rounding and its full-vocabulary KL in nats
+per next-token position. The dataset also retains the clean control and per-window scores.
+Rerun the same command to resume from the last saved trial.
+
+On completion or a graceful interruption, the tool exports `results.json` and
+`results.md` to `Results/gemma-3-1b-it-weight-sensitivity`. The Markdown ranks targets
+by mean KL at each noise level. Pass a different `--output` directory when changing
+the sweep settings.
 
 ### KL allocation profiling
 
