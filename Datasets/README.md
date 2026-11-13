@@ -63,6 +63,45 @@ calibration inputs, seed and bit budget, completes compression through the datas
 
 ## KL teacher targets
 
+### Gemma 3 1B IT weight sensitivity
+
+Run the following from the repository root to measure how much each decoder block changes
+the output distribution when its projection weights receive random error.
+
+```powershell
+.\.venv\Scripts\python.exe tools\measure_block_kl_sensitivity.py
+```
+
+The default sweep uses the pinned Gemma 3 1B IT checkpoint loaded in FP16, all 26 blocks,
+10% relative Frobenius weight error, and three noise seeds per block. It samples 16 disjoint
+256-token windows from the `content` column of the pinned
+[imatrix calibration Parquet](https://huggingface.co/datasets/eaddario/imatrix-calibration/blob/e87ed55dcba9d9c3a3e41539f3e728e981b1daa4/combined_all_small.parquet).
+Each block trial scales independent Gaussian noise to the same relative error in each of its
+seven quantizable projection matrices, then restores the original weights. Norms, biases,
+embeddings, the output head, and the other decoder blocks stay at their original FP16 values.
+The results measure sensitivity to this noise distribution. NanoQuant fitting errors can
+have a different structure and therefore produce a different KL response at the same norm.
+Use `--granularity projection` to perturb one matrix at a time. Use `--blocks 0 12 25`
+to select a subset, and `--error-levels 0.01 0.05 0.10` to measure the response at several
+noise levels. The same seed scales the same noise direction across levels for a given matrix.
+
+The first run saves exact token IDs and full-vocabulary FP16 teacher log probabilities
+under `Datasets/gemma-3-1b-it-fp16-sensitivity-16x256` (about 2 GiB by default). Add
+`--teacher-only` to prepare those targets as a separate step. Use `--teacher-dataset` to
+point to the same dataset from other sweeps. Reading either the default Parquet or a custom
+`--calibration-parquet PATH --text-column COLUMN` requires PyArrow from the `evaluation` extra.
+Choose a separate teacher directory when changing the corpus or sampling protocol.
+
+The sweep writes `results.json` and `results.md` under
+`Results/gemma-3-1b-it-weight-sensitivity`. It reports actual weight error after FP16
+rounding and full-vocabulary KL in nats per next-token position. The unchanged model
+establishes the KL floor from the stored teacher. The JSON retains each trial and
+each window's scores. The Markdown ranks targets by mean KL at each noise level.
+Rerun the same command to resume from the last saved trial. Pass a different
+`--output` directory when changing the sweep settings.
+
+### KL allocation profiling
+
 `tools/build_kl_teacher_dataset.py` prepares the original model's full-vocabulary log probabilities for KL allocation
 profiling. Each dataset contains the exact WikiText input tokens, FP16 log probabilities, baseline negative log
 likelihood, and the model, tokenizer and execution identities needed to validate reuse.
