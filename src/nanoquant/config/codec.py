@@ -14,7 +14,7 @@ from typing import Any, TypeVar, cast, get_args, get_origin, get_type_hints
 import yaml
 from pydantic import ConfigDict, TypeAdapter, ValidationError
 
-from .schema import RunConfig
+from .schema import FactorizedOptimizerConfig, RunConfig
 
 T = TypeVar("T")
 
@@ -134,6 +134,8 @@ def config_hash(config: RunConfig) -> str:
     reconstruction = payload["allocation"]["reconstruction"]
     if not config.block_tuning.compile_forward:
         payload["block_tuning"].pop("compile_forward", None)
+    if config.block_tuning.factorized.optimizer == FactorizedOptimizerConfig():
+        payload["block_tuning"]["factorized"].pop("optimizer", None)
     for name in ("allocation_dataset", "allocation_dataset_key"):
         if reconstruction.get(name) is None:
             reconstruction.pop(name, None)

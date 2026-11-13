@@ -1,9 +1,12 @@
+import hashlib
+import json
 from pathlib import Path
 
 import pytest
 import torch
 
 from nanoquant.application.loss_snapshots import BlockLossRecorder
+from nanoquant.config.codec import to_dict
 from nanoquant.config.schema import ProfilingConfig, ProfilingLevel
 from nanoquant.domain.models import (
     ArtifactRef,
@@ -31,7 +34,7 @@ from nanoquant.domain.models import (
     TensorSpec,
 )
 from nanoquant.domain.runs import BudgetState
-from nanoquant.infrastructure import commits
+from nanoquant.infrastructure import commits, optimizer_continuation
 from nanoquant.infrastructure.artifacts import ArtifactCorruptionError, LocalArtifactStore
 from nanoquant.infrastructure.commits import (
     CommitIdentity,
@@ -375,3 +378,65 @@ def test_failure_after_activation_generation_leaves_no_discoverable_block(tmp_pa
         '"artifact_type": "activation-generation"' in path.read_text(encoding="utf-8")
         for path in artifacts.root.glob("??/sha256-*/descriptor.json")
     )
+
+
+@pytest.mark.parametrize("interrupt_import", [False, True])
+def test_optimizer_continuation_preserves_payloads_and_recovers_transaction(tmp_path, monkeypatch, interrupt_import):
+    layer, plan, frozen, losses = _objects()
+    store = LocalArtifactStore(tmp_path / "artifacts")
+    with store.begin_write("quantization-plan") as writer:
+        (writer.path / "plan.json").write_text(json.dumps(to_dict(plan)))
+        plan_id = writer.commit().artifact_id
+    identity = CommitIdentity("old-config", "model", plan_id)
+    journal = ProgressJournal(tmp_path / "state", "run", store)
+    committed_layer = commit_layer(layer, store, identity)
+    committed_block = commit_block(BlockId(0), (layer,), frozen, losses, torch.ones(2, 3, 2),
+                                  torch.zeros(2, 3, 2), 0, store, identity)
+    journal.append("layer", 0, "linear", committed_layer.reference.artifact_id, identity)
+    journal.append("block", 0, None, committed_block.reference.artifact_id, identity)
+    source_journal = journal.path.read_bytes()
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({"config_hash": "old-manifest"}))
+    preprocessing = tmp_path / "state/preprocessing.json"
+    preprocessing.write_text(json.dumps({"resident_config_hash": "old-config", "plan": {"artifact_id": plan_id}}))
+    arguments = dict(source_journal_sha256=hashlib.sha256(source_journal).hexdigest(),
+                     source_manifest_config_hash="old-manifest", source_config_hash="old-config",
+                     target_config_hash="new-config", target_manifest={"config_hash": "new-manifest"}, start_block=1)
+    with pytest.raises(ValueError, match="source journal changed"):
+        optimizer_continuation.import_optimizer_prefix(
+            tmp_path, **{**arguments, "source_journal_sha256": "0" * 64},
+        )
+    assert journal.path.read_bytes() == source_journal
+    assert json.loads(manifest.read_text())["config_hash"] == "old-manifest"
+    write_bytes = optimizer_continuation._write_bytes
+    if interrupt_import:
+        def interrupted_write(path, data):
+            if path == manifest:
+                raise InterruptedError("during transaction")
+            write_bytes(path, data)
+        monkeypatch.setattr(optimizer_continuation, "_write_bytes", interrupted_write)
+        with pytest.raises(InterruptedError, match="during transaction"):
+            optimizer_continuation.import_optimizer_prefix(tmp_path, **arguments)
+        monkeypatch.setattr(optimizer_continuation, "_write_bytes", write_bytes)
+    receipt = optimizer_continuation.import_optimizer_prefix(tmp_path, **arguments)
+    assert receipt["complete_blocks_preserved"] == [0]
+    assert receipt["records_preserved"] == 2
+    assert receipt["status"] == "complete"
+    assert (tmp_path / "state/optimizer-continuation/source-journal.jsonl").read_bytes() == source_journal
+    new_identity = CommitIdentity("new-config", "model", plan_id)
+    discovered = journal.discover(plan, new_identity)
+    assert len(discovered.valid_records) == 2 and not discovered.orphan_records
+    restored = load_committed_block(
+        ArtifactRef("block-result", discovered.valid_records[-1].artifact_id, 1), store, new_identity,
+    )
+    assert restored.result == committed_block.result
+    teacher, compressed = load_block_activations(restored.reference, store)
+    assert torch.equal(teacher, torch.ones(2, 3, 2))
+    assert torch.equal(compressed, torch.zeros(2, 3, 2))
+    assert json.loads(preprocessing.read_text())["resident_config_hash"] == "new-config"
+    assert optimizer_continuation.import_optimizer_prefix(tmp_path, **arguments) == receipt
+    for record in json.loads("[" + ",".join(source_journal.decode().splitlines()) + "]"):
+        store.validate(record["artifact_id"])
+    changed = {**arguments, "source_journal_sha256": "0" * 64}
+    with pytest.raises(ValueError, match="receipt"):
+        optimizer_continuation.import_optimizer_prefix(tmp_path, **changed)

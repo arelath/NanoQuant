@@ -22,6 +22,9 @@ def test_072_retains_071_recipe_with_explicit_4b_adaptations():
         "block_tuning.non_factorized.loop.batch_size", "block_tuning.factorized.loop.batch_size",
         "block_tuning.post_block_refit.batch_size", "block_tuning.microbatch_size",
         "runtime.block_forward_batch_size", "evaluation.inline_quality",
+        "block_tuning.factorized.optimizer.name", "block_tuning.factorized.optimizer.start_block",
+        "block_tuning.factorized.optimizer.layer_patterns",
+        "block_tuning.factorized.optimizer.continuation_journal_sha256",
     }
     assert config.model == GEMMA_3_4B_COMPRESSION_TEMPLATE.model
     assert config.factorization == load_experiment(71).config.factorization
@@ -29,6 +32,11 @@ def test_072_retains_071_recipe_with_explicit_4b_adaptations():
     assert config.factorization.admm.inner_iterations == 2
     assert config.factorization.residual_stages.enabled
     assert config.block_tuning.compile_forward
+    assert config.block_tuning.factorized.optimizer.name == "fused_adamw_scales_fp32"
+    assert config.block_tuning.factorized.optimizer.start_block == 19
+    assert config.block_tuning.factorized.optimizer.layer_patterns == (
+        "mlp.gate_proj", "mlp.down_proj", "self_attn.o_proj",
+    )
     assert config.distillation == parent.distillation
     assert config.calibration == parent.calibration
     assert config.allocation.maximum_rank_layer_patterns == ("*",)

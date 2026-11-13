@@ -442,6 +442,7 @@ def resident_request_from_config(
         factorized_tuning_epochs=factorized.loop.epochs if factorized.loop.enabled else 0,
         factorized_tuning_batch_size=factorized.loop.batch_size,
         factorized_tuning_learning_rate=factorized_lr,
+        factorized_tuning_optimizer=factorized.optimizer,
         factorized_tuning_binary_learning_rate=factorized.learning_rates.binary,
         factorized_tuning_outlier_learning_rate=(
             factorized_lr

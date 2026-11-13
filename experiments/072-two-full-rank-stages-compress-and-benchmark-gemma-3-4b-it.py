@@ -13,6 +13,7 @@ from recipes import (
 )
 from recipes._delta import config_delta, retained_config
 
+from nanoquant.config.schema import FactorizedOptimizerConfig
 from nanoquant.self_measured_d2_workflow import SelfMeasuredD2ProfileOptions, run_self_measured_d2_experiment
 
 REFERENCE = retained_config(
@@ -38,6 +39,14 @@ CONFIG = config_delta(
         ),
         factorized=config_delta(
             REFERENCE.block_tuning.factorized,
+            # Both-seed held-out gate passed for these owners. Finish the saved
+            # partial block 18 with parity; retain up and shared QKV on parity.
+            optimizer=FactorizedOptimizerConfig(
+                name="fused_adamw_scales_fp32",
+                start_block=19,
+                layer_patterns=("mlp.gate_proj", "mlp.down_proj", "self_attn.o_proj"),
+                continuation_journal_sha256="f0b65f0c251c7acc033f6cc7d06de4d8c3e4a3dd112946830c77f88a1408e983",
+            ),
             loop=config_delta(REFERENCE.block_tuning.factorized.loop,
                               batch_size=MODEL_TEMPLATE.block_tuning.factorized.loop.batch_size),
         ),

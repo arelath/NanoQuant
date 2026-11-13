@@ -805,6 +805,17 @@ def validate(config: RunConfig, phase: ValidationPhase = ValidationPhase.PRE_RES
         require(loop.epochs >= 0, "CFG018", f"{path}.epochs", "must not be negative")
         require(loop.batch_size > 0, "CFG019", f"{path}.batch_size", "must be positive")
         require(not loop.enabled or loop.epochs > 0, "CFG020", path, "enabled loop requires positive epochs")
+    optimizer = config.block_tuning.factorized.optimizer
+    require(optimizer.name in {"parity", "fused_adamw_scales_fp32"}, "CFG250",
+            "block_tuning.factorized.optimizer.name", "unsupported optimizer")
+    require(optimizer.start_block >= 0 and bool(optimizer.layer_patterns), "CFG251",
+            "block_tuning.factorized.optimizer", "requires a nonnegative start block and projection patterns")
+    continuation = optimizer.continuation_journal_sha256
+    require(continuation is None or (
+        len(continuation) == 64 and all(character in "0123456789abcdef" for character in continuation)
+        and optimizer.start_block > 0 and optimizer.name == "fused_adamw_scales_fp32"
+    ), "CFG252", "block_tuning.factorized.optimizer.continuation_journal_sha256",
+            "requires an exact SHA-256 journal digest and a fused continuation boundary")
     microbatch = config.block_tuning.microbatch_size
     require(microbatch is None or microbatch > 0, "CFG021", "block_tuning.microbatch_size", "must be positive")
     refit = config.block_tuning.post_block_refit

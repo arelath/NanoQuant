@@ -227,3 +227,36 @@ screening evidence is in the other `optimizer-*` directories and must be compare
 Validation passed: 45 focused tests (2 deselected), the full default suite (1,635 passed,
 53 deselected), Ruff and mypy. These software checks do not establish full-model quality
 for the experimental optimizers.
+
+
+## Fused AdamW held-out check and continuation (2026-11-13)
+
+Tested block 0 gate, up, down and attention output projections with seeds 0 and 1,
+all 256 x 2048 training sequences, eight epochs and 2048 updates. Evaluation used
+32 separate WikiText-2 test windows, excluded from training and epoch selection.
+This is isolated projection reconstruction quality, not full-model perplexity.
+
+| Projection | Warm tuning time reduction | Weighted held-out MSE change | Decision |
+| --- | --- | --- | --- |
+| Gate | 21.3-23.2% | -1.01% to +1.10% | Enable |
+| Down | 23.4-24.1% | -7.80% to -5.23% | Enable |
+| Attention output | 8.4-9.7% | -1.35% to +0.10% | Enable |
+| Up | 19.8-21.0% | -0.73% to +4.77% | Keep parity optimizer |
+
+The acceptance bound was 2% held-out MSE regression per seed, checking weighted
+and unweighted error and Frobenius error. Results are in
+`evidence/072/optimizer-heldout-comparison.json`. Native fused AdamW keeps FP32
+scale masters during tuning and restores original storage precision afterward.
+
+Experiment 072 enables the three accepted projections starting at zero-based
+block 19; the partially saved block 18 finishes with the parity optimizer.
+The explicit journal-pinned metadata continuation preserved all 111 journal
+records, 18 completed blocks and three saved projections in block 18. Tensor
+and activation references are unchanged. Original metadata is backed up under
+`state/optimizer-continuation/`. Resume discovery found 111 valid records and
+zero orphans, with the next cursor at block 18 self_attn.attn_qkv. A fresh audit
+validated 693 artifacts (55.2 GB). No compression was started. Resume with the
+existing `python tools/run_experiment072_campaign.py` command.
+
+Validation: 1649 tests passed, 54 deselected in the full CPU suite; additional
+focused provenance tests and the CUDA native checkpoint/resume test passed.

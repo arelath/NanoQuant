@@ -14,7 +14,7 @@ from dataclasses import dataclass, replace
 from fnmatch import fnmatchcase
 from functools import partial
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import torch
 import transformers
@@ -90,6 +90,7 @@ from nanoquant.config.schema import (
     BiasCorrectionConfig,
     BinaryFactorSearchConfig,
     ExecutorKind,
+    FactorizedOptimizerConfig,
     KlAllocationObjective,
     KlSensitivityGranularity,
     LayerRankBudgetConfig,
@@ -214,6 +215,7 @@ from nanoquant.infrastructure.hf_language_model import load_causal_language_mode
 from nanoquant.infrastructure.io_utils import atomic_write_json
 from nanoquant.infrastructure.live_reconstruction import update_live_weight_error_report
 from nanoquant.infrastructure.model_adapters import TransformersModelAdapter, adapter_for_config
+from nanoquant.infrastructure.optimizer_continuation import import_optimizer_prefix
 from nanoquant.infrastructure.profiling import profiled_run
 from nanoquant.infrastructure.progress_journal import JournalRecord, ProgressJournal
 from nanoquant.infrastructure.reproducibility import deterministic_torch_execution
@@ -242,7 +244,10 @@ from nanoquant.infrastructure.tuning_checkpoint import (
 from nanoquant.ports.event_sink import EventSink, LayerCommittedPayload, emit_layer_committed
 from nanoquant.ports.model_adapter import ModelAdapter
 
-RESIDENT_ALGORITHM_VERSION = 68
+RESIDENT_ALGORITHM_VERSION = 69
+# Only version 69 adds an opt-in path without changing the default. A subsequent
+# algorithm version invalidates both paths normally.
+_PARITY_RESIDENT_ALGORITHM_VERSION = 68
 _CALIBRATION_ALGORITHM_VERSION = 1
 COVARIANCE_REFINEMENT_MAX_INPUT_FEATURES = 2048
 _THROUGHPUT_PROBE_REPETITIONS = 5
@@ -418,6 +423,7 @@ class ResidentQuantizationRequest:
     post_refit_covariance_refinement: PostRefitCovarianceRefinementConfig = (
         PostRefitCovarianceRefinementConfig()
     )
+    factorized_tuning_optimizer: FactorizedOptimizerConfig = FactorizedOptimizerConfig()
     factorized_tuning_epochs: int = 0
     factorized_tuning_batch_size: int = 8
     factorized_tuning_learning_rate: float = 1e-5
@@ -1909,6 +1915,17 @@ def _factorized_tuning_learning_rates(
     )
 
 
+def _factorized_optimizer_backend(
+    request: ResidentQuantizationRequest, block: int, projection: str,
+) -> Literal["parity", "fused_adamw_scales_fp32"]:
+    policy = request.factorized_tuning_optimizer
+    if policy.name == "fused_adamw_scales_fp32" and block >= policy.start_block and any(
+        fnmatchcase(projection, pattern) for pattern in policy.layer_patterns
+    ):
+        return "fused_adamw_scales_fp32"
+    return "parity"
+
+
 def _rehydrate_trainable_layer(
     state: FrozenNanoQuantState,
     tensors: LocalTensorStore,
@@ -2658,7 +2675,11 @@ def _run_post_refit_covariance_refinement(
 def _resident_config_hash(request: ResidentQuantizationRequest) -> str:
     adaptive_memory = request.memory_plan is not None and request.memory_plan.mode == "adaptive"
     semantic_config = {
-        "resident_algorithm_version": RESIDENT_ALGORITHM_VERSION,
+        "resident_algorithm_version": (
+            _PARITY_RESIDENT_ALGORITHM_VERSION
+            if RESIDENT_ALGORITHM_VERSION == 69 and request.factorized_tuning_optimizer == FactorizedOptimizerConfig()
+            else RESIDENT_ALGORITHM_VERSION
+        ),
         "runtime": {
             "torch": str(torch.__version__),
             "transformers": transformers.__version__,
@@ -2725,6 +2746,8 @@ def _resident_config_hash(request: ResidentQuantizationRequest) -> str:
         ),
         "seed": request.seed,
     }
+    if request.factorized_tuning_optimizer != FactorizedOptimizerConfig():
+        semantic_config["factorized_tuning_optimizer"] = request.factorized_tuning_optimizer
     # Preserve commit identity for the previously hard-coded parity policy.
     # A non-default retry policy is new semantic input and must invalidate it.
     if request.rank_retry != _DEFAULT_RESIDENT_RANK_RETRY:
@@ -3030,11 +3053,16 @@ def _resident_manifest_config(request: ResidentQuantizationRequest, component: s
     payload.pop("interrupt_after_preprocessing")
     payload.pop("preprocessing_reuse_run")
     payload.pop("rank_probe_reuse_run")
+    if request.factorized_tuning_optimizer == FactorizedOptimizerConfig():
+        payload.pop("factorized_tuning_optimizer")
     payload["token_ids"] = _manifest_tensor_identity(request.token_ids)
     payload["quality_token_ids"] = _manifest_tensor_identity(request.quality_token_ids)
     payload["component"] = component
     if request.run_config is not None:
-        payload["canonical_run_config"] = to_dict(request.run_config)
+        canonical = to_dict(request.run_config)
+        if request.run_config.block_tuning.factorized.optimizer == FactorizedOptimizerConfig():
+            canonical["block_tuning"]["factorized"].pop("optimizer")
+        payload["canonical_run_config"] = canonical
     if request.memory_plan is not None and request.memory_plan.mode == "adaptive":
         # These values are physical choices selected by the durable memory plan,
         # not changes to the user's canonical request. Keeping their concrete
@@ -4857,8 +4885,35 @@ def _load_reusable_calibration(
     )
 
 
+def _prepare_optimizer_continuation(request: ResidentQuantizationRequest, proposed: RunManifest) -> None:
+    policy = request.factorized_tuning_optimizer
+    if policy.continuation_journal_sha256 is None:
+        return
+    if request.run_config is None or policy.name != "fused_adamw_scales_fp32":
+        raise ValueError("optimizer continuation requires an explicit canonical fused recipe")
+    config = request.run_config
+    source_config = replace(config, block_tuning=replace(
+        config.block_tuning, factorized=replace(config.block_tuning.factorized, optimizer=FactorizedOptimizerConfig()),
+    ))
+    source_request = replace(request, run_config=source_config, factorized_tuning_optimizer=FactorizedOptimizerConfig())
+    source_proposed = _resident_manifest(source_request, "resident-quantization")
+    path = request.output / "manifest.json"
+    if not path.is_file():
+        raise ValueError("optimizer continuation requires its existing run; refusing to start from scratch")
+    stored = from_dict(RunManifest, json.loads(path.read_text(encoding="utf-8")))
+    target = replace(stored, config_hash=proposed.config_hash, resolved_config=proposed.resolved_config,
+                     launcher=proposed.launcher, environment=proposed.environment)
+    import_optimizer_prefix(
+        request.output, source_journal_sha256=policy.continuation_journal_sha256,
+        source_manifest_config_hash=source_proposed.config_hash,
+        source_config_hash=_resident_config_hash(source_request), target_config_hash=_resident_config_hash(request),
+        target_manifest=to_dict(target), start_block=policy.start_block,
+    )
+
+
 def _run_resident_quantization(request: ResidentQuantizationRequest) -> ResidentQuantizationResult:
     proposed = _resident_manifest(request, "resident-quantization")
+    _prepare_optimizer_continuation(request, proposed)
     with open_run_session(
         request.output,
         manifest=proposed,
@@ -5024,6 +5079,10 @@ def _run_resident_quantization(request: ResidentQuantizationRequest) -> Resident
 
 
 def _validate_resident_request(request: ResidentQuantizationRequest) -> None:
+    optimizer = request.factorized_tuning_optimizer
+    if (optimizer.name not in {"parity", "fused_adamw_scales_fp32"}
+            or optimizer.start_block < 0 or not optimizer.layer_patterns):
+        raise ValueError("invalid factorized tuning optimizer policy")
     kl_selected = request.allocation_strategy is AllocationStrategy.KL_CALIBRATED
     if kl_selected != bool(request.kl_profile_artifact) or kl_selected != bool(request.kl_profile_key):
         raise ValueError("KL-calibrated resident planning requires exactly one KL profile artifact and key")
@@ -8125,6 +8184,7 @@ def _execute_resident_quantization_pipeline(
                         batch_size=request.factorized_tuning_batch_size,
                         microbatch_size=request.tuning_microbatch_size,
                         learning_rate=request.factorized_tuning_learning_rate,
+                        optimizer=_factorized_optimizer_backend(request, block_index, layer_plan.layer.path),
                     ):
                         with _profile_layer_phase(
                             recorder,
@@ -8151,6 +8211,9 @@ def _execute_resident_quantization_pipeline(
                                     microbatch_size=request.tuning_microbatch_size,
                                     restore_best_state=request.restore_best_tuning_state,
                                     epoch_loss_mode=request.tuning_epoch_loss_mode,
+                                    optimizer_backend=_factorized_optimizer_backend(
+                                        request, block_index, layer_plan.layer.path,
+                                    ),
                                 ),
                                 tuning_forward,
                                 tuning_recorder,

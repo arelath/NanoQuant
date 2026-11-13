@@ -168,7 +168,7 @@ class ParityAdamW(Optimizer):
 
 
 def restore_optimizer_state(
-    optimizer: ParityAdamW,
+    optimizer: Optimizer,
     named_parameters: Iterable[tuple[str, Tensor]],
     states: Iterable[ParityAdamWState],
     completed_steps: int,
@@ -205,7 +205,7 @@ def restore_optimizer_state(
 
 
 def capture_optimizer_state(
-    optimizer: ParityAdamW,
+    optimizer: Optimizer,
     named_parameters: Iterable[tuple[str, Tensor]],
 ) -> tuple[ParityAdamWState, ...]:
     """Clone optimizer state to CPU for a durable training checkpoint."""
@@ -232,7 +232,7 @@ def capture_optimizer_state(
 
 
 def restore_cosine_annealing_state(
-    optimizer: ParityAdamW,
+    optimizer: Optimizer,
     scheduler: torch.optim.lr_scheduler.CosineAnnealingLR,
     completed_steps: int,
     total_steps: int,

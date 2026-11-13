@@ -398,8 +398,9 @@ def run_self_measured_d2_experiment(
             "all ranks are fixed, so allocation profiling and a second compression pass are unnecessary.",
             flush=True,
         )
-        # Preserve the control's original identity and journal. Publication owns
-        # the numbered output paths, while compression resumes the existing run.
+        # Resume the same control. An explicit optimizer continuation, when
+        # configured, imports its saved prefix with provenance before new work.
+        # Publication owns the numbered output paths.
         resolved = resolve_compression_quality_experiment(control, publication, launcher_path=launcher_path)
         execute_compression_quality_experiment(control, publication, resolved)
         return 0

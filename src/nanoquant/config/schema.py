@@ -536,10 +536,19 @@ class FactorizedLearningRates:
 
 
 @dataclass(frozen=True, slots=True)
+class FactorizedOptimizerConfig:
+    name: str = "parity"
+    start_block: int = 0
+    layer_patterns: tuple[str, ...] = ("*",)
+    continuation_journal_sha256: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class FactorizedTuningConfig:
     loop: TuningLoopConfig = field(default_factory=TuningLoopConfig)
     learning_rates: FactorizedLearningRates = field(default_factory=FactorizedLearningRates)
     skip_if_relative_loss_jump_below: float | None = None
+    optimizer: FactorizedOptimizerConfig = field(default_factory=FactorizedOptimizerConfig)
 
 
 @dataclass(frozen=True, slots=True)

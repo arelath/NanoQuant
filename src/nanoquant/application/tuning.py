@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Iterator
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Literal, TypeAlias
 
@@ -11,6 +12,7 @@ import torch
 from torch import nn
 
 from nanoquant.application.device_batches import iter_device_batches
+from nanoquant.application.fused_tuning_optimizer import capture_fused_state, fp32_scale_masters, restore_fused_state
 from nanoquant.application.layers import TrainableFactorizedLinear
 from nanoquant.application.parity_adamw import (
     ParityAdamW,
@@ -48,6 +50,7 @@ class TuningRequest:
     epoch_loss_mode: EpochLossMode = "full_evaluation"
     selection_inputs: torch.Tensor | None = None
     selection_targets: torch.Tensor | None = None
+    optimizer_backend: Literal["parity", "fused_adamw_scales_fp32"] = "parity"
 
 
 @dataclass(frozen=True, slots=True)
@@ -361,7 +364,7 @@ def _selected_gradients_are_finite(selected: list[tuple[str, nn.Parameter]]) -> 
 
 
 def _optimizer_state_is_finite(
-    optimizer: ParityAdamW,
+    optimizer: torch.optim.Optimizer,
     selected: list[tuple[str, nn.Parameter]],
 ) -> bool:
     return all(
@@ -374,7 +377,7 @@ def _optimizer_state_is_finite(
 
 @torch.no_grad()
 def _sanitize_nonfinite_optimizer_step(
-    optimizer: ParityAdamW,
+    optimizer: torch.optim.Optimizer,
     selected: list[tuple[str, nn.Parameter]],
 ) -> None:
     """Remove non-finite failed-step state before CUDA storage is recycled.
@@ -541,7 +544,16 @@ def tune(
         {"params": parameters, "lr": learning_rate}
         for learning_rate, parameters in grouped_parameters.items()
     ]
-    optimizer = ParityAdamW(optimizer_groups, lr=request.learning_rate, weight_decay=request.weight_decay)
+    optimizer: torch.optim.Optimizer
+    if request.optimizer_backend == "fused_adamw_scales_fp32":
+        optimizer = torch.optim.AdamW(
+            optimizer_groups, lr=request.learning_rate, weight_decay=request.weight_decay,
+            betas=(0.9, 0.99), eps=1e-6, fused=True,
+        )
+    elif request.optimizer_backend == "parity":
+        optimizer = ParityAdamW(optimizer_groups, lr=request.learning_rate, weight_decay=request.weight_decay)
+    else:
+        raise ValueError(f"unsupported tuning optimizer: {request.optimizer_backend}")
     initial_learning_rates = tuple(float(group["lr"]) for group in optimizer.param_groups)
     steps_per_epoch = (request.inputs.shape[0] + request.batch_size - 1) // request.batch_size
     total_steps = max(1, request.epochs * steps_per_epoch)
@@ -549,7 +561,10 @@ def tune(
     if starting_steps != (0 if resume is None else resume.completed_epochs * steps_per_epoch):
         raise ValueError("tuning resume step count disagrees with completed epochs")
     if resume is not None:
-        restore_optimizer_state(optimizer, selected, resume.optimizer_states, starting_steps, operation="tuning")
+        if request.optimizer_backend == "fused_adamw_scales_fp32":
+            restore_fused_state(optimizer, selected, resume.optimizer_states, starting_steps)
+        else:
+            restore_optimizer_state(optimizer, selected, resume.optimizer_states, starting_steps, operation="tuning")
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=total_steps, eta_min=request.learning_rate * 1e-4
     )
@@ -728,7 +743,11 @@ def tune(
                         stopped_early = True
                 if checkpoint_sink is not None:
                     with recorder.phase("checkpoint_snapshot"):
-                        optimizer_states = capture_optimizer_state(optimizer, selected)
+                        optimizer_states = (
+                            capture_fused_state(optimizer, selected)
+                            if request.optimizer_backend == "fused_adamw_scales_fp32"
+                            else capture_optimizer_state(optimizer, selected)
+                        )
                         checkpoint_sink(
                             TuningResumeState(
                                 epoch + 1,
@@ -852,16 +871,21 @@ def tune_factorized(
             return learning_rates.bias
         return request.learning_rate
 
-    return tune(
-        model,
-        request,
-        forward,
-        lambda name, _parameter: name.startswith(prefix),
-        recorder,
-        learning_rate_for_parameter=parameter_learning_rate,
-        resume=resume,
-        checkpoint_sink=checkpoint_sink,
+    precision = (
+        fp32_scale_masters(model.get_submodule(module_path))
+        if request.optimizer_backend == "fused_adamw_scales_fp32" else nullcontext()
     )
+    with precision:
+        return tune(
+            model,
+            request,
+            forward,
+            lambda name, _parameter: name.startswith(prefix),
+            recorder,
+            learning_rate_for_parameter=parameter_learning_rate,
+            resume=resume,
+            checkpoint_sink=checkpoint_sink,
+        )
 
 
 def post_block_refit(

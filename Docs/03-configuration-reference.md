@@ -1233,3 +1233,36 @@ There is no alternate `NanoQuantConfig`, `NanoQuantConfigDataclass`, `QuantArgum
 - migration covers every legacy field and fails on unmapped input;
 - generated CLI help and config documentation match field defaults;
 - no module outside `config` constructs its own defaults for canonical fields.
+
+
+## Selective fused factorized tuning and checkpoint continuation
+
+`block_tuning.factorized.optimizer` defaults to `name: parity`. The opt-in
+`fused_adamw_scales_fp32` backend uses native fused AdamW, BF16 binary-factor
+masters, and temporary FP32 scale masters. It preserves the existing learning
+rates, schedule, batches and epochs. Scale storage returns to its original dtype
+before freeze and subsequent tuning stages. Nonfactorized tuning, shared-input
+group tuning and post-block refit retain their existing optimizers.
+
+`start_block` is a zero-based boundary; `layer_patterns` selects standalone
+projection paths. The optimizer policy participates in resident commit identity.
+Native optimizer checkpoints preserve per-parameter step counts and moments;
+loading parity/Kahan state into the native optimizer is rejected.
+
+For an explicitly requested continuation of an existing run,
+`continuation_journal_sha256` pins the exact saved source journal. The preparation
+tool `tools/prepare_optimizer_continuation.py` is dry-run by default. `--apply`
+imports only small commit envelopes and updates the manifest and preprocessing
+pointer, preserving all tensor and activation references and the original
+manifest/journal under `state/optimizer-continuation/`. It does not run compression.
+The active partial block can retain parity until the declared boundary. A live
+tuning checkpoint must finish before import. Source changes, incompatible recipe
+deltas and a missing source run fail closed rather than starting over.
+
+The import receipt records the old/new commit mapping. A durable prepared
+transaction supports recovery if the process stops between metadata replacements.
+The new recipe binds both the optimizer policy and source-journal digest, so old
+orphan commits cannot be adopted as newly optimized results. Algorithm version 69
+identifies this optional path; the unchanged default retains its version-68
+identity only for this compatibility release. A subsequent algorithm version
+invalidates both paths normally.
