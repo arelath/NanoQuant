@@ -577,10 +577,18 @@ def _place_completed_decoder_block(
 def _weighted_mse(prediction: torch.Tensor, target: torch.Tensor, importance: torch.Tensor) -> float:
     if importance.ndim != 1 or importance.shape[0] != prediction.shape[-1]:
         raise ValueError("block output importance does not match hidden width")
+    if target.shape != prediction.shape:
+        raise ValueError("block loss prediction and target shapes differ")
     weights = importance.to(device=prediction.device, dtype=torch.float32)
     total = torch.zeros((), device=prediction.device)
     for index in range(prediction.shape[0]):
-        error = prediction[index].detach().float() - target[index].detach().float()
+        # A GPU activation cache can leave the teacher target on the device
+        # while propagated outputs are written to host memory. Move one sample
+        # at a time so the comparison stays bounded and device-consistent.
+        error = (
+            prediction[index].detach().float()
+            - target[index].detach().to(device=prediction.device).float()
+        )
         total += (error.square() * weights).sum()
     return float(total / prediction.numel())
 
