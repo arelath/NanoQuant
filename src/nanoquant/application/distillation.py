@@ -1022,6 +1022,55 @@ def _configured_distillation_loss(
     )
 
 
+def rehearse_distillation_step(
+    student: nn.Module,
+    token_ids: torch.Tensor,
+    lm_head: nn.Module,
+    hidden_states: HiddenStatesFunction,
+    target: TopKTeacherBatch,
+    config: TopKDistillationConfig,
+    selector: ParameterSelector,
+    *,
+    device: str | torch.device,
+) -> None:
+    """Run one training-shaped forward and backward that leaves no trace.
+
+    Callers use this to observe a real step's device footprint before training
+    starts. Parameters, gradients, trainability flags, module mode and random
+    state are identical before and after, so the trajectory is unaffected.
+    """
+
+    resolved = torch.device(device)
+    cuda_devices = (
+        [torch.cuda.current_device() if resolved.index is None else resolved.index]
+        if resolved.type == "cuda"
+        else []
+    )
+    prior_requires_grad = {id(parameter): parameter.requires_grad for parameter in student.parameters()}
+    prior_gradients = {id(parameter): parameter.grad for parameter in student.parameters()}
+    was_training = student.training
+    for name, parameter in student.named_parameters():
+        parameter.grad = None
+        parameter.requires_grad_(selector(name, parameter))
+    student.train()
+    try:
+        with torch.random.fork_rng(devices=cuda_devices):
+            sample_indices = torch.tensor(target.sample_indices, dtype=torch.long)
+            batch = token_ids.detach().cpu().index_select(0, sample_indices).to(device)
+            selected_tokens = target.token_indices.to(device=device, dtype=torch.long)
+            student_hidden = hidden_states(student, batch)
+            student_hidden = student_hidden.reshape(-1, student_hidden.shape[-1]).index_select(
+                0, selected_tokens
+            )
+            loss = _configured_distillation_loss(student_hidden, target, lm_head, config, device=device)
+            torch.autograd.backward(loss)
+    finally:
+        for parameter in student.parameters():
+            parameter.grad = prior_gradients[id(parameter)]
+            parameter.requires_grad_(prior_requires_grad[id(parameter)])
+        student.train(was_training)
+
+
 def distill_topk(
     student: nn.Module,
     token_ids: torch.Tensor,

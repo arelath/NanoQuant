@@ -7,6 +7,7 @@ import hashlib
 import json
 import re
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -25,9 +26,11 @@ from nanoquant.application.distillation import (
     TopKDistillationConfig,
     cache_topk_teacher_epoch,
     distill_topk,
+    rehearse_distillation_step,
 )
 from nanoquant.application.layers import (
     BlockEditor,
+    FactorizedReferenceLinear,
     LayerFreezer,
     SharedInputGroupFreezer,
     TrainableFactorizedLinear,
@@ -188,7 +191,16 @@ def _thaw_frozen_layers(
     tensors: LocalTensorStore,
     *,
     frozen_states: tuple[FrozenBlockState, ...] | None = None,
+    compact: bool = False,
+    share_group_evaluations: bool = False,
 ) -> dict[tuple[int, str], TrainableFactorizedLinear]:
+    """Install trainable owners for every frozen layer and shared-input group.
+
+    ``share_group_evaluations`` makes the members of a group reuse one owner
+    evaluation per input. Forward values are unchanged; gradients keep their
+    value but not their rounding, so only the distillation run itself opts in
+    and probes that replay earlier checkpoints keep the per-member path.
+    """
     editor = BlockEditor()
     freezer = LayerFreezer()
     trainable: dict[tuple[int, str], TrainableFactorizedLinear] = {}
@@ -232,6 +244,8 @@ def _thaw_frozen_layers(
                     else state.product_codebook.right_free_rows
                 ),
             )
+            if compact and module.product_codebook_free_rows is None:
+                _compact_owner(module)
             editor.install_trainable_layer(block, state.layer.path, module)
             trainable[(state.layer.block.index, state.layer.path)] = module
         for group_state in block_state.shared_input_groups:
@@ -256,15 +270,146 @@ def _thaw_frozen_layers(
                 immutable_binary_factors=True,
                 residual_stages=thaw_residual_stages(owner),
             )
+            if compact:
+                _compact_owner(module)
             editor.install_trainable_group(
                 block,
                 group_state.name,
                 tuple(member.layer for member in group_state.members),
                 tuple(member.row_end - member.row_start for member in group_state.members),
                 module,
+                share_member_evaluations=share_group_evaluations,
             )
             trainable[(group_state.block.index, group_state.name)] = module
     return trainable
+
+
+def _compact_owner(module: TrainableFactorizedLinear) -> None:
+    module.pack_fixed_signs()
+    for stage in module.residual_terms:
+        stage.pack_fixed_signs()
+
+
+def _needs_compact_student(loaded: LoadedFrozenModel, device: str) -> bool:
+    if not device.startswith("cuda"):
+        return False
+    # At this point all factors are on the host. Compare the expanded signs
+    # alone to physical capacity, without depending on transient CUDA usage.
+    signs = sum(
+        module.left_binary.numel() + module.right_binary.numel()
+        for module in loaded.model.modules() if isinstance(module, FactorizedReferenceLinear)
+    )
+    return 2 * signs >= torch.cuda.get_device_properties(torch.device(device)).total_memory
+
+
+def _compact_block_expansion_fits(student: nn.Module, device: str) -> bool:
+    if not device.startswith("cuda"):
+        return True
+    largest = max((sum(
+        2 * module.scale_mid.numel() * (module.scale_pre.numel() + module.scale_post.numel())
+        for module in block.modules() if isinstance(module, TrainableFactorizedLinear)
+    ) for block in _decoder_layers(student)), default=0)
+    free, _total = torch.cuda.mem_get_info(torch.device(device))
+    # Additional decoded signs are bounded by one recomputed block. Reserve
+    # 2 GiB beyond that for activations, optimizer and GEMM/decode workspace.
+    return largest + 2 * 1024**3 <= free
+
+
+def _configure_student_checkpointing(
+    student: nn.Module, *, compact: bool, enabled: bool, allow_block_expansion: bool = True,
+) -> str:
+    """Keep activations on device and avoid nested term/block recomputation.
+
+    Only disable term checkpoints after verifying the model enabled block
+    checkpointing. Reentrant blocks run the initial pass without autograd and
+    retain decoded factors for just the block currently undergoing backward.
+    """
+    block_checkpointing = False
+    if enabled:
+        enable = getattr(student, "gradient_checkpointing_enable", None)
+        if callable(enable):
+            if compact:
+                enable(gradient_checkpointing_kwargs={"use_reentrant": True})
+            else:
+                enable()
+            block_checkpointing = bool(getattr(student, "is_gradient_checkpointing", False))
+        enable_inputs = getattr(student, "enable_input_require_grads", None)
+        if callable(enable_inputs):
+            enable_inputs()
+    if compact:
+        for module in student.modules():
+            if isinstance(module, TrainableFactorizedLinear):
+                module.checkpoint_fixed_signs = not (block_checkpointing and allow_block_expansion)
+        mode = ("block checkpoints" if allow_block_expansion else "nested checkpoints (VRAM headroom limit)")
+        return "packed signs, GPU activations, " + (mode if block_checkpointing else "term checkpoints")
+    return "ordinary resident factors and GPU activations"
+
+
+# Left free after resident signs are sized from a measured training step. It
+# absorbs other processes' device memory growth and the allocator fragmentation
+# that steady-state training adds over one rehearsed step (about 0.2 GiB was
+# observed on a 12 GiB device).
+_RESIDENT_SIGN_HEADROOM_BYTES = 3 * 1024**3 // 2
+
+
+def _spare_memory_after_step(device: str, rehearse: Callable[[], None]) -> int:
+    """Return the device memory one real training step leaves unused.
+
+    This resets the allocator's peak statistics; callers that report a run-wide
+    peak must read it before calling.
+    """
+    target = torch.device(device)
+    release_memory(device, synchronize=True)
+    torch.cuda.reset_peak_memory_stats(target)
+    resting = torch.cuda.memory_reserved(target)
+    rehearse()
+    working_set = torch.cuda.max_memory_reserved(target) - resting
+    release_memory(device, synchronize=True)
+    free, _total = torch.cuda.mem_get_info(target)
+    return int(free) - int(working_set)
+
+
+def _packed_terms(student: nn.Module) -> list[TrainableFactorizedLinear]:
+    return [
+        module for module in student.modules()
+        if isinstance(module, TrainableFactorizedLinear) and module.fixed_sign_residency_bytes() > 0
+    ]
+
+
+def _retain_decoded_signs(student: nn.Module, budget: int) -> tuple[int, int]:
+    """Keep packed terms decoded while they fit the byte budget, smallest first.
+
+    Every decode pays a fixed launch cost on top of its size, so small terms
+    remove the most work per resident byte. The choice never changes a value:
+    resident signs are bitwise the ones decoding would produce.
+    """
+    resident = spent = 0
+    for module in sorted(_packed_terms(student), key=TrainableFactorizedLinear.fixed_sign_residency_bytes):
+        cost = module.fixed_sign_residency_bytes()
+        if cost > budget - spent:
+            break
+        module.unpack_fixed_signs()
+        resident += 1
+        spent += cost
+    return resident, spent
+
+
+def _use_spare_memory_for_signs(
+    student: nn.Module, device: str, rehearse: Callable[[], None],
+) -> tuple[int, int, int] | None:
+    """Spend measured spare device memory on resident signs for a block-checkpointed compact student.
+
+    Returns resident terms, packed terms considered and resident bytes, or None
+    when the policy does not apply and nothing was measured.
+    """
+    packed = _packed_terms(student)
+    # Term-checkpointed students were denied block expansion for lack of
+    # headroom, and unpacking a term would also change what autograd retains.
+    if not device.startswith("cuda") or not packed or any(module.checkpoint_fixed_signs for module in packed):
+        return None
+    spare = _spare_memory_after_step(device, rehearse)
+    resident, spent = _retain_decoded_signs(student, spare - _RESIDENT_SIGN_HEADROOM_BYTES)
+    return resident, len(packed), spent
 
 
 def _selected_parameters(
@@ -553,10 +698,15 @@ def _run_global_topk_distillation(
     elif loaded.global_tuning is not None:
         raise ValueError("run already has an active global tuning result")
     with recorder.phase("thaw"):
+        compact = _needs_compact_student(loaded, request.device)
+        if compact:
+            progress.status("using packed fixed signs with per-term backward recomputation")
         trainable = _thaw_frozen_layers(
             loaded,
             tensors,
             frozen_states=None if initializer is None else initializer.result.tuned_blocks,
+            compact=compact,
+            share_group_evaluations=True,
         )
         selected, auxiliary_names = _selected_parameters(loaded.model, trainable)
 
@@ -633,14 +783,41 @@ def _run_global_topk_distillation(
     with recorder.phase("student_setup"):
         student = loaded.model
         cast(Any, student).config.use_cache = False
-        if request.config.gradient_checkpointing:
-            enable_checkpointing = getattr(student, "gradient_checkpointing_enable", None)
-            if callable(enable_checkpointing):
-                enable_checkpointing()
-            enable_input_gradients = getattr(student, "enable_input_require_grads", None)
-            if callable(enable_input_gradients):
-                enable_input_gradients()
         student.to(request.device)
+        execution = _configure_student_checkpointing(
+            student, compact=compact, enabled=request.config.gradient_checkpointing,
+            allow_block_expansion=not compact or _compact_block_expansion_fits(student, request.device),
+        )
+        progress.status(f"student execution: {execution}")
+
+    def selector(_name: str, parameter: nn.Parameter) -> bool:
+        return id(parameter) in selected
+
+    def rehearse() -> None:
+        # The largest cached batch bounds the working set of every later step.
+        rehearse_distillation_step(
+            student,
+            tokens,
+            _lm_head(student),
+            _hidden_states,
+            max(
+                (batch for epoch in teacher_cache.epochs for batch in epoch),
+                key=lambda batch: (len(batch.sample_indices), batch.token_indices.numel()),
+            ),
+            request.config,
+            selector,
+            device=request.device,
+        )
+
+    peak_gpu_before_rehearsal = peak_device_memory_bytes(request.device)
+    with recorder.phase("resident_signs"):
+        residency = _use_spare_memory_for_signs(student, request.device, rehearse)
+    if residency is not None:
+        resident_terms, packed_terms, resident_bytes = residency
+        progress.status(
+            f"decoded signs resident for {resident_terms}/{packed_terms} factor terms "
+            f"({resident_bytes / 1024**3:.2f} GiB of measured spare device memory)"
+        )
     progress.status("measuring the pre-distillation block snapshot")
     with recorder.phase("block_snapshot_pre_kd"):
         pre_kd_block_losses = measure_block_output_mse(
@@ -703,7 +880,7 @@ def _run_global_topk_distillation(
                 _hidden_states,
                 teacher_cache,
                 request.config,
-                lambda _name, parameter: id(parameter) in selected,
+                selector,
                 device=request.device,
                 resume=None if active_checkpoint is None else active_checkpoint.state,
                 checkpoint_sink=checkpoint_sink,
@@ -735,7 +912,7 @@ def _run_global_topk_distillation(
         post_kd_block_losses,
         snapshot_selection.protocol,
     )
-    peak_gpu = peak_device_memory_bytes(request.device)
+    peak_gpu = max(peak_gpu_before_rehearsal, peak_device_memory_bytes(request.device))
     with recorder.phase("offload"):
         _offload_student(student, request.device)
 

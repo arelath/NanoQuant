@@ -2,6 +2,7 @@ import json
 import shutil
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -139,7 +140,10 @@ def test_complete_frozen_run_can_be_distilled_committed_and_reloaded(
 
     cooldowns: list[float] = []
     offloads: list[str] = []
-    monkeypatch.setattr("nanoquant.global_distillation.time.sleep", cooldowns.append)
+    monkeypatch.setattr(
+        global_distillation_module, "time",
+        SimpleNamespace(sleep=cooldowns.append, perf_counter=global_distillation_module.time.perf_counter),
+    )
     original_offload = global_distillation_module._offload_student
 
     def observe_offload(student: torch.nn.Module, device: str) -> None:
@@ -147,6 +151,9 @@ def test_complete_frozen_run_can_be_distilled_committed_and_reloaded(
         original_offload(student, device)
 
     monkeypatch.setattr(global_distillation_module, "_offload_student", observe_offload)
+    if residual_stages:
+        # Exercise packed training, checkpoint/resume and the standard freezer on CPU.
+        monkeypatch.setattr(global_distillation_module, "_needs_compact_student", lambda *_: True)
     request = GlobalDistillationRequest(
         output,
         snapshot,
@@ -162,7 +169,7 @@ def test_complete_frozen_run_can_be_distilled_committed_and_reloaded(
             vocabulary_chunk_size=7,
             token_chunk_size=4,
             maximum_tokens_per_batch=8,
-            gradient_checkpointing=False,
+            gradient_checkpointing=residual_stages,
             weight_decay=0.0,
             tail_mass_weight=0.5,
             minimum_teacher_mass_ratio=0.8,

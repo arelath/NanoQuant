@@ -13,6 +13,7 @@ from nanoquant.application.distillation import (
     cache_topk_teacher_targets,
     distill_topk,
     multiband_tail_distillation_loss,
+    rehearse_distillation_step,
     teacher_topk_logits,
     teacher_topk_logits_with_normalizers,
     topk_distillation_loss,
@@ -912,3 +913,55 @@ def test_distillation_micro_profile_preserves_cache_training_and_parameters() ->
     counters = {str(counter["name"]): counter for counter in payload["counters"]}  # type: ignore[index]
     assert counters["distillation.steps"]["total"] == profiled_metrics.steps_completed
     assert counters["distillation.teacher_cache_bytes"]["total"] == profiled_cache.bytes
+
+
+def test_rehearsed_step_leaves_no_trace_on_the_training_trajectory() -> None:
+    torch.manual_seed(31)
+    teacher = ToyLanguageModel()
+    control = deepcopy(teacher)
+    with torch.no_grad():
+        control.projection.weight.add_(
+            0.25 * torch.randn(control.projection.weight.shape, generator=torch.Generator().manual_seed(32))
+        )
+    rehearsed = deepcopy(control)
+    tokens = torch.randint(1, 17, (6, 5), generator=torch.Generator().manual_seed(33))
+    config = TopKDistillationConfig(epochs=2, batch_size=2, learning_rate=0.03, top_k=6, seed=34)
+    cache = cache_topk_teacher_targets(teacher, tokens, teacher.lm_head, _hidden, config, device="cpu", pad_token_id=0)
+
+    def selector(name: str, _parameter: nn.Parameter) -> bool:
+        return name == "projection.weight"
+
+    def random_hidden(model: nn.Module, token_ids: torch.Tensor) -> torch.Tensor:
+        torch.rand(3)  # a forward that consumes the global generator
+        return _hidden(model, token_ids)
+
+    rehearsed.eval()
+    rehearsed.norm.weight.requires_grad_(False)
+    earlier_gradient = torch.full_like(rehearsed.projection.weight, 0.5)
+    rehearsed.projection.weight.grad = earlier_gradient.clone()
+    before = {name: value.detach().clone() for name, value in rehearsed.named_parameters()}
+    trainable = {name: value.requires_grad for name, value in rehearsed.named_parameters()}
+    generator_state = torch.get_rng_state()
+
+    rehearse_distillation_step(
+        rehearsed, tokens, rehearsed.lm_head, random_hidden, cache.epochs[0][0], config, selector, device="cpu"
+    )
+
+    assert torch.equal(torch.get_rng_state(), generator_state)
+    assert not rehearsed.training
+    assert trainable == {name: value.requires_grad for name, value in rehearsed.named_parameters()}
+    assert all(torch.equal(value, before[name]) for name, value in rehearsed.named_parameters())
+    assert torch.equal(rehearsed.projection.weight.grad, earlier_gradient)
+    assert all(
+        value.grad is None for name, value in rehearsed.named_parameters() if name != "projection.weight"
+    )
+
+    rehearsed.projection.weight.grad = None
+    rehearsed.norm.weight.requires_grad_(True)
+    rehearsed.train()
+    control_metrics = distill_topk(control, tokens, control.lm_head, _hidden, cache, config, selector, device="cpu")
+    rehearsed_metrics = distill_topk(
+        rehearsed, tokens, rehearsed.lm_head, _hidden, cache, config, selector, device="cpu"
+    )
+    assert rehearsed_metrics == control_metrics
+    assert torch.equal(rehearsed.projection.weight, control.projection.weight)

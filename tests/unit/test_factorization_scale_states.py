@@ -456,6 +456,25 @@ def test_pack_independent_sign_reconstruction(values: list[bool]) -> None:
     assert torch.equal(unpack_sign_bits(packed, shape), signs)
 
 
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("shape", [(1,), (3, 5), (7, 9), (16, 8), (2, 3, 11)])
+def test_sign_unpacking_matches_the_bitwise_definition_in_every_dtype(
+    dtype: torch.dtype, shape: tuple[int, ...]
+) -> None:
+    generator = torch.Generator().manual_seed(sum(shape))
+    signs = torch.randint(0, 2, shape, generator=generator).to(dtype).mul_(2).sub_(1)
+    packed, packed_shape = pack_sign_bits(signs)
+    count = signs.numel()
+    shifts = torch.arange(8, dtype=torch.uint8)
+    reference = ((packed.reshape(-1, 1) >> shifts) & 1).reshape(-1)[:count].reshape(shape).to(dtype) * 2 - 1
+
+    decoded = unpack_sign_bits(packed, packed_shape, dtype=dtype)
+
+    assert decoded.dtype is dtype
+    assert torch.equal(decoded, reference)
+    assert torch.equal(decoded, signs)
+
+
 @given(st.floats(min_value=0.01, max_value=100, allow_nan=False, allow_infinity=False))
 def test_reconstruction_is_invariant_to_reciprocal_outer_scaling(multiplier: float) -> None:
     left = torch.tensor([[1.0, -1.0], [-1.0, 1.0]])

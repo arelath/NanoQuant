@@ -215,6 +215,88 @@ def test_group_owner_views_share_parameters_and_round_trip(tmp_path: Path) -> No
     )
 
 
+def _installed_group(*, share: bool) -> tuple[_Block, TrainableSharedInputFactorGroup, list[int]]:
+    block = _Block()
+    owner = TrainableSharedInputFactorGroup(
+        torch.sign(torch.randn(10, 4, dtype=torch.float64, generator=torch.Generator().manual_seed(1))),
+        torch.sign(torch.randn(4, 8, dtype=torch.float64, generator=torch.Generator().manual_seed(2))),
+        torch.rand(8, dtype=torch.float64, generator=torch.Generator().manual_seed(3)) + 0.5,
+        torch.rand(4, dtype=torch.float64, generator=torch.Generator().manual_seed(4)) + 0.5,
+        torch.rand(10, dtype=torch.float64, generator=torch.Generator().manual_seed(5)) + 0.5,
+        immutable_binary_factors=True,
+    )
+    owner.left_latent.requires_grad_(False)
+    owner.right_latent.requires_grad_(False)
+    members = tuple(LayerId(BlockId(0), path) for path in ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"))
+    BlockEditor().install_trainable_group(
+        block, "self_attn.attn_qkv", members, (6, 2, 2), owner, share_member_evaluations=share,
+    )
+    evaluations: list[int] = []
+    owner.register_forward_hook(lambda *_: evaluations.append(1))
+    return block, owner, evaluations
+
+
+def _member_outputs(block: _Block, value: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    attention = block.self_attn
+    return attention.q_proj(value), attention.k_proj(value), attention.v_proj(value)
+
+
+def test_shared_group_evaluation_runs_the_owner_once_with_unchanged_values_and_gradients() -> None:
+    separate, separate_owner, separate_evaluations = _installed_group(share=False)
+    shared, shared_owner, shared_evaluations = _installed_group(share=True)
+    value = torch.randn(3, 8, dtype=torch.float64, generator=torch.Generator().manual_seed(6))
+    weights = torch.randn(3, 10, dtype=torch.float64, generator=torch.Generator().manual_seed(7))
+
+    expected_input = value.clone().requires_grad_()
+    actual_input = value.clone().requires_grad_()
+    expected = torch.cat(_member_outputs(separate, expected_input), dim=-1)
+    actual = torch.cat(_member_outputs(shared, actual_input), dim=-1)
+
+    assert (len(separate_evaluations), len(shared_evaluations)) == (3, 1)
+    assert torch.equal(actual, expected)
+    (expected * weights).sum().backward()
+    (actual * weights).sum().backward()
+    assert torch.allclose(actual_input.grad, expected_input.grad, rtol=1e-12, atol=0)
+    for name, parameter in separate_owner.named_parameters():
+        if parameter.grad is not None:
+            assert torch.allclose(dict(shared_owner.named_parameters())[name].grad, parameter.grad, rtol=1e-12, atol=0)
+    # Nothing may outlive the last member: a retained output would pin the block's autograd graph.
+    evaluation = shared.self_attn.q_proj._evaluation
+    assert evaluation is shared.self_attn.v_proj._evaluation
+    assert evaluation._input is None and evaluation._output is None
+    assert separate.self_attn.q_proj._evaluation is None
+
+
+def test_shared_group_evaluation_never_reuses_a_stale_owner_output() -> None:
+    shared, owner, evaluations = _installed_group(share=True)
+    attention = shared.self_attn
+    first = torch.randn(3, 8, dtype=torch.float64, generator=torch.Generator().manual_seed(8))
+    second = first + 1
+
+    assert torch.equal(attention.q_proj(first), owner(first)[:, :6])
+    evaluations.clear()
+    # A different tensor, even mid-group, is a different evaluation.
+    assert torch.equal(attention.k_proj(second), owner(second)[:, 6:8])
+    assert torch.equal(attention.v_proj(second), owner(second)[:, 8:10])
+    assert len(evaluations) == 3  # one shared evaluation plus the two reference calls above
+
+    evaluations.clear()
+    mutable = first.clone()
+    before = attention.q_proj(mutable).clone()
+    mutable.add_(1)
+    assert torch.equal(attention.k_proj(mutable), owner(second)[:, 6:8])
+    assert not torch.equal(attention.q_proj(mutable), before)
+    assert len(evaluations) == 3  # the in-place edit forced a second shared evaluation
+
+    evaluations.clear()
+    tracked = first.clone().requires_grad_()
+    with torch.no_grad():
+        assert not attention.q_proj(tracked).requires_grad
+    assert attention.k_proj(tracked).requires_grad
+    assert attention.v_proj(tracked).requires_grad
+    assert len(evaluations) == 2  # the no-grad result is not handed to a gradient pass
+
+
 def test_group_logical_and_packed_state_preserve_member_slices(tmp_path: Path) -> None:
     spec = QuantizedLinearSpec(
         "blocks.0.self_attn.attn_qkv",

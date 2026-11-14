@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import weakref
 from contextlib import ExitStack
 from dataclasses import dataclass
@@ -9,6 +10,7 @@ from typing import Any, cast
 
 import torch
 from torch import nn
+from torch.utils.checkpoint import checkpoint
 
 from nanoquant.domain.linear_math import (
     functional_dense_reconstruction,
@@ -29,6 +31,7 @@ from nanoquant.domain.models import (
     TrainableFactors,
 )
 from nanoquant.domain.outliers import quantize_int8_columns
+from nanoquant.domain.packing import pack_sign_bits, unpack_sign_bits
 from nanoquant.domain.sign_word_codebook import ProductSignCodebook, decode_product_codebook
 from nanoquant.ports.tensor_store import TensorStore
 
@@ -118,6 +121,8 @@ class TrainableFactorizedLinear(nn.Module):
         self.patch_left = None if patch_left is None else nn.Parameter(patch_left.detach().clone())
         self.patch_right = None if patch_right is None else nn.Parameter(patch_right.detach().clone())
         self.immutable_binary_factors = immutable_binary_factors
+        self._packed_factor_shapes: tuple[tuple[int, ...], tuple[int, ...]] | None = None
+        self.checkpoint_fixed_signs = True
         if any(stage.residual_stages or stage.bias is not None or stage.outlier_indices is not None
                or stage.patch_left is not None or stage.product_codebook_free_rows is not None
                for stage in residual_stages):
@@ -148,9 +153,15 @@ class TrainableFactorizedLinear(nn.Module):
 
     def dense_weight(self) -> torch.Tensor:
         apply_sign = cast(Any, _SignSTE).apply
+        left, right = (
+            self._decode_fixed_signs(self.scale_pre.dtype)
+            if self._packed_factor_shapes is not None
+            else (cast(torch.Tensor, apply_sign(self.left_latent)),
+                  cast(torch.Tensor, apply_sign(self.effective_right_latent())))
+        )
         weight = functional_dense_reconstruction(
-            cast(torch.Tensor, apply_sign(self.left_latent)),
-            cast(torch.Tensor, apply_sign(self.effective_right_latent())),
+            left,
+            right,
             self.scale_pre,
             self.scale_mid,
             self.scale_post,
@@ -164,19 +175,53 @@ class TrainableFactorizedLinear(nn.Module):
             weight = weight + stage.dense_weight()
         return weight
 
-    def forward(self, value: torch.Tensor) -> torch.Tensor:
-        apply_sign = cast(Any, _SignSTE).apply
-        right = (
-            self.effective_right_latent()
-            if self.immutable_binary_factors and not self.right_latent.requires_grad
-            else cast(torch.Tensor, apply_sign(self.effective_right_latent()))
-        ).to(device=value.device, dtype=value.dtype)
-        left = (
-            self.left_latent
-            if self.immutable_binary_factors and not self.left_latent.requires_grad
-            else cast(torch.Tensor, apply_sign(self.left_latent))
-        ).to(device=value.device, dtype=value.dtype)
-        output = functional_factorized_linear(
+    def pack_fixed_signs(self) -> None:
+        """Use transient decoded signs for scale-only training, without changing parameter names for scales."""
+        if not self.immutable_binary_factors or self.product_codebook_free_rows is not None:
+            raise ValueError("compact training requires immutable plain binary factors")
+        if self._packed_factor_shapes is None:
+            left, left_shape = pack_sign_bits(self.left_latent)
+            right, right_shape = pack_sign_bits(self.right_latent)
+            del self.left_latent, self.right_latent
+            self.register_buffer("left_latent", left, persistent=False)
+            self.register_buffer("right_latent", right, persistent=False)
+            self._packed_factor_shapes = left_shape, right_shape
+
+    def fixed_sign_residency_bytes(self) -> int:
+        """Return the extra memory needed to keep this term's packed signs decoded."""
+        shapes = self._packed_factor_shapes
+        if shapes is None:
+            return 0
+        decoded = sum(math.prod(shape) for shape in shapes) * self.scale_pre.element_size()
+        return decoded - self.left_latent.numel() - self.right_latent.numel()
+
+    def unpack_fixed_signs(self) -> None:
+        """Keep decoded signs resident, trading memory for the decode in every forward."""
+        if self._packed_factor_shapes is not None:
+            left, right = self._decode_fixed_signs(self.scale_pre.dtype)
+            self.register_buffer("left_latent", left, persistent=False)
+            self.register_buffer("right_latent", right, persistent=False)
+            self._packed_factor_shapes = None
+
+    def _decode_fixed_signs(self, dtype: torch.dtype) -> tuple[torch.Tensor, torch.Tensor]:
+        shapes = self._packed_factor_shapes
+        if shapes is None:
+            raise ValueError("no packed sign factors")
+        return (unpack_sign_bits(self.left_latent, shapes[0], dtype=dtype),
+                unpack_sign_bits(self.right_latent, shapes[1], dtype=dtype))
+
+    def export_signs(self) -> tuple[torch.Tensor, torch.Tensor]:
+        if self._packed_factor_shapes is not None:
+            return self._decode_fixed_signs(torch.float32)
+        return (torch.where(self.left_latent.detach() >= 0, 1.0, -1.0),
+                torch.where(self.effective_right_latent().detach() >= 0, 1.0, -1.0))
+
+    def _forward_term(self, value: torch.Tensor) -> torch.Tensor:
+        if self._packed_factor_shapes is not None:
+            left, right = self._decode_fixed_signs(value.dtype)
+        else:
+            left, right = self._materialize_forward_signs(value)
+        return functional_factorized_linear(
             value,
             left,
             right,
@@ -190,6 +235,28 @@ class TrainableFactorizedLinear(nn.Module):
             self.patch_left,
             self.patch_right,
         )
+
+    def _materialize_forward_signs(self, value: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        apply_sign = cast(Any, _SignSTE).apply
+        right = (
+            self.effective_right_latent()
+            if self.immutable_binary_factors and not self.right_latent.requires_grad
+            else cast(torch.Tensor, apply_sign(self.effective_right_latent()))
+        ).to(device=value.device, dtype=value.dtype)
+        left = (
+            self.left_latent
+            if self.immutable_binary_factors and not self.left_latent.requires_grad
+            else cast(torch.Tensor, apply_sign(self.left_latent))
+        ).to(device=value.device, dtype=value.dtype)
+        return left, right
+
+    def forward(self, value: torch.Tensor) -> torch.Tensor:
+        # Autograd would otherwise retain each decoded matrix until backward.
+        output = (
+            cast(torch.Tensor, checkpoint(self._forward_term, value, use_reentrant=False, preserve_rng_state=False))
+            if self._packed_factor_shapes is not None and self.checkpoint_fixed_signs and torch.is_grad_enabled()
+            else self._forward_term(value)
+        )
         for stage in self.residual_terms:
             output = output + stage(value)
         return output
@@ -201,14 +268,66 @@ class TrainableSharedInputFactorGroup(TrainableFactorizedLinear):
     coupled_shared_input_scales = True
 
 
+class SharedGroupEvaluation:
+    """One owner evaluation shared by every member view that receives the same input.
+
+    Members of a group are called back to back with one input tensor. Without
+    sharing, each member re-evaluates the whole stacked owner and autograd
+    back-propagates through it once per member. Sharing leaves every forward
+    value bitwise unchanged; parameter gradients remain the same sum but are
+    accumulated in one backward pass, so they differ in floating-point rounding.
+    """
+
+    def __init__(self, members: int) -> None:
+        if members <= 0:
+            raise ValueError("a shared group evaluation needs at least one member")
+        self.members = members
+        self._input: torch.Tensor | None = None
+        self._input_version = 0
+        self._gradient_mode = False
+        self._output: torch.Tensor | None = None
+        self._remaining = 0
+
+    def __call__(self, owner: nn.Module, value: torch.Tensor) -> torch.Tensor:
+        output = self._output
+        if (
+            output is not None
+            and self._input is value
+            and self._input_version == value._version
+            and self._gradient_mode == torch.is_grad_enabled()
+        ):
+            self._remaining -= 1
+        else:
+            output = owner(value)
+            if not isinstance(output, torch.Tensor):
+                raise RuntimeError("shared-input group owner did not return a tensor")
+            # Holding the input keeps its identity from being reused by another tensor.
+            self._input, self._input_version = value, value._version
+            self._gradient_mode = torch.is_grad_enabled()
+            self._output = output
+            self._remaining = self.members - 1
+        if self._remaining <= 0:
+            # The last member has its slice; keep neither activations nor an autograd graph alive.
+            self._input = self._output = None
+        return output
+
+
 class SharedInputProjectionView(nn.Module):
     """Parameter-free logical projection backed by a registered group owner."""
 
-    def __init__(self, owner: nn.Module, row_start: int, row_end: int, in_features: int) -> None:
+    def __init__(
+        self,
+        owner: nn.Module,
+        row_start: int,
+        row_end: int,
+        in_features: int,
+        evaluation: SharedGroupEvaluation | None = None,
+    ) -> None:
         super().__init__()
         if row_start < 0 or row_end <= row_start or in_features <= 0:
             raise ValueError("invalid shared-input projection slice")
         object.__setattr__(self, "_owner_reference", weakref.ref(owner))
+        self._evaluation = evaluation
         self.row_start = row_start
         self.row_end = row_end
         self.in_features = in_features
@@ -223,7 +342,7 @@ class SharedInputProjectionView(nn.Module):
         return owner
 
     def forward(self, value: torch.Tensor) -> torch.Tensor:
-        output = self.owner(value)
+        output = self.owner(value) if self._evaluation is None else self._evaluation(self.owner, value)
         if not isinstance(output, torch.Tensor) or output.shape[-1] < self.row_end:
             raise RuntimeError("shared-input group output does not cover its member slice")
         return output[..., self.row_start : self.row_end]
@@ -405,15 +524,16 @@ def _freeze_residual_stages(
 ) -> tuple[FrozenResidualFactorState, ...]:
     stages = []
     for stage in trainable.residual_terms:
+        left, right = stage.export_signs()
         refs = tensors.put("frozen-residual-stage", {
-            "left_binary": torch.where(stage.left_latent.detach() >= 0, 1.0, -1.0),
-            "right_binary": torch.where(stage.right_latent.detach() >= 0, 1.0, -1.0),
+            "left_binary": left,
+            "right_binary": right,
             "scale_pre": stage.scale_pre.detach(),
             "scale_mid": stage.scale_mid.detach(),
             "scale_post": stage.scale_post.detach(),
         })
         stages.append(FrozenResidualFactorState(
-            stage.left_latent.shape[1], refs["left_binary"], refs["right_binary"],
+            left.shape[1], refs["left_binary"], refs["right_binary"],
             ScaleState(refs["scale_pre"], refs["scale_mid"], refs["scale_post"]),
         ))
     return tuple(stages)
@@ -472,8 +592,7 @@ class LayerFreezer:
         patch_storage_dtype: torch.dtype | None = None,
         product_codebook: ProductCodebookFactorState | None = None,
     ) -> FrozenLayer:
-        left = torch.where(trainable.left_latent.detach() >= 0, 1.0, -1.0)
-        right = torch.where(trainable.effective_right_latent().detach() >= 0, 1.0, -1.0)
+        left, right = trainable.export_signs()
         if product_codebook is not None:
             if trainable.product_codebook_free_rows != product_codebook.right_free_rows:
                 raise ValueError("trainable and persisted product-codebook free rows differ")
@@ -540,8 +659,9 @@ class LayerFreezer:
         return self.load(
             state,
             tensors,
-            device=str(trainable.left_latent.device),
-            dtype=trainable.left_latent.dtype,
+            device=str(trainable.scale_pre.device),
+            dtype=(trainable.scale_pre.dtype if trainable._packed_factor_shapes is not None
+                   else trainable.left_latent.dtype),
             backend=backend,
         )
 
@@ -651,10 +771,9 @@ class SharedInputGroupFreezer:
             raise ValueError("shared-input freeze requires aligned members and widths")
         if len({member.block for member in members}) != 1:
             raise ValueError("shared-input freeze members must belong to one block")
-        if sum(member_widths) != trainable.left_latent.shape[0]:
+        left, right = trainable.export_signs()
+        if sum(member_widths) != left.shape[0]:
             raise ValueError("shared-input member widths do not cover the stacked output")
-        left = torch.where(trainable.left_latent.detach() >= 0, 1.0, -1.0)
-        right = torch.where(trainable.right_latent.detach() >= 0, 1.0, -1.0)
         values: dict[str, torch.Tensor] = {
             "left_binary": left,
             "right_binary": right,
@@ -701,8 +820,9 @@ class SharedInputGroupFreezer:
         return self.load(
             state,
             tensors,
-            device=str(trainable.left_latent.device),
-            dtype=trainable.left_latent.dtype,
+            device=str(trainable.scale_pre.device),
+            dtype=(trainable.scale_pre.dtype if trainable._packed_factor_shapes is not None
+                   else trainable.left_latent.dtype),
             backend=backend,
         )
 
@@ -823,13 +943,23 @@ class BlockEditor:
         members: tuple[LayerId, ...],
         member_widths: tuple[int, ...],
         owner: TrainableSharedInputFactorGroup,
+        *,
+        share_member_evaluations: bool = False,
     ) -> None:
+        """Install member views of one owner.
+
+        ``share_member_evaluations`` evaluates the owner once per shared input
+        instead of once per member. It is opt-in because it changes gradient
+        rounding, which block tuning's resumable commits must not see.
+        """
         if len(members) != len(member_widths):
             raise ValueError("shared-input trainable members and widths differ")
+        evaluation = SharedGroupEvaluation(len(members)) if share_member_evaluations else None
         cursor = 0
         views = []
         for member, width in zip(members, member_widths, strict=True):
-            views.append((member, SharedInputProjectionView(owner, cursor, cursor + width, owner.scale_pre.numel())))
+            view = SharedInputProjectionView(owner, cursor, cursor + width, owner.scale_pre.numel(), evaluation)
+            views.append((member, view))
             cursor += width
         if cursor != owner.scale_post.numel():
             raise ValueError("shared-input trainable slices do not cover the group output")
