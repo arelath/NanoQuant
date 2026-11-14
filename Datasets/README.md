@@ -105,6 +105,16 @@ On completion or a graceful interruption, the tool exports `results.json` and
 by mean KL at each noise level. Pass a different `--output` directory when changing
 the sweep settings.
 
+Fit each projection's KL response from a completed sweep with
+`tools/fit_kl_sensitivity.py PATH_TO_MEASUREMENTS_RESULTS_JSON --heatmap PATH_TO_PNG`.
+The tool writes `kl-response-fits.json` beside the dataset's measurements. Each curve
+uses a power law for KL above the clean control and records the seed means, fit residual
+metrics, and predictions with each error level held out in turn. The equal-KL heatmap
+inverts each curve at the predicted KL of the median-response projection at 10% error.
+Use `--anchor BLOCK:PROJECTION` and `--anchor-error FRACTION` to pick a different
+reference. Arrows mark extrapolations beyond the measured weight errors. The targets
+predict isolated projection effects. Joint perturbations may interact.
+
 ### KL allocation profiling
 
 `tools/build_kl_teacher_dataset.py` prepares the original model's full-vocabulary log probabilities for KL allocation
