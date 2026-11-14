@@ -1268,6 +1268,49 @@ identity. The imatrix compatibility release below preserves these identities
 when the new option is absent; future numerical changes invalidate them normally.
 
 
+## Measured tuning batch schedule and continuation (2026-11-14)
+
+`block_tuning.batch_schedule` is disabled by default and is then absent from both
+the config hash and the resident commit identity, so existing runs keep their
+identities. When enabled, every block at or after the zero-based `start_block`
+tunes with one logical batch for factorized, non-factorized and post-block refit
+tuning, executed in one pass without gradient accumulation. Earlier blocks keep
+the per-stage batch and microbatch sizes configured above.
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `enabled` | `false` | Turn the schedule on. |
+| `start_block` | `0` | First block that uses the scheduled batch. |
+| `batch_size` | `null` | Fixed logical batch; `null` measures it. |
+| `maximum_batch_size` | `8` | Upper bound for the measured selection. |
+| `memory_safety_factor` | `1.5` | Multiplier on the measured transient footprint. |
+| `continuation_journal_sha256` | `null` | Source journal digest for an existing-run continuation. |
+
+With `batch_size: null`, the resident run measures one forward/backward pass of
+the largest decoder block inside its device lease, trying powers of two from the
+sample-capped maximum downward. It selects the largest batch whose allocated
+baseline, plus the transient peak times `memory_safety_factor`, plus
+`runtime.memory_policy.gpu_reserve_gib`, fits the device's total memory. Model
+size and free device memory therefore determine the logical batch. On a non-CUDA
+device the selection is the sample-capped maximum. The selection is written to
+`state/tuning-batch-selection.json` with its observations and reused on every
+resume. A stored selection for a different schedule is rejected, so a resume can
+never change the numerical schedule of the remaining blocks. Because the logical
+batch changes optimization, the measured value can differ between devices. The
+commit identity records the configured schedule, and the selection file records
+the value used.
+
+To switch an existing run, `tools/prepare_batch_schedule_continuation.py
+--run-output RUN --start-block N` reproduces the saved request, pins the current
+journal digest, and prints the target identity. It is dry-run by default.
+`--apply` uses the same metadata-only import as the optimizer continuation, with
+a receipt under `state/optimizer-continuation/`. `N` must be after every block
+with a journal record, so a partly committed block finishes with its original
+sizes. The launcher must then declare the same schedule, including the digest.
+A run cannot import an optimizer continuation and a batch-schedule continuation
+together.
+
+
 ## llama.cpp imatrix input importance (2026-11-13)
 
 New interactive compression runs accept a llama.cpp importance file:

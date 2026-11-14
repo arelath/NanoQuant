@@ -13,7 +13,7 @@ from recipes import (
 )
 from recipes._delta import config_delta, retained_config
 
-from nanoquant.config.schema import ImatrixConfig
+from nanoquant.config.schema import ImatrixConfig, TuningBatchScheduleConfig
 from nanoquant.self_measured_d2_workflow import SelfMeasuredD2ProfileOptions, run_self_measured_d2_experiment
 
 REFERENCE = retained_config(
@@ -40,6 +40,17 @@ CONFIG = config_delta(
                 REFERENCE.block_tuning.factorized.optimizer,
                 continuation_journal_sha256=None,
             ),
+        ),
+        # Blocks 0-10 were committed with 072's 4B memory-bound batches (factorized
+        # and refit 1, non-factorized 4). The 1B model fits 071's batch 8, so the
+        # remaining blocks use a measured logical batch of up to 8, executed
+        # without gradient accumulation. The completed prefix is imported by
+        # tools/prepare_batch_schedule_continuation.py with this journal digest.
+        batch_schedule=TuningBatchScheduleConfig(
+            enabled=True,
+            start_block=11,
+            maximum_batch_size=8,
+            continuation_journal_sha256="10ecd0a406bc1efa1ae1543494595cc73aca5300bcb7adbb1838325989bdca99",
         ),
     ),
 )

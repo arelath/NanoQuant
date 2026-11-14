@@ -824,6 +824,20 @@ def validate(config: RunConfig, phase: ValidationPhase = ValidationPhase.PRE_RES
         and optimizer.start_block > 0 and optimizer.name == "fused_adamw_scales_fp32"
     ), "CFG252", "block_tuning.factorized.optimizer.continuation_journal_sha256",
             "requires an exact SHA-256 journal digest and a fused continuation boundary")
+    schedule = config.block_tuning.batch_schedule
+    require(schedule.start_block >= 0 and schedule.maximum_batch_size > 0
+            and (schedule.batch_size is None or schedule.batch_size > 0)
+            and schedule.memory_safety_factor >= 1.0, "CFG256", "block_tuning.batch_schedule",
+            "requires a nonnegative start block, positive batch sizes, and a safety factor of at least 1")
+    schedule_continuation = schedule.continuation_journal_sha256
+    require(schedule_continuation is None or (
+        len(schedule_continuation) == 64
+        and all(character in "0123456789abcdef" for character in schedule_continuation)
+        and schedule.enabled and schedule.start_block > 0
+        and continuation is None
+    ), "CFG257", "block_tuning.batch_schedule.continuation_journal_sha256",
+            "requires an exact SHA-256 journal digest, an enabled schedule with a positive start block, "
+            "and no simultaneous optimizer continuation")
     microbatch = config.block_tuning.microbatch_size
     require(microbatch is None or microbatch > 0, "CFG021", "block_tuning.microbatch_size", "must be positive")
     refit = config.block_tuning.post_block_refit

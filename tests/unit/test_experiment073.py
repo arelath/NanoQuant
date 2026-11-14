@@ -11,13 +11,15 @@ from nanoquant.config.validation import ValidationPhase, raise_for_issues, valid
 from tests.support.experiments import config_diff_paths, load_experiment
 
 
-def test_073_changes_only_model_imatrix_and_removes_old_journal_pin():
+def test_073_changes_model_imatrix_journal_pin_and_remaining_block_batches():
     namespace = runpy.run_path(str(next(Path('experiments').glob('073-*.py'))))
     parent, config = namespace['REFERENCE'], namespace['CONFIG']
     assert parent == load_experiment(72).config
     assert config_diff_paths(parent, config) == {
         'model.source', 'model.revision', 'model.tokenizer_revision',
         'calibration.imatrix', 'block_tuning.factorized.optimizer.continuation_journal_sha256',
+        'block_tuning.batch_schedule.enabled', 'block_tuning.batch_schedule.start_block',
+        'block_tuning.batch_schedule.continuation_journal_sha256',
     }
     assert config.model == BASE_COMPRESSION_TEMPLATE.model
     assert config.factorization == parent.factorization
@@ -30,6 +32,12 @@ def test_073_changes_only_model_imatrix_and_removes_old_journal_pin():
     assert optimizer.start_block == 19
     assert optimizer.name == 'fused_adamw_scales_fp32'
     assert optimizer.layer_patterns == ('mlp.gate_proj', 'mlp.down_proj', 'self_attn.o_proj')
+    schedule = config.block_tuning.batch_schedule
+    assert schedule.enabled and schedule.start_block == 11
+    assert schedule.batch_size is None and schedule.maximum_batch_size == 8
+    assert schedule.continuation_journal_sha256 == '10ecd0a406bc1efa1ae1543494595cc73aca5300bcb7adbb1838325989bdca99'
+    # Blocks before the schedule keep 072's committed batch sizes.
+    assert config.block_tuning.factorized.loop.batch_size == parent.block_tuning.factorized.loop.batch_size == 1
     assert config.allocation.maximum_rank_layer_patterns == ('*',)
     assert config.allocation.bounds.overcomplete_rank_ceiling_fraction == 2.
     assert config.calibration.imatrix.sha256 == '86a81192de49a6480f8dc19c5a7fd3f4377af59172fd4c7b8d93d296a0a18515'

@@ -116,6 +116,7 @@ from nanoquant.config.schema import (
     RunConfig,
     ScaleFitConfig,
     SharedInputGroupConfig,
+    TuningBatchScheduleConfig,
 )
 from nanoquant.domain.binary_factor_search import (
     BinaryFactorSearchResult,
@@ -447,6 +448,10 @@ class ResidentQuantizationRequest:
     post_block_refit_epoch_cooldown_seconds: float = 0.0
     tuning_microbatch_size: int | None = None
     post_block_refit_microbatch_size: int | None = None
+    tuning_batch_schedule: TuningBatchScheduleConfig = TuningBatchScheduleConfig()
+    # Resolved inside the run session and persisted with the run; never part of
+    # the commit identity, which records the configured schedule instead.
+    selected_tuning_batch_size: int | None = None
     legacy_tuning_seed_reset: bool = False
     restore_best_tuning_state: bool = True
     tuning_epoch_loss_mode: EpochLossMode = "full_evaluation"
@@ -1625,6 +1630,201 @@ def _autotune_tuning_microbatch(
             torch.cuda.empty_cache()
 
 
+_TUNING_BATCH_SELECTION_SCHEMA_VERSION = 1
+
+
+@dataclass(frozen=True, slots=True)
+class _BlockTuningBatches:
+    factorized: int
+    nonfactorized: int
+    post_block_refit: int
+    tuning_microbatch: int | None
+    refit_microbatch: int | None
+    scheduled: bool
+
+
+def _block_tuning_batches(request: ResidentQuantizationRequest, block: int) -> _BlockTuningBatches:
+    """Return the logical batch and microbatch sizes that govern one block."""
+
+    schedule = request.tuning_batch_schedule
+    if not schedule.enabled or block < schedule.start_block:
+        return _BlockTuningBatches(
+            request.factorized_tuning_batch_size,
+            request.nonfactorized_tuning_batch_size,
+            request.post_block_refit_batch_size,
+            request.tuning_microbatch_size,
+            request.post_block_refit_microbatch_size,
+            scheduled=False,
+        )
+    selected = request.selected_tuning_batch_size
+    if selected is None or selected <= 0:
+        raise RuntimeError("the tuning batch schedule was not resolved before block tuning")
+    # A scheduled block executes its logical batch in one pass; the selection
+    # was admitted against measured device memory for exactly that footprint.
+    return _BlockTuningBatches(selected, selected, selected, selected, selected, scheduled=True)
+
+
+def _tuning_batch_candidates(maximum: int, samples: int) -> tuple[int, ...]:
+    ceiling = max(1, min(maximum, samples))
+    candidates = []
+    candidate = 1
+    while candidate * 2 <= ceiling:
+        candidate *= 2
+    while candidate >= 1:
+        candidates.append(candidate)
+        candidate //= 2
+    if ceiling not in candidates:
+        candidates.insert(0, ceiling)
+    return tuple(candidates)
+
+
+def _gpu_reserve_bytes(request: ResidentQuantizationRequest) -> int:
+    gib = 1.0 if request.run_config is None else request.run_config.runtime.memory_policy.gpu_reserve_gib
+    return int(gib * 2**30)
+
+
+def _resolve_tuning_batch_schedule(
+    request: ResidentQuantizationRequest,
+    adapter: Any,
+    source: Any,
+    inventory: ModelInventory,
+    decoder_layers: nn.ModuleList,
+    inputs: torch.Tensor,
+    captured_metadata: dict[str, object],
+    events: EventSink,
+) -> int | None:
+    """Select, persist, or reuse the scheduled logical tuning batch.
+
+    The selection is measured once per run and reused on every resume. A
+    stored selection for a different schedule is rejected instead of silently
+    changing the numerical recipe of the remaining blocks.
+    """
+
+    schedule = request.tuning_batch_schedule
+    if not schedule.enabled:
+        return None
+    path = request.output / "state" / "tuning-batch-selection.json"
+    expected_schedule = to_dict(schedule)
+    if path.is_file():
+        stored = json.loads(path.read_text(encoding="utf-8"))
+        if (
+            stored.get("schema_version") != _TUNING_BATCH_SELECTION_SCHEMA_VERSION
+            or stored.get("schedule") != expected_schedule
+            or not isinstance(stored.get("selected_batch_size"), int)
+            or stored["selected_batch_size"] <= 0
+        ):
+            raise ValueError(f"stored tuning batch selection does not match this schedule: {path}")
+        selected = int(stored["selected_batch_size"])
+        cast(Any, events).emit(
+            "resident-quantization",
+            "info",
+            "tuning_batch.reused",
+            selected_batch_size=selected,
+            start_block=schedule.start_block,
+            selection=str(path),
+        )
+        return selected
+
+    observations: list[dict[str, object]] = []
+    device_total: int | None = None
+    device_name: str | None = None
+    reserve = _gpu_reserve_bytes(request)
+    samples = int(inputs.shape[0])
+    if schedule.batch_size is not None:
+        selected = schedule.batch_size
+        method = "configured"
+    elif not request.device.startswith("cuda"):
+        selected = max(1, min(schedule.maximum_batch_size, samples))
+        method = "unmeasured_non_cuda_device"
+    else:
+        method = "measured_block_forward_backward"
+        _free, device_total = torch.cuda.mem_get_info(request.device)
+        device_name = torch.cuda.get_device_name(request.device)
+        streamed_block = request.executor is ExecutorKind.CPU_OFFLOAD
+        representative = max(inventory.blocks, key=_inventory_block_elements)
+        block = (
+            adapter.load_block(source, representative.block, request.device)
+            if streamed_block
+            else decoder_layers[representative.block.index]
+        )
+        metadata = _forward_metadata_to_device(_clone_forward_metadata(captured_metadata), request.device)
+        original_requires_grad = {id(parameter): parameter.requires_grad for parameter in block.parameters()}
+        selected = 0
+        try:
+            for parameter in block.parameters():
+                parameter.requires_grad_(True)
+            for candidate in _tuning_batch_candidates(schedule.maximum_batch_size, samples):
+                block.zero_grad(set_to_none=True)
+                torch.cuda.synchronize(request.device)
+                torch.cuda.empty_cache()
+                baseline = torch.cuda.memory_allocated(request.device)
+                torch.cuda.reset_peak_memory_stats(request.device)
+                try:
+                    batch = inputs[:candidate].to(request.device)
+                    prediction = adapter.run_block(block, batch, **metadata)
+                    torch.autograd.backward(prediction.float().square().mean())
+                    del batch, prediction
+                    torch.cuda.synchronize(request.device)
+                    peak = torch.cuda.max_memory_reserved(request.device)
+                except RuntimeError as exc:
+                    if not is_cuda_oom(exc):
+                        raise
+                    observations.append({"batch_size": candidate, "fits": False, "error": "cuda_oom"})
+                    continue
+                transient = max(0, peak - baseline)
+                required = baseline + int(transient * schedule.memory_safety_factor) + reserve
+                fits = required <= device_total
+                observations.append({
+                    "batch_size": candidate,
+                    "fits": fits,
+                    "baseline_allocated_bytes": baseline,
+                    "peak_reserved_bytes": peak,
+                    "required_bytes": required,
+                })
+                if fits:
+                    selected = candidate
+                    break
+        finally:
+            block.zero_grad(set_to_none=True)
+            for parameter in block.parameters():
+                parameter.requires_grad_(original_requires_grad[id(parameter)])
+            if streamed_block:
+                del block
+            torch.cuda.empty_cache()
+        if selected == 0:
+            raise ResourceAdmissionError(
+                "RES001 no scheduled tuning batch fits the device, including batch size 1"
+            )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(
+        path,
+        {
+            "schema_version": _TUNING_BATCH_SELECTION_SCHEMA_VERSION,
+            "schedule": expected_schedule,
+            "selected_batch_size": selected,
+            "method": method,
+            "device": request.device,
+            "device_name": device_name,
+            "device_total_bytes": device_total,
+            "gpu_reserve_bytes": reserve,
+            "calibration_samples": samples,
+            "observations": observations,
+        },
+    )
+    cast(Any, events).emit(
+        "resident-quantization",
+        "info",
+        "tuning_batch.selected",
+        selected_batch_size=selected,
+        start_block=schedule.start_block,
+        maximum_batch_size=schedule.maximum_batch_size,
+        method=method,
+        device_total_bytes=device_total,
+        observations=observations,
+    )
+    return selected
+
+
 def _run_prefix_batched(
     adapter: Any,
     model: nn.Module,
@@ -2755,6 +2955,8 @@ def _resident_config_hash(request: ResidentQuantizationRequest) -> str:
         semantic_config["imatrix"] = request.imatrix
     if request.factorized_tuning_optimizer != FactorizedOptimizerConfig():
         semantic_config["factorized_tuning_optimizer"] = request.factorized_tuning_optimizer
+    if request.tuning_batch_schedule != TuningBatchScheduleConfig():
+        semantic_config["tuning_batch_schedule"] = request.tuning_batch_schedule
     # Preserve commit identity for the previously hard-coded parity policy.
     # A non-default retry policy is new semantic input and must invalidate it.
     if request.rank_retry != _DEFAULT_RESIDENT_RANK_RETRY:
@@ -3066,6 +3268,10 @@ def _resident_manifest_config(request: ResidentQuantizationRequest, component: s
         payload.pop("imatrix")
     if request.factorized_tuning_optimizer == FactorizedOptimizerConfig():
         payload.pop("factorized_tuning_optimizer")
+    if request.tuning_batch_schedule == TuningBatchScheduleConfig():
+        payload.pop("tuning_batch_schedule")
+    # The measured batch is a durable run-state selection, not manifest input.
+    payload.pop("selected_tuning_batch_size")
     payload["token_ids"] = _manifest_tensor_identity(request.token_ids)
     payload["quality_token_ids"] = _manifest_tensor_identity(request.quality_token_ids)
     payload["component"] = component
@@ -3075,6 +3281,8 @@ def _resident_manifest_config(request: ResidentQuantizationRequest, component: s
             canonical["calibration"].pop("imatrix")
         if request.run_config.block_tuning.factorized.optimizer == FactorizedOptimizerConfig():
             canonical["block_tuning"]["factorized"].pop("optimizer")
+        if request.run_config.block_tuning.batch_schedule == TuningBatchScheduleConfig():
+            canonical["block_tuning"].pop("batch_schedule")
         payload["canonical_run_config"] = canonical
     if request.memory_plan is not None and request.memory_plan.mode == "adaptive":
         # These values are physical choices selected by the durable memory plan,
@@ -4931,28 +5139,59 @@ def _load_reusable_calibration(
 
 
 def _prepare_optimizer_continuation(request: ResidentQuantizationRequest, proposed: RunManifest) -> None:
-    policy = request.factorized_tuning_optimizer
-    if policy.continuation_journal_sha256 is None:
+    """Import a committed block prefix into a recipe that changes from ``start_block``.
+
+    Two block-gated recipe changes support continuation: the factorized
+    optimizer policy and the logical tuning batch schedule. Each derives its
+    source recipe by removing only its own policy, so a run that already uses
+    the other policy keeps it unchanged.
+    """
+
+    optimizer = request.factorized_tuning_optimizer
+    schedule = request.tuning_batch_schedule
+    if optimizer.continuation_journal_sha256 is not None and schedule.continuation_journal_sha256 is not None:
+        raise ValueError("optimizer and batch schedule continuations cannot be imported together")
+    if request.run_config is None and (
+        optimizer.continuation_journal_sha256 is not None or schedule.continuation_journal_sha256 is not None
+    ):
+        raise ValueError("recipe continuation requires an explicit canonical recipe")
+    if optimizer.continuation_journal_sha256 is not None:
+        if optimizer.name != "fused_adamw_scales_fp32":
+            raise ValueError("optimizer continuation requires an explicit canonical fused recipe")
+        config = cast(RunConfig, request.run_config)
+        source_config = replace(config, block_tuning=replace(
+            config.block_tuning,
+            factorized=replace(config.block_tuning.factorized, optimizer=FactorizedOptimizerConfig()),
+        ))
+        source_request = replace(
+            request, run_config=source_config, factorized_tuning_optimizer=FactorizedOptimizerConfig(),
+        )
+        journal_sha256, start_block = optimizer.continuation_journal_sha256, optimizer.start_block
+        numerical_payload = "unchanged; computed with the source optimizer"
+    elif schedule.continuation_journal_sha256 is not None:
+        config = cast(RunConfig, request.run_config)
+        source_config = replace(
+            config, block_tuning=replace(config.block_tuning, batch_schedule=TuningBatchScheduleConfig()),
+        )
+        source_request = replace(
+            request, run_config=source_config, tuning_batch_schedule=TuningBatchScheduleConfig(),
+        )
+        journal_sha256, start_block = schedule.continuation_journal_sha256, schedule.start_block
+        numerical_payload = "unchanged; computed with the source tuning batch sizes"
+    else:
         return
-    if request.run_config is None or policy.name != "fused_adamw_scales_fp32":
-        raise ValueError("optimizer continuation requires an explicit canonical fused recipe")
-    config = request.run_config
-    source_config = replace(config, block_tuning=replace(
-        config.block_tuning, factorized=replace(config.block_tuning.factorized, optimizer=FactorizedOptimizerConfig()),
-    ))
-    source_request = replace(request, run_config=source_config, factorized_tuning_optimizer=FactorizedOptimizerConfig())
     source_proposed = _resident_manifest(source_request, "resident-quantization")
     path = request.output / "manifest.json"
     if not path.is_file():
-        raise ValueError("optimizer continuation requires its existing run; refusing to start from scratch")
+        raise ValueError("recipe continuation requires its existing run; refusing to start from scratch")
     stored = from_dict(RunManifest, json.loads(path.read_text(encoding="utf-8")))
     target = replace(stored, config_hash=proposed.config_hash, resolved_config=proposed.resolved_config,
                      launcher=proposed.launcher, environment=proposed.environment)
     import_optimizer_prefix(
-        request.output, source_journal_sha256=policy.continuation_journal_sha256,
+        request.output, source_journal_sha256=journal_sha256,
         source_manifest_config_hash=source_proposed.config_hash,
         source_config_hash=_resident_config_hash(source_request), target_config_hash=_resident_config_hash(request),
-        target_manifest=to_dict(target), start_block=policy.start_block,
+        target_manifest=to_dict(target), start_block=start_block, numerical_payload=numerical_payload,
     )
 
 
@@ -6828,6 +7067,16 @@ def _execute_resident_quantization_pipeline(
         captured_metadata,
         events,
     )
+    selected_tuning_batch = _resolve_tuning_batch_schedule(
+        request,
+        adapter,
+        source,
+        inventory,
+        decoder_layers,
+        initial_inputs,
+        captured_metadata,
+        events,
+    )
     tuning_enabled = (
         request.factorized_tuning_epochs > 0
         or request.nonfactorized_tuning_epochs > 0
@@ -6878,6 +7127,7 @@ def _execute_resident_quantization_pipeline(
         block_forward_batch_size=selected_forward_batch,
         tuning_microbatch_size=selected_tuning_microbatch,
         post_block_refit_microbatch_size=selected_refit_microbatch,
+        selected_tuning_batch_size=selected_tuning_batch,
         memory_plan=memory_plan,
         memory_plan_reference=memory_plan_reference,
     )
@@ -7482,6 +7732,7 @@ def _execute_resident_quantization_pipeline(
     )
 
     for block_plan in block_quantizer.pending(plan.blocks, completed_block_indexes):
+        block_batches = _block_tuning_batches(request, block_plan.block.index)
         block_work = block_quantizer.prepare(
             block_plan,
             teacher_inputs,
@@ -7596,12 +7847,12 @@ def _execute_resident_quantization_pipeline(
                                 compressed_inputs,
                                 teacher_outputs,
                                 nonfactorized_epochs,
-                                request.nonfactorized_tuning_batch_size,
+                                block_batches.nonfactorized,
                                 request.nonfactorized_tuning_learning_rate,
                                 early_stop_relative_tolerance=request.nonfactorized_tuning_early_stop_relative_tolerance,
                                 output_importance=block_output_importance,
                                 seed=_tuning_seed(request, "nonfactorized-tuning", block_index, group_plan.name),
-                                microbatch_size=request.tuning_microbatch_size,
+                                microbatch_size=block_batches.tuning_microbatch,
                                 restore_best_state=request.restore_best_tuning_state,
                                 epoch_loss_mode=request.tuning_epoch_loss_mode,
                             ),
@@ -7760,11 +8011,11 @@ def _execute_resident_quantization_pipeline(
                                 compressed_inputs,
                                 teacher_outputs,
                                 request.factorized_tuning_epochs,
-                                request.factorized_tuning_batch_size,
+                                block_batches.factorized,
                                 request.factorized_tuning_learning_rate,
                                 output_importance=block_output_importance,
                                 seed=_tuning_seed(request, "factorized-tuning", block_index, group_plan.name),
-                                microbatch_size=request.tuning_microbatch_size,
+                                microbatch_size=block_batches.tuning_microbatch,
                                 restore_best_state=request.restore_best_tuning_state,
                                 epoch_loss_mode=request.tuning_epoch_loss_mode,
                             ),
@@ -7961,8 +8212,8 @@ def _execute_resident_quantization_pipeline(
                         block=block_index,
                         layer=layer_plan.layer.path,
                         epochs=nonfactorized_epochs,
-                        batch_size=request.nonfactorized_tuning_batch_size,
-                        microbatch_size=request.tuning_microbatch_size,
+                        batch_size=block_batches.nonfactorized,
+                        microbatch_size=block_batches.tuning_microbatch,
                         learning_rate=request.nonfactorized_tuning_learning_rate,
                     ):
                         with _profile_layer_phase(
@@ -7977,7 +8228,7 @@ def _execute_resident_quantization_pipeline(
                                     compressed_inputs,
                                     teacher_outputs,
                                     nonfactorized_epochs,
-                                    request.nonfactorized_tuning_batch_size,
+                                    block_batches.nonfactorized,
                                     request.nonfactorized_tuning_learning_rate,
                                     early_stop_relative_tolerance=(
                                         request.nonfactorized_tuning_early_stop_relative_tolerance
@@ -7989,7 +8240,7 @@ def _execute_resident_quantization_pipeline(
                                         block_index,
                                         layer_plan.layer.path,
                                     ),
-                                    microbatch_size=request.tuning_microbatch_size,
+                                    microbatch_size=block_batches.tuning_microbatch,
                                     epoch_observer=_epoch_cooldown_observer(
                                         request.nonfactorized_tuning_epoch_cooldown_seconds,
                                         events,
@@ -8247,8 +8498,8 @@ def _execute_resident_quantization_pipeline(
                         layer=layer_plan.layer.path,
                         epochs=request.factorized_tuning_epochs,
                         completed_epochs=(0 if active_checkpoint is None else active_checkpoint.state.completed_epochs),
-                        batch_size=request.factorized_tuning_batch_size,
-                        microbatch_size=request.tuning_microbatch_size,
+                        batch_size=block_batches.factorized,
+                        microbatch_size=block_batches.tuning_microbatch,
                         learning_rate=request.factorized_tuning_learning_rate,
                         optimizer=_factorized_optimizer_backend(request, block_index, layer_plan.layer.path),
                     ):
@@ -8265,7 +8516,7 @@ def _execute_resident_quantization_pipeline(
                                     compressed_inputs,
                                     teacher_outputs,
                                     request.factorized_tuning_epochs,
-                                    request.factorized_tuning_batch_size,
+                                    block_batches.factorized,
                                     request.factorized_tuning_learning_rate,
                                     output_importance=block_output_importance,
                                     seed=_tuning_seed(
@@ -8274,7 +8525,7 @@ def _execute_resident_quantization_pipeline(
                                         block_index,
                                         layer_plan.layer.path,
                                     ),
-                                    microbatch_size=request.tuning_microbatch_size,
+                                    microbatch_size=block_batches.tuning_microbatch,
                                     restore_best_state=request.restore_best_tuning_state,
                                     epoch_loss_mode=request.tuning_epoch_loss_mode,
                                     optimizer_backend=_factorized_optimizer_backend(
@@ -8468,8 +8719,8 @@ def _execute_resident_quantization_pipeline(
                 block=block_index,
                 layers=len(frozen_states),
                 epochs=request.post_block_refit_epochs,
-                batch_size=request.post_block_refit_batch_size,
-                microbatch_size=request.post_block_refit_microbatch_size,
+                batch_size=block_batches.post_block_refit,
+                microbatch_size=block_batches.refit_microbatch,
                 learning_rate=request.post_block_refit_learning_rate,
             ):
                 with _profile_block_phase(recorder, block_index, "refit"):
@@ -8479,11 +8730,11 @@ def _execute_resident_quantization_pipeline(
                             compressed_inputs,
                             teacher_outputs,
                             request.post_block_refit_epochs,
-                            request.post_block_refit_batch_size,
+                            block_batches.post_block_refit,
                             request.post_block_refit_learning_rate,
                             output_importance=block_output_importance,
                             seed=_tuning_seed(request, "post-block-refit", block_index, None),
-                            microbatch_size=request.post_block_refit_microbatch_size,
+                            microbatch_size=block_batches.refit_microbatch,
                             epoch_observer=_epoch_cooldown_observer(
                                 request.post_block_refit_epoch_cooldown_seconds,
                                 events,

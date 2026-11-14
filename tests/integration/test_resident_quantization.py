@@ -12,6 +12,7 @@ from transformers.models.gemma3.configuration_gemma3 import Gemma3TextConfig
 from transformers.models.gemma3.modeling_gemma3 import Gemma3ForCausalLM
 
 import nanoquant.resident_quantization as resident
+from nanoquant.application.prefix_capture import capture_prefix_invocations
 from nanoquant.config.codec import semantic_hash
 from nanoquant.config.schema import (
     ADMMConfig,
@@ -30,14 +31,17 @@ from nanoquant.config.schema import (
     ReconstructionRankPlanningConfig,
     RunConfig,
     SharedInputGroupConfig,
+    TuningBatchScheduleConfig,
 )
 from nanoquant.infrastructure.artifacts import ArtifactCorruptionError, LocalArtifactStore
 from nanoquant.infrastructure.commits import load_block_activations
 from nanoquant.infrastructure.frozen_model_loader import load_frozen_run
+from nanoquant.infrastructure.model_adapters import adapter_for_config
 from nanoquant.infrastructure.packed_model_loader import load_packed_model
 from nanoquant.infrastructure.progress import ProgressJournal
 from nanoquant.infrastructure.run_registry import select_run
 from nanoquant.infrastructure.runtime_export import export_frozen_run_logical, validate_frozen_run_logical
+from nanoquant.infrastructure.safetensors_source import SafetensorsModelSource
 from nanoquant.resident_quantization import (
     ResidentQuantizationRequest,
     _clone_forward_metadata,
@@ -1033,6 +1037,149 @@ def test_resident_tuning_recipe_refits_blocks_and_resumes_exactly(
     assert epoch_resumed.compressed_nll == pytest.approx(control.compressed_nll, rel=1e-6, abs=1e-7)
     assert epoch_resumed.blocks[0].frozen_state.quantized_layers == control.blocks[0].frozen_state.quantized_layers
     assert not (epoch_request.output / "state" / "tuning-checkpoint").exists()
+
+
+def test_tuning_batch_schedule_applies_from_its_start_block_and_resumes_exactly(tmp_path: Path) -> None:
+    snapshot = tmp_path / "snapshot"
+    Gemma3ForCausalLM(Gemma3TextConfig(
+        vocab_size=24,
+        hidden_size=8,
+        intermediate_size=16,
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=4,
+    )).save_pretrained(snapshot, safe_serialization=True)
+    schedule = TuningBatchScheduleConfig(enabled=True, start_block=1, maximum_batch_size=4)
+    base = ResidentQuantizationRequest(
+        snapshot,
+        tmp_path / "control",
+        "fixture/gemma3",
+        "pinned-test-revision",
+        ((1, 2, 3, 4), (4, 3, 2, 1), (5, 6, 7, 8), (8, 7, 6, 5)),
+        device="cpu",
+        target_bpw=8.0,
+        rank_multiple=1,
+        admm=ADMMConfig(outer_iterations=1, inner_iterations=1),
+        nonfactorized_tuning_epochs_by_layer=(1, 0),
+        nonfactorized_tuning_batch_size=1,
+        factorized_tuning_epochs=1,
+        factorized_tuning_batch_size=1,
+        post_block_refit_epochs=1,
+        post_block_refit_batch_size=1,
+        tuning_microbatch_size=1,
+        post_block_refit_microbatch_size=1,
+        tuning_batch_schedule=schedule,
+    )
+
+    control = run_resident_quantization(base)
+    events = [
+        json.loads(line) for line in (base.output / "events.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    tuning_batches = {
+        (event["fields"]["block"], event["name"]): (
+            event["fields"]["batch_size"], event["fields"]["microbatch_size"],
+        )
+        for event in events
+        if event["name"] in {
+            "nonfactorized_tuning.started", "factorized_tuning.started", "post_block_refit.started",
+        }
+    }
+    assert {key: value for key, value in tuning_batches.items() if key[0] == 0} == {
+        (0, "nonfactorized_tuning.started"): (1, 1),
+        (0, "factorized_tuning.started"): (1, 1),
+        (0, "post_block_refit.started"): (1, 1),
+    }
+    assert {key: value for key, value in tuning_batches.items() if key[0] == 1} == {
+        (1, "nonfactorized_tuning.started"): (4, 4),
+        (1, "factorized_tuning.started"): (4, 4),
+        (1, "post_block_refit.started"): (4, 4),
+    }
+    selection = json.loads((base.output / "state/tuning-batch-selection.json").read_text(encoding="utf-8"))
+    assert selection["selected_batch_size"] == 4
+
+    unscheduled = run_resident_quantization(replace(
+        base, output=tmp_path / "unscheduled", tuning_batch_schedule=TuningBatchScheduleConfig(),
+    ))
+    assert unscheduled.blocks[0].frozen_state == control.blocks[0].frozen_state
+    assert unscheduled.blocks[1].frozen_state != control.blocks[1].frozen_state
+
+    resumed_request = replace(base, output=tmp_path / "resumed", interrupt_after_block_commits=1)
+    with pytest.raises(InterruptedError):
+        run_resident_quantization(resumed_request)
+    resumed = run_resident_quantization(replace(resumed_request, interrupt_after_block_commits=None))
+    resumed_events = [
+        json.loads(line)["name"]
+        for line in (resumed_request.output / "events.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert resumed_events.count("tuning_batch.selected") == 1
+    assert resumed_events.count("tuning_batch.reused") == 1
+    assert resumed.compressed_nll == pytest.approx(control.compressed_nll, rel=1e-6, abs=1e-7)
+    assert resumed.blocks[1].frozen_state.quantized_layers == control.blocks[1].frozen_state.quantized_layers
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA to measure the tuning batch")
+def test_tuning_batch_probe_measures_cuda_without_changing_the_model(tmp_path: Path) -> None:
+    # The full tiny-model run is numerically unstable on CUDA for most random
+    # initializations, independent of the schedule, so exercise the probe directly.
+    snapshot = tmp_path / "snapshot"
+    torch.manual_seed(0)
+    Gemma3ForCausalLM(Gemma3TextConfig(
+        vocab_size=24,
+        hidden_size=8,
+        intermediate_size=16,
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=4,
+    )).save_pretrained(snapshot, safe_serialization=True)
+    source = SafetensorsModelSource(snapshot, source="fixture", revision="r", verify_hashes=False)
+    adapter = adapter_for_config(source.inventory().config)
+    inventory = adapter.model_inventory(source)
+    model = Gemma3ForCausalLM.from_pretrained(snapshot, attn_implementation="eager").to("cuda").eval()
+    layers = adapter.get_decoder_layers(model)
+    tokens = torch.tensor([[1, 2, 3, 4], [4, 3, 2, 1], [5, 6, 7, 8], [8, 7, 6, 5]], device="cuda")
+    capture = capture_prefix_invocations(layers[0], (lambda: adapter.run_decoder_forward(model, tokens[:1]),))[0]
+    inputs = resident._run_prefix_batched(adapter, model, tokens, 4, "cpu").detach()
+    metadata = resident._forward_metadata_to_device(resident._clone_forward_metadata(capture.keyword), "cuda")
+
+    def observed() -> tuple[dict[str, torch.Tensor], dict[str, bool], list[torch.Tensor]]:
+        with torch.no_grad():
+            outputs = [adapter.run_block(layer, inputs.to("cuda"), **metadata).cpu() for layer in layers]
+        return (
+            {name: value.detach().cpu().clone() for name, value in model.state_dict().items()},
+            {name: parameter.requires_grad for name, parameter in model.named_parameters()},
+            outputs,
+        )
+
+    class Events:
+        names: list[str] = []
+
+        def emit(self, _component: str, _level: str, name: str, **_fields: object) -> None:
+            self.names.append(name)
+
+    before = observed()
+    request = ResidentQuantizationRequest(
+        snapshot, tmp_path / "run", "fixture", "r", ((1, 2),), device="cuda",
+        tuning_batch_schedule=TuningBatchScheduleConfig(enabled=True, start_block=1, maximum_batch_size=4),
+    )
+    events = Events()
+    selected = resident._resolve_tuning_batch_schedule(
+        request, adapter, source, inventory, layers, inputs, capture.keyword, cast(Any, events),
+    )
+    after = observed()
+
+    assert selected == 4
+    assert events.names == ["tuning_batch.selected"]
+    assert all(torch.equal(before[0][name], after[0][name]) for name in before[0])
+    assert before[1] == after[1]
+    assert all(parameter.grad is None for parameter in model.parameters())
+    assert all(torch.equal(first, second) for first, second in zip(before[2], after[2], strict=True))
+    selection = json.loads((request.output / "state/tuning-batch-selection.json").read_text(encoding="utf-8"))
+    assert selection["method"] == "measured_block_forward_backward"
+    assert selection["device_total_bytes"] > 0
+    assert selection["observations"][0]["fits"] is True
+    assert selection["observations"][0]["peak_reserved_bytes"] > 0
 
 
 @pytest.mark.parametrize("restore_completed_blocks", [True, False])

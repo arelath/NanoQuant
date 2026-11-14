@@ -626,6 +626,7 @@ def test_noop_tail_fields_preserve_legacy_config_hash() -> None:
     legacy_payload["distillation"].pop("tail_mass_weight")
     legacy_payload["factorization"].pop("residual_stages")
     legacy_payload["block_tuning"].pop("compile_forward")
+    legacy_payload["block_tuning"].pop("batch_schedule")
     legacy_payload["block_tuning"]["factorized"].pop("optimizer")
     legacy_payload["allocation"]["reconstruction"].pop("allocation_dataset")
     legacy_payload["allocation"]["reconstruction"].pop("allocation_dataset_key")

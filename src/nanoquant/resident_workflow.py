@@ -464,6 +464,7 @@ def resident_request_from_config(
         post_block_refit_epoch_cooldown_seconds=options.post_block_refit_epoch_cooldown_seconds,
         tuning_microbatch_size=effective_tuning_microbatch,
         post_block_refit_microbatch_size=effective_refit_microbatch,
+        tuning_batch_schedule=config.block_tuning.batch_schedule,
         legacy_tuning_seed_reset=config.block_tuning.reset_seed_each_stage,
         restore_best_tuning_state=config.block_tuning.restore_best_state,
         tuning_epoch_loss_mode=config.block_tuning.epoch_loss_mode.value,

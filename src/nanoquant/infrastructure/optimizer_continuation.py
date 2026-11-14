@@ -40,6 +40,7 @@ def _write_bytes(path: Path, data: bytes) -> None:
 def import_optimizer_prefix(
     output: Path, *, source_journal_sha256: str, source_manifest_config_hash: str,
     source_config_hash: str, target_config_hash: str, target_manifest: dict[str, Any], start_block: int,
+    numerical_payload: str = "unchanged; computed with the source optimizer",
 ) -> dict[str, Any]:
     root = output / "state" / "optimizer-continuation"
     receipt_path = root / "receipt.json"
@@ -119,7 +120,7 @@ def import_optimizer_prefix(
                 "source_journal_sha256": source_journal_sha256,
                 "source_commit": {"artifact_id": descriptor.artifact_id,
                                   "artifact_type": descriptor.artifact_type},
-                "numerical_payload": "unchanged; computed with the source optimizer",
+                "numerical_payload": numerical_payload,
             }
             with store.begin_write(descriptor.artifact_type) as writer:
                 (writer.path / filename).write_text(json.dumps(payload, sort_keys=True, indent=2), encoding="utf-8")

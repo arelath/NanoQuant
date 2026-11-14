@@ -576,6 +576,27 @@ class PostBlockRefitConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class TuningBatchScheduleConfig:
+    """One logical tuning batch for blocks at and after ``start_block``.
+
+    When enabled, factorized, non-factorized, and post-block refit tuning in
+    scheduled blocks all use the same logical batch and execute it without
+    gradient accumulation. ``batch_size=None`` selects the largest power of two
+    up to ``maximum_batch_size`` whose measured block forward/backward
+    footprint, multiplied by ``memory_safety_factor``, fits the compute device.
+    The selection is persisted with the run and reused on every resume, so a
+    run never changes its numerical schedule because free memory changed.
+    """
+
+    enabled: bool = False
+    start_block: int = 0
+    batch_size: int | None = None
+    maximum_batch_size: int = 8
+    memory_safety_factor: float = 1.5
+    continuation_journal_sha256: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class PostRefitCovarianceRefinementConfig:
     enabled: bool = False
     block_indices: tuple[int, ...] = ()
@@ -598,6 +619,7 @@ class BlockTuningConfig:
         default_factory=PostRefitCovarianceRefinementConfig
     )
     microbatch_size: int | None = None
+    batch_schedule: TuningBatchScheduleConfig = field(default_factory=TuningBatchScheduleConfig)
     reset_seed_each_stage: bool = False
     restore_best_state: bool = True
     epoch_loss_mode: TuningEpochLossMode = TuningEpochLossMode.FULL_EVALUATION
