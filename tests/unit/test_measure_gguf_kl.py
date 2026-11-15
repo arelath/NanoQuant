@@ -84,7 +84,7 @@ def test_additive_prediction_counts_extrapolated_projections() -> None:
 
 def test_markdown_lists_each_file_and_the_prediction_ratio() -> None:
     tool = _tool()
-    variant = {"kl_above_control": 0.2, "perplexity_ratio": 1.05}
+    variant = {"kl_above_control": 0.2, "nll_above_control": 0.0488, "perplexity_ratio": 1.05}
     report = {
         "protocol": {"teacher": {"source": "test/model", "model_dtype": "torch.float32"}},
         "measured_at": "now", "measurement_sweep": "sweep", "measured_error_range": [0.01, 0.35],
@@ -105,6 +105,13 @@ def test_markdown_lists_each_file_and_the_prediction_ratio() -> None:
         "json": "gguf-kl.json",
     }
     markdown = tool.render_markdown(report)
-    assert "| m-Q4.gguf | 2.0 | 4.50 | Q8_0 (8.50 bits) | 0.2000 | +5.0% | 0.1000 | 0.0100 |" in markdown
+    assert "| m-Q4.gguf | 2.0 | 4.50 | Q8_0 (8.50 bits) | 0.2000 | +0.0488 | +5.0% | 0.1000 | 0.0100 |" in markdown
+    for header in (
+        "All weights KL (nats/token)", "All weights NLL change (nats/token)", "Projections-only KL (nats/token)",
+        "Embedding-only KL (nats/token)", "Additive prediction (nats/token)",
+        "Measured projections-only KL (nats/token)", "KL target per projection (nats/token)",
+        "Mean joint KL (nats/token)", "95% CI (nats/token)",
+    ):
+        assert f" {header} |" in markdown
     assert "| m-Q4.gguf | Q4_K ×3, Q6_K ×1 | 5.00% | 2.00%–9.00% | 0.4000 | 0.1000 | 0.250 | 0 |" in markdown
     assert "| 0.001 | 3.00% | 0.1200 | 0.1100 – 0.1300 |" in markdown

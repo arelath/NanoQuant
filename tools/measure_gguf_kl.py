@@ -213,18 +213,21 @@ def render_markdown(report: Mapping) -> str:
         f"Measured on {report['measured_at']} against the teacher of sweep `{report['measurement_sweep']}`.",
         f"Each GGUF's dequantized weights were loaded into the pinned model at "
         f"`{protocol['teacher']['model_dtype']}` and scored on the same {clean['token_count']:,} next-token "
-        "positions as the sensitivity sweep. KL is full-vocabulary KL(teacher ‖ quantized) per position.",
-        "This measures weight quantization only; the llama.cpp runtime also quantizes activations and "
-        "uses its own kernels, so its outputs can differ further.",
+        "positions as the sensitivity sweep. KL is full-vocabulary KL(teacher ‖ quantized) in nats/token,",
+        "averaged over next-token positions. This measures weight quantization only; the llama.cpp runtime",
+        "also quantizes activations and uses its own kernels, so its outputs can differ further.",
         "",
-        f"Clean model: {clean['kl_nats_per_token']:.6g} nats/token KL against the stored teacher, "
-        f"{clean['nll_nats_per_token']:.6f} nats/token NLL.",
+        f"Clean model: KL {clean['kl_nats_per_token']:.6g} nats/token against the stored teacher, "
+        f"NLL {clean['nll_nats_per_token']:.6f} nats/token.",
         "",
         "## KL by file",
         "",
-        "| GGUF | File MB | Projection bits/weight | Embedding | All weights KL | Perplexity change | "
-        "Projections-only KL | Embedding-only KL |",
-        "| --- | ---: | ---: | --- | ---: | ---: | ---: | ---: |",
+        "All KL and NLL values are in nats/token, measured above the clean model.",
+        "",
+        "| GGUF | File MB | Projection bits/weight | Embedding | All weights KL (nats/token) | "
+        "All weights NLL change (nats/token) | Perplexity change | Projections-only KL (nats/token) | "
+        "Embedding-only KL (nats/token) |",
+        "| --- | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: |",
     ]
     for item in files:
         variants = item["variants"]
@@ -232,24 +235,26 @@ def render_markdown(report: Mapping) -> str:
             f"| {item['file']} | {item['bytes'] / 1e6:.1f} | {item['projection_bits_per_weight']:.2f} | "
             f"{item['embedding_type']} ({item['embedding_bits_per_weight']:.2f} bits) | "
             f"{variants['all weights']['kl_above_control']:.4f} | "
+            f"{variants['all weights']['nll_above_control']:+.4f} | "
             f"{variants['all weights']['perplexity_ratio'] - 1:+.1%} | "
             f"{variants['projections']['kl_above_control']:.4f} | "
             f"{variants['embedding']['kl_above_control']:.4f} |"
         )
     lines += [
         "",
-        "KL values are above the clean control. Perplexity change is exp(NLL change) − 1 on the calibration",
-        "windows for the all-weights variant.",
+        "Perplexity change is exp(NLL change in nats/token) − 1 on the calibration windows for the",
+        "all-weights variant.",
         "",
         "## Projection errors against the isolated-sensitivity prediction",
         "",
-        "The prediction sums each projection's fitted isolated KL at its measured relative weight error.",
-        "Fits come from Gaussian-noise trials between "
+        "The prediction sums each projection's fitted isolated KL in nats/token at its measured relative",
+        "weight error. Fits come from Gaussian-noise trials between "
         f"{report['measured_error_range'][0]:.0%} and {report['measured_error_range'][1]:.0%} error; "
         "projections outside that range are extrapolated.",
         "",
-        "| GGUF | Projection types | Median projection error | Error range | Additive prediction | "
-        "Measured projections-only KL | Measured / predicted | Extrapolated projections |",
+        "| GGUF | Projection types | Median projection error | Error range | "
+        "Additive prediction (nats/token) | Measured projections-only KL (nats/token) | Measured / predicted | "
+        "Extrapolated projections |",
         "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for item in files:
@@ -269,7 +274,8 @@ def render_markdown(report: Mapping) -> str:
             f"From `{joint['source']}`: every projection perturbed at once to its equal-KL target error "
             f"({joint['runs']} noise draws each).",
             "",
-            "| KL target per projection | Median target error | Mean joint KL | 95% CI |",
+            "| KL target per projection (nats/token) | Median target error | Mean joint KL (nats/token) | "
+            "95% CI (nats/token) |",
             "| ---: | ---: | ---: | ---: |",
         ]
         for row in joint["rows"]:
