@@ -1,0 +1,73 @@
+{
+  "config_changes": [
+    {
+      "after": "D:\\dev\\research\\NanoQuantRewrite\\Datasets\\gemma-3-270m-it-imatrix-unsloth-columns-eaddario-rows\\imatrix.gguf",
+      "before": "D:\\dev\\research\\NanoQuantRewrite\\Datasets\\gemma-3-270m-it-imatrix-eaddario-huge-rows\\imatrix.gguf",
+      "field": "calibration.imatrix.path"
+    },
+    {
+      "after": "f4b1e6e371afbc34d3296e16559d4ad707be41075f88f4a5049fcfaaf8ef678d",
+      "before": "3deceafea3aadd5fb6b75e22dfa0123bb99f22e0be95816354b374e80ebcc0c9",
+      "field": "calibration.imatrix.sha256"
+    }
+  ],
+  "config_hash": "sha256:de5935c0c4baf9bec5573c6188893b89074342b08ff9b970f133441a2e74d85c",
+  "dataset_contents_separately_validated": true,
+  "dataset_sha256": "f4b1e6e371afbc34d3296e16559d4ad707be41075f88f4a5049fcfaaf8ef678d",
+  "dry_run_passed": true,
+  "dry_run_sha256": "29cda4b7a0235007d8ad25a67923606049fbd414fe0a501448c087a40daf34a9",
+  "effective_run_output": "D:\\dev\\research\\NanoQuantRewrite\\evidence\\076\\076-d2-uniform-control-gemma-3-270m-it",
+  "experiment": 76,
+  "focused_tests_passed": 25,
+  "full_test_log_sha256": "2880cc35d67913098c41bf83c30eacc74ed51970c99bb4481905c7a998deab78",
+  "full_tests_deselected": 54,
+  "full_tests_passed": 1802,
+  "launcher_sha256": "879932670858597e42421dd40a7b57c7522c8d8c8e51e29e56addeaa059f0d55",
+  "mapped_projections": 126,
+  "mypy_passed": true,
+  "parent_config_hash": "sha256:06b8f9c7f5796e80c95cca6969ea3f1e1514cce6691704536b6e147d3df92b40",
+  "parent_experiment": 75,
+  "plan_passed": true,
+  "plan_sha256": "133b0ede746e4e06f8353aa56cde80797b8982131c3b693eb7e7eeb657141a4d",
+  "profile_options_equal": true,
+  "raw_axis_copies_exact": true,
+  "ruff_passed": true,
+  "status": "prepared_not_started",
+  "workflow_changes": [
+    {
+      "after": "outputs/076/llamacpp-checkpoint",
+      "before": "outputs/075/llamacpp-checkpoint",
+      "field": "export.checkpoint_output"
+    },
+    {
+      "after": "Results/076/gemma-3-270m-it-nanoquant.gguf",
+      "before": "Results/075/gemma-3-270m-it-nanoquant.gguf",
+      "field": "export.gguf_output"
+    },
+    {
+      "after": "outputs/076/logical",
+      "before": "outputs/075/logical",
+      "field": "export.logical_output"
+    },
+    {
+      "after": "outputs/076/packed",
+      "before": "outputs/075/packed",
+      "field": "export.packed_output"
+    },
+    {
+      "after": "Results/076/076-fast-hybrid-imatrix-two-full-rank-stages-compress-and-benchmark-gemma-3-270m-it-quality.md",
+      "before": "Results/075/075-fast-row-imatrix-two-full-rank-stages-compress-and-benchmark-gemma-3-270m-it-quality.md",
+      "field": "quality_markdown_output"
+    },
+    {
+      "after": "outputs/076/076-fast-hybrid-imatrix-two-full-rank-stages-compress-and-benchmark-gemma-3-270m-it-quality.json",
+      "before": "outputs/075/075-fast-row-imatrix-two-full-rank-stages-compress-and-benchmark-gemma-3-270m-it-quality.json",
+      "field": "quality_output"
+    },
+    {
+      "after": "outputs/076/076-fast-hybrid-imatrix-two-full-rank-stages-compress-and-benchmark-gemma-3-270m-it-summary.json",
+      "before": "outputs/075/075-fast-row-imatrix-two-full-rank-stages-compress-and-benchmark-gemma-3-270m-it-summary.json",
+      "field": "summary_output"
+    }
+  ]
+}

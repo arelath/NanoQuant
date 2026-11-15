@@ -1,0 +1,679 @@
+{
+  "bytes": 988864,
+  "calibration": {
+    "imatrix": {
+      "path": "D:\\dev\\research\\NanoQuantRewrite\\Datasets\\gemma-3-270m-it-imatrix-unsloth-columns-eaddario-rows\\imatrix.gguf",
+      "sha256": "f4b1e6e371afbc34d3296e16559d4ad707be41075f88f4a5049fcfaaf8ef678d",
+      "tensor_map": [],
+      "use_rows": true
+    }
+  },
+  "identity": {
+    "columns": {
+      "path": "D:\\dev\\research\\NanoQuantRewrite\\Datasets\\gemma-3-270m-it-imatrix-unsloth\\imatrix_unsloth.gguf_file",
+      "receipt": {
+        "bytes": 471040,
+        "filename": "imatrix_unsloth.gguf_file",
+        "format": "gguf",
+        "repository": "unsloth/gemma-3-270m-it-GGUF",
+        "resolved_url": "https://huggingface.co/unsloth/gemma-3-270m-it-GGUF/resolve/c90975dbd40c0c7b275fefaae758c3415c906238/imatrix_unsloth.gguf_file",
+        "revision": "c90975dbd40c0c7b275fefaae758c3415c906238",
+        "sha256": "2f88200eae0588cf7b3030f34e5469a529758a1c69f7a13453b7d3a91de017f3",
+        "source_url": "https://huggingface.co/unsloth/gemma-3-270m-it-GGUF/blob/main/imatrix_unsloth.gguf_file",
+        "tensor_count": 126
+      },
+      "sha256": "2f88200eae0588cf7b3030f34e5469a529758a1c69f7a13453b7d3a91de017f3"
+    },
+    "method": "copy-original-axis-sums-and-counts-v1",
+    "model": "unsloth/gemma-3-270m-it",
+    "model_weights_sha256": "700b710a9a99c295ed546647aa81cacf9f81f4c573ea2be613a0e2517a44afab",
+    "revision": "23cf460f6bb16954176b3ddcc8d4f250501458a9",
+    "rows": {
+      "path": "D:\\dev\\research\\NanoQuantRewrite\\Datasets\\gemma-3-270m-it-imatrix-eaddario-huge-rows\\imatrix.gguf",
+      "receipt": {
+        "bytes": 988608,
+        "calibration": {
+          "bytes": 32303694,
+          "encoding": "utf-8",
+          "filename": "calibration.txt",
+          "record_separator": "\n\n",
+          "repository": "eaddario/imatrix-calibration",
+          "revision": "e87ed55dcba9d9c3a3e41539f3e728e981b1daa4",
+          "rows_skipped": 0,
+          "rows_written": 1,
+          "sha256": "786cb7d7adfe5c0e957b5206e6cf522892bee9922746add7d55c5b7368e1ab2d",
+          "source_filename": "combined_all_huge.parquet",
+          "source_sha256": "696861a9d942de9612e69a561f99445fe21576c00e7f1ff8f2019982ac36cf31",
+          "text_column": "content"
+        },
+        "chunk_size": 512,
+        "chunks": 13301,
+        "command": [
+          "D:\\dev\\research\\llama.cpp\\build\\bin\\Release\\llama-imatrix.exe",
+          "-m",
+          "D:\\dev\\research\\NanoQuantRewrite\\Datasets\\gemma-3-270m-it-imatrix-eaddario-huge-rows\\model-f16.gguf",
+          "-f",
+          "D:\\dev\\research\\NanoQuantRewrite\\Datasets\\gemma-3-270m-it-imatrix-eaddario-huge-rows\\calibration.txt",
+          "-o",
+          "D:\\dev\\research\\NanoQuantRewrite\\Datasets\\gemma-3-270m-it-imatrix-eaddario-huge-rows\\imatrix.partial.gguf",
+          "--output-format",
+          "gguf",
+          "--no-ppl",
+          "--output-frequency",
+          "10",
+          "--ctx-size",
+          "512",
+          "--batch-size",
+          "512",
+          "--ubatch-size",
+          "512",
+          "--chunks",
+          "-1",
+          "--gpu-layers",
+          "99"
+        ],
+        "context_tokens_processed": 6810112,
+        "elapsed_seconds": 3193.8280000000377,
+        "filename": "imatrix.gguf",
+        "files": [
+          {
+            "filename": "imatrix.gguf",
+            "sha256": "3deceafea3aadd5fb6b75e22dfa0123bb99f22e0be95816354b374e80ebcc0c9"
+          },
+          {
+            "filename": "calibration.txt",
+            "sha256": "786cb7d7adfe5c0e957b5206e6cf522892bee9922746add7d55c5b7368e1ab2d"
+          },
+          {
+            "filename": "calibration.json",
+            "sha256": "4c1124a11e4aa7599354cd0da8e900bc8eb02dd999009bd25b3e35b4d40f5a3c"
+          },
+          {
+            "filename": "model.json",
+            "sha256": "7e99067e173e27a695ba2c0c45ca0ba633e2027ae31fdef89620928bf65216dc"
+          },
+          {
+            "filename": "request.json",
+            "sha256": "066fd0eec0c7aa2f93ad0e7bec884fc3270d3f7551e8daf062843d56a0872ebe"
+          },
+          {
+            "filename": "imatrix.log",
+            "sha256": "cb97d671bc1fa0ae492de98f367805a0d4386cfa1eb19f02311feaf2db9a82bb"
+          }
+        ],
+        "format": "gguf",
+        "llama_cpp_revision": "2927569f318311aded148d76be6b1109664066f5",
+        "model": {
+          "files": {
+            ".gitattributes": "34448b82c17d60fec9b65b1f093c115ddbaadc04beb1b0140b6bfed2e012a930",
+            "README.md": "645fadbf83bfca50136a9b10265266b3db3eec671b03c24c5f28594ff4af9a5d",
+            "added_tokens.json": "50b2f405ba56a26d4913fd772089992252d7f942123cc0a034d96424221ba946",
+            "chat_template.jinja": "af95fbef33b76a50e5f463ff9766f85ce84f5849d915c4bd6c1619d852ac3231",
+            "config.json": "2706d3533059c6e1086badab27cc234e8ca2228975c3f73eeaef7f57cb5ec1db",
+            "generation_config.json": "be9e552870ff18a6c6beb0f6811030509c040d641e6972ce53c2fb540bbb4ba0",
+            "model.safetensors": "700b710a9a99c295ed546647aa81cacf9f81f4c573ea2be613a0e2517a44afab",
+            "special_tokens_map.json": "45a857d8a2495d0be30a5d2d6de03278195eb028b6e0b8efc248bfa697d65f05",
+            "tokenizer.json": "4667f2089529e8e7657cfb6d1c19910ae71ff5f28aa7ab2ff2763330affad795",
+            "tokenizer.model": "1299c11d7cf632ef3b4e11937501358ada021bbdf7c47638d13c0ee982f2e79c",
+            "tokenizer_config.json": "be2182df1ad0ea735d336418896eb06e5cc2f59136e7aaeac5de2ec2197742ac"
+          },
+          "repository": "unsloth/gemma-3-270m-it",
+          "revision": "23cf460f6bb16954176b3ddcc8d4f250501458a9"
+        },
+        "model_gguf": {
+          "bytes": 542835488,
+          "input": {
+            "converter_sha256": "3b4064d368d8e5a2c6fe64e031652c463787d5c47a4aaa08e5f68314d6307ea3",
+            "model": {
+              "files": {
+                ".gitattributes": "34448b82c17d60fec9b65b1f093c115ddbaadc04beb1b0140b6bfed2e012a930",
+                "README.md": "645fadbf83bfca50136a9b10265266b3db3eec671b03c24c5f28594ff4af9a5d",
+                "added_tokens.json": "50b2f405ba56a26d4913fd772089992252d7f942123cc0a034d96424221ba946",
+                "chat_template.jinja": "af95fbef33b76a50e5f463ff9766f85ce84f5849d915c4bd6c1619d852ac3231",
+                "config.json": "2706d3533059c6e1086badab27cc234e8ca2228975c3f73eeaef7f57cb5ec1db",
+                "generation_config.json": "be9e552870ff18a6c6beb0f6811030509c040d641e6972ce53c2fb540bbb4ba0",
+                "model.safetensors": "700b710a9a99c295ed546647aa81cacf9f81f4c573ea2be613a0e2517a44afab",
+                "special_tokens_map.json": "45a857d8a2495d0be30a5d2d6de03278195eb028b6e0b8efc248bfa697d65f05",
+                "tokenizer.json": "4667f2089529e8e7657cfb6d1c19910ae71ff5f28aa7ab2ff2763330affad795",
+                "tokenizer.model": "1299c11d7cf632ef3b4e11937501358ada021bbdf7c47638d13c0ee982f2e79c",
+                "tokenizer_config.json": "be2182df1ad0ea735d336418896eb06e5cc2f59136e7aaeac5de2ec2197742ac"
+              },
+              "repository": "unsloth/gemma-3-270m-it",
+              "revision": "23cf460f6bb16954176b3ddcc8d4f250501458a9"
+            },
+            "outtype": "f16"
+          },
+          "sha256": "b5ac82a69f5ab64f6b021291603e6b9b10e604cb69990de73240b482016c8751"
+        },
+        "normalization": "llama-cpp-sums-over-counts",
+        "request": {
+          "calibration_file": "combined_all_huge.parquet",
+          "calibration_repo": "eaddario/imatrix-calibration",
+          "calibration_revision": "e87ed55dcba9d9c3a3e41539f3e728e981b1daa4",
+          "chunks": -1,
+          "context_size": 512,
+          "executable_sha256": "cd462a61b8bc49ea2c861cb836cce4373f19ff3ee24c506e97142f12e6834388",
+          "gpu_layers": 99,
+          "model": "unsloth/gemma-3-270m-it",
+          "model_gguf": null,
+          "revision": "23cf460f6bb16954176b3ddcc8d4f250501458a9",
+          "text_column": "content"
+        },
+        "schema": "nanoquant-imatrix-dataset-v1",
+        "sha256": "3deceafea3aadd5fb6b75e22dfa0123bb99f22e0be95816354b374e80ebcc0c9",
+        "status": "complete",
+        "tensor_count": 126,
+        "tensor_shapes": {
+          "blk.0.attn_k.weight": [
+            1,
+            640
+          ],
+          "blk.0.attn_output.weight": [
+            1,
+            1024
+          ],
+          "blk.0.attn_q.weight": [
+            1,
+            640
+          ],
+          "blk.0.attn_v.weight": [
+            1,
+            640
+          ],
+          "blk.0.ffn_down.weight": [
+            1,
+            2048
+          ],
+          "blk.0.ffn_gate.weight": [
+            1,
+            640
+          ],
+          "blk.0.ffn_up.weight": [
+            1,
+            640
+          ],
+          "blk.1.attn_k.weight": [
+            1,
+            640
+          ],
+          "blk.1.attn_output.weight": [
+            1,
+            1024
+          ],
+          "blk.1.attn_q.weight": [
+            1,
+            640
+          ],
+          "blk.1.attn_v.weight": [
+            1,
+            640
+          ],
+          "blk.1.ffn_down.weight": [
+            1,
+            2048
+          ],
+          "blk.1.ffn_gate.weight": [
+            1,
+            640
+          ],
+          "blk.1.ffn_up.weight": [
+            1,
+            640
+          ],
+          "blk.10.attn_k.weight": [
+            1,
+            640
+          ],
+          "blk.10.attn_output.weight": [
+            1,
+            1024
+          ],
+          "blk.10.attn_q.weight": [
+            1,
+            640
+          ],
+          "blk.10.attn_v.weight": [
+            1,
+            640
+          ],
+          "blk.10.ffn_down.weight": [
+            1,
+            2048
+          ],
+          "blk.10.ffn_gate.weight": [
+            1,
+            640
+          ],
+          "blk.10.ffn_up.weight": [
+            1,
+            640
+          ],
+          "blk.11.attn_k.weight": [
+            1,
+            640
+          ],
+          "blk.11.attn_output.weight": [
+            1,
+            1024
+          ],
+          "blk.11.attn_q.weight": [
+            1,
+            640
+          ],
+          "blk.11.attn_v.weight": [
+            1,
+            640
+          ],
+          "blk.11.ffn_down.weight": [
+            1,
+            2048
+          ],
+          "blk.11.ffn_gate.weight": [
+            1,
+            640
+          ],
+          "blk.11.ffn_up.weight": [
+            1,
+            640
+          ],
+          "blk.12.attn_k.weight": [
+            1,
+            640
+          ],
+          "blk.12.attn_output.weight": [
+            1,
+            1024
+          ],
+          "blk.12.attn_q.weight": [
+            1,
+            640
+          ],
+          "blk.12.attn_v.weight": [
+            1,
+            640
+          ],
+          "blk.12.ffn_down.weight": [
+            1,
+            2048
+          ],
+          "blk.12.ffn_gate.weight": [
+            1,
+            640
+          ],
+          "blk.12.ffn_up.weight": [
+            1,
+            640
+          ],
+          "blk.13.attn_k.weight": [
+            1,
+            640
+          ],
+          "blk.13.attn_output.weight": [
+            1,
+            1024
+          ],
+          "blk.13.attn_q.weight": [
+            1,
+            640
+          ],
+          "blk.13.attn_v.weight": [
+            1,
+            640
+          ],
+          "blk.13.ffn_down.weight": [
+            1,
+            2048
+          ],
+          "blk.13.ffn_gate.weight": [
+            1,
+            640
+          ],
+          "blk.13.ffn_up.weight": [
+            1,
+            640
+          ],
+          "blk.14.attn_k.weight": [
+            1,
+            640
+          ],
+          "blk.14.attn_output.weight": [
+            1,
+            1024
+          ],
+          "blk.14.attn_q.weight": [
+            1,
+            640
+          ],
+          "blk.14.attn_v.weight": [
+            1,
+            640
+          ],
+          "blk.14.ffn_down.weight": [
+            1,
+            2048
+          ],
+          "blk.14.ffn_gate.weight": [
+            1,
+            640
+          ],
+          "blk.14.ffn_up.weight": [
+            1,
+            640
+          ],
+          "blk.15.attn_k.weight": [
+            1,
+            640
+          ],
+          "blk.15.attn_output.weight": [
+            1,
+            1024
+          ],
+          "blk.15.attn_q.weight": [
+            1,
+            640
+          ],
+          "blk.15.attn_v.weight": [
+            1,
+            640
+          ],
+          "blk.15.ffn_down.weight": [
+            1,
+            2048
+          ],
+          "blk.15.ffn_gate.weight": [
+            1,
+            640
+          ],
+          "blk.15.ffn_up.weight": [
+            1,
+            640
+          ],
+          "blk.16.attn_k.weight": [
+            1,
+            640
+          ],
+          "blk.16.attn_output.weight": [
+            1,
+            1024
+          ],
+          "blk.16.attn_q.weight": [
+            1,
+            640
+          ],
+          "blk.16.attn_v.weight": [
+            1,
+            640
+          ],
+          "blk.16.ffn_down.weight": [
+            1,
+            2048
+          ],
+          "blk.16.ffn_gate.weight": [
+            1,
+            640
+          ],
+          "blk.16.ffn_up.weight": [
+            1,
+            640
+          ],
+          "blk.17.attn_k.weight": [
+            1,
+            640
+          ],
+          "blk.17.attn_output.weight": [
+            1,
+            1024
+          ],
+          "blk.17.attn_q.weight": [
+            1,
+            640
+          ],
+          "blk.17.attn_v.weight": [
+            1,
+            640
+          ],
+          "blk.17.ffn_down.weight": [
+            1,
+            2048
+          ],
+          "blk.17.ffn_gate.weight": [
+            1,
+            640
+          ],
+          "blk.17.ffn_up.weight": [
+            1,
+            640
+          ],
+          "blk.2.attn_k.weight": [
+            1,
+            640
+          ],
+          "blk.2.attn_output.weight": [
+            1,
+            1024
+          ],
+          "blk.2.attn_q.weight": [
+            1,
+            640
+          ],
+          "blk.2.attn_v.weight": [
+            1,
+            640
+          ],
+          "blk.2.ffn_down.weight": [
+            1,
+            2048
+          ],
+          "blk.2.ffn_gate.weight": [
+            1,
+            640
+          ],
+          "blk.2.ffn_up.weight": [
+            1,
+            640
+          ],
+          "blk.3.attn_k.weight": [
+            1,
+            640
+          ],
+          "blk.3.attn_output.weight": [
+            1,
+            1024
+          ],
+          "blk.3.attn_q.weight": [
+            1,
+            640
+          ],
+          "blk.3.attn_v.weight": [
+            1,
+            640
+          ],
+          "blk.3.ffn_down.weight": [
+            1,
+            2048
+          ],
+          "blk.3.ffn_gate.weight": [
+            1,
+            640
+          ],
+          "blk.3.ffn_up.weight": [
+            1,
+            640
+          ],
+          "blk.4.attn_k.weight": [
+            1,
+            640
+          ],
+          "blk.4.attn_output.weight": [
+            1,
+            1024
+          ],
+          "blk.4.attn_q.weight": [
+            1,
+            640
+          ],
+          "blk.4.attn_v.weight": [
+            1,
+            640
+          ],
+          "blk.4.ffn_down.weight": [
+            1,
+            2048
+          ],
+          "blk.4.ffn_gate.weight": [
+            1,
+            640
+          ],
+          "blk.4.ffn_up.weight": [
+            1,
+            640
+          ],
+          "blk.5.attn_k.weight": [
+            1,
+            640
+          ],
+          "blk.5.attn_output.weight": [
+            1,
+            1024
+          ],
+          "blk.5.attn_q.weight": [
+            1,
+            640
+          ],
+          "blk.5.attn_v.weight": [
+            1,
+            640
+          ],
+          "blk.5.ffn_down.weight": [
+            1,
+            2048
+          ],
+          "blk.5.ffn_gate.weight": [
+            1,
+            640
+          ],
+          "blk.5.ffn_up.weight": [
+            1,
+            640
+          ],
+          "blk.6.attn_k.weight": [
+            1,
+            640
+          ],
+          "blk.6.attn_output.weight": [
+            1,
+            1024
+          ],
+          "blk.6.attn_q.weight": [
+            1,
+            640
+          ],
+          "blk.6.attn_v.weight": [
+            1,
+            640
+          ],
+          "blk.6.ffn_down.weight": [
+            1,
+            2048
+          ],
+          "blk.6.ffn_gate.weight": [
+            1,
+            640
+          ],
+          "blk.6.ffn_up.weight": [
+            1,
+            640
+          ],
+          "blk.7.attn_k.weight": [
+            1,
+            640
+          ],
+          "blk.7.attn_output.weight": [
+            1,
+            1024
+          ],
+          "blk.7.attn_q.weight": [
+            1,
+            640
+          ],
+          "blk.7.attn_v.weight": [
+            1,
+            640
+          ],
+          "blk.7.ffn_down.weight": [
+            1,
+            2048
+          ],
+          "blk.7.ffn_gate.weight": [
+            1,
+            640
+          ],
+          "blk.7.ffn_up.weight": [
+            1,
+            640
+          ],
+          "blk.8.attn_k.weight": [
+            1,
+            640
+          ],
+          "blk.8.attn_output.weight": [
+            1,
+            1024
+          ],
+          "blk.8.attn_q.weight": [
+            1,
+            640
+          ],
+          "blk.8.attn_v.weight": [
+            1,
+            640
+          ],
+          "blk.8.ffn_down.weight": [
+            1,
+            2048
+          ],
+          "blk.8.ffn_gate.weight": [
+            1,
+            640
+          ],
+          "blk.8.ffn_up.weight": [
+            1,
+            640
+          ],
+          "blk.9.attn_k.weight": [
+            1,
+            640
+          ],
+          "blk.9.attn_output.weight": [
+            1,
+            1024
+          ],
+          "blk.9.attn_q.weight": [
+            1,
+            640
+          ],
+          "blk.9.attn_v.weight": [
+            1,
+            640
+          ],
+          "blk.9.ffn_down.weight": [
+            1,
+            2048
+          ],
+          "blk.9.ffn_gate.weight": [
+            1,
+            640
+          ],
+          "blk.9.ffn_up.weight": [
+            1,
+            640
+          ]
+        }
+      },
+      "sha256": "3deceafea3aadd5fb6b75e22dfa0123bb99f22e0be95816354b374e80ebcc0c9"
+    },
+    "schema": 1
+  },
+  "producer_sha256": "73519401ec08912c8b0097b2ce0b3a179b955d78f0638c52ad291ef61eaa3243",
+  "sha256": "f4b1e6e371afbc34d3296e16559d4ad707be41075f88f4a5049fcfaaf8ef678d"
+}
