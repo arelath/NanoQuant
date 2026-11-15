@@ -155,6 +155,8 @@ def execute_compression_quality_experiment(
     config: RunConfig,
     experiment: CompressionQualityExperiment,
     resolved: ResolvedCompressionQualityExperiment,
+    *,
+    audit_before_global_tuning: bool = False,
 ) -> dict[str, Any]:
     """Compress the pinned model, then compare BF16 and frozen quality."""
 
@@ -186,6 +188,7 @@ def execute_compression_quality_experiment(
             maximum_wddm_shared_bytes=maximum_shared_bytes,
             interrupt_after_block_commits=experiment.interrupt_after_block_commits,
             allow_relocated_completed_run=experiment.allow_relocated_completed_run,
+            audit_before_global_tuning=audit_before_global_tuning,
         ),
     )
     workflow = complete.workflow

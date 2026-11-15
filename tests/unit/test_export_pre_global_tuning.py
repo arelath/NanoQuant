@@ -104,3 +104,28 @@ def test_base_result_is_reused_only_for_a_matching_protocol(tmp_path: Path) -> N
     assert tool.reusable_base_result(published, _request(task_names=("piqa",))) is None
     assert tool.reusable_base_result(published, _request(revision="other")) is None
     assert tool.reusable_base_result(tmp_path / "missing.json", _request()) is None
+
+
+def test_refresh_is_explicit_and_preserves_report_until_replacement(monkeypatch, tmp_path: Path) -> None:
+    tool = _tool()
+    run_output = tmp_path / "run"
+    (run_output / "state").mkdir(parents=True)
+    (run_output / "state/journal.jsonl").write_text("fixture")
+    quality = tmp_path / "pre-quality.json"
+    quality.write_text("previous report")
+    plan = replace(tool.build_plan(LAUNCHER, uniform_control=True), run_output=run_output, quality_output=quality)
+    monkeypatch.setattr(tool, "build_plan", lambda *a, **kw: plan)
+    monkeypatch.setattr(tool, "_reject_incompatible_run_before_preparation", lambda *a: None)
+    monkeypatch.setattr(tool, "active_global_tuning", lambda *a: object())
+
+    def stop_before_loading(**kwargs):
+        raise RuntimeError("reached validated export preparation")
+
+    monkeypatch.setattr(tool, "snapshot_download", stop_before_loading)
+    args = argparse.Namespace(launcher=LAUNCHER, uniform_control=True, suffix="pre-kd", plan_only=False)
+    with pytest.raises(FileExistsError, match="already exists"):
+        tool.run(args)
+    args.refresh_quality = True
+    with pytest.raises(RuntimeError, match="reached validated export preparation"):
+        tool.run(args)
+    assert quality.read_text() == "previous report"

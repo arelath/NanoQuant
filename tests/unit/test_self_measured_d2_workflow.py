@@ -9,6 +9,22 @@ from nanoquant.self_measured_d2_workflow import SelfMeasuredD2ProfileOptions
 from tests.support.experiments import load_experiment
 
 
+def test_maximum_rank_control_forwards_pre_distillation_audit(monkeypatch, tmp_path) -> None:
+    definition = load_experiment(77)
+    monkeypatch.setattr(workflow, "resolve_compression_quality_experiment", lambda *a, **kw: object())
+    observed = []
+    monkeypatch.setattr(
+        workflow, "execute_compression_quality_experiment",
+        lambda *a, **kw: observed.append(kw),
+    )
+    assert workflow.run_self_measured_d2_experiment(
+        definition, launcher_path=tmp_path / "experiments/077.py", arguments=[],
+        profile_options=SelfMeasuredD2ProfileOptions(tuned_operating_point=True),
+        reuse_maximum_rank_control=True, audit_before_global_tuning=True,
+    ) == 0
+    assert observed == [{"audit_before_global_tuning": True}]
+
+
 def test_uniform_control_propagates_block_bounded_execution(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

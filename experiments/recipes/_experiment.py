@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
+import subprocess
+import sys
 from collections.abc import Callable
+from contextlib import redirect_stdout
 from dataclasses import dataclass, replace
 from enum import Enum
+from io import StringIO
 from pathlib import Path
 from typing import Generic, TypeVar
 
@@ -472,6 +477,47 @@ def experiment_callable_main(module_name: str, runner: Callable[[], int]) -> Non
         raise SystemExit(runner())
 
 
+def experiment_pre_post_callable_main(
+    module_name: str,
+    launcher_path: str | Path,
+    runner: Callable[[], int],
+    *,
+    uniform_control: bool = False,
+) -> None:
+    """Run the normal post-KD workflow, then export/score its immutable pre-KD commits.
+
+    Previews remain JSON and never execute either model. Repeated real launches
+    validate/reuse exports and refresh the pre-KD benchmark against the current
+    post-KD report, rather than trusting a stale quality file.
+    """
+    if module_name != "__main__":
+        return
+    launcher = Path(launcher_path).resolve()
+    root = launcher.parent.parent
+    command = [sys.executable, str(root / "tools/export_pre_global_tuning.py"), str(launcher)]
+    if uniform_control:
+        command.append("--uniform-control")
+    preview = any(flag in sys.argv[1:] for flag in ("--plan-only", "--dry-run"))
+    if preview:
+        captured = StringIO()
+        with redirect_stdout(captured):
+            result = runner()
+        if result:
+            print(captured.getvalue(), end="")
+            raise SystemExit(result)
+        post_plan = json.loads(captured.getvalue())
+        pre_plan = subprocess.run(
+            command + ["--plan-only"], cwd=root, check=True, capture_output=True, text=True,
+        )
+        post_plan["pre_global_tuning"] = json.loads(pre_plan.stdout)
+        print(json.dumps(post_plan, indent=2))
+        raise SystemExit(0)
+    result = runner()
+    if result == 0:
+        result = subprocess.run(command + ["--refresh-quality"], cwd=root, check=False).returncode
+    raise SystemExit(result)
+
+
 __all__ = [
     "BaselineKind",
     "BaselineRef",
@@ -487,6 +533,7 @@ __all__ = [
     "define_rank_expansion_experiment",
     "experiment_callable_main",
     "experiment_main",
+    "experiment_pre_post_callable_main",
     "run_experiment",
     "validate_experiment_registry",
 ]

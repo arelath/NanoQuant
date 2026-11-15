@@ -23,6 +23,7 @@ from ._experiment import (
     define_rank_expansion_experiment,
     experiment_callable_main,
     experiment_main,
+    experiment_pre_post_callable_main,
     run_experiment,
 )
 from .base_compression import (
@@ -56,6 +57,7 @@ from .base_compression import (
 )
 
 __all__ = [
+    "experiment_pre_post_callable_main",
     "DECLARATIVE_EXPERIMENT_SCHEMA_VERSION",
     "DeclarativeExperiment",
     "ExperimentWorkflowKind",

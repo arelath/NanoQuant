@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -397,6 +399,34 @@ def test_combined_workflow_runs_quantization_before_distillation(
     assert cast(Any, result.quantization) is quantization_result
     assert cast(Any, result.distillation) is distillation_result
     assert transitions == [{"artifact_id": "sha256-distillation"}]
+
+
+@pytest.mark.parametrize("audit_fails", [False, True])
+def test_fresh_audit_precedes_kd_and_failure_prevents_training(tmp_path, monkeypatch, audit_fails) -> None:
+    calls = []
+    quantization = SimpleNamespace(inventory=SimpleNamespace(blocks=tuple(range(18))))
+    distillation = SimpleNamespace(reference=SimpleNamespace(artifact_id="distillation"))
+    monkeypatch.setattr(workflow, "run_resident_quantization", lambda request: calls.append("quantize") or quantization)
+    monkeypatch.setattr(workflow, "run_global_topk_distillation", lambda request: calls.append("kd") or distillation)
+    monkeypatch.setattr(workflow, "_transition_workflow_manifest", lambda *a, **kw: None)
+
+    def audit(command, **kwargs):
+        calls.append("audit")
+        assert "--require-complete" in command
+        assert command[command.index("--expected-blocks") + 1] == "18"
+        assert kwargs["check"] is True
+        if audit_fails:
+            raise subprocess.CalledProcessError(1, command)
+
+    monkeypatch.setattr(workflow.subprocess, "run", audit)
+    options = ResidentExecutionOptions(audit_before_global_tuning=True)
+    if audit_fails:
+        with pytest.raises(subprocess.CalledProcessError):
+            execute_resident_workflow(_resident_config(), _inputs(tmp_path), options)
+        assert calls == ["quantize", "audit"]
+    else:
+        execute_resident_workflow(_resident_config(), _inputs(tmp_path), options)
+        assert calls == ["quantize", "audit", "kd"]
 
 
 def test_combined_workflow_runs_mass_floor_correction_after_primary_distillation(

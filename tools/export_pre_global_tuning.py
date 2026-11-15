@@ -20,6 +20,7 @@ from typing import Any, cast
 
 import _paths  # noqa: F401
 from huggingface_hub import snapshot_download
+from validate_resident_run import validate_resident_run
 
 from nanoquant.compression_export_workflow import CompressionExportRecipe, execute_compression_export
 from nanoquant.compression_quality_workflow import CompressionQualityExperiment
@@ -37,7 +38,7 @@ from nanoquant.infrastructure.runs import launcher_provenance
 from nanoquant.quality_evaluation import QualityEvaluationRequest, execute_quality_evaluation
 from nanoquant.quality_evaluation_workflow import render_quality_evaluation_markdown
 from nanoquant.resident_workflow import _reject_incompatible_run_before_preparation
-from nanoquant.self_measured_d2_workflow import _uniform_control_config
+from nanoquant.self_measured_d2_workflow import _resolved_model_block_count, _uniform_control_config
 
 REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
 _BASE_PROTOCOL_FIELDS = (
@@ -72,6 +73,10 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--suffix", default="pre-kd", help="name suffix for the new outputs")
     parser.add_argument("--plan-only", action="store_true", help="print the resolved paths and exit")
+    parser.add_argument(
+        "--refresh-quality", action="store_true",
+        help="validate/reuse existing pre-KD exports and recompute an existing pre-KD quality report",
+    )
     return parser
 
 
@@ -237,7 +242,7 @@ def run(args: argparse.Namespace, *, repository_root: Path = REPOSITORY_ROOT) ->
     _reject_incompatible_run_before_preparation(plan.run_output, config_hash(plan.config))
     if active_global_tuning(plan.run_output) is None:
         raise ValueError("the run has no active global tuning, so its published export is already pre-KD")
-    if plan.quality_output.exists():
+    if plan.quality_output.exists() and not getattr(args, "refresh_quality", False):
         raise FileExistsError(f"pre-global-tuning quality output already exists: {plan.quality_output}")
     config = plan.config
     workflow = plan.workflow
@@ -246,6 +251,9 @@ def run(args: argparse.Namespace, *, repository_root: Path = REPOSITORY_ROOT) ->
         revision=str(config.model.revision),
         local_files_only=workflow.local_files_only,
     )).resolve()
+    validate_resident_run(
+        plan.run_output, expected_blocks=_resolved_model_block_count(config), require_complete=True,
+    )
 
     print(f"[pre-kd] exporting {plan.run_output} without global tuning", flush=True)
     exports = execute_compression_export(

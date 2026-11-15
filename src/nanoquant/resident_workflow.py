@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import json
 import math
+import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -107,6 +109,7 @@ class ResidentExecutionOptions:
     maximum_wddm_shared_bytes: int | None = None
     replan_memory: bool = False
     allow_relocated_completed_run: bool = False
+    audit_before_global_tuning: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -713,6 +716,20 @@ def execute_resident_workflow(
             memory_retries += 1
     distillation = None
     if config.distillation.enabled:
+        if options.audit_before_global_tuning:
+            if inputs.launcher_path is None:
+                raise ValueError("pre-distillation audit requires a repository launcher path")
+            repository = inputs.launcher_path.resolve().parent.parent
+            subprocess.run(
+                [
+                    sys.executable, str(repository / "tools/validate_resident_run.py"),
+                    "--run-output", str(inputs.output.resolve()),
+                    "--expected-blocks", str(len(quantization.inventory.blocks)),
+                    "--require-complete",
+                    "--output", str(inputs.output / "pre-global-resident-audit.json"),
+                ],
+                cwd=repository, check=True,
+            )
         try:
             primary_request = distillation_request_from_config(config, inputs, options)
             if config.distillation.mass_floor_correction.enabled:

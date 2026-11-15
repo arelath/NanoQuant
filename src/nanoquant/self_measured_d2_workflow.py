@@ -320,6 +320,7 @@ def run_self_measured_d2_experiment(
     allocation_profile_dataset: Path | None = None,
     kl_teacher_dataset: Path | None = None,
     reuse_maximum_rank_control: bool = False,
+    audit_before_global_tuning: bool = False,
 ) -> int:
     """Prepare, verify, and consume same-campaign KL inputs before compression."""
 
@@ -351,6 +352,8 @@ def run_self_measured_d2_experiment(
         help="validate configuration and show preparation inputs without loading datasets or running any stage",
     )
     parsed = parser.parse_args(arguments)
+    if audit_before_global_tuning and not reuse_maximum_rank_control:
+        parser.error("pre-distillation audit is currently supported by maximum-rank control reuse")
     if parsed.plan_only and parsed.dry_run:
         parser.error("choose --plan-only or --dry-run")
     if reuse_maximum_rank_control:
@@ -377,6 +380,7 @@ def run_self_measured_d2_experiment(
                 and parsed.allocation_profile_dataset is None and parsed.kl_profile is None
             ),
             "reuse_maximum_rank_control": reuse_maximum_rank_control,
+            "audit_before_global_tuning": audit_before_global_tuning,
         }, indent=2))
         return 0
     if reuse_maximum_rank_control:
@@ -391,7 +395,10 @@ def run_self_measured_d2_experiment(
             export=replace(experiment.workflow.export, publication_experiment_number=number),
         )
         if parsed.dry_run:
-            print(json.dumps({"dry_run": True, "config": to_dict(control), "workflow": to_dict(publication)}, indent=2))
+            print(json.dumps({
+                "dry_run": True, "config": to_dict(control), "workflow": to_dict(publication),
+                "audit_before_global_tuning": audit_before_global_tuning,
+            }, indent=2))
             return 0
         print(
             f"Resuming Experiment {number:03d} maximum-rank control as the final model; "
@@ -402,7 +409,12 @@ def run_self_measured_d2_experiment(
         # configured, imports its saved prefix with provenance before new work.
         # Publication owns the numbered output paths.
         resolved = resolve_compression_quality_experiment(control, publication, launcher_path=launcher_path)
-        execute_compression_quality_experiment(control, publication, resolved)
+        if audit_before_global_tuning:
+            execute_compression_quality_experiment(
+                control, publication, resolved, audit_before_global_tuning=True,
+            )
+        else:
+            execute_compression_quality_experiment(control, publication, resolved)
         return 0
     if parsed.dry_run and parsed.allocation_profile_dataset is None:
         parser.error("--dry-run requires --allocation-profile-dataset; automatic preparation will not be started")
