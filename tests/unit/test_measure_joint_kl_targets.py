@@ -71,10 +71,16 @@ def test_measure_scores_all_projections_perturbed_together(monkeypatch) -> None:
     result = tool.measure(None, None, weights, _fit(), seeds=[0, 1], device="cpu", token_chunk_size=2,
                           log=lambda _message: None)
 
-    assert calls == [0, 2, 2]
-    item, = result["results"]
+    # Clean score, two zero-error control runs, then two joint runs with both projections changed.
+    assert calls == [0, 0, 0, 2, 2]
+    control, item = result["results"]
+    assert control["kl_target"] == 0 and set(control["target_errors"].values()) == {0.0}
+    assert control["mean_kl_above_control"] == 0 and control["kl_seed_sd"] == 0
+    assert control["mean_additive_prediction"] == 0 and control["mean_measured_over_additive"] is None
+    assert all(set(run["actual_errors"].values()) == {0.0} for run in control["runs"])
     assert item["projection_count"] == 2 and item["isolated_sum"] == pytest.approx(0.02)
     assert item["mean_kl_above_control"] == pytest.approx(0.1)
+    assert item["kl_standard_error"] == pytest.approx(0)
     # Additive prediction is coefficient × error ** exponent summed over projections: 0.01 + 0.04.
     assert item["mean_additive_prediction"] == pytest.approx(0.05, rel=1e-4)
     assert item["mean_measured_over_additive"] == pytest.approx(2.0, rel=1e-4)
@@ -85,8 +91,26 @@ def test_measure_scores_all_projections_perturbed_together(monkeypatch) -> None:
         "measured_at": "now", "measurement_sweep": "sweep", "seeds": [0, 1], "json": "joint.json", **result,
     }
     markdown = tool.render_markdown(report)
-    assert "| 0.01 | 2 | 15.00% (range 10.00%–20.00%) | 0.0500 | 0.1000 |" in markdown
+    assert ("| 0 | 2 | 0 (unperturbed control) | 0.0000 | 0.0000 | 0.0000 – 0.0000 | 0.0000 | 0.0000 | n/a | "
+            "n/a | +0.0000 |") in markdown
+    assert "| 0.01 | 2 | 15.00% (range 10.00%–20.00%) | 0.0500 | 0.1000 | 0.1000 – 0.1000 |" in markdown
+    assert "| 2.000 | 2.000 – 2.000 |" in markdown
     assert markdown.count("| 0.01 | 0 |") + markdown.count("| 0.01 | 1 |") == 2
+    assert "2 runs per target (noise seeds 0–1)" in markdown
+    without = tool.measure(None, None, weights, _fit(), seeds=[0], device="cpu", token_chunk_size=2,
+                           include_control=False, log=lambda _message: None)
+    assert [item["kl_target"] for item in without["results"]] == [0.01]
+
+
+def test_confidence_interval_uses_student_t_for_the_run_count() -> None:
+    tool = _tool()
+    low, high = tool.confidence_interval_95([1.0, 2.0, 3.0])
+    half_width = 4.303 / 3 ** 0.5
+    assert (low, high) == pytest.approx((2 - half_width, 2 + half_width))
+    assert tool.t_critical_95(14) == 2.145  # 15 runs
+    assert tool.t_critical_95(31) == pytest.approx(2.0395, abs=1e-3)
+    assert tool.t_critical_95(1000) == pytest.approx(1.9623, abs=1e-3)
+    assert tool.confidence_interval_95([1.0]) is None
 
 
 def test_spec_lookup_matches_source_revision_and_precision() -> None:

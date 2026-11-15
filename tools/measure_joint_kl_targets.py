@@ -43,6 +43,30 @@ from nanoquant.infrastructure.kl_teacher_dataset import KlTeacherDataset, load_k
 from nanoquant.infrastructure.model_adapters import adapter_for_config
 
 SPECS = (GEMMA_1B, GEMMA_270M, GEMMA_4B)
+# Two-sided 95% Student-t critical values for 1-30 degrees of freedom.
+_T95 = (
+    12.706, 4.303, 3.182, 2.776, 2.571, 2.447, 2.365, 2.306, 2.262, 2.228,
+    2.201, 2.179, 2.160, 2.145, 2.131, 2.120, 2.110, 2.101, 2.093, 2.086,
+    2.080, 2.074, 2.069, 2.064, 2.060, 2.056, 2.052, 2.048, 2.045, 2.042,
+)
+
+
+def t_critical_95(degrees_of_freedom: int) -> float:
+    if degrees_of_freedom < 1:
+        raise ValueError("a confidence interval needs at least two runs")
+    if degrees_of_freedom <= len(_T95):
+        return _T95[degrees_of_freedom - 1]
+    z, df = 1.959964, degrees_of_freedom  # Cornish-Fisher expansion; within 1e-3 above 30 df.
+    return z + (z**3 + z) / (4 * df) + (5 * z**5 + 16 * z**3 + 3 * z) / (96 * df**2)
+
+
+def confidence_interval_95(values: list[float]) -> tuple[float, float] | None:
+    """Two-sided 95% Student-t interval for the mean of independent runs."""
+    if len(values) < 2:
+        return None
+    mean = statistics.fmean(values)
+    half_width = t_critical_95(len(values) - 1) * statistics.stdev(values) / math.sqrt(len(values))
+    return mean - half_width, mean + half_width
 
 
 def spec_for_protocol(protocol: Mapping) -> ModelSpec:
@@ -96,13 +120,15 @@ def projection_weights(model: nn.Module, adapter, targets: list[str]) -> dict[st
 
 def measure(
     model: nn.Module, dataset: KlTeacherDataset, weights: Mapping[str, torch.Tensor], fit: Mapping,
-    *, seeds: list[int], device: str, token_chunk_size: int, log=print,
+    *, seeds: list[int], device: str, token_chunk_size: int, include_control: bool = True, log=print,
 ) -> dict:
     clean = score_model(model, dataset, device=device, token_chunk_size=token_chunk_size)
     curves = fit["curves"]
     results = []
-    for index, kl_target in enumerate(fit["kl_targets"]):
-        errors = target_errors(fit, index)
+    # The control row runs the same joint path at zero error, so it measures repeat-run noise.
+    cases = [(0.0, dict.fromkeys(curves, 0.0))] if include_control else []
+    cases += [(kl_target, target_errors(fit, index)) for index, kl_target in enumerate(fit["kl_targets"])]
+    for kl_target, errors in cases:
         runs = []
         for seed in seeds:
             started = time.perf_counter()
@@ -113,6 +139,7 @@ def measure(
                 curves[name]["coefficient"] * actual[name] ** curves[name]["exponent"] for name in actual
             )
             kl_above = score["kl_nats_per_token"] - clean["kl_nats_per_token"]
+            ratio = kl_above / predicted if predicted > 0 else None
             runs.append({
                 "seed": seed,
                 "kl_nats_per_token": score["kl_nats_per_token"],
@@ -120,23 +147,29 @@ def measure(
                 "nll_nats_per_token": score["nll_nats_per_token"],
                 "nll_above_control": score["nll_nats_per_token"] - clean["nll_nats_per_token"],
                 "additive_prediction": predicted,
-                "measured_over_additive": kl_above / predicted,
+                "measured_over_additive": ratio,
                 "actual_errors": actual,
                 "sequences": score["sequences"],
                 "seconds": time.perf_counter() - started,
             })
             log(f"KL target {kl_target:g}, seed {seed}: joint KL above control {kl_above:.6g} nats/token "
-                f"(additive prediction {predicted:.6g}, ratio {kl_above / predicted:.3f})")
+                f"(additive prediction {predicted:.6g}"
+                + ("" if ratio is None else f", ratio {ratio:.3f}") + ")")
         values = [run["kl_above_control"] for run in runs]
+        sd = statistics.stdev(values) if len(values) > 1 else None
+        ratios = [run["measured_over_additive"] for run in runs]
         results.append({
             "kl_target": kl_target,
             "projection_count": len(errors),
             "isolated_sum": kl_target * len(errors),
             "target_errors": errors,
             "mean_kl_above_control": statistics.fmean(values),
-            "kl_seed_sd": statistics.stdev(values) if len(values) > 1 else None,
+            "kl_seed_sd": sd,
+            "kl_standard_error": None if sd is None else sd / math.sqrt(len(values)),
+            "kl_confidence_interval_95": confidence_interval_95(values),
             "mean_additive_prediction": statistics.fmean(run["additive_prediction"] for run in runs),
-            "mean_measured_over_additive": statistics.fmean(run["measured_over_additive"] for run in runs),
+            "mean_measured_over_additive": None if None in ratios else statistics.fmean(ratios),
+            "ratio_confidence_interval_95": None if None in ratios else confidence_interval_95(ratios),
             "mean_nll_above_control": statistics.fmean(run["nll_above_control"] for run in runs),
             "runs": runs,
         })
@@ -145,7 +178,24 @@ def measure(
 
 def _error_summary(errors: Mapping[str, float]) -> str:
     values = sorted(errors.values())
+    if values[-1] == 0:
+        return "0 (unperturbed control)"
     return f"{statistics.median(values):.2%} (range {values[0]:.2%}–{values[-1]:.2%})"
+
+
+def _nats(value: float | None, *, signed: bool = False) -> str:
+    if value is None:
+        return "n/a"
+    sign = "+" if signed else ""
+    return f"{value:{sign}.2e}" if value != 0 and abs(value) < 1e-3 else f"{value:{sign}.4f}"
+
+
+def _ratio(value: float | None) -> str:
+    return "n/a" if value is None else f"{value:.3f}"
+
+
+def _interval(bounds, formatter) -> str:
+    return "n/a" if bounds is None else f"{formatter(bounds[0])} – {formatter(bounds[1])}"
 
 
 def render_markdown(report: Mapping) -> str:
@@ -156,35 +206,44 @@ def render_markdown(report: Mapping) -> str:
         "",
         f"Measured on {report['measured_at']} from sweep `{report['measurement_sweep']}`.",
         f"Model precision `{protocol['teacher']['model_dtype']}`, {clean['token_count']:,} scored next-token "
-        f"positions per run, seeds {', '.join(map(str, report['seeds']))}.",
+        f"positions per run, {len(report['seeds'])} runs per target (noise seeds "
+        f"{report['seeds'][0]}–{report['seeds'][-1]}).",
         "",
         "Every projection is perturbed at the same time to the relative weight error that its isolated",
         "power-law fit predicts would add the KL target by itself. The additive prediction sums each",
         "projection's fitted KL at its measured error, which is about the projection count times the",
         "target. A ratio above 1 means the errors compound; below 1, they partly cancel or saturate.",
+        "The 0 row is the control: the same joint path with zero error, run as many times as the others.",
+        "Each run uses a different noise seed, so the SD is the spread across noise draws and the",
+        "standard error is the uncertainty of the mean. The 95% confidence intervals are two-sided",
+        "Student-t intervals for the mean over the runs, treating noise draws as independent.",
         "",
-        f"Clean control: {clean['kl_nats_per_token']:.6g} nats/token KL, "
+        f"Clean model: {clean['kl_nats_per_token']:.6g} nats/token KL against the stored teacher, "
         f"{clean['nll_nats_per_token']:.6f} nats/token NLL.",
         "",
         "| KL target per projection | Projections | Median target error | Additive prediction | "
-        "Measured joint KL above control | Seed SD | Measured / additive | NLL change |",
-        "| ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: |",
+        "Mean joint KL above control | 95% CI of mean KL | SD | Standard error | Mean measured / additive | "
+        "95% CI of ratio | Mean NLL change |",
+        "| ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for item in report["results"]:
-        sd = "n/a" if item["kl_seed_sd"] is None else f"{item['kl_seed_sd']:.4f}"
         lines.append(
             f"| {item['kl_target']:g} | {item['projection_count']} | {_error_summary(item['target_errors'])} | "
-            f"{item['mean_additive_prediction']:.4f} | {item['mean_kl_above_control']:.4f} | {sd} | "
-            f"{item['mean_measured_over_additive']:.3f} | {item['mean_nll_above_control']:+.4f} |"
+            f"{_nats(item['mean_additive_prediction'])} | {_nats(item['mean_kl_above_control'])} | "
+            f"{_interval(item.get('kl_confidence_interval_95'), _nats)} | "
+            f"{_nats(item['kl_seed_sd'])} | {_nats(item.get('kl_standard_error'))} | "
+            f"{_ratio(item['mean_measured_over_additive'])} | "
+            f"{_interval(item.get('ratio_confidence_interval_95'), _ratio)} | "
+            f"{_nats(item['mean_nll_above_control'], signed=True)} |"
         )
     lines += ["", "## Runs", "", "| KL target | Seed | Joint KL above control | Additive prediction | Ratio | "
               "NLL change |", "| ---: | ---: | ---: | ---: | ---: | ---: |"]
     for item in report["results"]:
         for run in item["runs"]:
             lines.append(
-                f"| {item['kl_target']:g} | {run['seed']} | {run['kl_above_control']:.4f} | "
-                f"{run['additive_prediction']:.4f} | {run['measured_over_additive']:.3f} | "
-                f"{run['nll_above_control']:+.4f} |"
+                f"| {item['kl_target']:g} | {run['seed']} | {_nats(run['kl_above_control'])} | "
+                f"{_nats(run['additive_prediction'])} | {_ratio(run['measured_over_additive'])} | "
+                f"{_nats(run['nll_above_control'], signed=True)} |"
             )
     lines += [
         "",
@@ -205,7 +264,9 @@ def main() -> int:
     parser.add_argument("measurements", type=Path, help="a completed projection sweep's measurements/<id>/results.json")
     parser.add_argument("--kl-target", type=float, action="append",
                         help=f"nats/token per projection; repeatable (default {DEFAULT_KL_TARGETS})")
-    parser.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2])
+    parser.add_argument("--seeds", type=int, nargs="+", default=list(range(15)),
+                        help="noise seeds, one run per seed for every target (default 0-14)")
+    parser.add_argument("--no-control", action="store_true", help="skip the zero-error control row")
     parser.add_argument("--output", type=Path, help="Markdown report (default joint-kl-targets.md beside the sweep)")
     parser.add_argument("--local-files-only", action="store_true")
     args = parser.parse_args()
@@ -244,7 +305,7 @@ def main() -> int:
         weights = projection_weights(model, adapter, protocol["targets"])
         measured = measure(
             model, dataset, weights, fit, seeds=args.seeds, device=device,
-            token_chunk_size=protocol["token_chunk_size"],
+            token_chunk_size=protocol["token_chunk_size"], include_control=not args.no_control,
         )
     report = {
         "schema_version": 1,
