@@ -114,3 +114,25 @@ The `calibration.imatrix` object printed by that command pins the path and SHA-2
 Keep the model-specific directory together when moving the dataset. NanoQuant's
 existing `resolve_imatrix` validates mapping and widths against the target model
 inventory when the imatrix is consumed.
+
+## Verified first build (2026-11-15)
+
+The default Gemma 3 270M IT run completed locally and its completed-dataset reuse
+path passed a fresh hash audit with `--local-files-only`.
+
+| Measurement | Result |
+| --- | --- |
+| Calibration text | 32,303,694 UTF-8 bytes, extracted from the complete Parquet content |
+| Completed contexts | 13,301 × 512 = 6,810,112 token slots |
+| Model coverage | All 126 projections across 18 blocks; no unused entries |
+| Observations | Exactly 6,810,112 per projection |
+| Imatrix size | 471,072 bytes |
+| Collection command wall time, including tokenization | 2,698.343 seconds |
+| Imatrix SHA-256 | `73bc8cbe4cc5941d224d43ce419a96b9f285fe4c7a126290f8db83d9ff4f2241` |
+| Calibration text SHA-256 | `786cb7d7adfe5c0e957b5206e6cf522892bee9922746add7d55c5b7368e1ab2d` |
+| Source Parquet SHA-256 | `696861a9d942de9612e69a561f99445fe21576c00e7f1ff8f2019982ac36cf31` |
+
+The local dataset's `source.json` contains complete generation provenance;
+`validation.json` records the safetensors-inventory mapping and the uniform
+observation-count check. This validates the artifact and its model coverage;
+downstream quantization quality was not measured in this build.
