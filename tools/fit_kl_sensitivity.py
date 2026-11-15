@@ -171,7 +171,7 @@ def plot_measurements(report: dict, output: Path) -> None:
                              layout="constrained", squeeze=False)
     for ax, grid, level in zip(axes.flat, grids, levels, strict=False):
         im = ax.imshow(grid, aspect="auto", interpolation="nearest", cmap="magma", norm=norm)
-        ax.set_title(f"{level:.0%} requested weight error")
+        ax.set_title(f"{level * 100:g}% requested weight error")
         ax.set_xticks(range(len(blocks)), blocks, fontsize=7)
         ax.set_yticks(range(len(projections)), projections, fontsize=8)
         ax.set_xlabel("Decoder block")
