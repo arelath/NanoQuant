@@ -285,6 +285,13 @@ complete dataset directory together when moving it between workspaces.
 
 ## External llama.cpp importance data
 
+To generate local importance data from a Hugging Face model and Parquet corpus,
+use `tools/build_imatrix_dataset.py`. The first default is Gemma 3 270M IT with
+the complete `eaddario/imatrix-calibration/combined_all_huge.parquet` corpus,
+stored in `Datasets/gemma-3-270m-it-imatrix-eaddario-huge/` beside a hash-pinned
+`source.json` completion receipt. See [building imatrix datasets](../Docs/imatrix-datasets.md)
+for preparation, generation, options and completion checks.
+
 Experiment 073 uses `Datasets/gemma-3-1b-it-imatrix-unsloth/imatrix_unsloth.dat`,
 downloaded from `unsloth/gemma-3-1b-it-GGUF` at revision
 `f0b45be0aac41bd6a100a4b5734cad5f67255bfb`. Its SHA-256 is
