@@ -14,7 +14,7 @@ from typing import Any, TypeVar, cast, get_args, get_origin, get_type_hints
 import yaml
 from pydantic import ConfigDict, TypeAdapter, ValidationError
 
-from .schema import FactorizedOptimizerConfig, RunConfig, TuningBatchScheduleConfig
+from .schema import FactorizedOptimizerConfig, ImatrixConfig, RunConfig, TuningBatchScheduleConfig
 
 T = TypeVar("T")
 
@@ -105,7 +105,10 @@ def from_dict(cls: type[T], data: dict[str, Any], *, path: str = "config") -> T:
 def to_dict(value: Any) -> Any:
     """Convert dataclasses/enums/tuples to stable JSON-compatible values."""
     if is_dataclass(value) and not isinstance(value, type):
-        return {field.name: to_dict(getattr(value, field.name)) for field in fields(value)}
+        payload = {field.name: to_dict(getattr(value, field.name)) for field in fields(value)}
+        if isinstance(value, ImatrixConfig) and not value.use_rows:
+            payload.pop("use_rows")
+        return payload
     if isinstance(value, Enum):
         return value.value
     if isinstance(value, (tuple, list)):

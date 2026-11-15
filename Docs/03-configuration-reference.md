@@ -1311,7 +1311,7 @@ A run cannot import an optimizer continuation and a batch-schedule continuation
 together.
 
 
-## llama.cpp imatrix input importance (2026-11-13)
+## llama.cpp imatrix input and output importance
 
 New interactive compression runs accept a llama.cpp importance file:
 
@@ -1338,10 +1338,10 @@ config = replace(config, calibration=replace(
 ```
 
 `python tools/inspect_imatrix.py PATH` validates a file and prints the pinned
-`calibration.imatrix` JSON object plus tensor dimensions without running a model.
+`calibration.imatrix` JSON object plus column and row tensor dimensions without running a model.
 Numbered experiment launchers should use an `ImatrixConfig` literal from this
 output, avoiding infrastructure imports in thin recipe files.
-The schema is `ImatrixConfig(path, sha256, tensor_map=())`. `sha256` is the bare
+The schema is `ImatrixConfig(path, sha256, tensor_map=(), use_rows=False)`. `sha256` is the bare
 64-character lowercase digest. In YAML/JSON, copy the object printed by the
 inspection tool. Paths in hand-authored recipes are relative to the working
 directory unless absolute. The file must remain available for resume.
@@ -1355,10 +1355,19 @@ Legacy values are divided by ncall; GGUF `.in_sum2` values are divided by their
 do not take a square root before importing. NanoQuant's solver takes the square
 root when preconditioning the fit. Imported values receive no additional
 shrinkage or per-layer normalization. Existing output/Fisher importance and
-input means still come from NanoQuant calibration. With forward-only calibration,
-output weights remain ones. This feature does not eliminate calibration or KD.
+input means come from NanoQuant calibration when `use_rows` is disabled. In that
+mode, forward-only calibration uses ones for output weights.
 
-Imported inputs are persisted in calibration tensors before objectives and plans
+For a GGUF with row statistics, `--imatrix` and `imatrix_config(path)` enable
+`use_rows` in the saved recipe. These runs use `.out_sum2 / .out_counts` as
+`output_importance`, replacing the calibrated weighting for the projection.
+This measures output activation energy. Each selected projection must supply a
+single dense vector with one entry per output row. Shared-input groups use the
+common input vector and each projection's own output vector. Set `use_rows: false`
+in a hand-authored recipe to retain calibrated output weights. Saved recipes that
+omit the field keep their original objective and run identity.
+
+Imported weights are persisted in calibration tensors before objectives and plans
 are built. ADMM, scale fitting, independent residual stages, weighted selection,
 rank probes and weighted error reporting therefore consume the same weights.
 Block tuning still uses its existing activation loss; explicit full-covariance
@@ -1384,7 +1393,7 @@ Dense projections require a single count group; multi-expert tensors are not
 silently averaged. Shared-input group members must have matching input vectors.
 
 `imatrix.json` records the source hash, format, resolved mappings and unused
-entries in each run directory. The pinned policy participates in calibration,
+entries for each imported axis. The pinned policy participates in calibration,
 manifest and commit identities. Imported/precomputed objective tensors are
 checked against the file; a changed file fails before opening a run session.
 Opting in changes the numerical objective and requires a new run directory.

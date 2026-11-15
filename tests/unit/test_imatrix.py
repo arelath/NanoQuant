@@ -11,7 +11,7 @@ from nanoquant.config.codec import config_hash, from_dict, to_dict
 from nanoquant.config.schema import ImatrixConfig, ImatrixTensorMapping, ModelConfig, RunConfig, SharedInputGroupConfig
 from nanoquant.config.validation import validate
 from nanoquant.domain.models import BlockId, BlockInventory, LayerId, LayerInventory, ModelInventory
-from nanoquant.infrastructure.imatrix import imatrix_config, load_imatrix, resolve_imatrix
+from nanoquant.infrastructure.imatrix import imatrix_config, load_imatrix, resolve_imatrix, resolve_imatrix_axes
 from nanoquant.resident_quantization import (
     ResidentQuantizationRequest,
     _calibration_config_hash,
@@ -33,7 +33,7 @@ def write_legacy(path, entries, trailer=True):
     return imatrix_config(path)
 
 
-def write_gguf(path, values, counts, *, kind='imatrix', omit_counts=False):
+def write_gguf(path, values, counts, *, kind='imatrix', omit_counts=False, row_sums=None, row_counts=None):
     writer = GGUFWriter(str(path), 'imatrix')
     writer.add_string('general.type', kind)
     writer.add_uint32('imatrix.chunk_count', 7)
@@ -42,6 +42,10 @@ def write_gguf(path, values, counts, *, kind='imatrix', omit_counts=False):
     writer.add_tensor('blk.0.attn_q.weight.in_sum2', np.array(values, dtype=np.float32))
     if not omit_counts:
         writer.add_tensor('blk.0.attn_q.weight.counts', np.array(counts, dtype=np.float32))
+    if row_sums is not None:
+        writer.add_tensor('blk.0.attn_q.weight.out_sum2', np.array(row_sums, dtype=np.float32))
+    if row_counts is not None:
+        writer.add_tensor('blk.0.attn_q.weight.out_counts', np.array(row_counts, dtype=np.float32))
     writer.write_header_to_file()
     writer.write_kv_data_to_file()
     writer.write_tensors_to_file()
@@ -129,6 +133,10 @@ def test_hash_pinning_config_roundtrip_and_identities(tmp_path):
     assert config_hash(config) != config_hash(altered)
     request = ResidentQuantizationRequest(tmp_path, tmp_path / 'out', 'fixture', 'rev', ((1, 2),), device='cpu')
     changed = replace(request, imatrix=pinned)
+    with_rows = replace(changed, imatrix=replace(pinned, use_rows=True))
+    assert 'use_rows' not in to_dict(pinned)
+    assert _resident_config_hash(with_rows) != _resident_config_hash(changed)
+    assert _calibration_config_hash(with_rows) != _calibration_config_hash(changed)
     assert _resident_config_hash(request) != _resident_config_hash(changed)
     assert _calibration_config_hash(request) != _calibration_config_hash(changed)
     assert 'imatrix' not in _resident_manifest_config(request, 'resident-quantization')
@@ -139,6 +147,33 @@ def test_hash_pinning_config_roundtrip_and_identities(tmp_path):
     with pytest.raises(ValueError, match='SHA-256'):
         load_imatrix(path, pinned.sha256)
     assert pinned.sha256 != hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_gguf_resolves_input_and_output_axes_independently(tmp_path):
+    path = tmp_path / 'rows.gguf'
+    write_gguf(path, [1, 4, 9], [1], row_sums=[6, 24], row_counts=[3])
+    config = imatrix_config(path)
+    assert config.use_rows and from_dict(ImatrixConfig, to_dict(config)) == config
+    inputs, outputs, report = resolve_imatrix_axes(config, inventory())
+    layer = next(iter(inputs))
+    assert torch.equal(inputs[layer], torch.tensor([1., 4., 9.]))
+    assert torch.equal(outputs[layer], torch.tensor([2., 8.]))
+    assert report['row_tensor_map'] == report['tensor_map']
+    assert not resolve_imatrix_axes(replace(config, use_rows=False), inventory())[1]
+
+
+@pytest.mark.parametrize(('sums', 'counts', 'error'), [
+    (None, None, 'missing imatrix row'),
+    ([1, 4], None, 'matching .out_sum2 and .out_counts'),
+    ([1, 4], [0], 'positive integral observation counts'),
+    ([1, 4, 9], [1], 'row shape mismatch'),
+    ([[1, 4], [1, 4]], [1, 1], 'row shape mismatch'),
+])
+def test_gguf_rows_fail_closed_when_enabled(tmp_path, sums, counts, error):
+    path = tmp_path / 'rows.gguf'
+    write_gguf(path, [1, 4, 9], [1], row_sums=sums, row_counts=counts)
+    with pytest.raises(ValueError, match=error):
+        resolve_imatrix_axes(replace(imatrix_config(path), use_rows=True), inventory())
 
 
 def test_schema_rejects_unpinned_source():

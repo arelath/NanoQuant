@@ -9,7 +9,7 @@ from __future__ import annotations
 import hashlib
 import io
 import struct
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +25,7 @@ class ImatrixData:
     sha256: str
     format: str
     entries: dict[str, torch.Tensor]
+    row_entries: dict[str, torch.Tensor] = field(default_factory=dict)
 
 
 def file_sha256(path: Path) -> str:
@@ -39,7 +40,7 @@ def imatrix_config(path: str | Path) -> ImatrixConfig:
     """Pin a local file for a recipe. Full format validation occurs here too."""
     source = Path(path).resolve()
     data = load_imatrix(source)
-    return ImatrixConfig(str(source), data.sha256)
+    return ImatrixConfig(str(source), data.sha256, use_rows=bool(data.row_entries))
 
 
 def _normalized(sums: np.ndarray[Any, Any], counts: np.ndarray[Any, Any], name: str) -> torch.Tensor:
@@ -90,7 +91,7 @@ def _legacy(payload: bytes) -> dict[str, torch.Tensor]:
     return result
 
 
-def _gguf(path: Path) -> dict[str, torch.Tensor]:
+def _gguf(path: Path) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
     from gguf import GGUFReader
 
     reader = GGUFReader(str(path), 'r')
@@ -108,7 +109,15 @@ def _gguf(path: Path) -> dict[str, torch.Tensor]:
     counts = {name.removesuffix('.counts') for name in tensors if name.endswith('.counts')}
     if not names or names != counts:
         raise ValueError('imatrix GGUF requires matching .in_sum2 and .counts tensors')
-    return {name: _normalized(tensors[name + '.in_sum2'], tensors[name + '.counts'], name) for name in sorted(names)}
+    row_names = {name.removesuffix('.out_sum2') for name in tensors if name.endswith('.out_sum2')}
+    row_counts = {name.removesuffix('.out_counts') for name in tensors if name.endswith('.out_counts')}
+    if row_names != row_counts or not row_names <= names:
+        raise ValueError('imatrix GGUF requires matching .out_sum2 and .out_counts for each row entry with columns')
+    return (
+        {name: _normalized(tensors[name + '.in_sum2'], tensors[name + '.counts'], name) for name in sorted(names)},
+        {name: _normalized(tensors[name + '.out_sum2'], tensors[name + '.out_counts'], name + ' rows')
+         for name in sorted(row_names)},
+    )
 
 
 def load_imatrix(path: Path, expected_sha256: str | None = None) -> ImatrixData:
@@ -118,12 +127,12 @@ def load_imatrix(path: Path, expected_sha256: str | None = None) -> ImatrixData:
     with path.open('rb') as stream:
         magic = stream.read(4)
     try:
-        entries = _gguf(path) if magic == b'GGUF' else _legacy(path.read_bytes())
+        entries, rows = _gguf(path) if magic == b'GGUF' else (_legacy(path.read_bytes()), {})
     except (IndexError, KeyError, OverflowError, UnicodeError, struct.error) as error:
         raise ValueError(f'malformed imatrix: {error}') from error
     if file_sha256(path) != before:
         raise ValueError('imatrix changed while being read')
-    return ImatrixData(before, 'gguf' if magic == b'GGUF' else 'legacy', entries)
+    return ImatrixData(before, 'gguf' if magic == b'GGUF' else 'legacy', entries, rows)
 
 
 _LLAMA_NAMES = {
@@ -136,11 +145,19 @@ _LLAMA_NAMES = {
 def resolve_imatrix(
     config: ImatrixConfig, inventory: ModelInventory, groups: tuple[SharedInputGroupConfig, ...] = (),
 ) -> tuple[dict[LayerId, torch.Tensor], dict[str, object]]:
+    inputs, _, report = resolve_imatrix_axes(config, inventory, groups)
+    return inputs, report
+
+
+def resolve_imatrix_axes(
+    config: ImatrixConfig, inventory: ModelInventory, groups: tuple[SharedInputGroupConfig, ...] = (),
+) -> tuple[dict[LayerId, torch.Tensor], dict[LayerId, torch.Tensor], dict[str, object]]:
     data = load_imatrix(Path(config.path), config.sha256)
     explicit = {item.layer: item.tensor for item in config.tensor_map}
     if len(explicit) != len(config.tensor_map):
         raise ValueError('duplicate imatrix layer mappings')
     resolved: dict[LayerId, torch.Tensor] = {}
+    outputs: dict[LayerId, torch.Tensor] = {}
     mappings: dict[str, str] = {}
     used: set[str] = set()
     for block in inventory.blocks:
@@ -166,6 +183,14 @@ def resolve_imatrix(
             # These are mean squared activations, not their square roots.
             # The ADMM solver takes square roots when preconditioning weights.
             resolved[layer.layer] = value[0].contiguous()
+            if config.use_rows:
+                row = data.row_entries.get(name)
+                if row is None:
+                    raise ValueError(f'missing imatrix row importance for {key}: {name}')
+                if tuple(row.shape) != (1, layer.out_features):
+                    raise ValueError(f'imatrix row shape mismatch for {key}: {tuple(row.shape)}; '
+                                     f'expected one dense output vector of width {layer.out_features}')
+                outputs[layer.layer] = row[0].contiguous()
             mappings[key] = name
     if set(explicit) - set(mappings):
         raise ValueError('imatrix tensor_map contains layers outside the quantized inventory')
@@ -174,6 +199,12 @@ def resolve_imatrix(
             members = [resolved[LayerId(block.block, member)] for member in group.members]
             if any(not torch.allclose(members[0], value, rtol=1e-4, atol=1e-6) for value in members[1:]):
                 raise ValueError(f'imatrix shared-input vectors disagree in block {block.block.index}, {group.name}')
-    return resolved, {'format': data.format, 'sha256': data.sha256, 'path': config.path,
-                      'normalization': 'llama-cpp-sums-over-counts', 'tensor_map': mappings,
-                      'unused_entries': sorted(set(data.entries) - used)}
+    report: dict[str, object] = {
+        'format': data.format, 'sha256': data.sha256, 'path': config.path,
+        'normalization': 'llama-cpp-sums-over-counts', 'tensor_map': mappings,
+        'unused_entries': sorted(set(data.entries) - used),
+    }
+    if config.use_rows:
+        report['row_tensor_map'] = mappings
+        report['unused_row_entries'] = sorted(set(data.row_entries) - used)
+    return resolved, outputs, report

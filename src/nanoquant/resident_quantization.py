@@ -11,6 +11,7 @@ import time
 from collections.abc import Callable, Iterator
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
+from dataclasses import field as dataclass_field
 from fnmatch import fnmatchcase
 from functools import partial
 from pathlib import Path
@@ -214,7 +215,7 @@ from nanoquant.infrastructure.device_memory import (
 )
 from nanoquant.infrastructure.environment import capture_environment
 from nanoquant.infrastructure.hf_language_model import load_causal_language_model
-from nanoquant.infrastructure.imatrix import file_sha256, resolve_imatrix
+from nanoquant.infrastructure.imatrix import file_sha256, resolve_imatrix_axes
 from nanoquant.infrastructure.io_utils import atomic_write_json
 from nanoquant.infrastructure.live_reconstruction import update_live_weight_error_report
 from nanoquant.infrastructure.model_adapters import TransformersModelAdapter, adapter_for_config
@@ -247,9 +248,8 @@ from nanoquant.infrastructure.tuning_checkpoint import (
 from nanoquant.ports.event_sink import EventSink, LayerCommittedPayload, emit_layer_committed
 from nanoquant.ports.model_adapter import ModelAdapter
 
-RESIDENT_ALGORITHM_VERSION = 70
-# Version 70 adds only opt-in imatrix weighting. Preserve both version 69
-# optimizer identities when imatrix is absent; future versions invalidate normally.
+RESIDENT_ALGORITHM_VERSION = 71
+# Preserve existing run identities when imported output weights are disabled.
 _PARITY_RESIDENT_ALGORITHM_VERSION = 68
 _CALIBRATION_ALGORITHM_VERSION = 1
 COVARIANCE_REFINEMENT_MAX_INPUT_FEATURES = 2048
@@ -2885,14 +2885,16 @@ def _run_post_refit_covariance_refinement(
 
 def _resident_config_hash(request: ResidentQuantizationRequest) -> str:
     adaptive_memory = request.memory_plan is not None and request.memory_plan.mode == "adaptive"
+    if RESIDENT_ALGORITHM_VERSION != 71:
+        algorithm_version = RESIDENT_ALGORITHM_VERSION
+    elif request.imatrix is not None:
+        algorithm_version = RESIDENT_ALGORITHM_VERSION if request.imatrix.use_rows else 70
+    elif request.factorized_tuning_optimizer == FactorizedOptimizerConfig():
+        algorithm_version = _PARITY_RESIDENT_ALGORITHM_VERSION
+    else:
+        algorithm_version = 69
     semantic_config = {
-        "resident_algorithm_version": (
-            _PARITY_RESIDENT_ALGORITHM_VERSION
-            if RESIDENT_ALGORITHM_VERSION == 70 and request.imatrix is None
-            and request.factorized_tuning_optimizer == FactorizedOptimizerConfig()
-            else 69 if RESIDENT_ALGORITHM_VERSION == 70 and request.imatrix is None
-            else RESIDENT_ALGORITHM_VERSION
-        ),
+        "resident_algorithm_version": algorithm_version,
         "runtime": {
             "torch": str(torch.__version__),
             "transformers": transformers.__version__,
@@ -4819,7 +4821,7 @@ def _validate_imatrix_objectives(
 ) -> None:
     if request.imatrix is None:
         return
-    expected, _report = resolve_imatrix(request.imatrix, inventory, request.shared_input_groups)
+    expected, expected_rows, _report = resolve_imatrix_axes(request.imatrix, inventory, request.shared_input_groups)
     tensors = LocalTensorStore(artifacts)
     by_layer = {item.layer: item for item in calibration.stats.layers}
     objectives_by_layer = {item.layer: item for item in objectives.objectives}
@@ -4832,6 +4834,13 @@ def _validate_imatrix_objectives(
         with tensors.read(reference, "cpu") as stored:
             if not torch.equal(stored, value):
                 raise ValueError(f"cached input importance differs from pinned imatrix: {layer}")
+    for layer, value in expected_rows.items():
+        reference = by_layer[layer].output_importance
+        if objectives_by_layer[layer].output_importance != reference:
+            raise ValueError("cached imatrix row objective differs from calibration")
+        with tensors.read(reference, "cpu") as stored:
+            if not torch.equal(stored, value):
+                raise ValueError(f"cached output importance differs from pinned imatrix: {layer}")
     if plan is not None:
         planned = [item.objective for block in plan.blocks for item in block.layers]
         planned.extend(
@@ -5556,6 +5565,7 @@ class _ResidentEnvironment:
     model: nn.Module
     decoder_layers: nn.ModuleList
     imatrix_inputs: dict[LayerId, torch.Tensor] | None = None
+    imatrix_outputs: dict[LayerId, torch.Tensor] = dataclass_field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -5742,8 +5752,11 @@ def _setup_resident_environment(
             )
         inventory = replace(inventory, blocks=tuple(reordered_blocks))
     imatrix_inputs = None
+    imatrix_outputs: dict[LayerId, torch.Tensor] = {}
     if request.imatrix is not None:
-        imatrix_inputs, imatrix_report = resolve_imatrix(request.imatrix, inventory, request.shared_input_groups)
+        imatrix_inputs, imatrix_outputs, imatrix_report = resolve_imatrix_axes(
+            request.imatrix, inventory, request.shared_input_groups,
+        )
         atomic_write_json(request.output / "imatrix.json", imatrix_report)
     model_device = _model_placement_device(request)
     with recorder.phase("setup"), recorder.phase("inputs"):
@@ -5798,6 +5811,7 @@ def _setup_resident_environment(
         model,
         adapter.get_decoder_layers(model),
         imatrix_inputs=imatrix_inputs,
+        imatrix_outputs=imatrix_outputs,
     )
 
 
@@ -7367,7 +7381,11 @@ def _execute_resident_quantization_pipeline(
             ), recorder.phase("calibrate"), recorder.phase("persist"):
                 if environment.imatrix_inputs is not None:
                     calibration_values = [
-                        (layer, replace(stats, input_importance=environment.imatrix_inputs[layer]))
+                        (layer, replace(
+                            stats,
+                            input_importance=environment.imatrix_inputs[layer],
+                            output_importance=environment.imatrix_outputs.get(layer, stats.output_importance),
+                        ))
                         for layer, stats in calibration_values
                     ]
                 calibration = persist_calibration(

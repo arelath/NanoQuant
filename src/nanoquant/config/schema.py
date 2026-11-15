@@ -272,6 +272,7 @@ class ImatrixConfig:
     path: str
     sha256: str
     tensor_map: tuple[ImatrixTensorMapping, ...] = ()
+    use_rows: bool = False
 
 
 @dataclass(frozen=True, slots=True)

@@ -17,8 +17,11 @@ def main() -> int:
     args = parser.parse_args()
     config = imatrix_config(args.path)
     data = load_imatrix(args.path, config.sha256)
-    print(json.dumps({'calibration': {'imatrix': to_dict(config)}, 'format': data.format,
-                      'tensors': {name: list(value.shape) for name, value in data.entries.items()}}, indent=2))
+    report = {'calibration': {'imatrix': to_dict(config)}, 'format': data.format,
+              'tensors': {name: list(value.shape) for name, value in data.entries.items()}}
+    if data.row_entries:
+        report['row_tensors'] = {name: list(value.shape) for name, value in data.row_entries.items()}
+    print(json.dumps(report, indent=2))
     return 0
 
 
