@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
@@ -25,6 +26,72 @@ def _gemma_qkv_sizes(fields: dict[str, Any], block: int) -> tuple[int, int, int]
         integer("head_count_kv") * integer("key_length"),
         integer("head_count_kv") * integer("value_length"),
     )
+
+
+@dataclass(frozen=True)
+class DenseProjection:
+    """One effective FP32 projection rebuilt from NanoQuant sidecars.
+
+    ``sources`` names every GGUF tensor of the stored group; a stacked QKV group lists the same
+    sources for q, k and v, and ``storage_bytes`` gives each its row share of the group's bytes.
+    """
+
+    weight: np.ndarray
+    group: str
+    sources: tuple[str, ...]
+    storage_bytes: float
+
+
+def dense_nanoquant_projections(
+    fields: dict[str, Any], tensors: dict[str, Any], gguf: Any,
+) -> dict[str, DenseProjection]:
+    """Rebuild every NanoQuant projection as a dense matrix keyed by its plain ``<base>.weight`` name."""
+    architecture = fields["general.architecture"].contents()
+    bases = {
+        name.removesuffix(suffix)
+        for name in tensors for suffix in (".nq_stage0_v", ".nq_v")
+        if name.endswith(suffix)
+    }
+    if not bases:
+        raise ValueError("No staged NanoQuant projections found")
+    projections = {}
+    for base in sorted(bases):
+        count_field = fields.get(f"quantization.nanoquant.{base}.residual_stage_count")
+        terms: tuple[str, ...]
+        if count_field is None:
+            terms = ("nq",)
+        else:
+            terms = ("nq_stage0", *(f"nq_residual_{index}" for index in range(int(count_field.contents()))))
+        dense = None
+        sources: list[str] = []
+        for term in terms:
+            suffixes: tuple[str, ...] = ("v", "u", "scale_pre", "scale_mid", "scale_post")
+            if term == "nq":
+                suffixes += ("salient_idx", "salient_weight", "salient_scale")
+            sources += [name for suffix in suffixes if (name := f"{base}.{term}_{suffix}") in tensors]
+            weight = reconstruct_nanoquant_weight(tensors, base, gguf, term=term)
+            if dense is None:
+                dense = weight
+            else:
+                if dense.shape != weight.shape:
+                    raise ValueError(f"Stage shape differs for {base}.{term}")
+                dense += weight
+        assert dense is not None
+        group_bytes = sum(int(tensors[name].n_bytes) for name in sources)
+        if base.endswith(".attn_qkv"):
+            if architecture != "gemma3":
+                raise ValueError(f"Stacked QKV materialization is unsupported for {architecture}")
+            sizes = _gemma_qkv_sizes(fields, int(base.split(".")[1]))
+            if sum(sizes) != dense.shape[0]:
+                raise ValueError(f"Invalid stacked QKV shape for {base}: {dense.shape}")
+            block = base.removesuffix("_qkv")
+            for name, matrix in zip(("q", "k", "v"), np.split(dense, np.cumsum(sizes)[:-1], axis=0), strict=True):
+                projections[f"{block}_{name}.weight"] = DenseProjection(
+                    matrix, base, tuple(sources), group_bytes * matrix.shape[0] / dense.shape[0],
+                )
+        else:
+            projections[f"{base}.weight"] = DenseProjection(dense, base, tuple(sources), float(group_bytes))
+    return projections
 
 
 def _verify_unchanged(
@@ -57,13 +124,7 @@ def materialize_gguf(source: Path, output: Path, llama_cpp_root: Path) -> dict[s
     if fields["quantization.nanoquant.stage_format"].contents() != "additive_binary_v1":
         raise ValueError("Expected independently scaled additive NanoQuant factors")
     tensors = tensor_map(reader)
-    bases = {
-        name.removesuffix(suffix)
-        for name in tensors for suffix in (".nq_stage0_v", ".nq_v")
-        if name.endswith(suffix)
-    }
-    if not bases:
-        raise ValueError("No staged NanoQuant projections found")
+    projections = dense_nanoquant_projections(fields, tensors, gguf)
     writer = gguf.GGUFWriter(None, architecture, endianess=reader.endianess)
     for name, field in fields.items():
         if (
@@ -78,41 +139,11 @@ def materialize_gguf(source: Path, output: Path, llama_cpp_root: Path) -> dict[s
             subtype = field.types[-1] if value_type == gguf.GGUFValueType.ARRAY else None
             writer.add_key_value(name, field.contents(), value_type, sub_type=subtype)
     untouched = set(tensors)
-    projection_count = 0
-    for base in sorted(bases):
-        count_field = fields.get(f"quantization.nanoquant.{base}.residual_stage_count")
-        terms: tuple[str, ...]
-        if count_field is None:
-            terms = ("nq",)
-        else:
-            terms = ("nq_stage0", *(f"nq_residual_{index}" for index in range(int(count_field.contents()))))
-        dense = None
-        for term in terms:
-            suffixes: tuple[str, ...] = ("v", "u", "scale_pre", "scale_mid", "scale_post")
-            if term == "nq":
-                suffixes += ("salient_idx", "salient_weight", "salient_scale")
-            untouched.difference_update(f"{base}.{term}_{suffix}" for suffix in suffixes)
-            weight = reconstruct_nanoquant_weight(tensors, base, gguf, term=term)
-            if dense is None:
-                dense = weight
-            else:
-                if dense.shape != weight.shape:
-                    raise ValueError(f"Stage shape differs for {base}.{term}")
-                dense += weight
-        assert dense is not None
-        if base.endswith(".attn_qkv"):
-            if architecture != "gemma3":
-                raise ValueError(f"Stacked QKV materialization is unsupported for {architecture}")
-            sizes = _gemma_qkv_sizes(fields, int(base.split(".")[1]))
-            if sum(sizes) != dense.shape[0]:
-                raise ValueError(f"Invalid stacked QKV shape for {base}: {dense.shape}")
-            block = base.removesuffix("_qkv")
-            for name, matrix in zip(("q", "k", "v"), np.split(dense, np.cumsum(sizes)[:-1], axis=0), strict=True):
-                writer.add_tensor(f"{block}_{name}.weight", matrix)
-            projection_count += 3
-        else:
-            writer.add_tensor(f"{base}.weight", dense)
-            projection_count += 1
+    for projection in projections.values():
+        untouched.difference_update(projection.sources)
+    for name, projection in projections.items():
+        writer.add_tensor(name, projection.weight)
+    projection_count = len(projections)
     for name in sorted(untouched):
         if ".nq_" in name:
             raise ValueError(f"Unconsumed NanoQuant sidecar {name}")

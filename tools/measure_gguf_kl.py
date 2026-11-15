@@ -9,6 +9,7 @@ unlike the llama.cpp runtime. Three variants separate the sources of error:
 - embedding: only the token embedding, which Gemma ties to the output projection;
 - all weights: every quantized matrix in the file.
 
+NanoQuant GGUFs are read by rebuilding each projection from its binary-factor sidecars.
 Unquantized GGUF norms are checked against the model (Gemma stores ``1 + weight``) and left as is.
 The projections variant also reports the sum of each projection's isolated fitted KL at its
 measured weight error, so real quantization error can be compared with the additive prediction.
@@ -30,6 +31,7 @@ from collections import Counter
 from collections.abc import Mapping
 from pathlib import Path
 
+import gguf
 import numpy as np
 import torch
 from fit_kl_sensitivity import fit_dataset
@@ -37,6 +39,7 @@ from gguf import GGUFReader
 from gguf.quants import dequantize
 from huggingface_hub import snapshot_download
 from kl_sensitivity_dataset import score_model, verify_local_weights
+from materialize_nanoquant_gguf import dense_nanoquant_projections
 from measure_joint_kl_targets import projection_weights, spec_for_protocol
 from torch import nn
 
@@ -68,9 +71,33 @@ VARIANTS = ("projections", "embedding", "all weights")
 
 
 def read_gguf(path: Path) -> dict[str, dict]:
-    """Return every GGUF tensor dequantized to FP32 with its storage type and size."""
-    tensors = {}
-    for tensor in GGUFReader(path).tensors:
+    """Return every GGUF tensor dequantized to FP32 with its storage type and size.
+
+    NanoQuant files store each projection as binary-factor sidecars; those are rebuilt into the
+    dense ``<base>.weight`` matrices they encode, with a stacked QKV group split into q, k and v.
+    """
+    reader = GGUFReader(path)
+    stored = {tensor.name: tensor for tensor in reader.tensors}
+    tensors: dict[str, dict] = {}
+    consumed: set[str] = set()
+    stage_format = reader.fields.get("quantization.nanoquant.stage_format")
+    if stage_format is not None:
+        if stage_format.contents() != "additive_binary_v1":
+            raise ValueError(f"unsupported NanoQuant stage format {stage_format.contents()!r}")
+        for name, projection in dense_nanoquant_projections(reader.fields, stored, gguf).items():
+            stages = sum(source.endswith("_v") for source in projection.sources)
+            tensors[name] = {
+                "type": f"NanoQuant {stages}-stage binary",
+                "elements": int(projection.weight.size),
+                "bytes": projection.storage_bytes,
+                "values": torch.from_numpy(np.array(projection.weight, dtype=np.float32, copy=True)),
+            }
+            consumed.update(projection.sources)
+    for tensor in reader.tensors:
+        if tensor.name in consumed:
+            continue
+        if ".nq_" in tensor.name:
+            raise ValueError(f"unconsumed NanoQuant sidecar {tensor.name}")
         values = dequantize(tensor.data, tensor.tensor_type)
         tensors[tensor.name] = {
             "type": tensor.tensor_type.name,
@@ -245,6 +272,15 @@ def render_markdown(report: Mapping) -> str:
         "Perplexity change is exp(NLL change in nats/token) − 1 on the calibration windows for the",
         "all-weights variant.",
         "",
+    ]
+    if any(name.startswith("NanoQuant") for item in files for name in item["projection_types"]):
+        lines += [
+            "NanoQuant files are scored on the dense weights rebuilt from their stored binary factors",
+            "and scales, with every stage summed. Their bits/weight count all stored factor and scale",
+            "bytes; a stacked QKV group's bytes are split across q, k and v by row count.",
+            "",
+        ]
+    lines += [
         "## Projection errors against the isolated-sensitivity prediction",
         "",
         "The prediction sums each projection's fitted isolated KL in nats/token at its measured relative",

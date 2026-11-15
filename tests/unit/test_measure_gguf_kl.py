@@ -61,6 +61,56 @@ def test_read_gguf_dequantizes_q8_and_maps_projection_embedding_and_norm_names(t
         tool.relative_error(torch.zeros(32, 64), stored["values"])
 
 
+def _pack_signs(signs: np.ndarray) -> np.ndarray:
+    rows, columns = signs.shape
+    padded = np.zeros((rows, -(-columns // 32) * 32), dtype=np.uint64)
+    padded[:, :columns] = signs < 0
+    words = (padded.reshape(rows, -1, 32) << np.arange(32, dtype=np.uint64)).sum(axis=-1)
+    return words.astype(np.uint32).view(np.int32)
+
+
+def test_read_gguf_rebuilds_stacked_two_stage_nanoquant_qkv(tmp_path) -> None:
+    from gguf import GGUFWriter
+
+    tool = _tool()
+    generator = np.random.default_rng(1)
+    rank, out_features, in_features = 3, 6, 40
+    writer = GGUFWriter(str(tmp_path / "nq.gguf"), "gemma3")
+    writer.add_string("quantization.nanoquant.stage_format", "additive_binary_v1")
+    writer.add_uint32("quantization.nanoquant.blk.0.attn_qkv.residual_stage_count", 1)
+    for key, value in {"head_count": 1, "head_count_kv": 1, "key_length": 2, "value_length": 2}.items():
+        writer.add_uint32(f"gemma3.attention.{key}", value)
+    expected = np.zeros((out_features, in_features), dtype=np.float32)
+    for term in ("nq_stage0", "nq_residual_0"):
+        left = generator.choice([-1.0, 1.0], (out_features, rank)).astype(np.float32)
+        right = generator.choice([-1.0, 1.0], (rank, in_features)).astype(np.float32)
+        scales = {name: generator.uniform(0.5, 2, size).astype(np.float32)
+                  for name, size in (("pre", in_features), ("mid", rank), ("post", out_features))}
+        expected += (left * scales["post"][:, None]) @ (right * scales["mid"][:, None] * scales["pre"][None, :])
+        writer.add_tensor(f"blk.0.attn_qkv.{term}_u", _pack_signs(left))
+        writer.add_tensor(f"blk.0.attn_qkv.{term}_v", _pack_signs(right))
+        for name, values in scales.items():
+            writer.add_tensor(f"blk.0.attn_qkv.{term}_scale_{name}", values)
+    writer.add_tensor("token_embd.weight", generator.standard_normal((5, in_features)).astype(np.float32))
+    writer.write_header_to_file()
+    writer.write_kv_data_to_file()
+    writer.write_tensors_to_file()
+    writer.close()
+    group_bytes = 2 * (out_features * 4 + rank * 2 * 4 + (in_features + rank + out_features) * 4)
+
+    tensors = tool.read_gguf(tmp_path / "nq.gguf")
+    assert set(tensors) == {"blk.0.attn_q.weight", "blk.0.attn_k.weight", "blk.0.attn_v.weight", "token_embd.weight"}
+    projections, embedding, _ = tool.map_tensors(
+        tensors, ["0:self_attn.q_proj", "0:self_attn.k_proj", "0:self_attn.v_proj"],
+    )
+    rebuilt = torch.cat([projections[f"0:self_attn.{name}_proj"]["values"] for name in "qkv"])
+    torch.testing.assert_close(rebuilt, torch.from_numpy(expected))
+    assert {item["type"] for item in projections.values()} == {"NanoQuant 2-stage binary"}
+    assert sum(item["bytes"] for item in projections.values()) == pytest.approx(group_bytes)
+    assert tool._bits(projections.values()) == pytest.approx(8 * group_bytes / expected.size)
+    assert embedding["type"] == "F32"
+
+
 def test_norm_check_expects_gemmas_stored_plus_one() -> None:
     tool = _tool()
     layer = nn.Module()

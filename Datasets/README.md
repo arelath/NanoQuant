@@ -153,8 +153,10 @@ the pinned model and calibration Parquet are already cached.
 `tools/measure_joint_kl_targets.py` perturbs every projection at once to its equal-KL
 target error and writes `joint-kl-targets.md` beside the sweep. `tools/measure_gguf_kl.py`
 scores llama.cpp GGUF quantizations against the same teacher and tokens and writes
-`gguf-kl.md`. The compared GGUFs are in `Datasets/gemma-3-270m-it-gguf-unsloth`:
-`UD-IQ2_XXS`, `Q2_K`, `Q4_K_M` and `Q8_0` from `unsloth/gemma-3-270m-it-GGUF` at revision
+`gguf-kl.md`; NanoQuant GGUFs are rebuilt from their binary-factor sidecars. The compared
+files are Experiment 074's `Results/074/gemma-3-270m-it-nanoquant.gguf` and its pre-KD
+variant, plus, in `Datasets/gemma-3-270m-it-gguf-unsloth`, `UD-IQ2_XXS`, `Q2_K`, `Q3_K_M`,
+`Q4_K_M` and `Q8_0` from `unsloth/gemma-3-270m-it-GGUF` at revision
 `c90975dbd40c0c7b275fefaae758c3415c906238`, with sizes and SHA-256 in `source.json`.
 
 ### Gemma 3 4B IT weight sensitivity
