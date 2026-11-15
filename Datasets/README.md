@@ -150,6 +150,13 @@ JSON and Markdown reports and the PNGs. Rerun the same command to resume.
 Use `--teacher-only` to build just the teacher, or `--local-files-only` when
 the pinned model and calibration Parquet are already cached.
 
+`tools/measure_joint_kl_targets.py` perturbs every projection at once to its equal-KL
+target error and writes `joint-kl-targets.md` beside the sweep. `tools/measure_gguf_kl.py`
+scores llama.cpp GGUF quantizations against the same teacher and tokens and writes
+`gguf-kl.md`. The compared GGUFs are in `Datasets/gemma-3-270m-it-gguf-unsloth`:
+`UD-IQ2_XXS`, `Q2_K`, `Q4_K_M` and `Q8_0` from `unsloth/gemma-3-270m-it-GGUF` at revision
+`c90975dbd40c0c7b275fefaae758c3415c906238`, with sizes and SHA-256 in `source.json`.
+
 ### Gemma 3 4B IT weight sensitivity
 
 When ready to generate it, run from the repository root:
