@@ -37,6 +37,45 @@ overrides. All arms must report 126 importance entries in use. The native
 quantizer consumes input-column importance; it ignores the output-row fields.
 This comparison does not measure NanoQuant's row-weighted factorization or KD.
 
+### Primary quality comparison: six task benchmarks
+
+On 2026-11-15, all nine existing quantized GGUFs and the F16 reference were
+freshly evaluated using the established PIQA, ARC Easy, ARC Challenge,
+HellaSwag, WinoGrande, and BoolQ protocol: the first 1,000 examples per task,
+with the pinned prompts, splits, and primary accuracy metrics. Every model
+used the same native runtime and prepared token IDs. No compression or
+distillation experiment was launched for this evaluation.
+
+The table shows the unweighted mean of the six task scores, in percent.
+F16 scored **50.20%**. Higher is better; individual task results are in the
+[full task-quality report](gemma-3-270m-imatrix-task-quality.md).
+
+| Native format | Curated corpus | Equal-budget Eaddario | Existing full Eaddario | Curated minus equal-budget |
+| --- | ---: | ---: | ---: | ---: |
+| Q2_K | 47.92% | 47.67% | 48.02% | +0.25 pp |
+| Q4_K_M | 47.77% | 46.70% | 46.72% | +1.07 pp |
+| IQ4_NL | 48.18% | 48.12% | 47.68% | +0.07 pp |
+
+Task accuracy gives a different ranking from perplexity. The clearest mean
+gain from curated calibration is Q4_K_M, including gains on four tasks against
+the equal-budget control, one tie, and a WinoGrande decline. Q2_K's small mean
+gain over equal-budget Eaddario is driven mainly by BoolQ; four tasks decline.
+IQ4_NL's equal-budget mean is nearly unchanged, with gains on three tasks and
+losses on three. These fixed diagnostic slices and one corpus selection do not
+establish a universal calibration improvement.
+
+All 60,000 per-example task outcomes were checked against the reported scores.
+Model hashes, input hashes, runtime hashes, and protocol hashes were verified;
+each model used four parallel sequences, eight threads and batch threads, and
+99 GPU layers. Per-model JSON, paired outcome counts, commands, evaluator
+source hashes, and the resumable runner are under
+`outputs/imatrix-calibration-comparison-v1/native/quality/`.
+
+### Historical perplexity diagnostic
+
+The measurements below are retained diagnostic evidence. Use the task results
+above for the quality comparison rather than inferring task performance from PPL.
+
 Evaluation uses the complete cached WikiText-2 raw test split at revision
 `b08601e04326c79dfdd32d625aee71d232d685c3`, joining all 4,358 text rows with
 double newlines. UTF-8 text SHA-256:
@@ -53,7 +92,7 @@ different from the shorter NanoQuant quality protocol; their absolute PPL
 numbers must not be compared directly. WikiText is retained diagnostic evidence,
 not an untouched final acceptance set. No task-accuracy claim follows from PPL.
 
-### Results on 2026-11-15
+#### Perplexity results on 2026-11-15
 
 Lower perplexity is better. The unquantized F16 reference scored **64.0052**.
 
@@ -63,11 +102,11 @@ Lower perplexity is better. The unquantized F16 reference scored **64.0052**.
 | Q4_K_M | 67.4555 | 66.7665 | 66.5674 | +1.03% | +1.33% |
 | IQ4_NL | 65.9993 | 62.7732 | 63.1254 | +5.14% | +4.55% |
 
-The new corpus improves Q2_K in this protocol but regresses both four-bit
-presets. It should remain an experimental alternative rather than replace
-the existing matrix across formats. Corpus mix and formatting changed together;
-this experiment does not isolate the cause. No multiple-seed uncertainty or
-instruction/task evaluation was performed. The original Eaddario control was
+The new corpus improves Q2_K perplexity but worsens perplexity for both four-bit
+presets. The subsequent task benchmarks above show why this alone is not a
+quality conclusion. Corpus mix and formatting changed together; this experiment
+does not isolate the cause. No multiple-seed uncertainty was measured. The
+original Eaddario control was
 preserved as-is; it was not retroactively decontaminated using the new corpus's
 evaluation exclusion filter.
 
