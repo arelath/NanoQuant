@@ -1,0 +1,41 @@
+{
+  "bytes": 989568,
+  "calibration": {
+    "imatrix": {
+      "path": "D:\\dev\\research\\NanoQuantRewrite\\Datasets\\gemma-3-270m-it-model-fisher-rows-512\\imatrix.gguf",
+      "sha256": "95f11c507b9f6be977b1e1cbd9586473c955fc4057b7b519b1208f4ba8ab9565",
+      "tensor_map": [],
+      "use_rows": true
+    }
+  },
+  "derivation_seconds": 0.2890958999632858,
+  "identity": {
+    "calibration_token_sha256": "56238ba23f8f0724be6057c14bddb3d86b5bbbb6aaa98514511c38a4208b0f6a",
+    "code_sha256": "fdd9527f650ba82d5be9bd76c57deb851dffe1be7eee499925200fcc4d7302d2",
+    "fisher_sha256": "316b5ad81de84af59592bbbee14b53e676c7143c4032bf151174ca966ef154b5",
+    "method": "row=mean_j(F); shared_column=mean_i(stack(F))/mean(stack(F))",
+    "model": "unsloth/gemma-3-270m-it",
+    "parent_protocol_sha256": "fe5be992f1a4e45e0c1b53acbdc7a95720e2a3d96bf9984e1335c966176c6fab",
+    "revision": "23cf460f6bb16954176b3ddcc8d4f250501458a9",
+    "schema": 1,
+    "shared_input_groups": [
+      {
+        "member_multipliers": [],
+        "members": [
+          "self_attn.q_proj",
+          "self_attn.k_proj",
+          "self_attn.v_proj"
+        ],
+        "name": "self_attn.attn_qkv"
+      }
+    ],
+    "source_context_length": 128,
+    "source_contexts": 128,
+    "source_targets": 512,
+    "target_distribution": "teacher sampled",
+    "weights_sha256": "700b710a9a99c295ed546647aa81cacf9f81f4c573ea2be613a0e2517a44afab"
+  },
+  "mapped_projections": 126,
+  "sha256": "95f11c507b9f6be977b1e1cbd9586473c955fc4057b7b519b1208f4ba8ab9565",
+  "source_collection_seconds": 269.22339480003575
+}

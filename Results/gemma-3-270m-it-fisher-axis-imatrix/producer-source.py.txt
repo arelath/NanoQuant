@@ -1,0 +1,266 @@
+"""Derive compact row/column IMatrix files from measured per-weight Fisher.
+
+No new backwards are required. Optional evaluation reuses the exact retained
+scalar-quantization protocol; this does not change a resident recipe.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import time
+from pathlib import Path
+
+import _paths  # noqa: F401
+import numpy as np
+import torch
+from gguf import GGUFWriter
+from probe_weight_fisher_imatrix import ROOT, STEMS, evaluate, load_stage, paired_interval, quantize
+
+from nanoquant.config.codec import to_dict
+from nanoquant.config.schema import SharedInputGroupConfig
+from nanoquant.infrastructure.device_lease import acquire_device_lease
+from nanoquant.infrastructure.hf_language_model import load_causal_language_model
+from nanoquant.infrastructure.imatrix import imatrix_config, load_imatrix, resolve_imatrix_axes
+from nanoquant.infrastructure.io_utils import atomic_write_json, hash_file
+from nanoquant.infrastructure.model_adapters import adapter_for_config
+from nanoquant.infrastructure.safetensors_source import SafetensorsModelSource
+
+QKV = ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj")
+GROUPS = (SharedInputGroupConfig("self_attn.attn_qkv", QKV),)
+KINDS = ("empirical_fisher", "model_fisher")
+
+
+def marginal_axes(fishers):
+    """Fit a nonnegative marginal-preserving product to a vertical stack.
+
+    row_l = mean_columns(F_l); column = mean_rows(F_stack)/mean(F_stack).
+    Each row's mean and the stacked column means are preserved. This is a
+    marginal/independence approximation, not an SVD or a full Fisher matrix.
+    """
+    if not fishers or any(f.ndim != 2 or not f.numel() for f in fishers):
+        raise ValueError("nonempty Fisher matrices required")
+    if len({f.shape[1] for f in fishers}) != 1:
+        raise ValueError("shared Fisher inputs must have the same width")
+    rows, column_sum = [], torch.zeros(fishers[0].shape[1], dtype=torch.float64)
+    total_rows = 0
+    for fisher in fishers:
+        value = fisher.detach().cpu().double()
+        if not torch.isfinite(value).all() or (value < 0).any() or float(value.sum()) <= 0:
+            raise ValueError("Fisher matrices must be finite, nonnegative and nonzero")
+        rows.append(value.mean(1).float())
+        column_sum.add_(value.sum(0))
+        total_rows += value.shape[0]
+    column_mean = column_sum / total_rows
+    column = (column_mean / column_mean.mean()).float()
+    return rows, column
+
+
+def derive_axes(fisher):
+    groups = {}
+    for name in sorted(fisher):
+        parts = name.split(".")
+        projection = ".".join(parts[3:])
+        if parts[:2] != ["model", "layers"] or parts[-1] not in STEMS:
+            raise ValueError(f"unexpected Gemma projection {name}")
+        group = f"model.layers.{parts[2]}.self_attn.attn_qkv" if projection in QKV else name
+        groups.setdefault(group, []).append(name)
+    columns, rows = {}, {}
+    for group, names in groups.items():
+        if group.endswith("attn_qkv") and len(names) != 3:
+            raise ValueError("incomplete shared QKV group")
+        row_vectors, column = marginal_axes([fisher[n] for n in names])
+        for name, row in zip(names, row_vectors, strict=True):
+            columns[name] = column.clone()
+            rows[name] = row
+    return columns, rows
+
+
+def gguf_name(module):
+    return f"blk.{module.split('.')[2]}.{STEMS[module.split('.')[-1]]}.weight"
+
+
+def write_axis_gguf(path, columns, rows, metadata):
+    if not columns or set(columns) != set(rows):
+        raise ValueError("matching row and column inventories required")
+    if path.exists():
+        raise FileExistsError(path)
+    temporary = path.with_suffix(".partial.gguf")
+    writer = GGUFWriter(str(temporary), "imatrix")
+    writer.add_string("general.type", "imatrix")
+    writer.add_string("nanoquant.imatrix.statistic", "marginals-of-per-target-squared-weight-gradients")
+    writer.add_string("nanoquant.imatrix.provenance", json.dumps(metadata, sort_keys=True))
+    writer.add_string("nanoquant.imatrix.count_semantics", "one derived aggregate; source target count in provenance")
+    for name in sorted(columns):
+        key = gguf_name(name)
+        # The stored axes are derived scores, not raw activation sums. Count=1
+        # preserves them exactly; never mislabel 512 targets as activation slots.
+        writer.add_tensor(key + ".in_sum2", columns[name].numpy().astype(np.float32))
+        writer.add_tensor(key + ".counts", np.ones(1, dtype=np.float32))
+        writer.add_tensor(key + ".out_sum2", rows[name].numpy().astype(np.float32))
+        writer.add_tensor(key + ".out_counts", np.ones(1, dtype=np.float32))
+    try:
+        writer.write_header_to_file()
+        writer.write_kv_data_to_file()
+        writer.write_tensors_to_file()
+    finally:
+        writer.close()
+    loaded = load_imatrix(temporary)
+    for name in columns:
+        if (not torch.equal(loaded.entries[gguf_name(name)][0], columns[name])
+                or not torch.equal(loaded.row_entries[gguf_name(name)][0], rows[name])):
+            raise ValueError("GGUF axes did not round-trip exactly")
+    temporary.replace(path)
+
+
+def audit_parent(root):
+    protocol = json.loads((root / "protocol.json").read_text())
+    summary = json.loads((root / "summary.json").read_text())
+    if (summary["status"] != "complete_exploratory_probe"
+            or summary["protocol_sha256"] != hash_file(root / "protocol.json")
+            or protocol["code_sha256"] != hash_file(Path(__file__).with_name("probe_weight_fisher_imatrix.py"))):
+        raise ValueError("parent probe is incomplete or its protocol/code changed")
+    snapshot = Path(protocol["arguments"]["snapshot"])
+    if hash_file(snapshot / "model.safetensors") != protocol["weights_sha256"]:
+        raise ValueError("parent model weights changed")
+    data, receipt = load_stage(root, "inputs")
+    if receipt != summary["inputs"]:
+        # The stage receipt has one additional file-hash field.
+        if {k: v for k, v in receipt.items() if k != "sha256"} != summary["inputs"]:
+            raise ValueError("parent input receipt changed")
+    source = SafetensorsModelSource(snapshot, source=protocol["model"], revision=protocol["revision"], verify_hashes=True)
+    inventory = adapter_for_config(source.inventory().config).model_inventory(source)
+    return protocol, summary, data, inventory
+
+
+def build(args):
+    protocol, parent, data, inventory = audit_parent(args.fisher_run)
+    expected_shapes = {layer.weight.source_key.removesuffix(".weight"): (layer.out_features, layer.in_features)
+                       for block in inventory.blocks for layer in block.quantizable_layers}
+    exports = {}
+    for kind in KINDS:
+        fisher, receipt = load_stage(args.fisher_run, kind)
+        expected_receipt = {k: v for k, v in parent["fisher"][kind].items() if k != "sha256"}
+        if ({k: v for k, v in receipt.items() if k != "sha256"} != expected_receipt
+                or set(fisher) != set(expected_shapes)
+                or any(tuple(f.shape) != expected_shapes[n] for n, f in fisher.items())):
+            raise ValueError("Fisher receipt or real-model tensor inventory mismatch")
+        targets = receipt["targets"]
+        destination = args.dataset_root / f"gemma-3-270m-it-{kind.replace('_', '-')}-rows-{targets}"
+        destination.mkdir(parents=True, exist_ok=True)
+        path = destination / "imatrix.gguf"
+        identity = dict(schema=1, model=protocol["model"], revision=protocol["revision"],
+                        weights_sha256=protocol["weights_sha256"], source_targets=targets,
+                        source_contexts=protocol["arguments"]["calibration_samples"],
+                        source_context_length=protocol["arguments"]["length"],
+                        target_distribution=receipt["target_distribution"], fisher_sha256=receipt["sha256"],
+                        parent_protocol_sha256=hash_file(args.fisher_run / "protocol.json"),
+                        calibration_token_sha256=parent["inputs"]["calibration_token_sha256"],
+                        method="row=mean_j(F); shared_column=mean_i(stack(F))/mean(stack(F))",
+                        shared_input_groups=[to_dict(g) for g in GROUPS],
+                        code_sha256=hash_file(Path(__file__)))
+        start = time.perf_counter()
+        columns, rows = derive_axes(fisher)
+        derivation_seconds = time.perf_counter() - start
+        del fisher
+        receipt_path = destination / "source.json"
+        if receipt_path.exists():
+            saved = json.loads(receipt_path.read_text())
+            if saved["identity"] != identity or saved["sha256"] != hash_file(path):
+                raise ValueError("incompatible or corrupt existing Fisher IMatrix")
+        else:
+            write_axis_gguf(path, columns, rows, identity)
+        config = imatrix_config(path)
+        inputs, outputs, validation = resolve_imatrix_axes(config, inventory, GROUPS)
+        if len(inputs) != len(outputs) or len(inputs) != 126 or validation["unused_entries"]:
+            raise ValueError("incomplete real-model IMatrix mapping")
+        loaded = load_imatrix(path)
+        if any(not torch.equal(loaded.entries[gguf_name(n)][0], columns[n])
+               or not torch.equal(loaded.row_entries[gguf_name(n)][0], rows[n]) for n in columns):
+            raise ValueError("existing file differs from freshly derived axes")
+        record = dict(identity=identity, sha256=config.sha256, bytes=path.stat().st_size,
+                      derivation_seconds=derivation_seconds, calibration={"imatrix": to_dict(config)},
+                      mapped_projections=len(inputs), source_collection_seconds=receipt["seconds"])
+        if not receipt_path.exists():
+            atomic_write_json(receipt_path, record)
+            atomic_write_json(destination / "validation.json", validation)
+        exports[kind] = json.loads(receipt_path.read_text())
+        print(json.dumps(dict(kind=kind, path=str(path), bytes=record["bytes"], sha256=config.sha256)), flush=True)
+    return protocol, parent, data, exports
+
+
+def compare(args, protocol, parent, data, exports):
+    root = args.output
+    root.mkdir(parents=True, exist_ok=True)
+    frozen = dict(parent_protocol_sha256=hash_file(args.fisher_run / "protocol.json"),
+                  parent_summary_sha256=hash_file(args.fisher_run / "summary.json"),
+                  code_sha256=hash_file(Path(__file__)), exports=exports,
+                  arms=["imatrix_rows_columns", *KINDS], device="cpu", threads=args.threads,
+                  bits=[3, 4], evaluation="same retired exploratory positions as parent; not a fresh gate")
+    path = root / "protocol.json"
+    if path.exists() and json.loads(path.read_text()) != frozen:
+        raise ValueError("comparison protocol changed; use another output directory")
+    atomic_write_json(path, frozen)
+    old_imatrix = load_imatrix(Path(protocol["arguments"]["imatrix"]), protocol["imatrix_sha256"])
+    matrices = {"imatrix_rows_columns": old_imatrix}
+    for kind, record in exports.items():
+        config = record["calibration"]["imatrix"]
+        matrices[kind] = load_imatrix(Path(config["path"]), config["sha256"])
+    with acquire_device_lease("cpu"):
+        model = load_causal_language_model(protocol["arguments"]["snapshot"], torch_dtype=torch.float32,
+                                          attention_implementation="eager", local_files_only=True)
+        model.eval().requires_grad_(False)
+        modules = {name: m for name, m in model.named_modules()
+                   if isinstance(m, torch.nn.Linear) and name.split(".")[-1] in STEMS}
+        original = {name: module.weight.detach().clone() for name, module in modules.items()}
+        baseline = evaluate(model, data, root, "cpu", teacher=True)
+        if baseline != parent["baseline"]:
+            raise ValueError("teacher replay differs from parent; comparisons cannot be reused")
+        report = dict(status="running", baseline=baseline, exports=exports, results=[],
+                      parent_protocol_sha256=frozen["parent_protocol_sha256"])
+        for bits in (3, 4):
+            control = next(r for r in parent["results"] if r["bits"] == bits and r["arm"] == "imatrix_rows_columns")
+            for arm, matrix in matrices.items():
+                for name, module in modules.items():
+                    key = gguf_name(name)
+                    importance = matrix.row_entries[key].reshape(-1, 1) * matrix.entries[key].reshape(1, -1)
+                    module.weight.copy_(quantize(original[name], importance, bits))
+                metrics = evaluate(model, data, root, "cpu")
+                if arm == "imatrix_rows_columns" and metrics["sequences"] != control["sequences"]:
+                    raise ValueError("current IMatrix replay differs from parent")
+                entry = dict(arm=arm, bits=bits, projection_logical_bpw=bits + .25, **metrics)
+                entry["comparisons"] = {}
+                for reference in ("imatrix_rows_columns", "imatrix_columns", "matched_rows_columns", *KINDS):
+                    previous = next(r for r in parent["results"] if r["bits"] == bits and r["arm"] == reference)
+                    entry["comparisons"][reference] = {
+                        metric: paired_interval([r[metric] for r in metrics["sequences"]],
+                                                [r[metric] for r in previous["sequences"]])
+                        for metric in ("kl", "nll")
+                    }
+                report["results"].append(entry)
+                atomic_write_json(root / "summary.json", report)
+                print(json.dumps(dict(arm=arm, bits=bits, kl=metrics["kl"], nll=metrics["nll"])), flush=True)
+        report.update(status="complete_exploratory_axis_probe", teacher_and_current_imatrix_replay="exact")
+        atomic_write_json(root / "summary.json", report)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--fisher-run", type=Path,
+                        default=ROOT / "evidence/probes/gemma270m-weight-fisher-imatrix-512-targets")
+    parser.add_argument("--dataset-root", type=Path, default=ROOT / "Datasets")
+    parser.add_argument("--output", type=Path, default=ROOT / "evidence/probes/gemma270m-fisher-axes")
+    parser.add_argument("--threads", type=int, default=4)
+    parser.add_argument("--evaluate", action="store_true")
+    args = parser.parse_args()
+    if args.threads <= 0:
+        parser.error("threads must be positive")
+    torch.set_num_threads(args.threads)
+    torch.use_deterministic_algorithms(True)
+    result = build(args)
+    if args.evaluate:
+        compare(args, *result)
+
+
+if __name__ == "__main__":
+    main()
