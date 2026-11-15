@@ -1,0 +1,44 @@
+{
+  "adoption_rule": "no production adoption from this screen; follow-up if KL improves >=5%",
+  "arguments": {
+    "calibration_samples": 128,
+    "device": "cpu",
+    "eval_samples": 24,
+    "imatrix": "D:\\dev\\research\\NanoQuantRewrite\\Datasets\\gemma-3-270m-it-imatrix-eaddario-huge-rows\\imatrix.gguf",
+    "length": 128,
+    "output": "evidence\\probes\\gemma270m-weight-fisher-imatrix-512-targets",
+    "seed": 20261115,
+    "snapshot": "C:\\Users\\pdykstra\\.cache\\huggingface\\hub\\models--unsloth--gemma-3-270m-it\\snapshots\\23cf460f6bb16954176b3ddcc8d4f250501458a9",
+    "targets": 4,
+    "threads": 4
+  },
+  "arms": [
+    "uniform",
+    "imatrix_columns",
+    "imatrix_rows_columns",
+    "matched_rows_columns",
+    "empirical_fisher",
+    "model_fisher"
+  ],
+  "bits": [
+    3,
+    4
+  ],
+  "code_sha256": "5dfa290ff7d5df30e5dcf1f6d6c49d60d7bf11abde8344b8334d18d150daf076",
+  "evidence_tier": "exploratory full-model scalar quantization screen",
+  "imatrix_sha256": "3deceafea3aadd5fb6b75e22dfa0123bb99f22e0be95816354b374e80ebcc0c9",
+  "limitations": [
+    "short contexts and sampled targets",
+    "scalar quantizer, not NanoQuant factors",
+    "no GGUF or deployed BPW claim",
+    "existing imatrix has much larger sample budget",
+    "WikiText prefix is a reused monitor, not a fresh gate"
+  ],
+  "model": "unsloth/gemma-3-270m-it",
+  "precision": "FP32 model/gradient/statistics; F16 representable quantizer scales",
+  "quantizer": "8x8 tile, signed uniform codes, one F16 scale, 31 ratios 0.5..1.25",
+  "revision": "23cf460f6bb16954176b3ddcc8d4f250501458a9",
+  "schema": 1,
+  "uncertainty": "5000 paired sequence bootstrap resamples; exploratory, no multiple-test correction",
+  "weights_sha256": "700b710a9a99c295ed546647aa81cacf9f81f4c573ea2be613a0e2517a44afab"
+}

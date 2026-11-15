@@ -1,0 +1,20 @@
+{
+  "python": "3.12.1 (tags/v3.12.1:2305ca5, Dec  7 2023, 22:03:25) [MSC v.1937 64 bit (AMD64)]",
+  "platform": "Windows-11-10.0.26200-SP0",
+  "packages": {
+    "torch": "2.12.1+cu130",
+    "transformers": "4.51.3",
+    "numpy": "2.4.4",
+    "safetensors": "0.8.0",
+    "gguf": "0.19.0"
+  },
+  "git_head_before_probe_commit": "e85e9733cce7625a31260ce9a08c3aad9d90e80f",
+  "source_hashes": {
+    "tools/probe_weight_fisher_imatrix.py": "5dfa290ff7d5df30e5dcf1f6d6c49d60d7bf11abde8344b8334d18d150daf076",
+    "src/nanoquant/quality_evaluation.py": "89ee44f43cac228a60c043a7a4f02539cc1b744b3f3c586250128902537c218a",
+    "src/nanoquant/infrastructure/hf_language_model.py": "727080d86818f002fdd4984527e3edfdb160fe2f90abe680ee5c9922419d1409",
+    "src/nanoquant/infrastructure/imatrix.py": "c08f9989e5c629d447c20670bb9e005079fc1df0db26d670056aaa3cf3622241",
+    "src/nanoquant/infrastructure/hf_task_evaluation.py": "a2eebe9c2ef683dbec80e0c68467cba19b1121f918af55a0d986e878e57ce774"
+  },
+  "note": "CPU four threads, concurrent Experiment 075 GPU workload; timings are not isolated throughput benchmarks"
+}

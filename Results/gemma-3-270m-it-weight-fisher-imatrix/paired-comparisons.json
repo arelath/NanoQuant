@@ -1,0 +1,434 @@
+[
+  {
+    "run": "pilot-summary.json",
+    "bits": 3,
+    "arm": "empirical_fisher",
+    "control": "imatrix_columns",
+    "kl": {
+      "mean": 0.1432524025440216,
+      "low": -0.07115067193905512,
+      "high": 0.35562577992677663,
+      "relative_percent": 4.521180032754524
+    },
+    "nll": {
+      "mean": -0.18068071206410727,
+      "low": -0.5096309850613276,
+      "high": 0.12215980688730863,
+      "relative_percent": -2.351656857224649
+    }
+  },
+  {
+    "run": "pilot-summary.json",
+    "bits": 3,
+    "arm": "empirical_fisher",
+    "control": "imatrix_rows_columns",
+    "kl": {
+      "mean": 0.5392167170842489,
+      "low": 0.4088034950196743,
+      "high": 0.6829037298758824,
+      "relative_percent": 19.44868825761823
+    },
+    "nll": {
+      "mean": 0.46511069933573407,
+      "low": 0.218610850473245,
+      "high": 0.7022734453280767,
+      "relative_percent": 6.609190263642328
+    }
+  },
+  {
+    "run": "pilot-summary.json",
+    "bits": 3,
+    "arm": "empirical_fisher",
+    "control": "matched_rows_columns",
+    "kl": {
+      "mean": 0.7014339913924535,
+      "low": 0.553938359518846,
+      "high": 0.8564200792461631,
+      "relative_percent": 26.871857554373758
+    },
+    "nll": {
+      "mean": 0.6251092751820883,
+      "low": 0.4359356845418612,
+      "high": 0.8118230829636255,
+      "relative_percent": 9.08941277684141
+    }
+  },
+  {
+    "run": "pilot-summary.json",
+    "bits": 3,
+    "arm": "model_fisher",
+    "control": "imatrix_columns",
+    "kl": {
+      "mean": 0.25742701689402264,
+      "low": 0.07216434180736542,
+      "high": 0.4318903600176171,
+      "relative_percent": 8.124637828082172
+    },
+    "nll": {
+      "mean": -0.1518954634666443,
+      "low": -0.4601374660929044,
+      "high": 0.1318303376436232,
+      "relative_percent": -1.9770013310325463
+    }
+  },
+  {
+    "run": "pilot-summary.json",
+    "bits": 3,
+    "arm": "model_fisher",
+    "control": "imatrix_rows_columns",
+    "kl": {
+      "mean": 0.6533913314342499,
+      "low": 0.544014410674572,
+      "high": 0.754696255425612,
+      "relative_percent": 23.566784768858273
+    },
+    "nll": {
+      "mean": 0.493895947933197,
+      "low": 0.26613890926043193,
+      "high": 0.7051894317070643,
+      "relative_percent": 7.018226617866374
+    }
+  },
+  {
+    "run": "pilot-summary.json",
+    "bits": 3,
+    "arm": "model_fisher",
+    "control": "matched_rows_columns",
+    "kl": {
+      "mean": 0.8156086057424545,
+      "low": 0.6747865106910467,
+      "high": 0.9493125535547734,
+      "relative_percent": 31.245874227059044
+    },
+    "nll": {
+      "mean": 0.6538945237795512,
+      "low": 0.47665116886297865,
+      "high": 0.8192667235930761,
+      "relative_percent": 9.507965207230672
+    }
+  },
+  {
+    "run": "pilot-summary.json",
+    "bits": 4,
+    "arm": "empirical_fisher",
+    "control": "imatrix_columns",
+    "kl": {
+      "mean": 0.08228922014435132,
+      "low": 0.022929424637307724,
+      "high": 0.13881510272622108,
+      "relative_percent": 13.190324251898055
+    },
+    "nll": {
+      "mean": -0.2546950578689575,
+      "low": -0.3563215342660745,
+      "high": -0.15846997400124868,
+      "relative_percent": -4.747133565490646
+    }
+  },
+  {
+    "run": "pilot-summary.json",
+    "bits": 4,
+    "arm": "empirical_fisher",
+    "control": "imatrix_rows_columns",
+    "kl": {
+      "mean": -0.03308432176709175,
+      "low": -0.11043288769821326,
+      "high": 0.03723426020393766,
+      "relative_percent": -4.4754868962233685
+    },
+    "nll": {
+      "mean": -0.3220928907394409,
+      "low": -0.4271913431584835,
+      "high": -0.2085440474251906,
+      "relative_percent": -5.928850116537088
+    }
+  },
+  {
+    "run": "pilot-summary.json",
+    "bits": 4,
+    "arm": "empirical_fisher",
+    "control": "matched_rows_columns",
+    "kl": {
+      "mean": 0.015172429382801056,
+      "low": -0.05285500194877386,
+      "high": 0.07676246259361505,
+      "relative_percent": 2.195792833231569
+    },
+    "nll": {
+      "mean": -0.21381576855977377,
+      "low": -0.31853246639172234,
+      "high": -0.10981576989094417,
+      "relative_percent": -4.01580252268613
+    }
+  },
+  {
+    "run": "pilot-summary.json",
+    "bits": 4,
+    "arm": "model_fisher",
+    "control": "imatrix_columns",
+    "kl": {
+      "mean": 0.052579848716656365,
+      "low": 0.005773771181702614,
+      "high": 0.09777976395562292,
+      "relative_percent": 8.428142258145478
+    },
+    "nll": {
+      "mean": -0.21047004063924155,
+      "low": -0.3093794867396355,
+      "high": -0.1068658098578453,
+      "relative_percent": -3.9228456288412983
+    }
+  },
+  {
+    "run": "pilot-summary.json",
+    "bits": 4,
+    "arm": "model_fisher",
+    "control": "imatrix_rows_columns",
+    "kl": {
+      "mean": -0.06279369319478671,
+      "low": -0.12265626375253001,
+      "high": -0.007655392773449447,
+      "relative_percent": -8.494426847772797
+    },
+    "nll": {
+      "mean": -0.2778678735097249,
+      "low": -0.36620474408070247,
+      "high": -0.18631981561581296,
+      "relative_percent": -5.114788378153767
+    }
+  },
+  {
+    "run": "pilot-summary.json",
+    "bits": 4,
+    "arm": "model_fisher",
+    "control": "matched_rows_columns",
+    "kl": {
+      "mean": -0.0145369420448939,
+      "low": -0.06929904554660121,
+      "high": 0.038018808110306626,
+      "relative_percent": -2.1038234783589793
+    },
+    "nll": {
+      "mean": -0.16959075133005777,
+      "low": -0.2604187232752641,
+      "high": -0.0767499163746834,
+      "relative_percent": -3.185185880362662
+    }
+  },
+  {
+    "run": "larger-summary.json",
+    "bits": 3,
+    "arm": "empirical_fisher",
+    "control": "imatrix_columns",
+    "kl": {
+      "mean": 0.4454648395379384,
+      "low": 0.20489297757546107,
+      "high": 0.6739481245477991,
+      "relative_percent": 13.91565697143693
+    },
+    "nll": {
+      "mean": 0.21461041768391928,
+      "low": -0.07343372652928035,
+      "high": 0.5040006622672081,
+      "relative_percent": 2.8199808897449774
+    }
+  },
+  {
+    "run": "larger-summary.json",
+    "bits": 3,
+    "arm": "empirical_fisher",
+    "control": "imatrix_rows_columns",
+    "kl": {
+      "mean": 0.7947071095307668,
+      "low": 0.5906890312830607,
+      "high": 0.9809846647083759,
+      "relative_percent": 27.865541337904908
+    },
+    "nll": {
+      "mean": 0.8313591281572977,
+      "low": 0.5929266477624575,
+      "high": 1.0658863837520283,
+      "relative_percent": 11.88742516388135
+    }
+  },
+  {
+    "run": "larger-summary.json",
+    "bits": 3,
+    "arm": "empirical_fisher",
+    "control": "matched_rows_columns",
+    "kl": {
+      "mean": 0.9523075222969055,
+      "low": 0.7512099474668502,
+      "high": 1.1478507325053215,
+      "relative_percent": 35.34481382339278
+    },
+    "nll": {
+      "mean": 0.9541678229967753,
+      "low": 0.7291155864795049,
+      "high": 1.1747326056162506,
+      "relative_percent": 13.887303390331084
+    }
+  },
+  {
+    "run": "larger-summary.json",
+    "bits": 3,
+    "arm": "model_fisher",
+    "control": "imatrix_columns",
+    "kl": {
+      "mean": 0.2613341013590495,
+      "low": 0.05243938316901525,
+      "high": 0.4707787039379278,
+      "relative_percent": 8.163687426427169
+    },
+    "nll": {
+      "mean": 0.00759655237197876,
+      "low": -0.24982103407382963,
+      "high": 0.2637827838460604,
+      "relative_percent": 0.09981869821658051
+    }
+  },
+  {
+    "run": "larger-summary.json",
+    "bits": 3,
+    "arm": "model_fisher",
+    "control": "imatrix_rows_columns",
+    "kl": {
+      "mean": 0.6105763713518778,
+      "low": 0.44788446426391604,
+      "high": 0.776971777031819,
+      "relative_percent": 21.40919706368254
+    },
+    "nll": {
+      "mean": 0.6243452628453573,
+      "low": 0.42435119648774466,
+      "high": 0.8402874569098153,
+      "relative_percent": 8.927378478358094
+    }
+  },
+  {
+    "run": "larger-summary.json",
+    "bits": 3,
+    "arm": "model_fisher",
+    "control": "matched_rows_columns",
+    "kl": {
+      "mean": 0.7681767841180166,
+      "low": 0.6092477448284626,
+      "high": 0.937654103587071,
+      "relative_percent": 28.51081691827575
+    },
+    "nll": {
+      "mean": 0.7471539576848348,
+      "low": 0.5632724444071452,
+      "high": 0.9467673415939013,
+      "relative_percent": 10.874348767146568
+    }
+  },
+  {
+    "run": "larger-summary.json",
+    "bits": 4,
+    "arm": "empirical_fisher",
+    "control": "imatrix_columns",
+    "kl": {
+      "mean": 0.05196346963445345,
+      "low": -0.020568211500843366,
+      "high": 0.12236472166453782,
+      "relative_percent": 8.161069834607716
+    },
+    "nll": {
+      "mean": -0.1522849996884664,
+      "low": -0.2539089322090149,
+      "high": -0.05380472789208095,
+      "relative_percent": -2.7714413656641623
+    }
+  },
+  {
+    "run": "larger-summary.json",
+    "bits": 4,
+    "arm": "empirical_fisher",
+    "control": "imatrix_rows_columns",
+    "kl": {
+      "mean": -0.06633691489696503,
+      "low": -0.1268284445007642,
+      "high": -0.005464386598517632,
+      "relative_percent": -8.78606552284108
+    },
+    "nll": {
+      "mean": -0.24678216377894083,
+      "low": -0.32671766728162766,
+      "high": -0.17133585363626488,
+      "relative_percent": -4.4152674690002165
+    }
+  },
+  {
+    "run": "larger-summary.json",
+    "bits": 4,
+    "arm": "empirical_fisher",
+    "control": "matched_rows_columns",
+    "kl": {
+      "mean": 0.012295035024484,
+      "low": -0.04659763422484199,
+      "high": 0.072589945482711,
+      "relative_percent": 1.817737602737446
+    },
+    "nll": {
+      "mean": -0.11770302057266235,
+      "low": -0.20297599732875823,
+      "high": -0.03602550079425177,
+      "relative_percent": -2.155649187246933
+    }
+  },
+  {
+    "run": "larger-summary.json",
+    "bits": 4,
+    "arm": "model_fisher",
+    "control": "imatrix_columns",
+    "kl": {
+      "mean": 0.048429506520430245,
+      "low": -0.015812037419527768,
+      "high": 0.10948979649692774,
+      "relative_percent": 7.606046854630488
+    },
+    "nll": {
+      "mean": -0.2217586636543274,
+      "low": -0.32092681129773454,
+      "high": -0.12175315320491792,
+      "relative_percent": -4.035795612852855
+    }
+  },
+  {
+    "run": "larger-summary.json",
+    "bits": 4,
+    "arm": "model_fisher",
+    "control": "imatrix_rows_columns",
+    "kl": {
+      "mean": -0.06987087801098824,
+      "low": -0.13064193464815615,
+      "high": -0.011974161304533541,
+      "relative_percent": -9.254125147310166
+    },
+    "nll": {
+      "mean": -0.3162558277448018,
+      "low": -0.4000532974799474,
+      "high": -0.23284239719311398,
+      "relative_percent": -5.6582455017866184
+    }
+  },
+  {
+    "run": "larger-summary.json",
+    "bits": 4,
+    "arm": "model_fisher",
+    "control": "matched_rows_columns",
+    "kl": {
+      "mean": 0.00876107191046079,
+      "low": -0.044897942586491504,
+      "high": 0.06059514104078213,
+      "relative_percent": 1.2952651066237886
+    },
+    "nll": {
+      "mean": -0.18717668453852335,
+      "low": -0.2624716490507126,
+      "high": -0.11476236532131841,
+      "relative_percent": -3.4280111583708917
+    }
+  }
+]
