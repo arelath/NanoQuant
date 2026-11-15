@@ -10,6 +10,8 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, cast
 
+from gguf import GGUFReader
+
 from nanoquant.infrastructure.io_utils import atomic_write_json, hash_canonical_text_file, hash_file
 from nanoquant.infrastructure.mmproj_export import (
     MMPROJ_OUTPUT_NAME,
@@ -145,6 +147,39 @@ def _quantizer_command(
         str(quantized),
         base_type,
     )
+
+
+def _order_residual_gguf_metadata(path: Path) -> None:
+    """Put standard metadata ahead of NanoQuant metadata in the staged export."""
+    reader = GGUFReader(path)
+    fields = tuple(field for name, field in reader.fields.items() if not name.startswith("GGUF."))
+    architecture = reader.fields["general.architecture"].contents()
+    metadata_end = int(reader.tensors[0].field.offset)
+    spans = {
+        field.name: (int(field.offset), int(end))
+        for field, end in zip(fields, (*(field.offset for field in fields[1:]), metadata_end), strict=True)
+    }
+    del reader, fields
+
+    # LM Studio's offload preview reads only the first 5,000 bytes. Large
+    # per-projection inventories and tokenizer arrays must follow the layer count.
+    preview_keys = ("general.architecture", f"{architecture}.block_count", "general.file_type")
+    standard = [name for name in spans if name not in preview_keys and not name.startswith("quantization.nanoquant.")]
+    nanoquant = [name for name in spans if name.startswith("quantization.nanoquant.")]
+    ordered = [name for name in preview_keys if name in spans] + standard + nanoquant
+    if ordered == list(spans):
+        return
+
+    metadata_start = next(iter(spans.values()))[0]
+    with path.open("r+b") as file:
+        file.seek(metadata_start)
+        metadata = memoryview(file.read(metadata_end - metadata_start))
+        if len(metadata) != metadata_end - metadata_start:
+            raise ValueError("GGUF metadata ended before the tensor table")
+        file.seek(metadata_start)
+        for name in ordered:
+            start, end = spans[name]
+            file.write(metadata[start - metadata_start : end - metadata_start])
 
 
 def _inspect_gguf_tensor_contract(
@@ -538,6 +573,10 @@ def export_llamacpp_gguf(
             )
         if not quantized.is_file() or quantized.stat().st_size == 0:
             raise RuntimeError("llama.cpp quantizer did not produce a non-empty GGUF")
+        if any(layer.spec.residual_ranks for block in packed.manifest.blocks for layer in block.layers):
+            # Quantization rewrites standard keys such as general.file_type, so
+            # order the final metadata before validation, hashing, and publication.
+            _order_residual_gguf_metadata(quantized)
         actual_embedding_type, actual_output_type, scale_count, scale_types = _inspect_gguf_tensor_contract(
             quantized,
             reference,

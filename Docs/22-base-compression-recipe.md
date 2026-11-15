@@ -175,6 +175,11 @@ files, repository access, a 30-second heartbeat during the blocking Hub commit, 
 creation, and export-summary refresh. They include only non-secret repository and artifact metadata; `HF_TOKEN` is
 never logged.
 
+For staged NanoQuant GGUFs, export orders the final metadata after auxiliary-tensor
+quantization. The architecture and block count are visible in LM Studio's 5,000-byte
+preview, and standard metadata precedes the NanoQuant metadata. Tensor bytes and metadata
+values are preserved.
+
 ## Exporting an older completed run
 
 `execute_compression_export` performs only stages 2–5, never recompresses the model, and never contacts Hugging Face.

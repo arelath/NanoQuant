@@ -4,8 +4,10 @@ import json
 import subprocess
 from pathlib import Path
 
+import numpy as np
 import pytest
 import torch
+from gguf import GGUFReader, GGUFWriter
 from safetensors.torch import save_file
 
 import nanoquant.infrastructure.gguf_export as gguf_export
@@ -20,6 +22,42 @@ from nanoquant.runtime import (
     convert_logical_to_packed,
     write_logical_artifact,
 )
+
+
+def test_residual_gguf_metadata_keeps_standard_fields_in_preview(tmp_path: Path) -> None:
+    path = tmp_path / "staged.gguf"
+    writer = GGUFWriter(path, "gemma3")
+    for block in range(90):
+        writer.add_uint32(f"quantization.nanoquant.blk.{block}.ffn_up.residual_stage_count", 1)
+    writer.add_uint32("gemma3.block_count", 18)
+    writer.add_array("tokenizer.ggml.tokens", ["sample"] * 1024)
+    writer.add_string("quantization.nanoquant.stage_format", "additive_binary_v1")
+    writer.add_uint32("general.file_type", 1)
+    writer.add_tensor("blk.0.ffn_up.nq_residual_0_v", np.arange(32, dtype=np.int32))
+    writer.write_header_to_file()
+    writer.write_kv_data_to_file()
+    writer.write_tensors_to_file()
+    writer.close()
+    before = GGUFReader(path)
+    assert before.fields["gemma3.block_count"].offset > 5000
+    tensor_table = before.tensors[0].field.offset
+    fields = {key: field.contents() for key, field in before.fields.items()}
+    original_tensors = path.read_bytes()[tensor_table:]
+    del before
+
+    gguf_export._order_residual_gguf_metadata(path)
+
+    after = GGUFReader(path)
+    assert after.fields["gemma3.block_count"].offset < 5000
+    residual_start = min(
+        field.offset for key, field in after.fields.items() if key.startswith("quantization.nanoquant.")
+    )
+    assert all(
+        field.offset < residual_start for key, field in after.fields.items() if not key.startswith("quantization.")
+    )
+    assert after.tensors[0].field.offset == tensor_table
+    assert {key: field.contents() for key, field in after.fields.items()} == fields
+    assert path.read_bytes()[tensor_table:] == original_tensors
 
 
 def _packed(tmp_path: Path) -> Path:
