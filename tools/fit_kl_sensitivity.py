@@ -61,7 +61,32 @@ def fit_curve(rows: list[dict], baseline: float) -> dict:
     }
 
 
-def fit_dataset(source: Path, anchor: str | None, anchor_error: float) -> dict:
+DEFAULT_KL_TARGETS = (0.001, 0.0025, 0.005)
+
+
+def _target_error(curve: dict, kl: float) -> dict:
+    """Invert one fitted curve at a KL above the clean control and flag extrapolation."""
+    error = (kl / curve["coefficient"]) ** (1 / curve["exponent"])
+    low, high = curve["measured_error_range"]
+    # Ignore tiny differences from FP16 rounding at a measured endpoint.
+    status = (
+        "below_measured" if error < low and not math.isclose(error, low, rel_tol=1e-4)
+        else "above_measured" if error > high and not math.isclose(error, high, rel_tol=1e-4)
+        else "within_measured"
+    )
+    return {"kl_above_control": kl, "target_error": error, "range_status": status}
+
+
+def heatmap_name(kl: float) -> str:
+    return f"equal-kl-target-error-heatmap-{kl:g}-nats.png"
+
+
+def fit_dataset(source: Path, kl_targets: tuple[float, ...] = DEFAULT_KL_TARGETS) -> dict:
+    if not kl_targets or any(not math.isfinite(kl) or kl <= 0 for kl in kl_targets):
+        raise ValueError("KL targets must be finite and positive nats per token")
+    if len(set(kl_targets)) != len(kl_targets):
+        raise ValueError("KL targets must be unique")
+    kl_targets = tuple(sorted(kl_targets))
     digest = hash_file(source)
     data = json.loads(source.read_text(encoding="utf-8"))
     if hash_file(source) != digest:
@@ -77,117 +102,194 @@ def fit_dataset(source: Path, anchor: str | None, anchor_error: float) -> dict:
         raise ValueError("measurement dataset is incomplete or has duplicate trials")
     grouped = defaultdict(list)
     for row in data["trials"]:
-        grouped[row["target"]].append(row)
+        if row["requested_error"] > 0:
+            grouped[row["target"]].append(row)
     curves = {}
     for target in protocol["targets"]:
         block, projection = target.split(":", 1)
-        curves[target] = {"block": int(block), "projection": projection, **fit_curve(grouped[target], baseline)}
-    if anchor is None:
-        ranked = sorted(
-            curves,
-            key=lambda target: curves[target]["coefficient"] * anchor_error ** curves[target]["exponent"],
-        )
-        anchor = ranked[(len(ranked) - 1) // 2]
-    if anchor not in curves:
-        raise ValueError(f"unknown anchor projection {anchor!r}; use a block:projection key from the measurements")
-    reference = curves[anchor]
-    common_kl = reference["coefficient"] * anchor_error ** reference["exponent"]
-    for target, curve in curves.items():
-        error = anchor_error if target == anchor else (common_kl / curve["coefficient"]) ** (1 / curve["exponent"])
-        low, high = curve["measured_error_range"]
-        # Ignore tiny differences from FP16 rounding at a measured endpoint.
-        status = (
-            "below_measured" if error < low and not math.isclose(error, low, rel_tol=1e-4)
-            else "above_measured" if error > high and not math.isclose(error, high, rel_tol=1e-4)
-            else "within_measured"
-        )
-        curve["equal_kl"] = {"target_error": error, "range_status": status}
+        curve = {"block": int(block), "projection": projection, **fit_curve(grouped[target], baseline)}
+        curve["kl_targets"] = [_target_error(curve, kl) for kl in kl_targets]
+        curves[target] = curve
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "measurement_file": source.name,
         "measurement_sha256": digest,
         "teacher_artifact": protocol["teacher_artifact"],
         "model": "kl_above_control = coefficient * actual_relative_frobenius_error ** exponent",
         "fit_method": "ordinary least squares on log of seed means at each measured error level",
         "clean_kl_nats_per_token": baseline,
-        "equal_kl": {"anchor": anchor, "anchor_error": anchor_error, "kl_above_control": common_kl},
+        "kl_targets": list(kl_targets),
         "curves": curves,
     }
 
 
-def plot_targets(fit: dict, path: Path) -> None:
-    import matplotlib
+def require_plotting() -> None:
+    try:
+        import matplotlib
+    except ModuleNotFoundError as exc:
+        raise RuntimeError("install the NanoQuant visualization extra to render sensitivity plots") from exc
 
     matplotlib.use("Agg")
+
+
+def plot_measurements(report: dict, output: Path) -> None:
+    """Render measured seed means, retaining signed KL deltas near the clean control."""
+    require_plotting()
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import SymLogNorm
+    from matplotlib.ticker import PercentFormatter
+
+    protocol = report["protocol"]
+    levels = sorted(protocol["levels"])
+    groups = {}
+    for target in protocol["targets"]:
+        block, separator, projection = target.partition(":")
+        if not separator:
+            block, projection = block.removeprefix("block "), "All projections"
+        groups[target] = (int(block), projection)
+    blocks = sorted({b for b, _ in groups.values()})
+    projections = list(dict.fromkeys(p for _, p in groups.values()))
+    baseline = report["clean_baseline"]["kl_nats_per_token"]
+    trials = defaultdict(list)
+    for row in report["trials"]:
+        trials[row["target"], row["requested_error"]].append(row)
+    means = {
+        key: (float(np.mean([r["actual_error"] for r in rows])),
+              float(np.mean([r["kl_nats_per_token"] - baseline for r in rows])))
+        for key, rows in trials.items()
+    }
+    grids = np.full((len(levels), len(projections), len(blocks)), np.nan)
+    for (target, level), (_, kl) in means.items():
+        b, p = groups[target]
+        grids[levels.index(level), projections.index(p), blocks.index(b)] = kl
+    vmin = min(0.0, float(np.nanmin(grids)))
+    vmax = max(1e-8, float(np.nanmax(grids)))
+    norm = SymLogNorm(linthresh=max(1e-8, vmax * 1e-4), vmin=vmin, vmax=vmax)
+    output.mkdir(parents=True, exist_ok=True)
+    height = math.ceil(len(levels) / 2)
+    fig, axes = plt.subplots(height, 2, figsize=(max(12, 0.39 * len(blocks)), 3.1 * height),
+                             layout="constrained", squeeze=False)
+    for ax, grid, level in zip(axes.flat, grids, levels, strict=False):
+        im = ax.imshow(grid, aspect="auto", interpolation="nearest", cmap="magma", norm=norm)
+        ax.set_title(f"{level:.0%} requested weight error")
+        ax.set_xticks(range(len(blocks)), blocks, fontsize=7)
+        ax.set_yticks(range(len(projections)), projections, fontsize=8)
+        ax.set_xlabel("Decoder block")
+    for ax in list(axes.flat)[len(levels):]:
+        ax.set_visible(False)
+    fig.suptitle(f"{protocol['teacher']['source']}: measured KL sensitivity")
+    fig.colorbar(im, ax=axes, label="KL above clean control (nats/token, symlog)")
+    fig.savefig(output / "kl-sensitivity-heatmaps.png", dpi=160)
+    plt.close(fig)
+
+    fig, axes = plt.subplots(math.ceil(len(projections) / 2), 2, figsize=(12, 3 * math.ceil(len(projections) / 2)),
+                             layout="constrained", squeeze=False, sharex=True, sharey=True)
+    colors = plt.get_cmap("viridis")(np.linspace(0, 1, len(blocks)))
+    for ax, projection in zip(axes.flat, projections, strict=False):
+        for target, (block, name) in groups.items():
+            if name == projection:
+                points = sorted(means[target, level] for level in levels if (target, level) in means)
+                if points:
+                    x, y = zip(*points, strict=True)
+                    ax.plot(x, y, marker=".", color=colors[blocks.index(block)], linewidth=0.9)
+        ax.set_title(projection)
+        ax.set_yscale("symlog", linthresh=norm.linthresh)
+        ax.xaxis.set_major_formatter(PercentFormatter(1))
+        ax.grid(alpha=0.2)
+    for ax in list(axes.flat)[len(projections):]:
+        ax.set_visible(False)
+    block_norm = plt.Normalize(min(blocks), max(max(blocks), min(blocks) + 1))
+    fig.colorbar(plt.cm.ScalarMappable(norm=block_norm, cmap="viridis"), ax=axes, label="Decoder block")
+    fig.suptitle(f"{protocol['teacher']['source']}: KL response by projection")
+    fig.supxlabel("Measured relative Frobenius error")
+    fig.supylabel("KL above clean control (nats/token)")
+    fig.savefig(output / "kl-error-response.png", dpi=160)
+    plt.close(fig)
+
+
+def plot_targets(fit: dict, directory: Path) -> list[Path]:
+    """Render one weight-error target heatmap per KL target, sharing one colour scale."""
+    require_plotting()
     import matplotlib.pyplot as plt
     from matplotlib.colors import LogNorm
-    from matplotlib.patches import Rectangle
     from matplotlib.ticker import PercentFormatter
 
     curves = fit["curves"]
     blocks = sorted({curve["block"] for curve in curves.values()})
     projections = list(dict.fromkeys(curve["projection"] for curve in curves.values()))
-    grid = np.full((len(projections), len(blocks)), np.nan)
-    fig, ax = plt.subplots(figsize=(max(8, 0.55 * len(blocks) + 2), 5.3), layout="constrained")
-    values = [curve["equal_kl"]["target_error"] for curve in curves.values()]
-    norm = LogNorm(vmin=min(values), vmax=max(values))
-    cmap = plt.get_cmap("viridis")
-    for target, curve in curves.items():
-        col = blocks.index(curve["block"])
-        row = projections.index(curve["projection"])
-        error = curve["equal_kl"]["target_error"]
-        grid[row, col] = error
-        status = curve["equal_kl"]["range_status"]
-        suffix = {"below_measured": "↓", "above_measured": "↑", "within_measured": ""}[status]
-        color = "#12202a" if norm(error) > 0.57 else "white"
-        ax.text(col, row, f"{error:.1%}{suffix}", ha="center", va="center", color=color, fontsize=8)
-        if target == fit["equal_kl"]["anchor"]:
-            ax.add_patch(Rectangle((col - 0.48, row - 0.48), 0.96, 0.96, fill=False,
-                                   edgecolor="#ffb454", linewidth=2.4))
-    image = ax.imshow(grid, cmap=cmap, norm=norm, aspect="auto", interpolation="nearest")
-    reference = fit["equal_kl"]
-    fig.suptitle("Weight-error targets for equal predicted output KL", fontsize=17, fontweight="bold")
-    ax.set_title(
-        f"{reference['kl_above_control']:.5f} nats/token above control · "
-        f"Anchor {reference['anchor']} at {reference['anchor_error']:.0%}",
-        loc="left", fontsize=11,
-    )
-    ax.set_xticks(range(len(blocks)), blocks)
     labels = [p.replace("self_attn.", "Attn ").replace("mlp.", "MLP ").removesuffix("_proj") for p in projections]
-    ax.set_yticks(range(len(projections)), labels)
-    ax.tick_params(length=0)
-    ax.set_xlabel("Decoder block (zero-based)")
-    for spine in ax.spines.values():
-        spine.set_visible(False)
-    bar = fig.colorbar(image, ax=ax, pad=0.02)
-    ticks = (0.01, 0.02, 0.05, 0.10, 0.20, 0.35, 0.50, 1.0)
-    bar.set_ticks([tick for tick in ticks if norm.vmin <= tick <= norm.vmax])
-    bar.ax.yaxis.set_major_formatter(PercentFormatter(1))
-    bar.set_label("Target relative weight error (log scale)")
-    fig.supxlabel(
-        "↓ Below measured range   ·   ↑ Above measured range   ·   Gold outline marks the anchor", fontsize=10,
-    )
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(path, dpi=180, facecolor="white")
-    plt.close(fig)
+    values = [item["target_error"] for curve in curves.values() for item in curve["kl_targets"]]
+    norm = LogNorm(vmin=min(values), vmax=max(max(values), min(values) * 1.001))
+    cmap = plt.get_cmap("viridis")
+    low = min(curve["measured_error_range"][0] for curve in curves.values())
+    high = max(curve["measured_error_range"][1] for curve in curves.values())
+    directory.mkdir(parents=True, exist_ok=True)
+    paths = []
+    for index, kl in enumerate(fit["kl_targets"]):
+        grid = np.full((len(projections), len(blocks)), np.nan)
+        fig, ax = plt.subplots(figsize=(max(8, 0.55 * len(blocks) + 2), 5.3), layout="constrained")
+        extrapolated = 0
+        for curve in curves.values():
+            item = curve["kl_targets"][index]
+            if not math.isclose(item["kl_above_control"], kl):
+                raise ValueError("curve KL targets do not match the fit's KL targets")
+            col, row = blocks.index(curve["block"]), projections.index(curve["projection"])
+            error = item["target_error"]
+            grid[row, col] = error
+            suffix = {"below_measured": "↓", "above_measured": "↑", "within_measured": ""}[item["range_status"]]
+            extrapolated += bool(suffix)
+            color = "#12202a" if norm(error) > 0.57 else "white"
+            ax.text(col, row, f"{error:.1%}{suffix}", ha="center", va="center", color=color, fontsize=8)
+        image = ax.imshow(grid, cmap=cmap, norm=norm, aspect="auto", interpolation="nearest")
+        fig.suptitle("Weight-error targets for equal predicted output KL", fontsize=17, fontweight="bold")
+        ax.set_title(
+            f"Target {kl:g} nats/token above control · "
+            f"{extrapolated} of {len(curves)} targets outside the measured {low:.0%}–{high:.0%} error range",
+            loc="left", fontsize=11,
+        )
+        ax.set_xticks(range(len(blocks)), blocks)
+        ax.set_yticks(range(len(projections)), labels)
+        ax.tick_params(length=0)
+        ax.set_xlabel("Decoder block (zero-based)")
+        for spine in ax.spines.values():
+            spine.set_visible(False)
+        bar = fig.colorbar(image, ax=ax, pad=0.02)
+        ticks = (0.005, 0.01, 0.02, 0.05, 0.10, 0.20, 0.35, 0.50, 1.0)
+        bar.set_ticks([tick for tick in ticks if norm.vmin <= tick <= norm.vmax])
+        bar.ax.yaxis.set_major_formatter(PercentFormatter(1, decimals=1))
+        bar.set_label("Target relative weight error (log scale, shared across KL targets)")
+        fig.supxlabel(
+            "↓ Below measured range (extrapolated)   ·   ↑ Above measured range (extrapolated)", fontsize=10,
+        )
+        path = directory / heatmap_name(kl)
+        fig.savefig(path, dpi=180, facecolor="white")
+        plt.close(fig)
+        paths.append(path)
+    return paths
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("measurements", type=Path, help="the teacher dataset's measurements/<sweep-id>/results.json")
-    parser.add_argument("--anchor", help="block:projection key; defaults to the lower median fitted response")
-    parser.add_argument("--anchor-error", type=float, default=0.10)
-    parser.add_argument("--heatmap", type=Path, help="optional path for a target-error heatmap PNG")
+    parser.add_argument(
+        "--kl-target", type=float, action="append",
+        help=(
+            "KL above the clean control in nats/token; repeatable "
+            f"(default {', '.join(map(str, DEFAULT_KL_TARGETS))})"
+        ),
+    )
+    parser.add_argument("--heatmap-directory", type=Path, help="optional directory for one heatmap PNG per KL target")
     args = parser.parse_args()
-    if not math.isfinite(args.anchor_error) or args.anchor_error <= 0:
-        parser.error("--anchor-error must be finite and positive")
-    fit = fit_dataset(args.measurements, args.anchor, args.anchor_error)
+    try:
+        fit = fit_dataset(args.measurements, tuple(args.kl_target or DEFAULT_KL_TARGETS))
+    except ValueError as exc:
+        parser.error(str(exc))
     output = args.measurements.with_name("kl-response-fits.json")
     atomic_write_json(output, fit)
     print(f"Saved {len(fit['curves'])} curves to {output}")
-    if args.heatmap is not None:
-        plot_targets(fit, args.heatmap)
-        print(f"Saved heatmap to {args.heatmap}")
+    if args.heatmap_directory is not None:
+        for path in plot_targets(fit, args.heatmap_directory):
+            print(f"Saved heatmap to {path}")
     return 0
 
 

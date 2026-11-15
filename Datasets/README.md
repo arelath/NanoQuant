@@ -74,8 +74,8 @@ the output distribution when its weights receive random error.
 
 The default sweep uses the pinned Gemma 3 1B IT checkpoint loaded in FP16. It tests
 each of the seven projections in each of the 26 blocks individually, for 182 targets
-and 2,184 trials with three noise seeds at each of four relative Frobenius errors
-(5%, 10%, 20%, and 35%). It samples 16 disjoint
+and 3,276 trials with three noise seeds at each of six relative Frobenius errors
+(1%, 2.5%, 5%, 10%, 20%, and 35%). It samples 16 disjoint
 256-token windows from the `content` column of the pinned
 [imatrix calibration Parquet](https://huggingface.co/datasets/eaddario/imatrix-calibration/blob/e87ed55dcba9d9c3a3e41539f3e728e981b1daa4/combined_all_small.parquet).
 Each trial scales Gaussian noise to the requested relative error in one projection matrix,
@@ -98,22 +98,99 @@ teacher dataset directory. The sweep ID identifies the teacher artifact and meas
 settings, so multiple sweeps can share the same teacher. For later fitting, use each
 trial's measured weight error after FP16 rounding and its full-vocabulary KL in nats
 per next-token position. The dataset also retains the clean control and per-window scores.
-Rerun the same command to resume from the last saved trial.
+Rerun the same command to resume from the last saved trial. A sweep that differs from an
+earlier sweep of the same teacher only in its error levels imports that sweep's clean control
+and its trials at the shared levels, recording their source in `imported_trials`, and measures
+only the new levels. The earlier sweep directory is left unchanged.
 
 On completion or a graceful interruption, the tool exports `results.json` and
 `results.md` to `Results/gemma-3-1b-it-weight-sensitivity`. The Markdown ranks targets
 by mean KL at each noise level. Pass a different `--output` directory when changing
-the sweep settings.
+the sweep settings; a change of error levels alone replaces the exported report.
 
 Fit each projection's KL response from a completed sweep with
-`tools/fit_kl_sensitivity.py PATH_TO_MEASUREMENTS_RESULTS_JSON --heatmap PATH_TO_PNG`.
+`tools/fit_kl_sensitivity.py PATH_TO_MEASUREMENTS_RESULTS_JSON --heatmap-directory PATH`.
 The tool writes `kl-response-fits.json` beside the dataset's measurements. Each curve
 uses a power law for KL above the clean control and records the seed means, fit residual
-metrics, and predictions with each error level held out in turn. The equal-KL heatmap
-inverts each curve at the predicted KL of the median-response projection at 10% error.
-Use `--anchor BLOCK:PROJECTION` and `--anchor-error FRACTION` to pick a different
-reference. Arrows mark extrapolations beyond the measured weight errors. The targets
-predict isolated projection effects. Joint perturbations may interact.
+metrics, and predictions with each error level held out in turn. Each curve is then
+inverted at fixed KL targets above the clean control: 0.001, 0.0025 and 0.005
+nats/token by default, or repeat `--kl-target NATS` to choose others. One
+`equal-kl-target-error-heatmap-<KL>-nats.png` is rendered per target, all on one colour
+scale. Arrows mark extrapolations beyond the measured weight errors. The 1% and 2.5%
+levels keep more of the low-KL targets within the measured range. The
+targets predict isolated projection effects. Joint perturbations may interact.
+
+### Gemma 3 270M IT weight sensitivity
+
+This launcher builds the teacher dataset, measures each projection, fits the KL
+response curves, and renders the measured KL heatmaps, response curves, and
+equal-KL target heatmaps.
+
+```powershell
+.\.venv\Scripts\python.exe tools\build_gemma_3_270m_sensitivity_dataset.py
+```
+
+It uses the pinned `google/gemma-3-270m-it` revision
+`ac82b4e820549b854eebf28ce6dedaf9fdfa17b3` and the 1B calibration and
+perturbation defaults. The 270M model runs in FP32 with TF32 disabled. The clean
+model overflowed in FP16. In BF16, any weight change added about 0.004 nats/token of
+rounding noise, even at 0.01% weight error, which hid the response below about 5% error.
+In FP32, KL grows with the square of the weight error down to 0.01%. Cached teacher
+log probabilities use FP16, and the clean control is about 3e-7 nats/token.
+Its 18 blocks have 126 projection targets, for 2,268
+trials at six error levels and three seeds. Install the `evaluation` and
+`visualization` extras for Parquet and plotting.
+
+The teacher and measurements go under `Datasets/gemma-3-270m-it-fp32-sensitivity-16x256`.
+The earlier BF16 measurements remain under `Datasets/gemma-3-270m-it-bf16-sensitivity-16x256`
+for reference; do not use their fits for low-KL targets.
+Each `measurements/<sweep-id>/` directory contains the raw `results.json`
+and `kl-response-fits.json` with fit quality. Its `reports/` folder contains the
+JSON and Markdown reports and the PNGs. Rerun the same command to resume.
+Use `--teacher-only` to build just the teacher, or `--local-files-only` when
+the pinned model and calibration Parquet are already cached.
+
+### Gemma 3 4B IT weight sensitivity
+
+When ready to generate it, run from the repository root:
+
+```powershell
+.\.venv\Scripts\python.exe tools\build_gemma_3_4b_sensitivity_dataset.py --local-files-only
+```
+
+This uses the pinned `google/gemma-3-4b-it` revision
+`093f9f388b31de276ce2de164bdc2081324b9767` and the same FP16 Gaussian-noise
+measurement protocol as the 1B launcher. It loads the text decoder from the
+multimodal checkpoint and defaults to 34 blocks, 238 projections, and 4,284
+trials (16 × 256-token windows, six error levels, three seeds). Install the
+`evaluation` and `visualization` extras for Parquet and plotting. The full
+sweep requires many forward passes, a device that fits the FP16 4B decoder,
+and about 2 GiB of storage for the default teacher log probabilities alone.
+
+Everything stays under `Datasets/gemma-3-4b-it-fp16-sensitivity-16x256` by
+default. Rerun the same command to reuse the teacher and resume the sweep.
+Use `--teacher-dataset PATH` for a different dataset directory.
+
+```text
+measurements/<sweep-id>/
+  results.json
+  kl-response-fits.json
+  reports/
+    results.json
+    results.md
+    kl-sensitivity-heatmaps.png
+    kl-error-response.png
+    equal-kl-target-error-heatmap-0.001-nats.png
+    equal-kl-target-error-heatmap-0.0025-nats.png
+    equal-kl-target-error-heatmap-0.005-nats.png
+```
+
+The measured heatmaps and response graph are rendered after all trials finish.
+The equal-KL fit and heatmaps require a projection sweep with at least four
+positive error levels and invertible response curves. `--teacher-only`
+prepares the teacher targets without measurements or plots; `--no-plots`
+keeps the measurements and text reports but skips chart generation.
+This dataset is distinct from the WikiText KL teacher targets used by 072.
 
 ### KL allocation profiling
 
@@ -208,3 +285,11 @@ All 182 input-importance vectors match the pinned 1B model's projection inventor
 This is an external activation-importance input, separate from allocation profiles
 and KL teacher targets. See [Experiment 073](../Docs/Experiments/073-imatrix-two-full-rank-stages-gemma-3-1b.md)
 for the prepared recipe and launch command.
+
+Experiment 074 uses `Datasets/gemma-3-270m-it-imatrix-unsloth/imatrix_unsloth.gguf_file`,
+downloaded from `unsloth/gemma-3-270m-it-GGUF` at revision
+`c90975dbd40c0c7b275fefaae758c3415c906238`. It is a GGUF-format imatrix with SHA-256
+`2f88200eae0588cf7b3030f34e5469a529758a1c69f7a13453b7d3a91de017f3`; `source.json`
+beside it records the URL, revision, size and hash. All 126 vectors match the pinned
+`unsloth/gemma-3-270m-it` projection inventory. See
+[Experiment 074](../Docs/Experiments/074-fast-imatrix-two-full-rank-stages-gemma-3-270m.md).
