@@ -37,6 +37,9 @@ evaluation = [
 imatrix = [
   "pyarrow>=19",
 ]
+allocation = [
+  "scipy>=1.11",
+]
 visualization = [
   "reportlab>=4.0",
   "matplotlib==3.10.3",

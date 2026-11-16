@@ -1,7 +1,10 @@
 # Byte-budget allocation across binary stages and llama.cpp formats
 
-Written 2026-11-16. Status: design, with a CPU pilot on Gemma 3 1B. Nothing here has been
-compressed or scored on a model yet.
+Written 2026-11-16. Status: initial CPU design pilot, with projection-only validation now in
+progress. The allocation tables below are predictions, not measured mixed-model results.
+The active follow-up keeps embeddings fixed and uses the expanded 1–35% sensitivity sweep.
+Experiment 081 has completed on 270M; its three-stage results are real, but are not a measured
+third-stage menu for the 1B model used in this pilot.
 
 ## Summary
 
@@ -25,8 +28,8 @@ llama.cpp quantizations of the same checkpoint. All numbers are the additive est
 Three things in the pilot change the plan as you described it.
 
 - **080 has two full-rank stages, not three.** Its recipe is 074's two-stage recipe at 2.515
-  bits per weight. Three stages are Experiment 081, on 270M, which has not run. The third
-  stage below is an assumption, marked as such.
+  bits per weight. Three stages are Experiment 081, completed on 270M. The third
+  stage below is still an assumption for 1B, marked as such.
 - **The switch to a standard format pays off before the third stage.** For MLP down and
   attention output, a 3-bit format already matches or beats two stages at the same bytes. A
   third stage is only competitive for MLP gate and up.
@@ -34,9 +37,10 @@ Three things in the pilot change the plan as you described it.
   inputs, which is not a multiple of 256, so llama.cpp stores them in 32-wide formats: IQ4_NL,
   Q4_1, Q5_0, Q5_1 and Q8_0.
 
-The estimate has not been checked against measured KL on 1B, and the one model-level test we
-have (the Q8_0 hybrid) delivered a third to a half of the predicted gain. Section 8 covers that
-risk, and section 10 puts a measurement gate ahead of any implementation.
+At the time of the pilot, the estimate had not been checked against measured KL on 1B.
+The Q8_0 hybrid improved empirical loss and accuracy, but those metrics cannot directly
+validate a predicted KL reduction. Section 8 covers that risk, and section 10 puts a
+matched measurement gate ahead of pipeline implementation.
 
 ## 1. What the 080 report shows
 
@@ -111,6 +115,9 @@ for Q6_K on those matrices produces Q8_0, and Q4_K produces Q5_0.
 All standard options are quantized with the same imatrix the staged recipe uses.
 
 ### Token embedding
+
+This subsection records a possible future direction. Embedding changes and embedding-only
+measurements are excluded from the active follow-up at the user's request.
 
 The embedding is one more unit with the same 32-wide ladder. Its KL cannot come from the
 sensitivity curves, which cover projections only. It needs one direct KL measurement per
@@ -215,10 +222,11 @@ This is a multiple-choice knapsack: one option per unit, one shared budget.
 3. Start every unit at its cheapest option. Take upgrades in order of KL saved per byte,
    across all units, while they fit.
 
-The result is optimal except for at most one upgrade that did not fit, which is small against
-130 units. It runs in milliseconds, so the whole size-against-KL curve can be produced along
-with any single budget. The pilot implementation is `allocate` in
-`tools/probe_byte_budget_allocation.py`.
+This is a fast heuristic, not an exact discrete optimum. A point above a unit's convex hull
+can still be useful when the next upgrade does not fit, and indivisible upgrades can make
+greedy selection suboptimal. The pilot implementation is `allocate` in
+`tools/probe_byte_budget_allocation.py`. The CPU audit in `tools/audit_byte_budget_allocation.py`
+retains all discrete options and reports an integer solver's lower bound and optimality gap.
 
 **Family multipliers.** The objective takes one multiplier per option family, default 1. They
 exist because isolated estimates treat the two families unequally (section 8) and are set from
@@ -267,6 +275,13 @@ For comparison at the same budgets:
 
 ## 7. What this says about a third stage
 
+These conclusions describe the original 1B surrogate pilot only. Completed Experiment 081
+has three full-rank stages on 270M: its retained WikiText perplexity is 218.1163 versus
+252.4739 for the matching two-stage 074 **pre-KD** control, with file bytes increasing from
+220,441,248 to 238,158,624. Their resolved numerical recipes differ in the stage ceiling;
+074's later global distillation is excluded by using its pre-KD report. This is evidence
+that a third stage helps on 270M, not proof of its relative byte efficiency on 1B.
+
 - With the optimistic assumption, offering a third stage lowers the estimate by at most 4% at
   any budget. The solver uses it for MLP gate and up only.
 - For MLP down, attention output and QKV it is never on the efficient set. For the first two,
@@ -284,7 +299,14 @@ design.
 
 ## 8. Why the estimate cannot be trusted yet
 
-**The one model-level test under-delivered.** 080's Q8_0 hybrid replaced 26 projections that
+The prior [quantization-error and KL study](Articles/quantization-error-and-kl/article.md)
+already separates these effects on 270M. Imatrix weighting predicts summed isolated costs
+within 8–25%, improves NanoQuant matrix-ranking agreement from 0.84 to 0.96, and survives a
+second imatrix check. It does not remove the measured whole-model interaction discount.
+The follow-up here tests transfer to 1B and conditional gains in an already compressed model;
+it is not a fresh claim that importance weighting or structured residuals have never been tested.
+
+**The initial model-level test used different metrics.** 080's Q8_0 hybrid replaced 26 projections that
 carry 59% of the estimate. Measured against BF16:
 
 | Measure | Predicted change | Measured change |
@@ -293,11 +315,13 @@ carry 59% of the estimate. Measured against BF16:
 | WikiText-2 loss gap to BF16 | | −19% (0.303 → 0.244 nats) |
 | MMLU accuracy gap to BF16 | | −30% (7.7 → 5.4 points) |
 
-There are two possible reasons, and the data does not separate them.
+KL, empirical next-token loss, and task accuracy need not improve by the same fraction.
+The table therefore does not establish the accuracy or scale of the KL prediction.
+Matched teacher KL is required first. Potential sources of prediction error include:
 
-- **The estimate overweights those projections.** It has not been checked against isolated or
-  joint KL on 1B. Its total is 3.66 nats/token for a model whose WikiText loss gap is 0.30, so
-  its absolute scale is clearly too high.
+- **The noise proxy misprices structured residuals.** Equal imatrix-weighted error does not
+  establish equal KL for Gaussian noise and an actual quantization residual. Measure actual
+  isolated options before attributing a mismatch solely to inter-layer compensation.
 - **The swap broke compensation.** Binary factors are fitted block by block, with each block
   seeing the compressed output of the blocks before it. On 270M that made the whole-file KL
   51–61% of the sum of the isolated costs, against 82–92% for llama.cpp files. Replacing early
@@ -306,8 +330,9 @@ There are two possible reasons, and the data does not separate them.
 
 **Consequences for the design.**
 
-- The allocation has to be decided before compression, so each block is fitted against the
-  mixed model it will actually run in. A post-hoc swap is a lower bound, not the method.
+- The eventual allocation should be decided before compression, so each block is fitted against
+  the mixed model it will actually run in. Post-hoc swaps are useful diagnostics; their gain is
+  not a guaranteed lower bound on the gain after recompression.
 - Isolated estimates undervalue binary factors against standard formats. Applying the 270M
   ratios as family multipliers (0.6 for staged, 0.87 for standard) changes 38 of the 130
   choices at 547.4 MB, and 16 of them change family. The main shift is MLP down keeping two
@@ -317,7 +342,9 @@ There are two possible reasons, and the data does not separate them.
 
 **Other limits of the pilot.**
 
-- The 1B sweep ran in FP16 at 5–35% error. Everything at 4 bits and above lies below that range.
+- The original 1B sweep ran in FP16 at 5–35% error. The subsequent 1% and 2.5% extension
+  covers all 182 current two-stage residuals and changes their additive estimate by only
+  −0.22% (3.660094 to 3.652172). Precise standard options can still lie below the new range.
 - One imatrix and one calibration text. The imatrix that weights the error is the one the
   quantizers optimise against.
 - The one-stage numbers come from a truncated two-stage fit, and the three-stage numbers are
@@ -375,17 +402,20 @@ llama.cpp, including the IQ formats, needs its own check.
 
 ## 10. Order of work
 
-Each step is a gate for the next.
+The active sequence keeps embeddings fixed. Each measurement informs the following step.
 
 1. **Validate the estimate on 1B (GPU, hours).** Measure joint KL for 080 and for the Q8_0
    hybrid on the sweep's text, and isolated KL for a sample of menu options. Decide the
    family multipliers from that, or decide the estimate needs a different objective.
-2. **Extend the 1B sweep downward in FP32,** to 1% and 2.5% error, so the 4-bit and higher
-   options are inside the measured range. The BF16 sweep on 270M showed a noise floor near
-   0.003 nats/token at these levels, so FP32 is required.
-3. **Measure the embedding** at Q8_0, Q5_1, Q5_0 and IQ4_NL.
+2. **Measure actual options in clean and compressed contexts.** Sample early, middle and late
+   blocks, preserving shared QKV as one storage unit. Test the ordering and marginal KL
+   saved per byte. The low-error sweep extension is already complete in FP16, with a clean
+   control KL of 2.57e-7; a full FP32 rerun is not justified by the older 270M BF16 noise floor.
+3. **Audit the discrete allocator on CPU,** using the expanded curves and no assumed third
+   stage. Compare the full menu with a conservative menu that retains at least two stages
+   wherever a unit stays binary. Keep embedding bytes fixed.
 4. **Post-hoc mixed file at 547.4 MB,** built like the Q8_0 hybrid and scored on the same
-   protocol. It costs one evaluation and gives a floor for the gain.
+   protocol. It measures one candidate; it does not establish a floor for recompression gain.
 5. **Plan-time mixed compression at 547.4 MB,** the real test. Success is lower measured KL
    and perplexity than 080 at the same bytes.
 6. **Third-stage probe** on MLP gate and up for a few blocks, only if step 5 leaves those
