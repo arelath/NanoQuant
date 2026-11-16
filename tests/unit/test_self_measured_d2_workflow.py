@@ -25,6 +25,25 @@ def test_maximum_rank_control_forwards_pre_distillation_audit(monkeypatch, tmp_p
     assert observed == [{"audit_before_global_tuning": True}]
 
 
+def test_maximum_rank_control_preserves_disabled_distillation(monkeypatch, tmp_path) -> None:
+    definition = load_experiment(80)
+    monkeypatch.setattr(workflow, "resolve_compression_quality_experiment", lambda *a, **kw: object())
+    observed = []
+    monkeypatch.setattr(
+        workflow, "execute_compression_quality_experiment",
+        lambda config, quality, _resolved: observed.append((config, quality)),
+    )
+    assert workflow.run_self_measured_d2_experiment(
+        definition, launcher_path=tmp_path / "experiments/080.py", arguments=[],
+        profile_options=SelfMeasuredD2ProfileOptions(tuned_operating_point=False),
+        reuse_maximum_rank_control=True,
+    ) == 0
+    (config, quality), = observed
+    assert not config.distillation.enabled
+    assert config.allocation.strategy.value == "uniform"
+    assert quality.include_mmlu
+
+
 def test_uniform_control_propagates_block_bounded_execution(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

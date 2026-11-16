@@ -359,7 +359,8 @@ def run_self_measured_d2_experiment(
     if reuse_maximum_rank_control:
         if experiment.config.allocation.maximum_rank_layer_patterns != ("*",):
             raise ValueError("control reuse requires maximum rank for every projection")
-        if not profile_options.tuned_operating_point or experiment.config.distillation.foldable_mlp_multipliers.enabled:
+        if (profile_options.tuned_operating_point != experiment.config.distillation.enabled
+                or experiment.config.distillation.foldable_mlp_multipliers.enabled):
             raise ValueError("control reuse requires matching global distillation settings")
         if any(value is not None for value in (
             parsed.allocation_profile_dataset, parsed.kl_profile, parsed.kl_control_run,
@@ -387,7 +388,9 @@ def run_self_measured_d2_experiment(
         repository = Path(launcher_path).resolve().parent.parent
         number = _experiment_number(experiment.config)
         campaign_root = (repository / "evidence" / f"{number:03d}").resolve()
-        control = _uniform_control_config(experiment.config, campaign_root, tuned_operating_point=True)
+        control = _uniform_control_config(
+            experiment.config, campaign_root, tuned_operating_point=profile_options.tuned_operating_point,
+        )
         if control.distillation != experiment.config.distillation:
             raise ValueError("control reuse requires identical distillation configuration")
         publication = replace(

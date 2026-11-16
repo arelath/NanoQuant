@@ -39,6 +39,7 @@ from nanoquant.infrastructure.hf_calibration_dataset import (
     prepare_behavior_evaluation,
 )
 from nanoquant.infrastructure.hf_language_model import load_causal_language_model
+from nanoquant.infrastructure.hf_mmlu import PreparedMmlu, evaluate_mmlu, prepare_mmlu
 from nanoquant.infrastructure.hf_task_evaluation import (
     hash_hf_tokenizer_snapshot,
     load_pinned_dataset_split,
@@ -100,8 +101,11 @@ class QualityEvaluationRequest:
     reasoning_sequence_length: int = 512
     maximum_thinking_degradation_ratio: float = 1.10
     reasoning_batch_size: int = 1
+    include_mmlu: bool = False
 
     def __post_init__(self) -> None:
+        if self.include_mmlu and self.stream_base_model:
+            raise ValueError("MMLU requires a resident Transformers model")
         if not self.source or not self.revision:
             raise ValueError("quality evaluation model source and revision are required")
         if self.backend not in {
@@ -161,6 +165,7 @@ class PreparedQualityInputs:
     tasks: tuple[PreparedMultipleChoiceInputs, ...]
     reasoning: tuple[PreparedBehaviorEvaluation, ...] = ()
     wikitext_attention_mask: torch.Tensor | None = None
+    mmlu: PreparedMmlu | None = None
 
 
 def _wikitext_context_policy(bos_token_id: int | None) -> str:
@@ -364,6 +369,7 @@ def prepare_quality_inputs(
         tuple(tasks),
         tuple(reasoning),
         wikitext_mask,
+        prepare_mmlu(tokenizer, local_files_only=request.local_files_only) if request.include_mmlu else None,
     )
 
 
@@ -454,6 +460,25 @@ def _evaluate_model(
             metric=result.primary_metric,
             value=result.primary_value,
         )
+    if inputs.mmlu is not None:
+        mmlu_started = time.perf_counter()
+        _emit_progress(progress, "mmlu_started", model=label, sample_count=len(inputs.mmlu.tokens))
+
+        def check_mmlu_memory() -> None:
+            if monitor is not None:
+                monitor.check()
+
+        mmlu_result = evaluate_mmlu(
+            model, inputs.mmlu, device=request.device, pad_token_id=inputs.pad_token_id,
+            after_batch=check_mmlu_memory,
+        )
+        tasks.append({
+            "task": {"task_name": "mmlu", "primary_metric": "acc"},
+            "task_input_identity": inputs.mmlu.identity,
+            "result": mmlu_result,
+            "elapsed_seconds": time.perf_counter() - mmlu_started,
+        })
+        _emit_progress(progress, "mmlu_completed", model=label, value=mmlu_result["primary_value"])
     reasoning = []
     for prepared_reasoning in inputs.reasoning:
         mode = prepared_reasoning.mode.value
@@ -634,6 +659,7 @@ def describe_quality_protocol(
         "task_limit": request.task_limit,
         "task_batch_size": request.task_batch_size,
         "tokenizer_hash": inputs.tokenizer_hash,
+        **({} if inputs.mmlu is None else {"mmlu": inputs.mmlu.identity}),
         **({"wikitext_full_split": True} if request.wikitext_samples is None else {}),
         **({} if base_execution is None else {"base_execution": base_execution}),
         **(
@@ -662,8 +688,13 @@ def execute_quality_evaluation(
 ) -> dict[str, Any]:
     """Evaluate the base model and, when requested, the frozen candidate."""
 
+    if request.include_mmlu and not evaluate_candidate:
+        raise ValueError("MMLU requires the matched Transformers candidate evaluator")
+
     _emit_progress(progress, "input_preparation_started", reused=prepared is not None)
     inputs = prepare_quality_inputs(request, progress) if prepared is None else prepared
+    if request.include_mmlu != (inputs.mmlu is not None):
+        raise ValueError("prepared MMLU inputs do not match the requested protocol")
     _emit_progress(progress, "input_preparation_completed", task_count=len(inputs.tasks))
     wall_started = time.perf_counter()
     _emit_progress(progress, "device_lease_started", device=request.device)
@@ -716,6 +747,11 @@ def execute_quality_evaluation(
             else:
                 if "wikitext" not in base_result or "tasks" not in base_result:
                     raise ValueError("reused quality base result is incomplete")
+                if inputs.mmlu is not None and not any(
+                    item["result"]["task_name"] == "mmlu" and item["task_input_identity"] == inputs.mmlu.identity
+                    for item in base_result["tasks"]
+                ):
+                    raise ValueError("reused quality base result lacks the requested MMLU inputs")
                 _emit_progress(progress, "model_evaluation_reused", model="base")
             frozen_result: dict[str, Any] | None = None
             frozen_identity: dict[str, Any] | None = None

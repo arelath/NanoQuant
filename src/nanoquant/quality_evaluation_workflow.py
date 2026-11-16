@@ -267,6 +267,10 @@ def render_quality_evaluation_markdown(payload: dict[str, Any]) -> str:
             f"- Tasks: {', '.join(str(item) for item in protocol['task_names'])}; "
             f"first {protocol['task_limit']} rows, batch {protocol['task_batch_size']}"
         ),
+        *([
+            f"- MMLU: full {protocol['mmlu']['samples']:,}-question test split, "
+            f"{protocol['mmlu']['few_shot']} same-subject dev examples, answer-letter logits."
+        ] if "mmlu" in protocol else []),
         f"- Tokenizer hash: `{_markdown_cell(protocol['tokenizer_hash'])}`",
         "",
         "## Quality results",

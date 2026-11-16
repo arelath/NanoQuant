@@ -24,9 +24,11 @@ import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
+import gguf
 import numpy as np
 from huggingface_hub import snapshot_download
 from kl_sensitivity_dataset import verify_local_weights
+from materialize_nanoquant_gguf import dense_nanoquant_projections
 from measure_gguf_kl import PROJECTIONS, map_tensors, read_gguf
 from measure_joint_kl_targets import spec_for_protocol
 from safetensors import safe_open
@@ -35,6 +37,126 @@ from nanoquant.infrastructure.imatrix import load_imatrix
 from nanoquant.infrastructure.io_utils import atomic_write_json, atomic_write_text, hash_file
 
 GGUF_NAMES = {path: kind for kind, path in PROJECTIONS.items()}
+
+
+def prediction_inputs(measurements: Path, imatrix: Path, imatrix_sha256: str | None, fits_sha256: str | None):
+    """Validate a projection sweep, matching source weights and imatrix without inference."""
+    sweep = json.loads(measurements.read_bytes())
+    sweep_sha = hash_file(measurements)
+    fits_path = measurements.with_name("kl-response-fits.json")
+    fit = json.loads(fits_path.read_bytes())
+    fit_sha = hash_file(fits_path)
+    protocol = sweep["protocol"]
+    curves = fit["curves"]
+    targets = protocol["targets"]
+    if (fit["measurement_sha256"] != sweep_sha or fit["teacher_artifact"] != protocol["teacher_artifact"]
+            or len(sweep["trials"]) != sweep["expected_trials"] or set(targets) != curves.keys()
+            or (fits_sha256 is not None and fits_sha256 != fit_sha)):
+        raise ValueError("sweep and projection sensitivity fits do not match")
+    spec = spec_for_protocol(protocol)
+    if protocol["model_weights_sha256"] != spec.weights_identity or len(targets) != 7 * spec.blocks:
+        raise ValueError("sensitivity sweep does not cover the pinned decoder projection inventory")
+    if len(spec.weight_files) != 1:
+        raise ValueError("prediction-only currently requires a single safetensors checkpoint")
+    snapshot = Path(snapshot_download(repo_id=spec.source, revision=spec.revision, local_files_only=True))
+    verify_local_weights(snapshot, spec)
+    matrix = load_imatrix(imatrix, imatrix_sha256)
+    keys = {}
+    ref_path = snapshot / spec.weight_files[0][0]
+    with safe_open(ref_path, framework="pt", device="cpu") as reference:
+        for target in targets:
+            block, projection = target.split(":", 1)
+            name = f"blk.{block}.{GGUF_NAMES[projection]}.weight"
+            source_key = f"model.layers.{block}.{projection}.weight"
+            shape = reference.get_slice(source_key).get_shape()
+            value = matrix.entries.get(name)
+            if value is None or tuple(value.shape) != (1, shape[1]):
+                raise ValueError(f"imatrix projection missing or wrong width: {name}")
+            keys[target] = (name, source_key)
+    identity = {
+        "protocol": protocol, "measurement_sha256": sweep_sha, "fits_sha256": fit_sha,
+        "measurements": str(measurements), "imatrix": {"path": str(imatrix), "sha256": matrix.sha256},
+        "checkpoint": str(ref_path), "projection_count": len(keys),
+    }
+    return identity, curves, matrix, ref_path, keys
+
+
+def predict_components(path: Path, curves: Mapping, importance: Mapping, reference, keys: Mapping) -> dict:
+    """Compute export-weight residuals and additive component estimates."""
+    reader = gguf.GGUFReader(path)
+    dense = dense_nanoquant_projections(reader.fields, {tensor.name: tensor for tensor in reader.tensors}, gguf)
+    if dense.keys() != {name for name, _ in keys.values()}:
+        raise ValueError("GGUF projection coverage does not match the sensitivity sweep")
+    rows = []
+    for key, (name, source_key) in keys.items():
+        original = reference.get_tensor(source_key).float().numpy()
+        packed = dense[name].weight
+        if packed.shape != original.shape:
+            raise ValueError(f"exported projection does not match the pinned source shape: {name}")
+        error, weighted = noise_equivalent_error(original, packed, importance[name].numpy().ravel())
+        curve = curves[key]
+        low, high = curve["measured_error_range"]
+        if not math.isfinite(weighted):
+            raise ValueError(f"non-finite weight reconstruction error: {name}")
+        block, projection = key.split(":", 1)
+        rows.append({
+            "block": int(block), "projection": projection, "relative_error": error,
+            "noise_equivalent_error": weighted, "unweighted_kl": curve["coefficient"] * error ** curve["exponent"],
+            "weighted_kl": curve["coefficient"] * weighted ** curve["exponent"],
+            "weighted_extrapolated": not low <= weighted <= high,
+        })
+    rows.sort(key=lambda row: -row["weighted_kl"])
+    total = math.fsum(row["weighted_kl"] for row in rows)
+    for row in rows:
+        row["share"] = row["weighted_kl"] / total if total else 0.0
+
+    def summarize_by(field: str) -> list[dict]:
+        grouped = []
+        for key in sorted({row[field] for row in rows}):
+            group = [row for row in rows if row[field] == key]
+            grouped.append({field: key, "weighted_kl": math.fsum(row["weighted_kl"] for row in group),
+                            "share": math.fsum(row["share"] for row in group)})
+        return sorted(grouped, key=lambda row: -row["weighted_kl"])
+
+    return {
+        "file": str(path), "sha256": hash_file(path), "weighted_kl_sum": total,
+        "unweighted_kl_sum": math.fsum(row["unweighted_kl"] for row in rows),
+        "blocks": summarize_by("block"), "types": summarize_by("projection"), "projections": rows,
+    }
+
+
+def render_component_predictions(report: Mapping) -> str:
+    lines = [
+        f"# Imatrix error attribution | {report['protocol']['teacher']['source']}", "",
+        "Each fitted sensitivity curve takes the exported projection's imatrix-weighted residual.",
+        "KL estimates are in nats/token. Shares divide by the sum of the weighted projection estimates.",
+        "These are additive estimates of isolated effects. Joint model KL depends on interactions between layers.", "",
+        f"Imatrix SHA-256 `{report['imatrix']['sha256']}` and sweep SHA-256 `{report['measurement_sha256']}`.", "",
+    ]
+    for result in report["files"]:
+        lines.extend([
+            f"## {Path(result['file']).name}", "", f"GGUF SHA-256 `{result['sha256']}`.", "",
+            f"Weighted sum **{result['weighted_kl_sum']:.6f}**, unweighted sum {result['unweighted_kl_sum']:.6f}.",
+            f"The five largest projections account for {sum(row['share'] for row in result['projections'][:5]):.2%}.",
+            "Block indices are zero-based.", "",
+        ])
+        for group, key, heading in (("blocks", "block", "Blocks"), ("types", "projection", "Projection types")):
+            lines.extend([f"### {heading}", "", "| Component | Estimated KL | Share |", "| --- | ---: | ---: |"])
+            lines.extend(f"| {row[key]} | {row['weighted_kl']:.6f} | {row['share']:.2%} |" for row in result[group])
+            lines.append("")
+        lines.extend([
+            "### Individual projections", "", "An asterisk marks a weighted error outside the measured sweep range.",
+            "", "| Block | Projection | Raw weight error | Noise-equivalent error | Estimated KL | Share |",
+            "| ---: | --- | ---: | ---: | ---: | ---: |",
+        ])
+        for row in result["projections"]:
+            marker = "*" if row["weighted_extrapolated"] else ""
+            lines.append(
+                f"| {row['block']} | {row['projection']} | {row['relative_error']:.3%} | "
+                f"{row['noise_equivalent_error']:.3%} | {row['weighted_kl']:.6f}{marker} | {row['share']:.2%} |"
+            )
+        lines.append("")
+    return "\n".join(lines)
 
 
 def noise_equivalent_error(original: np.ndarray, quantized: np.ndarray, importance: np.ndarray) -> tuple[float, float]:
@@ -132,18 +254,43 @@ def render_markdown(report: Mapping) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("isolated", type=Path, help="a gguf-isolated-kl JSON from measure_gguf_isolated_kl.py")
+    parser.add_argument("isolated", type=Path, help="isolated GGUF report, or sweep results.json with --predict-only")
     parser.add_argument("--imatrix", type=Path, required=True, help="llama.cpp imatrix (GGUF or legacy)")
-    parser.add_argument("--gguf", type=Path, action="append", required=True, help="GGUF file; repeatable")
+    parser.add_argument("--gguf", type=Path, action="append", help="GGUF file; repeatable")
     parser.add_argument("--output", type=Path, help="Markdown report (default <isolated>-imatrix-weighted.md)")
+    parser.add_argument("--predict-only", action="store_true", help="estimate components from a pinned sweep")
+    parser.add_argument("--check-inputs", action="store_true", help="validate prediction inputs without an export")
+    parser.add_argument("--imatrix-sha256")
+    parser.add_argument("--fits-sha256")
     args = parser.parse_args()
     isolated = args.isolated.resolve()
+    if args.check_inputs and not args.predict_only:
+        parser.error("--check-inputs requires --predict-only")
+    if not args.check_inputs and not args.gguf:
+        parser.error("--gguf is required unless checking prediction inputs")
+    if args.predict_only:
+        identity, curves, matrix, ref_path, keys = prediction_inputs(
+            isolated, args.imatrix.resolve(), args.imatrix_sha256, args.fits_sha256,
+        )
+        if args.check_inputs:
+            print(json.dumps(identity, indent=2))
+            return 0
+        output = (args.output or isolated.with_name("imatrix-error-attribution.md")).resolve()
+        with safe_open(ref_path, framework="pt", device="cpu") as reference:
+            files = [predict_components(path.resolve(), curves, matrix.entries, reference, keys) for path in args.gguf]
+        result = {"schema_version": 1, **identity, "files": files}
+        atomic_write_json(output.with_suffix(".json"), result)
+        atomic_write_text(output, render_component_predictions(result))
+        print(f"Report written to {output}", flush=True)
+        return 0
+    if args.fits_sha256 is not None:
+        parser.error("--fits-sha256 requires --predict-only")
     report = json.loads(isolated.read_text(encoding="utf-8"))
     fits = json.loads(isolated.with_name("kl-response-fits.json").read_text(encoding="utf-8"))
     if not fits["measurement_sha256"] == report["measurement_sha256"] == hash_file(isolated.with_name("results.json")):
         raise ValueError("the isolated report, the fits and the sweep do not belong together")
     output = (args.output or isolated.with_name(isolated.stem + "-imatrix-weighted.md")).resolve()
-    matrix = load_imatrix(args.imatrix.resolve())
+    matrix = load_imatrix(args.imatrix.resolve(), args.imatrix_sha256)
     spec = spec_for_protocol(report["protocol"])
     snapshot = Path(snapshot_download(repo_id=spec.source, revision=spec.revision, local_files_only=True))
     verify_local_weights(snapshot, spec)

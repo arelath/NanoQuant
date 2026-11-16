@@ -81,8 +81,11 @@ class CompressionQualityExperiment:
     llamacpp_quality_parallel: int = 4
     reasoning_sequence_length_override: int | None = None
     allow_relocated_completed_run: bool = False
+    include_mmlu: bool = False
 
     def __post_init__(self) -> None:
+        if self.include_mmlu and (self.quality_backend != BackendType.DENSE.value or self.llamacpp_quality):
+            raise ValueError("MMLU requires dense Transformers quality evaluation")
         if self.wikitext_samples <= 0 or self.wikitext_sequence_length < 2:
             raise ValueError("quality dimensions are invalid")
         if self.wikitext_batch_size <= 0 or self.task_batch_size <= 0 or self.task_limit <= 0:
@@ -219,6 +222,7 @@ def execute_compression_quality_experiment(
         task_names=experiment.task_names,
         task_limit=experiment.task_limit,
         task_batch_size=experiment.task_batch_size,
+        include_mmlu=experiment.include_mmlu,
         local_files_only=experiment.local_files_only,
         maximum_wddm_shared_bytes=maximum_shared_bytes,
         packed_artifact=(

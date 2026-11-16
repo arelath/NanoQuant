@@ -23,9 +23,12 @@ from nanoquant.compression_export_workflow import (
 from nanoquant.compression_quality_workflow import CompressionQualityExperiment
 from nanoquant.config.schema import IntentConfig, RunConfig
 from nanoquant.domain.constants import BackendType
+from nanoquant.infrastructure.hf_mmlu import MMLU_QUESTIONS, MMLU_REPO, MMLU_REVISION, mmlu_files
+from nanoquant.infrastructure.io_utils import hash_file
 from nanoquant.quality_evaluation import QualityEvaluationRequest
 from nanoquant.quality_evaluation_workflow import QualityEvaluationExperiment
 from nanoquant.rank_expansion_experiment import RankExpansionExperiment
+from nanoquant.self_measured_d2_workflow import SelfMeasuredD2ProfileOptions, run_self_measured_d2_experiment
 
 _SAFE_NAME = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _NUMBERED_NAME = re.compile(r"^\d{3}-")
@@ -349,6 +352,7 @@ def define_compression_quality_experiment(
     reasoning_sequence_length_override: int | None = None,
     task_limit: int = 200,
     allow_relocated_completed_run: bool = False,
+    include_mmlu: bool = False,
 ) -> ExperimentDefinition[CompressionQualityExperiment]:
     layout = ExperimentLayout(identity)
     config = _materialize_config(template, identity, layout)
@@ -369,6 +373,7 @@ def define_compression_quality_experiment(
         reasoning_sequence_length_override=reasoning_sequence_length_override,
         task_limit=task_limit,
         allow_relocated_completed_run=allow_relocated_completed_run,
+        include_mmlu=include_mmlu,
     )
     return ExperimentDefinition(identity, config, workflow, layout)
 
@@ -516,6 +521,75 @@ def experiment_pre_post_callable_main(
     if result == 0:
         result = subprocess.run(command + ["--refresh-quality"], cwd=root, check=False).returncode
     raise SystemExit(result)
+
+
+def run_imatrix_attribution_experiment(
+    experiment: ExperimentDefinition[CompressionQualityExperiment],
+    *,
+    launcher_path: str,
+    profile_options: SelfMeasuredD2ProfileOptions,
+    sweep: Path,
+    fits_sha256: str,
+    attribution: Path,
+) -> int:
+    """Preflight analysis inputs and score only the canonical completed export."""
+    def compression() -> int:
+        return run_self_measured_d2_experiment(
+            experiment, launcher_path=launcher_path, profile_options=profile_options, reuse_maximum_rank_control=True,
+        )
+
+    if any(flag in sys.argv[1:] for flag in ("-h", "--help")):
+        return compression()
+    root = Path(launcher_path).resolve().parent.parent
+    imatrix = experiment.config.calibration.imatrix
+    gguf = experiment.workflow.export.gguf_output
+    if imatrix is None or imatrix.sha256 is None or gguf is None:
+        raise ValueError("imatrix attribution requires a pinned imatrix and a canonical GGUF export")
+    command = [
+        sys.executable, str(root / "tools/predict_imatrix_weighted_kl.py"), str(sweep),
+        "--predict-only", "--imatrix", imatrix.path, "--imatrix-sha256", imatrix.sha256,
+        "--fits-sha256", fits_sha256, "--gguf", str(root / gguf), "--output", str(attribution),
+    ]
+    plan_only = "--plan-only" in sys.argv[1:]
+    preview = plan_only or "--dry-run" in sys.argv[1:]
+    payload = {}
+    if preview:
+        captured = StringIO()
+        with redirect_stdout(captured):
+            result = compression()
+        if result != 0:
+            print(captured.getvalue(), end="")
+            return result
+        payload = json.loads(captured.getvalue())
+
+    attribution_plan: dict[str, object] = {
+        "markdown": str(attribution), "json": str(attribution.with_suffix(".json")), "command": command,
+    }
+    payload["attribution"] = attribution_plan
+    if experiment.workflow.include_mmlu:
+        payload["mmlu"] = {
+            "dataset": MMLU_REPO, "revision": MMLU_REVISION, "test_examples": MMLU_QUESTIONS, "few_shot": 5,
+        }
+    if not plan_only:
+        checked = subprocess.run(command + ["--check-inputs"], cwd=root, check=True, capture_output=True, text=True)
+        inputs = json.loads(checked.stdout)
+        teacher = inputs["protocol"]["teacher"]
+        model = experiment.config.model
+        if (teacher["source"], teacher["revision"]) != (model.source, model.revision):
+            raise ValueError("sensitivity teacher does not match the recipe's model")
+        attribution_plan["validated_inputs"] = inputs
+        if experiment.workflow.include_mmlu:
+            payload["mmlu"]["split_sha256"] = {
+                k: hash_file(v) for k, v in mmlu_files(local_files_only=experiment.workflow.local_files_only).items()
+            }
+    if preview:
+        print(json.dumps(payload, indent=2))
+        return 0
+
+    result = compression()
+    if result != 0:
+        return result
+    return subprocess.run(command, cwd=root, check=False).returncode
 
 
 __all__ = [
