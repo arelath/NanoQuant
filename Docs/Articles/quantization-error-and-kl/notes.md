@@ -303,8 +303,13 @@ Points to make:
   while the joint KL falls 17.1%.
 - **Use:** prioritising blocks and projections without running the model. Whole-model error
   still needs the interaction.
-- **Caveat: same imatrix.** The weighting uses the imatrix the quantizers optimised against.
-  An imatrix from different text would be the independent test. Not run.
+- **Independent imatrix check.** The table uses the imatrix the quantizers optimised against.
+  Repeated with `Datasets/gemma-3-270m-it-imatrix-eaddario-huge/imatrix.gguf`, which none of
+  the quantizers used (report `gguf-isolated-kl-imatrix-weighted-eaddario.md`): weighted /
+  isolated is 1.13 for 074 after distillation, 1.24 UD-IQ2_XXS, 1.12 Q2_K, 1.21 Q3_K_M, 1.19
+  Q4_K_M, with rank correlations 0.90–0.97. So the result does not depend on using the
+  quantizer's own imatrix. Caveat: that imatrix comes from eaddario's calibration text, the
+  collection our 16×256 test windows are drawn from.
 
 ## Finding 6: weight error is not the whole story
 

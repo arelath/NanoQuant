@@ -269,8 +269,9 @@ The weighting also ranks the matrices better. For our binary-factor format it li
 agreement between predicted and measured cost from 0.84 to 0.96, and it picks the same five
 most damaging blocks as the direct measurement.
 
-One caution: the importance matrix we weighted with is the one the quantizers were calibrated
-on. A matrix built from different text is the fairer test, and we have not run it.
+The importance matrix we weighted with is the one the quantizers were calibrated on, which
+could flatter the result. So we repeated the prediction with a second importance matrix that
+the quantizers never saw. It overshoots by 12–24%, nearly the same.
 
 **Interaction is small for llama.cpp files.** Their whole-file cost is 82–92% of the sum of
 the isolated costs. Independent random noise gave 93–99% in the same test, so part of that is
@@ -330,8 +331,8 @@ the evaluation is part of the experiment.
   than the sum of its parts: 8–18% less in the llama.cpp files, 39–49% less in our format.
 - The calibration test covers three llama.cpp formats and one importance matrix. Other
   quantizers and other calibration sets may gain more or less.
-- The importance-weighted prediction used the same importance matrix the quantizers were
-  calibrated on.
+- The second importance matrix, used to check the weighted prediction, was built from the
+  same text collection our test windows come from.
 - The map gives the cost of error in each matrix. Choosing bit widths also needs to know how
   fast error falls as each matrix gets more bits, which is a separate measurement.
 
