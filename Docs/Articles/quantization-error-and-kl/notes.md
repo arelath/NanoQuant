@@ -394,6 +394,11 @@ quantized models but do not work on them.
 - Kept: the square law, the 87× spread and where sensitivity sits, additivity (98–99%), real
   files at a third to a half of the noise prediction, the calibration ablation (55–66% more
   drift without it), the Q2_K naming point, and practical advice for choosing a file.
+- One paragraph on the importance-weighted forecast (Finding 10), stated against the whole
+  file because this version never introduces one-table-at-a-time measurement of real files:
+  for UD-IQ2_XXS, Q2_K, Q3_K_M and Q4_K_M the unweighted prediction is 2.1–3.0× the joint KL
+  ("two to three times too high") and the weighted one is 1.26–1.52× ("a quarter to a half
+  too high").
 - Dropped: the binary-factor format, distillation, the per-matrix and interaction split,
   block-scaled noise, per-format numbers, NLL against KL, and the BF16 trap.
 - Figures: the 0.001 equal-KL heatmap, `joint-additivity.png`, and

@@ -120,6 +120,13 @@ higher.*
 Calibration does not make the rounding error smaller. It moves the same amount of error to
 places where the model does not notice it.
 
+The same record of what the model leans on also improves the forecast. Our first forecast
+counted every bit of rounding error equally, and for the more heavily compressed files it came
+out two to three times too high. When we instead counted each error by how much the model
+leans on that number, the forecast came out a quarter to a half too high. That is not exact,
+but it is close enough to show which tables need the most care, and it takes no test run of
+the model.
+
 ## What this means if you download models
 
 - **Prefer calibrated files.** Many uploaders say so in the description, often with the word
