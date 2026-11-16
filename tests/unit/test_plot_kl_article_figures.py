@@ -78,3 +78,15 @@ def test_decomposition_rows_put_noise_references_first_and_average_like_for_like
     assert rows[0] == {"label": "Gaussian noise", "shape": 1.0, "interaction": pytest.approx(0.98)}
     assert rows[1]["shape"] == pytest.approx(0.85) and rows[1]["interaction"] == pytest.approx(0.98)
     assert tool.plot_decomposition(rows, tmp_path).stat().st_size > 0
+
+
+def test_ablation_rows_pair_each_uncalibrated_file_with_its_calibrated_twin() -> None:
+    tool = _tool()
+    factors = {"groups": {"all": {"all": {"shape_factor": 0.5, "interaction_factor": 0.9}}}}
+    isolated = {"files": [{"file": f"m-it-{name}.gguf", **factors}
+                          for name in ("Q4_K_M-imatrix", "Q4_K_M-noimatrix", "Q2_K-imatrix", "Q2_K-noimatrix")]}
+    joint = {"results": [{"kl_target": 0.001, "mean_measured_over_additive": 0.98}]}
+    rows = tool.decomposition_rows(isolated, joint, [], report_order=True)
+    assert [row["label"] for row in rows] == [
+        "Gaussian noise", "Q4_K_M, no calibration", "Q4_K_M, calibrated", "Q2_K, no calibration", "Q2_K, calibrated",
+    ]

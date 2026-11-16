@@ -188,9 +188,9 @@ Points to make:
 - **Every format below 8 bits is cheaper.** Per-matrix factor by stored type, pooled over the
   five llama.cpp files with duplicate tensors counted once: Q6_K 0.45, Q5_K 0.43, Q5_1 0.41,
   Q5_0 0.62, Q4_K 0.40, IQ4_NL 0.47, IQ3_S 0.41, Q3_K 0.57, IQ2_S 0.32, IQ2_XXS 0.40.
-- **Calibration is the likely cause, not a measured one.** All Unsloth files carry imatrix
-  metadata and every format except Q8_0 uses it. Bit width is confounded with calibration
-  here. The controlled test is the same formats quantized without an imatrix. Not run.
+- **Calibration is the cause: see Finding 9.** All Unsloth files carry imatrix metadata and
+  every format except Q8_0 uses it, so bit width is confounded with calibration in these
+  files. The controlled test below removes the confound.
 - **Interaction, llama.cpp files:** whole file 0.82–0.92. Block groups (seven matrices of one
   block): median 0.95–1.00, range 0.83–1.26. Type groups (one type across 18 blocks): median
   0.96–0.99. So it accumulates across the model, not inside a block or a type. Present at
@@ -209,6 +209,51 @@ Points to make:
 - **A better forecast.** For llama.cpp files the sum of isolated real KLs overestimates the
   joint by 9–22%, against 2–3× for the Gaussian map.
 - Figure: `shape-and-interaction.png`.
+
+## Finding 9: calibration is the per-matrix saving (imatrix ablation)
+
+Source: `gguf-kl-imatrix-ablation.md/json` and `gguf-isolated-kl-imatrix-ablation.md/json`
+beside the sweep. Files and provenance: `Datasets/gemma-3-270m-it-gguf-local-quantize/`
+(`source.json`). Run 2026-11-15.
+
+Method: convert the pinned Google snapshot to an F32 GGUF, then run the local
+`llama-quantize` (llama.cpp commit `2927569f3`) to Q4_K_M, Q3_K_M and Q2_K, each with and
+without `--imatrix imatrix_unsloth.gguf_file` (Unsloth's published imatrix for this model,
+built from `unsloth_calibration_gemma-3-270m-it.txt`, not our test text). Same binary, same
+tensor types within a pair.
+
+| File | Median weight error | Joint KL | Per-matrix | Interaction | Product |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Q4_K_M, calibrated | 4.51% | 0.1808 | 0.520 | 0.878 | 0.457 |
+| Q4_K_M, no calibration | 4.54% | 0.2978 | 0.864 | 0.898 | 0.776 |
+| Q3_K_M, calibrated | 8.66% | 0.4596 | 0.511 | 0.849 | 0.434 |
+| Q3_K_M, no calibration | 8.80% | 0.7651 | 0.800 | 0.914 | 0.731 |
+| Q2_K, calibrated | 9.12% | 1.0710 | 0.568 | 0.888 | 0.505 |
+| Q2_K, no calibration | 9.20% | 1.6558 | 0.828 | 0.946 | 0.784 |
+
+Points to make:
+
+- **Same error, different damage.** Per-matrix weight error with / without the imatrix has
+  median 0.99–1.00 (range 0.91–1.15). KL without it is 1.65×, 1.66× and 1.55× the calibrated
+  KL; calibration cuts KL by 39%, 40% and 35% at the same file size.
+- **Without calibration, quantization error behaves like block-scaled random noise.**
+  Per-matrix factor 0.80–0.86 against 0.88–0.90 for the noise and 0.81 for Q8_0. By type
+  (no imatrix / block-scaled noise): q 0.46–0.54 / 0.53, k 0.51 / 0.57, v 1.03–1.11 / 1.02,
+  o 0.77–0.81 / 0.84, gate 0.83–0.85 / 0.83, up 0.85–0.89 / 0.92, down 0.94–1.01 / 0.95.
+- **Where calibration helps** (Q4_K_M, calibrated / uncalibrated per-matrix ratio by type):
+  down 0.42 / 1.01, q 0.26 / 0.46, k 0.27 / 0.51, o 0.53 / 0.81, gate 0.58 / 0.83, up
+  0.67 / 0.89, v 0.97 / 1.03. Largest on MLP down, q and k; almost none on v.
+- **Full chain for calibrated Q4_K_M:** 0.864 (block scaling) × 0.602 (calibration) × 0.878
+  (interaction) = 0.457.
+- **Calibration adds a little interaction too:** 0.85–0.89 calibrated against 0.90–0.95
+  uncalibrated. Independent block-scaled noise gave 0.93–0.99.
+- **Replica check.** The local calibrated Q4_K_M has the same tensor types as Unsloth's Q4_K_M
+  and matches its per-matrix weight error to 1e-5 (joint KL 0.1808 against 0.1812). The local
+  Q3_K_M and Q2_K are not replicas of Unsloth's: this llama.cpp falls back to Q4_0 for the
+  640-wide matrices where Unsloth's files have IQ4_NL.
+- **Not tested:** IQ formats (llama-quantize refuses very low-bit types without an imatrix),
+  other imatrix files, other quantizers.
+- Figure: `calibration-ablation.png`.
 
 ## Finding 6: weight error is not the whole story
 
@@ -249,8 +294,8 @@ Points to make:
   shape; the rate side (how error falls with bits per matrix) is a separate measurement.
 - That real quantization error is exactly additive. Measured: 8–18% sub-additive for the
   llama.cpp files, 39–49% for the binary-factor files.
-- That calibration (the imatrix) is why low-bit formats beat Gaussian noise per matrix. It is
-  consistent with the data and untested.
+- That calibration always gives 35–40%. That is three K-quant formats and one imatrix on one
+  small model.
 - That attention q and k "don't matter". They are 16% of total sensitivity.
 - That results transfer to larger models unchanged.
 
@@ -263,7 +308,8 @@ Points to make:
 5. Headline: it adds up (figure: additivity).
 6. Real quantizers: where they put error (figure: error maps) and how they compare to the
    prediction (figure: predicted vs measured).
-6b. Why real error is cheaper: one matrix at a time (figure: shape and interaction).
+6b. Why real error is cheaper: one matrix at a time (figure: shape and interaction), then
+    the calibration ablation (figure: calibration ablation).
 7. Two things weight error does not tell you (distillation; NLL vs KL).
 8. Sidebar: the BF16 trap.
 9. Limits and what comes next.

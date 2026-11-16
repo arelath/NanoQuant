@@ -225,11 +225,33 @@ calibration data, comes in at 81% and tracks that noise matrix by matrix. Every 
 bits, from Q6_K down to IQ2_XXS, comes in between 32% and 62%.
 
 So the lower-bit formats do something that roughly halves the cost of their error, beyond
-scaling it to the weights. These files were built with calibration data, which lets the
-quantizer round each weight knowing which inputs the matrix usually sees, so the error lands
-in directions that rarely get used. That is the obvious candidate, and we have not confirmed
-it. The check is to quantize the same model to the same formats without calibration data and
-measure again.
+scaling it to the weights. The obvious candidate is calibration. These files were built with
+an importance matrix: statistics on which inputs each matrix usually sees, collected by running
+the model over sample text. The quantizer uses it to round each weight so that the error lands
+in directions that rarely get used.
+
+**Calibration is the per-matrix saving.** To test that, we quantized the model ourselves to
+three formats, each one twice with the same quantizer: once with the importance matrix and
+once without. The calibration text is not our test text.
+
+![The same split for three formats quantized with and without calibration data](figures/calibration-ablation.png)
+
+*Each pair is one format quantized twice. The weight error is the same within a pair. Only the
+calibrated file gets the large per-matrix saving.*
+
+The weight error barely moves. For the median matrix it is within 1% either way. The damage
+moves a lot: without calibration, KL is 55–66% higher at the same file size. The per-matrix
+factor is 0.80–0.86 without calibration, which is where block-scaled random noise sits, and
+0.51–0.57 with it.
+
+So calibration does not make the error smaller. It puts the same amount of error somewhere
+less harmful. It helps most on the MLP down matrices, where it cuts the cost of a given error
+by more than half, and on the query and key matrices. It does almost nothing for the value
+matrices.
+
+That accounts for the whole gap in a calibrated 4-bit file. Start from the Gaussian
+prediction. Block scaling leaves 86% of it. Calibration leaves 60% of that. Interaction leaves
+88% of that. The product is 46%, which is what the file measures.
 
 **Interaction is small for llama.cpp files.** Their whole-file cost is 82–92% of the sum of
 the isolated costs. Independent random noise gave 93–99% in the same test, so part of that is
@@ -286,8 +308,8 @@ the evaluation is part of the experiment.
 - The test text is 4,080 token positions from one calibration set.
 - Exact additivity is shown for random noise only. Real quantization error adds up to less
   than the sum of its parts: 8–18% less in the llama.cpp files, 39–49% less in our format.
-- We have not tested quantization without calibration data, so calibration is a likely
-  explanation for the per-matrix saving, not a measured one.
+- The calibration test covers three llama.cpp formats and one importance matrix. Other
+  quantizers and other calibration sets may gain more or less.
 - The map gives the cost of error in each matrix. Choosing bit widths also needs to know how
   fast error falls as each matrix gets more bits, which is a separate measurement.
 
@@ -300,7 +322,9 @@ the evaluation is part of the experiment.
   for a heavily damaged model.
 - Real quantizers do two to three times better than random error of the same size, so the
   additive sum is a ceiling rather than a forecast.
-- About nine tenths of that advantage is inside each matrix. The rest comes from errors
-  costing less together than apart.
+- About nine tenths of that advantage is inside each matrix, and most of it is calibration:
+  same format, same weight error, 35–40% less KL.
+- Weight error alone does not rank quantizers. Two files with the same error in every matrix
+  differed by more than half in KL.
 - Distillation left every matrix's own cost unchanged and improved only how they combine.
 - Measure fidelity with KL, in full precision.

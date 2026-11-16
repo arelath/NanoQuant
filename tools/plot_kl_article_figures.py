@@ -4,7 +4,9 @@ Reads a projection sweep's ``results.json`` and the ``joint-kl-targets*.json`` a
 reports beside it. Writes the sweep's own sensitivity and equal-KL charts plus the article
 figures: joint additivity, where each quantized file puts its weight error, measured KL against
 the additive prediction and, when ``gguf-isolated-kl.json`` exists, how each file's saving splits
-into per-matrix error shape and interaction between matrices.
+into per-matrix error shape and interaction between matrices. A
+``gguf-isolated-kl-imatrix-ablation.json`` report adds the same split for files quantized with and
+without calibration data.
 
 Usage:
     .venv\\Scripts\\python.exe tools\\plot_kl_article_figures.py ^
@@ -41,6 +43,9 @@ def short_name(file: str) -> str:
 
 def display_name(file: str) -> str:
     name = short_name(file)
+    for suffix, label in (("-noimatrix", ", no calibration"), ("-imatrix", ", calibrated")):
+        if name.endswith(suffix):
+            return name.removesuffix(suffix) + label
     return {"nanoquant": "Binary factors", "nanoquant-pre-kd": "Binary factors, before distillation"}.get(name, name)
 
 
@@ -188,8 +193,14 @@ def plot_predicted_vs_measured(report: Mapping, joint: Mapping, output: Path) ->
     return path
 
 
-def decomposition_rows(isolated: Mapping, joint: Mapping, block_noise: list[Mapping]) -> list[dict]:
-    """Return one row per noise model or file: its shape and interaction factors, most bits first."""
+def decomposition_rows(
+    isolated: Mapping, joint: Mapping, block_noise: list[Mapping], *, report_order: bool = False,
+) -> list[dict]:
+    """Return one row per noise model or file with its shape and interaction factors.
+
+    Files are listed most bits first, or in the report's own order with each uncalibrated file
+    ahead of its calibrated twin when ``report_order`` is set.
+    """
     ratios = [row["mean_measured_over_additive"] for row in joint["results"] if row["kl_target"] > 0]
     rows = [{"label": "Gaussian noise", "shape": 1.0, "interaction": float(np.mean(ratios))}]
     if block_noise:
@@ -199,7 +210,13 @@ def decomposition_rows(isolated: Mapping, joint: Mapping, block_noise: list[Mapp
             # Only each report's first joint run shares its noise with the isolated measurements.
             "interaction": float(np.mean([r["joint"][0]["joint_over_isolated"] for r in block_noise])),
         })
-    for item in reversed(isolated["files"]):
+    files = list(reversed(isolated["files"]))
+    if report_order:
+        names = [short_name(item["file"]).rsplit("-", 1)[0] for item in isolated["files"]]
+        files = sorted(isolated["files"], key=lambda item: (
+            names.index(short_name(item["file"]).rsplit("-", 1)[0]), not item["file"].endswith("-noimatrix.gguf"),
+        ))
+    for item in files:
         everything = item["groups"]["all"]["all"]
         label = display_name(item["file"])
         label = "Binary factors, after distillation" if label == "Binary factors" else label
@@ -208,7 +225,10 @@ def decomposition_rows(isolated: Mapping, joint: Mapping, block_noise: list[Mapp
     return rows
 
 
-def plot_decomposition(rows: list[dict], output: Path) -> Path:
+def plot_decomposition(
+    rows: list[dict], output: Path, *, name: str = "shape-and-interaction.png",
+    title: str = "Where the predicted damage goes: most of the saving is inside each matrix",
+) -> Path:
     import matplotlib.pyplot as plt
 
     fig, ax = plt.subplots(figsize=(11, 0.56 * len(rows) + 1.9), layout="constrained")
@@ -235,14 +255,13 @@ def plot_decomposition(rows: list[dict], output: Path) -> Path:
     ax.set_xlim(0, 1.3)
     ax.set_xticks([0, 0.25, 0.5, 0.75, 1], ["0", "25%", "50%", "75%", "100%"])
     ax.set_xlabel("Share of the KL predicted from Gaussian-noise sensitivity", color=MUTED)
-    ax.set_title("Where the predicted damage goes: most of the saving is inside each matrix", loc="left",
-                 fontsize=12, color=INK, fontweight="bold")
+    ax.set_title(title, loc="left", fontsize=12, color=INK, fontweight="bold")
     ax.grid(axis="x", color=GRID, linewidth=0.8)
     ax.set_axisbelow(True)
     fig.legend(loc="outside lower left", ncols=1, frameon=False, fontsize=9, labelcolor=INK)
     _style(ax)
     ax.spines["left"].set_visible(False)
-    path = output / "shape-and-interaction.png"
+    path = output / name
     fig.savefig(path, dpi=160, facecolor="white")
     plt.close(fig)
     return path
@@ -275,6 +294,14 @@ def main() -> int:
                        for path in sorted(measurements.parent.glob("block-scaled-noise-kl*.json"))]
         rows = decomposition_rows(json.loads(isolated_path.read_text(encoding="utf-8")), joint, block_noise)
         paths.append(plot_decomposition(rows, args.output))
+        ablation_path = measurements.with_name("gguf-isolated-kl-imatrix-ablation.json")
+        if ablation_path.exists():
+            ablation = json.loads(ablation_path.read_text(encoding="utf-8"))
+            paths.append(plot_decomposition(
+                decomposition_rows(ablation, joint, block_noise, report_order=True), args.output,
+                name="calibration-ablation.png",
+                title="Same format, same weight error: calibration is the per-matrix saving",
+            ))
     for path in paths:
         print(path)
     return 0
