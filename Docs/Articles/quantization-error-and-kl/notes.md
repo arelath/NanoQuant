@@ -384,6 +384,22 @@ Points to make:
 - A Map of Where Quantization Hurts a Small LLM
 - 126 Matrices, One Budget: Measuring Where Quantization Error Goes
 
+## Concise technical version
+
+`article-technical-concise.md` covers the same findings as `article.md` for the same reader,
+in about 2,700 words instead of 3,500, and is built to be scanned.
+
+- Opens with a six-bullet summary, then defines weight error and KL once.
+- Eight numbered sections, each headed by its finding. Numbers that the long article spreads
+  through prose are in short lists (Medium has no tables): the per-file bits, error and KL;
+  the per-matrix × interaction factors for all seven files; the three calibration pairs.
+- States the importance-weighting recipe as three numbered steps.
+- Moves file names, perplexity against KL and the BF16 floor into one "Three cautions"
+  section, and the protocol into a closing "How we measured" list.
+- Adds details the long article leaves out: the fit method, the Q8_0 extrapolation caveat,
+  the weight-only caveat, and why our Q3_K_M and Q2_K differ from the published ones.
+- Drops the six-level sensitivity heatmaps and the quantizer weight-error maps. Six figures.
+
 ## General-audience version
 
 `article-general-audience.md` is a shorter second article for people who download and run
