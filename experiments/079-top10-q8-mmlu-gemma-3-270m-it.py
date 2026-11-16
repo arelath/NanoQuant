@@ -1,4 +1,4 @@
-"""Experiment 079: five-shot MMLU-Pro with ten Q8_0 projection replacements."""
+"""Experiment 079: matched five-shot MMLU with ten Q8_0 projection replacements."""
 
 from __future__ import annotations
 
@@ -6,7 +6,6 @@ import argparse
 import hashlib
 import json
 import shutil
-import string
 import sys
 import time
 from collections import Counter, defaultdict
@@ -34,7 +33,7 @@ COPY = RESULT / ORIGINAL.name
 HYBRID = RESULT / "gemma-3-270m-it-nanoquant-pre-kd-top10-q8_0-materialized.gguf"
 SOURCE = "unsloth/gemma-3-270m-it"
 REVISION = "23cf460f6bb16954176b3ddcc8d4f250501458a9"
-LETTERS = string.ascii_uppercase
+LETTERS = "ABCD"
 
 
 def source_snapshot():
@@ -146,29 +145,25 @@ def prepare(snapshot):
     return info
 
 
-def prepare_questions(dataset, pro, tokenizer):
-    meta = json.loads((OUT / "datasets.json").read_bytes())[dataset]
+def prepare_questions(tokenizer):
+    meta = json.loads((OUT / "datasets.json").read_bytes())["mmlu"]
     rows = pq.read_table(meta["files"]["test"]).to_pylist()
-    examples = pq.read_table(meta["files"]["validation" if pro else "dev"]).to_pylist()
-    column = "category" if pro else "subject"
+    examples = pq.read_table(meta["files"]["dev"]).to_pylist()
     by_subject = defaultdict(list)
     for example in examples:
-        by_subject[example[column]].append(example)
+        by_subject[example["subject"]].append(example)
 
     def format_question(row):
-        options = row["options" if pro else "choices"]
-        gold = row["answer_index" if pro else "answer"]
-        if pro:
-            assert row["answer"] == LETTERS[gold]
-        kept = [(idx, value) for idx, value in enumerate(options) if not pro or value != "N/A"]
-        gold = [idx for idx, _ in kept].index(gold)
+        options = row["choices"]
+        gold = row["answer"]
+        assert len(options) == len(LETTERS) and 0 <= gold < len(options)
         lines = [row["question"].strip()]
-        lines.extend(f"{LETTERS[index]}. {value.strip()}" for index, (_, value) in enumerate(kept))
-        return "\n".join(lines) + "\nAnswer:", len(kept), gold
+        lines.extend(f"{letter}. {value.strip()}" for letter, value in zip(LETTERS, options, strict=True))
+        return "\n".join(lines) + "\nAnswer:", len(options), gold
 
     prefixes = {}
     for subject, group in by_subject.items():
-        assert len(group) >= 5
+        assert len(group) == 5
         examples = [format_question(row) for row in group[:5]]
         header = f"The following are multiple choice questions (with answers) about {subject.replace('_', ' ')}.\n\n"
         prefixes[subject] = header + "".join(f"{prompt} {LETTERS[gold]}\n\n" for prompt, _, gold in examples)
@@ -176,12 +171,12 @@ def prepare_questions(dataset, pro, tokenizer):
     prompts = []
     for index, row in enumerate(rows):
         prompt, count, gold = format_question(row)
-        prompts.append(prefixes[row[column]] + prompt)
-        records.append((row["question_id"] if pro else index, row[column], count, gold))
-    assert len(records) == len({r[0] for r in records}) == (12032 if pro else 14042)
+        prompts.append(prefixes[row["subject"]] + prompt)
+        records.append((index, row["subject"], count, gold))
+    assert len(records) == 14042 and len(prefixes) == 57
     tokens = tokenizer(prompts, add_special_tokens=True, verbose=False).input_ids
     label_ids = []
-    for label in LETTERS[: max(r[2] for r in records)]:
+    for label in LETTERS:
         prefix = tokenizer.encode("Answer:", add_special_tokens=False)
         joined = tokenizer.encode(f"Answer: {label}", add_special_tokens=False)
         assert joined[:-1] == prefix
@@ -293,42 +288,45 @@ def render(results, models):
         "The other 116 projections in the hybrid GGUF store the same reconstructed FP32 weights as the staged "
         "control. The embedding and norms retain their original stored bytes.",
         "The standalone hybrid GGUF materializes the remaining projections, which increases file size. "
-        "Both quantized arms are evaluated with the same dense BF16 Transformers backend.",
+        "All three models are evaluated with the same dense BF16 Transformers backend.",
         "",
-        "MMLU and MMLU-Pro use their full test sets and five examples from the same subject.",
-        "The model selects the available answer letter with the largest next-token logit.",
-        "This MMLU-Pro protocol measures direct answer selection. "
-        "The official TIGER leaderboard uses generated chain-of-thought answers.",
-        "Standard MMLU and MMLU-Pro scores come from different question sets.",
+        "Standard MMLU uses the full 14,042-question test set across 57 subjects, with five dev examples per subject.",
+        "The model selects the answer letter A through D with the largest next-token logit.",
         "",
         "| Model | Benchmark | Correct / total | Accuracy |",
         "| --- | --- | ---: | ---: |",
     ]
-    for label, task, r in results:
-        lines.append(f"| {label} | {task} | {r['correct']:,} / {r['count']:,} | {r['correct'] / r['count']:.2%} |")
+    for label, r in results:
+        lines.append(f"| {label} | MMLU | {r['correct']:,} / {r['count']:,} | {r['correct'] / r['count']:.2%} |")
     if len(results) == 3:
-        base, hybrid = (r for _, task, r in results if task == "MMLU-Pro")
-        assert base["identity"]["protocol"] == hybrid["identity"]["protocol"]
+        base, bf16, hybrid = (r for _, r in results)
+        assert base["identity"]["protocol"] == bf16["identity"]["protocol"] == hybrid["identity"]["protocol"]
         gained = lost = 0
-        for a, b in zip(base["examples"], hybrid["examples"], strict=True):
-            assert (a["id"], a["subject"], a["gold"]) == (b["id"], b["subject"], b["gold"])
+        for a, b, ref in zip(base["examples"], hybrid["examples"], bf16["examples"], strict=True):
+            assert (
+                (a["id"], a["subject"], a["gold"])
+                == (b["id"], b["subject"], b["gold"])
+                == (ref["id"], ref["subject"], ref["gold"])
+            )
             gained += int(a["predicted"] != a["gold"] and b["predicted"] == b["gold"])
             lost += int(a["predicted"] == a["gold"] and b["predicted"] != b["gold"])
         assert gained - lost == hybrid["correct"] - base["correct"]
         delta = 100 * (gained - lost) / base["count"]
         lines += [
             "",
-            f"The matched MMLU-Pro change was **{delta:+.2f} percentage points**. "
+            f"The matched MMLU change was **{delta:+.2f} percentage points**. "
             f"The hybrid fixed {gained:,} answers and missed {lost:,} the control got right.",
             "",
-            "| MMLU-Pro subject | Questions | Control | Q8_0 hybrid |",
-            "| --- | ---: | ---: | ---: |",
+            "| MMLU subject | Questions | BF16 | Control | Q8_0 hybrid |",
+            "| --- | ---: | ---: | ---: | ---: |",
         ]
         for subject, a in base["subjects"].items():
             b = hybrid["subjects"][subject]
-            assert a["count"] == b["count"]
+            ref = bf16["subjects"][subject]
+            assert a["count"] == b["count"] == ref["count"]
             lines.append(
-                f"| {subject} | {a['count']:,} | {a['correct'] / a['count']:.2%} | {b['correct'] / b['count']:.2%} |"
+                f"| {subject} | {a['count']:,} | {ref['correct'] / ref['count']:.2%} | "
+                f"{a['correct'] / a['count']:.2%} | {b['correct'] / b['count']:.2%} |"
             )
     lines += [
         "",
@@ -347,7 +345,7 @@ def render(results, models):
         f"- Control GGUF: {models['baseline_bytes']:,} bytes, SHA-256 `{models['identity']['baseline_sha256']}`.",
         f"- Hybrid GGUF: {models['hybrid_bytes']:,} bytes, SHA-256 `{models['hybrid_sha256']}`.",
         f"- BF16 snapshot: `{SOURCE}@{REVISION}`.",
-        "- [MMLU dataset](https://huggingface.co/datasets/cais/mmlu) and [MMLU-Pro benchmark](https://github.com/TIGER-AI-Lab/MMLU-Pro).",
+        "- [MMLU dataset](https://huggingface.co/datasets/cais/mmlu).",
         "- Inputs, model hashes, per-subject counts and per-question predictions are under `outputs/079`.",
         "",
     ]
@@ -368,18 +366,17 @@ def main():
         render([], models)
         return
     tokenizer = AutoTokenizer.from_pretrained(snapshot, local_files_only=True)
-    pro = prepare_questions("mmlu-pro", True, tokenizer)
-    mmlu = prepare_questions("mmlu", False, tokenizer)
+    mmlu = prepare_questions(tokenizer)
     results = []
     torch.backends.cuda.matmul.allow_tf32 = False
     with acquire_device_lease("cuda:0"):
-        for title, label, task, file, data in (
-            ("074 pre-KD copy", "pre-kd-mmlu-pro", "MMLU-Pro", COPY, pro),
-            ("BF16", "bf16-mmlu", "MMLU", None, mmlu),
-            ("079 top-ten Q8_0", "q8-top10-mmlu-pro", "MMLU-Pro", HYBRID, pro),
+        for title, label, file in (
+            ("074 pre-KD copy", "pre-kd-mmlu", COPY),
+            ("BF16", "bf16-standard-mmlu", None),
+            ("079 top-ten Q8_0", "q8-top10-mmlu", HYBRID),
         ):
-            result = evaluate(label, snapshot, file, data, tokenizer.pad_token_id, args.smoke)
-            results.append((title, task, result))
+            result = evaluate(label, snapshot, file, mmlu, tokenizer.pad_token_id, args.smoke)
+            results.append((title, result))
             if args.smoke is None:
                 render(results, models)
 
