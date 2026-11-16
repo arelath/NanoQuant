@@ -6,7 +6,7 @@ figures: joint additivity, where each quantized file puts its weight error, meas
 the additive prediction and, when ``gguf-isolated-kl.json`` exists, how each file's saving splits
 into per-matrix error shape and interaction between matrices. A
 ``gguf-isolated-kl-imatrix-ablation.json`` report adds the same split for files quantized with and
-without calibration data.
+without calibration data, and ``gguf-kl-imatrix-ablation.json`` adds a plain bar chart of their KL.
 
 Usage:
     .venv\\Scripts\\python.exe tools\\plot_kl_article_figures.py ^
@@ -267,6 +267,43 @@ def plot_decomposition(
     return path
 
 
+def calibration_pairs(report: Mapping) -> list[tuple[str, float, float]]:
+    """Return (format, calibrated KL, uncalibrated KL) for each format quantized both ways."""
+    kl = {short_name(item["file"]): item["variants"]["projections"]["kl_above_control"] for item in report["files"]}
+    formats = dict.fromkeys(name.rsplit("-", 1)[0] for name in kl if name.endswith(("-imatrix", "-noimatrix")))
+    return [(name, kl[f"{name}-imatrix"], kl[f"{name}-noimatrix"]) for name in formats]
+
+
+def plot_calibration_bars(report: Mapping, output: Path) -> Path:
+    import matplotlib.pyplot as plt
+
+    pairs = calibration_pairs(report)
+    fig, ax = plt.subplots(figsize=(9, 5.2), layout="constrained")
+    positions = np.arange(len(pairs))
+    series = (("Rounded with calibration", BLUE, -0.2, [pair[1] for pair in pairs]),
+              ("Rounded without calibration", ORANGE, 0.2, [pair[2] for pair in pairs]))
+    for label, color, offset, values in series:
+        bars = ax.bar(positions + offset, values, width=0.36, color=color, label=label, edgecolor="white",
+                      linewidth=2)
+        ax.bar_label(bars, labels=[f"{value:.2f}" for value in values], padding=3, fontsize=9, color=INK)
+    for position, (_, calibrated, plain) in zip(positions, pairs, strict=True):
+        ax.annotate(f"{plain / calibrated - 1:+.0%}", (position + 0.2, plain), xytext=(0, 18),
+                    textcoords="offset points", ha="center", fontsize=10, color=INK, fontweight="bold")
+    ax.set_xticks(positions, [f"{name} recipe" for name, _, _ in pairs])
+    ax.set_ylim(0, max(pair[2] for pair in pairs) * 1.2)
+    ax.set_ylabel("Drift from the original model (KL, nats/token)", color=MUTED)
+    ax.set_title("Same file size, same rounding error: calibration cuts the drift", loc="left", fontsize=12,
+                 color=INK, fontweight="bold")
+    ax.grid(axis="y", color=GRID, linewidth=0.8)
+    ax.set_axisbelow(True)
+    ax.legend(loc="upper left", frameon=False, fontsize=9, labelcolor=INK)
+    _style(ax)
+    path = output / "calibration-drift-bars.png"
+    fig.savefig(path, dpi=160, facecolor="white")
+    plt.close(fig)
+    return path
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("measurements", type=Path, help="a completed projection sweep's measurements/<id>/results.json")
@@ -302,6 +339,9 @@ def main() -> int:
                 name="calibration-ablation.png",
                 title="Same format, same weight error: calibration is the per-matrix saving",
             ))
+    bars_path = measurements.with_name("gguf-kl-imatrix-ablation.json")
+    if bars_path.exists():
+        paths.append(plot_calibration_bars(json.loads(bars_path.read_text(encoding="utf-8")), args.output))
     for path in paths:
         print(path)
     return 0

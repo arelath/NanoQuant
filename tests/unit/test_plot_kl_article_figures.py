@@ -90,3 +90,16 @@ def test_ablation_rows_pair_each_uncalibrated_file_with_its_calibrated_twin() ->
     assert [row["label"] for row in rows] == [
         "Gaussian noise", "Q4_K_M, no calibration", "Q4_K_M, calibrated", "Q2_K, no calibration", "Q2_K, calibrated",
     ]
+
+
+def test_calibration_pairs_match_each_format_and_the_bar_chart_renders(tmp_path) -> None:
+    pytest.importorskip("matplotlib")
+    tool = _tool()
+    tool.require_plotting()
+    report = {"files": [
+        {"file": f"m-it-{name}.gguf", "variants": {"projections": {"kl_above_control": kl}}}
+        for name, kl in (("Q4_K_M-imatrix", 0.2), ("Q4_K_M-noimatrix", 0.3), ("Q2_K-imatrix", 1.0),
+                         ("Q2_K-noimatrix", 1.6))
+    ]}
+    assert tool.calibration_pairs(report) == [("Q4_K_M", 0.2, 0.3), ("Q2_K", 1.0, 1.6)]
+    assert tool.plot_calibration_bars(report, tmp_path).stat().st_size > 0

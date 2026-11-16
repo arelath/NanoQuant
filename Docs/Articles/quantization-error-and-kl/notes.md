@@ -326,3 +326,20 @@ Points to make:
 - Quantization Error Adds Up. Almost Exactly. (current)
 - A Map of Where Quantization Hurts a Small LLM
 - 126 Matrices, One Budget: Measuring Where Quantization Error Goes
+
+## General-audience version
+
+`article-general-audience.md` is a shorter second article for people who download and run
+quantized models but do not work on them.
+
+- Vocabulary: "table of numbers" for a weight matrix, "drift" for KL (named once), "rounding
+  error" for weight error, "calibration" for the imatrix. No units in the text.
+- Kept: the square law, the 87× spread and where sensitivity sits, additivity (98–99%), real
+  files at a third to a half of the noise prediction, the calibration ablation (55–66% more
+  drift without it), the Q2_K naming point, and practical advice for choosing a file.
+- Dropped: the binary-factor format, distillation, the per-matrix and interaction split,
+  block-scaled noise, per-format numbers, NLL against KL, and the BF16 trap.
+- Figures: the 0.001 equal-KL heatmap, `joint-additivity.png`, and
+  `calibration-drift-bars.png` (made for this version).
+- The last paragraph refers to the technical article. Add the link once that one is published.
+
