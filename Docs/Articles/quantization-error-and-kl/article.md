@@ -184,19 +184,79 @@ So the map does two things well for real quantizers and one thing badly:
 - It does not rank across families. It predicts our binary-factor file to be worse than
   UD-IQ2_XXS, and after distillation it measures better, at fewer bits per weight.
 
-We do not yet know why real error is cheaper. One explanation is that these quantizers are
-calibrated: they round each weight with knowledge of which inputs the matrix typically sees,
-so the error lands in directions that rarely get used, while random noise is spread evenly
-over all of them. Another is that structured errors in different matrices partly cancel in a way that
-independent noise cannot. Our data does not separate the two. Swapping in one quantized matrix
-at a time would, and that is the next experiment.
+## Why real error is cheaper
+
+A real quantizer could beat the prediction in two ways. Each matrix's error could do less
+damage than random noise of the same size. Or the errors in different matrices could cost less
+together than they do apart. File-level numbers cannot tell these apart, so we ran the
+experiment that can.
+
+For each of the seven files we loaded one quantized matrix at a time into the otherwise
+original model and measured its KL alone: 126 measurements per file. That splits the gap into
+two factors.
+
+- **The per-matrix factor** is the sum of the 126 isolated costs divided by the Gaussian
+  prediction. It says how harmful a matrix's real error is next to random noise of the same
+  size.
+- **The interaction factor** is the cost of the whole file divided by the sum of the isolated
+  costs. Below 1, the errors cost less together than apart.
+
+![How each file's gap to the prediction splits into a per-matrix part and an interaction part](figures/shape-and-interaction.png)
+
+*Each bar is the Gaussian prediction for one file. Blue is the KL the file actually costs.
+Orange is what was saved inside individual matrices, green what was saved when they were
+combined.*
+
+**Most of the saving is inside each matrix.** In the four low-bit llama.cpp files, a quantized
+matrix on its own costs 41–55% of what Gaussian noise of the same size would. Combining the
+matrices then takes off another 12–18%. About nine tenths of the gap to the prediction is
+there before any two errors meet.
+
+**It depends on the matrix type.** Quantized query and key matrices cost about a quarter of
+the Gaussian figure. The MLP matrices cost about half. Value matrices cost nearly the same as
+Gaussian noise. One island on the map all but disappears: block 5's query matrix, a sensitive
+spot under Gaussian noise, costs 5–18% of its prediction in every file.
+
+**Scaling error to the local weights explains little.** A block quantizer gives each short run
+of weights its own scale, so its error is small where the weights are small. We tested that
+idea on its own, with random noise scaled the same way and no quantizer involved. It costs 89%
+of the Gaussian figure. Plain 8-bit rounding (Q8_0), the one format here that ignores
+calibration data, comes in at 81% and tracks that noise matrix by matrix. Every format below 8
+bits, from Q6_K down to IQ2_XXS, comes in between 32% and 62%.
+
+So the lower-bit formats do something that roughly halves the cost of their error, beyond
+scaling it to the weights. These files were built with calibration data, which lets the
+quantizer round each weight knowing which inputs the matrix usually sees, so the error lands
+in directions that rarely get used. That is the obvious candidate, and we have not confirmed
+it. The check is to quantize the same model to the same formats without calibration data and
+measure again.
+
+**Interaction is small for llama.cpp files.** Their whole-file cost is 82–92% of the sum of
+the isolated costs. Independent random noise gave 93–99% in the same test, so part of that is
+ordinary. It is not a saturation effect either, because it shows up in the 8-bit file, where
+the total damage is 0.005 nats/token. And it does not happen inside a block: the seven
+matrices of one block typically combine to 95–100% of their sum. The saving builds up across
+the depth of the model.
+
+**Interaction is large for our binary-factor format.** Its whole-file cost is 61% of the
+isolated sum before distillation and 51% after. That format is fitted block by block against
+the original model's activations, with each block seeing the output of the compressed blocks
+before it. Later matrices are trained to compensate for earlier ones, and this measurement
+shows how much they do.
+
+This also gives a better forecast than the map. For the llama.cpp files, adding up the 126
+isolated costs of the actual quantized matrices overestimates the file by 9–22%. The Gaussian
+map overestimates it by 2–3×.
 
 ## Two things weight error does not tell you
 
-**Direction matters as much as distance.** Our binary-factor model was measured before and
-after a distillation pass, which trains the compressed model to imitate the original's
-outputs. The weight error was the same before and after: 23.5% for the median matrix. The KL
-dropped by 17%. The weights moved no closer to the originals, and the model's behaviour did.
+**Distillation fixes the combination, not the parts.** Our binary-factor model was measured
+before and after a distillation pass, which trains the compressed model to imitate the
+original's outputs. The weight error was the same before and after: 23.5% for the median
+matrix. The KL dropped by 17%. The one-matrix-at-a-time test shows where that came from. The
+isolated costs did not move: their sum is 2.96 nats/token before distillation and 2.97 after.
+The whole-file cost fell from 1.82 to 1.50. Distillation did not make any single matrix a
+better copy. It made the matrices compensate for each other.
 
 **Perplexity can hide damage that KL sees.** The Q3_K_M file raises perplexity by only 1.8%,
 which looks better than Q4_K_M's 4.3%. Its KL is twice as high. Perplexity averages over
@@ -224,8 +284,10 @@ the evaluation is part of the experiment.
   (median exponent 1.94), but we have only run the joint test and the quantizer comparison on
   270M.
 - The test text is 4,080 token positions from one calibration set.
-- Additivity is shown for random noise only. Whether real quantization error adds the same way
-  is open.
+- Exact additivity is shown for random noise only. Real quantization error adds up to less
+  than the sum of its parts: 8–18% less in the llama.cpp files, 39–49% less in our format.
+- We have not tested quantization without calibration data, so calibration is a likely
+  explanation for the per-matrix saving, not a measured one.
 - The map gives the cost of error in each matrix. Choosing bit widths also needs to know how
   fast error falls as each matrix gets more bits, which is a separate measurement.
 
@@ -238,4 +300,7 @@ the evaluation is part of the experiment.
   for a heavily damaged model.
 - Real quantizers do two to three times better than random error of the same size, so the
   additive sum is a ceiling rather than a forecast.
+- About nine tenths of that advantage is inside each matrix. The rest comes from errors
+  costing less together than apart.
+- Distillation left every matrix's own cost unchanged and improved only how they combine.
 - Measure fidelity with KL, in full precision.

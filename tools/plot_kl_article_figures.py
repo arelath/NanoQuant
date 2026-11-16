@@ -1,9 +1,10 @@
 """Render the figures for the quantization-error-and-KL article from a completed sweep.
 
 Reads a projection sweep's ``results.json`` and the ``joint-kl-targets*.json`` and ``gguf-kl.json``
-reports beside it. Writes the sweep's own sensitivity and equal-KL charts plus three article
-figures: joint additivity, where each quantized file puts its weight error, and measured KL
-against the additive prediction.
+reports beside it. Writes the sweep's own sensitivity and equal-KL charts plus the article
+figures: joint additivity, where each quantized file puts its weight error, measured KL against
+the additive prediction and, when ``gguf-isolated-kl.json`` exists, how each file's saving splits
+into per-matrix error shape and interaction between matrices.
 
 Usage:
     .venv\\Scripts\\python.exe tools\\plot_kl_article_figures.py ^
@@ -187,12 +188,73 @@ def plot_predicted_vs_measured(report: Mapping, joint: Mapping, output: Path) ->
     return path
 
 
+def decomposition_rows(isolated: Mapping, joint: Mapping, block_noise: list[Mapping]) -> list[dict]:
+    """Return one row per noise model or file: its shape and interaction factors, most bits first."""
+    ratios = [row["mean_measured_over_additive"] for row in joint["results"] if row["kl_target"] > 0]
+    rows = [{"label": "Gaussian noise", "shape": 1.0, "interaction": float(np.mean(ratios))}]
+    if block_noise:
+        rows.append({
+            "label": "Block-scaled random noise",
+            "shape": float(np.mean([r["sum_isolated_kl"] / r["gaussian_prediction"] for r in block_noise])),
+            # Only each report's first joint run shares its noise with the isolated measurements.
+            "interaction": float(np.mean([r["joint"][0]["joint_over_isolated"] for r in block_noise])),
+        })
+    for item in reversed(isolated["files"]):
+        everything = item["groups"]["all"]["all"]
+        label = display_name(item["file"])
+        label = "Binary factors, after distillation" if label == "Binary factors" else label
+        rows.append({"label": label, "shape": everything["shape_factor"],
+                     "interaction": everything["interaction_factor"]})
+    return rows
+
+
+def plot_decomposition(rows: list[dict], output: Path) -> Path:
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots(figsize=(11, 0.56 * len(rows) + 1.9), layout="constrained")
+    positions = np.arange(len(rows))[::-1]
+    parts = {
+        "KL the weights actually cost": (BLUE, [row["shape"] * row["interaction"] for row in rows]),
+        "Saved: the errors cost less together than apart": (
+            AQUA, [row["shape"] * (1 - row["interaction"]) for row in rows]),
+        "Saved: each matrix's error costs less than Gaussian noise": (ORANGE, [1 - row["shape"] for row in rows]),
+    }
+    left = np.zeros(len(rows))
+    for label, (color, values) in parts.items():
+        widths = np.clip(values, 0, None)
+        ax.barh(positions, widths, left=left, height=0.62, color=color, label=label, edgecolor="white", linewidth=2)
+        left += widths
+    for position, row in zip(positions, rows, strict=True):
+        ax.annotate(
+            f"{row['shape']:.2f} × {row['interaction']:.2f} = {row['shape'] * row['interaction']:.2f}",
+            (1, position), xytext=(8, 0), textcoords="offset points", va="center", fontsize=9, color=INK,
+        )
+    ax.annotate("per-matrix × interaction", (1, positions[0] + 0.62), xytext=(8, 0), textcoords="offset points",
+                va="center", fontsize=9, color=MUTED)
+    ax.set_yticks(positions, [row["label"] for row in rows], fontsize=9)
+    ax.set_xlim(0, 1.3)
+    ax.set_xticks([0, 0.25, 0.5, 0.75, 1], ["0", "25%", "50%", "75%", "100%"])
+    ax.set_xlabel("Share of the KL predicted from Gaussian-noise sensitivity", color=MUTED)
+    ax.set_title("Where the predicted damage goes: most of the saving is inside each matrix", loc="left",
+                 fontsize=12, color=INK, fontweight="bold")
+    ax.grid(axis="x", color=GRID, linewidth=0.8)
+    ax.set_axisbelow(True)
+    fig.legend(loc="outside lower left", ncols=1, frameon=False, fontsize=9, labelcolor=INK)
+    _style(ax)
+    ax.spines["left"].set_visible(False)
+    path = output / "shape-and-interaction.png"
+    fig.savefig(path, dpi=160, facecolor="white")
+    plt.close(fig)
+    return path
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("measurements", type=Path, help="a completed projection sweep's measurements/<id>/results.json")
     parser.add_argument("--output", type=Path, required=True, help="directory for the PNG figures")
     parser.add_argument("--joint-report", type=Path, help="joint JSON (default joint-kl-targets-100-runs.json)")
     parser.add_argument("--gguf-report", type=Path, help="GGUF KL JSON (default gguf-kl.json)")
+    parser.add_argument("--isolated-report", type=Path, help="default gguf-isolated-kl.json, skipped if absent")
     args = parser.parse_args()
     measurements = args.measurements.resolve()
     require_plotting()
@@ -207,6 +269,12 @@ def main() -> int:
         plot_additivity(joint, args.output), plot_error_maps(gguf, args.output),
         plot_predicted_vs_measured(gguf, joint, args.output),
     ]
+    isolated_path = args.isolated_report or measurements.with_name("gguf-isolated-kl.json")
+    if isolated_path.exists():
+        block_noise = [json.loads(path.read_text(encoding="utf-8"))
+                       for path in sorted(measurements.parent.glob("block-scaled-noise-kl*.json"))]
+        rows = decomposition_rows(json.loads(isolated_path.read_text(encoding="utf-8")), joint, block_noise)
+        paths.append(plot_decomposition(rows, args.output))
     for path in paths:
         print(path)
     return 0

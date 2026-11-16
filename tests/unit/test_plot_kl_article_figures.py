@@ -55,3 +55,26 @@ def test_article_figures_render_from_joint_and_gguf_reports(tmp_path) -> None:
         tool.plot_predicted_vs_measured({"files": files}, joint, tmp_path),
     ]
     assert all(path.stat().st_size > 0 for path in paths)
+
+
+def test_decomposition_rows_put_noise_references_first_and_average_like_for_like_runs(tmp_path) -> None:
+    pytest.importorskip("matplotlib")
+    tool = _tool()
+    tool.require_plotting()
+    joint = {"results": [{"kl_target": 0}, {"kl_target": 0.001, "mean_measured_over_additive": 0.98}]}
+    block = [
+        {"sum_isolated_kl": 0.9, "gaussian_prediction": 1.0,
+         "joint": [{"joint_over_isolated": 0.96}, {"joint_over_isolated": 0.5}]},
+        {"sum_isolated_kl": 0.8, "gaussian_prediction": 1.0, "joint": [{"joint_over_isolated": 1.0}]},
+    ]
+    isolated = {"files": [
+        {"file": "m-it-nanoquant.gguf", "groups": {"all": {"all": {"shape_factor": 0.35, "interaction_factor": 0.5}}}},
+        {"file": "m-it-Q4_K_M.gguf", "groups": {"all": {"all": {"shape_factor": 0.52, "interaction_factor": 0.88}}}},
+    ]}
+    rows = tool.decomposition_rows(isolated, joint, block)
+    assert [row["label"] for row in rows] == [
+        "Gaussian noise", "Block-scaled random noise", "Q4_K_M", "Binary factors, after distillation",
+    ]
+    assert rows[0] == {"label": "Gaussian noise", "shape": 1.0, "interaction": pytest.approx(0.98)}
+    assert rows[1]["shape"] == pytest.approx(0.85) and rows[1]["interaction"] == pytest.approx(0.98)
+    assert tool.plot_decomposition(rows, tmp_path).stat().st_size > 0

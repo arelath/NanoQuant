@@ -119,11 +119,9 @@ Points to make:
   files in the right order.
 - **It does not rank across quantizer families.** The binary-factor files are predicted worse
   than UD-IQ2_XXS (8.5 vs 5.2) but the distilled one measures better (1.50 vs 1.74).
-- **We do not know why from this data.** Two candidate explanations that this experiment
-  cannot separate: (a) each matrix's quantization error is less harmful than Gaussian noise of
-  the same norm, because imatrix-weighted rounding pushes error into directions the inputs
-  rarely excite; (b) structured errors in different matrices partly cancel. Swapping one
-  matrix at a time from a GGUF would separate them. Not done yet. Do not claim either.
+- **Why: see Finding 8.** The one-matrix-at-a-time test (run 2026-11-15) separates the two
+  candidate explanations: each matrix's error being less harmful than Gaussian noise, and
+  errors in different matrices costing less together than apart.
 - **Q8_0 caveat:** all 126 of its errors (0.53%–0.78%) are below the 1% floor of the sweep, so
   its prediction is extrapolated.
 - **Names mislead on this model.** K-quants need rows that divide into 256-wide blocks. Five of
@@ -144,6 +142,73 @@ Points to make:
   (0.0083). UD-IQ2_XXS stores it at Q5_1 and pays 0.103.
 - **File size hides this.** At Q8_0 the embedding is about 178 MB, most of a 220–290 MB file.
 - Figures: `quantizer-weight-error-maps.png`, `predicted-vs-measured-kl.png`.
+
+## Finding 8: why real error is cheaper (one matrix at a time)
+
+Source: `gguf-isolated-kl.md/json` and `block-scaled-noise-kl*.md/json` beside the sweep, from
+`tools/measure_gguf_isolated_kl.py` and `tools/measure_block_scaled_noise_kl.py`.
+
+Method: for each file, load one dequantized projection at a time into the clean model (126
+scores), then every block's seven projections together (18), every projection type across all
+blocks (7), and everything (1).
+
+- Per-matrix ("shape") factor = sum of isolated KLs / sum of Gaussian predictions.
+- Interaction factor = joint KL / sum of isolated KLs.
+- Their product is measured / predicted.
+
+| File | Gaussian prediction | Sum of isolated KLs | Joint KL | Per-matrix | Interaction | Product |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Binary factors, before distillation | 8.535 | 2.956 | 1.815 | 0.346 | 0.614 | 0.213 |
+| Binary factors, after distillation | 8.572 | 2.970 | 1.504 | 0.346 | 0.506 | 0.175 |
+| UD-IQ2_XXS | 5.217 | 2.115 | 1.737 | 0.405 | 0.821 | 0.333 |
+| Q2_K | 1.975 | 1.082 | 0.943 | 0.548 | 0.871 | 0.477 |
+| Q3_K_M | 0.912 | 0.417 | 0.358 | 0.458 | 0.858 | 0.393 |
+| Q4_K_M | 0.396 | 0.206 | 0.181 | 0.520 | 0.879 | 0.458 |
+| Q8_0 | 0.0063 | 0.0051 | 0.0047 | 0.809 | 0.915 | 0.740 |
+
+Points to make:
+
+- **Most of the saving is per-matrix.** For the four low-bit llama.cpp files the per-matrix
+  factor is 0.41–0.55 and interaction 0.82–0.88. Of the total gap to the prediction, 86–89% is
+  per-matrix. For the binary-factor files it is 79–83%.
+- **By matrix type** (median isolated KL / Gaussian prediction, llama.cpp low-bit files): q
+  0.23–0.26, k 0.26–0.27, v 0.80–0.97, o 0.53–0.62, gate 0.52–0.58, up 0.50–0.67, down
+  0.35–0.57. Range over single matrices 0.05–1.24.
+- **Block 5's q matrix is a Gaussian-only island.** Isolated real KL is 0.05–0.18 of its
+  prediction in all seven files, and 0.16 under block-scaled random noise. Block 13 q: 0.07–0.18
+  in the low-bit files, 0.50 at Q8_0.
+- **Block-scaled random noise control.** Uniform noise scaled by the largest magnitude in each
+  run of 32 weights along a row, 5% relative error, three seeds: per-matrix factor 0.88–0.90
+  (q 0.53, k 0.57, v 1.02, o 0.84, gate 0.83, up 0.92, down 0.95). So block scaling alone
+  explains about a tenth.
+- **Q8_0 behaves like block-scaled noise.** Factor 0.81; per-matrix median real / block-noise
+  0.95; rank correlation 0.81 across the 126 matrices. `quantize_q8_0` in llama.cpp ignores
+  the imatrix (`(void)quant_weights`). Caveat: all Q8_0 errors are below 1%, so its Gaussian
+  predictions are extrapolated.
+- **Every format below 8 bits is cheaper.** Per-matrix factor by stored type, pooled over the
+  five llama.cpp files with duplicate tensors counted once: Q6_K 0.45, Q5_K 0.43, Q5_1 0.41,
+  Q5_0 0.62, Q4_K 0.40, IQ4_NL 0.47, IQ3_S 0.41, Q3_K 0.57, IQ2_S 0.32, IQ2_XXS 0.40.
+- **Calibration is the likely cause, not a measured one.** All Unsloth files carry imatrix
+  metadata and every format except Q8_0 uses it. Bit width is confounded with calibration
+  here. The controlled test is the same formats quantized without an imatrix. Not run.
+- **Interaction, llama.cpp files:** whole file 0.82–0.92. Block groups (seven matrices of one
+  block): median 0.95–1.00, range 0.83–1.26. Type groups (one type across 18 blocks): median
+  0.96–0.99. So it accumulates across the model, not inside a block or a type. Present at
+  Q8_0 (0.915 at 0.005 nats/token), so not saturation.
+- **Interaction, random noise reference:** block-scaled noise with the same draws used alone
+  and together: 0.985, 0.930, 0.945 (three seeds). So independent noise already gives a few
+  percent, and the llama.cpp excess over that is about 5–10 points. Each real file is a single
+  deterministic realisation, and the five llama.cpp files share many identical tensors, so
+  they are not five independent samples.
+- **Interaction, binary factors:** 0.61 before distillation, 0.51 after. Block groups median
+  0.89 and 0.87. Likely reason: block-by-block fitting against the teacher with compressed
+  predecessors, so later matrices compensate for earlier ones. That reason is our reading of
+  the method, not something this test isolates.
+- **Distillation changed only the interaction.** Sum of isolated KLs 2.956 → 2.970; per-matrix
+  isolated KL after / before has median 1.006 (range 0.79–1.20). Joint KL 1.815 → 1.504.
+- **A better forecast.** For llama.cpp files the sum of isolated real KLs overestimates the
+  joint by 9–22%, against 2–3× for the Gaussian map.
+- Figure: `shape-and-interaction.png`.
 
 ## Finding 6: weight error is not the whole story
 
@@ -172,8 +237,8 @@ Points to make:
   only been run on 270M.
 - 4,080 token positions from one calibration set. Enough for stable means, small for anything
   per-token.
-- Gaussian noise is a probe, not a quantizer. The additivity result is proven for Gaussian
-  noise only.
+- Gaussian noise is a probe, not a quantizer. Exact additivity (0.98–0.99) is proven for
+  Gaussian noise only; real files come in at 0.82–0.92 (llama.cpp) and 0.51–0.61 (ours).
 - Weight-only measurement. llama.cpp's runtime adds its own arithmetic differences.
 - The binary-factor format is our own experimental work, not a released quantizer. Easy to
   cut from the article if it distracts.
@@ -182,7 +247,10 @@ Points to make:
 
 - That the map tells you the best bit allocation. It tells you the cost side for one error
   shape; the rate side (how error falls with bits per matrix) is a separate measurement.
-- That real quantization error is additive. Untested.
+- That real quantization error is exactly additive. Measured: 8–18% sub-additive for the
+  llama.cpp files, 39–49% for the binary-factor files.
+- That calibration (the imatrix) is why low-bit formats beat Gaussian noise per matrix. It is
+  consistent with the data and untested.
 - That attention q and k "don't matter". They are 16% of total sensitivity.
 - That results transfer to larger models unchanged.
 
@@ -195,6 +263,7 @@ Points to make:
 5. Headline: it adds up (figure: additivity).
 6. Real quantizers: where they put error (figure: error maps) and how they compare to the
    prediction (figure: predicted vs measured).
+6b. Why real error is cheaper: one matrix at a time (figure: shape and interaction).
 7. Two things weight error does not tell you (distillation; NLL vs KL).
 8. Sidebar: the BF16 trap.
 9. Limits and what comes next.

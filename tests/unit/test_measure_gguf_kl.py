@@ -165,3 +165,14 @@ def test_markdown_lists_each_file_and_the_prediction_ratio() -> None:
         assert f" {header} |" in markdown
     assert "| m-Q4.gguf | Q4_K ×3, Q6_K ×1 | 5.00% | 2.00%–9.00% | 0.4000 | 0.1000 | 0.250 | 0 |" in markdown
     assert "| 0.001 | 3.00% | 0.1200 | 0.1100 – 0.1300 |" in markdown
+
+
+def test_swapped_replaces_weights_only_inside_the_block() -> None:
+    tool = _tool()
+    weight = nn.Parameter(torch.zeros(2, 3))
+    with tool.swapped({"w": (weight, torch.ones(2, 3))}):
+        assert weight.detach().sum() == 6
+    assert weight.detach().sum() == 0
+    with pytest.raises(RuntimeError, match="boom"), tool.swapped({"w": (weight, torch.ones(2, 3))}):
+        raise RuntimeError("boom")
+    assert weight.detach().sum() == 0

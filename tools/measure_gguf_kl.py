@@ -28,8 +28,11 @@ import re
 import statistics
 import time
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import gguf
 import numpy as np
@@ -161,6 +164,80 @@ def additive_prediction(curves: Mapping, errors: Mapping[str, float]) -> tuple[f
     return total, outside
 
 
+@contextmanager
+def swapped(pairs: Mapping[str, tuple[torch.Tensor, torch.Tensor]]) -> Iterator[None]:
+    """Copy each replacement into its model weight for the block, then restore the originals."""
+    originals = {name: weight.detach().cpu().clone() for name, (weight, _) in pairs.items()}
+    try:
+        with torch.no_grad():
+            for weight, values in pairs.values():
+                weight.copy_(values.to(device=weight.device, dtype=weight.dtype))
+        yield
+    finally:
+        with torch.no_grad():
+            for name, (weight, _) in pairs.items():
+                weight.copy_(originals[name].to(weight.device))
+
+
+@dataclass(frozen=True)
+class SweepSession:
+    """A completed sweep's model, teacher and fitted curves, loaded and ready to score."""
+
+    measurements: Path
+    protocol: Mapping[str, Any]
+    curves: Mapping[str, Any]
+    measured_error_range: tuple[float, float]
+    model: nn.Module
+    adapter: Any
+    dataset: Any
+    clean: Mapping[str, Any]
+
+    @property
+    def targets(self) -> list[str]:
+        return list(self.protocol["targets"])
+
+    def score(self) -> dict:
+        return score_model(
+            self.model, self.dataset, device=self.protocol["device"],
+            token_chunk_size=self.protocol["token_chunk_size"],
+        )
+
+
+@contextmanager
+def sweep_session(measurements: Path, *, local_files_only: bool) -> Iterator[SweepSession]:
+    """Load a completed projection sweep's pinned model and teacher under the device lease."""
+    measurements = measurements.resolve()
+    sweep = json.loads(measurements.read_text(encoding="utf-8"))
+    protocol = sweep["protocol"]
+    if len(sweep["trials"]) != sweep["expected_trials"]:
+        raise ValueError("the sensitivity sweep is incomplete")
+    spec = spec_for_protocol(protocol)
+    curves = fit_dataset(measurements)["curves"]
+    low = min(curve["measured_error_range"][0] for curve in curves.values())
+    high = max(curve["measured_error_range"][1] for curve in curves.values())
+    snapshot = Path(snapshot_download(
+        repo_id=spec.source, revision=spec.revision, local_files_only=local_files_only,
+        allow_patterns=["*.json", "*.safetensors", "*.model", "*.txt"],
+    ))
+    verify_local_weights(snapshot, spec)
+    config = json.loads((snapshot / "config.json").read_text(encoding="utf-8"))
+    adapter = adapter_for_config(config)
+    if spec.dtype == torch.float32:
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
+    device = protocol["device"]
+    with acquire_device_lease(device):
+        dataset = load_kl_teacher_dataset(measurements.parent.parent.parent)
+        if dataset.reference.artifact_id != protocol["teacher_artifact"]:
+            raise ValueError("the teacher dataset does not match the sweep's teacher artifact")
+        model = load_causal_language_model(
+            snapshot, torch_dtype=spec.dtype, attention_implementation=adapter.attention_implementation,
+            local_files_only=True,
+        ).to(device).eval()
+        clean = score_model(model, dataset, device=device, token_chunk_size=protocol["token_chunk_size"])
+        yield SweepSession(measurements, protocol, curves, (low, high), model, adapter, dataset, clean)
+
+
 def measure_file(
     model: nn.Module, adapter, dataset, path: Path, sweep_targets: list[str], curves: Mapping, clean: Mapping,
     *, device: str, token_chunk_size: int, log=print,
@@ -180,16 +257,8 @@ def measure_file(
     variants = {}
     for variant in VARIANTS:
         pairs = swaps[variant]
-        originals = {name: weight.detach().cpu().clone() for name, (weight, _) in pairs.items()}
-        try:
-            with torch.no_grad():
-                for weight, values in pairs.values():
-                    weight.copy_(values.to(device=weight.device, dtype=weight.dtype))
+        with swapped(pairs):
             score = score_model(model, dataset, device=device, token_chunk_size=token_chunk_size)
-        finally:
-            with torch.no_grad():
-                for name, (weight, _) in pairs.items():
-                    weight.copy_(originals[name].to(weight.device))
         nll_change = score["nll_nats_per_token"] - clean["nll_nats_per_token"]
         variants[variant] = {
             "kl_nats_per_token": score["kl_nats_per_token"],
@@ -361,40 +430,14 @@ def main() -> int:
     parser.add_argument("--local-files-only", action="store_true")
     args = parser.parse_args()
     measurements = args.measurements.resolve()
-    sweep = json.loads(measurements.read_text(encoding="utf-8"))
-    protocol = sweep["protocol"]
-    if len(sweep["trials"]) != sweep["expected_trials"]:
-        raise ValueError("the sensitivity sweep is incomplete")
-    spec = spec_for_protocol(protocol)
-    fit = fit_dataset(measurements)
-    curves = fit["curves"]
-    low = min(curve["measured_error_range"][0] for curve in curves.values())
-    high = max(curve["measured_error_range"][1] for curve in curves.values())
     output = (args.output or measurements.with_name("gguf-kl.md")).resolve()
-    snapshot = Path(snapshot_download(
-        repo_id=spec.source, revision=spec.revision, local_files_only=args.local_files_only,
-        allow_patterns=["*.json", "*.safetensors", "*.model", "*.txt"],
-    ))
-    verify_local_weights(snapshot, spec)
-    config = json.loads((snapshot / "config.json").read_text(encoding="utf-8"))
-    adapter = adapter_for_config(config)
-    if spec.dtype == torch.float32:
-        torch.backends.cuda.matmul.allow_tf32 = False
-        torch.backends.cudnn.allow_tf32 = False
-    device = protocol["device"]
-    with acquire_device_lease(device):
-        dataset = load_kl_teacher_dataset(measurements.parent.parent.parent)
-        if dataset.reference.artifact_id != protocol["teacher_artifact"]:
-            raise ValueError("the teacher dataset does not match the sweep's teacher artifact")
-        model = load_causal_language_model(
-            snapshot, torch_dtype=spec.dtype, attention_implementation=adapter.attention_implementation,
-            local_files_only=True,
-        ).to(device).eval()
-        clean = score_model(model, dataset, device=device, token_chunk_size=protocol["token_chunk_size"])
+    with sweep_session(measurements, local_files_only=args.local_files_only) as session:
+        protocol, clean = session.protocol, session.clean
+        low, high = session.measured_error_range
         files = [
             measure_file(
-                model, adapter, dataset, path.resolve(), protocol["targets"], curves, clean,
-                device=device, token_chunk_size=protocol["token_chunk_size"],
+                session.model, session.adapter, session.dataset, path.resolve(), session.targets, session.curves,
+                clean, device=protocol["device"], token_chunk_size=protocol["token_chunk_size"],
             )
             for path in args.gguf
         ]
