@@ -174,7 +174,8 @@ def test_each_admm_stage_fits_the_remaining_residual_and_is_deterministic(tmp_pa
     assert not torch.allclose(first, prediction)
 
 
-def test_resident_staged_rank_tuning_resume_and_export_accounting(tmp_path: Path):
+@pytest.mark.parametrize("full_rank_stages", [None, 3], ids=["budget-allocated", "three-full-rank"])
+def test_resident_staged_rank_tuning_resume_and_export_accounting(tmp_path: Path, full_rank_stages: int | None):
     from transformers.models.gemma3.configuration_gemma3 import Gemma3TextConfig
     from transformers.models.gemma3.modeling_gemma3 import Gemma3ForCausalLM
 
@@ -189,6 +190,7 @@ def test_resident_staged_rank_tuning_resume_and_export_accounting(tmp_path: Path
         run_resident_quantization,
     )
     from nanoquant.runtime.artifact import RuntimeModelMetadata
+    from nanoquant.runtime.llamacpp import export_llamacpp_checkpoint
     from nanoquant.runtime.packed_artifact import convert_logical_to_packed
 
     snapshot = tmp_path / "snapshot"
@@ -212,7 +214,8 @@ def test_resident_staged_rank_tuning_resume_and_export_accounting(tmp_path: Path
         device="cpu",
         target_bpw=6.0,
         rank_multiple=1,
-        overcomplete_rank_ceiling_fraction=None,
+        overcomplete_rank_ceiling_fraction=None if full_rank_stages is None else float(full_rank_stages),
+        maximum_rank_layer_patterns=() if full_rank_stages is None else ("*",),
         residual_stages=True,
         admm=ADMMConfig(outer_iterations=3, inner_iterations=1),
         allocation_strategy=AllocationStrategy.UNIFORM,
@@ -245,6 +248,9 @@ def test_resident_staged_rank_tuning_resume_and_export_accounting(tmp_path: Path
     assert block.shared_input_groups[0].frozen_state.residual_stages
     for item in (*block.layers, *block.shared_input_groups):
         state = item.frozen_state
+        if full_rank_stages is not None:
+            physical_rank = min(state.left_binary.spec.shape[0], state.right_binary.spec.shape[1])
+            assert (state.rank, *(stage.rank for stage in state.residual_stages)) == (physical_rank,) * full_rank_stages
         assert item.actual_bit_cost == factor_bit_cost(
             state.left_binary.spec.shape[0],
             state.right_binary.spec.shape[1],
@@ -262,6 +268,16 @@ def test_resident_staged_rank_tuning_resume_and_export_accounting(tmp_path: Path
     )
     assert validate_frozen_run_logical(request.output, tmp_path / "logical", 1).exact
     convert_logical_to_packed(tmp_path / "logical", tmp_path / "packed")
+    if full_rank_stages is not None:
+        from safetensors import safe_open
+
+        checkpoint_root = tmp_path / "checkpoint"
+        checkpoint = export_llamacpp_checkpoint(tmp_path / "packed", checkpoint_root)
+        assert checkpoint.schema_version == 2
+        with safe_open(checkpoint_root / checkpoint.shards[0].path, framework="pt", device="cpu") as shard:
+            count_keys = [key for key in shard.keys() if key.endswith(".residual_stage_count")]
+            assert len(count_keys) == checkpoint.layer_count == 5
+            assert all(int(shard.get_tensor(key).item()) == full_rank_stages - 1 for key in count_keys)
     tokens = torch.tensor([[1, 2, 3, 4]])
     for backend in ("dense", "factorized"):
         packed_model = load_packed_model(tmp_path / "packed", request.output, snapshot,
