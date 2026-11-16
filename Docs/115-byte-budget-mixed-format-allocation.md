@@ -12,8 +12,8 @@ third-stage menu for the 1B model used in this pilot.
 At the 547,391,648-byte budget, 080 measures 1.3695 projection KL; the two-stage-minimum mix
 measures 1.6090 and the full menu 1.7104. Native WikiText perplexities are 130.48, 140.15 and
 135.91 respectively. The greedy solver's gap is negligible at the tested budgets. The
-post-hoc quality gate therefore fails. A small matched refit canary is the next gate before
-general resident mixed-plan support; plan-time refitting is still untested.
+post-hoc quality gate therefore fails. The matched fixed-sign scale-refit gate below also
+fails; full binary-factor refitting during plan-time compression remains untested.
 
 The [IMatrix-shaped-noise follow-up](Experiments/080-imatrix-shaped-noise.md) completed
 520 projection-only probes with embeddings fixed. NanoQuant's actual residuals are more
@@ -21,6 +21,18 @@ concentrated in low-importance columns than IQ4_NL/IQ3_S on all 10 shared projec
 Inverse-square-root IMatrix noise improves on isotropic noise, but the existing weighted
 curve is more accurate for NanoQuant (median fold error 1.115 versus 1.243). The tested
 shaped sweep does not resolve the mixed-allocation failure or replace the refit gate.
+
+The [conditional replacement and refit follow-up](Experiments/080-mixed-refit.md)
+has now completed both 26-block continuations. Only blocks 0–4 improve 080 when
+their selected replacements are installed individually; the other 21 worsen it.
+After matched fixed-sign scale refits, original/mixed KL is 1.3785/1.7047, compared
+with 1.3695/1.6090 beforehand. Dense WikiText perplexity changes from 130.31/140.06
+to 132.38/180.00. Every trainable mixed block improves local validation activation
+MSE, yet model quality regresses. Embeddings, signs, standard tensors and file
+sizes remain fixed. This schedule does not recover the expected mixed benefit.
+Native WikiText confirms it: 130.48/140.15 before, 132.31/180.10 after.
+Conditional allocation and a bounded test of a different adaptation objective or
+trainable surface should precede general resident mixed-plan support.
 
 ## Summary
 

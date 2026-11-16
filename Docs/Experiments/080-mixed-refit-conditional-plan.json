@@ -1,0 +1,292 @@
+{
+  "sources": {
+    "080": {
+      "path": "Results/080/gemma-3-1b-it-nanoquant.gguf"
+    },
+    "mixed": {
+      "path": "outputs/byte-budget-validation-1b/gemma-3-1b-it-mixed-conservative.gguf"
+    }
+  },
+  "tasks": [
+    {
+      "name": "joint-080",
+      "base": "080"
+    },
+    {
+      "name": "joint-mixed",
+      "base": "mixed"
+    },
+    {
+      "name": "conditional-block-00",
+      "base": "080",
+      "replacements": {
+        "mixed": [
+          "0:self_attn.o_proj",
+          "0:self_attn.q_proj",
+          "0:self_attn.k_proj",
+          "0:self_attn.v_proj",
+          "0:mlp.down_proj",
+          "0:mlp.gate_proj",
+          "0:mlp.up_proj"
+        ]
+      }
+    },
+    {
+      "name": "conditional-block-01",
+      "base": "080",
+      "replacements": {
+        "mixed": [
+          "1:self_attn.o_proj",
+          "1:self_attn.q_proj",
+          "1:self_attn.k_proj",
+          "1:self_attn.v_proj",
+          "1:mlp.down_proj"
+        ]
+      }
+    },
+    {
+      "name": "conditional-block-02",
+      "base": "080",
+      "replacements": {
+        "mixed": [
+          "2:self_attn.o_proj",
+          "2:self_attn.q_proj",
+          "2:self_attn.k_proj",
+          "2:self_attn.v_proj",
+          "2:mlp.down_proj"
+        ]
+      }
+    },
+    {
+      "name": "conditional-block-03",
+      "base": "080",
+      "replacements": {
+        "mixed": [
+          "3:self_attn.o_proj",
+          "3:mlp.down_proj"
+        ]
+      }
+    },
+    {
+      "name": "conditional-block-04",
+      "base": "080",
+      "replacements": {
+        "mixed": [
+          "4:self_attn.o_proj",
+          "4:mlp.down_proj"
+        ]
+      }
+    },
+    {
+      "name": "conditional-block-05",
+      "base": "080",
+      "replacements": {
+        "mixed": [
+          "5:self_attn.o_proj",
+          "5:self_attn.q_proj",
+          "5:self_attn.k_proj",
+          "5:self_attn.v_proj"
+        ]
+      }
+    },
+    {
+      "name": "conditional-block-06",
+      "base": "080",
+      "replacements": {
+        "mixed": [
+          "6:self_attn.o_proj"
+        ]
+      }
+    },
+    {
+      "name": "conditional-block-07",
+      "base": "080",
+      "replacements": {
+        "mixed": [
+          "7:self_attn.o_proj",
+          "7:mlp.down_proj"
+        ]
+      }
+    },
+    {
+      "name": "conditional-block-08",
+      "base": "080",
+      "replacements": {
+        "mixed": [
+          "8:self_attn.o_proj",
+          "8:mlp.down_proj"
+        ]
+      }
+    },
+    {
+      "name": "conditional-block-09",
+      "base": "080",
+      "replacements": {
+        "mixed": [
+          "9:self_attn.o_proj",
+          "9:mlp.down_proj"
+        ]
+      }
+    },
+    {
+      "name": "conditional-block-10",
+      "base": "080",
+      "replacements": {
+        "mixed": [
+          "10:self_attn.o_proj",
+          "10:mlp.down_proj"
+        ]
+      }
+    },
+    {
+      "name": "conditional-block-11",
+      "base": "080",
+      "replacements": {
+        "mixed": [
+          "11:self_attn.o_proj",
+          "11:mlp.down_proj"
+        ]
+      }
+    },
+    {
+      "name": "conditional-block-12",
+      "base": "080",
+      "replacements": {
+        "mixed": [
+          "12:self_attn.o_proj",
+          "12:mlp.down_proj"
+        ]
+      }
+    },
+    {
+      "name": "conditional-block-13",
+      "base": "080",
+      "replacements": {
+        "mixed": [
+          "13:self_attn.o_proj",
+          "13:mlp.down_proj"
+        ]
+      }
+    },
+    {
+      "name": "conditional-block-14",
+      "base": "080",
+      "replacements": {
+        "mixed": [
+          "14:self_attn.o_proj",
+          "14:mlp.down_proj"
+        ]
+      }
+    },
+    {
+      "name": "conditional-block-15",
+      "base": "080",
+      "replacements": {
+        "mixed": [
+          "15:self_attn.o_proj",
+          "15:mlp.down_proj"
+        ]
+      }
+    },
+    {
+      "name": "conditional-block-16",
+      "base": "080",
+      "replacements": {
+        "mixed": [
+          "16:self_attn.o_proj",
+          "16:mlp.down_proj"
+        ]
+      }
+    },
+    {
+      "name": "conditional-block-17",
+      "base": "080",
+      "replacements": {
+        "mixed": [
+          "17:self_attn.o_proj",
+          "17:mlp.down_proj"
+        ]
+      }
+    },
+    {
+      "name": "conditional-block-18",
+      "base": "080",
+      "replacements": {
+        "mixed": [
+          "18:self_attn.o_proj",
+          "18:mlp.down_proj"
+        ]
+      }
+    },
+    {
+      "name": "conditional-block-19",
+      "base": "080",
+      "replacements": {
+        "mixed": [
+          "19:self_attn.o_proj",
+          "19:mlp.down_proj"
+        ]
+      }
+    },
+    {
+      "name": "conditional-block-20",
+      "base": "080",
+      "replacements": {
+        "mixed": [
+          "20:self_attn.o_proj",
+          "20:mlp.down_proj"
+        ]
+      }
+    },
+    {
+      "name": "conditional-block-21",
+      "base": "080",
+      "replacements": {
+        "mixed": [
+          "21:self_attn.o_proj",
+          "21:mlp.down_proj"
+        ]
+      }
+    },
+    {
+      "name": "conditional-block-22",
+      "base": "080",
+      "replacements": {
+        "mixed": [
+          "22:self_attn.o_proj",
+          "22:mlp.down_proj"
+        ]
+      }
+    },
+    {
+      "name": "conditional-block-23",
+      "base": "080",
+      "replacements": {
+        "mixed": [
+          "23:self_attn.o_proj",
+          "23:mlp.down_proj"
+        ]
+      }
+    },
+    {
+      "name": "conditional-block-24",
+      "base": "080",
+      "replacements": {
+        "mixed": [
+          "24:self_attn.o_proj",
+          "24:mlp.down_proj"
+        ]
+      }
+    },
+    {
+      "name": "conditional-block-25",
+      "base": "080",
+      "replacements": {
+        "mixed": [
+          "25:self_attn.o_proj",
+          "25:mlp.down_proj"
+        ]
+      }
+    }
+  ]
+}

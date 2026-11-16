@@ -1,0 +1,14 @@
+{
+  "sources": {
+    "original-before": {"path": "Results/080/gemma-3-1b-it-nanoquant.gguf"},
+    "mixed-before": {"path": "outputs/byte-budget-validation-1b/gemma-3-1b-it-mixed-conservative.gguf"},
+    "original-after": {"path": "outputs/mixed-refit-1b/original/refitted.gguf"},
+    "mixed-after": {"path": "outputs/mixed-refit-1b/mixed/refitted.gguf"}
+  },
+  "tasks": [
+    {"name": "original-before", "base": "original-before"},
+    {"name": "mixed-before", "base": "mixed-before"},
+    {"name": "original-after", "base": "original-after"},
+    {"name": "mixed-after", "base": "mixed-after"}
+  ]
+}
