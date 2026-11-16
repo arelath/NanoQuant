@@ -130,6 +130,13 @@ def test_complete_compression_export_runs_validated_stages_in_order(
         "upload_validated_model_artifacts",
         lambda *_args, **_kwargs: pytest.fail("local export must not contact Hugging Face"),
     )
+    markdown = resolved.gguf_output.with_name("003-imatrix-error-attribution.md")
+    attribution = (markdown, markdown.with_suffix(".json"))
+    monkeypatch.setattr(
+        workflow, "publish_imatrix_attribution",
+        lambda _config, _root, _snapshot, gguf, checksum, **kwargs:
+        calls.append(("attribution", gguf, checksum, kwargs["experiment_number"])) or attribution,
+    )
 
     result = execute_compression_export(
         _CONFIG,
@@ -139,7 +146,8 @@ def test_complete_compression_export_runs_validated_stages_in_order(
         snapshot=tmp_path / "snapshot",
     )
 
-    assert calls == [("logical", True), "packed", ("gguf", "q8_0", "q8_0")]
+    assert calls == [("logical", True), "packed", ("gguf", "q8_0", "q8_0"),
+                     ("attribution", resolved.gguf_output, "a" * 64, 3)]
     assert result.logical == {"exact": True}
     assert result.packed == {"exact": True}
     assert result.gguf.output == resolved.gguf_output
@@ -152,6 +160,7 @@ def test_complete_compression_export_runs_validated_stages_in_order(
     assert summary["gguf"]["token_embedding_type"] == "q8_0"
     assert summary["gguf"]["output_tensor_type"] == "q8_0"
     assert summary["gguf"]["output_tensor_present"] is False
+    assert summary["imatrix_error_attribution"] == {"markdown": str(attribution[0]), "json": str(attribution[1])}
     assert summary["schema_version"] == 6
     assert summary["mmproj"]["output"] == str(resolved.gguf_output.parent / "mmproj-BF16.gguf")
     assert summary["mmproj"]["sha256"] == "b" * 64

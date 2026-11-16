@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import tempfile
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -42,10 +43,10 @@ class DenseProjection:
     storage_bytes: float
 
 
-def dense_nanoquant_projections(
+def iter_dense_nanoquant_projections(
     fields: dict[str, Any], tensors: dict[str, Any], gguf: Any,
-) -> dict[str, DenseProjection]:
-    """Rebuild every NanoQuant projection as a dense matrix keyed by its plain ``<base>.weight`` name."""
+) -> Iterator[tuple[str, DenseProjection]]:
+    """Rebuild projections one stored factor group at a time."""
     architecture = fields["general.architecture"].contents()
     bases = {
         name.removesuffix(suffix)
@@ -54,7 +55,6 @@ def dense_nanoquant_projections(
     }
     if not bases:
         raise ValueError("No staged NanoQuant projections found")
-    projections = {}
     for base in sorted(bases):
         count_field = fields.get(f"quantization.nanoquant.{base}.residual_stage_count")
         terms: tuple[str, ...]
@@ -86,12 +86,18 @@ def dense_nanoquant_projections(
                 raise ValueError(f"Invalid stacked QKV shape for {base}: {dense.shape}")
             block = base.removesuffix("_qkv")
             for name, matrix in zip(("q", "k", "v"), np.split(dense, np.cumsum(sizes)[:-1], axis=0), strict=True):
-                projections[f"{block}_{name}.weight"] = DenseProjection(
+                yield f"{block}_{name}.weight", DenseProjection(
                     matrix, base, tuple(sources), group_bytes * matrix.shape[0] / dense.shape[0],
                 )
         else:
-            projections[f"{base}.weight"] = DenseProjection(dense, base, tuple(sources), float(group_bytes))
-    return projections
+            yield f"{base}.weight", DenseProjection(dense, base, tuple(sources), float(group_bytes))
+
+
+def dense_nanoquant_projections(
+    fields: dict[str, Any], tensors: dict[str, Any], gguf: Any,
+) -> dict[str, DenseProjection]:
+    """Rebuild every NanoQuant projection keyed by its plain ``<base>.weight`` name."""
+    return dict(iter_dense_nanoquant_projections(fields, tensors, gguf))
 
 
 def _verify_unchanged(

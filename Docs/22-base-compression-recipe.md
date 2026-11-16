@@ -32,6 +32,8 @@ Results/NNN/
   model-slug-nanoquant.gguf.export.json
   model-slug-nanoquant.model-card.md       # validated source for Hub README.md
   model-slug-nanoquant.export-summary.json
+  NNN-imatrix-error-attribution.md         # when imatrix and fitted sensitivity data match
+  NNN-imatrix-error-attribution.json
   NNN-experiment-name-gguf-quality.json    # when llama.cpp deployment quality is enabled
   model-slug-nanoquant.gguf.huggingface.json  # only when a Hub upload is configured
   mmproj-BF16.gguf                 # multimodal snapshots only
@@ -77,6 +79,14 @@ selected base and override list, while validated schema-5 floating-sidecar expor
 
 The mmproj remains independent of NanoQuant language-weight compression and is generated directly from the pinned
 Hugging Face vision stack. Text-only snapshots, including Gemma 3 1B, do not produce a placeholder mmproj.
+
+After validating the language GGUF, the shared exporter publishes Markdown and JSON attribution when the
+run uses an imatrix and a fitted projection sensitivity sweep in `Datasets` matches its checkpoint weight hashes.
+For matching complete sweeps, the exporter prefers FP32 and then FP16 over BF16, with more trials preferred
+within the same precision. This lets byte-identical checkpoint mirrors use the same sweep. Each report uses
+the run's input-column weights and, when configured, its output-row weights. It estimates isolated projection KL
+on CPU and records the GGUF, imatrix, sweep and fits hashes. The export summary links both reports. Separate
+pre-KD exports include their GGUF stem in the report name.
 
 The NanoQuant-specific language converter is vendored at
 `tools/llamacpp/convert_nanoquant_to_gguf.py`, with its upstream license and provenance beside it. Portable setup may

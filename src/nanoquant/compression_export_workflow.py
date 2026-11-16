@@ -16,6 +16,7 @@ from nanoquant.foldable_mlp_tuning import (
     active_foldable_mlp_tuning,
     run_foldable_mlp_tuning,
 )
+from nanoquant.imatrix_attribution import publish_imatrix_attribution
 from nanoquant.infrastructure.gguf_export import (
     DEFAULT_OUTPUT_TENSOR_TYPE,
     DEFAULT_TOKEN_EMBEDDING_TYPE,
@@ -589,6 +590,13 @@ def execute_compression_export(
         output_tensor_type=resolved.output_tensor_type,
         converter_path=root / "tools" / "llamacpp" / "convert_nanoquant_to_gguf.py",
     )
+    experiment_number = resolved.publication_experiment_number
+    if experiment_number is None:
+        experiment_number = config.intent.experiment_number
+    attribution = publish_imatrix_attribution(
+        config, root, source_snapshot, gguf.output, gguf.sha256,
+        experiment_number=experiment_number, variant=resolved.use_active_global_tuning is False,
+    )
     huggingface = None
     summary_output = resolved.gguf_output.with_suffix(".export-summary.json")
     atomic_write_json(
@@ -627,6 +635,9 @@ def execute_compression_export(
                 }
             ),
             "huggingface": (None if huggingface is None else huggingface_upload_summary(huggingface)),
+            "imatrix_error_attribution": (
+                None if attribution is None else {"markdown": str(attribution[0]), "json": str(attribution[1])}
+            ),
         },
     )
     return CompressionExportResult(

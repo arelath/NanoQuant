@@ -26,7 +26,7 @@ without regenerating them. Shape is 256 × 2,048 and the fingerprint is
   includes overall accuracy, and the JSON includes per-subject counts and
   per-question predictions. Other historical launchers keep their recorded
   benchmark choices. New dense quality recipes can enable `include_mmlu=True`.
-- After quality and export succeed, the attribution step reads the exported
+- After GGUF validation, the shared attribution step reads the exported
   NanoQuant projection weights and the matching 1B source matrices. It weights
   squared residuals by mean-one column importance and maps that error through
   the 1B sensitivity curves. It writes estimates and shares for every block,

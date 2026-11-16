@@ -34,6 +34,18 @@ def test_noise_equivalent_error_weights_each_columns_residual_by_mean_one_import
         tool.noise_equivalent_error(original, quantized, np.ones(3, dtype=np.float32))
 
 
+def test_noise_equivalent_error_weights_output_rows_when_supplied() -> None:
+    tool = _tool()
+    original = np.ones((2, 4), dtype=np.float32)
+    quantized = original.copy()
+    quantized[0, 0] += 0.25
+    columns = np.array([4, 0, 0, 0], dtype=np.float32)
+    rows = np.array([2, 0], dtype=np.float32)
+    raw, weighted = tool.noise_equivalent_error(original, quantized, columns, rows)
+    assert weighted == pytest.approx(raw * np.sqrt(8))
+    assert tool.noise_equivalent_error(original, quantized, columns, rows[::-1])[1] == 0
+
+
 def test_summary_compares_both_predictions_with_isolated_and_joint_kl() -> None:
     tool = _tool()
     rows = {

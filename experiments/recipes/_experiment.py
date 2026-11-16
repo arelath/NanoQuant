@@ -532,13 +532,15 @@ def run_imatrix_attribution_experiment(
     fits_sha256: str,
     attribution: Path,
 ) -> int:
-    """Preflight analysis inputs and score only the canonical completed export."""
+    """Include the pinned attribution and MMLU inputs in Experiment 080 previews."""
     def compression() -> int:
         return run_self_measured_d2_experiment(
             experiment, launcher_path=launcher_path, profile_options=profile_options, reuse_maximum_rank_control=True,
         )
 
-    if any(flag in sys.argv[1:] for flag in ("-h", "--help")):
+    arguments = set(sys.argv[1:])
+    plan_only = "--plan-only" in arguments
+    if arguments & {"-h", "--help"} or not arguments & {"--plan-only", "--dry-run"}:
         return compression()
     root = Path(launcher_path).resolve().parent.parent
     imatrix = experiment.config.calibration.imatrix
@@ -550,17 +552,13 @@ def run_imatrix_attribution_experiment(
         "--predict-only", "--imatrix", imatrix.path, "--imatrix-sha256", imatrix.sha256,
         "--fits-sha256", fits_sha256, "--gguf", str(root / gguf), "--output", str(attribution),
     ]
-    plan_only = "--plan-only" in sys.argv[1:]
-    preview = plan_only or "--dry-run" in sys.argv[1:]
-    payload = {}
-    if preview:
-        captured = StringIO()
-        with redirect_stdout(captured):
-            result = compression()
-        if result != 0:
-            print(captured.getvalue(), end="")
-            return result
-        payload = json.loads(captured.getvalue())
+    captured = StringIO()
+    with redirect_stdout(captured):
+        result = compression()
+    if result != 0:
+        print(captured.getvalue(), end="")
+        return result
+    payload = json.loads(captured.getvalue())
 
     attribution_plan: dict[str, object] = {
         "markdown": str(attribution), "json": str(attribution.with_suffix(".json")), "command": command,
@@ -582,14 +580,8 @@ def run_imatrix_attribution_experiment(
             payload["mmlu"]["split_sha256"] = {
                 k: hash_file(v) for k, v in mmlu_files(local_files_only=experiment.workflow.local_files_only).items()
             }
-    if preview:
-        print(json.dumps(payload, indent=2))
-        return 0
-
-    result = compression()
-    if result != 0:
-        return result
-    return subprocess.run(command, cwd=root, check=False).returncode
+    print(json.dumps(payload, indent=2))
+    return 0
 
 
 __all__ = [
