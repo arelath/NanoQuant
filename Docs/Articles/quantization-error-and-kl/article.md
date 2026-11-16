@@ -253,6 +253,25 @@ That accounts for the whole gap in a calibrated 4-bit file. Start from the Gauss
 prediction. Block scaling leaves 86% of it. Calibration leaves 60% of that. Interaction leaves
 88% of that. The product is 46%, which is what the file measures.
 
+**Weighting the error by importance turns the map into a forecast.** If calibration works by
+moving error away from the inputs that matter, the same importance matrix should tell us how
+much a given error will cost. So we stopped treating all of a matrix's error alike. We weighted
+the error in each input column by how strongly that input is driven, and put the result through
+the same Gaussian-noise curves as before. Nothing was fitted to the measurements, and no model
+was run.
+
+For the calibrated files, the plain prediction overshoots the summed one-matrix costs by
+1.8–2.9×. The weighted prediction overshoots by 8–25%. For the uncalibrated files the weighting
+changes nothing, as it should: their error is not steered anywhere, and both predictions sit
+16–25% high. That leftover matches the block-scaling effect measured above.
+
+The weighting also ranks the matrices better. For our binary-factor format it lifts the rank
+agreement between predicted and measured cost from 0.84 to 0.96, and it picks the same five
+most damaging blocks as the direct measurement.
+
+One caution: the importance matrix we weighted with is the one the quantizers were calibrated
+on. A matrix built from different text is the fairer test, and we have not run it.
+
 **Interaction is small for llama.cpp files.** Their whole-file cost is 82–92% of the sum of
 the isolated costs. Independent random noise gave 93–99% in the same test, so part of that is
 ordinary. It is not a saturation effect either, because it shows up in the 8-bit file, where
@@ -266,9 +285,10 @@ the original model's activations, with each block seeing the output of the compr
 before it. Later matrices are trained to compensate for earlier ones, and this measurement
 shows how much they do.
 
-This also gives a better forecast than the map. For the llama.cpp files, adding up the 126
-isolated costs of the actual quantized matrices overestimates the file by 9–22%. The Gaussian
-map overestimates it by 2–3×.
+Interaction is the part no per-matrix estimate can see. The importance-weighted prediction is
+still 24–52% above the whole-file cost for the llama.cpp files, and about double it for our
+format. It is a good tool for deciding which matrices and blocks to protect. Predicting the
+whole model still needs a measurement of how the errors combine.
 
 ## Two things weight error does not tell you
 
@@ -310,6 +330,8 @@ the evaluation is part of the experiment.
   than the sum of its parts: 8–18% less in the llama.cpp files, 39–49% less in our format.
 - The calibration test covers three llama.cpp formats and one importance matrix. Other
   quantizers and other calibration sets may gain more or less.
+- The importance-weighted prediction used the same importance matrix the quantizers were
+  calibrated on.
 - The map gives the cost of error in each matrix. Choosing bit widths also needs to know how
   fast error falls as each matrix gets more bits, which is a separate measurement.
 
@@ -326,5 +348,7 @@ the evaluation is part of the experiment.
   same format, same weight error, 35–40% less KL.
 - Weight error alone does not rank quantizers. Two files with the same error in every matrix
   differed by more than half in KL.
+- Weighting each matrix's error by an importance matrix fixes most of that: it predicts the
+  per-matrix cost to within 8–25%, with no model run.
 - Distillation left every matrix's own cost unchanged and improved only how they combine.
 - Measure fidelity with KL, in full precision.

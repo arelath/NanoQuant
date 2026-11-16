@@ -255,6 +255,57 @@ Points to make:
   other imatrix files, other quantizers.
 - Figure: `calibration-ablation.png`.
 
+## Finding 10: imatrix-weighted error predicts per-matrix KL
+
+Source: `outputs/074/074-imatrix-weighted-kl.json` and
+`outputs/074/measure_imatrix_weighted_kl.py` (the original 074 analysis), generalised to every
+file as `tools/predict_imatrix_weighted_kl.py` with reports
+`gguf-isolated-kl-imatrix-weighted.md/json` and
+`gguf-isolated-kl-imatrix-ablation-imatrix-weighted.md/json` beside the sweep. Both give the
+same 074 numbers. CPU only, no model run.
+
+Method: for each projection, sum the squared residual per input column, weight each column by
+its importance divided by the mean importance (Unsloth's imatrix, the one 074 and the llama.cpp
+files were calibrated on), divide by the squared norm of the original weights and take the
+square root. That noise-equivalent error goes through the same fitted Gaussian curve. Nothing
+is fitted to the measured GGUF KL.
+
+| File | Unweighted | Weighted | Sum of isolated | Joint | Unweighted / isolated | Weighted / isolated | Weighted / joint |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Binary factors, before distillation | 8.536 | 3.179 | 2.956 | 1.815 | 2.89 | 1.08 | 1.75 |
+| Binary factors, after distillation | 8.573 | 3.220 | 2.970 | 1.504 | 2.89 | 1.08 | 2.14 |
+| UD-IQ2_XXS | 5.217 | 2.635 | 2.115 | 1.737 | 2.47 | 1.25 | 1.52 |
+| Q2_K (Unsloth) | 1.976 | 1.187 | 1.082 | 0.943 | 1.83 | 1.10 | 1.26 |
+| Q3_K_M (Unsloth) | 0.912 | 0.491 | 0.417 | 0.358 | 2.19 | 1.18 | 1.37 |
+| Q4_K_M (Unsloth) | 0.396 | 0.244 | 0.206 | 0.181 | 1.92 | 1.18 | 1.35 |
+| Q8_0 | 0.0063 | 0.0064 | 0.0051 | 0.0047 | 1.24 | 1.24 | 1.36 |
+| Q4_K_M, calibrated (local) | 0.396 | 0.244 | 0.206 | 0.181 | 1.92 | 1.18 | 1.35 |
+| Q4_K_M, no calibration | 0.384 | 0.389 | 0.331 | 0.298 | 1.16 | 1.17 | 1.31 |
+| Q3_K_M, calibrated (local) | 1.059 | 0.648 | 0.541 | 0.460 | 1.96 | 1.20 | 1.41 |
+| Q3_K_M, no calibration | 1.046 | 1.044 | 0.837 | 0.765 | 1.25 | 1.25 | 1.37 |
+| Q2_K, calibrated (local) | 2.123 | 1.344 | 1.206 | 1.071 | 1.76 | 1.11 | 1.25 |
+| Q2_K, no calibration | 2.113 | 2.054 | 1.750 | 1.656 | 1.21 | 1.17 | 1.24 |
+
+Points to make:
+
+- **Calibrated files:** the unweighted prediction is 1.76–2.89× the isolated sum; the weighted
+  one is 1.08–1.25×. For 074 after distillation the overestimate falls from 189% to 8.4%.
+- **Uncalibrated files and Q8_0:** weighting changes nothing (1.16–1.25× either way). Their
+  error is not steered by the imatrix, so the weighted and unweighted errors agree. The
+  leftover 16–25% matches the block-scaling factor (0.80–0.90) from Findings 8 and 9.
+- **Ranking.** Spearman correlation between predicted and measured isolated KL over 126
+  projections: 074 0.84 → 0.96; UD-IQ2_XXS 0.93 → 0.97; Q2_K 0.91 → 0.96; Q3_K_M 0.82 → 0.89;
+  Q4_K_M 0.92 → 0.95. For 074 the weighted estimate names the same five largest blocks as the
+  measured block KLs, with blocks 1, 0 and 3 in the right order; the unweighted one puts
+  block 11 in its top five.
+- **It does not see interaction.** Weighted / joint is 1.24–1.52 for the llama.cpp files and
+  1.75–2.14 for 074. Through distillation the weighted sum rises slightly (3.179 → 3.220)
+  while the joint KL falls 17.1%.
+- **Use:** prioritising blocks and projections without running the model. Whole-model error
+  still needs the interaction.
+- **Caveat: same imatrix.** The weighting uses the imatrix the quantizers optimised against.
+  An imatrix from different text would be the independent test. Not run.
+
 ## Finding 6: weight error is not the whole story
 
 - Distillation left the binary-factor model's weight error unchanged (23.5% median before and
@@ -309,7 +360,8 @@ Points to make:
 6. Real quantizers: where they put error (figure: error maps) and how they compare to the
    prediction (figure: predicted vs measured).
 6b. Why real error is cheaper: one matrix at a time (figure: shape and interaction), then
-    the calibration ablation (figure: calibration ablation).
+    the calibration ablation (figure: calibration ablation), then the imatrix-weighted
+    prediction (no figure).
 7. Two things weight error does not tell you (distillation; NLL vs KL).
 8. Sidebar: the BF16 trap.
 9. Limits and what comes next.
