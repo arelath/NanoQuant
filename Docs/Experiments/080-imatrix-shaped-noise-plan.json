@@ -1,0 +1,78 @@
+{
+  "purpose": "Matched actual residual / isotropic / block / inverse-sqrt-imatrix / block-imatrix comparison. Fixed parameters, no KL fitting. Blocks 6 and 19 were not in the prior sampled intervention set.",
+  "previously_sampled_blocks": [
+    0,
+    13,
+    25
+  ],
+  "confirmation_blocks": [
+    6,
+    19
+  ],
+  "imatrix": "Datasets/gemma-3-1b-it-imatrix-unsloth/imatrix_unsloth.dat",
+  "imatrix_sha256": "86a81192de49a6480f8dc19c5a7fd3f4377af59172fd4c7b8d93d296a0a18515",
+  "importance_floor": 0.01,
+  "block_size": 32,
+  "seeds": [
+    17,
+    29,
+    43
+  ],
+  "sources": {
+    "NanoQuant080": {
+      "path": "Results/080/gemma-3-1b-it-nanoquant.gguf",
+      "targets": [
+        "0:mlp.gate_proj",
+        "0:mlp.down_proj",
+        "0:self_attn.o_proj",
+        "13:mlp.gate_proj",
+        "13:mlp.down_proj",
+        "13:self_attn.o_proj",
+        "25:mlp.gate_proj",
+        "25:mlp.down_proj",
+        "25:self_attn.o_proj",
+        "6:mlp.gate_proj",
+        "6:mlp.down_proj",
+        "6:self_attn.o_proj",
+        "19:mlp.gate_proj",
+        "19:mlp.down_proj",
+        "19:self_attn.o_proj"
+      ]
+    },
+    "IQ4_NL": {
+      "path": "Datasets/gemma-3-1b-it-gguf-local-quantize/gemma-3-1b-it-pure-IQ4_NL-imatrix.gguf",
+      "targets": [
+        "0:mlp.gate_proj",
+        "0:mlp.down_proj",
+        "0:self_attn.o_proj",
+        "13:mlp.gate_proj",
+        "13:mlp.down_proj",
+        "13:self_attn.o_proj",
+        "25:mlp.gate_proj",
+        "25:mlp.down_proj",
+        "25:self_attn.o_proj",
+        "6:mlp.gate_proj",
+        "6:mlp.down_proj",
+        "6:self_attn.o_proj",
+        "19:mlp.gate_proj",
+        "19:mlp.down_proj",
+        "19:self_attn.o_proj"
+      ]
+    },
+    "IQ3_S": {
+      "path": "Datasets/gemma-3-1b-it-gguf-local-quantize/gemma-3-1b-it-o-down-IQ3_S-imatrix.gguf",
+      "targets": [
+        "0:mlp.down_proj",
+        "0:self_attn.o_proj",
+        "13:mlp.down_proj",
+        "13:self_attn.o_proj",
+        "25:mlp.down_proj",
+        "25:self_attn.o_proj",
+        "6:mlp.down_proj",
+        "6:self_attn.o_proj",
+        "19:mlp.down_proj",
+        "19:self_attn.o_proj"
+      ]
+    }
+  }
+}

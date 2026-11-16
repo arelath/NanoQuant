@@ -15,6 +15,13 @@ measures 1.6090 and the full menu 1.7104. Native WikiText perplexities are 130.4
 post-hoc quality gate therefore fails. A small matched refit canary is the next gate before
 general resident mixed-plan support; plan-time refitting is still untested.
 
+The [IMatrix-shaped-noise follow-up](Experiments/080-imatrix-shaped-noise.md) completed
+520 projection-only probes with embeddings fixed. NanoQuant's actual residuals are more
+concentrated in low-importance columns than IQ4_NL/IQ3_S on all 10 shared projections.
+Inverse-square-root IMatrix noise improves on isotropic noise, but the existing weighted
+curve is more accurate for NanoQuant (median fold error 1.115 versus 1.243). The tested
+shaped sweep does not resolve the mixed-allocation failure or replace the refit gate.
+
 ## Summary
 
 Every decoder projection gets a menu of storage options: one, two or three full-rank binary
