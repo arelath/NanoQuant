@@ -1,10 +1,19 @@
 # Byte-budget allocation across binary stages and llama.cpp formats
 
-Written 2026-11-16. Status: initial CPU design pilot, with projection-only validation now in
-progress. The allocation tables below are predictions, not measured mixed-model results.
-The active follow-up keeps embeddings fixed and uses the expanded 1–35% sensitivity sweep.
+Written 2026-11-16. Status: initial CPU design pilot, with a completed fixed-embedding
+[validation follow-up](../Results/080/080-byte-budget-mixed-format-validation.md).
+The original allocation tables below are predictions, not measured mixed-model results.
+The follow-up keeps embeddings fixed and uses the expanded 1–35% sensitivity sweep.
 Experiment 081 has completed on 270M; its three-stage results are real, but are not a measured
 third-stage menu for the 1B model used in this pilot.
+
+**Follow-up outcome:** the weighted proxy matches the summed isolated costs of 15 sampled
+1B storage units within about 5%, but both exact integer allocations regress joint quality.
+At the 547,391,648-byte budget, 080 measures 1.3695 projection KL; the two-stage-minimum mix
+measures 1.6090 and the full menu 1.7104. Native WikiText perplexities are 130.48, 140.15 and
+135.91 respectively. The greedy solver's gap is negligible at the tested budgets. The
+post-hoc quality gate therefore fails. A small matched refit canary is the next gate before
+general resident mixed-plan support; plan-time refitting is still untested.
 
 ## Summary
 

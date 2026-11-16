@@ -2,6 +2,7 @@ import gguf
 import numpy as np
 import pytest
 from export_byte_budget_mix import export_mix
+from measure_gguf_kl import read_gguf
 
 
 def write(writer, path):
@@ -16,6 +17,7 @@ def sources(tmp_path):
     standard = tmp_path / "standard.gguf"
     writer = gguf.GGUFWriter(None, "gemma3")
     writer.add_uint32("quantization.nanoquant.tensor_count", 2)
+    writer.add_string("quantization.nanoquant.stage_format", "additive_binary_v1")
     for name in ("head_count", "head_count_kv"):
         writer.add_uint32(f"gemma3.attention.{name}", 1)
     for name in ("key_length", "value_length"):
@@ -60,8 +62,12 @@ def test_replaces_whole_qkv_group_truncates_stages_and_preserves_embedding(tmp_p
     tensors = {tensor.name: tensor for tensor in reader.tensors}
     assert np.array_equal(tensors["token_embd.weight"].data, embedding)
     assert not any("nq_residual" in name or "attn_qkv" in name for name in tensors)
-    assert reader.fields["quantization.nanoquant.blk.0.ffn_gate.residual_stage_count"].contents() == 0
+    assert "quantization.nanoquant.blk.0.ffn_gate.residual_stage_count" not in reader.fields
+    assert "blk.0.ffn_gate.nq_v" in tensors
+    assert not any("ffn_gate.nq_stage0" in name for name in tensors)
     assert all(f"blk.0.attn_{kind}.weight" in tensors for kind in ("q", "k", "v"))
+    decoded = read_gguf(output)
+    assert np.array_equal(decoded["blk.0.ffn_gate.weight"]["values"].numpy(), np.full((64, 32), 32.0))
 
 
 def test_rejects_partial_group_or_over_budget_without_publishing(tmp_path):

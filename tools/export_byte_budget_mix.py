@@ -39,6 +39,10 @@ def select_payloads(reader, standard: list, units: dict, choices: dict) -> tuple
             for name in sidecars:
                 if not name.startswith(prefixes):
                     del payloads[name]
+                elif keep == 1:
+                    # Match the existing converter/native contract: stage0 denotes
+                    # a residual owner, which must have at least one residual.
+                    payloads[name.replace(".nq_stage0_", ".nq_")] = payloads.pop(name)
             stage_counts[owner] = keep - 1
             continue
         kinds = label.split()
@@ -76,7 +80,8 @@ def validate_payloads(path: Path, expected: dict, stage_counts: dict, standard_o
                 or not np.array_equal(tensor.data, wanted.data)):
             raise ValueError(f"mixed export changed source payload: {name}")
     for owner, count in stage_counts.items():
-        if reader.fields[f"quantization.nanoquant.{owner}.residual_stage_count"].contents() != count:
+        field = reader.fields.get(f"quantization.nanoquant.{owner}.residual_stage_count")
+        if (count == 0 and field is not None) or (count > 0 and (field is None or field.contents() != count)):
             raise ValueError(f"incorrect exported stage count: {owner}")
     if int(reader.fields["quantization.nanoquant.tensor_count"].contents()) != len(stage_counts):
         raise ValueError("incorrect exported NanoQuant owner count")
@@ -102,6 +107,9 @@ def export_mix(source: Path, standard_paths: list[Path], units: dict, choices: d
         if name.startswith("GGUF.") or name == "general.architecture":
             continue
         if any(name.startswith(f"quantization.nanoquant.{owner}.") for owner in removed):
+            continue
+        if any(count == 0 and name == f"quantization.nanoquant.{owner}.residual_stage_count"
+               for owner, count in counts.items()):
             continue
         value = field.contents()
         if name == "general.alignment":
