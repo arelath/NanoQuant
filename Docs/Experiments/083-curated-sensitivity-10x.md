@@ -98,3 +98,18 @@ run resumes the existing measurement identity after 21 committed trials.
 Detailed timing receipts are under
 `outputs/curated-sensitivity-270m-160x256/scoring-benchmark-repeat.json`.
 The active log is `sweep-gpu-cache.log` in that same directory.
+
+The four-pass scorer (`--teacher-passes 4 --teacher-gpu-cache-gib 6`) holds
+40 teacher windows (5 GiB) in CUDA at a time and evaluates every outstanding
+perturbation before advancing to the next partition. Per-pass results checkpoint
+under `measurements/<sweep-id>/passes-4`; the standard complete trials merge
+after all partitions finish, using the original ordered per-window reductions.
+An interruption resumes completed partial scores. Existing complete trials are
+retained and skipped.
+
+On three 270M perturbations, four passes took 6.3–6.7 seconds of scoring per full
+160-window trial. Uploading all four partitions took 7.4 seconds, amortized
+across the sweep. Full per-window records and aggregate scores matched the
+saved batch-one measurements exactly. Peak allocated CUDA memory was 6.45 GiB.
+The CPU regression also verifies uneven partitions, partial-pass interruption,
+resume and exact combined results.

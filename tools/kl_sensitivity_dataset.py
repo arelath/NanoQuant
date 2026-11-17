@@ -11,7 +11,7 @@ import statistics
 from collections import defaultdict
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import torch
@@ -240,6 +240,11 @@ def score_model(
             raise ValueError(f"model returned nonfinite KL or NLL for calibration window {index}")
         sequences.append({"kl_nats_per_token": kl, "nll_nats_per_token": nll, "token_count": count})
         del logits
+    return combine_window_scores(sequences)
+
+
+def combine_window_scores(sequences: list[dict]) -> dict:
+    """Reduce ordered window measurements identically for one or several passes."""
     count = sum(row["token_count"] for row in sequences)
     return {
         "kl_nats_per_token": math.fsum(row["kl_nats_per_token"] * row["token_count"] for row in sequences) / count,
@@ -416,7 +421,10 @@ def _sweep(
             atomic_write_json(checkpoint, report, indent=None, sort_keys=False)
         print(f"Saving sweep measurements to {checkpoint}", flush=True)
         try:
-            _run_trials(args, model, dataset, targets, report, checkpoint)
+            if getattr(args, "teacher_passes", 1) > 1:
+                _run_trial_passes(args, model, dataset, targets, report, checkpoint)
+            else:
+                _run_trials(args, model, dataset, targets, report, checkpoint)
         finally:
             # Read the committed version so the exported reports reflect durable trials.
             committed = json.loads(checkpoint.read_text(encoding="utf-8"))
@@ -443,8 +451,11 @@ def _write_plots(checkpoint: Path, report: dict, output: Path, granularity: str)
 def _run_trials(
     args: argparse.Namespace, model: nn.Module, dataset: KlTeacherDataset,
     targets: dict[str, dict[str, torch.Tensor]], report: dict, checkpoint: Path,
+    *,
+    skip_trials: set[tuple[str, float, int]] | None = None,
 ) -> None:
     done = {(row["target"], row["requested_error"], row["seed"]) for row in report["trials"]}
+    done.update(skip_trials or ())
     for target, weights in targets.items():
         for level in args.error_levels:
             for seed in args.seeds:
@@ -466,6 +477,71 @@ def _run_trials(
                     "projections": metrics, **score,
                 })
                 atomic_write_json(checkpoint, report, indent=None, sort_keys=False)
+
+
+def _run_trial_passes(args, model, dataset, targets, report, checkpoint):
+    """Keep each teacher partition resident while measuring every outstanding perturbation."""
+    count = len(dataset.cache.batches)
+    passes = args.teacher_passes
+    if not 1 < passes <= count:
+        raise ValueError("teacher pass count must be between two and the window count")
+    completed = {(row["target"], row["requested_error"], row["seed"]) for row in report["trials"]}
+    if len(completed) == report["expected_trials"]:
+        return
+    parts = []
+    for index in range(passes):
+        start, stop = index * count // passes, (index + 1) * count // passes
+        pass_identity = {"protocol": report["protocol"], "windows": [start, stop], "passes": passes}
+        path = checkpoint.parent / f"passes-{passes}" / f"{index:03d}.json"
+        if path.exists():
+            partial = json.loads(path.read_text(encoding="utf-8"))
+            if partial["pass_identity"] != pass_identity:
+                raise ValueError("teacher-pass checkpoint has a different scoring identity")
+        else:
+            partial = {
+                "schema_version": 1, "pass_identity": pass_identity, "protocol": report["protocol"],
+                "expected_trials": report["expected_trials"],
+                "clean_baseline": combine_window_scores(report["clean_baseline"]["sequences"][start:stop]),
+                "trials": [],
+            }
+        done = {(row["target"], row["requested_error"], row["seed"]) for row in partial["trials"]} | completed
+        if len(done) != report["expected_trials"]:
+            batches = dataset.cache.batches[start:stop]
+            cache_bytes = sum(batch.numel() * batch.element_size() for batch in batches)
+            budget = int(args.teacher_gpu_cache_gib * 2**30)
+            if args.device.startswith("cuda") and cache_bytes > budget:
+                raise ValueError("teacher partition exceeds GPU cache budget; increase the pass count")
+            subset = replace(dataset, tokens=dataset.tokens[start:stop],
+                             cache=replace(dataset.cache, batches=batches))
+            subset = cache_teacher_targets(subset, args.device, budget)
+            print(f"Pass {index + 1}/{passes}: windows {start}:{stop}, {cache_bytes / 2**30:.2f} GiB; "
+                  f"{report['expected_trials'] - len(done)} remaining trials", flush=True)
+            _run_trials(args, model, subset, targets, partial, path, skip_trials=completed)
+            del subset
+        parts.append(partial)
+    per_pass = [
+        {(row["target"], row["requested_error"], row["seed"]): row for row in part["trials"]}
+        for part in parts
+    ]
+    for target in targets:
+        for level in args.error_levels:
+            for seed in args.seeds:
+                key = (target, level, seed)
+                if key in completed:
+                    continue
+                segments = [part[key] for part in per_pass]
+                metadata = ("target", "requested_error", "seed", "actual_error", "projections")
+                if any(any(segment[field] != segments[0][field] for field in metadata) for segment in segments):
+                    raise ValueError("teacher partitions measured different weight perturbations")
+                sequences = [row for segment in segments for row in segment["sequences"]]
+                if len(sequences) != count:
+                    raise ValueError("teacher partitions do not cover all windows")
+                score = combine_window_scores(sequences)
+                report["trials"].append({
+                    **{field: segments[0][field] for field in metadata}, **score,
+                    "kl_above_control": score["kl_nats_per_token"] - report["clean_baseline"]["kl_nats_per_token"],
+                })
+    atomic_write_json(checkpoint, report, indent=None, sort_keys=False)
 
 
 def make_parser(spec: ModelSpec, *, dataset_reports: bool) -> argparse.ArgumentParser:
@@ -497,6 +573,8 @@ def make_parser(spec: ModelSpec, *, dataset_reports: bool) -> argparse.ArgumentP
     parser.add_argument("--teacher-only", action="store_true", help="capture or verify targets and exit")
     parser.add_argument("--teacher-gpu-cache-gib", type=float, default=0.0,
                         help="cache this many GiB of teacher targets on CUDA and prefetch pinned host batches")
+    parser.add_argument("--teacher-passes", type=int, default=1,
+                        help="measure all perturbations per teacher partition, then combine exact window scores")
     parser.set_defaults(output=None)
     if not dataset_reports:
         parser.add_argument("--output", type=Path, default=ROOT / "Results" / f"{spec.slug}-weight-sensitivity")
@@ -515,6 +593,10 @@ def main(
         parser.error("samples and token chunk size must be positive and sequence length must be at least two")
     if not math.isfinite(args.teacher_gpu_cache_gib) or args.teacher_gpu_cache_gib < 0:
         parser.error("teacher GPU cache size must be finite and nonnegative")
+    if args.teacher_passes < 1 or args.teacher_passes > args.samples:
+        parser.error("teacher passes must be between one and the number of samples")
+    if args.teacher_passes > 1 and args.teacher_gpu_cache_gib <= 0:
+        parser.error("multiple teacher passes require a positive GPU cache budget")
     if any(not math.isfinite(level) or level < 0 for level in args.error_levels):
         parser.error("error levels must be finite and nonnegative")
     if args.blocks is not None and any(not 0 <= index < spec.blocks for index in args.blocks):
@@ -553,8 +635,9 @@ def main(
         ).to(args.device).eval()
         dataset = _teacher_dataset(args, snapshot, model, config, args.teacher_dataset, data_sha256, spec)
         if not args.teacher_only:
-            dataset = cache_teacher_targets(dataset, args.device, int(args.teacher_gpu_cache_gib * 2**30))
-            if args.teacher_gpu_cache_gib:
+            if args.teacher_passes == 1:
+                dataset = cache_teacher_targets(dataset, args.device, int(args.teacher_gpu_cache_gib * 2**30))
+            if args.teacher_gpu_cache_gib and args.teacher_passes == 1:
                 resident = sum(batch.is_cuda for batch in dataset.cache.batches)
                 pinned = sum(batch.is_pinned() for batch in dataset.cache.batches)
                 print(f"Teacher targets: {resident} CUDA batches, {pinned} pinned-host batches with prefetch",

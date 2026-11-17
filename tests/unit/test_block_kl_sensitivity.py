@@ -240,7 +240,7 @@ def test_sweep_scores_cached_teacher_and_resumes_completed_trials(tmp_path, monk
     assert json.loads((args.output / "results.json").read_text(encoding="utf-8")) == report
 
 
-def _tiny_sweep(tmp_path, monkeypatch):
+def _tiny_sweep(tmp_path, monkeypatch, samples=1):
     model = TinyModel("projection").eval()
     adapter = SimpleNamespace(
         attention_implementation="eager",
@@ -250,15 +250,58 @@ def _tiny_sweep(tmp_path, monkeypatch):
     monkeypatch.setattr(sensitivity, "adapter_for_config", lambda _: adapter)
     monkeypatch.setattr(sensitivity, "vocabulary_size_from_config", lambda _: 4)
     monkeypatch.setattr(sensitivity, "hash_hf_tokenizer_snapshot", lambda _: "test-tokenizer")
-    monkeypatch.setattr(sensitivity, "_load_tokens", lambda *_: (torch.tensor([[0, 1, 2, 3]]), 0))
+    monkeypatch.setattr(sensitivity, "_load_tokens",
+                        lambda *_: (torch.tensor([[0, 1, 2, 3]]).repeat(samples, 1), 0))
     args = SimpleNamespace(
         output=tmp_path / "reports", blocks=None, granularity="projection",
         teacher_dataset=tmp_path / "teacher", device="cpu", token_chunk_size=2,
         error_levels=[0.05, 0.10], seeds=[0, 1],
-        text_column="content", calibration_seed=0, samples=1, sequence_length=4,
+        text_column="content", calibration_seed=0, samples=samples, sequence_length=4,
     )
     dataset = sensitivity._teacher_dataset(args, tmp_path, model, {}, args.teacher_dataset, "test-data")
     return model, args, dataset
+
+
+def test_teacher_passes_resume_partial_work_and_match_full_scores(tmp_path, monkeypatch) -> None:
+    model, args, dataset = _tiny_sweep(tmp_path, monkeypatch, samples=5)
+    sensitivity._sweep(args, {}, model, dataset)
+    checkpoint, = (args.teacher_dataset / "measurements").glob("*/results.json")
+    reference = json.loads(checkpoint.read_text(encoding="utf-8"))
+    partial = {**reference, "trials": reference["trials"][:1]}
+    checkpoint.write_text(json.dumps(partial), encoding="utf-8")
+    args.output = tmp_path / "pass-reports"
+    args.teacher_passes = 4
+    args.teacher_gpu_cache_gib = 1
+    scorer = sensitivity.score_model
+    calls = []
+
+    def interrupted(*values, **keywords):
+        calls.append(None)
+        if len(calls) == 4:
+            raise KeyboardInterrupt
+        return scorer(*values, **keywords)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(sensitivity, "score_model", interrupted)
+        with pytest.raises(KeyboardInterrupt):
+            sensitivity._sweep(args, {}, model, dataset)
+    saved = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert saved["trials"] == reference["trials"][:1]
+    pass_file = checkpoint.parent / "passes-4" / "000.json"
+    assert len(json.loads(pass_file.read_text(encoding="utf-8"))["trials"]) == 3
+    resumed_calls = []
+
+    def resumed(*values, **keywords):
+        resumed_calls.append(None)
+        return scorer(*values, **keywords)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(sensitivity, "score_model", resumed)
+        sensitivity._sweep(args, {}, model, dataset)
+    final = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert final == reference
+    assert len(resumed_calls) == (reference["expected_trials"] - 1) * 4 - 3
+    assert all(torch.equal(weight, model.original) for weight in model.parameters())
 
 
 def test_added_error_levels_reuse_trials_measured_at_shared_levels(tmp_path, monkeypatch) -> None:
