@@ -35,3 +35,22 @@ coverage limitations are documented in [the corpus report](../gemma-calibration-
 
 Reuse this invocation to resume completed noise trials. The full sweep can take
 many hours. Logs are under `outputs/curated-sensitivity-160x256`.
+
+## Initial joint-model comparison
+
+The curated teacher dataset completed on 2026-11-17. Joint decoder KL is measured
+with clean embeddings on the same windows for all three existing exports.
+
+| Experiment | Original corpus, 16 windows | Curated nested 16 | Curated 160 |
+| --- | ---: | ---: | ---: |
+| 080 | 1.369504 | 0.764553 | 0.747412 |
+| 082 | 1.413458 | 0.756072 | 0.761960 |
+| 083 | 1.379170 | 0.770809 | 0.786708 |
+
+080 leads on the full curated sample. Its ranking relative to 082 reverses in
+the nested 16-window subset. On 160 windows, 083 minus 080 is +0.039297
+nats/token, with a paired window standard error of 0.007966. Absolute KL values
+across the original and curated corpora reflect their different token distributions.
+These windows provide within-corpus variation, not independent corpus replications.
+The [result JSON](../../Results/083/083-curated-160-joint-kl.json) retains every window.
+The 3,276-trial sensitivity sweep is running separately.
