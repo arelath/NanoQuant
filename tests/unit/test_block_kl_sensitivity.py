@@ -11,6 +11,34 @@ from torch import nn
 from nanoquant.infrastructure.io_utils import hash_file
 
 
+def test_local_curated_text_preserves_special_tokens_and_rejects_changed_bytes(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "calibration.txt"
+    text = "<bos>prose<eos>\n<start_of_turn>user\nquestion<end_of_turn>\n"
+    path.write_text(text, encoding="utf-8")
+    calls = []
+
+    class Tokenizer:
+        bos_token_id = 2
+        eos_token_id = 1
+
+        def encode(self, value, *, add_special_tokens, verbose):
+            calls.append((value, add_special_tokens, verbose))
+            return list(range(10, 34))
+
+    monkeypatch.setattr(sensitivity.AutoTokenizer, "from_pretrained", lambda *a, **k: Tokenizer())
+    args = sensitivity.make_parser(sensitivity.GEMMA_1B, dataset_reports=True).parse_args([
+        "--calibration-text", str(path), "--samples", "4", "--sequence-length", "5",
+    ])
+    digest = hash_file(path)
+    tokens, bos = sensitivity._load_tokens(args, tmp_path, digest)
+    assert calls == [(text, False, False)]
+    assert bos == 2 and tokens.shape == (4, 5) and tokens[:, 0].tolist() == [2] * 4
+    assert len(set(tokens[:, 1:].flatten().tolist())) == 16
+    path.write_text(text + "changed", encoding="utf-8")
+    with pytest.raises(ValueError, match="SHA-256"):
+        sensitivity._load_tokens(args, tmp_path, digest)
+
+
 def test_4b_defaults_use_distinct_model_and_dataset_reports() -> None:
     spec = sensitivity.GEMMA_4B
     args = sensitivity.make_parser(spec, dataset_reports=True).parse_args([])

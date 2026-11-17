@@ -110,6 +110,19 @@ def calibration_windows(
 
 
 def _load_tokens(args: argparse.Namespace, snapshot: Path, data_sha256: str) -> tuple[torch.Tensor, int]:
+    tokenizer = AutoTokenizer.from_pretrained(snapshot, local_files_only=True)
+    bos, eos = tokenizer.bos_token_id, tokenizer.eos_token_id
+    if bos is None or eos is None:
+        raise ValueError("the calibration tokenizer must define BOS and EOS")
+    text_path = getattr(args, "calibration_text", None)
+    if text_path is not None:
+        if hash_file(text_path) != data_sha256:
+            raise ValueError("calibration text SHA-256 differs from the requested input")
+        text = text_path.read_text(encoding="utf-8")
+        corpus = tokenizer.encode(text, add_special_tokens=False, verbose=False)
+        return calibration_windows(
+            corpus, bos=bos, samples=args.samples, length=args.sequence_length, seed=args.calibration_seed,
+        ), bos
     try:
         import pyarrow.parquet as pq
     except ModuleNotFoundError as exc:
@@ -121,10 +134,6 @@ def _load_tokens(args: argparse.Namespace, snapshot: Path, data_sha256: str) -> 
     ))
     if hash_file(path) != data_sha256:
         raise ValueError("calibration Parquet SHA-256 differs from the requested input")
-    tokenizer = AutoTokenizer.from_pretrained(snapshot, local_files_only=True)
-    bos, eos = tokenizer.bos_token_id, tokenizer.eos_token_id
-    if bos is None or eos is None:
-        raise ValueError("the calibration tokenizer must define BOS and EOS")
     corpus: list[int] = []
     with pq.ParquetFile(path) as parquet:
         for batch in parquet.iter_batches(columns=[args.text_column]):
@@ -142,7 +151,11 @@ def _teacher_dataset(
     args: argparse.Namespace, snapshot: Path, model: nn.Module, config: dict[str, object],
     root: Path, data_sha256: str, spec: ModelSpec = GEMMA_1B,
 ) -> KlTeacherDataset:
-    fingerprint = f"parquet-windows-v1:{data_sha256}:{args.text_column}:{args.calibration_seed}"
+    fingerprint = (
+        f"text-windows-v1:{data_sha256}:{args.calibration_seed}"
+        if getattr(args, "calibration_text", None) is not None
+        else f"parquet-windows-v1:{data_sha256}:{args.text_column}:{args.calibration_seed}"
+    )
     compatible = dict(
         source=spec.source, revision=spec.revision, model_hash=_model_config_hash(config),
         tokenizer_hash=hash_hf_tokenizer_snapshot(snapshot), model_dtype=spec.dtype,
@@ -457,7 +470,9 @@ def _run_trials(
 def make_parser(spec: ModelSpec, *, dataset_reports: bool) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=f"Build a weight-sensitivity dataset for pinned {spec.source}.")
     parser.add_argument("--snapshot", type=Path, help=f"local snapshot of {spec.source} at {spec.revision}")
-    parser.add_argument("--calibration-parquet", type=Path, help="override the pinned imatrix calibration file")
+    corpus = parser.add_mutually_exclusive_group()
+    corpus.add_argument("--calibration-parquet", type=Path, help="override the pinned imatrix calibration file")
+    corpus.add_argument("--calibration-text", type=Path, help="UTF-8 corpus, retaining native tokenizer special tokens")
     parser.add_argument("--text-column", default="content")
     parser.add_argument("--calibration-seed", type=int, default=0)
     parser.add_argument("--samples", type=int, default=16)
@@ -507,7 +522,8 @@ def main(
     args.teacher_dataset = args.teacher_dataset or (
         ROOT / "Datasets" / f"{spec.slug}-{spec.precision}-sensitivity-{args.samples}x{args.sequence_length}"
     )
-    data_sha256 = hash_file(args.calibration_parquet) if args.calibration_parquet else CALIBRATION_SHA256
+    calibration_path = args.calibration_text or args.calibration_parquet
+    data_sha256 = hash_file(calibration_path) if calibration_path else CALIBRATION_SHA256
     snapshot = args.snapshot or Path(snapshot_download(
         repo_id=spec.source, revision=spec.revision, local_files_only=args.local_files_only,
         allow_patterns=["*.json", "*.safetensors", "*.model", "*.txt"],
