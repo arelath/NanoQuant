@@ -200,6 +200,7 @@ class SweepSession:
         return score_model(
             self.model, self.dataset, device=self.protocol["device"],
             token_chunk_size=self.protocol["token_chunk_size"],
+            evaluation_batch_size=self.protocol.get("evaluation_batch_size", 1),
         )
 
 
@@ -234,13 +235,16 @@ def sweep_session(measurements: Path, *, local_files_only: bool) -> Iterator[Swe
             snapshot, torch_dtype=spec.dtype, attention_implementation=adapter.attention_implementation,
             local_files_only=True,
         ).to(device).eval()
-        clean = score_model(model, dataset, device=device, token_chunk_size=protocol["token_chunk_size"])
+        clean = score_model(
+            model, dataset, device=device, token_chunk_size=protocol["token_chunk_size"],
+            evaluation_batch_size=protocol.get("evaluation_batch_size", 1),
+        )
         yield SweepSession(measurements, protocol, curves, (low, high), model, adapter, dataset, clean)
 
 
 def measure_file(
     model: nn.Module, adapter, dataset, path: Path, sweep_targets: list[str], curves: Mapping, clean: Mapping,
-    *, device: str, token_chunk_size: int, log=print,
+    *, device: str, token_chunk_size: int, log=print, evaluation_batch_size: int = 1,
 ) -> dict:
     started = time.perf_counter()
     tensors = read_gguf(path)
@@ -258,7 +262,10 @@ def measure_file(
     for variant in VARIANTS:
         pairs = swaps[variant]
         with swapped(pairs):
-            score = score_model(model, dataset, device=device, token_chunk_size=token_chunk_size)
+            score = score_model(
+                model, dataset, device=device, token_chunk_size=token_chunk_size,
+                evaluation_batch_size=evaluation_batch_size,
+            )
         nll_change = score["nll_nats_per_token"] - clean["nll_nats_per_token"]
         variants[variant] = {
             "kl_nats_per_token": score["kl_nats_per_token"],
@@ -438,6 +445,7 @@ def main() -> int:
             measure_file(
                 session.model, session.adapter, session.dataset, path.resolve(), session.targets, session.curves,
                 clean, device=protocol["device"], token_chunk_size=protocol["token_chunk_size"],
+                evaluation_batch_size=protocol.get("evaluation_batch_size", 1),
             )
             for path in args.gguf
         ]

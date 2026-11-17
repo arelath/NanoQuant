@@ -304,6 +304,28 @@ def test_teacher_passes_resume_partial_work_and_match_full_scores(tmp_path, monk
     assert all(torch.equal(weight, model.original) for weight in model.parameters())
 
 
+def test_batched_scoring_preserves_window_records_and_has_a_separate_sweep(tmp_path, monkeypatch) -> None:
+    model, args, dataset = _tiny_sweep(tmp_path, monkeypatch, samples=5)
+    expected = sensitivity.score_model(model, dataset, device="cpu", token_chunk_size=2)
+    for batch in (2, 4):
+        observed = sensitivity.score_model(
+            model, dataset, device="cpu", token_chunk_size=2, evaluation_batch_size=batch,
+        )
+        assert observed == expected
+        assert len(observed["sequences"]) == 5 and observed["token_count"] == 15
+    sensitivity._sweep(args, {}, model, dataset)
+    single, = (args.teacher_dataset / "measurements").glob("*/results.json")
+    before = single.read_bytes()
+    args.evaluation_batch_size = 2
+    args.output = tmp_path / "batched-report"
+    sensitivity._sweep(args, {}, model, dataset)
+    all_sweeps = list((args.teacher_dataset / "measurements").glob("*/results.json"))
+    assert len(all_sweeps) == 2 and single.read_bytes() == before
+    batched = json.loads(next(path for path in all_sweeps if path != single).read_text(encoding="utf-8"))
+    assert batched["protocol"]["evaluation_batch_size"] == 2
+    assert "imported_trials" not in batched
+
+
 def test_added_error_levels_reuse_trials_measured_at_shared_levels(tmp_path, monkeypatch) -> None:
     model, args, dataset = _tiny_sweep(tmp_path, monkeypatch)
     sensitivity._sweep(args, {}, model, dataset)

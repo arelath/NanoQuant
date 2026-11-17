@@ -113,3 +113,24 @@ across the sweep. Full per-window records and aggregate scores matched the
 saved batch-one measurements exactly. Peak allocated CUDA memory was 6.45 GiB.
 The CPU regression also verifies uneven partitions, partial-pass interruption,
 resume and exact combined results.
+
+## Batched forwards
+
+The active run uses four resident teacher partitions with
+`--evaluation-batch-size 8`. A benchmark of batches 1, 2, 4 and 8 on a
+40-window resident partition found batch 8 fastest at approximately 1.04 seconds,
+versus 2.1–2.4 seconds for batch 1. Peak allocated CUDA memory was 9.2 GiB.
+Measurements covered the clean model and 1% and 20% perturbations.
+
+Batched FP32 matrix products introduce small rounding changes. The largest
+aggregate KL shift in these tests was about 3.1e-8 nats/token. Consequently
+batch 8 has a distinct measurement identity containing its evaluation batch size
+and scorer version. Earlier batch-one complete and partial measurements remain
+in their original checkpoint directory. The teacher dataset is shared.
+Pass boundaries align to forward batches so partitioning preserves the same
+batched forward shapes and window ordering.
+
+The active log is
+`outputs/curated-sensitivity-270m-160x256/sweep-batch8-four-pass.log`.
+Resume with the same 270M command, appending
+`--teacher-gpu-cache-gib 6 --teacher-passes 4 --evaluation-batch-size 8`.

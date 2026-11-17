@@ -12,6 +12,7 @@ from collections import defaultdict
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
+from itertools import islice
 from pathlib import Path
 
 import torch
@@ -226,20 +227,27 @@ def perturb_weights(
 
 @torch.inference_mode()
 def score_model(
-    model: nn.Module, dataset: KlTeacherDataset, *, device: str, token_chunk_size: int,
+    model: nn.Module, dataset: KlTeacherDataset, *, device: str, token_chunk_size: int, evaluation_batch_size: int = 1,
 ) -> dict:
+    if evaluation_batch_size < 1:
+        raise ValueError("evaluation batch size must be positive")
     sequences = []
-    for index, teacher in enumerate(teacher_batches(dataset, device)):
-        tokens = dataset.tokens[index : index + 1].to(device)
+    teachers = iter(teacher_batches(dataset, device))
+    for start in range(0, len(dataset.cache.batches), evaluation_batch_size):
+        batches = [teacher.to(device) for teacher in islice(teachers, evaluation_batch_size)]
+        teacher = batches[0] if len(batches) == 1 else torch.cat(batches, dim=0)
+        tokens = dataset.tokens[start : start + len(batches)].to(device)
         logits = model(input_ids=tokens, use_cache=False).logits
         # Treat rounded log probabilities as logits to renormalize them in FP32.
-        nll, kl, count = causal_kl_nll_from_logits(
-            teacher.to(device), logits, tokens, token_chunk_size=token_chunk_size,
-        )
-        if not math.isfinite(kl) or not math.isfinite(nll):
-            raise ValueError(f"model returned nonfinite KL or NLL for calibration window {index}")
-        sequences.append({"kl_nats_per_token": kl, "nll_nats_per_token": nll, "token_count": count})
-        del logits
+        for row in range(len(batches)):
+            nll, kl, count = causal_kl_nll_from_logits(
+                teacher[row : row + 1], logits[row : row + 1], tokens[row : row + 1],
+                token_chunk_size=token_chunk_size,
+            )
+            if not math.isfinite(kl) or not math.isfinite(nll):
+                raise ValueError(f"model returned nonfinite KL or NLL for calibration window {start + row}")
+            sequences.append({"kl_nats_per_token": kl, "nll_nats_per_token": nll, "token_count": count})
+        del logits, teacher, batches
     return combine_window_scores(sequences)
 
 
@@ -399,6 +407,9 @@ def _sweep(
         "levels": args.error_levels,
         "seeds": args.seeds,
     }
+    if getattr(args, "evaluation_batch_size", 1) != 1:
+        identity["evaluation_batch_size"] = args.evaluation_batch_size
+        identity["score_version"] = "per-window-kl-batched-forward-v1"
     sweep_id = hashlib.sha256(json.dumps(identity, sort_keys=True).encode("utf-8")).hexdigest()
     checkpoint = args.teacher_dataset / "measurements" / sweep_id / "results.json"
     output = args.output or checkpoint.parent / "reports"
@@ -416,6 +427,7 @@ def _sweep(
             if "clean_baseline" not in report:
                 report["clean_baseline"] = score_model(
                     model, dataset, device=args.device, token_chunk_size=args.token_chunk_size,
+                    evaluation_batch_size=getattr(args, "evaluation_batch_size", 1),
                 )
         if not checkpoint.exists():
             atomic_write_json(checkpoint, report, indent=None, sort_keys=False)
@@ -466,7 +478,10 @@ def _run_trials(
                     flush=True,
                 )
                 with perturb_weights(weights, level=level, seed=seed) as metrics:
-                    score = score_model(model, dataset, device=args.device, token_chunk_size=args.token_chunk_size)
+                    score = score_model(
+                        model, dataset, device=args.device, token_chunk_size=args.token_chunk_size,
+                        evaluation_batch_size=getattr(args, "evaluation_batch_size", 1),
+                    )
                 norm_sq = math.fsum(row["weight_squared_norm"] for row in metrics.values())
                 error_sq = math.fsum(row["error_squared_norm"] for row in metrics.values())
                 baseline_kl = report["clean_baseline"]["kl_nats_per_token"]
@@ -483,14 +498,17 @@ def _run_trial_passes(args, model, dataset, targets, report, checkpoint):
     """Keep each teacher partition resident while measuring every outstanding perturbation."""
     count = len(dataset.cache.batches)
     passes = args.teacher_passes
-    if not 1 < passes <= count:
-        raise ValueError("teacher pass count must be between two and the window count")
+    batch_size = getattr(args, "evaluation_batch_size", 1)
+    forward_batches = math.ceil(count / batch_size)
+    if not 1 < passes <= forward_batches:
+        raise ValueError("teacher pass count must be between two and the number of forward batches")
     completed = {(row["target"], row["requested_error"], row["seed"]) for row in report["trials"]}
     if len(completed) == report["expected_trials"]:
         return
     parts = []
     for index in range(passes):
-        start, stop = index * count // passes, (index + 1) * count // passes
+        start = (index * forward_batches // passes) * batch_size
+        stop = min(count, ((index + 1) * forward_batches // passes) * batch_size)
         pass_identity = {"protocol": report["protocol"], "windows": [start, stop], "passes": passes}
         path = checkpoint.parent / f"passes-{passes}" / f"{index:03d}.json"
         if path.exists():
@@ -569,6 +587,7 @@ def make_parser(spec: ModelSpec, *, dataset_reports: bool) -> argparse.ArgumentP
     )
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--token-chunk-size", type=int, default=32)
+    parser.add_argument("--evaluation-batch-size", type=int, default=1, help="windows per student forward pass")
     parser.add_argument("--teacher-dataset", type=Path, help="reusable teacher dataset directory")
     parser.add_argument("--teacher-only", action="store_true", help="capture or verify targets and exit")
     parser.add_argument("--teacher-gpu-cache-gib", type=float, default=0.0,
@@ -591,10 +610,12 @@ def main(
     args = parser.parse_args(arguments)
     if args.samples < 1 or args.sequence_length < 2 or args.token_chunk_size < 1:
         parser.error("samples and token chunk size must be positive and sequence length must be at least two")
+    if args.evaluation_batch_size < 1:
+        parser.error("evaluation batch size must be positive")
     if not math.isfinite(args.teacher_gpu_cache_gib) or args.teacher_gpu_cache_gib < 0:
         parser.error("teacher GPU cache size must be finite and nonnegative")
-    if args.teacher_passes < 1 or args.teacher_passes > args.samples:
-        parser.error("teacher passes must be between one and the number of samples")
+    if args.teacher_passes < 1 or args.teacher_passes > math.ceil(args.samples / args.evaluation_batch_size):
+        parser.error("teacher passes must be between one and the number of forward batches")
     if args.teacher_passes > 1 and args.teacher_gpu_cache_gib <= 0:
         parser.error("multiple teacher passes require a positive GPU cache budget")
     if any(not math.isfinite(level) or level < 0 for level in args.error_levels):
