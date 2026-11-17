@@ -482,6 +482,45 @@ def experiment_callable_main(module_name: str, runner: Callable[[], int]) -> Non
         raise SystemExit(runner())
 
 
+def run_kl_rank_option_experiment(
+    definition: ExperimentDefinition[CompressionQualityExperiment],
+    *,
+    launcher_path: str,
+    dataset_path: Path,
+) -> int:
+    """Bind the published KL options and materialize the source run's calibration tokens."""
+    from nanoquant.config.codec import config_hash, to_dict
+    from nanoquant.infrastructure.allocation_profile_dataset import load_allocation_profile_dataset
+    from nanoquant.infrastructure.hf_calibration_dataset import materialize_pinned_calibration
+
+    root = Path(launcher_path).resolve().parents[1]
+    dataset = load_allocation_profile_dataset(root / dataset_path)
+    config = definition.config
+    model = dataset.payload["model"]
+    if (model["source"], model["revision"]) != (config.model.source, config.model.revision):
+        raise ValueError("KL rank options belong to a different model")
+    if not dataset.payload.get("kl_rank_options"):
+        raise ValueError("allocation dataset has no KL options")
+    reconstruction = replace(config.allocation.reconstruction, allocation_dataset=dataset_path.as_posix(),
+                             allocation_dataset_key=dataset.reference.artifact_id)
+    config = replace(config, allocation=replace(config.allocation, reconstruction=reconstruction))
+    if sys.argv[1:] == ["--plan-only"]:
+        print(json.dumps(to_dict(config), indent=2))
+        return 0
+    if sys.argv[1:]:
+        raise ValueError("expected no arguments or --plan-only")
+    source = Path(dataset.payload["source_run"])
+    output = root / config.output.run_root / config.intent.name
+    if not (output / "calibration-input.json").exists():
+        receipt = json.loads((source / "calibration-input.json").read_text(encoding="utf-8"))
+        materialize_pinned_calibration(
+            source, output, sample_count=config.calibration.sample_count, sequence_length=config.model.sequence_length,
+            seed=config.dataset.selection_seed, preparation_id=config_hash(config),
+            tokenizer_identity=receipt["tokenizer_identity"],
+        )
+    return run_experiment(replace(definition, config=config), launcher_path=launcher_path)
+
+
 def experiment_pre_post_callable_main(
     module_name: str,
     launcher_path: str | Path,

@@ -131,16 +131,20 @@ def test_published_dataset_is_self_contained_and_decodes_as_allocation_evidence(
     prototype = {"complete": True, "full_rank": 32, "member_rows": [32], "points": points,
                  "curves": {"objective_nmse": monotone_curve([32, 64, 96], [.3, .1, .04])}}
     records = []
-    for i in range(130):
+    for i in range(3):
         record = copy.deepcopy(prototype)
         record["identity"] = {"unit_id": f"{i}:fixture", "source_weight_hashes": ["source"],
                               "logical_seed": i, "shape": [32, 32]}
         record["members"] = [{"block": {"index": i}, "path": "fixture"}]
         records.append(record)
-    dataset = publish(tmp_path, {"run_output": "retirable-source", "source_plan_id": "source-plan"},
+    unit_ids = [r["identity"]["unit_id"] for r in records]
+    identity = {"run_output": "retirable-source", "source_plan_id": "source-plan", "unit_ids": unit_ids}
+    with pytest.raises(ValueError, match="incomplete"):
+        publish(tmp_path, identity, records[:-1], {"model": {}}, {}, None)
+    dataset = publish(tmp_path, identity,
                       records, {"model": {"source": "fixture", "revision": "fixed"}}, {}, None)
     loaded = load_allocation_profile_dataset(tmp_path, dataset.reference.artifact_id)
-    assert len(loaded.payload["units"]) == 130
+    assert len(loaded.payload["units"]) == 3
     assert loaded.kl_profile is None
     entry = loaded.payload["units"][0]
     assert entry["staged_measurements"]["points"][-1]["stage_ranks"] == [32, 32, 32]

@@ -260,7 +260,10 @@ def measure_unit(case, root, parameters, scale_config, seed, identity_key, sourc
 
 
 def publish(root, identity, records, plan_payload, recipe, profile):
-    if len(records) != 130 or any(not r["complete"] for r in records):
+    expected_units = set(identity["unit_ids"])
+    measured_units = {record["identity"]["unit_id"] for record in records}
+    if (not expected_units or len(records) != len(expected_units) or measured_units != expected_units
+            or any(not r["complete"] for r in records)):
         raise ValueError("refusing to publish incomplete all-unit dataset")
     store = LocalArtifactStore(root / "artifacts")
     with store.begin_write("staged-rank-measurement-protocol") as writer:
@@ -317,7 +320,7 @@ def main():
     args = parser.parse_args()
     root, run = args.output.resolve(), args.run_output.resolve()
     audit = json.loads(args.audit.read_text())
-    if not audit.get("complete") or audit["completed_blocks"] != list(range(26)):
+    if not audit.get("complete"):
         raise ValueError("requires a complete source resident artifact audit")
     manifest = json.loads((run / "manifest.json").read_text())
     recipe = manifest["resolved_config"]["canonical_run_config"]
@@ -333,6 +336,9 @@ def main():
     artifacts = LocalArtifactStore(run / "artifacts", use_persistent_validation_cache=False)
     artifacts.validate(state["plan"]["artifact_id"])
     plan_payload = json.loads((artifacts.path_for(state["plan"]["artifact_id"]) / "plan.json").read_text())
+    blocks = [entry["block"]["index"] for entry in plan_payload["blocks"]]
+    if not blocks or blocks != list(range(len(blocks))) or audit["completed_blocks"] != blocks:
+        raise ValueError("source audit and plan must cover the same contiguous block inventory")
     source_hashes = {}
     for block in plan_payload["blocks"]:
         for layer in block["layers"]:
@@ -341,6 +347,8 @@ def main():
         for group in block["shared_input_groups"]:
             source_hashes[f"{block['block']['index']}:{group['name']}"] = [m["weight"]["content_hash"]
                                                                        for m in group["members"]]
+    if set(source_hashes) != {f"{block}:{owner}" for block in blocks for owner in OWNERS}:
+        raise ValueError("source must have the five supported physical owners in each block")
     profile = None if args.kl_profile is None else load_kl_budget_profile(args.kl_profile)
     model_digest = hash_file(args.model)
     validate_model_hash(source_hashes, model_digest)
@@ -352,6 +360,7 @@ def main():
                 "run_output": str(run), "manifest_sha256": hash_file(run / "manifest.json"),
                 "journal_sha256": hash_file(run / "state/journal.jsonl"), "audit_sha256": hash_file(args.audit),
                 "source_plan_id": state["plan"]["artifact_id"], "model_sha256": model_digest,
+                "unit_ids": sorted(source_hashes),
                 "model": str(args.model.resolve()), "seed": args.seed, "device": args.device,
                 "fractions": list(FRACTIONS), "admm": asdict(parameters), "scale_fit": scale_config,
                 "code_sha256": {str(path): hash_file(path) for path in code_paths},
@@ -372,9 +381,9 @@ def main():
             (root / child).mkdir(exist_ok=True)
         records = []
         with acquire_device_lease(args.device), _legacy_cuda_numerics():
-            for block in range(26):
-                _, cases = _load_cases(run, args.model, (block,), OWNERS, 26)
-                if len(cases) != 5:
+            for block in blocks:
+                _, cases = _load_cases(run, args.model, (block,), OWNERS, len(blocks))
+                if {case.name for case in cases} != set(OWNERS) or len(cases) != len(OWNERS):
                     raise ValueError("incomplete physical unit inventory")
                 for case in cases:
                     key = f"{case.block}:{case.name}"

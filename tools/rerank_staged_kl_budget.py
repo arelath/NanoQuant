@@ -54,6 +54,7 @@ def main() -> int:
     parser.add_argument("--publish-kl-options", type=Path, help="publish in-range options for the resident allocator")
     args = parser.parse_args()
     plan, attribution, measured = map(load_json, (args.plan, args.attribution, args.measured))
+    reference_label = plan.get("reference_label", "082")
     identity = measured["identity"]
     if (not measured["complete"] or hash_file(args.attribution) != identity["attribution_sha256"]
             or measured["protocol"] != attribution["protocol"]
@@ -137,17 +138,19 @@ def main() -> int:
     lines = [
         "# Staged rank allocation by isolated KL", "",
         "The model prices another rank increment by the isolated KL it is expected to save per factor byte.",
-        "Each projection starts at its measured 082 isolated KL. The saved rank curve supplies the relative",
-        "change in IMatrix-weighted squared error, which becomes relative KL through the sensitivity exponent.",
+        f"Each projection starts at its measured {reference_label} isolated KL.",
+        "The saved rank curve supplies the relative change in IMatrix-weighted squared error.",
+        "The sensitivity exponent converts that change to relative KL.",
         "A shared QKV option sums the three member KL values. The discrete solver picks one rank per unit.",
         "", f"Factor budget: {budget:,} bytes. Used: {solution['projection_bytes']:,} bytes.",
-        f"Measured 082 isolated sum: {before_kl:.8f}. Reranked estimate: {solution['kl']:.8f} nats/token.",
+        f"Measured {reference_label} isolated sum: {before_kl:.8f} nats/token.",
+        f"Reranked estimate: {solution['kl']:.8f} nats/token.",
         f"Greedy estimate: {report['greedy_kl']:.8f}. Solver relative gap: {solution['relative_gap']:.3g}.",
         f"The rerank places {at_cap} units at their rank caps and {outside_count} projections outside the",
         "sensitivity sweep's error range. Rank selection stays within the measured rank range.",
         f"Restricting every projection to the sensitivity sweep's range gives {in_range_solution['kl']:.8f} "
         f"nats/token using {in_range_solution['projection_bytes']:,} factor bytes.",
-        "", "| Unit | 082 rank | Reranked rank | KL saved | Byte change |",
+        "", f"| Unit | {reference_label} rank | Reranked rank | KL saved | Byte change |",
         "| --- | ---: | ---: | ---: | ---: |",
     ]
     for row in rows:

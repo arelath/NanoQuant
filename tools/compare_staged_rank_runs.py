@@ -16,11 +16,17 @@ from nanoquant.infrastructure.io_utils import atomic_write_json, atomic_write_te
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def load_result(number: str) -> tuple[Path, dict, str]:
+def load_result(
+    number: str, model_slug: str = "gemma-3-1b-it", *, pre_kd: bool = False,
+) -> tuple[Path, dict, str]:
     directory = ROOT / "Results" / number
-    (quality_path,) = directory.glob(f"{number}-*-compress-and-benchmark-*-quality.json")
+    (quality_path,) = [
+        path for path in directory.glob(f"{number}-*-compress-and-benchmark-*-quality.json")
+        if path.name.endswith("-pre-kd-quality.json") == pre_kd
+    ]
     quality = json.loads(quality_path.read_text(encoding="utf-8"))
-    path = directory / "gemma-3-1b-it-nanoquant.gguf"
+    suffix = "-pre-kd" if pre_kd else ""
+    path = directory / f"{model_slug}-nanoquant{suffix}.gguf"
     if quality["deployment_storage"]["gguf_bytes"] != path.stat().st_size:
         raise ValueError(f"{number}: quality report does not match the GGUF size")
     reader = GGUFReader(path)
@@ -36,6 +42,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("attribution", type=Path, help="attribution JSON identifying the common sensitivity teacher")
     parser.add_argument("experiments", nargs="+", type=int)
+    parser.add_argument("--model-slug", default="gemma-3-1b-it")
+    parser.add_argument("--pre-kd", type=int, action="append", default=[])
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     attribution = json.loads(args.attribution.read_text(encoding="utf-8"))
@@ -43,15 +51,20 @@ def main() -> int:
     if hash_file(sweep) != attribution["measurement_sha256"]:
         raise ValueError("the shared KL teacher sweep differs from the attribution")
     experiments = [f"{number:03}" for number in args.experiments]
-    runs = {number: load_result(number) for number in experiments}
+    runs = {number: load_result(number, args.model_slug, pre_kd=int(number) in args.pre_kd)
+            for number in experiments}
     first = runs[experiments[0]][1]
     embeddings = {embedding for _, _, embedding in runs.values()}
     if len(embeddings) != 1:
         raise ValueError("the exported embedding bytes differ across experiments")
-    # Dataset cache fingerprints can differ for the exact same token ids.
+    # Compare token IDs and candidate execution. MMLU may be absent on an older baseline.
     def benchmark_protocol(quality: dict) -> dict:
-        return {key: value for key, value in quality["protocol"].items() if key != "wikitext_fingerprint"}
+        return {key: value for key, value in quality["protocol"].items()
+                if key not in {"wikitext_fingerprint", "base_execution", "mmlu"}}
 
+    mmlu_protocols = [quality["protocol"]["mmlu"] for _, quality, _ in runs.values() if "mmlu" in quality["protocol"]]
+    if any(protocol != mmlu_protocols[0] for protocol in mmlu_protocols):
+        raise ValueError("MMLU benchmark protocols differ")
     for number, (_, quality, _) in runs.items():
         if (
             (quality["model"]["source"], quality["model"]["revision"])
@@ -67,6 +80,7 @@ def main() -> int:
             kl = measure_file(
                 session.model, session.adapter, session.dataset, path, session.targets, session.curves, session.clean,
                 device=session.protocol["device"], token_chunk_size=session.protocol["token_chunk_size"],
+                evaluation_batch_size=session.protocol.get("evaluation_batch_size", 1),
                 log=lambda message: print(message, flush=True),
             )
             tasks = {row["task_name"]: row["frozen"] for row in quality["comparison"]["tasks"]}
@@ -80,11 +94,13 @@ def main() -> int:
             "teacher": session.protocol["teacher"], "sweep_sha256": attribution["measurement_sha256"],
             "clean": session.clean, "embedding_sha256": embeddings.pop(),
             "benchmark_protocol": benchmark_protocol(first),
+            "mmlu_protocol": mmlu_protocols[0] if mmlu_protocols else None,
             "experiments": scores,
         }
+    dtype = report["teacher"]["model_dtype"].removeprefix("torch.")
     lines = [
         "# Joint KL and benchmark comparison", "",
-        f"Full-vocabulary KL above the clean FP16 reference on {report['clean']['token_count']:,} token positions.",
+        f"Full-vocabulary KL above the clean {dtype} reference on {report['clean']['token_count']:,} token positions.",
         "Decoder KL swaps all decoder projections together with clean embeddings. Full model KL also swaps the",
         "byte-identical Q8_0 embeddings shared across these exports.", "",
         "| Experiment | Joint decoder KL | Full model KL | WikiText-2 PPL | Six-task mean | MMLU | GGUF bytes |",
@@ -93,8 +109,10 @@ def main() -> int:
     for number, row in scores.items():
         gguf = row["gguf"]
         decoder, whole = (gguf["variants"][key]["kl_above_control"] for key in ("projections", "all weights"))
-        lines.append(f"| {number} | {decoder:.6f} | {whole:.6f} | {row['wikitext_perplexity']:.4f} | "
-                     f"{row['six_task_accuracy']:.2%} | {row['tasks']['mmlu']:.2%} | {gguf['bytes']:,} |")
+        label = f"{number} pre-KD" if int(number) in args.pre_kd else number
+        mmlu = f"{row['tasks']['mmlu']:.2%}" if "mmlu" in row["tasks"] else "—"
+        lines.append(f"| {label} | {decoder:.6f} | {whole:.6f} | {row['wikitext_perplexity']:.4f} | "
+                     f"{row['six_task_accuracy']:.2%} | {mmlu} | {gguf['bytes']:,} |")
     lines.extend(["", "| Task | " + " | ".join(experiments) + " |",
                   "| --- | " + " | ".join(["---:"] * len(experiments)) + " |"])
     for task in first["protocol"]["task_names"]:
