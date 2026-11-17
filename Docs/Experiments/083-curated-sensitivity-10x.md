@@ -53,4 +53,26 @@ nats/token, with a paired window standard error of 0.007966. Absolute KL values
 across the original and curated corpora reflect their different token distributions.
 These windows provide within-corpus variation, not independent corpus replications.
 The [result JSON](../../Results/083/083-curated-160-joint-kl.json) retains every window.
-The 3,276-trial sensitivity sweep is running separately.
+The 1B sweep was stopped at the user's request after 418 of 3,276 completed
+trials. Its checkpoints and teacher dataset are preserved for resume.
+
+## 270M first
+
+The active replacement uses pinned `google/gemma-3-270m-it` revision
+`ac82b4e820549b854eebf28ce6dedaf9fdfa17b3`, the same curated text,
+160 × 256 windows and seeds 0, 1, 2. Omit the 35% noise level. The five levels
+1%, 2.5%, 5%, 10%, 20% give 1,890 trials across 126 individual projections.
+Use the existing FP32 sensitivity recipe for 270M, which avoids its FP16
+overflow and BF16 small-error rounding floor.
+
+The 270M tokenizer recognizes the native Gemma control tokens and produces
+1,000,294 corpus tokens. Input validation is retained under
+`outputs/curated-sensitivity-270m-160x256/input-validation.json`.
+
+```powershell
+.\.venv\Scripts\python.exe tools/build_gemma_3_270m_sensitivity_dataset.py --calibration-text Datasets/gemma-3-imatrix-calibration-v1/calibration.txt --samples 160 --sequence-length 256 --calibration-seed 0 --teacher-dataset Datasets/gemma-3-270m-it-fp32-sensitivity-curated-160x256 --error-levels 0.01 0.025 0.05 0.10 0.20 --seeds 0 1 2 --local-files-only
+```
+
+Logs are under `outputs/curated-sensitivity-270m-160x256`. After the sweep,
+the queued sampling analysis compares nested 16 versus all 160 curated
+windows and the retained complete 270M FP32 sensitivity sweep.
