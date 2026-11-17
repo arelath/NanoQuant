@@ -76,3 +76,25 @@ The 270M tokenizer recognizes the native Gemma control tokens and produces
 Logs are under `outputs/curated-sensitivity-270m-160x256`. After the sweep,
 the queued sampling analysis compares nested 16 versus all 160 curated
 windows and the retained complete 270M FP32 sensitivity sweep.
+
+## Scoring performance
+
+The teacher cache occupies 20 GiB in host memory. The initial scorer transfers
+each 128 MiB window to CUDA for every trial. An eight-window profile measured
+0.462 seconds of forward computation, 0.366 seconds of teacher transfer and
+0.155 seconds of KL reduction.
+
+The active 270M sweep now uses `--teacher-gpu-cache-gib 6`. This retains
+48 windows in CUDA memory and pins the remaining 112 host windows. A copy
+stream prefetches one window while the current window executes. Pinned host
+copies require approximately 14 GiB of additional host memory during setup.
+Peak allocated CUDA memory in the validation was approximately 7.7 GiB.
+
+Three paired full-160-window perturbed-model scores took 8.70/6.75,
+15.96/8.83 and 16.56/11.31 seconds before/after caching. Total scoring time
+fell 35%, a 1.53× speedup across these pairs. Every per-window KL, NLL and
+aggregate score matched exactly, including the saved clean baseline. The
+run resumes the existing measurement identity after 21 committed trials.
+Detailed timing receipts are under
+`outputs/curated-sensitivity-270m-160x256/scoring-benchmark-repeat.json`.
+The active log is `sweep-gpu-cache.log` in that same directory.

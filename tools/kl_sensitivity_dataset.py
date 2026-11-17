@@ -17,6 +17,7 @@ from pathlib import Path
 import torch
 from fit_kl_sensitivity import fit_dataset, plot_measurements, plot_targets, require_plotting
 from huggingface_hub import hf_hub_download, snapshot_download
+from sensitivity_teacher_cache import cache_teacher_targets, teacher_batches
 from torch import nn
 from transformers.models.auto.tokenization_auto import AutoTokenizer
 
@@ -228,7 +229,7 @@ def score_model(
     model: nn.Module, dataset: KlTeacherDataset, *, device: str, token_chunk_size: int,
 ) -> dict:
     sequences = []
-    for index, teacher in enumerate(dataset.cache.batches):
+    for index, teacher in enumerate(teacher_batches(dataset, device)):
         tokens = dataset.tokens[index : index + 1].to(device)
         logits = model(input_ids=tokens, use_cache=False).logits
         # Treat rounded log probabilities as logits to renormalize them in FP32.
@@ -494,6 +495,8 @@ def make_parser(spec: ModelSpec, *, dataset_reports: bool) -> argparse.ArgumentP
     parser.add_argument("--token-chunk-size", type=int, default=32)
     parser.add_argument("--teacher-dataset", type=Path, help="reusable teacher dataset directory")
     parser.add_argument("--teacher-only", action="store_true", help="capture or verify targets and exit")
+    parser.add_argument("--teacher-gpu-cache-gib", type=float, default=0.0,
+                        help="cache this many GiB of teacher targets on CUDA and prefetch pinned host batches")
     parser.set_defaults(output=None)
     if not dataset_reports:
         parser.add_argument("--output", type=Path, default=ROOT / "Results" / f"{spec.slug}-weight-sensitivity")
@@ -510,6 +513,8 @@ def main(
     args = parser.parse_args(arguments)
     if args.samples < 1 or args.sequence_length < 2 or args.token_chunk_size < 1:
         parser.error("samples and token chunk size must be positive and sequence length must be at least two")
+    if not math.isfinite(args.teacher_gpu_cache_gib) or args.teacher_gpu_cache_gib < 0:
+        parser.error("teacher GPU cache size must be finite and nonnegative")
     if any(not math.isfinite(level) or level < 0 for level in args.error_levels):
         parser.error("error levels must be finite and nonnegative")
     if args.blocks is not None and any(not 0 <= index < spec.blocks for index in args.blocks):
@@ -548,6 +553,12 @@ def main(
         ).to(args.device).eval()
         dataset = _teacher_dataset(args, snapshot, model, config, args.teacher_dataset, data_sha256, spec)
         if not args.teacher_only:
+            dataset = cache_teacher_targets(dataset, args.device, int(args.teacher_gpu_cache_gib * 2**30))
+            if args.teacher_gpu_cache_gib:
+                resident = sum(batch.is_cuda for batch in dataset.cache.batches)
+                pinned = sum(batch.is_pinned() for batch in dataset.cache.batches)
+                print(f"Teacher targets: {resident} CUDA batches, {pinned} pinned-host batches with prefetch",
+                      flush=True)
             if dataset_reports:
                 output = _sweep(args, config, model, dataset, spec)
             else:
