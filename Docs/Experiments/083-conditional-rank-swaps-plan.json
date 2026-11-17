@@ -1,0 +1,40 @@
+{
+  "comparison": "Results/083/083-quality-and-joint-kl-comparison.json",
+  "isolated": "Results/083/083-isolated-vs-joint-kl.json",
+  "attribution": "Results/083/083-imatrix-error-attribution.json",
+  "sources": {
+    "080": "Results/080/gemma-3-1b-it-nanoquant.gguf",
+    "083": "Results/083/gemma-3-1b-it-nanoquant.gguf"
+  },
+  "task_samples": 256,
+  "mmlu_per_subject": 4,
+  "sample_seed": 83,
+  "swaps": {
+    "early-down": [
+      "0:mlp.down_proj",
+      "6:self_attn.o_proj",
+      "10:self_attn.attn_qkv",
+      "11:mlp.gate_proj",
+      "23:self_attn.attn_qkv"
+    ],
+    "early-up": [
+      "0:mlp.up_proj",
+      "14:mlp.gate_proj",
+      "21:self_attn.o_proj",
+      "22:self_attn.o_proj",
+      "24:self_attn.attn_qkv"
+    ],
+    "early-attention": [
+      "0:self_attn.attn_qkv",
+      "4:self_attn.o_proj",
+      "18:mlp.gate_proj",
+      "24:self_attn.o_proj"
+    ],
+    "later-control": [
+      "13:self_attn.o_proj",
+      "15:self_attn.o_proj",
+      "16:self_attn.o_proj",
+      "23:mlp.gate_proj"
+    ]
+  }
+}
