@@ -12,7 +12,10 @@ from audit_byte_budget_allocation import integer_allocate
 from probe_byte_budget_allocation import Option, allocate
 
 from nanoquant.domain.planning import factor_bit_cost
-from nanoquant.infrastructure.allocation_profile_dataset import load_allocation_profile_dataset
+from nanoquant.infrastructure.allocation_profile_dataset import (
+    load_allocation_profile_dataset,
+    publish_allocation_profile_dataset,
+)
 from nanoquant.infrastructure.io_utils import atomic_write_json, atomic_write_text, hash_file
 
 
@@ -47,6 +50,8 @@ def main() -> int:
     parser.add_argument("measured", type=Path, help="isolated KL validation JSON")
     parser.add_argument("--dataset", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True, help="output Markdown report")
+    parser.add_argument("--publish-in-range-dataset", type=Path, help="publish the in-range choice as a pinned dataset")
+    parser.add_argument("--publish-kl-options", type=Path, help="publish in-range options for the resident allocator")
     args = parser.parse_args()
     plan, attribution, measured = map(load_json, (args.plan, args.attribution, args.measured))
     identity = measured["identity"]
@@ -151,6 +156,37 @@ def main() -> int:
                      f"{row['kl_saved']:+.8f} | {after['bytes'] - before['bytes']:+,} |")
     atomic_write_json(args.output.with_suffix(".json"), report)
     atomic_write_text(args.output, "\n".join([*lines, ""]))
+    if args.publish_in_range_dataset is not None:
+        pinned = publish_allocation_profile_dataset(args.publish_in_range_dataset, {
+            **dataset.payload,
+            "pinned_rank_plan": {
+                "objective": "measured-isolated-kl-anchored-in-range",
+                "source_dataset": dataset.reference.artifact_id,
+                "allocation_sha256": hash_file(args.output.with_suffix(".json")),
+                "budget_bits": budget * 8,
+                "spent_bits": in_range_solution["projection_bytes"] * 8,
+                "ranks": {key: int(rank) for key, rank in in_range_solution["choices"].items()},
+            },
+        }, dataset.kl_profile)
+        print(f"Published pinned rank plan: {pinned.reference.artifact_id}", flush=True)
+    if args.publish_kl_options is not None:
+        kl_dataset = publish_allocation_profile_dataset(args.publish_kl_options, {
+            **dataset.payload,
+            "kl_rank_source": {
+                "method": "measured-isolated-kl-anchored-in-range",
+                "allocation_sha256": hash_file(args.output.with_suffix(".json")),
+                "source_dataset": dataset.reference.artifact_id,
+            },
+            "kl_rank_options": {
+                key: {
+                    option.label: {member: score["kl"] for member, score in
+                                   prices[key][int(option.label)]["components"].items()}
+                    for option in choices
+                }
+                for key, choices in in_range_options.items()
+            },
+        }, dataset.kl_profile)
+        print(f"Published KL rank options: {kl_dataset.reference.artifact_id}", flush=True)
     print("\n".join(lines[2:10]), flush=True)
     return 0
 

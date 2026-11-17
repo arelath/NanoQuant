@@ -174,11 +174,13 @@ from nanoquant.domain.outliers import reconstruct_with_outliers
 from nanoquant.domain.planning import (
     RankResponseSegment,
     ReconstructionAllocationUnit,
+    allocate_pinned_reconstruction_ranks,
     allocate_reconstruction_rank_budget,
     apply_reconstruction_rank_trust_region,
     factor_bit_cost,
     outlier_bit_cost,
     rebase_rank_response,
+    reconstruction_rank_cost,
 )
 from nanoquant.domain.profiling import NULL_RECORDER, PhaseRecorder
 from nanoquant.domain.residual_factorization import factorize_residual_admm
@@ -213,6 +215,7 @@ from nanoquant.infrastructure.device_memory import (
     release_cached_host_memory,
     sample_device_memory,
 )
+from nanoquant.infrastructure.discrete_allocation import DiscreteOption, solve_discrete_allocation
 from nanoquant.infrastructure.environment import capture_environment
 from nanoquant.infrastructure.hf_language_model import load_causal_language_model
 from nanoquant.infrastructure.imatrix import file_sha256, resolve_imatrix_axes
@@ -248,7 +251,9 @@ from nanoquant.infrastructure.tuning_checkpoint import (
 from nanoquant.ports.event_sink import EventSink, LayerCommittedPayload, emit_layer_committed
 from nanoquant.ports.model_adapter import ModelAdapter
 
-RESIDENT_ALGORITHM_VERSION = 71
+RESIDENT_ALGORITHM_VERSION = 73
+_DATASET_RANK_SOURCES = {RankResponseSource.DATASET, RankResponseSource.PINNED_DATASET, RankResponseSource.KL_DATASET}
+_DATASET_RECONSTRUCTION_SOURCES = {RankResponseSource.MEASURED, *_DATASET_RANK_SOURCES}
 # Preserve existing run identities when imported output weights are disabled.
 _PARITY_RESIDENT_ALGORITHM_VERSION = 68
 _CALIBRATION_ALGORITHM_VERSION = 1
@@ -2885,10 +2890,15 @@ def _run_post_refit_covariance_refinement(
 
 def _resident_config_hash(request: ResidentQuantizationRequest) -> str:
     adaptive_memory = request.memory_plan is not None and request.memory_plan.mode == "adaptive"
-    if RESIDENT_ALGORITHM_VERSION != 71:
+    if (
+        RESIDENT_ALGORITHM_VERSION != 73
+        or request.reconstruction_rank_planning.response_source is RankResponseSource.KL_DATASET
+    ):
         algorithm_version = RESIDENT_ALGORITHM_VERSION
+    elif request.reconstruction_rank_planning.response_source is RankResponseSource.PINNED_DATASET:
+        algorithm_version = 72
     elif request.imatrix is not None:
-        algorithm_version = RESIDENT_ALGORITHM_VERSION if request.imatrix.use_rows else 70
+        algorithm_version = 71 if request.imatrix.use_rows else 70
     elif request.factorized_tuning_optimizer == FactorizedOptimizerConfig():
         algorithm_version = _PARITY_RESIDENT_ALGORITHM_VERSION
     else:
@@ -3904,7 +3914,7 @@ def _run_reconstruction_rank_probes(
     kl_sensitivities: tuple[tuple[str, float], ...] = (),
 ) -> tuple[ArtifactRef, tuple[ReconstructionRankDecision, ...]]:
     reconstruction = request.reconstruction_rank_planning
-    if reconstruction.response_source is RankResponseSource.DATASET:
+    if reconstruction.response_source in _DATASET_RANK_SOURCES:
         return _allocate_from_profile_dataset(
             request, baseline_plan, probe_plan, artifacts, events, kl_sensitivities,
         )
@@ -4255,6 +4265,23 @@ def _allocate_from_profile_dataset(
     donor_units = {entry["evidence"]["unit_id"]: entry for entry in dataset.payload["units"]}
     if set(units) != set(donor_units):
         raise ValueError("allocation profile dataset must cover the current physical units exactly")
+    pin_plan = dataset.payload.get("pinned_rank_plan")
+    kl_plan = dataset.payload.get("kl_rank_options")
+    pinned = reconstruction.response_source is RankResponseSource.PINNED_DATASET
+    kl_selected = reconstruction.response_source is RankResponseSource.KL_DATASET
+    if pinned != (pin_plan is not None):
+        raise ValueError("explicit pinned-dataset mode must match a dataset with pinned ranks")
+    if kl_selected != (kl_plan is not None):
+        raise ValueError("KL dataset mode requires a dataset with per-rank KL options")
+    if kl_selected and (not isinstance(kl_plan, dict) or kl_plan.keys() != units.keys()):
+        raise ValueError("KL rank options must cover every physical unit exactly")
+    pinned_ranks: dict[str, int] | None = None
+    if pinned:
+        if not isinstance(pin_plan, dict) or not isinstance(pin_plan.get("ranks"), dict):
+            raise ValueError("invalid pinned rank plan")
+        pinned_ranks = pin_plan["ranks"]
+        if pinned_ranks.keys() != units.keys() or any(type(rank) is not int for rank in pinned_ranks.values()):
+            raise ValueError("pinned ranks must cover every physical unit exactly")
     imported = artifacts.import_validated(LocalArtifactStore(path / "artifacts"), dataset.reference.artifact_id)
     reference = ArtifactRef(imported.artifact_type, imported.artifact_id, imported.schema_version)
     predicted: dict[str, tuple[ArtifactRef, _RankProbeEvidence]] = {}
@@ -4275,6 +4302,14 @@ def _allocate_from_profile_dataset(
         ):
             raise ValueError(f"allocation profile dataset physical unit differs: {unit_id}")
         curve = evidence.response_curve
+        planned_ranks = (
+            [pinned_ranks[unit_id]] if pinned_ranks is not None
+            else [int(rank) for rank in kl_plan[unit_id]] if kl_plan is not None else []
+        )
+        lower = math.ceil(evidence.baseline_rank * curve.calibrated_rank_floor_fraction - 1e-9)
+        upper = math.floor(evidence.baseline_rank * curve.calibrated_rank_ceiling_fraction + 1e-9)
+        if any(not lower <= rank <= upper for rank in planned_ranks):
+            raise ValueError(f"dataset rank option outside measured coverage: {unit_id}")
         ratio, segments = rebase_rank_response(
             evidence.baseline_rank,
             unit.rank,
@@ -4322,6 +4357,10 @@ def _allocate_from_profile_dataset(
         "extrapolated_units": extrapolated,
         "baseline_error_ratios": ratios,
     }
+    if pinned:
+        metadata["pinned_rank_plan"] = pin_plan
+    if kl_selected:
+        metadata["kl_rank_source"] = dataset.payload.get("kl_rank_source")
     cast(Any, events).emit(
         "resident-quantization",
         "info",
@@ -4339,6 +4378,8 @@ def _allocate_from_profile_dataset(
         events,
         kl_sensitivities,
         metadata,
+        pinned_ranks=pinned_ranks,
+        kl_rank_options=kl_plan,
     )
 
 
@@ -4352,6 +4393,9 @@ def _allocate_reconstruction_rank_profile(
     events: EventSink,
     kl_sensitivities: tuple[tuple[str, float], ...],
     allocation_dataset: dict[str, Any] | None = None,
+    *,
+    pinned_ranks: dict[str, int] | None = None,
+    kl_rank_options: dict[str, dict[str, dict[str, float]]] | None = None,
 ) -> tuple[ArtifactRef, tuple[ReconstructionRankDecision, ...]]:
     reconstruction = request.reconstruction_rank_planning
     units = _rank_probe_units(baseline_plan)
@@ -4455,7 +4499,7 @@ def _allocate_reconstruction_rank_profile(
                     else evidence.weighted_normalized_squared_error
                     if (
                         kl_sensitivity
-                        or reconstruction.response_source in {RankResponseSource.MEASURED, RankResponseSource.DATASET}
+                        or reconstruction.response_source in _DATASET_RECONSTRUCTION_SOURCES
                     )
                     else evidence.raw_squared_error
                 ),
@@ -4487,16 +4531,56 @@ def _allocate_reconstruction_rank_profile(
         for group in block.shared_input_groups
         for member in group.members
     )
-    allocated = allocate_reconstruction_rank_budget(
-        tuple(allocation_units),
-        math.floor(original_elements * request.target_bpw),
-        multiple=request.rank_multiple,
-        floor_fraction=request.rank_floor_fraction,
-        ceiling_fraction=request.rank_ceiling_fraction,
-        sensitivity_strength=reconstruction.sensitivity_strength,
-        protected_rank_floor_fraction=reconstruction.protected_rank_floor_fraction,
-        target_protected_error_reduction_fraction=(reconstruction.target_protected_error_reduction_fraction),
-    )
+    target_bits = math.floor(original_elements * request.target_bpw)
+    if pinned_ranks is not None or kl_rank_options is not None:
+        if kl_sensitivity or any(unit.protected for unit in allocation_units):
+            raise ValueError("dataset rank choices are incompatible with additional KL weighting or rank protection")
+    if kl_rank_options is not None:
+        menus: dict[str, list[DiscreteOption]] = {}
+        for unit_id, scores_by_rank in kl_rank_options.items():
+            evidence = persisted[unit_id][1]
+            members = {f"{layer.block.index}:{layer.path}" for layer in evidence.members}
+            allocation_unit = next(unit for unit in allocation_units if unit.unit_id == unit_id)
+            options = []
+            for rank, scores in scores_by_rank.items():
+                if scores.keys() != members or any(not math.isfinite(kl) or kl < 0 for kl in scores.values()):
+                    raise ValueError(f"invalid per-member KL at rank {rank} for {unit_id}")
+                cost = reconstruction_rank_cost(allocation_unit, int(rank), request.rank_multiple)
+                if cost % 8:
+                    raise ValueError(f"KL rank option cost is not byte aligned for {unit_id}")
+                options.append(DiscreteOption(rank, cost // 8, math.fsum(scores.values())))
+            menus[unit_id] = options
+        solution = solve_discrete_allocation(menus, target_bits // 8)
+        allocated = allocate_pinned_reconstruction_ranks(
+            tuple(allocation_units), {key: int(option.label) for key, option in solution.choices.items()},
+            target_bits, multiple=request.rank_multiple,
+        )
+        assert allocation_dataset is not None
+        allocation_dataset["kl_solution"] = {
+            "estimated_sum": solution.error, "lower_bound": solution.lower_bound,
+            "relative_gap": solution.relative_gap, "status": solution.status, "message": solution.message,
+        }
+        cast(Any, events).emit("resident-quantization", "info", "allocation_dataset.kl_solved",
+                               **allocation_dataset["kl_solution"])
+    elif pinned_ranks is not None:
+        allocated = allocate_pinned_reconstruction_ranks(
+            tuple(allocation_units), pinned_ranks, target_bits,
+            multiple=request.rank_multiple,
+        )
+        pin_plan = (allocation_dataset or {})["pinned_rank_plan"]
+        if pin_plan["budget_bits"] != target_bits or pin_plan["spent_bits"] != allocated.spent_bits:
+            raise ValueError("pinned rank plan factor costs differ from the resident budget")
+    else:
+        allocated = allocate_reconstruction_rank_budget(
+            tuple(allocation_units),
+            target_bits,
+            multiple=request.rank_multiple,
+            floor_fraction=request.rank_floor_fraction,
+            ceiling_fraction=request.rank_ceiling_fraction,
+            sensitivity_strength=reconstruction.sensitivity_strength,
+            protected_rank_floor_fraction=reconstruction.protected_rank_floor_fraction,
+            target_protected_error_reduction_fraction=(reconstruction.target_protected_error_reduction_fraction),
+        )
     rank_trust_region: dict[str, Any] | None = None
     if reconstruction.rank_trust_reference_run is not None:
         reference_path = Path(reconstruction.rank_trust_reference_run)
@@ -4594,12 +4678,14 @@ def _allocate_reconstruction_rank_profile(
                 else "weighted_normalized_squared_error"
                 if (
                     kl_sensitivity
-                    or reconstruction.response_source in {RankResponseSource.MEASURED, RankResponseSource.DATASET}
+                    or reconstruction.response_source in _DATASET_RECONSTRUCTION_SOURCES
                 )
                 else "raw_squared_error"
             ),
             "allocation_objective": (
-                "unit_kl_proportional_score"
+                "additive_projection_kl" if kl_rank_options is not None
+                else "pinned_external_rank_plan" if pinned_ranks is not None
+                else "unit_kl_proportional_score"
                 if measured_kl_objective
                 else "tempered_reconstruction_proxy"
             ),
@@ -5405,7 +5491,7 @@ def _validate_resident_request(request: ResidentQuantizationRequest) -> None:
         raise ValueError("a non-default KL sensitivity granularity requires KL-calibrated planning")
     reconstruction = request.reconstruction_rank_planning
     trust_reference = reconstruction.rank_trust_reference_run
-    dataset_selected = reconstruction.response_source is RankResponseSource.DATASET
+    dataset_selected = reconstruction.response_source in _DATASET_RANK_SOURCES
     if dataset_selected != bool(reconstruction.allocation_dataset) or dataset_selected != bool(
         reconstruction.allocation_dataset_key
     ):

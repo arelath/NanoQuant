@@ -90,6 +90,8 @@ class RankResponseSource(StringEnum):
     CONFIGURED = "configured"
     MEASURED = "measured"
     DATASET = "dataset"
+    PINNED_DATASET = "pinned_dataset"
+    KL_DATASET = "kl_dataset"
 
 
 class KlAllocationObjective(StringEnum):

@@ -148,6 +148,41 @@ def _unit_factor_cost(unit: ReconstructionAllocationUnit, rank: int) -> BitCost:
                            residual_stages=unit.residual_stages, rank_alignment=unit.stage_rank_alignment)
 
 
+def reconstruction_rank_cost(unit: ReconstructionAllocationUnit, rank: int, multiple: int) -> int:
+    """Return exact charged bits for an aligned choice in a resolved unit."""
+    floor = math.ceil(unit.baseline_rank * unit.calibrated_rank_floor_fraction / multiple) * multiple
+    cap = min(
+        math.floor(unit.baseline_rank * unit.calibrated_rank_ceiling_fraction / multiple) * multiple,
+        unit.maximum_rank or min(unit.out_features, unit.in_features),
+    )
+    if type(rank) is not int or rank % multiple or not floor <= rank <= cap:
+        raise ValueError(f"rank is outside aligned bounds for {unit.unit_id}")
+    return _unit_factor_cost(unit, rank).total + unit.fixed_bits
+
+
+def allocate_pinned_reconstruction_ranks(
+    units: tuple[ReconstructionAllocationUnit, ...],
+    ranks: dict[str, int],
+    target_bits: int,
+    *,
+    multiple: int,
+) -> ReconstructionAllocationResult:
+    """Validate and price a complete external choice of aligned ranks."""
+    if set(ranks) != {unit.unit_id for unit in units}:
+        raise ValueError("pinned ranks must cover every physical unit exactly")
+    decisions = []
+    spent = 0
+    for unit in units:
+        rank = ranks[unit.unit_id]
+        spent += reconstruction_rank_cost(unit, rank, multiple)
+        decisions.append(ReconstructionAllocationDecision(
+            unit.unit_id, unit.baseline_rank, rank, unit.baseline_squared_error, predicted_squared_error(unit, rank),
+        ))
+    if spent > target_bits:
+        raise ValueError("pinned ranks exceed the exact factor budget")
+    return ReconstructionAllocationResult(tuple(decisions), spent, target_bits - spent, 0.0, 0.0)
+
+
 def allocate_reconstruction_rank_budget(
     units: tuple[ReconstructionAllocationUnit, ...],
     target_bits: int,

@@ -411,7 +411,10 @@ def validate(config: RunConfig, phase: ValidationPhase = ValidationPhase.PRE_RES
         "allocation.reconstruction.importance.protected_edge_block_count",
         "must not be negative",
     )
-    dataset_selected = reconstruction.response_source is RankResponseSource.DATASET
+    allocation_dataset_sources = {
+        RankResponseSource.DATASET, RankResponseSource.PINNED_DATASET, RankResponseSource.KL_DATASET,
+    }
+    dataset_selected = reconstruction.response_source in allocation_dataset_sources
     require(
         (dataset_selected and reconstruction.enabled and bool(reconstruction.allocation_dataset)
          and bool(reconstruction.allocation_dataset_key))
@@ -466,11 +469,21 @@ def validate(config: RunConfig, phase: ValidationPhase = ValidationPhase.PRE_RES
             "must be unit_frobenius or calibration_weighted",
         )
         require(
-            reconstruction.probe_admm is not None or reconstruction.response_source is RankResponseSource.DATASET,
+            reconstruction.probe_admm is not None or dataset_selected,
             "CFG060",
             "allocation.reconstruction.probe_admm",
             "an explicit full probe protocol is required",
         )
+        if reconstruction.response_source in {RankResponseSource.PINNED_DATASET, RankResponseSource.KL_DATASET}:
+            require(
+                config.allocation.strategy is AllocationStrategy.RECONSTRUCTION_AWARE
+                and not reconstruction.protect_sensitive_units
+                and not config.allocation.retry.enabled
+                and not config.allocation.maximum_rank_layer_patterns
+                and not config.allocation.layer_budget_multipliers,
+                "CFG202", "allocation.reconstruction.response_source",
+                "dataset rank choices require reconstruction-aware planning without promotions, protection or retries",
+            )
         if reconstruction.response_source is RankResponseSource.CONFIGURED:
             require(
                 bool(reconstruction.response_curves),

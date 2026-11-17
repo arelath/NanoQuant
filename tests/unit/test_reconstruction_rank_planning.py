@@ -24,10 +24,12 @@ from nanoquant.domain.planning import (
     ReconstructionAllocationDecision,
     ReconstructionAllocationResult,
     ReconstructionAllocationUnit,
+    allocate_pinned_reconstruction_ranks,
     allocate_reconstruction_rank_budget,
     apply_reconstruction_rank_trust_region,
     integrated_rank_response,
     predicted_squared_error,
+    reconstruction_rank_cost,
 )
 from nanoquant.resident_quantization import _measured_response_curve, _RankProbePoint, _reconstruction_importance_policy
 
@@ -55,6 +57,25 @@ def test_piecewise_response_is_continuous_and_uses_squared_error_slope() -> None
     assert integrated_rank_response(100, 150, 0.5, segments) == pytest.approx(0.25)
     assert predicted_squared_error(unit, 100) == 4.0
     assert predicted_squared_error(unit, 150) == pytest.approx(4.0 * math.exp(-0.5))
+
+
+def test_external_rank_choices_require_exact_coverage_alignment_and_budget() -> None:
+    unit = ReconstructionAllocationUnit(
+        "0:self_attn.attn_qkv", 128, 64, 64, 4.0, 1.0, False, 0.5, 2.0,
+        (RankResponseSegment(2.0, 0.01),), maximum_rank=128, residual_stages=True, stage_rank_alignment=32,
+    )
+    cost = reconstruction_rank_cost(unit, 96, 32)
+    selected = allocate_pinned_reconstruction_ranks((unit,), {unit.unit_id: 96}, cost + 64, multiple=32)
+    assert selected.decisions[0].planned_rank == 96
+    assert selected.spent_bits == cost
+    assert selected.remaining_bits == 64
+    with pytest.raises(ValueError, match="cover every physical unit"):
+        allocate_pinned_reconstruction_ranks((unit,), {}, cost, multiple=32)
+    for bad_rank in (31, 65, 160, True):
+        with pytest.raises(ValueError, match="outside aligned bounds"):
+            allocate_pinned_reconstruction_ranks((unit,), {unit.unit_id: bad_rank}, cost, multiple=32)
+    with pytest.raises(ValueError, match="exceed the exact factor budget"):
+        allocate_pinned_reconstruction_ranks((unit,), {unit.unit_id: 96}, cost - 1, multiple=32)
 
 
 def test_allocator_protects_sensitive_units_and_never_exceeds_exact_budget() -> None:

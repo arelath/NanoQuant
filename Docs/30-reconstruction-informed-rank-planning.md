@@ -14,6 +14,24 @@ launcher skips new control/probe measurement and computes a fresh budgeted plan 
 Dataset identities and extrapolation are recorded explicitly. This is an additional planning mode alongside the
 exact current-run and exact donor-probe contracts described below. See [planning datasets](../Datasets/README.md).
 
+The `pinned_dataset` response source consumes an externally solved rank plan
+from the same content-addressed allocation dataset contract. A
+`pinned_rank_plan` object contains `ranks` keyed by physical unit, `budget_bits`
+and `spent_bits`. The resident planner checks the model and source weight
+identities, full unit coverage, measured and configured rank bounds, rank
+alignment, and both bit totals. Rank retries, promotions and protection
+policies are disabled in this mode. Solver provenance may accompany the
+plan. The reconstruction curves remain available for diagnostic error estimates.
+
+Use `kl_dataset` to let the resident allocator choose ranks by marginal KL per
+byte. A `kl_rank_options` object maps each physical unit to candidate ranks
+and the estimated KL of each member projection at that rank. The allocator
+sums member KL for shared QKV and charges the shared factors once. It solves
+the discrete allocation under the exact factor budget and records the objective
+and solver gap with the plan. Install the optional `allocation` dependencies.
+The dataset can restrict the options to the sensitivity sweep's measured range
+with `tools/rerank_staged_kl_budget.py --publish-kl-options`.
+
 **Scope:** Resolve the selected independent-layer/shared-input-group topology, add a resumable full-model
 reconstruction-probe pass before fitting, then use measured per-unit errors and calibrated rank-response models to
 produce one immutable, fixed-budget rank plan. The initial target is pinned `google/gemma-3-1b-it`.
