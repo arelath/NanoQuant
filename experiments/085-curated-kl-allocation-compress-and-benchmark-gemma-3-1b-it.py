@@ -33,6 +33,10 @@ DECODER_WEIGHTS = 697_761_792
 
 CONFIG = config_delta(
     REFERENCE,
+    factorization=config_delta(
+        REFERENCE.factorization,
+        admm=config_delta(REFERENCE.factorization.admm, outer_iterations=800, penalty_schedule="linear"),
+    ),
     allocation=config_delta(
         REFERENCE.allocation,
         target_bpw=DECODER_FACTOR_BITS / DECODER_WEIGHTS,
@@ -78,8 +82,8 @@ EXPERIMENT = define_compression_quality_experiment(
     ExperimentIdentity(
         number=85,
         name="curated-kl-allocation-compress-and-benchmark-gemma-3-1b-it",
-        purpose="Repeat 083 at the same factor budget using curated KL sensitivity.",
-        hypothesis="Curated KL pricing reduces joint decoder KL at the same budget and improves benchmark quality.",
+        purpose="Repeat the curated KL allocation with an 800-iteration linear ADMM penalty ramp.",
+        hypothesis="Linear 800 improves joint decoder KL and benchmark quality at the same ranks as cubic 600.",
         baseline=BaselineRef.experiment(ExperimentRef(
             83, "in-range-kl-allocation-compress-and-benchmark-gemma-3-1b-it",
         )),

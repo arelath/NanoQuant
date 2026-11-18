@@ -3,13 +3,16 @@
 Repeat 083 using the completed 160-window curated FP16 sensitivity dataset.
 Test whether the new sensitivity curves and isolated KL anchors yield lower
 joint decoder KL and better benchmark quality at the same factor budget.
-083 is the primary comparison. 080 and 082 provide the uniform two-stage
-and reconstruction-error allocation references.
+The original 085 used 600 ADMM iterations with a cubic penalty ramp. The
+current run tests a linear ramp over 800 outer iterations per residual stage,
+with the same two inner power iterations, regularization of 0.03 and two
+scale-fit passes. Compare it with the original 085 to isolate the schedule
+change. 080, 082 and 083 remain allocation references.
 
 The decoder factor budget is **219,368,448 bytes**, or 2.51511 bits per
 decoder projection weight, including signs and scales. Use 083's pinned
 checkpoint, Unsloth IMatrix, shared QKV, and 256 × 2,048 compression tokens.
-Keep ADMM, layer and block tuning, refit, and Q8_0 embeddings matched. Global
+Keep layer and block tuning, refit, and Q8_0 embeddings matched. Global
 distillation and rank retries are disabled. The staged rank-response dataset
 was produced from 080, whose compression tokens have the same fingerprint
 as those used by 082 and 083.
