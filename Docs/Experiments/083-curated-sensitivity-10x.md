@@ -134,3 +134,31 @@ The active log is
 `outputs/curated-sensitivity-270m-160x256/sweep-batch8-four-pass.log`.
 Resume with the same 270M command, appending
 `--teacher-gpu-cache-gib 6 --teacher-passes 4 --evaluation-batch-size 8`.
+
+## Batched Gemma 3 1B sweep
+
+The 1B run reuses its pinned FP16 teacher and the same 160 curated windows.
+Use four 40-window teacher partitions with 5 GiB of CUDA cache and eight
+windows per student forward. Keep all six error levels and all three seeds.
+The batch-eight scorer recomputes the clean baseline and writes a separate
+measurement identity. The earlier 418 batch-one trials remain in their
+original checkpoint.
+
+A paired 40-window GPU benchmark measured the clean model, a 1% attention
+perturbation, and a 20% MLP perturbation. Resident batches of eight took
+0.94–0.96 seconds per score against 2.92–4.49 seconds with batch one and
+pageable teacher targets. Aggregate scoring time fell by a factor of 3.78.
+Peak CUDA allocation was 9.18 GiB, and WDDM shared usage peaked at 82 MiB
+during the benchmark. The largest raw aggregate KL change from batching was
+`4.46e-5` nats/token for the clean forward, so each sweep uses its own
+matching clean score.
+
+The [benchmark receipt](../../outputs/curated-sensitivity-160x256/1b-performance-benchmark.json)
+and [run log](../../outputs/curated-sensitivity-160x256/sweep-batch8-four-pass.log)
+are under `outputs/curated-sensitivity-160x256`. Each pass records its own
+progress under `measurements/<sweep-id>/passes-4`. The combined dataset and its
+fitted curves are written after all four passes finish.
+
+```powershell
+.\.venv\Scripts\python.exe tools/build_gemma_3_1b_sensitivity_dataset.py --calibration-text Datasets/gemma-3-imatrix-calibration-v1/calibration.txt --samples 160 --sequence-length 256 --calibration-seed 0 --teacher-dataset Datasets/gemma-3-1b-it-fp16-sensitivity-curated-160x256 --error-levels 0.01 0.025 0.05 0.10 0.20 0.35 --seeds 0 1 2 --teacher-gpu-cache-gib 5 --teacher-passes 4 --evaluation-batch-size 8 --local-files-only
+```
