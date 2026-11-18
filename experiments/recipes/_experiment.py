@@ -513,10 +513,32 @@ def run_kl_rank_option_experiment(
     output = root / config.output.run_root / config.intent.name
     if not (output / "calibration-input.json").exists():
         receipt = json.loads((source / "calibration-input.json").read_text(encoding="utf-8"))
+        tokenizer_identity = receipt.get("tokenizer_identity")
+        if not tokenizer_identity:
+            # Older receipts predate tokenizer identity. Resolve the pinned tokenizer
+            # while keeping the validated calibration tensors from the source run.
+            from huggingface_hub import snapshot_download
+
+            from nanoquant.infrastructure.hf_task_evaluation import (
+                TOKENIZER_BEHAVIOR_FILES,
+                hash_hf_tokenizer_snapshot,
+            )
+
+            tokenizer_source = config.model.tokenizer_source or config.model.source
+            tokenizer_revision = config.model.tokenizer_revision or config.model.revision
+            snapshot = Path(tokenizer_source)
+            if not snapshot.is_dir():
+                snapshot = Path(snapshot_download(
+                    repo_id=tokenizer_source,
+                    revision=tokenizer_revision,
+                    allow_patterns=list(TOKENIZER_BEHAVIOR_FILES),
+                    local_files_only=definition.workflow.local_files_only,
+                ))
+            tokenizer_identity = hash_hf_tokenizer_snapshot(snapshot)
         materialize_pinned_calibration(
             source, output, sample_count=config.calibration.sample_count, sequence_length=config.model.sequence_length,
             seed=config.dataset.selection_seed, preparation_id=config_hash(config),
-            tokenizer_identity=receipt["tokenizer_identity"],
+            tokenizer_identity=tokenizer_identity,
         )
     return run_experiment(replace(definition, config=config), launcher_path=launcher_path)
 
