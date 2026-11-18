@@ -10,6 +10,19 @@ successor block and journal record commit. V1 readers remain supported, and froz
 generations. The workspace-level shared store, reader leases, selected pins, migration, and store-aware GC described
 below are later rollout phases.
 
+The resident runner stages checkpoint files on one background I/O thread. It writes the complete CPU teacher
+activations during layer tuning and the compressed activations during block finalization. The coordinating
+thread waits for both files before publishing the activation generation, block result and journal record.
+Continuous execution reloads the same committed boundary used on resume. A failed write leaves the preceding
+generation available.
+
+During factorized layer tuning the same worker saves each epoch's detached CPU snapshot while the next epoch
+trains. The runner drains the prior save before taking another snapshot and before committing the layer.
+Explicit per-epoch interruption and cooldown boundaries wait for the individual save. Profiles report worker
+wall time in `io.activation_checkpoint_write_seconds` and `io.epoch_checkpoint_write_seconds`. The corresponding
+`io.activation_checkpoint_wait_seconds` and `io.epoch_checkpoint_wait_seconds` counters measure time spent
+waiting on the coordinating thread.
+
 ## 1. Problem statement
 
 NanoQuant must preserve enough state to resume expensive work, reproduce accepted results, and audit parity without

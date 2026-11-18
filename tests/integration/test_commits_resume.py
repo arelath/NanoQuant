@@ -1,5 +1,6 @@
 import hashlib
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -250,10 +251,12 @@ def test_post_commit_failure_artifacts_equal_uninterrupted_controls(tmp_path: Pa
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("background", [False, True])
 def test_commit_io_profile_preserves_layer_block_and_activation_artifact_identities(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     dtype: torch.dtype,
+    background: bool,
 ) -> None:
     layer_result, _plan, frozen_block, losses = _objects()
     identity = CommitIdentity("config", "model", "plan")
@@ -273,9 +276,18 @@ def test_commit_io_profile_preserves_layer_block_and_activation_artifact_identit
         control_block = commit_block(
             BlockId(0), (layer_result,), frozen_block, losses, teacher, compressed, 0, control_store, identity
         )
-    profiled_block = commit_block(
-        BlockId(0), (layer_result,), frozen_block, losses, teacher, compressed, 0, profiled_store, identity
-    )
+    if background:
+        with profiled_store.begin_write("activation-generation") as writer, ThreadPoolExecutor(max_workers=1) as pool:
+            for name, tensor in (("teacher_outputs", teacher), ("compressed_outputs", compressed)):
+                pool.submit(commits.write_activation_member, writer, name, tensor).result()
+            profiled_block = commit_block(
+                BlockId(0), (layer_result,), frozen_block, losses, teacher, compressed, 0, profiled_store, identity,
+                staged_activations=writer,
+            )
+    else:
+        profiled_block = commit_block(
+            BlockId(0), (layer_result,), frozen_block, losses, teacher, compressed, 0, profiled_store, identity
+        )
 
     assert profiled_layer.reference.artifact_id == control_layer.reference.artifact_id
     assert profiled_block.reference.artifact_id == control_block.reference.artifact_id

@@ -43,7 +43,9 @@ class LocalArtifactWriter:
         self._committed = False
         self._written_members: dict[str, tuple[ArtifactFile, os.stat_result]] = {}
 
-    def write_hashed_member(self, name: str, chunks: Iterable[bytes | memoryview]) -> None:
+    def write_hashed_member(
+        self, name: str, chunks: Iterable[bytes | memoryview], *, recorder: PhaseRecorder | None = None
+    ) -> None:
         """Write and hash a staged member from the same buffers before publication."""
         if (
             self._committed
@@ -54,13 +56,14 @@ class LocalArtifactWriter:
             raise ValueError("expected a new staged member filename")
         digest = hashlib.sha256()
         path = self.path / name
-        with self.store.recorder.phase("write"), path.open("xb", buffering=0) as stream:
+        phases = self.store.recorder if recorder is None else recorder
+        with phases.phase("write"), path.open("xb", buffering=0) as stream:
             for chunk in chunks:
                 if stream.write(chunk) != len(chunk):
                     raise OSError(f"short write for artifact member {name}")
-                with self.store.recorder.phase("hash"):
+                with phases.phase("hash"):
                     digest.update(chunk)
-            with self.store.recorder.phase("sync"):
+            with phases.phase("sync"):
                 os.fsync(stream.fileno())
         stat = path.stat()
         self._written_members[name] = (ArtifactFile(name, stat.st_size, digest.hexdigest()), stat)

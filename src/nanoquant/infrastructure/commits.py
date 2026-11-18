@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -21,11 +23,16 @@ from nanoquant.domain.models import (
     LayerResult,
     SharedInputGroupResult,
 )
+from nanoquant.domain.profiling import NULL_RECORDER, PhaseRecorder
 from nanoquant.infrastructure.safetensors_io import SAFETENSORS, activation_tensor_chunks
 
-from .artifacts import LocalArtifactStore
+from .artifacts import LocalArtifactStore, LocalArtifactWriter
 
 FailureInjector = Callable[[str], None]
+_ACTIVATION_FILENAMES = {
+    "teacher_outputs": "teacher-activations.safetensors",
+    "compressed_outputs": "compressed-activations.safetensors",
+}
 
 
 def _no_failure(point: str) -> None:
@@ -246,6 +253,25 @@ def commit_shared_input_group(
     return CommittedSharedInputGroup(reference, result)
 
 
+def write_activation_member(
+    writer: LocalArtifactWriter, name: str, tensor: torch.Tensor, *, recorder: PhaseRecorder = NULL_RECORDER
+) -> float:
+    """Stage one immutable CPU activation. Only the owner thread publishes the writer."""
+    started = time.perf_counter()
+    if tensor.device.type != "cpu":
+        raise ValueError("activation checkpoint staging requires a CPU tensor")
+    filename = _ACTIVATION_FILENAMES[name]
+    with recorder.phase("activation_prepare", tensor=name):
+        cpu_tensor = tensor.detach().contiguous()
+        chunks = activation_tensor_chunks(name, cpu_tensor)
+    if chunks is None:
+        with recorder.phase("write"):
+            SAFETENSORS.save({name: cpu_tensor}, writer.path / filename)
+    else:
+        writer.write_hashed_member(filename, chunks, recorder=recorder)
+    return time.perf_counter() - started
+
+
 def commit_block(
     block: BlockId,
     layers: tuple[LayerResult, ...],
@@ -263,6 +289,7 @@ def commit_block(
     peak_host_bytes: int = 0,
     warnings: tuple[str, ...] = (),
     shared_input_groups: tuple[SharedInputGroupResult, ...] = (),
+    staged_activations: LocalArtifactWriter | None = None,
 ) -> CommittedBlock:
     if teacher_outputs.shape != compressed_outputs.shape:
         raise ValueError("teacher/compressed activation shapes differ")
@@ -278,20 +305,20 @@ def commit_block(
             "compressed_dtype": str(compressed_outputs.dtype).removeprefix("torch."),
         }
         encoded_activation_core = json.dumps(activation_core, sort_keys=True, indent=2)
-    with artifacts.begin_write(ArtifactTypes.ACTIVATION_GENERATION) as writer:
-        for name, tensor, filename in (
-            ("teacher_outputs", teacher_outputs, "teacher-activations.safetensors"),
-            ("compressed_outputs", compressed_outputs, "compressed-activations.safetensors"),
-        ):
-            with artifacts.recorder.phase("activation_prepare", tensor=name):
-                cpu_tensor = tensor.detach().cpu().contiguous()
-                chunks = activation_tensor_chunks(name, cpu_tensor)
-            if chunks is None:
-                with artifacts.recorder.phase("write"):
-                    SAFETENSORS.save({name: cpu_tensor}, writer.path / filename)
-            else:
-                writer.write_hashed_member(filename, chunks)
-            del chunks, cpu_tensor
+    if staged_activations is not None and (
+        staged_activations.store is not artifacts
+        or staged_activations.artifact_type != ArtifactTypes.ACTIVATION_GENERATION
+        or not all((staged_activations.path / name).is_file() for name in _ACTIVATION_FILENAMES.values())
+    ):
+        raise ValueError("incomplete or mismatched staged block activation generation")
+    activation_transaction = (
+        artifacts.begin_write(ArtifactTypes.ACTIVATION_GENERATION)
+        if staged_activations is None else nullcontext(staged_activations)
+    )
+    with activation_transaction as writer:
+        if staged_activations is None:
+            for name, tensor in (("teacher_outputs", teacher_outputs), ("compressed_outputs", compressed_outputs)):
+                write_activation_member(writer, name, tensor.detach().cpu(), recorder=artifacts.recorder)
         with artifacts.recorder.phase("write"):
             (writer.path / "activation-generation.json").write_text(encoded_activation_core, encoding="utf-8")
         activation_descriptor = writer.commit()

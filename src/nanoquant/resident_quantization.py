@@ -9,6 +9,7 @@ import shutil
 import statistics
 import time
 from collections.abc import Callable, Iterator
+from concurrent.futures import Executor, ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
 from dataclasses import field as dataclass_field
@@ -77,7 +78,6 @@ from nanoquant.application.tuning import (
     EpochLossMode,
     FactorizedTuningLearningRates,
     TuningRequest,
-    TuningResumeState,
     post_block_refit,
     tune_factorized,
     tune_non_factorized,
@@ -207,6 +207,7 @@ from nanoquant.infrastructure.commits import (
     load_committed_layer,
     load_committed_shared_input_group,
     retire_block_activations,
+    write_activation_member,
 )
 from nanoquant.infrastructure.device_lease import acquire_device_lease
 from nanoquant.infrastructure.device_memory import (
@@ -243,10 +244,11 @@ from nanoquant.infrastructure.runtime_export import load_frozen_run_planning_ref
 from nanoquant.infrastructure.safetensors_source import SafetensorsModelSource
 from nanoquant.infrastructure.tensor_store import LocalTensorStore
 from nanoquant.infrastructure.tuning_checkpoint import (
+    StoredTuningCheckpoint,
     TuningCheckpointIdentity,
     active_tuning_checkpoint,
     clear_tuning_checkpoint,
-    save_tuning_checkpoint,
+    overlap_tuning_checkpoints,
 )
 from nanoquant.ports.event_sink import EventSink, LayerCommittedPayload, emit_layer_committed
 from nanoquant.ports.model_adapter import ModelAdapter
@@ -1950,21 +1952,15 @@ def _artifact_bytes(root: Path) -> int:
 
 def _ensure_block_commit_disk_capacity(
     request: ResidentQuantizationRequest,
-    teacher_outputs: torch.Tensor,
-    compressed_outputs: torch.Tensor,
+    *remaining_activations: torch.Tensor,
 ) -> tuple[int, int, int]:
     """Recheck live disk pressure before writing a resumable activation generation."""
 
     if request.memory_plan is None:
         return 0, 0, 0
-    # The content-addressed writer must temporarily coexist with the current
-    # generation. Only these two tensors are additional at this boundary; add
-    # bounded metadata/filesystem slack as a largest-write guard.
-    required = (
-        teacher_outputs.numel() * teacher_outputs.element_size()
-        + compressed_outputs.numel() * compressed_outputs.element_size()
-        + 64 * 2**20
-    )
+    # The new files coexist with the current generation. Already staged members
+    # are reflected in free space; reserve only outstanding writes and metadata.
+    required = sum(tensor.numel() * tensor.element_size() for tensor in remaining_activations) + 64 * 2**20
     free = int(shutil.disk_usage(request.output.resolve()).free)
     reserve = request.memory_plan.envelope.temporary_disk_reserve_bytes
     safe_capacity = max(0, free - reserve)
@@ -6285,12 +6281,13 @@ class ResidentQuantizationPipeline:
     run_id: str
 
     def run(self) -> ResidentQuantizationResult:
-        return _execute_resident_quantization_pipeline(
-            self.request,
-            self.events,
-            self.recorder,
-            self.run_id,
-        )
+        # Stop the worker before releasing any still-leased staging directory on failure.
+        with ExitStack() as block_staging, ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="nanoquant-checkpoint",
+        ) as checkpoint_io:
+            return _execute_resident_quantization_pipeline(
+                self.request, self.events, self.recorder, self.run_id, checkpoint_io, block_staging,
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -7090,6 +7087,8 @@ def _execute_resident_quantization_pipeline(
     events: EventSink,
     recorder: PhaseRecorder,
     run_id: str,
+    checkpoint_io: Executor,
+    block_staging: ExitStack,
 ) -> ResidentQuantizationResult:
     """Quantize all decoder linears while the source model remains resident on one device."""
     started = time.perf_counter()
@@ -7864,6 +7863,29 @@ def _execute_resident_quantization_pipeline(
             )
         working_block = block_work.working_block
         teacher_outputs = block_work.teacher_outputs
+        # The teacher stream is complete on CPU and read-only for the rest of the block.
+        # Check room for both members before the first write, then for remaining bytes at propagation.
+        with _profile_block_phase(recorder, block_index, "stage_teacher_checkpoint"):
+            required_disk_bytes, free_disk_bytes, reserved_disk_bytes = _ensure_block_commit_disk_capacity(
+                request, teacher_outputs, teacher_outputs,
+            )
+            if request.memory_plan is not None:
+                cast(Any, events).emit(
+                    "memory",
+                    "info",
+                    "memory.disk_commit_admitted",
+                    block=block_index,
+                    plan_revision=request.memory_plan.revision,
+                    required_additional_bytes=required_disk_bytes,
+                    free_bytes=free_disk_bytes,
+                    reserve_bytes=reserved_disk_bytes,
+                    safe_capacity_bytes=max(0, free_disk_bytes - reserved_disk_bytes),
+                )
+            activation_writer = block_staging.enter_context(artifacts.begin_write(ArtifactTypes.ACTIVATION_GENERATION))
+            teacher_write = checkpoint_io.submit(
+                write_activation_member, activation_writer, "teacher_outputs", teacher_outputs,
+            )
+            block_staging.callback(teacher_write.result)
         block_output_importance = block_work.output_importance
         loss_recorder = block_work.loss_recorder
         block_target_weighted_mean_square = loss_recorder.target_weighted_mean_square
@@ -8559,16 +8581,14 @@ def _execute_resident_quantization_pipeline(
                         ),
                     )
 
-                    def checkpoint_sink(
-                        state: TuningResumeState,
+                    def checkpoint_committed(
+                        stored: StoredTuningCheckpoint,
                         *,
-                        checkpoint_identity: TuningCheckpointIdentity = tuning_checkpoint_identity,
                         checkpoint_block: int = block_index,
                         checkpoint_layer: str = layer_plan.layer.path,
                         checkpoint_target_power: float = block_target_weighted_mean_square,
                     ) -> None:
                         nonlocal new_factorized_tuning_epoch_commits
-                        stored = save_tuning_checkpoint(request.output, state, checkpoint_identity)
                         new_factorized_tuning_epoch_commits += 1
                         events.emit(
                             "resident-quantization",
@@ -8620,7 +8640,12 @@ def _execute_resident_quantization_pipeline(
                             block_index,
                             layer_plan.layer.path,
                             "factorized_tuning",
-                        ):
+                        ), overlap_tuning_checkpoints(
+                            checkpoint_io, request.output, tuning_checkpoint_identity, checkpoint_committed,
+                            recorder=recorder,
+                            wait_each_epoch=(request.interrupt_after_factorized_tuning_epoch_commits is not None
+                                             or request.factorized_tuning_epoch_cooldown_seconds > 0),
+                        ) as (checkpoint_sink, drain_epoch_checkpoint):
                             tuning = tune_factorized(
                                 working_block,
                                 layer_plan.layer.path,
@@ -8643,6 +8668,8 @@ def _execute_resident_quantization_pipeline(
                                     optimizer_backend=_factorized_optimizer_backend(
                                         request, block_index, layer_plan.layer.path,
                                     ),
+                                    # Release the previous CPU snapshot before allocating the next one.
+                                    epoch_observer=lambda _epoch, _loss: drain_epoch_checkpoint(),
                                 ),
                                 tuning_forward,
                                 tuning_recorder,
@@ -9003,6 +9030,16 @@ def _execute_resident_quantization_pipeline(
                             None,
                         ),
                     ).detach()
+        with _profile_block_phase(recorder, block_index, "stage_compressed_checkpoint"):
+            wait_started = time.perf_counter()
+            teacher_write_seconds = teacher_write.result()
+            recorder.add("io.activation_checkpoint_wait_seconds", time.perf_counter() - wait_started, member="teacher")
+            recorder.add("io.activation_checkpoint_write_seconds", teacher_write_seconds, member="teacher")
+            _ensure_block_commit_disk_capacity(request, compressed_outputs)
+            compressed_write = checkpoint_io.submit(
+                write_activation_member, activation_writer, "compressed_outputs", compressed_outputs,
+            )
+            block_staging.callback(compressed_write.result)
         with _profile_block_phase(recorder, block_index, "finalize"):
             loss_recorder.record_final_frozen_pre_kd(
                 _weighted_mse(compressed_outputs, teacher_outputs, block_output_importance)
@@ -9030,23 +9067,13 @@ def _execute_resident_quantization_pipeline(
             retention=request.activation_retention,
         ):
             with _profile_block_phase(recorder, block_index, "commit"):
-                required_disk_bytes, free_disk_bytes, reserved_disk_bytes = _ensure_block_commit_disk_capacity(
-                    request,
-                    teacher_outputs,
-                    compressed_outputs,
+                wait_started = time.perf_counter()
+                compressed_write_seconds = compressed_write.result()
+                recorder.add(
+                    "io.activation_checkpoint_wait_seconds", time.perf_counter() - wait_started, member="compressed",
                 )
-                if request.memory_plan is not None:
-                    cast(Any, events).emit(
-                        "memory",
-                        "info",
-                        "memory.disk_commit_admitted",
-                        block=block_index,
-                        plan_revision=request.memory_plan.revision,
-                        required_additional_bytes=required_disk_bytes,
-                        free_bytes=free_disk_bytes,
-                        reserve_bytes=reserved_disk_bytes,
-                        safe_capacity_bytes=max(0, free_disk_bytes - reserved_disk_bytes),
-                    )
+                recorder.add("io.activation_checkpoint_write_seconds", compressed_write_seconds, member="compressed")
+                _ensure_block_commit_disk_capacity(request)
                 committed = commit_block(
                     block_plan.block,
                     tuple(layer_results),
@@ -9066,7 +9093,9 @@ def _execute_resident_quantization_pipeline(
                         ("tuning_disabled",) if request.scale_fit.enabled else ("scale_fit_disabled", "tuning_disabled")
                     ),
                     shared_input_groups=tuple(group_results),
+                    staged_activations=activation_writer,
                 )
+                block_staging.close()
                 block_journal_record = journal.append(
                     "block", block_index, None, committed.reference.artifact_id, identity
                 )

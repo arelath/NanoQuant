@@ -7,7 +7,11 @@ import math
 import os
 import shutil
 import tempfile
+import time
 import uuid
+from collections.abc import Callable, Iterator
+from concurrent.futures import Executor, Future
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -18,6 +22,7 @@ from nanoquant.application.tuning import (
     TuningResumeState,
 )
 from nanoquant.config.codec import from_dict, to_dict
+from nanoquant.domain.profiling import NULL_RECORDER, PhaseRecorder
 from nanoquant.infrastructure.io_utils import safe_replace
 from nanoquant.infrastructure.safetensors_io import SAFETENSORS
 
@@ -37,6 +42,47 @@ class StoredTuningCheckpoint:
     identity: TuningCheckpointIdentity
     state: TuningResumeState
     generation: str
+
+
+@contextmanager
+def overlap_tuning_checkpoints(
+    executor: Executor,
+    run_output: Path,
+    identity: TuningCheckpointIdentity,
+    on_commit: Callable[[StoredTuningCheckpoint], None],
+    *,
+    wait_each_epoch: bool = False,
+    recorder: PhaseRecorder = NULL_RECORDER,
+) -> Iterator[tuple[Callable[[TuningResumeState], None], Callable[[], None]]]:
+    """Persist owned CPU snapshots in order and acknowledge durable saves on the training thread."""
+    pending: Future[tuple[StoredTuningCheckpoint, float]] | None = None
+
+    def save(state: TuningResumeState) -> tuple[StoredTuningCheckpoint, float]:
+        started = time.perf_counter()
+        stored = save_tuning_checkpoint(run_output, state, identity)
+        return stored, time.perf_counter() - started
+
+    def drain() -> None:
+        nonlocal pending
+        if pending is not None:
+            finished, pending = pending, None
+            wait_started = time.perf_counter()
+            stored, write_seconds = finished.result()
+            recorder.add("io.epoch_checkpoint_wait_seconds", time.perf_counter() - wait_started)
+            recorder.add("io.epoch_checkpoint_write_seconds", write_seconds)
+            on_commit(stored)
+
+    def submit(state: TuningResumeState) -> None:
+        nonlocal pending
+        drain()
+        pending = executor.submit(save, state)
+        if wait_each_epoch:
+            drain()
+
+    try:
+        yield submit, drain
+    finally:
+        drain()
 
 
 def _checkpoint_root(run_output: str | Path) -> Path:

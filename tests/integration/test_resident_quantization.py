@@ -4,6 +4,7 @@ import os
 import shutil
 from dataclasses import replace
 from pathlib import Path
+from threading import Event
 from typing import Any, cast
 
 import pytest
@@ -1237,6 +1238,51 @@ def test_rolling_retention_keeps_only_latest_resume_generation(
         load_block_activations(result.frozen_model.blocks[0], artifacts)
     teacher, compressed = load_block_activations(result.frozen_model.blocks[1], artifacts)
     assert teacher.shape == compressed.shape == (1, 4, 16)
+
+
+def test_background_activation_write_failure_keeps_previous_resume_boundary(tmp_path, monkeypatch):
+    snapshot = tmp_path / "snapshot"
+    Gemma3ForCausalLM(Gemma3TextConfig(
+        vocab_size=32, hidden_size=16, intermediate_size=32, num_hidden_layers=2,
+        num_attention_heads=4, num_key_value_heads=2, head_dim=4,
+    )).save_pretrained(snapshot, safe_serialization=True)
+    output = tmp_path / "run"
+    first_layer_done = Event()
+    original_write = resident.write_activation_member
+    original_commit = resident.commit_layer
+    compressed_writes = 0
+
+    def record_layer(*args, **kwargs):
+        result = original_commit(*args, **kwargs)
+        first_layer_done.set()
+        return result
+
+    def write_member(writer, name, tensor):
+        nonlocal compressed_writes
+        if name == "teacher_outputs":
+            # A synchronous teacher write would prevent the first layer from ever finishing.
+            assert first_layer_done.wait(30)
+        else:
+            compressed_writes += 1
+            if compressed_writes == 2:
+                raise OSError("failed compressed activation write")
+        return original_write(writer, name, tensor)
+
+    monkeypatch.setattr(resident, "commit_layer", record_layer)
+    monkeypatch.setattr(resident, "write_activation_member", write_member)
+    with pytest.raises(OSError, match="failed compressed activation write"):
+        run_resident_quantization(ResidentQuantizationRequest(
+            snapshot, output, "fixture/gemma3", "pinned-test-revision", ((1, 2, 3, 4),),
+            device="cpu", target_bpw=8.0, rank_multiple=1,
+            admm=ADMMConfig(outer_iterations=1, inner_iterations=1),
+        ))
+    records = [json.loads(line) for line in (output / "state/journal.jsonl").read_text().splitlines()]
+    blocks = [record for record in records if record["kind"] == "block"]
+    assert [record["block"] for record in blocks] == [0]
+    reference = resident.ArtifactRef(resident.ArtifactTypes.BLOCK_RESULT, blocks[0]["artifact_id"], 1)
+    teacher, compressed = load_block_activations(reference, LocalArtifactStore(output / "artifacts"))
+    assert teacher.shape == compressed.shape == (1, 4, 16)
+    assert not list((output / "artifacts/.tmp").glob("lease-*"))
 
 
 def test_continuous_multiblock_run_reloads_committed_activation_boundary(

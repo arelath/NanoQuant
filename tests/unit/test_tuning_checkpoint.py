@@ -1,16 +1,68 @@
 import json
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
+from threading import Event, get_ident
 
+import pytest
 import torch
 
 from nanoquant.application.tuning import TuningOptimizerState, TuningResumeState
+from nanoquant.infrastructure import tuning_checkpoint
 from nanoquant.infrastructure.tuning_checkpoint import (
     TuningCheckpointIdentity,
     active_tuning_checkpoint,
     clear_tuning_checkpoint,
+    overlap_tuning_checkpoints,
     save_tuning_checkpoint,
 )
+
+
+def test_epoch_write_overlaps_training_and_acknowledges_in_order(tmp_path, monkeypatch):
+    entered, release = Event(), Event()
+    main_thread = get_ident()
+    commits = []
+
+    def delayed_write(output, state, identity):
+        assert get_ident() != main_thread
+        entered.set()
+        assert release.wait(10)
+        return save_tuning_checkpoint(output, state, identity)
+
+    def acknowledged(stored):
+        assert get_ident() == main_thread
+        assert active_tuning_checkpoint(tmp_path, _identity()).generation == stored.generation
+        commits.append(stored.state.completed_epochs)
+
+    monkeypatch.setattr(tuning_checkpoint, "save_tuning_checkpoint", delayed_write)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with overlap_tuning_checkpoints(pool, tmp_path, _identity(), acknowledged) as (submit, drain):
+            submit(_state(1))
+            try:
+                assert entered.wait(10)
+                assert active_tuning_checkpoint(tmp_path, _identity()) is None
+                assert commits == []
+            finally:
+                release.set()
+            drain()
+            submit(_state(2))
+    assert commits == [1, 2]
+    assert active_tuning_checkpoint(tmp_path, _identity()).state.completed_epochs == 2
+
+
+def test_epoch_write_failure_preserves_last_checkpoint(tmp_path, monkeypatch):
+    first = save_tuning_checkpoint(tmp_path, _state(1), _identity())
+    commits = []
+
+    def fail(*args):
+        raise OSError("checkpoint write failed")
+
+    monkeypatch.setattr(tuning_checkpoint, "save_tuning_checkpoint", fail)
+    with ThreadPoolExecutor(max_workers=1) as pool, pytest.raises(OSError, match="checkpoint write failed"):
+        with overlap_tuning_checkpoints(pool, tmp_path, _identity(), commits.append) as (submit, _drain):
+            submit(_state(2))
+    assert commits == []
+    assert active_tuning_checkpoint(tmp_path, _identity()).generation == first.generation
 
 
 def _identity(*, layer: str = "mlp.up_proj") -> TuningCheckpointIdentity:
