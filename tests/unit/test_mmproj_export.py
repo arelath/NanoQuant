@@ -25,6 +25,18 @@ def _snapshot(tmp_path: Path, *, vision: bool) -> Path:
     return snapshot
 
 
+def test_pinned_converter_hash_matches_local_reference_checkout() -> None:
+    import os
+
+    from nanoquant.infrastructure.io_utils import hash_canonical_text_file
+
+    reference = Path(os.environ.get("NANOQUANT_LLAMA_CPP_ROOT", r"D:\dev\research\llama.cpp"))
+    converter = reference / "convert_hf_to_gguf.py"
+    if not converter.is_file():
+        pytest.skip(f"llama.cpp reference checkout is unavailable: {reference}")
+    assert hash_canonical_text_file(converter) == MMPROJ_CONVERTER_SHA256
+
+
 def test_source_vision_stack_detection_is_config_driven(tmp_path: Path) -> None:
     assert source_has_vision_stack(_snapshot(tmp_path / "vision", vision=True))
     assert not source_has_vision_stack(_snapshot(tmp_path / "text", vision=False))
