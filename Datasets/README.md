@@ -180,7 +180,26 @@ variant, plus, in `Datasets/gemma-3-270m-it-gguf-unsloth`, `UD-IQ2_XXS`, `Q2_K`,
 
 ### Gemma 3 4B IT weight sensitivity
 
-When ready to generate it, run from the repository root:
+To run the curated sweep using the same 160 windows of 256 tokens as the 1B
+study, run from the repository root.
+
+```powershell
+.\tools\build_gemma_3_4b_curated_sensitivity_dataset.ps1
+```
+
+The launcher uses the cached pinned 4B checkpoint and
+`Datasets/gemma-3-imatrix-calibration-v1/calibration.txt`. It measures 238
+decoder projections at six relative Frobenius error levels from 1% through 35%,
+with three seeds per level. The sweep scores 40,800 next-token positions per
+trial. Its teacher log probabilities occupy about 19.5 GiB on disk. Results,
+response fits, and plots go under
+`Datasets/gemma-3-4b-it-fp16-sensitivity-curated-160x256`. Rerun the same
+command to resume. Use `-TeacherOnly` to capture and verify the teacher first.
+The launcher defaults to one window per forward and keeps the teacher cache in
+host memory. `-EvaluationBatchSize`, `-TeacherGpuCacheGiB`, and
+`-TeacherPasses` expose the shared builder's memory settings.
+
+The smaller 16-window sweep is also available.
 
 ```powershell
 .\.venv\Scripts\python.exe tools\build_gemma_3_4b_sensitivity_dataset.py --local-files-only
