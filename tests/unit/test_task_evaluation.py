@@ -246,6 +246,21 @@ def test_known_logits_batching_primary_metric_and_sample_limiting() -> None:
     )
 
 
+def test_batch_progress_reports_every_batch_without_changing_scores() -> None:
+    task = _task("piqa")
+    calls: list[tuple[int, int]] = []
+    request = MultipleChoiceEvaluationRequest(task, _examples(), batch_size=3)
+
+    reported = evaluate_multiple_choice(
+        request,
+        _known_logits,
+        batch_progress=lambda completed, total: calls.append((completed, total)),
+    )
+
+    assert reported == evaluate_multiple_choice(request, _known_logits)
+    assert calls == [(1, 2), (2, 2)]
+
+
 def test_left_truncation_preserves_all_choice_tokens_and_is_reported() -> None:
     task = replace(_task("boolq"), maximum_length=4)
     example = MultipleChoiceExample(
@@ -261,6 +276,40 @@ def test_left_truncation_preserves_all_choice_tokens_and_is_reported() -> None:
 
     assert result.truncated_choice_count == 2
     assert result.sample_count == 1
+
+
+def test_scored_position_log_softmax_matches_full_bfloat16_normalization() -> None:
+    task = _task("piqa")
+    generator = torch.Generator().manual_seed(7)
+    examples = (
+        MultipleChoiceExample("a", ((1, 2, 3), (1, 2)), ((4, 5), (6, 7, 8)), 0),
+        MultipleChoiceExample("b", ((9,), (9, 10, 11, 12)), ((13,), (14, 15)), 1),
+    )
+    vocabulary = 64
+    table = torch.randn((vocabulary, vocabulary), generator=generator).mul(8).to(torch.bfloat16)
+
+    def logits(tokens: torch.Tensor, _mask: torch.Tensor | None) -> torch.Tensor:
+        positions = torch.arange(tokens.shape[1]).to(torch.bfloat16).view(1, -1, 1)
+        return table[tokens] + positions
+
+    result = evaluate_multiple_choice(
+        MultipleChoiceEvaluationRequest(task, examples, batch_size=3),
+        logits,
+    )
+
+    for example, scored in zip(examples, result.examples, strict=True):
+        for choice, (context, continuation) in enumerate(
+            zip(example.contexts, example.continuations, strict=True)
+        ):
+            sequence = (*context, *continuation)
+            full = torch.nn.functional.log_softmax(
+                logits(torch.tensor([sequence[:-1]]), None), dim=-1
+            )[0]
+            expected = full[
+                torch.arange(len(context) - 1, len(sequence) - 1),
+                torch.tensor(continuation),
+            ].sum()
+            assert scored.choice_log_likelihoods[choice] == float(expected)
 
 
 def test_legacy_acc_norm_uses_choice_character_length_not_token_count() -> None:

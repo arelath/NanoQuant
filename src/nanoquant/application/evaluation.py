@@ -16,6 +16,8 @@ from torch import nn
 from nanoquant.config.codec import canonical_json, semantic_hash
 
 LogitsFunction = Callable[[torch.Tensor, torch.Tensor | None], torch.Tensor]
+# Called after each scored batch with ``(completed_batches, total_batches)``.
+BatchProgressFunction = Callable[[int, int], None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -661,7 +663,12 @@ def _valid_sequence(
     return torch.cat(additions)
 
 
-def evaluate_causal_nll(request: CausalEvaluationRequest, logits: LogitsFunction) -> CausalEvaluationResult:
+def evaluate_causal_nll(
+    request: CausalEvaluationRequest,
+    logits: LogitsFunction,
+    *,
+    batch_progress: BatchProgressFunction | None = None,
+) -> CausalEvaluationResult:
     tokens = request.token_ids
     if tokens.ndim != 2 or tokens.shape[0] == 0:
         raise ValueError("causal evaluation token IDs must be a non-empty rank-2 tensor")
@@ -700,6 +707,7 @@ def evaluate_causal_nll(request: CausalEvaluationRequest, logits: LogitsFunction
                 break
     total_nll = 0.0
     token_count = 0
+    total_batches = (len(windows) + request.batch_size - 1) // request.batch_size
     for start in range(0, len(windows), request.batch_size):
         selected = windows[start : start + request.batch_size]
         length = max(window.shape[1] for window, _labels in selected)
@@ -726,6 +734,8 @@ def evaluate_causal_nll(request: CausalEvaluationRequest, logits: LogitsFunction
             )
             total_nll += float(loss)
             token_count += count
+        if batch_progress is not None:
+            batch_progress(start // request.batch_size + 1, total_batches)
     if token_count == 0:
         raise ValueError("causal evaluation has no target tokens")
     mean = total_nll / token_count

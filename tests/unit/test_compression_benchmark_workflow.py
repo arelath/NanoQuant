@@ -27,6 +27,7 @@ from nanoquant.infrastructure.huggingface_upload import (
     HuggingFaceUploadConfig,
     HuggingFaceUploadResult,
 )
+from nanoquant.infrastructure.quality_progress import QualityProgressLogger
 from nanoquant.quality_evaluation import QualityEvaluationRequest
 from nanoquant.resident_workflow import ResolvedResidentInputs
 from tests.support.experiments import load_experiment
@@ -143,7 +144,8 @@ def test_compression_benchmark_executes_export_before_shared_quality_comparison(
 
     monkeypatch.setattr(workflow, "execute_complete_compression", complete)
 
-    def quality(request: QualityEvaluationRequest) -> dict[str, object]:
+    def quality(request: QualityEvaluationRequest, *, progress: object) -> dict[str, object]:
+        assert isinstance(progress, QualityProgressLogger)
         calls.append("quality")
         requests.append(request)
         return {"passed": True, "comparison": {}}

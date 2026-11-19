@@ -61,6 +61,22 @@ def test_causal_nll_scores_every_shifted_token_once_across_overlap_and_partial_w
     assert result.perplexity == pytest.approx(8)
 
 
+def test_causal_nll_batch_progress_reports_every_batch_without_changing_scores() -> None:
+    tokens = torch.tensor([[1, 2, 3, 4, 5], [6, 7, 1, 2, 3], [4, 5, 6, 7, 1]])
+    request = CausalEvaluationRequest(tokens, max_length=4, stride=2, batch_size=4)
+    calls: list[tuple[int, int]] = []
+
+    reported = evaluate_causal_nll(
+        request,
+        _uniform_logits(8),
+        batch_progress=lambda completed, total: calls.append((completed, total)),
+    )
+
+    assert reported == evaluate_causal_nll(request, _uniform_logits(8))
+    assert reported.window_count == 6
+    assert calls == [(1, 2), (2, 2)]
+
+
 def test_causal_shift_ignores_last_logit_and_overlap_matches_single_window() -> None:
     tokens = torch.tensor([[1, 2, 3, 4, 5, 6]])
     full = evaluate_causal_nll(

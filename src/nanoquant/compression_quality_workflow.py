@@ -29,6 +29,7 @@ from nanoquant.infrastructure.publication import (
     publish_experiment_artifacts,
     publish_run_artifacts,
 )
+from nanoquant.infrastructure.quality_progress import QualityProgressLogger
 from nanoquant.infrastructure.run_session import open_run_event_append_session
 from nanoquant.infrastructure.runs import launcher_provenance, validate_launcher_number
 from nanoquant.llamacpp_quality import (
@@ -250,12 +251,16 @@ def execute_compression_quality_experiment(
         reasoning_sequence_length=reasoning_sequence_length,
         maximum_thinking_degradation_ratio=config.evaluation.maximum_thinking_degradation_ratio,
     )
+    quality_progress = QualityProgressLogger()
     prepared_quality = (
-        prepare_quality_inputs(quality_request) if experiment.llamacpp_quality else None
+        prepare_quality_inputs(quality_request, quality_progress)
+        if experiment.llamacpp_quality
+        else None
     )
     quality = execute_quality_evaluation(
         quality_request,
         prepared=prepared_quality,
+        progress=quality_progress,
         evaluate_candidate=experiment.quality_backend is not None,
     )
     quality_seconds = time.perf_counter() - quality_started

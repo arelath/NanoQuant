@@ -21,6 +21,7 @@ from nanoquant.infrastructure.huggingface_upload import (
     HuggingFaceUploadResult,
 )
 from nanoquant.infrastructure.mmproj_export import MmprojExportResult
+from nanoquant.infrastructure.quality_progress import QualityProgressLogger
 from nanoquant.resident_workflow import ResolvedResidentInputs
 from tests.support.experiments import load_experiment
 
@@ -134,12 +135,17 @@ def test_compression_quality_runs_quality_before_huggingface_upload_and_publicat
     monkeypatch.setattr(
         workflow,
         "prepare_quality_inputs",
-        lambda _request: calls.append("prepare-quality") or prepared_quality,
+        lambda _request, progress: (
+            calls.append("prepare-quality") or progress_loggers.append(progress) or prepared_quality
+        ),
     )
+    progress_loggers: list[object] = []
 
-    def evaluate(request, *, prepared, evaluate_candidate):  # type: ignore[no-untyped-def]
+    def evaluate(request, *, prepared, progress, evaluate_candidate):  # type: ignore[no-untyped-def]
         calls.append("quality")
         assert prepared is prepared_quality
+        assert isinstance(progress, QualityProgressLogger)
+        assert progress_loggers == [progress]
         assert evaluate_candidate is False
         quality_requests.append(request)
         return {

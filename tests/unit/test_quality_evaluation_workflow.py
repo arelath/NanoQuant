@@ -9,6 +9,7 @@ import pytest
 
 import nanoquant.quality_evaluation_workflow as workflow
 from nanoquant.config.schema import BehaviorSliceConfig, DatasetSourceConfig, ReasoningMode
+from nanoquant.infrastructure.quality_progress import QualityProgressLogger
 from nanoquant.quality_evaluation import QualityEvaluationRequest
 from nanoquant.quality_evaluation_workflow import (
     QualityEvaluationExperiment,
@@ -141,7 +142,8 @@ def test_quality_workflow_records_config_and_launcher_provenance(
     launcher = tmp_path / "002-benchmark-gemma-3-1b-it.py"
     launcher.write_text("# provenance fixture\n", encoding="utf-8")
 
-    def evaluate(resolved: QualityEvaluationRequest) -> dict[str, Any]:
+    def evaluate(resolved: QualityEvaluationRequest, *, progress: object) -> dict[str, Any]:
+        assert isinstance(progress, QualityProgressLogger)
         observed.append(resolved)
         return {"schema_version": 1, "passed": True, "results": {}}
 
@@ -235,7 +237,7 @@ def test_quality_workflow_writes_deterministic_markdown(
     launcher.write_text("# provenance fixture\n", encoding="utf-8")
     request = QualityEvaluationRequest(tmp_path, "model", "revision", tmp_path / "run")
     experiment = QualityEvaluationExperiment(request, output, markdown_path=markdown)
-    monkeypatch.setattr(workflow, "execute_quality_evaluation", lambda _request: _quality_result())
+    monkeypatch.setattr(workflow, "execute_quality_evaluation", lambda _request, progress: _quality_result())
     published = []
     monkeypatch.setattr(
         workflow,

@@ -18,6 +18,7 @@ from nanoquant.infrastructure.publication import (
     PublishableArtifactKind,
     publish_experiment_artifacts,
 )
+from nanoquant.infrastructure.quality_progress import QualityProgressLogger
 from nanoquant.infrastructure.runs import launcher_provenance, validate_launcher_number
 from nanoquant.quality_evaluation import QualityEvaluationRequest, execute_quality_evaluation
 
@@ -412,7 +413,7 @@ def execute_quality_evaluation_experiment(
         experiment,
         launcher_path=launcher_path,
     )
-    result = execute_quality_evaluation(resolved.request)
+    result = execute_quality_evaluation(resolved.request, progress=QualityProgressLogger())
     experiment_number = config.intent.experiment_number
     if experiment_number is None:
         raise ValueError("quality evaluation requires an experiment number")

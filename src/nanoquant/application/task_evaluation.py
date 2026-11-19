@@ -9,7 +9,13 @@ from dataclasses import dataclass
 
 import torch
 
-from nanoquant.application.evaluation import EvaluationPartition, EvaluatorRegistry, EvaluatorSpec, LogitsFunction
+from nanoquant.application.evaluation import (
+    BatchProgressFunction,
+    EvaluationPartition,
+    EvaluatorRegistry,
+    EvaluatorSpec,
+    LogitsFunction,
+)
 from nanoquant.application.evaluation_cache import TaskInputCacheIdentity
 from nanoquant.config.codec import canonical_json, semantic_hash
 
@@ -520,6 +526,8 @@ def _prediction(values: tuple[float, ...]) -> tuple[int, bool]:
 def evaluate_multiple_choice(
     request: MultipleChoiceEvaluationRequest,
     logits: LogitsFunction,
+    *,
+    batch_progress: BatchProgressFunction | None = None,
 ) -> MultipleChoiceEvaluationResult:
     if not request.examples:
         raise ValueError("multiple-choice evaluation requires examples")
@@ -548,6 +556,7 @@ def evaluate_multiple_choice(
             candidates.append((example_index, choice_index, sequence, len(retained_context), len(continuation)))
     raw_scores = [[0.0] * len(example.contexts) for example in examples]
     mean_scores = [[0.0] * len(example.contexts) for example in examples]
+    total_batches = (len(candidates) + request.batch_size - 1) // request.batch_size
     for start in range(0, len(candidates), request.batch_size):
         selected = candidates[start : start + request.batch_size]
         width = max(len(candidate[2]) - 1 for candidate in selected)
@@ -568,17 +577,31 @@ def evaluate_multiple_choice(
         # lm-eval 0.4.12 leaves ``dtype=None`` for log-softmax, so its
         # historical BF16 protocol scores and accumulates in the model output
         # dtype.  Promoting here changes close-choice predictions.
-        log_probabilities = torch.nn.functional.log_softmax(prediction, dim=-1)
-        for row, (example_index, choice_index, sequence, context_length, choice_length) in enumerate(selected):
-            targets = torch.tensor(sequence[context_length:], dtype=torch.long, device=prediction.device)
-            if targets.numel() != choice_length or int(targets.max()) >= prediction.shape[-1]:
+        #
+        # Log-softmax is independent per position, so only the scored
+        # continuation positions are normalized.  This matches full-tensor
+        # normalization exactly while avoiding a second batch x width x vocab
+        # allocation, which exceeds 12 GiB devices for large-vocabulary models.
+        row_indices: list[int] = []
+        position_indices: list[int] = []
+        target_tokens: list[int] = []
+        for row, (_example, _choice, sequence, context_length, choice_length) in enumerate(selected):
+            continuation_tokens = sequence[context_length:]
+            if len(continuation_tokens) != choice_length or max(continuation_tokens) >= prediction.shape[-1]:
                 raise ValueError("multiple-choice target token exceeds the logits vocabulary")
-            positions = torch.arange(
-                context_length - 1,
-                context_length - 1 + choice_length,
-                device=prediction.device,
-            )
-            score = float(log_probabilities[row, positions, targets].sum())
+            row_indices.extend([row] * choice_length)
+            position_indices.extend(range(context_length - 1, context_length - 1 + choice_length))
+            target_tokens.extend(continuation_tokens)
+        scored_rows = torch.tensor(row_indices, dtype=torch.long, device=prediction.device)
+        scored_positions = torch.tensor(position_indices, dtype=torch.long, device=prediction.device)
+        targets = torch.tensor(target_tokens, dtype=torch.long, device=prediction.device)
+        log_probabilities = torch.nn.functional.log_softmax(prediction[scored_rows, scored_positions], dim=-1)
+        target_log_probabilities = log_probabilities.gather(-1, targets.unsqueeze(-1)).squeeze(-1)
+        del log_probabilities
+        offset = 0
+        for example_index, choice_index, _sequence, _context_length, choice_length in selected:
+            score = float(target_log_probabilities[offset : offset + choice_length].sum())
+            offset += choice_length
             if not math.isfinite(score):
                 raise ValueError("multiple-choice evaluator produced a non-finite score")
             raw_scores[example_index][choice_index] = score
@@ -588,6 +611,8 @@ def evaluate_multiple_choice(
                 else choice_length
             )
             mean_scores[example_index][choice_index] = score / normalization_length
+        if batch_progress is not None:
+            batch_progress(start // request.batch_size + 1, total_batches)
     example_results = []
     for example, raw, normalized in zip(examples, raw_scores, mean_scores, strict=True):
         raw_values = tuple(raw)

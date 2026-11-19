@@ -23,6 +23,7 @@ from nanoquant.infrastructure.publication import (
     PublishableArtifactKind,
     publish_experiment_artifacts,
 )
+from nanoquant.infrastructure.quality_progress import QualityProgressLogger
 from nanoquant.infrastructure.run_session import open_run_event_append_session
 from nanoquant.quality_evaluation import (
     DEFAULT_QUALITY_TASK_BATCH_SIZE,
@@ -145,7 +146,8 @@ def execute_compression_benchmark_experiment(
             reasoning_samples_per_mode=config.evaluation.reasoning_samples_per_mode,
             reasoning_sequence_length=config.evaluation.reasoning_sequence_length,
             maximum_thinking_degradation_ratio=config.evaluation.maximum_thinking_degradation_ratio,
-        )
+        ),
+        progress=QualityProgressLogger(),
     )
     quality_output = resolved.benchmark_output.with_suffix(".quality.json")
     atomic_write_json(quality_output, quality)

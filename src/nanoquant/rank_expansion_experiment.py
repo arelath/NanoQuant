@@ -23,6 +23,7 @@ from nanoquant.infrastructure.publication import (
     PublishableArtifactKind,
     publish_experiment_artifacts,
 )
+from nanoquant.infrastructure.quality_progress import QualityProgressLogger
 from nanoquant.infrastructure.runs import launcher_provenance, validate_launcher_number
 from nanoquant.quality_evaluation import QualityEvaluationRequest, execute_quality_evaluation
 from nanoquant.quality_evaluation_workflow import render_quality_evaluation_markdown
@@ -211,7 +212,8 @@ def run_rank_expansion_experiment(
             task_limit=resolved.task_limit,
             maximum_wddm_shared_bytes=maximum_shared_bytes,
             packed_artifact=resolved.output_packed,
-        )
+        ),
+        progress=QualityProgressLogger(),
     )
     quality_seconds = time.perf_counter() - quality_started
     provenance = to_dict(launcher_provenance(launcher, config.intent.experiment_number))

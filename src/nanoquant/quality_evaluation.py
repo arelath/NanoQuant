@@ -401,6 +401,16 @@ def _evaluate_model(
 
     wikitext_started = time.perf_counter()
     _emit_progress(progress, "wikitext_started", model=label)
+
+    def wikitext_batch(completed: int, total: int) -> None:
+        _emit_progress(
+            progress,
+            "wikitext_batch_completed",
+            model=label,
+            completed_batches=completed,
+            total_batches=total,
+        )
+
     causal = evaluate_causal_nll(
         CausalEvaluationRequest(
             inputs.wikitext_tokens.to(request.device),
@@ -412,6 +422,7 @@ def _evaluate_model(
             batch_size=request.wikitext_batch_size,
         ),
         guarded_logits,
+        batch_progress=wikitext_batch,
     )
     wikitext_seconds = time.perf_counter() - wikitext_started
     _emit_progress(
@@ -420,6 +431,7 @@ def _evaluate_model(
         model=label,
         elapsed_seconds=wikitext_seconds,
         perplexity=causal.perplexity,
+        token_count=causal.token_count,
     )
     tasks = []
     for task_index, prepared in enumerate(inputs.tasks, start=1):
@@ -431,7 +443,26 @@ def _evaluate_model(
             task=prepared.task.task_name,
             task_index=task_index,
             task_count=len(inputs.tasks),
+            sample_count=len(prepared.examples[: request.task_limit]),
         )
+
+        def task_batch(
+            completed: int,
+            total: int,
+            task_name: str = prepared.task.task_name,
+            index: int = task_index,
+        ) -> None:
+            _emit_progress(
+                progress,
+                "task_batch_completed",
+                model=label,
+                task=task_name,
+                task_index=index,
+                task_count=len(inputs.tasks),
+                completed_batches=completed,
+                total_batches=total,
+            )
+
         result = evaluate_multiple_choice(
             MultipleChoiceEvaluationRequest(
                 prepared.task,
@@ -442,6 +473,7 @@ def _evaluate_model(
                 device=request.device,
             ),
             guarded_logits,
+            batch_progress=task_batch,
         )
         tasks.append(
             {
@@ -485,7 +517,18 @@ def _evaluate_model(
         reasoning_started = time.perf_counter()
         total_nll = 0.0
         token_count = 0
-        for start in range(0, prepared_reasoning.input_ids.shape[0], request.reasoning_batch_size):
+        reasoning_samples = int(prepared_reasoning.input_ids.shape[0])
+        reasoning_batches = (
+            reasoning_samples + request.reasoning_batch_size - 1
+        ) // request.reasoning_batch_size
+        _emit_progress(
+            progress,
+            "reasoning_started",
+            model=label,
+            mode=mode,
+            sample_count=reasoning_samples,
+        )
+        for start in range(0, reasoning_samples, request.reasoning_batch_size):
             token_ids = prepared_reasoning.input_ids[
                 start : start + request.reasoning_batch_size
             ].to(request.device)
@@ -499,6 +542,14 @@ def _evaluate_model(
             selected_logits = logits[:, :-1, :][target_mask[:, :-1]]
             selected_targets = token_ids[:, 1:][target_mask[:, :-1]]
             if selected_targets.numel() == 0:
+                _emit_progress(
+                    progress,
+                    "reasoning_batch_completed",
+                    model=label,
+                    mode=mode,
+                    completed_batches=start // request.reasoning_batch_size + 1,
+                    total_batches=reasoning_batches,
+                )
                 continue
             losses = torch.nn.functional.cross_entropy(
                 selected_logits.float(),
@@ -508,6 +559,14 @@ def _evaluate_model(
             total_nll += float(losses)
             token_count += int(selected_targets.numel())
             del losses, selected_targets, selected_logits, logits
+            _emit_progress(
+                progress,
+                "reasoning_batch_completed",
+                model=label,
+                mode=mode,
+                completed_batches=start // request.reasoning_batch_size + 1,
+                total_batches=reasoning_batches,
+            )
         if token_count == 0:
             raise ValueError(f"quality reasoning mode {mode} contains no response targets")
         mean_nll = total_nll / token_count
@@ -522,6 +581,15 @@ def _evaluate_model(
                 "sample_count": prepared_reasoning.input_ids.shape[0],
                 "elapsed_seconds": time.perf_counter() - reasoning_started,
             }
+        )
+        _emit_progress(
+            progress,
+            "reasoning_completed",
+            model=label,
+            mode=mode,
+            elapsed_seconds=reasoning[-1]["elapsed_seconds"],
+            perplexity=reasoning[-1]["perplexity"],
+            token_count=token_count,
         )
     payload = {
         "label": label,
@@ -538,6 +606,8 @@ def _evaluate_model(
         "model_evaluation_completed",
         model=label,
         elapsed_seconds=payload["elapsed_seconds"],
+        peak_device_bytes=payload["peak_device_bytes"],
+        peak_host_bytes=payload["peak_host_bytes"],
     )
     return payload
 
