@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import nullcontext
 from types import SimpleNamespace
 
 import kl_sensitivity_dataset as sensitivity
@@ -51,6 +52,41 @@ def test_4b_defaults_use_distinct_model_and_dataset_reports() -> None:
     assert legacy.output.name == "gemma-3-1b-it-weight-sensitivity"
     assert not legacy.plots
     assert sensitivity.GEMMA_1B.weights_identity == sensitivity.MODEL_WEIGHTS_SHA256
+
+
+def test_4b_bf16_override_names_and_captures_a_distinct_teacher(tmp_path, monkeypatch) -> None:
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    (snapshot / "config.json").write_text(json.dumps({"model_type": "gemma3"}))
+    adapter = SimpleNamespace(
+        attention_implementation="eager", decoder_block_count_from_config=lambda config: 34,
+    )
+    observed = {}
+
+    def load_model(path, *, torch_dtype, **kwargs):
+        assert path == snapshot
+        observed["dtype"] = torch_dtype
+        return nn.Identity()
+
+    def capture(args, snapshot, model, config, root, data_sha256, spec):
+        assert spec.dtype == torch.bfloat16
+        observed["root"] = root
+
+    monkeypatch.setattr(sensitivity, "ROOT", tmp_path)
+    monkeypatch.setattr(sensitivity, "snapshot_download", lambda **kwargs: snapshot)
+    monkeypatch.setattr(sensitivity, "adapter_for_config", lambda config: adapter)
+    monkeypatch.setattr(sensitivity, "acquire_device_lease", lambda device: nullcontext())
+    monkeypatch.setattr(sensitivity, "load_causal_language_model", load_model)
+    monkeypatch.setattr(sensitivity, "_teacher_dataset", capture)
+    assert sensitivity.main(
+        ["--device", "cpu", "--model-dtype", "bf16", "--teacher-only"],
+        spec=sensitivity.GEMMA_4B,
+        dataset_reports=True,
+    ) == 0
+    assert observed == {
+        "dtype": torch.bfloat16,
+        "root": tmp_path / "Datasets/gemma-3-4b-it-bf16-sensitivity-16x256",
+    }
 
 
 def test_270m_measures_in_fp32_in_its_own_dataset() -> None:

@@ -11,7 +11,7 @@ $repository = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 $python = Join-Path $repository '.venv/Scripts/python.exe'
 $builder = Join-Path $PSScriptRoot 'build_gemma_3_4b_sensitivity_dataset.py'
 $corpus = (Resolve-Path -LiteralPath (Join-Path $repository 'Datasets/gemma-3-imatrix-calibration-v1/calibration.txt')).Path
-$dataset = Join-Path $repository 'Datasets/gemma-3-4b-it-fp16-sensitivity-curated-160x256'
+$dataset = Join-Path $repository 'Datasets/gemma-3-4b-it-bf16-sensitivity-curated-160x256'
 
 $builderArgs = @(
     '--calibration-text', $corpus,
@@ -19,6 +19,7 @@ $builderArgs = @(
     '--sequence-length', '256',
     '--calibration-seed', '0',
     '--teacher-dataset', $dataset,
+    '--model-dtype', 'bf16',
     '--granularity', 'projection',
     '--error-levels', '0.01', '0.025', '0.05', '0.10', '0.20', '0.35',
     '--seeds', '0', '1', '2',

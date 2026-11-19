@@ -191,9 +191,10 @@ The launcher uses the cached pinned 4B checkpoint and
 `Datasets/gemma-3-imatrix-calibration-v1/calibration.txt`. It measures 238
 decoder projections at six relative Frobenius error levels from 1% through 35%,
 with three seeds per level. The sweep scores 40,800 next-token positions per
-trial. Its teacher log probabilities occupy about 19.5 GiB on disk. Results,
-response fits, and plots go under
-`Datasets/gemma-3-4b-it-fp16-sensitivity-curated-160x256`. Rerun the same
+trial. The FP16 model produced a non-finite clean baseline on these windows, so
+the curated launcher uses BF16 for the teacher and perturbed models. The stored
+log probabilities use FP16 and occupy about 20 GiB. Results, response fits, and
+plots go under `Datasets/gemma-3-4b-it-bf16-sensitivity-curated-160x256`. Rerun the same
 command to resume. Use `-TeacherOnly` to capture and verify the teacher first.
 The launcher defaults to one window per forward and keeps the teacher cache in
 host memory. `-EvaluationBatchSize`, `-TeacherGpuCacheGiB`, and

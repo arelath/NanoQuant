@@ -586,6 +586,10 @@ def make_parser(spec: ModelSpec, *, dataset_reports: bool) -> argparse.ArgumentP
         help="perturb one projection in one block (default), or all projections in one block",
     )
     parser.add_argument("--device", default="cuda:0")
+    parser.add_argument(
+        "--model-dtype", choices=tuple(_PRECISION_NAMES.values()),
+        help=f"teacher and perturbed model precision (default: {spec.precision})",
+    )
     parser.add_argument("--token-chunk-size", type=int, default=32)
     parser.add_argument("--evaluation-batch-size", type=int, default=1, help="windows per student forward pass")
     parser.add_argument("--teacher-dataset", type=Path, help="reusable teacher dataset directory")
@@ -608,6 +612,9 @@ def main(
 ) -> int:
     parser = make_parser(spec, dataset_reports=dataset_reports)
     args = parser.parse_args(arguments)
+    if args.model_dtype is not None:
+        dtype = next(dtype for dtype, name in _PRECISION_NAMES.items() if name == args.model_dtype)
+        spec = replace(spec, dtype=dtype)
     if args.samples < 1 or args.sequence_length < 2 or args.token_chunk_size < 1:
         parser.error("samples and token chunk size must be positive and sequence length must be at least two")
     if args.evaluation_batch_size < 1:
