@@ -9,6 +9,15 @@ from gguf import GGUFWriter
 from nanoquant.infrastructure.io_utils import hash_file
 
 
+@pytest.mark.parametrize("data,special", [(b" ", False), (b"\xef\xbb\xbftext", False),
+                                         (b"\xff", False), (b"<bos>hello", False)])
+def test_local_text_rejects_invalid_encoding_empty_data_or_unparsed_control_tokens(tmp_path, data, special):
+    path = tmp_path / "local.txt"
+    path.write_bytes(data)
+    with pytest.raises(ValueError):
+        builder.read_calibration_text(path, special)
+
+
 def test_parquet_extraction_preserves_unicode_and_embedded_newlines(tmp_path):
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
@@ -80,7 +89,8 @@ def test_completed_dataset_hash_audit_detects_tampering(tmp_path):
 
 
 @pytest.mark.parametrize("fail_inference", [False, True])
-def test_workflow_publishes_only_completed_datasets_and_reuses_them(tmp_path, monkeypatch, fail_inference):
+@pytest.mark.parametrize("local_text", [False, True])
+def test_workflow_publishes_only_completed_datasets_and_reuses_them(tmp_path, monkeypatch, fail_inference, local_text):
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
     import huggingface_hub
@@ -118,6 +128,16 @@ def test_workflow_publishes_only_completed_datasets_and_reuses_them(tmp_path, mo
         "--llama-cpp-root", str(llama), "--imatrix-exe", str(executable),
         "--dataset-dir", str(root), "--gpu-layers", "0",
     ])
+    if local_text:
+        source = tmp_path / "local.txt"
+        source.write_bytes(b"<bos><start_of_turn>user\nHello<end_of_turn>\n")
+        args.calibration_text = source
+        args.parse_special = True
+
+        def no_download(*args, **kwargs):
+            raise AssertionError("local text must not download Parquet")
+
+        monkeypatch.setattr(huggingface_hub, "hf_hub_download", no_download)
     if fail_inference:
         with pytest.raises(RuntimeError, match="inference failed"):
             builder.build(args)
@@ -133,6 +153,13 @@ def test_workflow_publishes_only_completed_datasets_and_reuses_them(tmp_path, mo
         assert not (root / "imatrix.partial.gguf").exists()
         assert builder.build(args) == receipt_path
         assert len(calls) == 2
+        if local_text:
+            assert "--parse-special" in calls[-1]
+            assert (root / "calibration.txt").read_bytes() == source.read_bytes()
+            assert receipt["calibration"]["sha256"] == hash_file(source)
+            source.write_bytes(b"modified local text")
+            with pytest.raises(ValueError, match="settings differ"):
+                builder.build(args)
         args.context_size = 1024
         with pytest.raises(ValueError, match="settings differ"):
             builder.build(args)

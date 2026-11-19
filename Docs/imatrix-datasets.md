@@ -4,6 +4,11 @@
 an LLM and stores it under `Datasets/`. This is a calibration input for subsequent
 compression, not a compression experiment or a model quality benchmark.
 
+For the new Gemma 3 text mixture, see [the corpus research and build report](gemma-calibration-corpus.md).
+Use `--calibration-text PATH --parse-special` to collect statistics from its local
+UTF-8 text. The local bytes and parsing setting are pinned in the request and
+receipt; missing special-token parsing is rejected for Gemma-formatted input.
+
 ## First dataset: Gemma 3 270M IT
 
 From the repository root in PowerShell:

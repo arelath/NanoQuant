@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -23,6 +24,16 @@ MODEL = "google/gemma-3-270m-it"
 MODEL_REVISION = "ac82b4e820549b854eebf28ce6dedaf9fdfa17b3"
 CALIBRATION_REPO = "eaddario/imatrix-calibration"
 CALIBRATION_REVISION = "e87ed55dcba9d9c3a3e41539f3e728e981b1daa4"
+
+
+def read_calibration_text(path: Path, parse_special: bool) -> bytes:
+    data = path.read_bytes()
+    text = data.decode("utf-8")
+    if not text.strip() or text.startswith("\ufeff"):
+        raise ValueError("local calibration must be nonempty UTF-8 without BOM")
+    if any(token in text for token in ("<bos>", "<start_of_turn>", "<end_of_turn>")) and not parse_special:
+        raise ValueError("Gemma-formatted text requires --parse-special")
+    return data
 
 
 def extract_calibration(parquet: Path, destination: Path, column: str) -> dict:
@@ -124,6 +135,8 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--calibration-repo", default=CALIBRATION_REPO)
     result.add_argument("--calibration-revision", default=CALIBRATION_REVISION)
     result.add_argument("--calibration-file", default="combined_all_huge.parquet")
+    result.add_argument("--calibration-text", type=Path, help="local UTF-8 corpus instead of a Hub Parquet")
+    result.add_argument("--parse-special", action="store_true", help="parse Gemma/chat control tokens in the corpus")
     result.add_argument("--text-column", default="content")
     result.add_argument("--context-size", type=int, default=512)
     result.add_argument("--chunks", type=int, default=-1, help="-1: every complete context in the full corpus")
@@ -153,6 +166,12 @@ def build(args: argparse.Namespace) -> Path:
                  "context_size": args.context_size, "chunks": args.chunks, "gpu_layers": args.gpu_layers,
                  "model_gguf": str(args.model_gguf.resolve()) if args.model_gguf else None,
                  "executable_sha256": hash_file(executable)}
+    if args.calibration_text:
+        local_data = read_calibration_text(args.calibration_text, args.parse_special)
+        requested["calibration_text"] = {"path": str(args.calibration_text.resolve()),
+                                          "sha256": hashlib.sha256(local_data).hexdigest()}
+    if args.parse_special:
+        requested["parse_special"] = True
     root.mkdir(parents=True, exist_ok=True)
     with RunLease(root / ".active-lease.json"):
         receipt_path = root / "source.json"
@@ -167,11 +186,20 @@ def build(args: argparse.Namespace) -> Path:
         if request_path.exists() and json.loads(request_path.read_text(encoding="utf-8")) != requested:
             raise ValueError("prepared dataset settings differ; choose a new --dataset-dir")
         atomic_write_json(request_path, requested)
-        parquet = Path(hf_hub_download(args.calibration_repo, args.calibration_file, repo_type="dataset",
-                                      revision=args.calibration_revision, local_files_only=args.local_files_only))
-        calibration = extract_calibration(parquet, root / "calibration.txt", args.text_column)
-        calibration.update({"repository": args.calibration_repo, "revision": parquet.parent.name,
-                            "source_filename": args.calibration_file, "source_sha256": hash_file(parquet)})
+        if args.calibration_text:
+            temporary = root / "calibration.txt.partial"
+            temporary.write_bytes(local_data)
+            temporary.replace(root / "calibration.txt")
+            calibration = {"filename": "calibration.txt", "sha256": hash_file(root / "calibration.txt"),
+                           "bytes": len(local_data), "encoding": "utf-8",
+                           "source_path": str(args.calibration_text.resolve()),
+                           "parse_special": args.parse_special}
+        else:
+            parquet = Path(hf_hub_download(args.calibration_repo, args.calibration_file, repo_type="dataset",
+                                          revision=args.calibration_revision, local_files_only=args.local_files_only))
+            calibration = extract_calibration(parquet, root / "calibration.txt", args.text_column)
+            calibration.update({"repository": args.calibration_repo, "revision": parquet.parent.name,
+                                "source_filename": args.calibration_file, "source_sha256": hash_file(parquet)})
         atomic_write_json(root / "calibration.json", calibration)
         snapshot = Path(snapshot_download(args.model, revision=requested["revision"],
                                          allow_patterns=["*.json", "*.safetensors", "*.model", "*.jinja", "*.txt"],
@@ -209,6 +237,8 @@ def build(args: argparse.Namespace) -> Path:
                    "--ctx-size", str(args.context_size), "--batch-size", str(args.context_size),
                    "--ubatch-size", str(min(args.context_size, 512)), "--chunks", str(args.chunks),
                    "--gpu-layers", str(args.gpu_layers)]
+        if args.parse_special:
+            command.append("--parse-special")
         log = root / "imatrix.log"
         start = time.monotonic()
         with acquire_device_lease("cuda:0") if args.gpu_layers else nullcontext():

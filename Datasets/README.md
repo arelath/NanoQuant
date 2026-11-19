@@ -1,5 +1,24 @@
 # Reusable planning datasets
 
+## Gemma 3 calibration corpus candidate
+
+`gemma-3-imatrix-calibration-v1/calibration.txt` contains 1,000,294 tokens across
+15,449 deduplicated records, with a separate 65,933-token held-out subset.
+It mixes prose, instructions, code, math, and multiscript text, uses Gemma's
+native user-turn template for prompts, and matches the pinned 270M, 1B, and 4B
+tokenizers exactly. Instruction data is prompt-only. Its downstream quality
+depends on the quantization format and must be measured.
+
+See [research, provenance, limitations, and usage](../Docs/gemma-calibration-corpus.md).
+The directory's `manifest.json` records hashes, sources, mixture counts, and
+cached-evaluation overlap filtering. Existing imatrix artifacts are unchanged.
+
+The computed 270M row-bearing matrix is
+`gemma-3-270m-it-imatrix-calibration-v1-rows/imatrix.gguf`. Its equal-budget old-corpus
+control is `gemma-3-270m-it-imatrix-eaddario-matched-v1-rows/imatrix.gguf`.
+Both contain 1,953 contexts of 512 tokens and complete input/output importance
+for all 126 projections. See the [matched comparison and NanoQuant run status](../Docs/Experiments/077-078-imatrix-calibration-comparison.md).
+
 ## Allocation profiles
 
 `tools/build_allocation_profile_dataset.py` extracts an existing run's measured rank responses and optional KL
