@@ -151,6 +151,10 @@ reproduces it first. It can be unified only after an A/B run shows no quality lo
 - GGUF export for the modified llama.cpp (`D:\dev\research\llama.cpp`), plus one NanoQuant checkpoint format.
 - The 085 evaluation protocol: WikiText-2, six tasks, MMLU, joint KL.
 - Crash-safe resume at block granularity.
+- Operations (§13):
+  - a menu-driven terminal front end over the same commands;
+  - Hugging Face upload of a finished release;
+  - running jobs on RunPod through its REST API.
 
 ### 3.2 Removed (no port, no flags)
 
@@ -172,8 +176,11 @@ Each item below is unused by 085 and is dropped entirely, not hidden behind a fl
 - **Infrastructure:**
   - observability: events framework, macro/micro profiler framework, CUDA trace capture;
   - resource management: memory-policy profiles, resource planner, runtime fallbacks;
-  - other: interactive compression, teacher-trace and llama.cpp teacher generation, mmproj export,
-    Qwen3 thinking-mode evaluation, long-context evaluation, Hugging Face upload.
+  - other: teacher-trace and llama.cpp teacher generation, mmproj export, Qwen3 thinking-mode evaluation,
+    long-context evaluation.
+  - The current `interactive_compression.py` (1,302 lines), `infrastructure/huggingface_upload.py`
+    (552 lines, which hashes every file itself), and the v1-era `RUNPOD.md` /
+    `tools/runpod_bootstrap.sh` manual flow are not ported. §13 replaces them with smaller designs.
 - **Tests and tools:** almost all 228 tools and 356 test files. Replacements are listed in §10.
 
 Anything here can come back later, but only through the promotion rule in §11.4.
@@ -199,7 +206,9 @@ Anything here can come back later, but only through the promotion rule in §11.4
 
 ```
 nanoquant/                         new repository (sibling of this one)
-├─ pyproject.toml                  torch, transformers (pinned), safetensors, gguf, numpy, scipy, pydantic, pyyaml
+├─ pyproject.toml                  torch, transformers (pinned), safetensors, gguf, numpy, scipy, pydantic, pyyaml,
+│                                  huggingface_hub, httpx
+├─ docker/Dockerfile               RunPod job image: code + pinned deps + pinned llama.cpp converter (§13.3)
 ├─ recipes/
 │  └─ gemma-3-1b-it-2p5.yaml       the 085 recipe (§6)
 ├─ profiles/                       small, git-tracked allocation profiles and stored plans (§8)
@@ -207,6 +216,7 @@ nanoquant/                         new repository (sibling of this one)
 │  └─ gemma-3-1b-it/plan-085.json  the 130 stage ranks 085 ran with
 ├─ src/nanoquant/
 │  ├─ cli.py                       one entry point: `nanoquant <command>`
+│  ├─ menu.py                      `nanoquant menu`: numbered menus over the same command functions (§13.1)
 │  ├─ config.py                    strict pydantic models for recipes (extra = forbid)
 │  ├─ workspace.py                 path conventions (§7), GPU lock file, atomic writes
 │  ├─ log.py                       run.log + metrics.jsonl + a `timed()` context manager
@@ -254,7 +264,12 @@ nanoquant/                         new repository (sibling of this one)
 │     ├─ perplexity.py
 │     ├─ tasks.py                  piqa, arc_easy, arc_challenge, hellaswag, winogrande, boolq
 │     ├─ mmlu.py
-│     └─ report.py                 report.md + report.json
+│  │  └─ report.py                 report.md + report.json
+│  │
+│  └─ ops/                         operations; never imported by the numerical layers
+│     ├─ hub.py                    release → Hugging Face model repo; model card from report.json (§13.2)
+│     ├─ runpod.py                 thin RunPod REST v2 client: catalog, volumes, pods, actions, logs (§13.3)
+│     └─ jobs.py                   job spec, submit / watch / resume / fetch / cancel, pod-side entrypoint
 └─ tests/                          §10
 ```
 
@@ -267,9 +282,11 @@ The packages form layers, and each layer may import only the layers below it:
 3. `data`, `calibrate`
 4. `allocation`, `compress`
 5. `export`, `evaluate`
-6. `cli`
+6. `ops`
+7. `cli`, `menu`
 
-`core` imports only torch. One import-graph test enforces this rule. It replaces the current
+`core` imports only torch. Only `ops` may import `huggingface_hub` (beyond model loading in `models`) or
+`httpx`, so no numerical code can reach the network. One import-graph test enforces this rule. It replaces the current
 architecture contract suite.
 
 ### 5.3 Size budget
@@ -286,7 +303,9 @@ The estimates below use the closest existing code as a guide:
 | export | 800 | checkpoint + GGUF via llama.cpp's converter classes |
 | evaluate | 1,200 | |
 | cli, config, workspace, log | 800 | |
-| **Total** | **≈ 10,000** | vs 80,587 + 67,450 tools today |
+| menu | 400 | thin; no logic of its own |
+| ops | 900 | hub 250, runpod client 300, jobs 350 |
+| **Total** | **≈ 11,300** | vs 80,587 + 67,450 tools today |
 
 `compress/` is the risky part to port. Phase 3 of §11 walks `resident_quantization.py` against the
 085 config. Any branch that 085 never takes is deleted, not translated.
@@ -351,7 +370,9 @@ evaluation:
 ### 6.2 Things that are not in the recipe
 
 Device, workspace root, cache placement, and diagnostics live on the command line or in environment
-variables. A run directory then records:
+variables. So do all operational choices: the Hugging Face repo id and privacy, the RunPod GPU type,
+network volume, and spend cap. These go in a job spec (§13.3) or on the command line, never in the recipe,
+because they don't change the compressed model. A run directory then records:
 
 - the fully resolved recipe;
 - the git commit of the code;
@@ -376,6 +397,7 @@ $NANOQUANT_HOME/
 │  └─ eval/<model>/                  tokenized eval sets
 ├─ runs/<run-name>/                  §7.3
 ├─ releases/<release-name>/          §7.4
+├─ jobs/<job-name>.json              local record of each RunPod job (§13.3); no secrets
 └─ locks/cuda0.lock                  OS file lock + pid; one compressing process per GPU
 ```
 
@@ -454,8 +476,9 @@ releases/gemma-3-1b-it-nanoquant-2p5/
 └─ report.md / report.json     protocol, scores vs BF16, sizes, wall time, peak memory
 ```
 
-`nanoquant release` copies the files; nothing is hard-linked. If a release is published to Hugging Face,
-the upload tool computes whatever checksums the hub wants at that moment. Nothing upstream depends on them.
+`nanoquant release` copies the files; nothing is hard-linked. `nanoquant upload` (§13.2) publishes a
+release to Hugging Face and adds `upload.json` (repo, commit URL, files, time). `huggingface_hub` computes
+whatever checksums the hub wants at that moment; nothing upstream depends on them.
 
 ### 7.5 What happens to today's data
 
@@ -670,7 +693,9 @@ The suite is small and every test guards a real failure mode:
 | Golden math (CPU) | three real 085 projections (one MLP, o, qkv): rewrite ADMM + scale fit vs saved old-code outputs, bit-exact or within a stated tolerance | every commit (fixtures ≈ a few MB) |
 | End to end (CPU, < 2 min) | random-initialized 2-block Gemma 3 config → calibrate → allocate → compress → kill/resume at a block → export → GGUF read-back equals checkpoint → dense eval is finite | every commit |
 | Allocation golden (CPU) | `plan-085.json` loads, totals 219,368,448 bytes, and matches the 085 GGUF stage shapes; the imported 085 profile at the 085 budget (with `--allow-probe-mismatch`) gives a plan within the byte budget, whose predicted KL is within the solver gap of 2.01198 (the in-range re-solve measured for this doc) | every commit |
+| Operations (CPU, no network) | menu: scripted input drives every item and each prints its equivalent command; hub: upload against a fake `HfApi` refuses an incomplete report, defaults to private, writes the model card and `upload.json`; runpod: client builds the request bodies in §13.3 against a saved excerpt of the v2 OpenAPI spec, and handles `ERROR`, 429, and pagination; jobs: no secret ever appears in a job spec, `run.json`, or log | every commit |
 | Parity gate (GPU, hours) | §11.2, the full 085 reproduction | manual, before each release |
+| RunPod smoke (paid, minutes) | submit the tiny 2-block job to the cheapest GPU, upload to a private test repo, pod terminates itself | manual, after `ops` changes |
 
 Test infrastructure stays minimal: one `conftest.py`, the tiny-model factory, and the fixtures above.
 There is no support package and no contract suite beyond the layering test.
@@ -723,7 +748,13 @@ factorization stay comparable even when end-to-end runs drift.
 Only one CUDA compression may run per GPU. The rewrite takes an OS lock on `locks/cuda0.lock` (msvcrt on
 Windows, fcntl elsewhere) that records its pid. It refuses to start if the old repo's device lease or
 `nvidia-smi` shows another NanoQuant process. The WDDM shared-memory guard (0.75 GiB) is kept as a hard
-failure, because Windows spills to shared memory silently.
+failure, because Windows spills to shared memory silently. It applies only on Windows.
+
+On RunPod the GPU lock is per pod and trivially held. The risk there is two pods on one run directory:
+a network volume can be mounted by more than one pod, and file locks over a network filesystem are not
+reliable. So each run directory also gets `runs/<name>/owner.json`, holding the pod id and a heartbeat time
+rewritten every minute. A second process refuses to start while the heartbeat is younger than 10 minutes,
+and names the owner.
 
 ### 11.4 Promotion rule (after v1)
 
@@ -748,3 +779,151 @@ code is deleted.
 | Q6 | Per-block loss snapshots (285 s) and entry-loss probes (73 s)? | Drop them as separate phases; record the losses the tuning loops already compute. Add an opt-in `--diagnostics` flag later if needed. |
 | Q7 | Keep a cached teacher (21 GB) for the sensitivity sweep, or recompute? | Cache under `cache/` when disk allows; otherwise recompute the FP teacher per batch, at about 2× sweep time. |
 | Q8 | Is code-commit mismatch allowed on resume? | Warn on a different git commit; refuse on a different `ALGORITHM_VERSION` or recipe. |
+| Q10 | How does a RunPod pod end without the user's machine being awake? | The pod-side entrypoint terminates its own pod via `POST /v2/pods/{id}/action`, using a key delivered as a RunPod secret. Verify first: that the pod id is available inside the pod, and whether a key can be scoped to pod actions only. If not, use a dedicated low-privilege account key. |
+| Q11 | Does an exited container keep billing? | The v2 spec says a stopped pod bills only for disk. Unverified for a pod whose main process exited. Self-termination (Q10) makes the answer matter less; still check it in the smoke test. |
+| Q12 | Job image: own image in a registry, or stock RunPod PyTorch image + git clone? | Own image, built from a tagged commit and pulled by digest. It carries the pinned llama.cpp converter, needs no git credentials on the pod, and starts faster. Needs a registry choice (GHCR is the obvious one) and RunPod registry auth if private. |
+| Q13 | How do pod-side inputs (calibration tokens, imatrix) get onto the network volume? | Keep them in a private Hugging Face dataset repo, pulled by name on first use. HF is then the single transport for inputs and outputs. |
+| Q14 | Gemma (and later Llama/Qwen) license terms for published derivatives? | Check each base model's terms before the first public upload; the model card template carries what they require. Uploads default to private until then. |
+
+## 13. Operations: menu, Hugging Face upload, RunPod jobs
+
+These three pieces sit in `menu.py` and `ops/`. They change how work is started and where results go,
+never what is computed. A release built locally, from the menu, or on RunPod from the same recipe and
+plan is the same release.
+
+### 13.1 Menu-driven CLI
+
+`nanoquant menu` opens numbered menus in the terminal. Rules:
+
+1. **Thin shell.** Every item calls the same function as a `nanoquant` subcommand, and nothing else.
+   The menu holds no state of its own; it reads the workspace each time it draws a screen.
+2. **Show the command.** Before running an item, the menu prints the equivalent command line, e.g.
+   `nanoquant allocate --recipe gemma-3-1b-it-2p5 --factor-bytes 219368448`. Anything done in the menu can
+   be repeated or scripted without it.
+3. **Confirm what costs money or publishes.** Starting a RunPod job and uploading a release ask for
+   confirmation, and show what will happen (§13.2, §13.3). Deleting a run or a cache asks too.
+4. **Testable.** Input and output are injected functions, as in the current `interactive_compression.py`
+   menu class, so tests drive it with scripted answers. Plain stdlib `input()`; no TUI framework.
+
+Menu tree (v1):
+
+| Menu | Items |
+| --- | --- |
+| Runs | list runs with status (committed blocks / 26, current phase, last heartbeat, local or job name); tail one run's `run.log` and summarize `metrics.jsonl`; new run from a recipe; resume; export; evaluate; release |
+| Plans | allocate a plan for a recipe at a new byte budget or target BPW; show a plan (rank per unit, stages, bytes, predicted KL, grouped by projection and block); diff two plans (units changed, rank deltas, byte and predicted-KL change); run the §8.4 fit check on a plan; set a run's plan (`fixed`) before it starts |
+| Profiles | list profiles and the ADMM settings their curves were measured with; start a profiling step (§8.3) locally or as a job |
+| Releases | list releases with headline scores; compare two reports; upload to Hugging Face |
+| Jobs | submit a run or profiling step to RunPod; list jobs with pod status and cost so far; tail logs; resume on a new pod; fetch results; cancel (terminate the pod) |
+| Workspace | disk use per root (`datasets`, `cache`, `runs`, `releases`); clear `cache/`; delete a released run's scratch |
+
+The Plans menu covers the common operations on `plan.json`. A plan made there is an ordinary file that
+the non-menu commands accept.
+
+### 13.2 Hugging Face upload
+
+`nanoquant upload <release> --repo <namespace>/<name> [--public]`. It also runs at the end of a run or
+job whose job spec names a destination.
+
+- **Only finished releases.** Upload refuses unless the release's `report.json` says evaluation completed
+  with finite metrics on the release's own GGUF and checkpoint. "When finished" means after `release`, not
+  after `compress`.
+- **Private by default.** A new repo is created private. Making a repo public needs `--public` on the
+  command line or a confirmation in the menu, and is never set by a job spec alone.
+- **What is uploaded:** the GGUF; `README.md` generated from `report.json`; `recipe.yaml`; `plan.json`. The
+  checkpoint is uploaded only with `--with-checkpoint`.
+- **Model card.** Generated, never hand-edited:
+  - YAML header: `base_model: <repo>`, `base_model_relation: quantized`, `library_name: gguf`, the license
+    the base model requires (Q14), tags;
+  - protocol and scores against BF16, GGUF bytes, BPW, plan summary, recipe name, code commit;
+  - the llama.cpp revision needed to run the file, since it needs the modified llama.cpp, not upstream.
+- **Transfer.** `huggingface_hub` does the hashing, LFS, and resumable transfer (`upload_folder`, or
+  `upload_large_folder` for large files). The rewrite computes no checksums. Re-uploading an unchanged
+  release creates no new content.
+- **Record.** `releases/<name>/upload.json`: repo id, private flag, commit URL, file list, time.
+- **Token.** `HF_TOKEN` from the environment or the `huggingface_hub` login cache only.
+
+### 13.3 RunPod jobs
+
+The current RunPod path (`RUNPOD.md`, `tools/runpod_bootstrap.sh`) is manual: create a pod in the web UI,
+clone, run a script in tmux. RunPod's REST API v1 is retired; the rewrite uses **REST v2** only
+(`https://api.runpod.io/v2`, `Authorization: Bearer $RUNPOD_API_KEY`).
+
+Confirmed from the v2 OpenAPI spec and migration guide (2026-11-19):
+
+| Need | v2 shape |
+| --- | --- |
+| Create pod | body `CreatePodRequest`: `name` (required), `image` (required unless `templateId`), exactly one of `gpu: {id, count}` or `cpu`, `cloud` (default `SECURE`), `dataCenterIds`, `mounts`, plus container fields `args`, `env`, `ports`, `disk`, `registry` |
+| Network volume mount | `mounts.network: [{volumeId, path}]`, up to 4 |
+| Status | `PROVISIONING`, `STARTING`, `RUNNING`, `EXITED`, `ERROR`, `TERMINATED` |
+| Hourly price | pod `cost`, USD per hour, in every status |
+| Lifecycle | `POST /v2/pods/{id}/action` with `stop`, `start`, `restart`, `terminate`; `DELETE /v2/pods/{id}` |
+| Volumes | `GET /v2/network-volumes` (cursor pagination); create with `name`, `size` (10–4096 GB), `dataCenter`, optional `type` |
+| Logs | streaming with `source`, `tail`, `since`, `Last-Event-ID` |
+| Limits | per-user rate limits; 429 with `RateLimit` headers |
+| Spot | v2 has no interruptible pods, so cost estimates use on-demand prices |
+
+**Not yet confirmed; verify against the full spec before writing the client:**
+
+- the create path (likely `POST /v2/pods`);
+- the single-pod GET path and the logs path;
+- the catalog path for GPU types and prices;
+- API-key scopes.
+
+`ops/runpod.py` is written against a saved excerpt of the spec, kept in `tests/fixtures/`, so a spec change
+shows up as a failing test rather than a failed paid job.
+
+**Job spec.** `jobs/<job-name>.json`, written by `nanoquant job submit` or the menu:
+
+```json
+{
+  "name": "gemma-3-1b-it-2p5-a6000",
+  "command": ["run", "--recipe", "gemma-3-1b-it-2p5"],
+  "image": "ghcr.io/<owner>/nanoquant@sha256:<digest>",
+  "code_commit": "<commit>",
+  "gpu": {"id": "<gpu type id>", "count": 1},
+  "volume": {"id": "<volume id>", "path": "/workspace"},
+  "max_hours": 6,
+  "max_cost_usd": 10,
+  "upload": {"repo": "<namespace>/gemma-3-1b-it-nanoquant-2p5"},
+  "pod_id": null,
+  "status": "draft"
+}
+```
+
+`nanoquant run` is a convenience command: calibrate, allocate, compress, export, evaluate, release, each
+resuming where it left off. The job spec never holds a token. `HF_TOKEN` and the pod's own RunPod key reach
+the pod as RunPod secrets referenced in `env`, so they appear in no file and no log. The image digest is
+the code identity; the job also records the commit the image was built from.
+
+**Flow.**
+
+1. **Submit.** Show GPU type, hourly price, estimated hours (from the last comparable run's wall time,
+   scaled by model size), the `max_hours` / `max_cost_usd` cap, the volume, and the upload target.
+   Confirm, or pass `--yes`. Create the pod and record `pod_id`.
+2. **Pod side.** The image's entrypoint is `nanoquant job-run`. It:
+   - sets `NANOQUANT_HOME` to a directory on the network volume;
+   - pulls missing inputs (tokens, imatrix) from the private inputs dataset repo (Q13);
+   - takes the run's `owner.json` lease (§11.3), or exits if another pod holds it;
+   - runs the command; this is the ordinary §7.3 resume, because the run directory lives on the volume;
+   - on success: release, then upload (§13.2);
+   - writes `runs/<name>/job-status.json` (phase, blocks done, heartbeat, result);
+   - terminates its own pod, on success or failure, after the status file is written (Q10).
+
+   A watchdog thread in the same process terminates the pod when `max_hours` or `max_cost_usd` is reached.
+3. **Watch.** `nanoquant job watch` and the Jobs menu poll pod status and the log stream at minute-scale
+   intervals. They only view: the job finishes, uploads, and terminates without them. On `ERROR` they
+   show the system log and leave the volume untouched.
+4. **Resume.** After a failure or a lost pod, `nanoquant job resume` creates a new pod with the same volume
+   and command. Committed blocks are reused.
+5. **Fetch.** Results come back from Hugging Face: `nanoquant job fetch` downloads the release from the
+   upload target, so no direct volume access is needed. A job without an upload target keeps its release
+   on the volume, and fetching it needs a short CPU pod.
+6. **Cancel.** Terminate the pod. The volume and the run directory stay.
+
+**Volume and data center.** A network volume is bound to one data center, so a job can only use the GPU
+types available there. `job submit` checks this before creating the pod and lists alternatives. One volume
+per data center is enough; it holds the HF cache, inputs, runs, and releases for every model.
+
+**Parity and reports.** A RunPod GPU is not the reference GPU. A RunPod run is held to the §11.2 quality
+bands, but not to its wall-time and memory "not worse" checks, which compare against the same GPU. Every
+report records GPU type, driver, CUDA, and torch versions, and whether it ran locally or as a job.

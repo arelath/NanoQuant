@@ -17,6 +17,11 @@ not when its items are written.
       `ALGORITHM_VERSION`.
 - [ ] Pick the workspace root (`NANOQUANT_HOME`, proposed `D:\nanoquant`) and check free disk space.
 - [ ] Q3 and Q9 are deferred to their phases below; they are not blockers.
+- [ ] Operations decisions, needed before track O2/O3 (not before Phase 1):
+  - [ ] Q12: job image in a registry (recommended: GHCR, pulled by digest) or stock image + git clone;
+  - [ ] Hugging Face namespace for releases, and for the private inputs dataset repo (Q13);
+  - [ ] default privacy for uploads (recommended: private until Q14 is answered);
+  - [ ] default RunPod spend cap per job (`max_hours`, `max_cost_usd`) and preferred data center.
 
 ## Phase 0 — Freeze references (this repository, read-only apart from new exports)
 
@@ -221,6 +226,90 @@ saying where each file came from.
 - [ ] Compress with the re-derived plan; result within the §11.2 bands (ranks may differ).
 
 **Exit:** the from-scratch 1B profile passes the bands. Only then do 270M and 4B go through production.
+
+## Operations track (§13)
+
+These run alongside the numbered phases. Each one lists the phase it needs first. They add no numerical
+code, so they never block the parity gate.
+
+### O1 — Menu-driven CLI (after Phase 4; Plans items after Phase 2)
+
+- [ ] `menu.py` with injected input/output functions; plain stdlib, numbered choices.
+- [ ] Every item calls an existing command function and prints the equivalent `nanoquant …` command first.
+- [ ] Runs menu: list with status (blocks committed / 26, phase, heartbeat, local or job); log tail and
+      metrics summary; new run; resume; export; evaluate; release.
+- [ ] Plans menu:
+  - [ ] allocate at a new byte budget or target BPW;
+  - [ ] show a plan by projection and block (ranks, stages, bytes, predicted KL);
+  - [ ] diff two plans (units changed, rank deltas, byte and predicted-KL change), backed by a new
+        `nanoquant plan diff` command;
+  - [ ] run the §8.4 fit check;
+  - [ ] set a run's `fixed` plan before it starts.
+- [ ] Profiles menu: list profiles with their probe ADMM settings; start a profiling step (needs Phase 6).
+- [ ] Releases menu: list with headline scores; compare two reports; upload (needs O2).
+- [ ] Workspace menu: disk use per root; clear `cache/`; delete a released run's scratch, with confirmation.
+- [ ] `nanoquant run` convenience command: calibrate → allocate → compress → export → evaluate → release,
+      each step resuming.
+- [ ] Tests: scripted input reaches every item; each prints its command; destructive items need confirmation.
+
+**Exit:** every menu item has a scripted test, and each printed command reproduces the item's effect.
+
+### O2 — Hugging Face upload (after Phase 4; first real upload after Phase 5)
+
+- [ ] `ops/hub.py` and `nanoquant upload <release> --repo … [--public] [--with-checkpoint]`.
+- [ ] Refuse unless `report.json` shows completed evaluation with finite metrics on the release's own files.
+- [ ] Create repos private by default; `--public` or a menu confirmation is the only way to publish.
+- [ ] Generate `README.md` from `report.json`: `base_model`, `base_model_relation: quantized`,
+      `library_name: gguf`, license, tags, scores vs BF16, sizes, BPW, plan summary, code commit, the
+      llama.cpp revision needed to run it.
+- [ ] Q14: check the Gemma terms for published derivatives and put what they require into the card template.
+- [ ] Upload GGUF, card, `recipe.yaml`, `plan.json` with `huggingface_hub`; no local checksums.
+- [ ] Write `releases/<name>/upload.json`.
+- [ ] Token only from `HF_TOKEN` or the hub login cache; a test asserts it reaches no file or log.
+- [ ] Tests against a fake `HfApi`: refusal on incomplete report, private default, card content,
+      `upload.json`.
+- [ ] Upload the Phase 5 release to a private repo; download it and load it in the modified llama.cpp.
+
+**Exit:** the Phase 5 release is on Hugging Face (private) and loads after download.
+
+### O3 — RunPod jobs (after O2)
+
+Verify first: these are not yet confirmed in the v2 spec.
+
+- [ ] Read the full v2 OpenAPI spec; confirm the create-pod path, single-pod GET path, logs path, GPU
+      catalog/price path, and API-key scopes. Save the excerpt the client uses to `tests/fixtures/`.
+- [ ] Q10: confirm the pod id is available inside a pod and that a pod can terminate itself with a key
+      delivered as a RunPod secret; decide on a scoped or dedicated low-privilege key.
+- [ ] Q11: confirm whether a pod whose main process exited keeps billing.
+
+Build:
+
+- [ ] `docker/Dockerfile`: code at a tagged commit, pinned deps, pinned llama.cpp converter; build, push,
+      record the digest.
+- [ ] Private inputs dataset repo on Hugging Face with the calibration tokens and imatrix (Q13); pod-side pull.
+- [ ] `ops/runpod.py`: thin v2 client (catalog, volumes, pods, actions, logs) with 429 backoff, cursor
+      pagination, and `ERROR` handling.
+- [ ] `ops/jobs.py`: job spec JSON under `jobs/`; no secrets in it.
+- [ ] `nanoquant job submit`: check GPU availability in the volume's data center, show price, estimate,
+      cap, and upload target, then require confirmation or `--yes`.
+- [ ] `nanoquant job-run` (pod entrypoint):
+  - [ ] `NANOQUANT_HOME` on the network volume; inputs pulled on first use;
+  - [ ] `runs/<name>/owner.json` lease with pod id and minute heartbeat; refuse while another owner's
+        heartbeat is under 10 minutes old;
+  - [ ] run, release, upload; write `job-status.json`;
+  - [ ] self-terminate on success or failure; watchdog terminates at `max_hours` / `max_cost_usd`.
+- [ ] `nanoquant job watch | logs | resume | fetch | cancel`, and the Jobs menu items.
+- [ ] Reports record GPU type, driver, CUDA, torch, and local vs job.
+- [ ] Tests (CPU, no network): request bodies against the saved spec excerpt; 429 and pagination;
+      lease refusal; no token in job spec, `run.json`, or logs.
+- [ ] Paid smoke test: tiny 2-block job on the cheapest GPU → private test repo → pod terminates itself;
+      check the pod shows `TERMINATED` and billing stopped.
+- [ ] Interruption test: cancel a real job mid-run, `job resume` on a new pod, committed blocks reused.
+- [ ] Full 085 recipe as a job; quality within the §11.2 bands (wall time and memory not compared).
+- [ ] Replace `RUNPOD.md` in the new repo with a short guide for the job commands.
+
+**Exit:** the 085 recipe runs end to end as a RunPod job, uploads its release, and terminates its pod
+without the local machine involved after submit.
 
 ## Phase 7 — Retire
 
