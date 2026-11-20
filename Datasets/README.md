@@ -197,8 +197,12 @@ log probabilities use FP16 and occupy about 20 GiB. Results, response fits, and
 plots go under `Datasets/gemma-3-4b-it-bf16-sensitivity-curated-160x256`. Rerun the same
 command to resume. Use `-TeacherOnly` to capture and verify the teacher first.
 The launcher defaults to one window per forward and keeps the teacher cache in
-host memory. `-EvaluationBatchSize`, `-TeacherGpuCacheGiB`, and
-`-TeacherPasses` expose the shared builder's memory settings.
+host memory. Resume a partitioned sweep with the same batch size and partition
+count it was started with. For the 20-partition run, use the following command.
+
+```powershell
+.\tools\build_gemma_3_4b_curated_sensitivity_dataset.ps1 -EvaluationBatchSize 1 -TeacherGpuCacheGiB 1.05 -TeacherPasses 20
+```
 
 The smaller 16-window sweep is also available.
 
@@ -207,15 +211,15 @@ The smaller 16-window sweep is also available.
 ```
 
 This uses the pinned `google/gemma-3-4b-it` revision
-`093f9f388b31de276ce2de164bdc2081324b9767` and the same FP16 Gaussian-noise
-measurement protocol as the 1B launcher. It loads the text decoder from the
+`093f9f388b31de276ce2de164bdc2081324b9767` and runs the model in BF16 with
+Gaussian weight perturbations. It loads the text decoder from the
 multimodal checkpoint and defaults to 34 blocks, 238 projections, and 4,284
 trials (16 × 256-token windows, six error levels, three seeds). Install the
 `evaluation` and `visualization` extras for Parquet and plotting. The full
-sweep requires many forward passes, a device that fits the FP16 4B decoder,
+sweep requires many forward passes, a device that fits the BF16 4B decoder,
 and about 2 GiB of storage for the default teacher log probabilities alone.
 
-Everything stays under `Datasets/gemma-3-4b-it-fp16-sensitivity-16x256` by
+Everything stays under `Datasets/gemma-3-4b-it-bf16-sensitivity-16x256` by
 default. Rerun the same command to reuse the teacher and resume the sweep.
 Use `--teacher-dataset PATH` for a different dataset directory.
 

@@ -31,6 +31,17 @@ def _fit(status: str = "within_measured") -> dict:
     }
 
 
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_joint_scoring_resolves_4b_teacher_precision(dtype) -> None:
+    tool = _tool()
+    source = tool.GEMMA_4B
+    spec = tool.spec_for_protocol({"teacher": {
+        "source": source.source, "revision": source.revision, "model_dtype": str(dtype),
+    }})
+    assert spec.dtype == dtype
+    assert spec.weight_files == source.weight_files
+
+
 def test_joint_perturbation_uses_each_targets_error_and_sweep_noise_then_restores() -> None:
     tool = _tool()
     first, second = torch.ones((32, 32)), torch.full((32, 32), 3.0)

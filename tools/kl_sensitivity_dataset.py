@@ -86,6 +86,7 @@ GEMMA_4B = ModelSpec(
         ("model-00001-of-00002.safetensors", "eb5fd5e97ddd07b56778733e9653c07312529cb00980a318fc3e1c4e3b5a8f1f"),
         ("model-00002-of-00002.safetensors", "fdde0e5aa5ced0fa203b3d50f4ab78168b7e3a3e08c6349f5cc9326666e1bb13"),
     ),
+    dtype=torch.bfloat16,
 )
 
 
@@ -187,6 +188,8 @@ def _teacher_dataset(
                 model, SpliceReconstructionSet((), (), ()), tokens, device=args.device,
             )
             baseline_nll, batches = evaluator.teacher_cache_state()
+            if not math.isfinite(baseline_nll):
+                raise ValueError(f"{spec.source} produced non-finite teacher NLL in {spec.precision.upper()}")
             cache = commit_active_kl_teacher_cache(root, protocol.cache_key, baseline_nll, batches)
         return publish_kl_teacher_dataset(root, protocol, tokens, cache)
 

@@ -54,7 +54,11 @@ def test_4b_defaults_use_distinct_model_and_dataset_reports() -> None:
     assert sensitivity.GEMMA_1B.weights_identity == sensitivity.MODEL_WEIGHTS_SHA256
 
 
-def test_4b_bf16_override_names_and_captures_a_distinct_teacher(tmp_path, monkeypatch) -> None:
+@pytest.mark.parametrize(("override", "precision", "dtype"), [
+    ([], "bf16", torch.bfloat16),
+    (["--model-dtype", "fp16"], "fp16", torch.float16),
+])
+def test_4b_precision_names_and_captures_a_distinct_teacher(tmp_path, monkeypatch, override, precision, dtype) -> None:
     snapshot = tmp_path / "snapshot"
     snapshot.mkdir()
     (snapshot / "config.json").write_text(json.dumps({"model_type": "gemma3"}))
@@ -69,7 +73,7 @@ def test_4b_bf16_override_names_and_captures_a_distinct_teacher(tmp_path, monkey
         return nn.Identity()
 
     def capture(args, snapshot, model, config, root, data_sha256, spec):
-        assert spec.dtype == torch.bfloat16
+        assert spec.dtype == dtype
         observed["root"] = root
 
     monkeypatch.setattr(sensitivity, "ROOT", tmp_path)
@@ -79,13 +83,13 @@ def test_4b_bf16_override_names_and_captures_a_distinct_teacher(tmp_path, monkey
     monkeypatch.setattr(sensitivity, "load_causal_language_model", load_model)
     monkeypatch.setattr(sensitivity, "_teacher_dataset", capture)
     assert sensitivity.main(
-        ["--device", "cpu", "--model-dtype", "bf16", "--teacher-only"],
+        ["--device", "cpu", "--teacher-only", *override],
         spec=sensitivity.GEMMA_4B,
         dataset_reports=True,
     ) == 0
     assert observed == {
-        "dtype": torch.bfloat16,
-        "root": tmp_path / "Datasets/gemma-3-4b-it-bf16-sensitivity-16x256",
+        "dtype": dtype,
+        "root": tmp_path / f"Datasets/gemma-3-4b-it-{precision}-sensitivity-16x256",
     }
 
 

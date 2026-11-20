@@ -20,6 +20,7 @@ import statistics
 import time
 from collections.abc import Iterator, Mapping
 from contextlib import ExitStack, contextmanager
+from dataclasses import replace
 from pathlib import Path
 
 import torch
@@ -42,7 +43,7 @@ from nanoquant.infrastructure.io_utils import atomic_write_json, atomic_write_te
 from nanoquant.infrastructure.kl_teacher_dataset import KlTeacherDataset, load_kl_teacher_dataset
 from nanoquant.infrastructure.model_adapters import adapter_for_config
 
-SPECS = (GEMMA_1B, GEMMA_270M, GEMMA_4B)
+SPECS = (GEMMA_1B, GEMMA_270M, GEMMA_4B, replace(GEMMA_4B, dtype=torch.float16))
 # Two-sided 95% Student-t critical values for 1-30 degrees of freedom.
 _T95 = (
     12.706, 4.303, 3.182, 2.776, 2.571, 2.447, 2.365, 2.306, 2.262, 2.228,
