@@ -1,0 +1,526 @@
+{
+  "schema_version": 1,
+  "resolved_config": {
+    "allocation": {
+      "bounds": {
+        "ceiling_fraction_of_uniform": 1.5,
+        "edge_block_boost": 0.15,
+        "floor_fraction_of_uniform": 0.6,
+        "multiple": 32,
+        "overcomplete_rank_ceiling_fraction": 3.0
+      },
+      "kl_profile_artifact": null,
+      "kl_profile_key": null,
+      "kl_sensitivity_granularity": "exact_or_type_block",
+      "layer_budget_multipliers": [],
+      "maximum_rank_layer_patterns": [
+        "*"
+      ],
+      "reconstruction": {
+        "allocation_dataset": null,
+        "allocation_dataset_key": null,
+        "enabled": false,
+        "importance": {
+          "edge_block_multiplier": 1.0,
+          "layer_multipliers": [],
+          "protected_edge_block_count": 0,
+          "protected_layer_patterns": []
+        },
+        "kl_objective": "sensitivity_proxy",
+        "objective_mode": "unit_frobenius",
+        "probe_admm": null,
+        "protect_sensitive_units": true,
+        "protected_rank_floor_fraction": 1.0,
+        "protected_sensitivity_quantile": 0.8,
+        "rank_trust_fraction": 1.0,
+        "rank_trust_reference_run": null,
+        "response_curves": [],
+        "response_profile_provenance": "",
+        "response_source": "configured",
+        "sensitivity_strength": 0.75,
+        "target_protected_error_reduction_fraction": 0.01
+      },
+      "retry": {
+        "allow_above_allocator_cap": true,
+        "enabled": true,
+        "extra_bit_budget_fraction": 0.01,
+        "maximum_attempts": 3,
+        "outlier_count_increment_at_rank_cap": 0,
+        "rank_increase_fraction": 0.25,
+        "thresholds": {
+          "raw_normalized_error": 0.5,
+          "weighted_normalized_error": 0.5
+        }
+      },
+      "sensitivity_alpha": 0.5,
+      "strategy": "uniform",
+      "target_bpw": 2.0,
+      "utility_profile_artifact": null
+    },
+    "block_tuning": {
+      "batch_schedule": {
+        "batch_size": null,
+        "continuation_journal_sha256": null,
+        "enabled": true,
+        "maximum_batch_size": 8,
+        "memory_safety_factor": 1.5,
+        "start_block": 0
+      },
+      "compile_forward": true,
+      "epoch_loss_mode": "legacy_training",
+      "factorized": {
+        "learning_rates": {
+          "bias": 1e-05,
+          "binary": 3e-05,
+          "outlier": null,
+          "scale": 1e-05
+        },
+        "loop": {
+          "batch_size": 1,
+          "early_stop_relative_tolerance": null,
+          "enabled": true,
+          "epochs": 8
+        },
+        "optimizer": {
+          "continuation_journal_sha256": null,
+          "layer_patterns": [
+            "mlp.gate_proj",
+            "mlp.down_proj",
+            "self_attn.o_proj"
+          ],
+          "name": "fused_adamw_scales_fp32",
+          "start_block": 0
+        },
+        "skip_if_relative_loss_jump_below": null
+      },
+      "layer_order": [
+        "mlp.gate_proj",
+        "mlp.up_proj",
+        "mlp.down_proj",
+        "self_attn.v_proj",
+        "self_attn.o_proj",
+        "self_attn.q_proj",
+        "self_attn.k_proj"
+      ],
+      "microbatch_size": 1,
+      "non_factorized": {
+        "epochs_by_layer_position": [
+          8,
+          4,
+          3,
+          6,
+          2
+        ],
+        "loop": {
+          "batch_size": 4,
+          "early_stop_relative_tolerance": null,
+          "enabled": true,
+          "epochs": 8
+        },
+        "optimizer": {
+          "learning_rate": 0.0001,
+          "name": "adamw",
+          "weight_decay": 0.0
+        }
+      },
+      "post_block_refit": {
+        "batch_size": 1,
+        "bias_learning_rate": null,
+        "enabled": true,
+        "epochs": 2,
+        "outlier_learning_rate": null,
+        "scale_learning_rate": 1e-05
+      },
+      "post_refit_covariance_refinement": {
+        "block_indices": [],
+        "enabled": false,
+        "regularization": {
+          "diagonal_blend": 0.0,
+          "diagonal_damp_fraction": 0.01,
+          "identity_shrinkage": 0.0,
+          "jitter_attempts": 5
+        },
+        "sampling": {
+          "batch_size": 1,
+          "max_sequences": null,
+          "max_tokens_per_layer": 8192,
+          "reuse_sibling_inputs": false
+        },
+        "shared_input_groups": []
+      },
+      "reset_seed_each_stage": true,
+      "restore_best_state": false
+    },
+    "calibration": {
+      "accumulation_dtype": "float32",
+      "batch_size": 1,
+      "fallback": {
+        "on_cuda_oom": [
+          "fail"
+        ]
+      },
+      "imatrix": {
+        "path": "D:\\dev\\research\\NanoQuantRewrite\\Datasets\\gemma-3-270m-it-imatrix-unsloth\\imatrix_unsloth.gguf_file",
+        "sha256": "2f88200eae0588cf7b3030f34e5469a529758a1c69f7a13453b7d3a91de017f3",
+        "tensor_map": []
+      },
+      "method": "online_fisher",
+      "objective": {
+        "block_size": null,
+        "kind": "diagonal",
+        "low_rank": null,
+        "regularization": {
+          "diagonal_blend": 0.0,
+          "diagonal_damp_fraction": 0.01,
+          "identity_shrinkage": 0.0,
+          "jitter_attempts": 5
+        },
+        "sampling": {
+          "batch_size": 1,
+          "max_sequences": null,
+          "max_tokens_per_layer": 4096,
+          "reuse_sibling_inputs": false
+        }
+      },
+      "sample_count": 256,
+      "shrinkage": 0.6
+    },
+    "dataset": {
+      "behavior_slices": [],
+      "cache_tokenized": true,
+      "formatting": "gemma-chat-plus-raw-text-v1",
+      "selection_seed": 0,
+      "shuffle": true,
+      "sources": [
+        {
+          "name": "HuggingFaceH4/ultrachat_200k",
+          "revision": "8049631c405ae6576f93f445c6b8166f76f5505a",
+          "split": "train_sft",
+          "subset": null,
+          "weight": 0.5
+        },
+        {
+          "name": "Salesforce/wikitext",
+          "revision": "b08601e04326c79dfdd32d625aee71d232d685c3",
+          "split": "train",
+          "subset": "wikitext-2-raw-v1",
+          "weight": 0.5
+        }
+      ]
+    },
+    "distillation": {
+      "batch_size": 1,
+      "enabled": false,
+      "epochs": 8,
+      "final_norm_calibration": {
+        "enabled": false,
+        "scale": 1.015
+      },
+      "foldable_mlp_multipliers": {
+        "checkpoint_interval_steps": 16,
+        "enabled": false,
+        "gradient_checkpointing": false,
+        "gradient_clip": 1.0,
+        "identity_penalty": 100.0,
+        "initializer_artifact": null,
+        "initializer_multiplier_limit": 128.0,
+        "initializer_sha256": null,
+        "learning_rate": 0.0001,
+        "multiplier_limit": 4.0,
+        "steps": 64
+      },
+      "gradient_checkpointing": true,
+      "learning_rate": 1e-05,
+      "loss": "top_k",
+      "mass_floor_correction": {
+        "enabled": false,
+        "epochs": 1,
+        "expected_initializer_protocol_hash": null,
+        "expected_initializer_steps": null,
+        "learning_rate": 1e-05,
+        "mass_loss_weight": 2.0,
+        "maximum_batches_per_epoch": 32,
+        "minimum_teacher_mass_ratio": 0.8,
+        "scheduler_total_steps": 128
+      },
+      "maximum_batches_per_epoch": null,
+      "maximum_tokens_per_batch": 512,
+      "optimizer_version": "legacy-optimi-adamw-v1",
+      "sampling_version": "legacy-python-device-rng-v1",
+      "tail_mass_weight": 1.0,
+      "teacher_targets_artifact": null,
+      "temperature": 1.0,
+      "token_chunk_size": 128,
+      "top_k": 64,
+      "vocabulary_chunk_size": 8192,
+      "weight_decay": 0.0
+    },
+    "evaluation": {
+      "baseline_run": null,
+      "default_tier": "quick",
+      "few_shot": 0,
+      "gates": [],
+      "inline_quality": false,
+      "inline_quality_samples": 1,
+      "inline_quality_tokens": 8,
+      "maximum_thinking_degradation_ratio": 1.1,
+      "reasoning_modes": [],
+      "reasoning_samples_per_mode": 8,
+      "reasoning_sequence_length": 512,
+      "sample_limit": null,
+      "suites": [
+        "artifact-parity-v1",
+        "ppl-wikitext2-v1",
+        "decode-v1"
+      ]
+    },
+    "factorization": {
+      "admm": {
+        "block_retry": {
+          "stop_iterations": 50000,
+          "target_error": 0.01
+        },
+        "convergence_check_interval": 100,
+        "early_stop_tolerance": null,
+        "inner_iterations": 2,
+        "outer_iterations": 3200,
+        "penalty_schedule": "cubic",
+        "regularization": 0.03,
+        "transpose_wide": false
+      },
+      "bias_correction": {
+        "charge_to_bit_budget": true,
+        "enabled": false,
+        "storage_dtype": "float16"
+      },
+      "binary_search": {
+        "control_outer_passes": 8,
+        "enabled": false,
+        "layer_patterns": [
+          "*"
+        ],
+        "max_one_bit_vectors": 2147483647,
+        "one_bit_fraction": 1.0,
+        "one_bit_passes": 16,
+        "scale_passes": 64,
+        "tabu_outer_passes": 8,
+        "tabu_passes": 2,
+        "tabu_steps": 256,
+        "tabu_tenure": 8,
+        "tabu_tenure_jitter": 4,
+        "variable_depth_length": 64,
+        "variable_depth_passes": 2
+      },
+      "compute_dtype": "bfloat16",
+      "implementation": "nanoquant_admm",
+      "low_rank_patch": {
+        "charge_to_bit_budget": true,
+        "enabled": false,
+        "fit_tokens": 4096,
+        "held_out_tokens": 4096,
+        "layer_patterns": [
+          "self_attn.o_proj"
+        ],
+        "rank": 8,
+        "require_held_out_acceptance": true,
+        "ridge_fraction": 0.01,
+        "storage_dtype": "float16"
+      },
+      "product_codebook": {
+        "allow_free_factor_fallback": true,
+        "assignment_batch_words": 65536,
+        "codebook_freeze_fraction": 0.5,
+        "codebook_update_interval": 10,
+        "codebook_warmup_fraction": 0.0,
+        "enabled": false,
+        "flips_per_word": 0,
+        "format": "product-codebook-free-k16-v1",
+        "free_row_fractions": [
+          0.5,
+          0.5625,
+          0.625
+        ],
+        "free_row_multiple": 32,
+        "index_bits": 16,
+        "layer_patterns": [
+          "mlp.*"
+        ],
+        "measured_option_allocation": true,
+        "minimum_coded_rows": 32,
+        "probe_final_options_per_layer": 2,
+        "probe_final_outer_iterations": null,
+        "probe_frontier_outer_iterations": null,
+        "probe_outer_iterations": 100,
+        "rank_span_fractions": [
+          0.0,
+          0.5,
+          1.0
+        ]
+      },
+      "residual_stages": {
+        "enabled": true
+      },
+      "scale_fit": {
+        "alternating_passes": 2,
+        "chunk_rows": 512,
+        "enabled": true,
+        "epsilon": 1e-08,
+        "rollback_on_regression": true
+      },
+      "shared_input": {
+        "enabled": true,
+        "groups": [
+          {
+            "member_multipliers": [
+              {
+                "member": "self_attn.v_proj",
+                "multiplier": 2.0
+              }
+            ],
+            "members": [
+              "self_attn.q_proj",
+              "self_attn.k_proj",
+              "self_attn.v_proj"
+            ],
+            "name": "self_attn.attn_qkv"
+          }
+        ]
+      },
+      "solve_dtype": "float32"
+    },
+    "intent": {
+      "baseline_run": null,
+      "experiment_number": null,
+      "hypothesis": "Direct exact-unit KL measurements provide the D2 allocation anchors.",
+      "name": "087-d2-uniform-control-gemma-3-270m-it",
+      "owner": null,
+      "purpose": "Build the same-campaign uniform control for Experiment 087 KL measurement.",
+      "tags": [
+        "gemma-3-270m-it",
+        "experiment-087-preparation",
+        "uniform-control",
+        "kl-profile-source"
+      ]
+    },
+    "model": {
+      "load_dtype": "bfloat16",
+      "revision": "23cf460f6bb16954176b3ddcc8d4f250501458a9",
+      "sequence_length": 2048,
+      "source": "unsloth/gemma-3-270m-it",
+      "tokenizer_revision": "23cf460f6bb16954176b3ddcc8d4f250501458a9",
+      "tokenizer_source": null,
+      "trust_remote_code": false
+    },
+    "observability": {
+      "block_snapshot_samples": 4,
+      "block_snapshot_tokens": 512,
+      "capture_cuda_trace": false,
+      "console_level": "info",
+      "diagnostic_fixture_policy": "on_failure",
+      "event_level": "info",
+      "loss_denominator_floor": 1e-08,
+      "record_admm_steps": false,
+      "record_block_loss_snapshots": true,
+      "record_resource_interval_seconds": 5.0,
+      "record_weight_reconstruction_table": true
+    },
+    "outliers": {
+      "charge_to_bit_budget": true,
+      "count_multiple": 1,
+      "fraction": 0.0,
+      "layer_patterns": [
+        "*"
+      ],
+      "removed_column_importance": "zero",
+      "residual_probe": {
+        "chunk_rows": 512,
+        "iterations": 80
+      },
+      "selector": "none",
+      "storage_dtype": "int8"
+    },
+    "output": {
+      "artifact_root": "artifacts",
+      "report_formats": [
+        "markdown",
+        "json"
+      ],
+      "retain_temporary_artifacts": false,
+      "run_root": "D:\\dev\\research\\NanoQuantRewrite\\evidence\\087",
+      "temporary_root": null
+    },
+    "packing": {
+      "align_blocks_to_shards": true,
+      "backend_layouts": [
+        "cuda-binary-v1"
+      ],
+      "embeddings": {
+        "bits": 8,
+        "group_size": null
+      },
+      "logical_format": "nanoquant-v1",
+      "shard_size_gib": 2.0
+    },
+    "profiling": {
+      "cuda_sample_every": 16,
+      "cuda_timing": false,
+      "emit_span_events": false,
+      "level": "macro",
+      "memory_counters": false,
+      "raw_samples_per_phase": 64,
+      "trace_blocks": [],
+      "trace_layers": []
+    },
+    "reproducibility": {
+      "allow_nondeterministic_kernels": false,
+      "deterministic": true,
+      "seed": 0
+    },
+    "runtime": {
+      "activations": {
+        "batch_size": 8,
+        "directory": null,
+        "gpu_cache": "auto",
+        "gpu_reserve_gib": 1.0,
+        "kind": "auto",
+        "prefetch_batches": 1
+      },
+      "block_forward_batch_size": 8,
+      "checkpoints": {
+        "activation_retention": "rolling",
+        "commit_granularity": "layer",
+        "enabled": true,
+        "keep_attempt_artifacts": false,
+        "verify_on_resume": true
+      },
+      "compute_device": "cuda",
+      "executor": "resident",
+      "memory_policy": {
+        "allow_growth_within_run": true,
+        "gpu_reserve_gib": 1.0,
+        "host_reserve_gib": 4.0,
+        "maximum_stage_retries": 3,
+        "mode": "fixed",
+        "profile": "balanced",
+        "temporary_disk_reserve_gib": 8.0
+      },
+      "on_cuda_oom": [
+        "fail"
+      ],
+      "resources": {
+        "cpu_memory_gib": null,
+        "gpu_memory_gib": null,
+        "pinned_memory_gib": 1.0,
+        "temporary_disk_gib": null,
+        "workspace_memory_gib": null
+      },
+      "source_streaming": {
+        "prefer_memory_mapping": true,
+        "prefetch_blocks": 0,
+        "verify_tensor_hashes": true
+      }
+    },
+    "schema_version": 1
+  },
+  "resolved_config_hash": "sha256:d8bc1c87b2d4c405fffe2791c6705393b23f16b1366b06338cd90b7431767fbb"
+}
