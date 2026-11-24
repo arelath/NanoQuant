@@ -12,6 +12,7 @@ from collections import deque
 from collections.abc import Callable, Iterator
 from concurrent.futures import Executor, ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
+from copy import copy
 from dataclasses import dataclass, replace
 from dataclasses import field as dataclass_field
 from fnmatch import fnmatchcase
@@ -254,7 +255,7 @@ from nanoquant.infrastructure.tuning_checkpoint import (
 from nanoquant.ports.event_sink import EventSink, LayerCommittedPayload, emit_layer_committed
 from nanoquant.ports.model_adapter import ModelAdapter
 
-RESIDENT_ALGORITHM_VERSION = 74
+RESIDENT_ALGORITHM_VERSION = 75
 _DATASET_RANK_SOURCES = {RankResponseSource.DATASET, RankResponseSource.PINNED_DATASET, RankResponseSource.KL_DATASET}
 _DATASET_RECONSTRUCTION_SOURCES = {RankResponseSource.MEASURED, *_DATASET_RANK_SOURCES}
 # Preserve existing run identities when imported output weights are disabled.
@@ -2394,13 +2395,43 @@ def _run_resident_factorization_attempts(
             outlier_count=outlier_count,
             shape=shape,
         ):
-            return execute_attempt_body(rank, attempt, outlier_count)
+            policy = request.admm.unit_reconstruction_retry
+            stage = factor_stage
+            started = time.perf_counter()
+            peak = 0
+            while True:
+                result, outliers, fitted = execute_attempt_body(rank, attempt, outlier_count, stage)
+                if policy is None:
+                    break
+                error = result.metrics.export_weighted_normalized_error
+                if not math.isfinite(error):
+                    raise ValueError("non-finite weighted unit reconstruction error")
+                iterations = stage.admm.outer_iterations
+                retry = policy.needs_retry(error, iterations)
+                peak = max(peak, result.peak_workspace_bytes)
+                context.events.emit(
+                    "resident-quantization", "info", "unit.admm_reconstruction_measured",
+                    block=layer_plan.layer.block.index, layer=layer_plan.layer.path, rank=rank,
+                    outer_iterations=iterations, weighted_error=error, target_error=policy.target_error, retry=retry,
+                )
+                if not retry:
+                    result = replace(result, wall_seconds=time.perf_counter() - started, peak_workspace_bytes=peak)
+                    break
+                stage = copy(factor_stage)
+                stage.admm = replace(factor_stage.admm, outer_iterations=2 * iterations)
+            companions.append((outliers, fitted))
+            return result
 
     def execute_attempt_body(
         rank: int,
         attempt: int,
         outlier_count: int,
-    ) -> FactorizationResult:
+        factor_stage: FactorizationAttemptStage,
+    ) -> tuple[FactorizationResult, OutlierSelectionResult, ScaleFitResult | None]:
+        attempt_config_hash = (
+            semantic_hash((config_hash, layer_plan.layer, factor_stage.admm.outer_iterations))
+            if request.admm.unit_reconstruction_retry is not None else config_hash
+        )
         started = time.perf_counter()
         attempt_window = PeakWindow(request.device).start()
         outlier_seed = (
@@ -2462,15 +2493,14 @@ def _run_resident_factorization_attempts(
             factorized = fit_residual_stages(
                 FactorizationRequest(
                     1, layer_plan.layer, source_weight, outliers.residual_weight, objective,
-                    rank, factor_seed, config_hash, outliers.factor_generator_state,
+                    rank, factor_seed, attempt_config_hash, outliers.factor_generator_state,
                 ), context, factor_stage=factor_stage, scale_stage=scale_stage,
                 fit_scales=request.scale_fit.enabled, multiple=request.rank_multiple, device=request.device,
             )
-            companions.append((outliers, None))
             attempt_window.finish()
             return replace(factorized, wall_seconds=time.perf_counter() - started,
                            peak_workspace_bytes=max(factorized.peak_workspace_bytes,
-                                                    attempt_window.peak_allocated_bytes))
+                                                    attempt_window.peak_allocated_bytes)), outliers, None
         with recorder.phase("admm"):
             factorized = execute_stage(
                 factor_stage,
@@ -2482,7 +2512,7 @@ def _run_resident_factorization_attempts(
                     objective,
                     rank,
                     factor_seed,
-                    config_hash,
+                    attempt_config_hash,
                     outliers.factor_generator_state,
                     product_free_rows(rank),
                 ),
@@ -2540,7 +2570,6 @@ def _run_resident_factorization_attempts(
                     input_importance,
                     output_importance,
                 )
-        companions.append((outliers, fitted))
         attempt_window.finish()
         peak = (
             max(probe_peak, attempt_window.peak_allocated_bytes)
@@ -2553,7 +2582,7 @@ def _run_resident_factorization_attempts(
             metrics=metrics,
             wall_seconds=time.perf_counter() - started,
             peak_workspace_bytes=peak,
-        )
+        ), outliers, fitted
 
     accepted = run_factorization_attempts(
         layer_plan,
@@ -2888,10 +2917,12 @@ def _run_post_refit_covariance_refinement(
 def _resident_config_hash(request: ResidentQuantizationRequest) -> str:
     adaptive_memory = request.memory_plan is not None and request.memory_plan.mode == "adaptive"
     if (
-        RESIDENT_ALGORITHM_VERSION != 74
-        or request.admm.block_retry is not None
+        RESIDENT_ALGORITHM_VERSION != 75
+        or request.admm.unit_reconstruction_retry is not None
     ):
         algorithm_version = RESIDENT_ALGORITHM_VERSION
+    elif request.admm.block_retry is not None:
+        algorithm_version = 74
     elif request.reconstruction_rank_planning.response_source is RankResponseSource.KL_DATASET:
         algorithm_version = 73
     elif request.reconstruction_rank_planning.response_source is RankResponseSource.PINNED_DATASET:

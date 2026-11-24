@@ -608,12 +608,19 @@ def validate(config: RunConfig, phase: ValidationPhase = ValidationPhase.PRE_RES
         "must be positive",
     )
     admm = config.factorization.admm
-    if admm.block_retry is not None:
+    require(
+        admm.block_retry is None or admm.unit_reconstruction_retry is None,
+        "CFG259", "factorization.admm", "select either block output or unit reconstruction retries",
+    )
+    for field in ("block_retry", "unit_reconstruction_retry"):
+        retry = getattr(admm, field)
+        if retry is None:
+            continue
         require(
-            math.isfinite(admm.block_retry.target_error) and admm.block_retry.target_error > 0
-            and admm.block_retry.stop_iterations >= admm.outer_iterations
+            math.isfinite(retry.target_error) and retry.target_error > 0
+            and retry.stop_iterations >= admm.outer_iterations
             and admm.early_stop_tolerance is None and not config.factorization.product_codebook.enabled,
-            "CFG258", "factorization.admm.block_retry",
+            "CFG258", f"factorization.admm.{field}",
             "requires a positive finite target, a stop budget at least as large as the first budget, "
             "fixed-length solves and independent factorization attempts",
         )

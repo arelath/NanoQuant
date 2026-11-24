@@ -106,8 +106,10 @@ def to_dict(value: Any) -> Any:
     """Convert dataclasses/enums/tuples to stable JSON-compatible values."""
     if is_dataclass(value) and not isinstance(value, type):
         payload = {field.name: to_dict(getattr(value, field.name)) for field in fields(value)}
-        if isinstance(value, ADMMConfig) and value.block_retry is None:
-            payload.pop("block_retry")
+        if isinstance(value, ADMMConfig):
+            for name in ("block_retry", "unit_reconstruction_retry"):
+                if payload[name] is None:
+                    payload.pop(name)
         if isinstance(value, ImatrixConfig) and not value.use_rows:
             payload.pop("use_rows")
         return payload

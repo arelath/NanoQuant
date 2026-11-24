@@ -174,10 +174,10 @@ def test_each_admm_stage_fits_the_remaining_residual_and_is_deterministic(tmp_pa
     assert not torch.allclose(first, prediction)
 
 
-@pytest.mark.parametrize(("full_rank_stages", "adaptive"), [(None, False), (3, False), (3, True)],
-                         ids=["budget-allocated", "three-full-rank", "adaptive-block-retry"])
+@pytest.mark.parametrize(("full_rank_stages", "adaptive"), [(None, None), (3, None), (3, "block"), (3, "unit")],
+                         ids=["budget-allocated", "three-full-rank", "adaptive-block-retry", "adaptive-unit-retry"])
 def test_resident_staged_rank_tuning_resume_and_export_accounting(
-    tmp_path: Path, full_rank_stages: int | None, adaptive: bool,
+    tmp_path: Path, full_rank_stages: int | None, adaptive: str | None,
 ):
     from transformers.models.gemma3.configuration_gemma3 import Gemma3TextConfig
     from transformers.models.gemma3.modeling_gemma3 import Gemma3ForCausalLM
@@ -221,7 +221,8 @@ def test_resident_staged_rank_tuning_resume_and_export_accounting(
         maximum_rank_layer_patterns=() if full_rank_stages is None else ("*",),
         residual_stages=True,
         admm=ADMMConfig(outer_iterations=3, inner_iterations=1,
-                        block_retry=BlockADMMRetryConfig(1e-16, 5) if adaptive else None),
+                        block_retry=BlockADMMRetryConfig(1e-16, 5) if adaptive == "block" else None,
+                        unit_reconstruction_retry=BlockADMMRetryConfig(1e-16, 5) if adaptive == "unit" else None),
         allocation_strategy=AllocationStrategy.UNIFORM,
         factorized_tuning_epochs=1,
         factorized_tuning_batch_size=1,
@@ -246,7 +247,14 @@ def test_resident_staged_rank_tuning_resume_and_export_accounting(
     result = run_resident_quantization(request)
     block = result.blocks[0]
     events = [json.loads(line) for line in (request.output / "events.jsonl").read_text().splitlines()]
-    if adaptive:
+    if adaptive == "unit":
+        decisions = [e["fields"] for e in events if e["name"] == "unit.admm_reconstruction_measured"]
+        owners = {layer.layer.path for layer in block.layers} | {group.name for group in block.shared_input_groups}
+        for owner in owners:
+            measured = [d for d in decisions if d["layer"] == owner]
+            assert [(d["outer_iterations"], d["retry"]) for d in measured] == [(3, True), (6, False)]
+            assert measured[-1]["weighted_error"] > 1e-16
+    if adaptive == "block":
         decisions = [e["fields"] for e in events if e["name"] == "block.admm_attempt_measured"]
         assert [(d["outer_iterations"], d["retry"]) for d in decisions] == [(3, True), (6, False)]
         assert decisions[-1]["weighted_error"] == block.losses.final_frozen_normalized_error
