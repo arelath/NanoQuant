@@ -18,7 +18,7 @@ After compression and export, the workflow evaluates WikiText-2 (64 × 128 token
 
 ```powershell
 $env:HF_DATASETS_CACHE = (Resolve-Path outputs/imatrix-calibration-comparison-v1/hf-datasets).Path
-.\.venv\Scripts\python.exe experiments/088-adaptive-admm-1bpw-compress-and-benchmark-gemma-3-270m-it.py
+.\.venv\Scripts\python.exe experiments/088-unit-reconstruction-admm-1bpw-compress-and-benchmark-gemma-3-270m-it.py
 ```
 
 The resident journal lives under `evidence/088`. The launch log lives under `outputs/088` and the final GGUF and quality reports go to `Results/088`.
