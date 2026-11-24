@@ -174,12 +174,15 @@ def test_each_admm_stage_fits_the_remaining_residual_and_is_deterministic(tmp_pa
     assert not torch.allclose(first, prediction)
 
 
-@pytest.mark.parametrize("full_rank_stages", [None, 3], ids=["budget-allocated", "three-full-rank"])
-def test_resident_staged_rank_tuning_resume_and_export_accounting(tmp_path: Path, full_rank_stages: int | None):
+@pytest.mark.parametrize(("full_rank_stages", "adaptive"), [(None, False), (3, False), (3, True)],
+                         ids=["budget-allocated", "three-full-rank", "adaptive-block-retry"])
+def test_resident_staged_rank_tuning_resume_and_export_accounting(
+    tmp_path: Path, full_rank_stages: int | None, adaptive: bool,
+):
     from transformers.models.gemma3.configuration_gemma3 import Gemma3TextConfig
     from transformers.models.gemma3.modeling_gemma3 import Gemma3ForCausalLM
 
-    from nanoquant.config.schema import AllocationStrategy, SharedInputGroupConfig
+    from nanoquant.config.schema import AllocationStrategy, BlockADMMRetryConfig, SharedInputGroupConfig
     from nanoquant.domain.planning import factor_bit_cost
     from nanoquant.infrastructure.frozen_model_loader import load_frozen_run
     from nanoquant.infrastructure.packed_model_loader import load_packed_model
@@ -217,7 +220,8 @@ def test_resident_staged_rank_tuning_resume_and_export_accounting(tmp_path: Path
         overcomplete_rank_ceiling_fraction=None if full_rank_stages is None else float(full_rank_stages),
         maximum_rank_layer_patterns=() if full_rank_stages is None else ("*",),
         residual_stages=True,
-        admm=ADMMConfig(outer_iterations=3, inner_iterations=1),
+        admm=ADMMConfig(outer_iterations=3, inner_iterations=1,
+                        block_retry=BlockADMMRetryConfig(1e-16, 5) if adaptive else None),
         allocation_strategy=AllocationStrategy.UNIFORM,
         factorized_tuning_epochs=1,
         factorized_tuning_batch_size=1,
@@ -234,11 +238,18 @@ def test_resident_staged_rank_tuning_resume_and_export_accounting(tmp_path: Path
         ),
         registry_root=tmp_path / "registry",
     )
+    if adaptive:
+        with pytest.raises(InterruptedError, match="new .*commits"):
+            run_resident_quantization(replace(request, interrupt_after_layer_commits=1))
     with pytest.raises(InterruptedError, match="new block commits"):
         run_resident_quantization(replace(request, interrupt_after_block_commits=1))
     result = run_resident_quantization(request)
     block = result.blocks[0]
     events = [json.loads(line) for line in (request.output / "events.jsonl").read_text().splitlines()]
+    if adaptive:
+        decisions = [e["fields"] for e in events if e["name"] == "block.admm_attempt_measured"]
+        assert [(d["outer_iterations"], d["retry"]) for d in decisions] == [(3, True), (6, False)]
+        assert decisions[-1]["weighted_error"] == block.losses.final_frozen_normalized_error
     for item in block.layers:
         committed = [event["fields"] for event in events if event["name"] == "layer.completed"
                      and event["fields"].get("layer") == item.layer.path

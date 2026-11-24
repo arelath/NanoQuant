@@ -607,6 +607,16 @@ def validate(config: RunConfig, phase: ValidationPhase = ValidationPhase.PRE_RES
         "factorization.admm.outer_iterations",
         "must be positive",
     )
+    admm = config.factorization.admm
+    if admm.block_retry is not None:
+        require(
+            math.isfinite(admm.block_retry.target_error) and admm.block_retry.target_error > 0
+            and admm.block_retry.stop_iterations >= admm.outer_iterations
+            and admm.early_stop_tolerance is None and not config.factorization.product_codebook.enabled,
+            "CFG258", "factorization.admm.block_retry",
+            "requires a positive finite target, a stop budget at least as large as the first budget, "
+            "fixed-length solves and independent factorization attempts",
+        )
     shared = config.factorization.shared_input
     group_names = tuple(group.name for group in shared.groups)
     require(

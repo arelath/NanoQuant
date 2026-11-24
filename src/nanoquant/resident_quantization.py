@@ -8,6 +8,7 @@ import math
 import shutil
 import statistics
 import time
+from collections import deque
 from collections.abc import Callable, Iterator
 from concurrent.futures import Executor, ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
@@ -253,7 +254,7 @@ from nanoquant.infrastructure.tuning_checkpoint import (
 from nanoquant.ports.event_sink import EventSink, LayerCommittedPayload, emit_layer_committed
 from nanoquant.ports.model_adapter import ModelAdapter
 
-RESIDENT_ALGORITHM_VERSION = 73
+RESIDENT_ALGORITHM_VERSION = 74
 _DATASET_RANK_SOURCES = {RankResponseSource.DATASET, RankResponseSource.PINNED_DATASET, RankResponseSource.KL_DATASET}
 _DATASET_RECONSTRUCTION_SOURCES = {RankResponseSource.MEASURED, *_DATASET_RANK_SOURCES}
 # Preserve existing run identities when imported output weights are disabled.
@@ -2887,10 +2888,12 @@ def _run_post_refit_covariance_refinement(
 def _resident_config_hash(request: ResidentQuantizationRequest) -> str:
     adaptive_memory = request.memory_plan is not None and request.memory_plan.mode == "adaptive"
     if (
-        RESIDENT_ALGORITHM_VERSION != 73
-        or request.reconstruction_rank_planning.response_source is RankResponseSource.KL_DATASET
+        RESIDENT_ALGORITHM_VERSION != 74
+        or request.admm.block_retry is not None
     ):
         algorithm_version = RESIDENT_ALGORITHM_VERSION
+    elif request.reconstruction_rank_planning.response_source is RankResponseSource.KL_DATASET:
+        algorithm_version = 73
     elif request.reconstruction_rank_planning.response_source is RankResponseSource.PINNED_DATASET:
         algorithm_version = 72
     elif request.imatrix is not None:
@@ -7842,7 +7845,39 @@ def _execute_resident_quantization_pipeline(
         selected_product_codebook_evidence,
     )
 
-    for block_plan in block_quantizer.pending(plan.blocks, completed_block_indexes):
+    pending_blocks = deque(block_quantizer.pending(plan.blocks, completed_block_indexes))
+    block_retry = request.admm.block_retry
+    while pending_blocks:
+        block_plan = pending_blocks.popleft()
+        unit_identity, unit_journal = identity, journal
+        attempt_iterations = request.admm.outer_iterations
+        entry_budget = budget
+        if block_retry is not None:
+            block_entry_inputs = compressed_inputs
+            rejected_seconds = 0.0
+            attempt_root = request.output / "state" / "block-admm" / semantic_hash(identity)[7:]
+            attempt_directory = attempt_root / str(block_plan.block.index)
+            while True:
+                attempt_result = attempt_directory / str(attempt_iterations) / "result.json"
+                if not attempt_result.exists():
+                    break
+                saved = json.loads(attempt_result.read_text(encoding="utf-8"))
+                if not block_retry.needs_retry(saved["weighted_error"], attempt_iterations):
+                    break
+                rejected_seconds += saved["wall_seconds"]
+                attempt_iterations *= 2
+            attempt_hash = semantic_hash((identity, block_plan.block.index, attempt_iterations))
+            unit_identity = replace(identity, config_hash=attempt_hash)
+            unit_journal = ProgressJournal(attempt_result.parent, run_id, artifacts)
+            discovery = unit_journal.discover(plan, unit_identity)
+            attempt_records = (*discovery.valid_records, *discovery.orphan_records)
+            partial_layer_records = {(r.block, r.layer): r for r in attempt_records if r.kind == "layer"}
+            partial_group_records = {(r.block, r.layer): r for r in attempt_records if r.kind == "group"}
+            factor_stage.admm = replace(request.admm, outer_iterations=attempt_iterations)
+            layer_quantizer = replace(layer_quantizer, config_hash=unit_identity.config_hash)
+            events.emit("resident-quantization", "info", "block.admm_attempt_started",
+                        block=block_plan.block.index, outer_iterations=attempt_iterations)
+
         block_batches = _block_tuning_batches(request, block_plan.block.index)
         block_work = block_quantizer.prepare(
             block_plan,
@@ -8011,7 +8046,7 @@ def _execute_resident_quantization_pipeline(
                             1,
                         ),
                         artifacts,
-                        identity,
+                        unit_identity,
                     ).result
                     frozen_group = SharedInputGroupFreezer().load(
                         prior_group.frozen_state,
@@ -8261,14 +8296,14 @@ def _execute_resident_quantization_pipeline(
                         committed_group = commit_shared_input_group(
                             group_result,
                             artifacts,
-                            identity,
+                            unit_identity,
                         )
-                        group_journal_record = journal.append(
+                        group_journal_record = unit_journal.append(
                             "group",
                             block_index,
                             group_plan.name,
                             committed_group.reference.artifact_id,
-                            identity,
+                            unit_identity,
                         )
                         clear_tuning_checkpoint(request.output)
                         events.emit(
@@ -8399,7 +8434,7 @@ def _execute_resident_quantization_pipeline(
                 prior_record = partial_layer_records.get((block_index, layer_plan.layer.path))
                 if prior_record is not None:
                     prior = load_committed_layer(
-                        ArtifactRef(ArtifactTypes.LAYER_RESULT, prior_record.artifact_id, 1), artifacts, identity
+                        ArtifactRef(ArtifactTypes.LAYER_RESULT, prior_record.artifact_id, 1), artifacts, unit_identity
                     ).result
                     frozen = LayerFreezer().load(
                         prior.frozen_state,
@@ -8561,9 +8596,9 @@ def _execute_resident_quantization_pipeline(
                 if request.factorized_tuning_epochs > 0:
                     BlockEditor().install_trainable_layer(working_block, layer_plan.layer.path, trainable)
                     tuning_checkpoint_identity = TuningCheckpointIdentity(
-                        identity.config_hash,
-                        identity.model_hash,
-                        identity.plan_hash,
+                        unit_identity.config_hash,
+                        unit_identity.model_hash,
+                        unit_identity.plan_hash,
                         block_index,
                         layer_plan.layer.path,
                         "factorized",
@@ -8763,13 +8798,13 @@ def _execute_resident_quantization_pipeline(
                     rank=layer_result.frozen_state.total_rank,
                 ):
                     with _profile_layer_phase(recorder, block_index, layer_plan.layer.path, "commit"):
-                        committed_layer = commit_layer(layer_result, artifacts, identity)
-                        layer_journal_record = journal.append(
+                        committed_layer = commit_layer(layer_result, artifacts, unit_identity)
+                        layer_journal_record = unit_journal.append(
                             "layer",
                             block_index,
                             layer_plan.layer.path,
                             committed_layer.reference.artifact_id,
-                            identity,
+                            unit_identity,
                         )
                         clear_tuning_checkpoint(request.output)
                         emit_layer_committed(
@@ -9059,6 +9094,25 @@ def _execute_resident_quantization_pipeline(
             )
             block_peak_host = peak_process_memory_bytes()
             peak_device_bytes = max(peak_device_bytes, block_peak)
+        if block_retry is not None:
+            weighted_error = loss_recorder.finalize().final_frozen_normalized_error
+            if weighted_error is None or not math.isfinite(weighted_error):
+                raise ValueError("adaptive ADMM requires a finite final normalized block error")
+            retry_block = block_retry.needs_retry(weighted_error, attempt_iterations)
+            decision = {
+                "block": block_index, "outer_iterations": attempt_iterations, "weighted_error": weighted_error,
+                "target_error": block_retry.target_error, "retry": retry_block,
+                "wall_seconds": time.perf_counter() - block_started,
+            }
+            atomic_write_json(attempt_result, decision)
+            cast(Any, events).emit("resident-quantization", "info", "block.admm_attempt_measured", **decision)
+            if retry_block:
+                block_staging.close()
+                budget = entry_budget
+                compressed_inputs = block_entry_inputs
+                pending_blocks.appendleft(block_plan)
+                del working_block, measure_block_loss, teacher_outputs, compressed_outputs
+                continue
         with _logged_operation(
             events,
             "block_commit",
@@ -9084,7 +9138,7 @@ def _execute_resident_quantization_pipeline(
                     budget.retry_bits_spent,
                     artifacts,
                     identity,
-                    wall_seconds=time.perf_counter() - block_started,
+                    wall_seconds=time.perf_counter() - block_started + (rejected_seconds if block_retry else 0.0),
                     peak_gpu_bytes=block_peak,
                     peak_host_bytes=block_peak_host,
                     warnings=()

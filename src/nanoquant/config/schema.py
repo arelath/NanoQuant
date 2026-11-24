@@ -381,6 +381,15 @@ class RankAllocationConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class BlockADMMRetryConfig:
+    target_error: float
+    stop_iterations: int
+
+    def needs_retry(self, error: float, iterations: int) -> bool:
+        return error >= self.target_error and iterations < self.stop_iterations
+
+
+@dataclass(frozen=True, slots=True)
 class ADMMConfig:
     outer_iterations: int = 800
     inner_iterations: int = 5
@@ -389,6 +398,7 @@ class ADMMConfig:
     convergence_check_interval: int = 100
     early_stop_tolerance: float | None = None
     transpose_wide: bool = False
+    block_retry: BlockADMMRetryConfig | None = None
 
 
 @dataclass(frozen=True, slots=True)

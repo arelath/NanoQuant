@@ -14,7 +14,7 @@ from typing import Any, TypeVar, cast, get_args, get_origin, get_type_hints
 import yaml
 from pydantic import ConfigDict, TypeAdapter, ValidationError
 
-from .schema import FactorizedOptimizerConfig, ImatrixConfig, RunConfig, TuningBatchScheduleConfig
+from .schema import ADMMConfig, FactorizedOptimizerConfig, ImatrixConfig, RunConfig, TuningBatchScheduleConfig
 
 T = TypeVar("T")
 
@@ -106,6 +106,8 @@ def to_dict(value: Any) -> Any:
     """Convert dataclasses/enums/tuples to stable JSON-compatible values."""
     if is_dataclass(value) and not isinstance(value, type):
         payload = {field.name: to_dict(getattr(value, field.name)) for field in fields(value)}
+        if isinstance(value, ADMMConfig) and value.block_retry is None:
+            payload.pop("block_retry")
         if isinstance(value, ImatrixConfig) and not value.use_rows:
             payload.pop("use_rows")
         return payload
