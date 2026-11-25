@@ -22,7 +22,7 @@ export CCE_AUTOTUNE="${CCE_AUTOTUNE:-0}"
 LLAMA_CPP_REPOSITORY="${NANOQUANT_LLAMA_CPP_REPOSITORY:-https://github.com/arelath/llama.cpp.git}"
 LLAMA_CPP_REVISION="${NANOQUANT_LLAMA_CPP_REVISION:-nanoquants}"
 VENDORED_CONVERTER="${REPOSITORY_ROOT}/tools/llamacpp/convert_nanoquant_to_gguf.py"
-VENDORED_CONVERTER_SHA256="c2e1fd064bbd46f38e9e3c5f739865d198ca75bd0bb9db16f72530d378d11304"
+VENDORED_CONVERTER_SHA256="7b3919b3f8a8b7f04308599252a083702d518b95212d155ed282991267a5ed68"
 REQUIRES_HF_WRITE=0
 PREFLIGHT_CCE=0
 
@@ -119,8 +119,13 @@ case "${EXPERIMENT}" in
     LAUNCHER="experiments/031-confirm-qwen3-8b-thinking-quality.py"
     PREFLIGHT_CCE=1
     ;;
+  089)
+    MODEL_ID="google/gemma-7b-it"
+    MODEL_REVISION="9c5798d27f588501ce1e108079d2a19e4c3a2353"
+    LAUNCHER="experiments/089-one-bpw-compress-and-benchmark-gemma-7b-it.py"
+    ;;
   *)
-    echo "Unsupported NANOQUANT_EXPERIMENT=${EXPERIMENT}; choose 001, 003, 006, 007, 008, 009, 017, 018, 025, 026, 027, 028, 029, 030, or 031." >&2
+    echo "Unsupported NANOQUANT_EXPERIMENT=${EXPERIMENT}; choose 001, 003, 006, 007, 008, 009, 017, 018, 025, 026, 027, 028, 029, 030, 031, or 089." >&2
     exit 2
     ;;
 esac
@@ -266,6 +271,7 @@ from huggingface_hub import snapshot_download
 print(snapshot_download(
     repo_id=os.environ["NANOQUANT_BOOTSTRAP_MODEL_ID"],
     revision=os.environ["NANOQUANT_BOOTSTRAP_MODEL_REVISION"],
+    ignore_patterns=["*.gguf"],
 ))
 PY
 )"

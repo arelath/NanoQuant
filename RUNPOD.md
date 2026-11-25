@@ -97,7 +97,7 @@ run through a CUDA-enabled inference executable.
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `HF_TOKEN` | unset | Hugging Face token. Experiments 009, 017, 018, and 025 require write permission for publication; gated snapshots require model access. |
-| `NANOQUANT_EXPERIMENT` | `025` | Numbered experiment to launch. Supported values are `001`, `003`, `006`, `007`, `008`, `009`, `017`, `018`, and `025`. |
+| `NANOQUANT_EXPERIMENT` | `029` | Numbered experiment to launch. Supported values are `001`, `003`, `006`, `007`, `008`, `009`, `017`, `018`, `025`–`031`, and `089`. |
 | `NANOQUANT_SETUP_ONLY` | `0` | Set to `1` to prepare everything without starting compression. |
 | `NANOQUANT_RUN_TESTS` | `1` | Set to `0` to skip the fast recipe preflight tests. |
 | `NANOQUANT_PREFETCH_QUALITY` | `1` | Set to `0` to skip evaluation-dataset downloads. Complete quality launchers may then fail unless those datasets are already cached. |
@@ -154,9 +154,16 @@ bash tools/runpod_bootstrap.sh
 | `017` | Gemma 3 1B architecture-protected stacked-QKV compression at sensitivity 0.5, quality, and publication |
 | `018` | Gemma 3 4B variant of Experiment 017 with bounded-memory safeguards, quality, and publication |
 | `025` | Llama 3.2 1B Instruct replication of Experiment 019 on the current pipeline, quality, and publication; default |
+| `089` | Original Gemma 7B IT, CPU-offloaded compression targeting a whole-model 1 BPW GGUF with results stored on the pod |
 
 The 4B and 12B workflows require substantially more host memory, storage, and runtime than the default setup check.
 Confirm the selected pod's resources before launching them.
+
+Experiment 089 uses one 24 GiB RTX 3090, at least 48 GB of host RAM, and a
+256 GB persistent `/workspace` volume. The gated Google checkpoint requires
+Hugging Face model access. Start it with `NANOQUANT_EXPERIMENT=089 bash tools/runpod_bootstrap.sh`.
+Measure its achieved whole-model BPW as the final GGUF size in bytes times eight,
+divided by 8,537,680,896 source parameters.
 
 ## 7. Resume and outputs
 
