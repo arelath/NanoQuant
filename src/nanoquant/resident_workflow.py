@@ -900,11 +900,7 @@ def resolve_resident_experiment_inputs(
     if model_path.exists():
         snapshot = model_path.resolve()
     else:
-        snapshot = Path(snapshot_download(
-            repo_id=config.model.source,
-            revision=str(config.model.revision),
-            ignore_patterns=["*.gguf"],
-        )).resolve()
+        snapshot = Path(snapshot_download(repo_id=config.model.source, revision=str(config.model.revision))).resolve()
     registry_root = Path(config.output.run_root)
     if not registry_root.is_absolute():
         registry_root = repository_root / registry_root
